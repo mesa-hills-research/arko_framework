@@ -1,0 +1,769 @@
+use super::*;
+use crate::agent_config::{AgentLLMConfig, LLMCapacityRetryConfig, LLMRetryConfig};
+
+fn harness() -> (
+    AgentLoop,
+    mpsc::Receiver<AgentEvent>,
+    mpsc::Sender<UserCommand>,
+) {
+    let config = AgentConfig::builder(
+        "retry-test".into(),
+        "Retry test".into(),
+        AgentLLMConfig {
+            model: ai::Model::openai_gpt_5_6_luna(),
+            generation_config: Default::default(),
+        },
+    )
+    .role_description("test".into())
+    .instructions("test".into())
+    .llm_error_policy(LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts: 10 })
+    .llm_retry_config(LLMRetryConfig {
+        jitter: false,
+        ..Default::default()
+    })
+    .build()
+    .unwrap();
+    let task = Task::new(config, "test".into(), std::env::temp_dir(), None);
+    let (events, rx) = mpsc::channel(100);
+    let (tx, commands) = mpsc::channel(10);
+    (
+        AgentLoop::new(
+            task,
+            Arc::new(ai::LLMClient::new()),
+            Arc::new(ToolRegistry::new()),
+            events,
+            commands,
+            None,
+            false,
+            None,
+            None,
+            None,
+        ),
+        rx,
+        tx,
+    )
+}
+
+fn provider_failure(status: u16, delay: Option<Duration>) -> ai::Error {
+    ai::Error::ProviderError {
+        message: "synthetic outage".into(),
+        status: Some(status),
+        code: None,
+        retry_after: delay,
+    }
+}
+
+fn capacity_failure(delay: Option<Duration>) -> ai::Error {
+    ai::Error::ProviderError {
+        message: "synthetic capacity outage".into(),
+        status: None,
+        code: Some("server_is_overloaded".into()),
+        retry_after: delay,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn capacity_wait_survives_hours_without_prompt_growth_or_a_request_deadline() {
+    let (mut agent, mut events, _commands) = harness();
+    agent.task.agent_config.llm_retry_config.capacity_retry = Some(Default::default());
+    let original_messages = agent.task.conversation.messages.len();
+    let started = tokio::time::Instant::now();
+    for _ in 0..20 {
+        agent
+            .run_llm_attempt::<()>(async { Err(capacity_failure(None)) })
+            .await
+            .unwrap();
+        assert!(matches!(agent.task.current_state, TaskState::InProgress));
+    }
+    assert!(started.elapsed() > Duration::from_secs(3600));
+    assert_eq!(agent.capacity_retry_attempts, 20);
+    assert_eq!(agent.task.conversation.messages.len(), original_messages);
+    assert!(agent.recovery_deadline().is_none());
+    let result = agent
+        .run_llm_attempt(async {
+            tokio_sleep(Duration::from_secs(600)).await;
+            Ok("recovered")
+        })
+        .await
+        .unwrap();
+    assert_eq!(result, Some("recovered"));
+    let mut delays = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        match event {
+            AgentEvent::RetryScheduled { delay_ms, .. } => delays.push(delay_ms),
+            AgentEvent::ErrorEncountered {
+                requires_approval_to_retry: true,
+                ..
+            } => panic!("capacity exhausted"),
+            _ => {}
+        }
+    }
+    assert_eq!(&delays[..5], &[30_000, 60_000, 120_000, 240_000, 300_000]);
+    assert!(delays[5..].iter().all(|d| *d == 300_000));
+}
+
+#[tokio::test(start_paused = true)]
+async fn capacity_wait_honors_server_hints_and_remains_cancellable_and_suspendable() {
+    for suspend in [false, true] {
+        for in_backoff in [false, true] {
+            let (mut agent, mut events, commands) = harness();
+            agent.task.agent_config.llm_retry_config.capacity_retry = Some(Default::default());
+            if !in_backoff {
+                let started = tokio::time::Instant::now();
+                agent
+                    .run_llm_attempt::<()>(async {
+                        Err(capacity_failure(Some(Duration::from_secs(600))))
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(started.elapsed(), Duration::from_secs(600));
+            }
+            let started = tokio::time::Instant::now();
+            let sender = tokio::spawn(async move {
+                commands
+                    .send(UserCommand::InjectContext {
+                        content: "peer progress".into(),
+                    })
+                    .await
+                    .unwrap();
+                tokio_sleep(Duration::from_millis(10)).await;
+                commands
+                    .send(if suspend {
+                        UserCommand::SuspendTask
+                    } else {
+                        UserCommand::CancelTask
+                    })
+                    .await
+                    .unwrap();
+            });
+            if in_backoff {
+                agent
+                    .run_llm_attempt::<()>(async {
+                        Err(capacity_failure(Some(Duration::from_secs(600))))
+                    })
+                    .await
+                    .unwrap();
+            } else {
+                agent
+                    .run_llm_attempt(std::future::pending::<Result<(), ai::Error>>())
+                    .await
+                    .unwrap();
+            }
+            sender.await.unwrap();
+            assert_eq!(started.elapsed(), Duration::from_millis(10));
+            assert!(agent.stop_requested);
+            assert_eq!(
+                matches!(agent.task.current_state, TaskState::Failed { .. }),
+                !suspend
+            );
+            while let Ok(event) = events.try_recv() {
+                assert!(!matches!(
+                    event,
+                    AgentEvent::ErrorEncountered {
+                        requires_approval_to_retry: true,
+                        ..
+                    }
+                ));
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn capacity_wait_does_not_disable_permanent_errors_or_other_retry_limits() {
+    for permanent in [false, true] {
+        let (mut agent, _events, _commands) = harness();
+        agent.task.agent_config.llm_retry_config.capacity_retry = Some(Default::default());
+        agent.task.agent_config.llm_error_policy =
+            LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts: 2 };
+        agent
+            .run_llm_attempt::<()>(async { Err(capacity_failure(Some(Duration::from_secs(3600)))) })
+            .await
+            .unwrap();
+        let started = tokio::time::Instant::now();
+        agent
+            .run_llm_attempt::<()>(async {
+                Err(provider_failure(if permanent { 401 } else { 503 }, None))
+            })
+            .await
+            .unwrap();
+        if !permanent {
+            assert_eq!(started.elapsed(), Duration::from_millis(250));
+            assert!(matches!(agent.task.current_state, TaskState::InProgress));
+            agent
+                .run_llm_attempt::<()>(async { Err(provider_failure(503, None)) })
+                .await
+                .unwrap();
+        } else {
+            assert_eq!(started.elapsed(), Duration::ZERO);
+        }
+        assert!(matches!(
+            agent.task.current_state,
+            TaskState::AwaitingErrorRecoveryApproval { .. }
+        ));
+        assert!(agent.capacity_recovery_started.is_none());
+    }
+    let (mut agent, _events, _commands) = harness();
+    agent.task.agent_config.llm_retry_config.capacity_retry = Some(Default::default());
+    agent.task.agent_config.llm_error_policy = LLMErrorPolicy::PauseAndAwaitApproval;
+    agent
+        .run_llm_attempt::<()>(async { Err(capacity_failure(None)) })
+        .await
+        .unwrap();
+    assert!(matches!(
+        agent.task.current_state,
+        TaskState::AwaitingErrorRecoveryApproval { .. }
+    ));
+    let (mut agent, _events, _commands) = harness();
+    agent.task.agent_config.llm_retry_config.capacity_retry = Some(Default::default());
+    agent
+        .run_llm_attempt::<()>(async { Err(capacity_failure(Some(Duration::MAX))) })
+        .await
+        .unwrap();
+    assert!(matches!(
+        agent.task.current_state,
+        TaskState::AwaitingErrorRecoveryApproval { .. }
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn temporary_failure_recovers_in_the_same_task_and_honors_server_delay() {
+    let (mut agent, mut events, _commands) = harness();
+    let id = agent.task.id;
+    let started = tokio::time::Instant::now();
+    assert!(
+        agent
+            .run_llm_attempt::<()>(async {
+                Err(provider_failure(429, Some(Duration::from_secs(60))))
+            })
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(started.elapsed(), Duration::from_secs(60));
+    assert_eq!(
+        agent
+            .run_llm_attempt(async { Ok("recovered") })
+            .await
+            .unwrap(),
+        Some("recovered")
+    );
+    assert_eq!(agent.task.id, id);
+    assert_eq!(agent.llm_interaction_attempts, 2);
+    let mut scheduled = 0;
+    while let Ok(event) = events.try_recv() {
+        match event {
+            AgentEvent::RetryScheduled { delay_ms, .. } => {
+                assert_eq!(delay_ms, 60_000);
+                scheduled += 1;
+            }
+            AgentEvent::ToolCallInitiated { .. }
+            | AgentEvent::ToolResult { .. }
+            | AgentEvent::UsageReported(_) => {
+                panic!("failed request must not execute tools or report usage")
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(scheduled, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn stream_capacity_error_retries_without_requesting_configuration_changes() {
+    let (mut agent, mut events, _commands) = harness();
+    let started = tokio::time::Instant::now();
+    agent
+        .run_llm_attempt::<()>(async {
+            Err(ai::Error::ProviderError {
+                message: "Our servers are currently overloaded. Please try again later.".into(),
+                status: None,
+                code: Some("server_is_overloaded".into()),
+                retry_after: None,
+            })
+        })
+        .await
+        .unwrap();
+    assert_eq!(started.elapsed(), Duration::from_millis(250));
+    assert_eq!(
+        agent
+            .run_llm_attempt(async { Ok("recovered") })
+            .await
+            .unwrap(),
+        Some("recovered")
+    );
+    let mut scheduled = 0;
+    while let Ok(event) = events.try_recv() {
+        match event {
+            AgentEvent::RetryScheduled { .. } => scheduled += 1,
+            AgentEvent::ErrorEncountered {
+                requires_approval_to_retry: true,
+                ..
+            } => {
+                panic!("temporary capacity errors must use bounded automatic recovery")
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(scheduled, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn temporary_failures_exhaust_at_ten_attempts_and_can_be_suspended() {
+    let (mut agent, mut events, commands) = harness();
+    let started = tokio::time::Instant::now();
+    for _ in 0..10 {
+        assert!(
+            agent
+                .run_llm_attempt::<()>(async { Err(provider_failure(503, None)) })
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert_eq!(started.elapsed(), Duration::from_millis(127_750));
+    assert!(matches!(
+        agent.task.current_state,
+        TaskState::AwaitingErrorRecoveryApproval { .. }
+    ));
+    let mut retries = 0;
+    let mut pauses = 0;
+    while let Ok(event) = events.try_recv() {
+        match event {
+            AgentEvent::RetryScheduled { .. } => retries += 1,
+            AgentEvent::ErrorEncountered {
+                requires_approval_to_retry: true,
+                ..
+            } => pauses += 1,
+            _ => {}
+        }
+    }
+    assert_eq!((retries, pauses), (9, 1));
+    commands.send(UserCommand::SuspendTask).await.unwrap();
+    let task = timeout(Duration::from_secs(1), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        task.current_state,
+        TaskState::AwaitingErrorRecoveryApproval { .. }
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn permanent_failures_pause_immediately_and_inform_policy_returns_to_host() {
+    for error in [
+        ai::Error::MissingApiKey("test".into()),
+        provider_failure(400, None),
+        provider_failure(401, None),
+    ] {
+        let (mut agent, mut events, _commands) = harness();
+        let started = tokio::time::Instant::now();
+        agent
+            .run_llm_attempt::<()>(async { Err(error) })
+            .await
+            .unwrap();
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert!(matches!(
+            agent.task.current_state,
+            TaskState::AwaitingErrorRecoveryApproval { .. }
+        ));
+        while let Ok(event) = events.try_recv() {
+            assert!(!matches!(event, AgentEvent::RetryScheduled { .. }));
+        }
+    }
+    let (mut agent, _events, _commands) = harness();
+    agent.task.agent_config.llm_error_policy =
+        LLMErrorPolicy::RetryThenInformAgent { max_attempts: 1 };
+    // Run the real runtime with missing provider configuration: it must
+    // return the preserved task to the host instead of spinning Interrupted.
+    let task = timeout(Duration::from_secs(1), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Interrupted { .. }));
+}
+
+#[tokio::test(start_paused = true)]
+async fn excessive_server_delay_stops_without_retrying_early() {
+    let (mut agent, _events, _commands) = harness();
+    agent.task.agent_config.llm_retry_config.max_elapsed_ms = 30_000;
+    let started = tokio::time::Instant::now();
+    agent
+        .run_llm_attempt::<()>(async { Err(provider_failure(429, Some(Duration::from_secs(60)))) })
+        .await
+        .unwrap();
+    assert_eq!(started.elapsed(), Duration::ZERO);
+    assert!(matches!(
+        agent.task.current_state,
+        TaskState::AwaitingErrorRecoveryApproval { .. }
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn elapsed_budget_interrupts_a_hung_retry_and_includes_request_time() {
+    let (mut agent, _events, _commands) = harness();
+    agent.task.agent_config.llm_retry_config.max_elapsed_ms = 1000;
+    let started = tokio::time::Instant::now();
+    agent
+        .run_llm_attempt::<()>(async { Err(provider_failure(503, None)) })
+        .await
+        .unwrap();
+    agent
+        .run_llm_attempt(std::future::pending::<Result<(), ai::Error>>())
+        .await
+        .unwrap();
+    assert_eq!(started.elapsed(), Duration::from_secs(1));
+    assert!(matches!(
+        agent.task.current_state,
+        TaskState::AwaitingErrorRecoveryApproval { .. }
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancel_and_suspend_interrupt_backoff_and_pending_requests() {
+    for suspend in [false, true] {
+        for in_backoff in [false, true] {
+            let (mut agent, _events, commands) = harness();
+            let started = tokio::time::Instant::now();
+            let sender = tokio::spawn(async move {
+                tokio_sleep(Duration::from_millis(10)).await;
+                commands
+                    .send(if suspend {
+                        UserCommand::SuspendTask
+                    } else {
+                        UserCommand::CancelTask
+                    })
+                    .await
+                    .unwrap();
+            });
+            if in_backoff {
+                agent
+                    .run_llm_attempt::<()>(async {
+                        Err(provider_failure(503, Some(Duration::from_secs(60))))
+                    })
+                    .await
+                    .unwrap();
+            } else {
+                agent
+                    .run_llm_attempt(std::future::pending::<Result<(), ai::Error>>())
+                    .await
+                    .unwrap();
+            }
+            sender.await.unwrap();
+            assert_eq!(started.elapsed(), Duration::from_millis(10));
+            assert!(agent.stop_requested);
+            assert_eq!(
+                matches!(agent.task.current_state, TaskState::Failed { .. }),
+                !suspend
+            );
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn peer_context_does_not_reset_recovery_limits() {
+    let (mut agent, _events, commands) = harness();
+    agent.task.agent_config.llm_error_policy =
+        LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts: 2 };
+    commands
+        .send(UserCommand::InjectContext {
+            content: "peer update".into(),
+        })
+        .await
+        .unwrap();
+    agent
+        .run_llm_attempt::<()>(async { Err(provider_failure(503, None)) })
+        .await
+        .unwrap();
+    let started = agent.recovery_started;
+    agent.flush_context_injections().unwrap();
+    assert_eq!(agent.recovery_started, started);
+    assert_eq!(agent.llm_interaction_attempts, 1);
+    agent
+        .run_llm_attempt::<()>(async { Err(provider_failure(503, None)) })
+        .await
+        .unwrap();
+    assert!(matches!(
+        agent.task.current_state,
+        TaskState::AwaitingErrorRecoveryApproval { .. }
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_oauth_without_refresh_credentials_uses_recovery_instead_of_losing_task() {
+    let (mut agent, mut events, commands) = harness();
+    // Synthetic non-JWT access token is treated as expired. No refresh token
+    // means no HTTP request can be made by this test.
+    agent.llm_client = Arc::new(ai::LLMClient::new().with_openai_chatgpt_oauth(
+        "synthetic-expired-token",
+        None,
+        "test-account",
+    ));
+    let runner = tokio::spawn(agent.run());
+    loop {
+        if let AgentEvent::ErrorEncountered {
+            requires_approval_to_retry,
+            error_message,
+            ..
+        } = events.recv().await.unwrap()
+        {
+            assert!(requires_approval_to_retry);
+            assert!(error_message.contains("No refresh_token"));
+            break;
+        }
+    }
+    commands.send(UserCommand::SuspendTask).await.unwrap();
+    let task = timeout(Duration::from_secs(1), runner)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        task.current_state,
+        TaskState::AwaitingErrorRecoveryApproval { .. }
+    ));
+    assert!(task.usage_history.is_empty());
+}
+
+#[test]
+fn retry_configuration_defaults_round_trip_and_rejects_invalid_limits() {
+    let (agent, _events, _commands) = harness();
+    let mut json = serde_json::to_value(&agent.task.agent_config).unwrap();
+    json.as_object_mut().unwrap().remove("llm_retry_config");
+    let config: AgentConfig = serde_json::from_value(json).unwrap();
+    assert_eq!(config.llm_retry_config, LLMRetryConfig::default());
+    let invalid = LLMRetryConfig {
+        max_elapsed_ms: 0,
+        ..Default::default()
+    };
+    assert!(invalid.validate().is_err());
+    let invalid = LLMRetryConfig {
+        initial_delay_ms: 1000,
+        max_delay_ms: 250,
+        ..Default::default()
+    };
+    assert!(invalid.validate().is_err());
+    let parsed: LLMRetryConfig = serde_json::from_str("{\"max_elapsed_ms\":60000}").unwrap();
+    assert_eq!(parsed.initial_delay_ms, 250);
+    assert_eq!(parsed.max_elapsed_ms, 60_000);
+    assert!(parsed.capacity_retry.is_none());
+    let parsed: LLMRetryConfig = serde_json::from_str(r#"{"capacity_retry":{}}"#).unwrap();
+    assert_eq!(
+        parsed.capacity_retry,
+        Some(LLMCapacityRetryConfig::default())
+    );
+    assert_eq!(
+        serde_json::from_value::<LLMRetryConfig>(serde_json::to_value(&parsed).unwrap()).unwrap(),
+        parsed
+    );
+    for (initial_delay_ms, max_delay_ms) in [(0, 300_000), (300_000, 30_000)] {
+        let invalid = LLMRetryConfig {
+            capacity_retry: Some(LLMCapacityRetryConfig {
+                initial_delay_ms,
+                max_delay_ms,
+            }),
+            ..Default::default()
+        };
+        assert!(invalid.validate().is_err());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn refresh_failure_consumes_the_shared_budget_before_model_request() {
+    let (mut agent, _events, _commands) = harness();
+    let model_calls = std::sync::atomic::AtomicUsize::new(0);
+    let started = tokio::time::Instant::now();
+    // The production operation performs refresh before creating a stream;
+    // inject a transient refresh error at that boundary, then a success.
+    for refresh_succeeds in [false, true] {
+        agent
+            .run_llm_attempt(async {
+                if !refresh_succeeds {
+                    return Err(provider_failure(503, Some(Duration::from_secs(2))));
+                }
+                model_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+    assert_eq!(started.elapsed(), Duration::from_secs(2));
+    assert_eq!(model_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(agent.llm_interaction_attempts, 2);
+}
+
+fn complete_response() -> ai::StreamEvent {
+    let mut message = ai::Message::new_assistant("Finished after recovery.");
+    message.tool_calls.push(ai::ToolCall {
+        id: Some("complete-once".into()),
+        name: "complete_task".into(),
+        arguments: serde_json::json!({"summary":"done"}),
+        thought_signature: None,
+        provider_id: None,
+    });
+    ai::StreamEvent::End(Box::new(ai::GenerationResponse {
+        message,
+        usage: ai::UsageInfo::new(0, 0),
+        model_call_usage: ai::ModelCallUsage::new(
+            "test-call".into(),
+            "test".into(),
+            "test".into(),
+            0,
+            0,
+            1000,
+        ),
+    }))
+}
+
+#[tokio::test(start_paused = true)]
+async fn full_runtime_recovers_and_executes_the_completed_tool_only_once() {
+    use futures::StreamExt;
+    let (mut agent, mut events, _commands) = harness();
+    agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
+    agent
+        .task
+        .agent_config
+        .tool_config
+        .default_auto_approve_tool_use = true;
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(Err(provider_failure(503, None)));
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(Ok(futures::stream::iter([Ok(complete_response())]).boxed()));
+    let started = tokio::time::Instant::now();
+    let task = timeout(Duration::from_secs(1), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(started.elapsed(), Duration::from_millis(250));
+    assert_eq!(task.usage_history.len(), 1);
+    let mut results = 0;
+    let mut retries = 0;
+    while let Ok(event) = events.try_recv() {
+        match event {
+            AgentEvent::ToolResult { tool_name, .. } => {
+                assert_eq!(tool_name, "complete_task");
+                results += 1;
+            }
+            AgentEvent::RetryScheduled { .. } => retries += 1,
+            _ => {}
+        }
+    }
+    assert_eq!((results, retries), (1, 1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn full_runtime_capacity_recovers_after_old_limits_and_completes_once() {
+    use futures::StreamExt;
+    let (mut agent, mut events, _commands) = harness();
+    agent.task.agent_config.llm_retry_config.capacity_retry = Some(Default::default());
+    agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
+    agent
+        .task
+        .agent_config
+        .tool_config
+        .default_auto_approve_tool_use = true;
+    for i in 0..12 {
+        let response = if i % 2 == 0 {
+            Err(capacity_failure(None))
+        } else {
+            Ok(futures::stream::iter([Err(capacity_failure(None))]).boxed())
+        };
+        agent
+            .scripted_responses
+            .get_mut()
+            .unwrap()
+            .push_back(response);
+    }
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(Ok(futures::stream::iter([Ok(complete_response())]).boxed()));
+    let started = tokio::time::Instant::now();
+    let task = timeout(Duration::from_secs(3600), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(started.elapsed() > Duration::from_secs(300));
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(task.usage_history.len(), 1);
+    let (mut retries, mut tools) = (0, 0);
+    while let Ok(event) = events.try_recv() {
+        match event {
+            AgentEvent::RetryScheduled { .. } => retries += 1,
+            AgentEvent::ToolResult { tool_name, .. } => {
+                assert_eq!(tool_name, "complete_task");
+                tools += 1;
+            }
+            AgentEvent::ErrorEncountered {
+                requires_approval_to_retry: true,
+                ..
+            } => panic!("capacity exhausted"),
+            _ => {}
+        }
+    }
+    assert_eq!((retries, tools), (12, 1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn full_runtime_bounds_a_retry_stream_and_preserves_partial_text() {
+    use futures::StreamExt;
+    let (mut agent, mut events, commands) = harness();
+    agent.task.agent_config.llm_retry_config.max_elapsed_ms = 1000;
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(Err(provider_failure(503, None)));
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(Ok(futures::stream::iter([Ok(ai::StreamEvent::TextChunk(
+            "partial work".into(),
+        ))])
+        .chain(futures::stream::pending())
+        .boxed()));
+    let started = tokio::time::Instant::now();
+    let runner = tokio::spawn(agent.run());
+    timeout(Duration::from_secs(2), async {
+        loop {
+            match events.recv().await.unwrap() {
+                AgentEvent::ErrorEncountered {
+                    requires_approval_to_retry: true,
+                    error_message,
+                    ..
+                } => {
+                    assert!(error_message.contains("budget exhausted during stream"));
+                    break;
+                }
+                AgentEvent::ToolResult { .. } | AgentEvent::UsageReported(_) => {
+                    panic!("incomplete stream must not execute tools or invent usage")
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(started.elapsed(), Duration::from_secs(1));
+    commands.send(UserCommand::SuspendTask).await.unwrap();
+    let task = timeout(Duration::from_secs(1), runner)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(task.conversation.messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|content| content.as_text() == Some("partial work"))
+    }));
+}

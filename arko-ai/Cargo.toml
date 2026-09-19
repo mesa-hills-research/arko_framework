@@ -1,0 +1,37 @@
+[package]
+name = "arko-ai"
+version = "0.1.0"
+edition = "2024"
+description = "All-in-one Rust crate for interfacing with LLMs from various providers"
+license = "MIT OR Apache 2.0"
+
+[dependencies]
+reqwest = { version = "0.11", features = ["json", "multipart", "stream"] }
+tokio = { version = "1.37.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+async-trait = "0.1"
+base64 = "0.21"
+url = "2.4"
+log = "0.4"
+futures = "0.3"
+tokio-stream = { version = "0.1", features = ["full"] }
+bytes = "1.5"
+async-stream = "0.3"
+eventsource-stream = "0.2.3"
+tokenizers = { version = "0.23.2", features = ["http"] }
+httpdate = "1.0"
+uuid = { version = "1.8.0", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+clap = { version = "4.5", features = ["derive"] }
+dotenv = "0.15"
+env_logger = "0.10"
+
+[[example]]
+name = "llm_client_cli"
+
+[[example]]
+name = "embeddings_demo"

@@ -1,0 +1,1119 @@
+pub mod config;
+pub mod engine;
+pub mod result;
+
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use arko_agents::{AgentConfig, InterceptionFailurePolicy, ToolResultInterceptor};
+use arko_ai::LLMClient;
+
+use crate::budget::{AddCostResult, BudgetManager, CostLedger};
+use crate::context::SharedContext;
+use crate::distillation::DistillationConfig;
+use crate::durable::{DurableStepContext, DurableStepSpec, InDoubtContext, ResolveInDoubt};
+use crate::error::WorkflowError;
+use crate::freshness::{ActorId, ResourceId};
+use crate::freshness::{ContextFreshnessConfig, ResourceTracker, ToolResourceEffect};
+use crate::hooks::{HookCallback, HookPoint, HookRegistry};
+use crate::memory::MemoryConfig;
+use crate::mesi::{FileTracker, MesiConfig};
+use crate::messaging::MessageBus;
+use crate::persistence::{PersistenceConfig, PersistenceManager};
+use crate::services::{RUN_WORKFLOW_AGENT_TOOL_NAME, WorkflowServices, WorkflowServicesConfig};
+use crate::user_input::UserInputHandler;
+use crate::verification::CompletionVerifierConfig;
+use crate::voting::{BallotConfig, BallotResult, BallotStore, CAST_VOTE_TOOL_NAME};
+use crate::workflow::config::{WorkflowConfig, WorkflowMetadata};
+use crate::workflow::engine::{WorkflowEngine, fire_hooks_on_context};
+use crate::workflow::result::{AgentResult, WorkflowEvent, WorkflowResult};
+
+/// A configured multi-agent workflow.
+///
+/// Created via [`WorkflowBuilder`]. Provides methods to run agents sequentially,
+/// in parallel, or via non-blocking spawn with manual driving.
+pub struct Workflow {
+    #[allow(dead_code)]
+    config: WorkflowConfig,
+    engine: WorkflowEngine,
+    context: Arc<SharedContext>,
+}
+
+impl Workflow {
+    /// Creates a new workflow builder.
+    pub fn builder() -> WorkflowBuilder {
+        WorkflowBuilder::new()
+    }
+
+    /// Run a named agent with the given prompt. Blocks until the agent completes.
+    ///
+    /// This is the simplest way to execute an agent. The workflow engine handles
+    /// all event processing (hooks, MESI, budget) internally.
+    pub async fn run_agent(
+        &self,
+        agent_name: &str,
+        prompt: &str,
+    ) -> Result<AgentResult, WorkflowError> {
+        let result = self
+            .engine
+            .run_agent(agent_name, prompt, &self.context)
+            .await;
+        if let Err(error) = &result {
+            fire_hooks_on_context(&self.context, HookPoint::OnWorkflowFailed, |hook| {
+                hook.agent_name = Some(agent_name.to_string());
+                hook.error_message = Some(error.to_string());
+            })?;
+        }
+        result
+    }
+
+    /// Continue a completed agent with its prior conversation and stable run
+    /// identity instead of starting again from an empty context.
+    pub async fn continue_agent(
+        &self,
+        previous: &AgentResult,
+        prompt: &str,
+    ) -> Result<AgentResult, WorkflowError> {
+        let result = self
+            .engine
+            .continue_agent(previous, prompt, &self.context)
+            .await;
+        if let Err(error) = &result {
+            fire_hooks_on_context(&self.context, HookPoint::OnWorkflowFailed, |hook| {
+                hook.agent_name = Some(previous.agent_name.clone());
+                hook.agent_run_id = Some(previous.agent_run_id);
+                hook.error_message = Some(error.to_string());
+            })?;
+        }
+        result
+    }
+
+    /// Run multiple agents in parallel. MESI tracking is active.
+    ///
+    /// All agents run concurrently. Results are returned in the same order
+    /// as the input. If any agent fails, the error is propagated.
+    pub async fn run_agents_parallel(
+        &self,
+        agents: Vec<(&str, String)>,
+    ) -> Result<Vec<AgentResult>, WorkflowError> {
+        let result = self.engine.run_agents_parallel(agents, &self.context).await;
+        if let Err(error) = &result {
+            fire_hooks_on_context(&self.context, HookPoint::OnWorkflowFailed, |hook| {
+                hook.error_message = Some(error.to_string());
+            })?;
+        }
+        result
+    }
+
+    /// Spawn an agent without blocking. Returns a handle for driving it.
+    ///
+    /// Use [`AgentHandle::wait`] to drive the event loop with default behavior
+    /// (auto-approve, hooks, MESI, budget) and collect the result.
+    ///
+    /// Use [`AgentHandle::into_parts`] to get the raw channels for custom
+    /// event processing.
+    pub async fn spawn_agent(
+        &self,
+        agent_name: &str,
+        prompt: &str,
+    ) -> Result<AgentHandle, WorkflowError> {
+        self.engine
+            .spawn_agent(agent_name, prompt, &self.context)
+            .await
+    }
+
+    /// Add a manual cost entry to the workflow budget.
+    ///
+    /// The cost is recorded in the cost ledger and counted toward the
+    /// running total identically to agent LLM costs. Budget warning
+    /// and exceeded hooks fire if their thresholds are crossed.
+    ///
+    /// Returns [`WorkflowError::BudgetExceeded`] if the addition pushes
+    /// the total past the budget limit. The cost is still recorded in
+    /// the ledger before the error is returned.
+    ///
+    /// The `metadata` field accepts a free-form string for accounting
+    /// context — service name, URL, API call body/response, or any
+    /// other information relevant for cost analysis.
+    pub fn add_manual_cost(
+        &self,
+        amount: f64,
+        description: &str,
+        metadata: Option<String>,
+    ) -> Result<AddCostResult, WorkflowError> {
+        if !amount.is_finite() || amount < 0.0 {
+            return Err(WorkflowError::InvalidCost(amount));
+        }
+        let cost_result = self
+            .context
+            .budget
+            .add_manual_cost(amount, description, metadata);
+
+        if cost_result.warning_triggered {
+            fire_hooks_on_context(&self.context, HookPoint::OnBudgetWarning, |hctx| {
+                hctx.budget_spent = cost_result.new_total;
+            })?;
+        }
+
+        if cost_result.exceeded {
+            fire_hooks_on_context(&self.context, HookPoint::OnBudgetExceeded, |hctx| {
+                hctx.budget_spent = cost_result.new_total;
+            })?;
+            return Err(WorkflowError::BudgetExceeded {
+                spent: cost_result.new_total,
+                limit: self.context.budget.limit().unwrap_or(0.0),
+            });
+        }
+
+        Ok(cost_result)
+    }
+
+    /// Returns a snapshot of the cost ledger for analysis.
+    ///
+    /// The ledger contains all cost entries — both automatic agent
+    /// costs and manual additions — in chronological order.
+    pub fn cost_ledger(&self) -> CostLedger {
+        self.context.budget.snapshot_ledger()
+    }
+
+    /// Access the shared context (memory, messages, budget, etc.)
+    pub fn context(&self) -> &Arc<SharedContext> {
+        &self.context
+    }
+
+    /// Get accumulated workflow result.
+    pub fn result(&self) -> WorkflowResult {
+        let results = self.context.agent_results.read().clone();
+        let total_cost = self.context.budget.total_spent();
+        let cost_ledger = self.context.budget.snapshot_ledger();
+        WorkflowResult {
+            workflow_run_id: self.context.workflow_run_id,
+            workflow_name: self.context.workflow_name.clone(),
+            metadata: self.context.workflow_metadata.clone(),
+            total_cost,
+            cost_ledger,
+            agent_results: results,
+        }
+    }
+
+    /// Save a checkpoint of the current workflow state.
+    pub async fn checkpoint(&self) -> Result<(), WorkflowError> {
+        self.engine.checkpoint(&self.context).await
+    }
+
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<WorkflowEvent> {
+        self.context.event_tx.subscribe()
+    }
+
+    /// Record that workflow code or a custom tool observed a resource.
+    pub fn register_resource_read(
+        &self,
+        actor: ActorId,
+        resource: ResourceId,
+    ) -> Result<(), WorkflowError> {
+        let tracker = self.context.resource_tracker.as_ref().ok_or_else(|| {
+            WorkflowError::BuilderInvalid("context freshness is not enabled".to_string())
+        })?;
+        tracker.record_read(&actor, resource);
+        Ok(())
+    }
+
+    /// Mark an arbitrary resource dirty and proactively notify active readers.
+    pub async fn mark_resource_dirty(
+        &self,
+        actor: ActorId,
+        resource: ResourceId,
+    ) -> Result<Vec<ActorId>, WorkflowError> {
+        let tracker = self.context.resource_tracker.as_ref().ok_or_else(|| {
+            WorkflowError::BuilderInvalid("context freshness is not enabled".to_string())
+        })?;
+        let stale = tracker.record_write(&actor, resource.clone());
+        for reader in &stale {
+            self.context
+                .messages
+                .inject_task(
+                    reader.task_id,
+                    format!(
+                        "Context freshness notice: {resource:?} changed after you observed it. Refresh that context before using it."
+                    ),
+                )
+                .await;
+            fire_hooks_on_context(&self.context, HookPoint::OnMesiConflict, |hook| {
+                hook.agent_name = Some(reader.agent_name.clone());
+                hook.agent_run_id = Some(reader.task_id);
+                hook.metadata.insert(
+                    "resource".to_string(),
+                    serde_json::json!(format!("{resource:?}")),
+                );
+                hook.metadata
+                    .insert("writer".to_string(), serde_json::json!(actor.agent_name));
+            })?;
+        }
+        Ok(stale)
+    }
+
+    /// Mark the workflow run complete, fire its final lifecycle hook, persist
+    /// the final snapshot, and return the accumulated result.
+    pub async fn finish(&self) -> Result<WorkflowResult, WorkflowError> {
+        fire_hooks_on_context(&self.context, HookPoint::PostWorkflow, |_| {})?;
+        self.checkpoint().await?;
+        Ok(self.result())
+    }
+
+    pub fn pause(&self) -> Result<(), WorkflowError> {
+        if !self
+            .context
+            .paused
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            fire_hooks_on_context(&self.context, HookPoint::OnWorkflowPause, |_| {})?;
+        }
+        Ok(())
+    }
+
+    pub fn resume(&self) -> Result<(), WorkflowError> {
+        if self
+            .context
+            .paused
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            fire_hooks_on_context(&self.context, HookPoint::OnWorkflowResume, |_| {})?;
+            self.context.resume_notify.notify_waiters();
+        }
+        Ok(())
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.context
+            .paused
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn begin_ballot(&self, config: BallotConfig) -> Result<uuid::Uuid, WorkflowError> {
+        self.context
+            .ballots
+            .as_ref()
+            .ok_or_else(|| {
+                WorkflowError::BuilderInvalid("structured voting is not enabled".to_string())
+            })?
+            .begin(config)
+            .map_err(WorkflowError::Deliberation)
+    }
+
+    pub fn finish_ballot(&self, ballot_id: uuid::Uuid) -> Result<BallotResult, WorkflowError> {
+        self.context
+            .ballots
+            .as_ref()
+            .ok_or_else(|| {
+                WorkflowError::BuilderInvalid("structured voting is not enabled".to_string())
+            })?
+            .finish(ballot_id)
+            .map_err(WorkflowError::Deliberation)
+    }
+
+    /// Execute an explicitly keyed replay-safe workflow step.
+    ///
+    /// A previously completed step returns its persisted output. An unresolved
+    /// prior attempt returns [`WorkflowError::DurableInDoubt`] unless the step
+    /// was explicitly declared retry-safe.
+    pub async fn durable_step<I, O, F, Fut>(
+        &self,
+        spec: DurableStepSpec,
+        input: &I,
+        execute: F,
+    ) -> Result<O, WorkflowError>
+    where
+        I: serde::Serialize,
+        O: serde::Serialize + serde::de::DeserializeOwned,
+        F: FnOnce(DurableStepContext) -> Fut,
+        Fut: std::future::Future<Output = Result<O, WorkflowError>>,
+    {
+        let store = self
+            .context
+            .durable_store
+            .as_ref()
+            .ok_or(WorkflowError::DurableUnavailable)?;
+        store.execute(&spec, input, execute).await
+    }
+
+    /// Execute a durable step with developer-supplied reconciliation for an
+    /// uncertain prior outcome.
+    pub async fn durable_step_with_resolver<I, O, F, Fut, R>(
+        &self,
+        spec: DurableStepSpec,
+        input: &I,
+        execute: F,
+        resolver: &R,
+    ) -> Result<O, WorkflowError>
+    where
+        I: serde::Serialize + Sync,
+        O: serde::Serialize + serde::de::DeserializeOwned,
+        F: FnOnce(DurableStepContext) -> Fut,
+        Fut: std::future::Future<Output = Result<O, WorkflowError>>,
+        R: ResolveInDoubt<I, O>,
+    {
+        let store = self
+            .context
+            .durable_store
+            .as_ref()
+            .ok_or(WorkflowError::DurableUnavailable)?;
+        store
+            .execute_with_resolver(&spec, input, execute, resolver)
+            .await
+    }
+
+    /// List steps whose side-effect outcome is not known.
+    pub async fn in_doubt_steps(&self) -> Result<Vec<InDoubtContext>, WorkflowError> {
+        let store = self
+            .context
+            .durable_store
+            .as_ref()
+            .ok_or(WorkflowError::DurableUnavailable)?;
+        store.list_in_doubt().await
+    }
+
+    pub async fn resolve_in_doubt_completed<I, O>(
+        &self,
+        spec: &DurableStepSpec,
+        input: &I,
+        output: &O,
+        actor: &str,
+        reason: &str,
+    ) -> Result<(), WorkflowError>
+    where
+        I: serde::Serialize,
+        O: serde::Serialize,
+    {
+        let store = self
+            .context
+            .durable_store
+            .as_ref()
+            .ok_or(WorkflowError::DurableUnavailable)?;
+        store
+            .operator_complete(spec, input, output, actor, reason)
+            .await
+    }
+
+    pub async fn resolve_in_doubt_failed<I: serde::Serialize>(
+        &self,
+        spec: &DurableStepSpec,
+        input: &I,
+        actor: &str,
+        reason: &str,
+    ) -> Result<(), WorkflowError> {
+        let store = self
+            .context
+            .durable_store
+            .as_ref()
+            .ok_or(WorkflowError::DurableUnavailable)?;
+        store
+            .operator_permanently_fail(spec, input, actor, reason)
+            .await
+    }
+
+    pub async fn authorize_in_doubt_retry<I: serde::Serialize>(
+        &self,
+        spec: &DurableStepSpec,
+        input: &I,
+        actor: &str,
+        reason: &str,
+    ) -> Result<(), WorkflowError> {
+        let store = self
+            .context
+            .durable_store
+            .as_ref()
+            .ok_or(WorkflowError::DurableUnavailable)?;
+        store
+            .operator_authorize_retry(spec, input, actor, reason)
+            .await
+    }
+}
+
+/// A handle to a running agent, enabling non-blocking spawn-then-wait patterns.
+///
+/// Obtained via [`Workflow::spawn_agent`]. Two usage modes:
+///
+/// 1. **Default driving**: Call [`wait`](AgentHandle::wait) to let the workflow
+///    engine handle all events (hooks, MESI, budget) and return the result.
+///
+/// 2. **Custom driving**: Call [`into_parts`](AgentHandle::into_parts) to get
+///    the raw event receiver, command sender, and join handle for manual event
+///    processing.
+pub struct AgentHandle {
+    event_rx: tokio::sync::mpsc::Receiver<arko_agents::runtime::event::AgentEvent>,
+    cmd_tx: tokio::sync::mpsc::Sender<arko_agents::runtime::command::UserCommand>,
+    join_handle: tokio::task::JoinHandle<Result<arko_agents::Task, arko_agents::ArkoAgentsError>>,
+    agent_name: String,
+    agent_run_id: uuid::Uuid,
+    context: Arc<SharedContext>,
+    persistence: Option<Arc<PersistenceManager>>,
+    pending_message_ids: Vec<uuid::Uuid>,
+}
+
+impl AgentHandle {
+    /// Returns the name of the agent this handle controls.
+    pub fn agent_name(&self) -> &str {
+        &self.agent_name
+    }
+
+    /// Drive the event loop with default workflow behavior and wait for completion.
+    ///
+    /// Handles hooks, MESI conflict detection, budget tracking, and error recovery
+    /// automatically. Returns the agent result on completion.
+    pub async fn wait(mut self) -> Result<AgentResult, WorkflowError> {
+        let drive_result = engine::drive_event_loop(
+            &self.agent_name,
+            self.agent_run_id,
+            &mut self.event_rx,
+            &self.cmd_tx,
+            &self.context,
+            self.persistence.as_ref(),
+        )
+        .await;
+
+        if drive_result
+            .as_ref()
+            .is_err_and(|error| !matches!(error, WorkflowError::UserInputRequired { .. }))
+        {
+            let _ = self
+                .cmd_tx
+                .send(arko_agents::runtime::command::UserCommand::CancelTask)
+                .await;
+        }
+
+        let join_result = self.join_handle.await;
+        let final_task = join_result
+            .map_err(|e| WorkflowError::Channel(format!("Agent join error: {}", e)))?
+            .map_err(WorkflowError::Agent)?;
+
+        let agent_result = engine::finalize_agent_task(
+            self.agent_name.clone(),
+            final_task,
+            &self.context,
+            self.persistence.as_ref(),
+        )
+        .await?;
+        if agent_result.status == result::AgentRunStatus::Completed {
+            self.context
+                .messages
+                .acknowledge_active(&self.agent_name, self.agent_run_id);
+            self.context
+                .messages
+                .acknowledge(&self.agent_name, &self.pending_message_ids);
+        }
+        self.context
+            .messages
+            .unregister_active(&self.agent_name, self.agent_run_id);
+
+        drive_result?;
+        if agent_result.status == result::AgentRunStatus::Completed {
+            Ok(agent_result)
+        } else {
+            Err(WorkflowError::Agent(
+                arko_agents::ArkoAgentsError::TaskExecution(
+                    agent_result
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "Agent did not complete".to_string()),
+                ),
+            ))
+        }
+    }
+
+    /// Decompose the handle into raw parts for custom event processing.
+    ///
+    /// Returns `(event_receiver, command_sender, join_handle, agent_name)`.
+    ///
+    /// When using this, the caller is responsible for processing
+    /// [`AgentEvent`](arko_agents::runtime::event::AgentEvent)s and sending
+    /// appropriate [`UserCommand`](arko_agents::runtime::command::UserCommand)s.
+    /// Hooks, MESI, and budget tracking are **not** applied automatically.
+    #[allow(clippy::type_complexity)]
+    pub fn into_parts(
+        self,
+    ) -> (
+        tokio::sync::mpsc::Receiver<arko_agents::runtime::event::AgentEvent>,
+        tokio::sync::mpsc::Sender<arko_agents::runtime::command::UserCommand>,
+        tokio::task::JoinHandle<Result<arko_agents::Task, arko_agents::ArkoAgentsError>>,
+        String,
+    ) {
+        (
+            self.event_rx,
+            self.cmd_tx,
+            self.join_handle,
+            self.agent_name,
+        )
+    }
+}
+
+/// Builder for constructing [`Workflow`] instances.
+pub struct WorkflowBuilder {
+    name: Option<String>,
+    metadata: WorkflowMetadata,
+    workspace: Option<PathBuf>,
+    llm_client: Option<Arc<LLMClient>>,
+    agents: Vec<(String, AgentConfig)>,
+    memory_config: Option<MemoryConfig>,
+    budget_limit: Option<f64>,
+    budget_warning: Option<f64>,
+    agent_budgets: HashMap<String, f64>,
+    hooks: Vec<(HookPoint, HookCallback)>,
+    persistence_config: Option<PersistenceConfig>,
+    resume_from: Option<PathBuf>,
+    mesi_config: Option<MesiConfig>,
+    freshness_config: Option<ContextFreshnessConfig>,
+    global_tools: Vec<Arc<dyn arko_agents::tool::Tool>>,
+    agent_tools: HashMap<String, Vec<Arc<dyn arko_agents::tool::Tool>>>,
+    global_interceptors: Vec<Arc<dyn ToolResultInterceptor>>,
+    agent_interceptors: HashMap<String, Vec<Arc<dyn ToolResultInterceptor>>>,
+    completion_verifiers: Vec<CompletionVerifierConfig>,
+    distillation_configs: Vec<DistillationConfig>,
+    services_config: Option<WorkflowServicesConfig>,
+    user_input_handler: Option<Arc<dyn UserInputHandler>>,
+    voting_enabled: bool,
+    interception_failure_policy: Option<InterceptionFailurePolicy>,
+}
+
+impl WorkflowBuilder {
+    pub fn new() -> Self {
+        Self {
+            name: None,
+            metadata: WorkflowMetadata::default(),
+            workspace: None,
+            llm_client: None,
+            agents: Vec::new(),
+            memory_config: None,
+            budget_limit: None,
+            budget_warning: None,
+            agent_budgets: HashMap::new(),
+            hooks: Vec::new(),
+            persistence_config: None,
+            resume_from: None,
+            mesi_config: None,
+            freshness_config: None,
+            global_tools: Vec::new(),
+            agent_tools: HashMap::new(),
+            global_interceptors: Vec::new(),
+            agent_interceptors: HashMap::new(),
+            completion_verifiers: Vec::new(),
+            distillation_configs: Vec::new(),
+            services_config: None,
+            user_input_handler: None,
+            voting_enabled: false,
+            interception_failure_policy: None,
+        }
+    }
+
+    /// Set the workflow name.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Set the workspace directory.
+    pub fn workspace(mut self, path: impl Into<PathBuf>) -> Self {
+        self.workspace = Some(path.into());
+        self
+    }
+
+    /// Set the LLM client.
+    pub fn llm_client(mut self, client: Arc<LLMClient>) -> Self {
+        self.llm_client = Some(client);
+        self
+    }
+
+    /// Register a named agent configuration.
+    pub fn agent(mut self, name: impl Into<String>, config: AgentConfig) -> Self {
+        self.agents.push((name.into(), config));
+        self
+    }
+
+    /// Configure the memory system.
+    pub fn memory(mut self, config: MemoryConfig) -> Self {
+        self.memory_config = Some(config);
+        self
+    }
+
+    /// Set the budget limit in dollars.
+    pub fn budget(mut self, limit: f64) -> Self {
+        self.budget_limit = Some(limit);
+        self
+    }
+
+    /// Set the budget warning threshold in dollars.
+    pub fn budget_warning(mut self, threshold: f64) -> Self {
+        self.budget_warning = Some(threshold);
+        self
+    }
+
+    /// Register a lifecycle hook.
+    pub fn hook(mut self, point: HookPoint, callback: HookCallback) -> Self {
+        self.hooks.push((point, callback));
+        self
+    }
+
+    /// Configure persistence.
+    pub fn persistence(mut self, config: PersistenceConfig) -> Self {
+        self.persistence_config = Some(config);
+        self
+    }
+
+    /// Enable MESI file conflict tracking with default config.
+    pub fn enable_mesi(mut self) -> Self {
+        self.mesi_config = Some(MesiConfig::default());
+        self
+    }
+
+    /// Enable MESI file conflict tracking with custom config.
+    pub fn mesi(mut self, config: MesiConfig) -> Self {
+        self.mesi_config = Some(config);
+        self
+    }
+
+    pub fn agent_budget(mut self, agent: impl Into<String>, limit: f64) -> Self {
+        self.agent_budgets.insert(agent.into(), limit);
+        self
+    }
+
+    /// Explicitly disable run persistence and durable steps.
+    pub fn ephemeral(mut self) -> Self {
+        self.persistence_config = None;
+        self.resume_from = None;
+        self
+    }
+
+    pub fn metadata(mut self, metadata: WorkflowMetadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Restore workflow state from a checkpoint when building. Persistence
+    /// must also be configured, and its run directory must match the
+    /// checkpoint's workflow-run identity.
+    pub fn resume_from(mut self, checkpoint: impl Into<PathBuf>) -> Self {
+        self.resume_from = Some(checkpoint.into());
+        self
+    }
+
+    /// Enable generalized context freshness for files, directory listings,
+    /// memory tiers, and custom resources.
+    pub fn context_freshness(mut self, config: ContextFreshnessConfig) -> Self {
+        self.freshness_config = Some(config);
+        self
+    }
+
+    /// Register a tool available to all agents.
+    pub fn global_tool(mut self, tool: Arc<dyn arko_agents::tool::Tool>) -> Self {
+        self.global_tools.push(tool);
+        self
+    }
+
+    /// Register a tool available only to a specific agent.
+    pub fn agent_tool(
+        mut self,
+        agent_name: impl Into<String>,
+        tool: Arc<dyn arko_agents::tool::Tool>,
+    ) -> Self {
+        self.agent_tools
+            .entry(agent_name.into())
+            .or_default()
+            .push(tool);
+        self
+    }
+
+    /// Register a tool result interceptor applied to all agents.
+    ///
+    /// Multiple global interceptors are chained in registration order.
+    /// Global interceptors run before any agent-specific interceptors.
+    pub fn tool_result_interceptor(mut self, interceptor: Arc<dyn ToolResultInterceptor>) -> Self {
+        self.global_interceptors.push(interceptor);
+        self
+    }
+
+    /// Register a tool result interceptor applied only to a specific agent.
+    ///
+    /// Multiple interceptors for the same agent are chained in registration order,
+    /// and run after any global interceptors.
+    pub fn agent_tool_result_interceptor(
+        mut self,
+        agent_name: impl Into<String>,
+        interceptor: Arc<dyn ToolResultInterceptor>,
+    ) -> Self {
+        self.agent_interceptors
+            .entry(agent_name.into())
+            .or_default()
+            .push(interceptor);
+        self
+    }
+
+    /// Set the failure policy for tool result interception.
+    ///
+    /// Defaults to `UseRawResult` (log warning and continue with the original
+    /// tool output if the interceptor fails).
+    pub fn interception_failure_policy(mut self, policy: InterceptionFailurePolicy) -> Self {
+        self.interception_failure_policy = Some(policy);
+        self
+    }
+
+    pub fn completion_verifier(mut self, config: CompletionVerifierConfig) -> Self {
+        self.completion_verifiers.push(config);
+        self
+    }
+
+    pub fn distiller(mut self, config: DistillationConfig) -> Self {
+        self.distillation_configs.push(config);
+        self
+    }
+
+    pub fn workflow_services(mut self, config: WorkflowServicesConfig) -> Self {
+        self.services_config = Some(config);
+        self
+    }
+
+    pub fn user_input_handler(mut self, handler: Arc<dyn UserInputHandler>) -> Self {
+        self.user_input_handler = Some(handler);
+        self
+    }
+
+    pub fn enable_voting(mut self) -> Self {
+        self.voting_enabled = true;
+        self
+    }
+
+    /// Build the workflow.
+    pub fn build(self) -> Result<Workflow, WorkflowError> {
+        for config in &self.distillation_configs {
+            config.validate()?;
+        }
+        let name = self.name.ok_or(WorkflowError::BuilderMissing {
+            field: "name".into(),
+        })?;
+        let workspace = self.workspace.ok_or(WorkflowError::BuilderMissing {
+            field: "workspace".into(),
+        })?;
+        let llm_client = self.llm_client.ok_or(WorkflowError::BuilderMissing {
+            field: "llm_client".into(),
+        })?;
+
+        if self.agents.is_empty() {
+            return Err(WorkflowError::BuilderMissing {
+                field: "agents (at least one required)".into(),
+            });
+        }
+
+        if !self.metadata.supported_platforms.is_empty()
+            && !self
+                .metadata
+                .supported_platforms
+                .iter()
+                .any(|platform| platform.matches_host())
+        {
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "workflow does not support host platform {}/{}",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            )));
+        }
+
+        if !workspace.is_dir() {
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "workspace '{}' does not exist or is not a directory",
+                workspace.display()
+            )));
+        }
+
+        for (label, value) in [
+            ("budget limit", self.budget_limit),
+            ("budget warning", self.budget_warning),
+        ] {
+            if let Some(value) = value
+                && (!value.is_finite() || value < 0.0)
+            {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "{label} must be finite and non-negative"
+                )));
+            }
+        }
+
+        let mut agent_names = HashSet::new();
+        for (agent_name, _) in &self.agents {
+            if !agent_names.insert(agent_name.clone()) {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "duplicate agent name '{agent_name}'"
+                )));
+            }
+        }
+
+        for referenced_agent in self
+            .agent_tools
+            .keys()
+            .chain(self.agent_interceptors.keys())
+        {
+            if !agent_names.contains(referenced_agent) {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "configuration references unknown agent '{referenced_agent}'"
+                )));
+            }
+        }
+        for (agent, limit) in &self.agent_budgets {
+            if !agent_names.contains(agent) {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "agent budget references unknown agent '{agent}'"
+                )));
+            }
+            if !limit.is_finite() || *limit < 0.0 {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "budget for agent '{agent}' must be finite and non-negative"
+                )));
+            }
+        }
+
+        for verifier in &self.completion_verifiers {
+            if !agent_names.contains(&verifier.verifier_agent) {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "completion verifier '{}' references unknown agent '{}'",
+                    verifier.name, verifier.verifier_agent
+                )));
+            }
+            for target in &verifier.target_agents {
+                if !agent_names.contains(target) {
+                    return Err(WorkflowError::BuilderInvalid(format!(
+                        "completion verifier '{}' targets unknown agent '{}'",
+                        verifier.name, target
+                    )));
+                }
+            }
+        }
+
+        let mut global_tool_names = HashSet::new();
+        for tool in &self.global_tools {
+            let tool_name = tool.name();
+            if matches!(
+                tool_name.as_str(),
+                "complete_task"
+                    | "ask_user"
+                    | "read_memory"
+                    | "write_memory"
+                    | "list_memories"
+                    | "send_message"
+                    | RUN_WORKFLOW_AGENT_TOOL_NAME
+                    | CAST_VOTE_TOOL_NAME
+            ) {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "tool name '{tool_name}' is reserved"
+                )));
+            }
+            if !global_tool_names.insert(tool_name.clone()) {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "duplicate global tool name '{tool_name}'"
+                )));
+            }
+        }
+
+        for (agent_name, tools) in &self.agent_tools {
+            let mut names = global_tool_names.clone();
+            for tool in tools {
+                let tool_name = tool.name();
+                if !names.insert(tool_name.clone()) {
+                    return Err(WorkflowError::BuilderInvalid(format!(
+                        "duplicate tool name '{tool_name}' for agent '{agent_name}'"
+                    )));
+                }
+            }
+        }
+
+        let resume_state = match &self.resume_from {
+            Some(path) => {
+                let json = std::fs::read_to_string(path)?;
+                let state: crate::persistence::state::WorkflowState = serde_json::from_str(&json)?;
+                if state.workflow_name != name {
+                    return Err(WorkflowError::BuilderInvalid(format!(
+                        "checkpoint is for workflow '{}', not '{}'",
+                        state.workflow_name, name
+                    )));
+                }
+                Some(state)
+            }
+            None => None,
+        };
+        if resume_state.is_some() && self.persistence_config.is_none() {
+            return Err(WorkflowError::BuilderInvalid(
+                "resume_from requires persistence configuration".to_string(),
+            ));
+        }
+
+        let workflow_run_id = match &self.persistence_config {
+            Some(config) => {
+                let persisted = PersistenceManager::resolve_run_id(config)?;
+                if let Some(state) = &resume_state
+                    && state.workflow_run_id != uuid::Uuid::nil()
+                    && state.workflow_run_id != persisted
+                {
+                    return Err(WorkflowError::BuilderInvalid(format!(
+                        "checkpoint run {} does not match persistence run {}",
+                        state.workflow_run_id, persisted
+                    )));
+                }
+                persisted
+            }
+            None => uuid::Uuid::new_v4(),
+        };
+        let persistence = self
+            .persistence_config
+            .map(|config| PersistenceManager::new(config, workflow_run_id));
+        let durable_store = persistence.as_ref().map(PersistenceManager::durable_store);
+
+        let budget = if let Some(state) = &resume_state {
+            BudgetManager::from_ledger(
+                self.budget_limit,
+                self.budget_warning,
+                state.cost_ledger.clone(),
+                state.oauth_exempt_agents.clone(),
+            )
+        } else {
+            BudgetManager::new(self.budget_limit, self.budget_warning)
+        };
+        for (agent, limit) in self.agent_budgets {
+            budget.set_agent_limit(agent, limit);
+        }
+        let memory = if let Some(state) = &resume_state {
+            crate::memory::MemoryStore::new(state.memory_snapshot.clone())
+        } else {
+            self.memory_config.unwrap_or_default().build()
+        };
+        let messages = if let Some(state) = &resume_state {
+            MessageBus::from_snapshot(agent_names.iter().cloned(), state.message_queues.clone())
+        } else {
+            MessageBus::new(agent_names.iter().cloned())
+        };
+        let legacy_mesi_config = self.mesi_config.clone();
+        let file_tracker = legacy_mesi_config.clone().map(FileTracker::with_config);
+        let freshness_config = self.freshness_config.or_else(|| {
+            legacy_mesi_config.map(|legacy| {
+                let mut config = ContextFreshnessConfig {
+                    block_on_conflict: legacy.block_on_conflict,
+                    tool_effects: HashMap::new(),
+                };
+                for tool in legacy.read_tools {
+                    let effect = if tool == "list_files" {
+                        ToolResourceEffect::ReadDirectoryTree {
+                            parameter: "directory".to_string(),
+                        }
+                    } else {
+                        ToolResourceEffect::ReadFile {
+                            parameter: "path".to_string(),
+                        }
+                    };
+                    config.tool_effects.insert(tool, effect);
+                }
+                for tool in legacy.write_tools {
+                    config.tool_effects.insert(
+                        tool,
+                        ToolResourceEffect::WriteFile {
+                            parameter: "path".to_string(),
+                        },
+                    );
+                }
+                config
+            })
+        });
+        let resource_tracker = freshness_config.map(|config| {
+            if let Some(snapshot) = resume_state
+                .as_ref()
+                .and_then(|state| state.freshness_snapshot.clone())
+            {
+                ResourceTracker::from_snapshot(workspace.clone(), config, snapshot)
+            } else {
+                ResourceTracker::new(workspace.clone(), config)
+            }
+        });
+
+        let mut hook_registry = HookRegistry::new();
+        for (point, callback) in self.hooks {
+            hook_registry.register(point, callback);
+        }
+
+        let (event_tx, _) = tokio::sync::broadcast::channel(1_024);
+        let context = Arc::new(SharedContext {
+            workflow_run_id,
+            workflow_name: name.clone(),
+            workflow_metadata: self.metadata.clone(),
+            workspace: workspace.clone(),
+            budget,
+            durable_store,
+            memory,
+            messages,
+            file_tracker,
+            resource_tracker,
+            hooks: Arc::new(hook_registry),
+            agent_configs: self.agents.iter().cloned().collect(),
+            global_tools: self.global_tools,
+            agent_tools: self.agent_tools,
+            agent_results: parking_lot::RwLock::new(
+                resume_state
+                    .as_ref()
+                    .map(|state| state.agent_results.clone())
+                    .unwrap_or_default(),
+            ),
+            global_interceptors: self.global_interceptors,
+            agent_interceptors: self.agent_interceptors,
+            interception_failure_policy: self.interception_failure_policy.unwrap_or_default(),
+            completion_verifiers: self.completion_verifiers,
+            verification_attempts: parking_lot::Mutex::new(HashMap::new()),
+            verification_baselines: parking_lot::Mutex::new(HashMap::new()),
+            verification_records: parking_lot::RwLock::new(
+                resume_state
+                    .as_ref()
+                    .map(|state| state.verification_records.clone())
+                    .unwrap_or_default(),
+            ),
+            distillation_configs: self.distillation_configs,
+            distillation_records: parking_lot::RwLock::new(
+                resume_state
+                    .as_ref()
+                    .map(|state| state.distillation_records.clone())
+                    .unwrap_or_default(),
+            ),
+            workflow_services: std::sync::OnceLock::new(),
+            paused: std::sync::atomic::AtomicBool::new(false),
+            resume_notify: tokio::sync::Notify::new(),
+            user_input_handler: self.user_input_handler,
+            ballots: self
+                .voting_enabled
+                .then(|| Arc::new(BallotStore::default())),
+            event_tx,
+        });
+
+        if let Some(services_config) = self.services_config {
+            let services = WorkflowServices::new(
+                Arc::downgrade(&context),
+                llm_client.clone(),
+                persistence.clone().map(Arc::new),
+                services_config,
+            );
+            context.workflow_services.set(services).map_err(|_| {
+                WorkflowError::BuilderInvalid("workflow services initialized twice".to_string())
+            })?;
+        }
+
+        let engine = WorkflowEngine::new(llm_client, persistence);
+        fire_hooks_on_context(&context, HookPoint::PreWorkflow, |_| {})?;
+
+        Ok(Workflow {
+            config: WorkflowConfig {
+                name,
+                workspace,
+                metadata: self.metadata,
+            },
+            engine,
+            context,
+        })
+    }
+}
+
+impl Default for WorkflowBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}

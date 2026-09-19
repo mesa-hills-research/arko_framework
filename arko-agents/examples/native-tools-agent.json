@@ -1,0 +1,26 @@
+{
+    "id": "coding-agent",
+    "name": "Coding Agent",
+    "role_description": "You are a skilled software engineer.",
+    "instructions": "Help the user with coding tasks. Always read files before modifying them.",
+    "llm_config": {
+      "provider": "OpenAI",
+      "model_id": "claude-opus-4-6",
+      "generation_config": {
+        "temperature": 0.0,
+        "temperature_specified": false,
+        "reasoning": { "OpenAI": { "effort": "medium", "include_summaries": true } }
+      }
+    },
+    "tool_config": {
+      "available_tool_names": ["read_file", "write_file", "apply_diff", "list_files", "ask_user", "complete_task"],
+      "allow_batched_tool_calls": true,
+      "default_auto_approve_tool_use": true,
+      "tool_calling_mode": "Native"
+    },
+    "environment_details_config": {
+      "current_working_directory": { "include": true, "placement": "SystemPrompt" },
+      "file_tree": { "include": true, "placement": "InitialTaskPrompt", "depth": 3 },
+      "operating_system": { "include": true, "placement": "SystemPrompt" }
+    }
+  }

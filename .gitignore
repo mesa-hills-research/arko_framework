@@ -1,0 +1,11 @@
+/target/
+**/target/
+.env
+.env.*
+!.env.example
+*.log
+__pycache__/
+*.py[cod]
+.venv/
+.DS_Store
+Thumbs.db

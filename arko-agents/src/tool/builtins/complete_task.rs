@@ -1,0 +1,72 @@
+use crate::tool::{
+    TaskContext, Tool, ToolDefinition, ToolError, ToolParameterDefinition, ToolParameterType,
+    ToolTypeDetails,
+};
+use async_trait::async_trait;
+use serde_json::Value;
+use std::collections::HashMap;
+
+pub const COMPLETE_TASK_TOOL_NAME: &str = "complete_task";
+pub const COMPLETE_TASK_SUMMARY_PARAM_NAME: &str = "summary";
+
+#[derive(Debug, Clone)]
+pub struct CompleteTaskTool;
+
+impl CompleteTaskTool {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    pub fn default_summary_description() -> String {
+        "A concise summary of the completed task, all actions taken, and the outcome.".to_string()
+    }
+}
+
+impl Default for CompleteTaskTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for CompleteTaskTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: COMPLETE_TASK_TOOL_NAME.to_string(),
+            description: "Use this tool to signify that the current task is fully completed. Provide a summary of what was accomplished.".to_string(),
+            output_based_example: None,
+            parameters: vec![ToolParameterDefinition {
+                name: COMPLETE_TASK_SUMMARY_PARAM_NAME.to_string(),
+                description: Self::default_summary_description(),
+                param_type: ToolParameterType::String,
+                required: true,
+                is_path: false,
+                flag: None,
+                default_value: None,
+            }],
+            supports_batched_calls: false,
+            tool_type_details: ToolTypeDetails::BuiltIn,
+            raw_json_schema_override: None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _context: &TaskContext<'_>,
+        params: HashMap<String, Value>,
+    ) -> Result<String, ToolError> {
+        let summary = params
+            .get(COMPLETE_TASK_SUMMARY_PARAM_NAME)
+            .ok_or_else(|| ToolError::MissingParameter {
+                param_name: COMPLETE_TASK_SUMMARY_PARAM_NAME.to_string(),
+            })?
+            .as_str()
+            .ok_or_else(|| ToolError::ParameterValidation {
+                param_name: COMPLETE_TASK_SUMMARY_PARAM_NAME.to_string(),
+                message: "Summary must be a string.".to_string(),
+            })?
+            .to_string();
+
+        Ok(summary)
+    }
+}

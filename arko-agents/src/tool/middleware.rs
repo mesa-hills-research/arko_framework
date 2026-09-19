@@ -1,0 +1,70 @@
+use std::collections::HashMap;
+use std::path::Path;
+
+use async_trait::async_trait;
+use serde_json::Value;
+use uuid::Uuid;
+
+use super::ToolError;
+
+/// Stable task information exposed at tool execution boundaries.
+#[derive(Debug, Clone, Copy)]
+pub struct ToolExecutionContext<'a> {
+    pub task_id: Uuid,
+    pub agent_name: &'a str,
+    pub initial_task_prompt: &'a str,
+    pub current_working_directory: &'a Path,
+}
+
+/// A fully parsed tool call about to be executed.
+#[derive(Debug)]
+pub struct ToolCallContext<'a> {
+    pub tool_call_id: Uuid,
+    pub tool_name: &'a str,
+    pub parameters: &'a HashMap<String, Value>,
+}
+
+/// The decision returned before a tool executes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolExecutionDecision {
+    Continue,
+    Reject {
+        message_to_agent: String,
+    },
+    /// Permanently reject the call and fail the task. This is intended for
+    /// policy gates where continuing would be unsafe or an attempt budget has
+    /// been exhausted.
+    FailTask {
+        reason: String,
+    },
+}
+
+/// The observed outcome of a tool execution.
+#[derive(Debug, Clone, Copy)]
+pub enum ToolExecutionOutcome<'a> {
+    Success(&'a str),
+    Error(&'a str),
+    /// The caller supplied an output during approval, so the runtime did not
+    /// execute the registered tool itself.
+    CallerProvided(&'a str),
+}
+
+/// Approval-independent middleware around actual tool execution.
+///
+/// Unlike approval events, this boundary is used for auto-approved, manually
+/// approved, native, output-based, single, and batched calls alike.
+#[async_trait]
+pub trait ToolExecutionMiddleware: Send + Sync {
+    async fn before(
+        &self,
+        context: &ToolExecutionContext<'_>,
+        call: &ToolCallContext<'_>,
+    ) -> Result<ToolExecutionDecision, ToolError>;
+
+    async fn after(
+        &self,
+        context: &ToolExecutionContext<'_>,
+        call: &ToolCallContext<'_>,
+        outcome: ToolExecutionOutcome<'_>,
+    ) -> Result<(), ToolError>;
+}

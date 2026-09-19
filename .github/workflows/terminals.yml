@@ -1,0 +1,22 @@
+name: Framework portability
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Framework library tests, including native terminal interactions
+        run: cargo test --workspace --lib --locked
+      - name: Index pipeline and watcher tests
+        run: cargo test -p arko-index --locked
+      - name: Interactive terminal example
+        run: cargo run -p arko-agents --example interactive_terminal --locked
