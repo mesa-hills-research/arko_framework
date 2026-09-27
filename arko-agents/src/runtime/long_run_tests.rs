@@ -100,7 +100,10 @@ async fn rate_limit_waits_back_off_without_a_hint_and_stay_cancellable() {
         .unwrap();
     sender.await.unwrap();
     assert_eq!(started.elapsed(), Duration::from_secs(1));
-    assert!(matches!(agent.task.current_state, TaskState::Failed { .. }));
+    assert!(matches!(
+        agent.task.current_state,
+        TaskState::Cancelled { .. }
+    ));
 }
 
 #[tokio::test(start_paused = true)]

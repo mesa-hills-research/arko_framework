@@ -153,7 +153,7 @@ async fn capacity_wait_honors_server_hints_and_remains_cancellable_and_suspendab
             assert_eq!(started.elapsed(), Duration::from_millis(10));
             assert!(agent.stop_requested);
             assert_eq!(
-                matches!(agent.task.current_state, TaskState::Failed { .. }),
+                matches!(agent.task.current_state, TaskState::Cancelled { .. }),
                 !suspend
             );
             while let Ok(event) = events.try_recv() {
@@ -458,7 +458,7 @@ async fn cancel_and_suspend_interrupt_backoff_and_pending_requests() {
             assert_eq!(started.elapsed(), Duration::from_millis(10));
             assert!(agent.stop_requested);
             assert_eq!(
-                matches!(agent.task.current_state, TaskState::Failed { .. }),
+                matches!(agent.task.current_state, TaskState::Cancelled { .. }),
                 !suspend
             );
         }

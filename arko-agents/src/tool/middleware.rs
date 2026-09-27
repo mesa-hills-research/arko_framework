@@ -37,6 +37,13 @@ pub enum ToolExecutionDecision {
     FailTask {
         reason: String,
     },
+    /// Reject the call and stop the task as
+    /// [`Cancelled`](crate::task::TaskState::Cancelled): the caller is
+    /// shutting the task down, for example because the run it belongs to was
+    /// cancelled.
+    CancelTask {
+        reason: String,
+    },
 }
 
 /// The observed outcome of a tool execution.

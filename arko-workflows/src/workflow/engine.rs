@@ -374,7 +374,7 @@ pub(crate) async fn finalize_agent_task(
             None,
             HookPoint::PostAgentCompletion,
         ),
-        TaskState::Failed { reason } if reason.to_ascii_lowercase().contains("cancel") => (
+        TaskState::Cancelled { reason } => (
             crate::workflow::result::AgentRunStatus::Cancelled,
             String::new(),
             Some(reason.clone()),
@@ -1485,6 +1485,52 @@ mod tests {
             command_rx.try_recv().unwrap(),
             UserCommand::CancelTask
         ));
+    }
+
+    /// The run status follows the task state, never the wording of a
+    /// failure reason.
+    #[tokio::test]
+    async fn only_a_cancelled_task_is_a_cancelled_run() {
+        let config = AgentConfig::builder(
+            "designer".into(),
+            "Designer".into(),
+            AgentLLMConfig {
+                model: Model::openai_gpt_5_6_sol(),
+                generation_config: GenerationConfig::default(),
+            },
+        )
+        .role_description("Designer".into())
+        .instructions("Design".into())
+        .build()
+        .unwrap();
+        let workflow = Workflow::builder()
+            .name("status-test")
+            .workspace(std::env::current_dir().unwrap())
+            .llm_client(Arc::new(LLMClient::new()))
+            .agent("designer", config.clone())
+            .build()
+            .unwrap();
+        for (state, status) in [
+            (
+                TaskState::Failed {
+                    reason: "The upload was cancelled by the server.".into(),
+                },
+                crate::workflow::result::AgentRunStatus::Failed,
+            ),
+            (
+                TaskState::Cancelled {
+                    reason: arko_agents::task::CANCELLED_BY_USER.into(),
+                },
+                crate::workflow::result::AgentRunStatus::Cancelled,
+            ),
+        ] {
+            let mut task = Task::new(config.clone(), "design".into(), ".".into(), None);
+            task.set_state(state);
+            let result = finalize_agent_task("designer".into(), task, workflow.context(), None)
+                .await
+                .unwrap();
+            assert_eq!(result.status, status);
+        }
     }
 
     #[test]

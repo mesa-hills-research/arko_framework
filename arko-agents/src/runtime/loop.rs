@@ -10,7 +10,7 @@ use crate::parsing::{
     ToolParsingConfig, assemble_tool_calls,
 };
 use crate::skill::SkillPromptContext;
-use crate::task::{PendingToolCallInfo, PlanUsageWindowMark, Task, TaskState};
+use crate::task::{CANCELLED_BY_USER, PendingToolCallInfo, PlanUsageWindowMark, Task, TaskState};
 use crate::tool::{
     InterceptedResult, InterceptionFailurePolicy, InterceptorConfig, TaskContext, ToolCallContext,
     ToolDefinition, ToolExecutionContext, ToolExecutionDecision, ToolExecutionMiddleware,
@@ -630,8 +630,8 @@ impl AgentLoop {
         match command {
             Some(UserCommand::InjectContext { content }) => self.queue_context_injection(content),
             Some(UserCommand::CancelTask) => {
-                self.task.set_state(TaskState::Failed {
-                    reason: "Task cancelled by user.".into(),
+                self.task.set_state(TaskState::Cancelled {
+                    reason: CANCELLED_BY_USER.into(),
                 });
                 self.stop_requested = true;
             }
@@ -1538,8 +1538,8 @@ impl AgentLoop {
 
                         if let UserCommand::CancelTask = cmd {
                             log::info!("Task {}: Cancelled by user command.", self.task.id);
-                            self.task.set_state(TaskState::Failed {
-                                reason: "Task cancelled by user.".to_string(),
+                            self.task.set_state(TaskState::Cancelled {
+                                reason: CANCELLED_BY_USER.to_string(),
                             });
                         }
 
@@ -1663,8 +1663,8 @@ impl AgentLoop {
             } else {
                 match self.command_receiver.try_recv() {
                     Ok(UserCommand::CancelTask) => {
-                        self.task.set_state(TaskState::Failed {
-                            reason: "Task cancelled by user.".to_string(),
+                        self.task.set_state(TaskState::Cancelled {
+                            reason: CANCELLED_BY_USER.to_string(),
                         });
                         self.emit_event(AgentEvent::TaskStateChanged(
                             self.task.current_state.clone(),
@@ -1801,7 +1801,7 @@ impl AgentLoop {
                                     self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
                                 }
                                 self.reject_announced_calls(&mut native_stream_call_ids, INTERRUPTED_CALL).await?;
-                                self.task.set_state(TaskState::Failed { reason: "Task cancelled by user.".to_string() });
+                                self.task.set_state(TaskState::Cancelled { reason: CANCELLED_BY_USER.to_string() });
                                 self.emit_event(AgentEvent::TaskStateChanged(self.task.current_state.clone())).await?;
                                 had_stream_error = true;
                                 break;
@@ -2707,6 +2707,28 @@ impl AgentLoop {
         Ok(())
     }
 
+    /// Rejects a call a middleware stopped the task at, and moves the task to
+    /// `state` (failed or cancelled).
+    async fn stop_at_tool_call(
+        &mut self,
+        tool_call_id: Uuid,
+        tool_name: &str,
+        reason: &str,
+        state: TaskState,
+    ) -> Result<(), ArkoAgentsError> {
+        self.emit_event(AgentEvent::ToolRejected {
+            tool_call_id,
+            tool_name: tool_name.to_string(),
+            reason: Some(reason.to_string()),
+        })
+        .await?;
+        self.task.set_state(state);
+        self.emit_event(AgentEvent::TaskStateChanged(
+            self.task.current_state.clone(),
+        ))
+        .await
+    }
+
     async fn emit_event(&self, event: AgentEvent) -> Result<(), ArkoAgentsError> {
         if self.event_sender.send(event.clone()).await.is_err() {
             let err_msg = format!("Failed to send AgentEvent: {:?}", event);
@@ -2747,19 +2769,22 @@ impl AgentLoop {
                 )));
             }
             ToolExecutionDecision::FailTask { reason } => {
-                self.emit_event(AgentEvent::ToolRejected {
-                    tool_call_id: internal_id,
-                    tool_name: tool_name.clone(),
-                    reason: Some(reason.clone()),
-                })
-                .await?;
-                self.task.set_state(TaskState::Failed {
+                let state = TaskState::Failed {
                     reason: reason.clone(),
-                });
-                self.emit_event(AgentEvent::TaskStateChanged(
-                    self.task.current_state.clone(),
-                ))
-                .await?;
+                };
+                self.stop_at_tool_call(internal_id, &tool_name, &reason, state)
+                    .await?;
+                return Ok(Some(ai::ToolResult::error_from_tool_call(
+                    ai_tool_call,
+                    &reason,
+                )));
+            }
+            ToolExecutionDecision::CancelTask { reason } => {
+                let state = TaskState::Cancelled {
+                    reason: reason.clone(),
+                };
+                self.stop_at_tool_call(internal_id, &tool_name, &reason, state)
+                    .await?;
                 return Ok(Some(ai::ToolResult::error_from_tool_call(
                     ai_tool_call,
                     &reason,
@@ -2914,19 +2939,19 @@ impl AgentLoop {
                     )));
                 }
                 ToolExecutionDecision::FailTask { reason } => {
-                    self.emit_event(AgentEvent::ToolRejected {
-                        tool_call_id: internal_id,
-                        tool_name: tool_name.to_string(),
-                        reason: Some(reason.clone()),
-                    })
-                    .await?;
-                    self.task.set_state(TaskState::Failed {
+                    let state = TaskState::Failed {
                         reason: reason.clone(),
-                    });
-                    self.emit_event(AgentEvent::TaskStateChanged(
-                        self.task.current_state.clone(),
-                    ))
-                    .await?;
+                    };
+                    self.stop_at_tool_call(internal_id, tool_name, &reason, state)
+                        .await?;
+                    return Ok(Some(ai::ToolResult::error_from_tool_call(ai_call, &reason)));
+                }
+                ToolExecutionDecision::CancelTask { reason } => {
+                    let state = TaskState::Cancelled {
+                        reason: reason.clone(),
+                    };
+                    self.stop_at_tool_call(internal_id, tool_name, &reason, state)
+                        .await?;
                     return Ok(Some(ai::ToolResult::error_from_tool_call(ai_call, &reason)));
                 }
             }
@@ -3774,19 +3799,21 @@ impl AgentLoop {
                 ToolExecutionDecision::FailTask { reason } => {
                     let formatted_error = pb_for_tool_results
                         .format_tool_execution_error_as_user_message(tool_name, &reason);
-                    self.emit_event(AgentEvent::ToolRejected {
-                        tool_call_id,
-                        tool_name: tool_name.to_string(),
-                        reason: Some(reason.clone()),
-                    })
-                    .await?;
-                    self.task.set_state(TaskState::Failed {
+                    let state = TaskState::Failed {
                         reason: reason.clone(),
-                    });
-                    self.emit_event(AgentEvent::TaskStateChanged(
-                        self.task.current_state.clone(),
-                    ))
-                    .await?;
+                    };
+                    self.stop_at_tool_call(tool_call_id, tool_name, &reason, state)
+                        .await?;
+                    return Ok(formatted_error);
+                }
+                ToolExecutionDecision::CancelTask { reason } => {
+                    let formatted_error = pb_for_tool_results
+                        .format_tool_execution_error_as_user_message(tool_name, &reason);
+                    let state = TaskState::Cancelled {
+                        reason: reason.clone(),
+                    };
+                    self.stop_at_tool_call(tool_call_id, tool_name, &reason, state)
+                        .await?;
                     return Ok(formatted_error);
                 }
             }
@@ -3935,6 +3962,85 @@ mod tests {
         .unwrap();
         assert!(rejection.contains("complete_task"));
         assert!(!rejection.contains("read_file, complete_task"));
+    }
+
+    /// Cancels the task at every call.
+    struct CancelEveryCall;
+
+    #[async_trait::async_trait]
+    impl ToolExecutionMiddleware for CancelEveryCall {
+        async fn before(
+            &self,
+            _context: &ToolExecutionContext<'_>,
+            _call: &ToolCallContext<'_>,
+        ) -> Result<ToolExecutionDecision, crate::tool::ToolError> {
+            Ok(ToolExecutionDecision::CancelTask {
+                reason: "Run cancelled.".into(),
+            })
+        }
+
+        async fn after(
+            &self,
+            _context: &ToolExecutionContext<'_>,
+            _call: &ToolCallContext<'_>,
+            _outcome: ToolExecutionOutcome<'_>,
+        ) -> Result<(), crate::tool::ToolError> {
+            panic!("a cancelled call does not run");
+        }
+    }
+
+    /// A middleware's cancel decision rejects the call and ends the task as
+    /// cancelled, for an auto-approved call and for an approved one.
+    #[tokio::test]
+    async fn a_middleware_cancels_the_task_at_a_tool_call() {
+        use futures::StreamExt;
+        for approval in [false, true] {
+            let (mut agent, mut events, commands) = super::retry_tests::harness();
+            let tool_config = &mut agent.task.agent_config.tool_config;
+            tool_config.tool_calling_mode = ToolCallingMode::Native;
+            tool_config.default_auto_approve_tool_use = !approval;
+            agent.execution_middleware = Some(Arc::new(CancelEveryCall));
+            let turn = futures::stream::iter([Ok(super::retry_tests::complete_response())]);
+            agent
+                .scripted_responses
+                .get_mut()
+                .unwrap()
+                .push_back(Ok(turn.boxed()));
+            let runner = tokio::spawn(agent.run());
+            let mut received = Vec::new();
+            while let Some(event) = timeout(Duration::from_secs(10), events.recv())
+                .await
+                .unwrap()
+            {
+                if let AgentEvent::ToolCallAwaitingApproval { tool_call_id, .. } = &event {
+                    commands
+                        .send(UserCommand::ApproveToolUse {
+                            tool_call_id: *tool_call_id,
+                            custom_tool_output: None,
+                            message_to_agent: None,
+                        })
+                        .await
+                        .unwrap();
+                }
+                received.push(event);
+            }
+            let task = runner.await.unwrap().unwrap();
+            assert_eq!(
+                task.current_state,
+                TaskState::Cancelled {
+                    reason: "Run cancelled.".into()
+                }
+            );
+            assert!(received.iter().any(|event| matches!(
+                event,
+                AgentEvent::ToolRejected { reason: Some(reason), .. } if reason == "Run cancelled."
+            )));
+            assert!(
+                !received
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::ToolResult { .. }))
+            );
+        }
     }
 }
 

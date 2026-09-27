@@ -21,8 +21,16 @@ pub struct PendingToolCallInfo {
     pub tool_description: String,
 }
 
+/// The reason a task stopped by [`UserCommand::CancelTask`](crate::runtime::command::UserCommand::CancelTask) records.
+pub const CANCELLED_BY_USER: &str = "Task cancelled by user.";
+
 /// Represents the current state of a task.
+///
+/// Tasks saved before [`TaskState::Cancelled`] existed recorded a cancelled
+/// task as `Failed` with the reason [`CANCELLED_BY_USER`]; that state loads
+/// as `Cancelled`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(from = "TaskStateRepr")]
 pub enum TaskState {
     Pending,
     InProgress,
@@ -57,12 +65,99 @@ pub enum TaskState {
     Failed {
         reason: String,
     },
+    /// Stopped on request (a [`CancelTask`](crate::runtime::command::UserCommand::CancelTask)
+    /// command or a middleware's
+    /// [`ToolExecutionDecision::CancelTask`](crate::tool::ToolExecutionDecision::CancelTask))
+    /// rather than by a failure.
+    Cancelled {
+        reason: String,
+    },
+}
+
+/// The serialized form of [`TaskState`], read before the legacy mapping.
+#[derive(Deserialize)]
+enum TaskStateRepr {
+    Pending,
+    InProgress,
+    AwaitingToolApproval {
+        tool_call_id: Uuid,
+        tool_name: String,
+        parameters: HashMap<String, Value>,
+        tool_description: String,
+    },
+    AwaitingBatchToolApproval {
+        batch_id: Uuid,
+        pending_calls: Vec<PendingToolCallInfo>,
+    },
+    AwaitingUserResponse {
+        questions: String,
+    },
+    AwaitingErrorRecoveryApproval {
+        error_message: String,
+    },
+    Interrupted {
+        reason: String,
+    },
+    Completed {
+        summary: String,
+    },
+    Failed {
+        reason: String,
+    },
+    Cancelled {
+        reason: String,
+    },
+}
+
+impl From<TaskStateRepr> for TaskState {
+    fn from(state: TaskStateRepr) -> Self {
+        match state {
+            TaskStateRepr::Pending => TaskState::Pending,
+            TaskStateRepr::InProgress => TaskState::InProgress,
+            TaskStateRepr::AwaitingToolApproval {
+                tool_call_id,
+                tool_name,
+                parameters,
+                tool_description,
+            } => TaskState::AwaitingToolApproval {
+                tool_call_id,
+                tool_name,
+                parameters,
+                tool_description,
+            },
+            TaskStateRepr::AwaitingBatchToolApproval {
+                batch_id,
+                pending_calls,
+            } => TaskState::AwaitingBatchToolApproval {
+                batch_id,
+                pending_calls,
+            },
+            TaskStateRepr::AwaitingUserResponse { questions } => {
+                TaskState::AwaitingUserResponse { questions }
+            }
+            TaskStateRepr::AwaitingErrorRecoveryApproval { error_message } => {
+                TaskState::AwaitingErrorRecoveryApproval { error_message }
+            }
+            TaskStateRepr::Interrupted { reason } => TaskState::Interrupted { reason },
+            TaskStateRepr::Completed { summary } => TaskState::Completed { summary },
+            // Saved before cancellation had its own state.
+            TaskStateRepr::Failed { reason } if reason == CANCELLED_BY_USER => {
+                TaskState::Cancelled { reason }
+            }
+            TaskStateRepr::Failed { reason } => TaskState::Failed { reason },
+            TaskStateRepr::Cancelled { reason } => TaskState::Cancelled { reason },
+        }
+    }
 }
 
 impl TaskState {
-    /// Returns true if the task is in a terminal state (Completed or Failed).
+    /// Returns true if the task is in a terminal state (Completed, Failed or
+    /// Cancelled).
     pub fn is_terminal(&self) -> bool {
-        matches!(self, TaskState::Completed { .. } | TaskState::Failed { .. })
+        matches!(
+            self,
+            TaskState::Completed { .. } | TaskState::Failed { .. } | TaskState::Cancelled { .. }
+        )
     }
 
     /// Returns true if the task is awaiting some form of user approval or response.
@@ -333,5 +428,140 @@ impl Task {
     pub fn increment_user_message_count(&mut self) -> usize {
         self.user_message_count += 1;
         self.user_message_count
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_config::AgentLLMConfig;
+    use crate::runtime::event::AgentEvent;
+
+    fn state(json: Value) -> TaskState {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn a_cancellation_saved_as_a_failure_loads_as_cancelled() {
+        assert_eq!(
+            state(serde_json::json!({"Failed": {"reason": "Task cancelled by user."}})),
+            TaskState::Cancelled {
+                reason: CANCELLED_BY_USER.to_string()
+            }
+        );
+        // Only the exact reason the runtime recorded is a cancellation.
+        for reason in [
+            "Task cancelled by user",
+            "Tool call cancelled by the server.",
+        ] {
+            assert_eq!(
+                state(serde_json::json!({"Failed": {"reason": reason}})),
+                TaskState::Failed {
+                    reason: reason.to_string()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn every_state_round_trips() {
+        let states = [
+            TaskState::Pending,
+            TaskState::InProgress,
+            TaskState::AwaitingToolApproval {
+                tool_call_id: Uuid::new_v4(),
+                tool_name: "write_file".into(),
+                parameters: HashMap::from([("path".into(), serde_json::json!("a.txt"))]),
+                tool_description: "Writes".into(),
+            },
+            TaskState::AwaitingBatchToolApproval {
+                batch_id: Uuid::new_v4(),
+                pending_calls: vec![PendingToolCallInfo {
+                    tool_call_id: Uuid::new_v4(),
+                    tool_name: "read_file".into(),
+                    parameters: HashMap::new(),
+                    tool_description: "Reads".into(),
+                }],
+            },
+            TaskState::AwaitingUserResponse {
+                questions: "Which?".into(),
+            },
+            TaskState::AwaitingErrorRecoveryApproval {
+                error_message: "boom".into(),
+            },
+            TaskState::Interrupted {
+                reason: "network".into(),
+            },
+            TaskState::Completed {
+                summary: "done".into(),
+            },
+            TaskState::Failed {
+                reason: "verifier rejected".into(),
+            },
+            TaskState::Cancelled {
+                reason: "Workflow cancelled.".into(),
+            },
+        ];
+        for original in states {
+            let json = serde_json::to_value(&original).unwrap();
+            assert_eq!(state(json), original);
+        }
+        assert_eq!(
+            serde_json::to_value(TaskState::Cancelled {
+                reason: CANCELLED_BY_USER.into()
+            })
+            .unwrap(),
+            serde_json::json!({"Cancelled": {"reason": CANCELLED_BY_USER}})
+        );
+        assert!(
+            TaskState::Cancelled {
+                reason: String::new()
+            }
+            .is_terminal()
+        );
+    }
+
+    #[test]
+    fn saved_tasks_and_events_from_before_the_cancelled_state_still_load() {
+        let config = AgentConfig::builder(
+            "saved".into(),
+            "Saved".into(),
+            AgentLLMConfig {
+                model: arko_ai::Model::openai_gpt_5_6_luna(),
+                generation_config: Default::default(),
+            },
+        )
+        .role_description("test".into())
+        .instructions("test".into())
+        .build()
+        .unwrap();
+        let mut task = Task::new(config, "prompt".into(), PathBuf::from("/workspace"), None);
+        task.set_state(TaskState::Completed {
+            summary: String::new(),
+        });
+        let mut json = serde_json::to_value(&task).unwrap();
+        json["current_state"] =
+            serde_json::json!({"Failed": {"reason": "Task cancelled by user."}});
+        let loaded: Task = serde_json::from_str(&json.to_string()).unwrap();
+        assert_eq!(
+            loaded.current_state,
+            TaskState::Cancelled {
+                reason: CANCELLED_BY_USER.to_string()
+            }
+        );
+        // Saved in whole seconds.
+        assert_eq!(
+            loaded.end_time.map(|time| time.timestamp()),
+            task.end_time.map(|time| time.timestamp())
+        );
+
+        let event: AgentEvent = serde_json::from_value(serde_json::json!({
+            "TaskStateChanged": {"Failed": {"reason": "Task cancelled by user."}}
+        }))
+        .unwrap();
+        assert!(matches!(
+            event,
+            AgentEvent::TaskStateChanged(TaskState::Cancelled { .. })
+        ));
     }
 }
