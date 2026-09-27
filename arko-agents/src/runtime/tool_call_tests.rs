@@ -825,6 +825,80 @@ async fn a_native_turn_a_paused_tool_error_stops_still_answers_every_call() {
     }
 }
 
+#[tokio::test]
+async fn an_approved_ask_user_answered_through_the_task_keeps_its_result() {
+    // A host that suspends while the agent waits for an answer and gives
+    // it with `prepare_for_resumption_with_user_response` (arko-workflows'
+    // `continue_agent`).
+    let workspace = workspace();
+    let mut config = config(ToolCallingMode::Native, &["ask_user"]);
+    config.tool_config.default_auto_approve_tool_use = false;
+    let (mut agent, mut events, commands) = agent(config, ToolRegistry::new(), &workspace);
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(turn(vec![native_call(
+            "ask",
+            "ask_user",
+            serde_json::json!({"questions": "Which file?"}),
+        )]));
+    let run = tokio::spawn(agent.run());
+    let tool_call_id = next_event(&mut events, |event| match event {
+        AgentEvent::ToolCallAwaitingApproval { tool_call_id, .. } => Some(tool_call_id),
+        _ => None,
+    })
+    .await;
+    commands
+        .send(UserCommand::ApproveToolUse {
+            tool_call_id,
+            custom_tool_output: None,
+            message_to_agent: None,
+        })
+        .await
+        .unwrap();
+    next_event(&mut events, |event| match event {
+        AgentEvent::UserQuestionsAsked { .. } => Some(()),
+        _ => None,
+    })
+    .await;
+    commands.send(UserCommand::SuspendTask).await.unwrap();
+    let mut task = timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        task.current_state,
+        TaskState::AwaitingUserResponse { .. }
+    ));
+    task.prepare_for_resumption_with_user_response("README.md".into())
+        .unwrap();
+    let (mut agent, _events, _commands) =
+        agent_for(task, ToolRegistry::new(), Arc::new(ai::LLMClient::new()));
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(complete());
+    let task = timeout(Duration::from_secs(10), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_calls_paired(&task.conversation);
+    assert_eq!(
+        result_for(&task.conversation, "ask")[0].output,
+        "Which file?"
+    );
+    assert!(
+        serde_json::to_string(&task.conversation)
+            .unwrap()
+            .contains("README.md")
+    );
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
 // Boolean parameters of output-based calls.
 
 #[cfg(unix)]

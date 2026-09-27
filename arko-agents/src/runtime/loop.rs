@@ -775,6 +775,19 @@ impl AgentLoop {
         self.task.increment_user_message_count();
     }
 
+    /// Whether an approved native turn's results go into the conversation
+    /// now: the task no longer waits, or it waits for the answer to
+    /// `ask_user`, which follows them (as when `ask_user` is auto-approved),
+    /// so the answer can also come from
+    /// [`Task::prepare_for_resumption_with_user_response`].
+    fn native_results_are_due(&self) -> bool {
+        !self.task.current_state.is_awaiting_approval()
+            || matches!(
+                self.task.current_state,
+                TaskState::AwaitingUserResponse { .. }
+            )
+    }
+
     fn queue_tool_images(
         &mut self,
         tool: &str,
@@ -1152,7 +1165,7 @@ impl AgentLoop {
                                         ) {
                                             self.task.set_state(TaskState::InProgress);
                                         }
-                                        if !self.task.current_state.is_awaiting_approval() {
+                                        if self.native_results_are_due() {
                                             self.flush_native_results_to_conversation(None);
                                         }
                                         native_handled = true;
@@ -1338,7 +1351,7 @@ impl AgentLoop {
                                         ) {
                                             self.task.set_state(TaskState::InProgress);
                                         }
-                                        if !self.task.current_state.is_awaiting_approval() {
+                                        if self.native_results_are_due() {
                                             self.flush_native_results_to_conversation(None);
                                         }
                                         native_handled = true;
