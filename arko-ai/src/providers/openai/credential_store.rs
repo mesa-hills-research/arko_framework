@@ -24,13 +24,13 @@ use std::sync::Arc;
 /// step 1 without refreshing, as Codex's unauthorized recovery re-reads
 /// `auth.json`: newer tokens are adopted and the request is sent once more.
 ///
-/// The client holds its credential lock, and the store's
-/// [`refresh_lock`](Self::refresh_lock) when it has one, across these calls,
-/// so neither clones of one client nor clients sharing the lock refresh
-/// concurrently. The calls run to completion even when the caller of the
-/// refresh is dropped. Implementations may block briefly (a small file read
-/// or write); they must never log or return tokens or account ids in error
-/// messages.
+/// The client holds the store's [`refresh_lock`](Self::refresh_lock) when it
+/// has one, and its own credential lock, across these calls, so neither
+/// clones of one client nor clients sharing the lock refresh concurrently.
+/// The calls run to completion even when the caller of the refresh is
+/// dropped (though not through a runtime shutdown). Implementations may
+/// block briefly (a small file read or write); they must never log or return
+/// tokens or account ids in error messages.
 pub trait ChatGptOAuthStore: Send + Sync {
     /// Called before a refresh with the credentials the client holds (and is
     /// about to refresh). Returns newer credentials for the same account to
@@ -58,8 +58,10 @@ pub trait ChatGptOAuthStore: Send + Sync {
     /// of the same file), held from [`before_refresh`](Self::before_refresh)
     /// to [`save_refreshed`](Self::save_refreshed): clients with different
     /// stores of the same credentials then never refresh concurrently. A
-    /// client takes its own credential lock first, then this one. `None`
-    /// (the default) when no other store shares the credentials.
+    /// client takes this lock first, then its own credential lock, so while
+    /// it waits for another client's refresh its requests go on with the
+    /// credentials it holds. `None` (the default) when no other store shares
+    /// the credentials.
     fn refresh_lock(&self) -> Option<Arc<tokio::sync::Mutex<()>>> {
         None
     }

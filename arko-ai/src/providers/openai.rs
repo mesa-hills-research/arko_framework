@@ -286,9 +286,19 @@ fn is_rate_limited_refresh(error: &Error) -> bool {
     matches!(error, Error::ProviderError { status: Some(429), .. })
 }
 
+/// How long one OAuth refresh request may take, from connecting to the end
+/// of the response body. The shared HTTP client has no total deadline (a
+/// generation can stream for a long time), but a refresh holds the
+/// credentials while it runs, so a stalled token endpoint must not hold them
+/// for long. A timeout is a transient [`Error::HttpError`]. (Should the
+/// server still rotate the token after that, its answer is lost and the next
+/// refresh is refused, as for any refresh whose answer never arrives.)
+const OAUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Exchanges a ChatGPT OAuth refresh token for new tokens, once; an HTTP
 /// failure (including a 429) is returned to the caller with its retry
-/// metadata. `client_id` and `token_url` default to the Codex CLI's.
+/// metadata. `client_id` and `token_url` default to the Codex CLI's. The
+/// request times out after 60 seconds (a transient [`Error::HttpError`]).
 ///
 /// Build `http_client` with [`crate::http_client`] or
 /// [`crate::http_client_builder`]. `reqwest::Client::new()` panics in
@@ -303,6 +313,19 @@ pub async fn refresh_chatgpt_oauth_token(
     client_id: Option<&str>,
     token_url: Option<&str>,
 ) -> Result<OAuthRefreshResult, Error> {
+    let timeout = Some(OAUTH_REFRESH_TIMEOUT);
+    request_oauth_refresh(http_client, refresh_token, client_id, token_url, timeout).await
+}
+
+/// [`refresh_chatgpt_oauth_token`] with the request timing out after
+/// `timeout`, if given.
+async fn request_oauth_refresh(
+    http_client: &reqwest::Client,
+    refresh_token: &str,
+    client_id: Option<&str>,
+    token_url: Option<&str>,
+    timeout: Option<Duration>,
+) -> Result<OAuthRefreshResult, Error> {
     let resolved_client_id = client_id.unwrap_or(CHATGPT_OAUTH_DEFAULT_CLIENT_ID);
     let resolved_token_url = token_url.unwrap_or(CHATGPT_OAUTH_DEFAULT_TOKEN_URL);
 
@@ -313,12 +336,13 @@ pub async fn refresh_chatgpt_oauth_token(
         "scope": "openid profile email offline_access",
     });
 
-    let response = http_client
+    let mut request = http_client
         .post(resolved_token_url)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await?;
+        .header("Content-Type", "application/json");
+    if let Some(timeout) = timeout {
+        request = request.timeout(timeout);
+    }
+    let response = request.json(&body).send().await?;
     let status = response.status();
     if !status.is_success() {
         let header_delay = retry_after_from_headers(&response);
@@ -366,6 +390,9 @@ pub struct OpenAIClient {
     /// for the credential lock, it tells a refresh whether the credentials
     /// were replaced while it waited.
     auth_epoch: Arc<AtomicU64>,
+    /// [`OAUTH_REFRESH_TIMEOUT`]. Tests shorten it, and turn it off under a
+    /// paused clock (which jumps ahead while test I/O is under way).
+    oauth_refresh_timeout: Option<Duration>,
 }
 
 /// What a refresh replaces; checked once the credential lock is held.
@@ -400,6 +427,7 @@ impl OpenAIClient {
             user_agent: None,
             credential_store: None,
             auth_epoch: Arc::new(AtomicU64::new(0)),
+            oauth_refresh_timeout: Some(OAUTH_REFRESH_TIMEOUT),
         }
     }
 
@@ -426,6 +454,7 @@ impl OpenAIClient {
             user_agent: None,
             credential_store: None,
             auth_epoch: Arc::new(AtomicU64::new(0)),
+            oauth_refresh_timeout: Some(OAUTH_REFRESH_TIMEOUT),
         }
     }
 
@@ -442,6 +471,7 @@ impl OpenAIClient {
             user_agent: None,
             credential_store: None,
             auth_epoch: Arc::new(AtomicU64::new(0)),
+            oauth_refresh_timeout: Some(OAUTH_REFRESH_TIMEOUT),
         }
     }
 
@@ -534,7 +564,11 @@ impl OpenAIClient {
     /// Returns a snapshot of the current ChatGPT OAuth credentials.
     ///
     /// The snapshot includes any access or refresh token installed by the
-    /// most recent successful refresh. API-key clients return `None`.
+    /// most recent successful refresh. A refresh in flight on this client or
+    /// a clone is waited for: it holds the credentials until its new tokens
+    /// are installed and stored (see [`refresh_oauth_token`](Self::refresh_oauth_token)
+    /// for awaiting this before a runtime shutdown). API-key clients return
+    /// `None`.
     pub async fn chatgpt_oauth_credentials(
         &self,
     ) -> Option<ChatGptOAuthCredentials> {
@@ -575,7 +609,22 @@ impl OpenAIClient {
     /// another refresh, so concurrent calls rotate once.
     ///
     /// Once the refresh request is sent, the refresh completes (installing
-    /// and storing the new tokens) even if this future is dropped.
+    /// and storing the new tokens) even if this future is dropped: it runs in
+    /// a Tokio task of its own. A runtime shutting down still cancels that
+    /// task, and rotated tokens it had not stored yet are then lost with the
+    /// process (the previous refresh token no longer works). A host that
+    /// must not lose them stops starting refreshes (for example, finishes or
+    /// cancels its agent runs) and then awaits
+    /// [`chatgpt_oauth_credentials`](Self::chatgpt_oauth_credentials)
+    /// before shutting the runtime down: a refresh in flight holds the
+    /// credential lock until the new tokens are installed and stored, so
+    /// that call returns only after it. Clients that don't share the
+    /// credentials (such as two built separately from one Codex `auth.json`)
+    /// are awaited one by one.
+    ///
+    /// The request times out after 60 seconds (a transient
+    /// [`Error::HttpError`]), so a stalled token endpoint holds the
+    /// credentials no longer than that.
     pub async fn refresh_oauth_token(&self) -> Result<OAuthRefreshResult, Error> {
         self.refresh_explicitly(self.retry_oauth_rate_limits).await
     }
@@ -607,7 +656,7 @@ impl OpenAIClient {
     }
 
     async fn refresh_explicitly(&self, retry_rate_limits: bool) -> Result<OAuthRefreshResult, Error> {
-        // Read before waiting for the credential lock: a refresh that is under
+        // Read before waiting for the refresh locks: a refresh that is under
         // way now replaces the credentials, and its result is returned
         // instead of refreshing again.
         let since = self.auth_epoch.load(Ordering::SeqCst);
@@ -680,23 +729,32 @@ impl OpenAIClient {
         }
     }
 
-    /// One refresh attempt. Takes this client's credential lock, then the
-    /// store's refresh lock (always in this order), and runs the rest in a
-    /// task of its own that holds both: from the store read to installing
-    /// and storing new tokens, nothing can be lost to the caller being
-    /// dropped (a refresh token rotates when the request succeeds, whether
-    /// or not anyone reads the response). Dropping the caller while it waits
-    /// for the locks cancels the attempt.
+    /// One refresh attempt. Takes the store's refresh lock (when it has
+    /// one), then this client's credential lock (always in this order), and
+    /// runs the rest in a task of its own that holds both: from the store
+    /// read to installing and storing new tokens, nothing can be lost to the
+    /// caller being dropped (a refresh token rotates when the request
+    /// succeeds, whether or not anyone reads the response). Dropping the
+    /// caller while it waits for the locks cancels the attempt; a runtime
+    /// shutting down cancels the task too.
+    ///
+    /// The store's lock comes first so that a client waiting for another
+    /// client's refresh of the same credentials does not hold its own
+    /// credentials meanwhile: its requests, which only read them, go on with
+    /// the token it holds. Once taken, the credential lock is held until the
+    /// refresh has installed and stored the new tokens, so this client's
+    /// requests (and [`chatgpt_oauth_credentials`](Self::chatgpt_oauth_credentials))
+    /// wait for them.
     async fn refresh_attempt(
         &self,
         target: RefreshTarget,
         rate_limit_retry_follows: bool,
     ) -> Result<Option<OAuthRefreshResult>, Error> {
-        let auth = self.auth.clone().write_owned().await;
         let store_lock = match self.credential_store.as_ref().and_then(|store| store.refresh_lock()) {
             Some(lock) => Some(lock.lock_owned().await),
             None => None,
         };
+        let auth = self.auth.clone().write_owned().await;
         let client = self.clone();
         let attempt = tokio::spawn(async move {
             let _store_lock = store_lock;
@@ -777,11 +835,12 @@ impl OpenAIClient {
                     .to_string(),
             )
         })?;
-        let result = match refresh_chatgpt_oauth_token(
+        let result = match request_oauth_refresh(
             &self.http_client,
             refresh_token,
             None,
             self.oauth_token_url.as_deref(),
+            self.oauth_refresh_timeout,
         )
         .await
         {

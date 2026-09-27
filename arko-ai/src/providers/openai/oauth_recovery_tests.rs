@@ -175,6 +175,14 @@ pub(super) fn client(url: &str) -> OpenAIClient {
     )
 }
 
+/// `client` with no refresh timeout, for tests with a paused clock: that
+/// clock jumps to the next timer whenever the runtime waits, also while test
+/// I/O is under way, so a refresh could time out before its answer arrives.
+fn untimed(mut client: OpenAIClient) -> OpenAIClient {
+    client.oauth_refresh_timeout = None;
+    client
+}
+
 /// An API-key client sending to the test server.
 pub(super) fn api_key_client(url: &str) -> OpenAIClient {
     let mut client = client(url);
@@ -631,7 +639,7 @@ async fn rate_limited_refreshes_retry_a_bounded_number_of_times() {
     let (url, server) =
         server((0..=OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES).map(|_| limited()).collect()).await;
     let store = Arc::new(ScriptedStore::default());
-    let client = with_store(client(&url), &store).with_oauth_rate_limit_retries(true);
+    let client = with_store(untimed(client(&url)), &store).with_oauth_rate_limit_retries(true);
     let started = tokio::time::Instant::now();
     let error = client.refresh_oauth_token().await.unwrap_err();
     assert!(matches!(error, Error::ProviderError { status: Some(429), .. }), "{error}");
@@ -797,15 +805,103 @@ async fn a_refresh_dropped_after_its_request_was_sent_still_installs_and_saves_t
         assert_eq!(request["refresh_token"], "synthetic-refresh");
         caller.abort();
         assert!(caller.await.unwrap_err().is_cancelled());
+        // The refresh holds the credentials until the new tokens are
+        // installed and saved: a host about to shut its runtime down awaits
+        // them, and so waits for the refresh.
+        let host = crate::LLMClient::new().with_openai_client(client.clone());
+        let settled = host.openai_chatgpt_oauth_credentials();
+        tokio::pin!(settled);
+        assert!(futures::poll!(&mut settled).is_pending());
         // The refresh token rotates once the server answers, whether or not
         // the caller is still there.
         server.gate.add_permits(1);
-        // The refresh holds the credentials until the new tokens are
-        // installed and saved.
         let new = stored("synthetic-new-access", "synthetic-new-refresh");
-        assert_eq!(client.chatgpt_oauth_credentials().await.unwrap(), new);
+        assert_eq!(settled.await.unwrap(), new);
         assert_eq!(file_credentials(&path), new);
         assert_eq!(server.request_count(), 1);
+    })
+    .await
+    .unwrap();
+}
+
+/// While one client's refresh waits on a stalled token endpoint (holding the
+/// file's refresh lock), another client of the same file keeps serving
+/// requests with its still valid token, also while it waits for that lock to
+/// refresh; it then finds the first client's tokens in the file.
+#[tokio::test]
+async fn a_client_waiting_for_another_clients_refresh_keeps_serving_requests() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut tokens = TestServer::start(vec![refreshed()], true).await;
+        let answered = || reply("/responses", 200, &completed_stream());
+        let responses = TestServer::start(vec![answered(), answered()], false).await;
+        let (_dir, path) = auth_file(&fresh_jwt());
+        let file = crate::codex_auth::CodexAuthFile::load(&path).unwrap();
+        let client = || {
+            served_by(file.openai_client().unwrap(), &responses.url)
+                .with_oauth_token_url(format!("{}/token", tokens.url))
+        };
+        let (first, second) = (client(), client());
+        let refreshing = tokio::spawn({
+            let first = first.clone();
+            async move { first.refresh_oauth_token_once().await }
+        });
+        // The refresh request is out: the first client holds the file's
+        // refresh lock until the token endpoint answers.
+        tokens.arrived.recv().await.unwrap();
+        let conversation = Conversation::new(Model::openai_gpt_6_astra());
+        second.generate_text(&conversation, &GenerationConfig::default()).await.unwrap();
+        // The second client's refresh waits for the file's lock without
+        // holding the second client's credentials.
+        let waiting = second.refresh_oauth_token_once();
+        tokio::pin!(waiting);
+        assert!(futures::poll!(&mut waiting).is_pending());
+        let held = second.chatgpt_oauth_credentials().await.unwrap();
+        assert_eq!(held.refresh_token.as_deref(), Some("synthetic-refresh"));
+        second.generate_text(&conversation, &GenerationConfig::default()).await.unwrap();
+        assert!(futures::poll!(&mut waiting).is_pending());
+        assert_eq!(responses.request_count(), 2);
+
+        tokens.gate.add_permits(1);
+        assert_eq!(refreshing.await.unwrap().unwrap().access_token, "synthetic-new-access");
+        assert_eq!(waiting.await.unwrap().access_token, "synthetic-new-access");
+        assert_eq!(tokens.request_count(), 1, "the second client adopted, not refreshed");
+        let new = stored("synthetic-new-access", "synthetic-new-refresh");
+        for client in [&first, &second] {
+            assert_eq!(client.chatgpt_oauth_credentials().await.unwrap(), new);
+        }
+        assert_eq!(file_credentials(&path), new);
+    })
+    .await
+    .unwrap();
+}
+
+/// A token endpoint that takes the request but never answers: the refresh
+/// times out with a transient error (back to the agent's bounded recovery)
+/// and lets go of the credentials.
+#[tokio::test]
+async fn a_stalled_token_endpoint_times_out_with_a_transient_error() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        // The 401 is answered; the refresh request after it never is.
+        let server = TestServer::start(vec![expired()], false).await;
+        let mut client = client(&server.url);
+        assert_eq!(client.oauth_refresh_timeout, Some(OAUTH_REFRESH_TIMEOUT));
+        assert_eq!(OAUTH_REFRESH_TIMEOUT, Duration::from_secs(60));
+        client.oauth_refresh_timeout = Some(Duration::from_millis(300));
+        let before = client.chatgpt_oauth_credentials().await.unwrap();
+        let error = client
+            .generate_text(&Conversation::new(Model::openai_gpt_6_astra()), &GenerationConfig::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(&error, Error::HttpError(error) if error.is_timeout()), "{error}");
+        assert_eq!(error.retry_class(), crate::RetryClass::Transient);
+        assert_eq!(server.request_count(), 2, "the refresh request was sent");
+        assert_eq!(client.chatgpt_oauth_credentials().await.unwrap(), before);
+
+        let error = client.refresh_oauth_token_once().await.unwrap_err();
+        assert!(matches!(&error, Error::HttpError(error) if error.is_timeout()), "{error}");
+        assert!(error.is_retryable());
+        assert_eq!(server.request_count(), 3);
+        assert_eq!(client.chatgpt_oauth_credentials().await.unwrap(), before);
     })
     .await
     .unwrap();
@@ -823,7 +919,7 @@ async fn a_rate_limited_refresh_waits_without_holding_the_credentials() {
         let limited = reply("/token", 429, r#"{"error":{"code":"rate_limit_exceeded"}}"#)
             .with_header("Retry-After", &asked.as_secs().to_string());
         let mut server = TestServer::start(vec![limited, refreshed()], false).await;
-        let client = client(&server.url).with_oauth_rate_limit_retries(true);
+        let client = untimed(client(&server.url)).with_oauth_rate_limit_retries(true);
         let waiting = tokio::spawn({
             let client = client.clone();
             async move {

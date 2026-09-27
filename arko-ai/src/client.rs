@@ -272,6 +272,16 @@ impl LLMClient {
     /// This permits a long-running host to persist rotated refresh tokens
     /// without exposing provider internals. API-key and unconfigured clients
     /// return `None`.
+    ///
+    /// A refresh in flight on this client (or a clone) is waited for: it
+    /// holds the credentials until its new tokens are installed and stored.
+    /// A refresh finishes even when its caller is dropped, but a Tokio
+    /// runtime shutting down cancels it, and tokens it had not stored yet are
+    /// lost (the previous refresh token no longer works). A host that must
+    /// not lose them stops starting refreshes (finishes or cancels its agent
+    /// runs) and then awaits this before shutting the runtime down; clients
+    /// built separately (even from one Codex `auth.json`) are awaited one by
+    /// one.
     pub async fn openai_chatgpt_oauth_credentials(
         &self,
     ) -> Option<providers::openai::ChatGptOAuthCredentials> {
@@ -319,12 +329,18 @@ impl LLMClient {
     /// for subsequent requests. A call that waits while another refresh
     /// replaces the credentials returns those instead of refreshing again.
     ///
+    /// Once the refresh request is sent, the refresh completes even if this
+    /// future is dropped, though not through a runtime shutdown (see
+    /// [`openai_chatgpt_oauth_credentials`](Self::openai_chatgpt_oauth_credentials)).
+    /// The request times out after 60 seconds with a retryable error.
+    ///
     /// # Errors
     ///
     /// - [`Error::MissingApiKey`] if no OpenAI client is configured.
     /// - [`Error::AuthenticationFailed`] if no refresh token is stored.
     /// - [`Error::InvalidRequest`] if the client uses API key auth.
     /// - [`Error::ProviderError`] if the token endpoint returns an error.
+    /// - [`Error::HttpError`] if the request fails or times out.
     pub async fn refresh_openai_oauth_token(
         &self,
     ) -> Result<providers::openai::OAuthRefreshResult, Error> {
