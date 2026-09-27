@@ -2,7 +2,7 @@
 //! the caller's model client and is never stored in index configuration or SQLite.
 use crate::{ArkoIndex, Error, Result, SearchHit, SearchOptions, SearchPage, error::invalid};
 use arko_ai::{
-    GenerationConfig, GenerationResponse, LLMClient, Model, Provider, StreamEvent, ToolChoice,
+    GenerationConfig, GenerationResponse, LLMClient, Model, StopReason, StreamEvent, ToolChoice,
     ToolConfig, ToolDefinition,
 };
 use async_trait::async_trait;
@@ -130,10 +130,11 @@ impl SearchJudge for LlmSearchJudge {
                 excluded: vec![],
             });
         }
-        if self.model.provider == Provider::Google {
-            return Err(invalid(
-                "the built-in judge requires provider completion metadata, which the current Google adapter does not expose; use a custom SearchJudge",
-            ));
+        if !self.model.reports_stop_reason() {
+            return Err(invalid(format!(
+                "the built-in judge requires completion metadata, which '{}' does not report; use a custom SearchJudge",
+                self.model.id
+            )));
         }
         let ids: Vec<_> = candidates.iter().map(|h| &h.id).collect();
         let schema = json!({"type":"object","properties":{
@@ -142,24 +143,25 @@ impl SearchJudge for LlmSearchJudge {
                 "id":{"type":"string","enum":ids},"reason":{"type":"string"}},
                 "required":["id","reason"],"additionalProperties":false},"maxItems":ids.len()}
         },"required":["ordered_ids","excluded"],"additionalProperties":false});
-        let config = self.generation.clone().with_tool_config(
-            ToolConfig::new(vec![
-                ToolDefinition::new(
-                    "select_results",
-                    "Select and order useful source passages; account for exclusions.",
-                    schema,
-                )
-                .with_strict(true),
-            ])
-            // Anthropic thinking models cannot force a particular tool. The
-            // completed response must still pass the same tool/ID validation.
-            .with_tool_choice(if self.model.provider == Provider::Anthropic {
-                ToolChoice::Auto
-            } else {
-                ToolChoice::Specific("select_results".into())
-            })
-            .with_parallel_tool_calls(false),
-        );
+        let mut tools = ToolConfig::new(vec![
+            ToolDefinition::new(
+                "select_results",
+                "Select and order useful source passages; account for exclusions.",
+                schema,
+            )
+            .with_strict(true),
+        ])
+        // Some models (and Anthropic manual thinking) cannot force a tool. The
+        // completed response must still pass the same tool/ID validation.
+        .with_tool_choice(if self.model.supports_forced_tool_choice(&self.generation) {
+            ToolChoice::Specific("select_results".into())
+        } else {
+            ToolChoice::Auto
+        });
+        if self.model.supports_disabling_parallel_tool_calls() {
+            tools = tools.with_parallel_tool_calls(false);
+        }
+        let config = self.generation.clone().with_tool_config(tools);
         let system = format!(
             "{INSTRUCTIONS}\nAdditional retrieval preferences:\n{}",
             self.instructions
@@ -190,13 +192,12 @@ fn parse_selection(
 ) -> Result<JudgeSelection> {
     // Never accept an incomplete/refused generation, even if its partial output
     // contains parseable tool arguments.
-    let reason = response.model_call_usage.stop_reason.as_deref();
-    if !matches!(
-        reason,
-        Some("completed" | "tool_use" | "tool_calls" | "stop")
-    ) {
+    if response.refusal.is_some()
+        || !matches!(response.stop_reason, StopReason::EndTurn | StopReason::ToolUse)
+    {
         return Err(invalid(format!(
-            "judge response incomplete/refused: {reason:?}"
+            "judge response incomplete/refused: {:?}",
+            response.stop_reason
         )));
     }
     if response.message.tool_calls.len() != 1
@@ -337,16 +338,19 @@ mod tests {
         let valid = response();
         assert!(parse_selection(&valid, &[]).is_ok());
         for reason in [
-            None,
-            Some("incomplete"),
-            Some("refusal"),
-            Some("content_filter"),
-            Some("max_tokens"),
+            StopReason::MaxTokens,
+            StopReason::Refusal,
+            StopReason::ContextWindowExceeded,
+            StopReason::Other("incomplete".into()),
+            StopReason::Other("unknown".into()),
         ] {
             let mut reply = valid.clone();
-            reply.model_call_usage.stop_reason = reason.map(str::to_owned);
+            reply.stop_reason = reason;
             assert!(parse_selection(&reply, &[]).is_err());
         }
+        let mut reply = valid.clone();
+        reply.refusal = Some(arko_ai::Refusal::new(arko_ai::RefusalSource::Model));
+        assert!(parse_selection(&reply, &[]).is_err());
         let mut reply = valid.clone();
         reply.message.tool_calls.clear();
         assert!(parse_selection(&reply, &[]).is_err());
@@ -362,8 +366,10 @@ mod tests {
         let mut reply = valid.clone();
         reply.message.tool_calls[0].arguments["invented_text"] = json!("rewritten source");
         assert!(parse_selection(&reply, &[]).is_err());
+        // Raw provider strings no longer matter; the normalized reason does.
         let mut reply = valid;
-        reply.model_call_usage.stop_reason = Some("tool_use".into());
+        reply.model_call_usage.stop_reason = Some("requires_action".into());
+        reply.stop_reason = StopReason::EndTurn;
         assert!(parse_selection(&reply, &[]).is_ok());
     }
 }

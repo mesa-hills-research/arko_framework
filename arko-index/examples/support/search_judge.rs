@@ -70,25 +70,31 @@ impl JudgeSession {
 }
 
 fn generation_config(overrides: Option<Value>) -> AnyResult<GenerationConfig> {
-    let mut value = serde_json::to_value(GenerationConfig::default())?;
-    if let Some(overrides) = overrides {
-        let fields = overrides
-            .as_object()
-            .ok_or("judge config must be a JSON object")?;
-        for (key, field) in fields {
-            if key == "tool_config" {
-                return Err("judge owns tool_config; configure selection preferences with --judge-instructions-file".into());
-            }
-            if value.get(key).is_none() {
-                return Err(format!("unknown judge configuration field: {key}").into());
-            }
-            value[key] = field.clone();
-        }
-        if fields.contains_key("temperature") && !fields.contains_key("temperature_specified") {
-            value["temperature_specified"] = Value::Bool(true);
-        }
+    let Some(overrides) = overrides else {
+        return Ok(GenerationConfig::default());
+    };
+    let fields = overrides
+        .as_object()
+        .ok_or("judge config must be a JSON object")?;
+    if fields.contains_key("tool_config") {
+        return Err("judge owns tool_config; configure selection preferences with --judge-instructions-file".into());
     }
-    Ok(serde_json::from_value(value)?)
+    // Omitted fields take their defaults (GenerationConfig is serde-defaulted).
+    let mut config: GenerationConfig = serde_json::from_value(overrides.clone())?;
+    // A recognized, non-null field always serializes back, so anything missing
+    // from the round trip is a typo or an unknown field.
+    let known = serde_json::to_value(&config)?;
+    if let Some(key) = fields
+        .iter()
+        .find(|(key, value)| !value.is_null() && known.get(key.as_str()).is_none())
+        .map(|(key, _)| key)
+    {
+        return Err(format!("unknown judge configuration field: {key}").into());
+    }
+    if fields.contains_key("temperature") && !fields.contains_key("temperature_specified") {
+        config.temperature_specified = true;
+    }
+    Ok(config)
 }
 
 impl JudgeArgs {

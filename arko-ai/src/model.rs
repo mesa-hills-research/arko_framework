@@ -1764,23 +1764,80 @@ impl Model {
         ]
     }
 
-    pub fn get(provider: Provider, model_id: &str) -> Result<Self, crate::error::Error> {
-        let models_to_search = match provider {
+    /// Every registered model for `provider`.
+    pub fn list(provider: Provider) -> Vec<Self> {
+        match provider {
             Provider::OpenAI => Self::list_openai_models(),
             Provider::Anthropic => Self::list_anthropic_models(),
             Provider::Google => Self::list_google_models(),
-        };
-
-        for model in models_to_search {
-            if model.id == model_id {
-                return Ok(model);
-            }
         }
+    }
 
-        Err(crate::error::Error::ModelNotSupported(format!(
-            "Model ID '{}' is not supported for provider {:?}.",
-            model_id, provider
-        )))
+    /// Every registered model, across providers.
+    pub fn all() -> Vec<Self> {
+        [Provider::OpenAI, Provider::Anthropic, Provider::Google]
+            .into_iter()
+            .flat_map(Self::list)
+            .collect()
+    }
+
+    /// The registered model with this id, from any provider. Ids are unique
+    /// across the registry.
+    pub fn find(model_id: &str) -> Option<Self> {
+        Self::all().into_iter().find(|model| model.id == model_id)
+    }
+
+    pub fn get(provider: Provider, model_id: &str) -> Result<Self, crate::error::Error> {
+        Self::list(provider.clone())
+            .into_iter()
+            .find(|model| model.id == model_id)
+            .ok_or_else(|| {
+                crate::error::Error::ModelNotSupported(format!(
+                    "Model ID '{}' is not supported for provider {:?}.",
+                    model_id, provider
+                ))
+            })
+    }
+
+    /// Whether a forced tool choice ([`ToolChoice::Required`] or
+    /// [`ToolChoice::Specific`]) is accepted for a request with `config`.
+    /// Anthropic rejects it on some models and, on every model, while manual
+    /// extended thinking (`budget_tokens`) is enabled.
+    ///
+    /// [`ToolChoice::Required`]: crate::tool::ToolChoice::Required
+    /// [`ToolChoice::Specific`]: crate::tool::ToolChoice::Specific
+    pub fn supports_forced_tool_choice(&self, config: &crate::config::GenerationConfig) -> bool {
+        match self.provider {
+            Provider::Anthropic => {
+                let manual_thinking = config.anthropic_thinking_enabled != Some(false)
+                    && matches!(
+                        config.reasoning,
+                        Some(crate::reasoning::ReasoningConfig::Anthropic { budget_tokens, .. })
+                            if budget_tokens > 0
+                    );
+                !self.rejects_anthropic_forced_tool_choice() && !manual_thinking
+            }
+            Provider::OpenAI | Provider::Google => true,
+        }
+    }
+
+    /// Whether `ToolConfig::with_parallel_tool_calls(false)` is accepted. The
+    /// Gemini Interactions API has no switch to disable parallel calls.
+    pub fn supports_disabling_parallel_tool_calls(&self) -> bool {
+        match self.provider {
+            Provider::OpenAI | Provider::Anthropic => true,
+            Provider::Google => false,
+        }
+    }
+
+    /// Whether responses carry a normalized
+    /// [`StopReason`](crate::stop::StopReason) and the provider's raw stop
+    /// metadata, so callers can tell complete turns from truncated or refused
+    /// ones.
+    pub fn reports_stop_reason(&self) -> bool {
+        match self.provider {
+            Provider::OpenAI | Provider::Anthropic | Provider::Google => true,
+        }
     }
 
     pub fn is_openai_gpt_6_astra(&self) -> bool {
@@ -2076,5 +2133,194 @@ impl Model {
             || self.is_gemini_3_6_flash()
             || self.is_gemini_3_7_flash()
             || self.is_gemini_3_8_flash()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{config::GenerationConfig, reasoning::ReasoningConfig};
+    use std::collections::HashSet;
+
+    #[test]
+    fn registry_ids_are_unique_and_lookups_agree() {
+        let all = Model::all();
+        let ids: HashSet<_> = all.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids.len(), all.len(), "duplicate model ids");
+        for model in &all {
+            assert_eq!(Model::find(&model.id).unwrap().provider, model.provider);
+            assert!(Model::get(model.provider.clone(), &model.id).is_ok());
+            assert!(Model::list(model.provider.clone()).iter().any(|m| m.id == model.id));
+        }
+        assert!(Model::find("not-a-model").is_none());
+        assert!(Model::get(Provider::OpenAI, "claude-opus-5-5").is_err());
+    }
+
+    #[test]
+    fn every_model_has_sane_limits_and_prices() {
+        for model in Model::all() {
+            let id = &model.id;
+            assert!(model.max_input_tokens >= 100_000, "{id} input limit");
+            assert!(model.max_output_tokens >= 8_192, "{id} output limit");
+            let pricing = &model.pricing;
+            assert!(pricing.input_cost_per_million > 0.0, "{id} input price");
+            assert!(pricing.output_cost_per_million >= pricing.input_cost_per_million, "{id} output price");
+            if let Some(cached) = pricing.cached_input_cost_per_million {
+                assert!(cached < pricing.input_cost_per_million, "{id} cache reads cost less");
+            }
+            if let Some(write) = pricing.cache_write_cost_per_million {
+                assert!(write >= pricing.input_cost_per_million, "{id} cache writes cost more");
+            }
+            if model.supports_cache && model.provider != Provider::Google {
+                assert!(pricing.cached_input_cost_per_million.is_some(), "{id} cache read price");
+            }
+            if let Some(threshold) = pricing.large_input_threshold {
+                assert!(threshold < model.max_input_tokens, "{id} long-context threshold");
+                assert!(pricing.large_input_cost_per_million.is_some(), "{id} long-context price");
+            }
+            for period in &pricing.schedule {
+                assert!(period.effective_from_unix().is_some(), "{id} schedule date");
+            }
+            if model.provider == Provider::Anthropic {
+                assert!(pricing.cache_write_1h_cost_per_million.is_some(), "{id} 1h writes");
+            }
+        }
+    }
+
+    #[test]
+    fn new_models_are_covered_by_their_feature_predicates() {
+        let opus = Model::anthropic_claude_opus_5_5();
+        assert!(opus.supports_anthropic_adaptive_thinking());
+        assert!(opus.defaults_anthropic_adaptive_thinking());
+        assert!(opus.always_uses_anthropic_adaptive_thinking());
+        assert!(opus.rejects_anthropic_manual_thinking());
+        assert!(opus.omits_anthropic_sampling_parameters());
+        assert!(opus.supports_anthropic_summarized_thinking_display());
+        assert!(opus.supports_anthropic_effort());
+        assert!(opus.supports_anthropic_xhigh_effort());
+        assert!(opus.supports_anthropic_max_effort());
+        assert!(opus.rejects_anthropic_forced_tool_choice());
+        assert!(opus.supports_anthropic_fast_mode());
+        assert!(opus.supports_anthropic_inference_geo());
+        assert!(opus.has_standard_anthropic_1m_context());
+        assert!(opus.supports_interleaved_thinking());
+        assert!(opus.auto_enables_interleaved_thinking());
+
+        for model in [
+            Model::google_gemini_3_8_flash(),
+            Model::google_gemini_3_7_flash(),
+            Model::google_gemini_3_6_flash(),
+            Model::google_gemini_3_5_flash_lite(),
+            Model::google_gemini_3_1_flash_lite_stable(),
+        ] {
+            assert!(model.uses_gemini_thinking_levels(), "{}", model.id);
+        }
+        assert!(Model::google_gemini_3_1_flash_lite_stable().is_gemini_3_1_flash_lite());
+
+        for model in [Model::openai_gpt_5_5_pro(), Model::openai_gpt_5_2_pro(), Model::openai_gpt_5_pro()] {
+            assert!(!model.supports_cache, "{}", model.id);
+            assert!(model.pricing.cached_input_cost_per_million.is_none());
+        }
+        assert!(Model::openai_gpt_5_5_pro().is_openai_gpt_5_5_pro());
+        assert!(!Model::openai_gpt_5_5().is_openai_gpt_5_5_pro());
+        assert!(Model::openai_gpt_5_pro().is_openai_gpt_5_pro());
+        assert!(!Model::openai_gpt_5().is_openai_gpt_5_pro());
+    }
+
+    #[test]
+    fn retired_and_deprecated_models_stay_registered() {
+        for id in [
+            "claude-3-5-sonnet-20240620",
+            "claude-3-5-sonnet-20241022",
+            "claude-3-7-sonnet-20250219",
+            "claude-opus-4-20250514",
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-1-20250805",
+            "gemini-3-pro-preview",
+            "gemini-3.1-flash-lite-preview",
+            "gemini-2.0-flash",
+            "gpt-5-pro-2025-10-06",
+            "o3-2025-04-16",
+            "o4-mini-2025-04-16",
+            "gpt-4.1-nano-2025-04-14",
+        ] {
+            assert!(Model::find(id).is_some(), "{id}");
+        }
+    }
+
+    /// The doc comment directly above the constructor that registers `id`.
+    fn constructor_doc(id: &str) -> String {
+        let source = include_str!("model.rs");
+        let at = source
+            .find(&format!("id: \"{id}\""))
+            .unwrap_or_else(|| panic!("{id} constructor"));
+        let lines: Vec<&str> = source[..at].lines().collect();
+        let function = lines
+            .iter()
+            .rposition(|line| line.trim_start().starts_with("pub fn "))
+            .unwrap();
+        lines[..function]
+            .iter()
+            .rev()
+            .take_while(|line| line.trim_start().starts_with("///"))
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn deprecated_models_document_their_retirement() {
+        for id in [
+            "claude-3-5-sonnet-20240620",
+            "claude-3-5-sonnet-20241022",
+            "claude-3-7-sonnet-20250219",
+            "claude-opus-4-20250514",
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-1-20250805",
+            "claude-opus-4-5-20251101",
+            "claude-sonnet-4-5-20250929",
+            "claude-haiku-4-5-20251001",
+            "gemini-3-pro-preview",
+            "gemini-3.1-flash-lite-preview",
+            "gemini-2.0-flash",
+            "gpt-5-pro-2025-10-06",
+            "gpt-5-2025-08-07",
+            "gpt-5-mini-2025-08-07",
+            "gpt-5-nano-2025-08-07",
+            "o3-2025-04-16",
+            "o3-pro-2025-06-10",
+            "o4-mini-2025-04-16",
+            "gpt-4.1-nano-2025-04-14",
+        ] {
+            let doc = constructor_doc(id).to_lowercase();
+            assert!(
+                ["retired", "shut down", "shuts down", "retirement"]
+                    .iter()
+                    .any(|word| doc.contains(word)),
+                "{id} lacks a retirement note: {doc}"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_flags_describe_provider_limits() {
+        let default = GenerationConfig::default();
+        let manual = GenerationConfig::default().with_reasoning(ReasoningConfig::anthropic(4096));
+        assert!(Model::anthropic_claude_sonnet_4_5().supports_forced_tool_choice(&default));
+        assert!(!Model::anthropic_claude_sonnet_4_5().supports_forced_tool_choice(&manual));
+        assert!(
+            Model::anthropic_claude_sonnet_4_5()
+                .supports_forced_tool_choice(&manual.clone().with_anthropic_thinking_enabled(false))
+        );
+        assert!(!Model::anthropic_claude_fable_5_1().supports_forced_tool_choice(&default));
+        assert!(!Model::anthropic_claude_opus_5_5().supports_forced_tool_choice(&default));
+        assert!(Model::openai_gpt_6_astra().supports_forced_tool_choice(&default));
+        assert!(Model::google_gemini_3_5_flash().supports_forced_tool_choice(&default));
+
+        assert!(!Model::google_gemini_3_5_flash().supports_disabling_parallel_tool_calls());
+        assert!(Model::openai_gpt_6_astra().supports_disabling_parallel_tool_calls());
+        assert!(Model::anthropic_claude_opus_5().supports_disabling_parallel_tool_calls());
+
+        assert!(Model::all().iter().all(Model::reports_stop_reason));
     }
 }

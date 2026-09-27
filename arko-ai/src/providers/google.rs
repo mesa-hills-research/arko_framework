@@ -586,6 +586,7 @@ impl GoogleClient {
         config: &GenerationConfig,
         stream: bool,
     ) -> Result<InteractionsRequest, Error> {
+        super::ensure_supported_inputs(conversation)?;
         if let Some(tool_config) = &config.tool_config
             && tool_config.parallel_tool_calls == Some(false)
         {

@@ -345,7 +345,11 @@ impl AgentLoop {
         let mut config = ai::ToolConfig::new(ai_tools);
 
         if !self.task.agent_config.tool_config.allow_batched_tool_calls
-            && self.task.conversation.model.provider != ai::Provider::Google
+            && self
+                .task
+                .conversation
+                .model
+                .supports_disabling_parallel_tool_calls()
         {
             config = config.with_parallel_tool_calls(false);
         }

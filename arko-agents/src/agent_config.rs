@@ -211,6 +211,12 @@ impl Default for AgentToolConfig {
 struct AgentLLMConfigSerdeHelper {
     provider: LLMProvider,
     model_id: String,
+    /// Snapshot of the model description. Loading prefers the registry entry
+    /// for `model_id` and falls back to this snapshot for ids the registry
+    /// doesn't know (for example models added after the config was saved).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<LLMModel>,
+    #[serde(default)]
     generation_config: LLMGenerationConfig,
 }
 
@@ -229,6 +235,7 @@ impl Serialize for AgentLLMConfig {
         let helper = AgentLLMConfigSerdeHelper {
             provider: self.model.provider.clone(),
             model_id: self.model.id.clone(),
+            model: Some(self.model.clone()),
             generation_config: self.generation_config.clone(),
         };
         helper.serialize(serializer)
@@ -241,12 +248,19 @@ impl<'de> Deserialize<'de> for AgentLLMConfig {
         D: Deserializer<'de>,
     {
         let helper = AgentLLMConfigSerdeHelper::deserialize(deserializer)?;
-        let model = LLMModel::get(helper.provider.clone(), &helper.model_id).map_err(|e| {
-            serde::de::Error::custom(format!(
-                "Failed to get model '{}' for provider '{:?}': {}",
-                helper.model_id, helper.provider, e
-            ))
-        })?;
+        let snapshot = helper
+            .model
+            .filter(|model| model.provider == helper.provider && model.id == helper.model_id);
+        let model = match (LLMModel::get(helper.provider.clone(), &helper.model_id), snapshot) {
+            (Ok(model), _) => model,
+            (Err(_), Some(snapshot)) => snapshot,
+            (Err(e), None) => {
+                return Err(serde::de::Error::custom(format!(
+                    "Failed to get model '{}' for provider '{:?}': {}",
+                    helper.model_id, helper.provider, e
+                )));
+            }
+        };
         Ok(AgentLLMConfig {
             model,
             generation_config: helper.generation_config,
@@ -682,5 +696,56 @@ impl AgentConfigBuilder {
             user_reminder: self.user_reminder,
             skills_config: self.skills_config,
         })
+    }
+}
+
+#[cfg(test)]
+mod llm_config_serde_tests {
+    use super::*;
+
+    #[test]
+    fn registry_models_round_trip_and_the_registry_wins_over_a_stale_snapshot() {
+        let config = AgentLLMConfig {
+            model: LLMModel::openai_gpt_6_astra(),
+            generation_config: LLMGenerationConfig::default().with_max_tokens(1234),
+        };
+        let mut saved = serde_json::to_value(&config).unwrap();
+        assert_eq!(saved["model_id"], "gpt-6-astra");
+        assert_eq!(saved["model"]["id"], "gpt-6-astra");
+        // A snapshot with outdated data is ignored when the registry knows the id.
+        saved["model"]["max_input_tokens"] = serde_json::json!(1);
+        let loaded: AgentLLMConfig = serde_json::from_value(saved).unwrap();
+        assert_eq!(loaded.model.max_input_tokens, LLMModel::openai_gpt_6_astra().max_input_tokens);
+        assert_eq!(loaded.generation_config.max_tokens, Some(1234));
+    }
+
+    #[test]
+    fn unknown_model_ids_load_from_their_snapshot() {
+        let mut model = LLMModel::openai_gpt_6_luna();
+        model.id = "gpt-future".into();
+        let config = AgentLLMConfig {
+            model: model.clone(),
+            generation_config: LLMGenerationConfig::default(),
+        };
+        let saved = serde_json::to_string(&config).unwrap();
+        let loaded: AgentLLMConfig = serde_json::from_str(&saved).unwrap();
+        assert_eq!(loaded.model.id, "gpt-future");
+        assert_eq!(loaded.model.max_input_tokens, model.max_input_tokens);
+
+        // Without a snapshot an unknown id still fails clearly.
+        let bare = serde_json::json!({"provider": "OpenAI", "model_id": "gpt-future"});
+        let error = serde_json::from_value::<AgentLLMConfig>(bare).unwrap_err();
+        assert!(error.to_string().contains("gpt-future"), "{error}");
+    }
+
+    #[test]
+    fn minimal_hand_written_configs_load_with_default_generation_settings() {
+        let yaml = "provider: Anthropic\nmodel_id: claude-opus-5-5\n";
+        let loaded: AgentLLMConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(loaded.model.id, "claude-opus-5-5");
+        assert!(loaded.generation_config.max_tokens.is_none());
+        let partial = "provider: OpenAI\nmodel_id: gpt-6-sol\ngeneration_config:\n  max_tokens: 900\n";
+        let loaded: AgentLLMConfig = serde_yaml::from_str(partial).unwrap();
+        assert_eq!(loaded.generation_config.max_tokens, Some(900));
     }
 }

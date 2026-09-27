@@ -112,6 +112,22 @@ impl GenerationResponse {
     }
 }
 
+/// Rejects content the model can't take before anything is sent: currently
+/// images for models without image input.
+pub(crate) fn ensure_supported_inputs(conversation: &Conversation) -> Result<(), Error> {
+    let has_images = conversation
+        .messages
+        .iter()
+        .any(|message| message.content.iter().any(|content| content.as_image().is_some()));
+    if has_images && !conversation.model.supports_image_input {
+        return Err(Error::UnsupportedFeature(format!(
+            "Model '{}' does not accept image input.",
+            conversation.model.id
+        )));
+    }
+    Ok(())
+}
+
 /// Removes a refused turn's output from `message` so it can't be replayed,
 /// returning any text generated before the refusal.
 pub(crate) fn take_refused_output(message: &mut Message) -> Option<String> {

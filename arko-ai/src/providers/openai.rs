@@ -974,6 +974,7 @@ impl OpenAIClient {
         config: &GenerationConfig,
         is_chatgpt_oauth: bool,
     ) -> Result<OpenAIRequest, Error> {
+        super::ensure_supported_inputs(conversation)?;
         let resolved_max_tokens = if is_chatgpt_oauth {
             None
         } else {
@@ -2710,5 +2711,46 @@ mod model_rule_tests {
         assert_eq!(alias.pricing.input_cost_per_million, sol.pricing.input_cost_per_million);
         assert!(alias.is_openai_gpt_5_6());
         assert!(accepts(&alias, OpenAIEffort::Max));
+    }
+}
+
+#[cfg(test)]
+mod input_capability_tests {
+    use super::OpenAIClient;
+    use crate::{
+        config::GenerationConfig,
+        conversation::Conversation,
+        error::Error,
+        message::{Content, Image},
+        model::Model,
+    };
+
+    #[test]
+    fn images_are_rejected_before_sending_to_models_without_image_input() {
+        let mut model = Model::openai_gpt_4_1();
+        let image = || vec![Content::Image(Image::new_url("https://example.com/a.png"))];
+        let mut conversation = Conversation::new(model.clone());
+        conversation.add_user_message_with_contents(image());
+        let client = OpenAIClient::new("test");
+        assert!(client.build_request(&conversation, &GenerationConfig::default(), false).is_ok());
+
+        model.supports_image_input = false;
+        let mut conversation = Conversation::new(model);
+        conversation.add_user_message_with_contents(image());
+        assert!(matches!(
+            client.build_request(&conversation, &GenerationConfig::default(), false),
+            Err(Error::UnsupportedFeature(_))
+        ));
+    }
+
+    #[test]
+    fn partial_generation_configs_deserialize_with_defaults() {
+        let config: GenerationConfig =
+            serde_json::from_value(serde_json::json!({"max_tokens": 4096})).unwrap();
+        assert_eq!(config.max_tokens, Some(4096));
+        assert!(!config.temperature_specified);
+        assert!(config.reasoning.is_none());
+        let empty: GenerationConfig = serde_json::from_str("{}").unwrap();
+        assert!(empty.max_tokens.is_none());
     }
 }

@@ -10,7 +10,10 @@ pub enum Verbosity {
     High,
 }
 
+/// Omitted fields take their defaults when deserializing, so a partial JSON or
+/// YAML config (for example `{"max_tokens": 4096}`) is valid.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct GenerationConfig {
     /// Sent only when `temperature_specified` is set; otherwise the model's
     /// default applies. Google's Interactions API no longer accepts it.

@@ -836,6 +836,7 @@ impl AnthropicClient {
         conversation: &Conversation,
         config: &GenerationConfig,
     ) -> Result<AnthropicRequest, Error> {
+        super::ensure_supported_inputs(conversation)?;
         // Omitted unless set, so the provider default applies (1.0, which is
         // also what thinking requires; validate_config rejects anything else).
         let temperature = (config.temperature_specified
