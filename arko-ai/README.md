@@ -162,10 +162,11 @@ efforts, mandatory reasoning) and input/output modalities. Variant suffixes reso
 base model.
 
 With a catalog loaded, or a model taken from it, requests are validated before sending:
-unknown slugs fail (except `@preset/…`), as do parameters the catalog doesn't list for the
-model (`temperature`, `reasoning`, `tools`, `tool_choice`, `verbosity`, `max_tokens`),
-which OpenRouter would otherwise drop silently, images for text-only models, and
-`effort: none` or `enabled: false` on models with mandatory reasoning.
+unknown slugs fail (except `@preset/…`; `model@preset/…` is checked by its model), as do
+parameters the catalog doesn't list for the model (`temperature`, `reasoning`, `tools`,
+`tool_choice`, `verbosity`, `max_tokens`), which OpenRouter would otherwise drop silently,
+images for text-only models, and `effort: none` or `enabled: false` on models with
+mandatory reasoning.
 
 ### What is sent
 

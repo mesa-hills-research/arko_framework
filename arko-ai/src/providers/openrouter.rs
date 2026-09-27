@@ -169,7 +169,8 @@ impl OpenRouterClient {
 
     /// The catalog model for `slug` when a catalog is loaded (failing for
     /// slugs it doesn't list; presets such as `@preset/name` are never
-    /// listed and pass), else [`Model::openrouter`].
+    /// listed and pass, and `model@preset/name` resolves to its model), else
+    /// [`Model::openrouter`].
     pub fn resolve_model(&self, slug: &str) -> Result<Model, Error> {
         match self.catalog().filter(|_| !slug.starts_with('@')) {
             Some(catalog) => catalog.get(slug).ok_or_else(|| {

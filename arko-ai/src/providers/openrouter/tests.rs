@@ -1044,6 +1044,32 @@ fn a_loaded_catalog_validates_slugs_parameters_images_and_mandatory_reasoning() 
     assert!(matches!(unknown, Error::ModelNotSupported(_)), "{unknown}");
     check("@preset/team-default", &GenerationConfig::default()).unwrap();
     check("openai/gpt-6-astra:floor", &GenerationConfig::default()).unwrap();
+    // The combined `model@preset/slug` form is checked by its model
+    // (https://openrouter.ai/docs/guides/features/presets).
+    check(
+        "openai/gpt-6-astra@preset/email-copywriter",
+        &GenerationConfig::default(),
+    )
+    .unwrap();
+    check(
+        "openai/gpt-6-astra:floor@preset/email-copywriter",
+        &GenerationConfig::default(),
+    )
+    .unwrap();
+    assert!(matches!(
+        check(
+            "openai/gpt-7@preset/email-copywriter",
+            &GenerationConfig::default()
+        ),
+        Err(Error::ModelNotSupported(_))
+    ));
+    let preset = client
+        .resolve_model("anthropic/claude-sonnet-5@preset/team")
+        .unwrap();
+    assert_eq!(
+        (preset.id.as_str(), preset.max_input_tokens),
+        ("anthropic/claude-sonnet-5@preset/team", 1_000_000)
+    );
 
     // Parameters the catalog doesn't list would be silently dropped.
     assert!(
@@ -1064,6 +1090,12 @@ fn a_loaded_catalog_validates_slugs_parameters_images_and_mandatory_reasoning() 
         .with_reasoning(ReasoningConfig::openrouter_effort(ReasoningEffort::None));
     assert!(
         check("openai/gpt-6-astra", &none)
+            .unwrap_err()
+            .to_string()
+            .contains("mandatory")
+    );
+    assert!(
+        check("openai/gpt-6-astra@preset/email-copywriter", &none)
             .unwrap_err()
             .to_string()
             .contains("mandatory")

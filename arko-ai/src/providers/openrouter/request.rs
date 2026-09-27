@@ -85,9 +85,21 @@ pub(crate) struct ChatRequest {
     pub(crate) service_tier: Option<OpenRouterServiceTier>,
 }
 
-/// The slug without a variant suffix (`openai/gpt-6-luna:floor` →
+/// The model of a combined `model@preset/slug` reference
+/// (`openai/gpt-6-luna@preset/email-copywriter` → `openai/gpt-6-luna`);
+/// other slugs, including a bare `@preset/slug`, are returned unchanged.
+/// https://openrouter.ai/docs/guides/features/presets
+pub(crate) fn without_preset(slug: &str) -> &str {
+    match slug.split_once("@preset/") {
+        Some((model, _)) if !model.is_empty() => model,
+        _ => slug,
+    }
+}
+
+/// The slug without a preset or variant suffix (`openai/gpt-6-luna:floor` →
 /// `openai/gpt-6-luna`).
 pub(crate) fn base_slug(slug: &str) -> &str {
+    let slug = without_preset(slug);
     slug.split_once(':').map_or(slug, |(base, _)| base)
 }
 
@@ -122,7 +134,9 @@ fn is_openai_pro_slug(slug: &str) -> bool {
 /// `:nitro` by throughput, `:floor` by price).
 fn is_sort_variant(slug: &str) -> bool {
     matches!(
-        slug.rsplit_once(':').map(|(_, variant)| variant),
+        without_preset(slug)
+            .rsplit_once(':')
+            .map(|(_, variant)| variant),
         Some("exacto" | "nitro" | "floor")
     )
 }

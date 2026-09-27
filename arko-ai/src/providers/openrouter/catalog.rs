@@ -3,6 +3,7 @@
 //! [`Model`]s. Fetched only on request and cached in memory by the client.
 //! https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties
 
+use super::request::without_preset;
 use crate::{
     error::Error,
     model::{Model, ModelPricing, ModelType, Provider},
@@ -165,26 +166,26 @@ impl OpenRouterCatalog {
 
     /// The model with this slug or canonical slug. A variant suffix
     /// (`:floor`, `:nitro`, `:thinking`, ...) not listed on its own resolves
-    /// to the base model; the returned model keeps the requested slug.
+    /// to the base model, and a combined `model@preset/slug` reference to its
+    /// model; the returned model keeps the requested slug.
     pub fn get(&self, slug: &str) -> Option<Model> {
-        if let Some(&position) = self.index.get(slug) {
-            let mut model = self.models[position].clone();
-            model.id = slug.to_string();
-            return Some(model);
-        }
-        let (base, _) = slug.split_once(':')?;
-        let &position = self.index.get(base)?;
-        let mut model = self.models[position].clone();
+        let mut model = self.models[self.position(slug)?].clone();
         model.id = slug.to_string();
         Some(model)
     }
 
-    /// Whether the catalog lists the slug (or its base without a variant).
+    /// Whether the catalog lists the slug (or its model without a variant or
+    /// preset).
     pub fn contains(&self, slug: &str) -> bool {
-        self.index.contains_key(slug)
-            || slug
-                .split_once(':')
-                .is_some_and(|(base, _)| self.index.contains_key(base))
+        self.position(slug).is_some()
+    }
+
+    fn position(&self, slug: &str) -> Option<usize> {
+        let model = without_preset(slug);
+        self.index
+            .get(model)
+            .or_else(|| self.index.get(model.split_once(':')?.0))
+            .copied()
     }
 }
 
