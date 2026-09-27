@@ -5,6 +5,7 @@ use tokio::task::JoinHandle;
 use self::command::UserCommand;
 use self::event::AgentEvent;
 use self::r#loop::AgentLoop;
+pub use self::turn_context::TurnContextSource;
 use crate::error::ArkoAgentsError;
 use crate::skill::SkillPromptContext;
 use crate::task::Task;
@@ -16,6 +17,7 @@ pub mod event;
 mod r#loop;
 mod monitor;
 mod retry;
+pub mod turn_context;
 
 const DEFAULT_EVENT_CHANNEL_SIZE: usize = 100;
 const DEFAULT_COMMAND_CHANNEL_SIZE: usize = 10;
@@ -23,12 +25,23 @@ const DEFAULT_COMMAND_CHANNEL_SIZE: usize = 10;
 /// The main runtime for executing agent tasks.
 pub struct AgentRuntime {
     llm_client: Arc<LLMClient>,
+    turn_context: Option<Arc<dyn TurnContextSource>>,
 }
 
 impl AgentRuntime {
     /// Creates a new AgentRuntime with the given LLM client.
     pub fn new(llm_client: Arc<LLMClient>) -> Self {
-        Self { llm_client }
+        Self {
+            llm_client,
+            turn_context: None,
+        }
+    }
+
+    /// Asks `source` for context before each model request of the tasks this
+    /// runtime runs; see [`TurnContextSource`].
+    pub fn with_turn_context(mut self, source: Arc<dyn TurnContextSource>) -> Self {
+        self.turn_context = Some(source);
+        self
     }
 
     /// Runs a task with the given agent configuration and tool registry.
@@ -61,7 +74,7 @@ impl AgentRuntime {
             }
         }
 
-        let agent_loop = AgentLoop::new(
+        let mut agent_loop = AgentLoop::new(
             task,
             Arc::clone(&self.llm_client),
             tool_registry,
@@ -73,6 +86,7 @@ impl AgentRuntime {
             interceptor_config,
             execution_middleware,
         );
+        agent_loop.turn_context = self.turn_context.clone();
 
         let task_join_handle = tokio::spawn(async move { agent_loop.run().await });
 

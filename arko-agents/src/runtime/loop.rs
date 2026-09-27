@@ -245,6 +245,8 @@ pub struct AgentLoop {
     interceptor_config: Option<InterceptorConfig>,
     execution_middleware: Option<Arc<dyn ToolExecutionMiddleware>>,
     pending_context_injections: Vec<String>,
+    /// Asked for context at each safe turn boundary.
+    pub(super) turn_context: Option<Arc<dyn super::TurnContextSource>>,
     tool_context_cursor: usize,
     file_tree_baseline: Option<crate::file_tree::FileTreeSnapshot>,
     file_tree_error: Option<String>,
@@ -308,6 +310,7 @@ impl AgentLoop {
             interceptor_config,
             execution_middleware,
             pending_context_injections: Vec::new(),
+            turn_context: None,
             tool_context_cursor: 0,
             file_tree_baseline: None,
             file_tree_error: None,
@@ -389,6 +392,13 @@ impl AgentLoop {
     }
 
     fn flush_context_injections(&mut self) -> Result<(), ArkoAgentsError> {
+        if let Some(content) = self
+            .turn_context
+            .as_ref()
+            .and_then(|source| source.turn_context(self.task.id))
+        {
+            self.queue_context_injection(content);
+        }
         if self.pending_context_injections.is_empty() {
             return Ok(());
         }
@@ -3473,6 +3483,7 @@ impl AgentLoop {
             attempt,
             delay_ms: delay.as_millis() as u64,
             elapsed_ms: elapsed.as_millis() as u64,
+            rate_limit: error.is_rate_limit(),
         })
         .await?;
         if !indefinite {
@@ -3962,6 +3973,66 @@ mod tests {
         .unwrap();
         assert!(rejection.contains("complete_task"));
         assert!(!rejection.contains("read_file, complete_task"));
+    }
+
+    /// Tells the task about something once, at its first turn boundary.
+    struct TellOnce(std::sync::atomic::AtomicBool);
+
+    impl super::super::TurnContextSource for TellOnce {
+        fn turn_context(&self, _task_id: Uuid) -> Option<String> {
+            (!self.0.swap(true, std::sync::atomic::Ordering::SeqCst))
+                .then(|| "Agent `b` is now running.".to_string())
+        }
+    }
+
+    /// A turn context source's content reaches the conversation before the
+    /// next model request, as a workflow context update, once.
+    #[tokio::test]
+    async fn turn_context_is_added_before_the_next_request() {
+        use futures::StreamExt;
+        let (mut agent, _events, _commands) = super::retry_tests::harness();
+        let tool_config = &mut agent.task.agent_config.tool_config;
+        tool_config.tool_calling_mode = ToolCallingMode::Native;
+        tool_config.default_auto_approve_tool_use = true;
+        agent.turn_context = Some(Arc::new(TellOnce(Default::default())));
+        let turn = futures::stream::iter([Ok(super::retry_tests::complete_response())]);
+        agent
+            .scripted_responses
+            .get_mut()
+            .unwrap()
+            .push_back(Ok(turn.boxed()));
+        let task = timeout(Duration::from_secs(10), agent.run())
+            .await
+            .unwrap()
+            .unwrap();
+        let updates = task
+            .conversation
+            .messages
+            .iter()
+            .filter(|message| message.role == ai::Role::User)
+            .filter_map(|message| message.content.iter().find_map(ai::Content::as_text))
+            .filter(|text| {
+                text.starts_with("# Workflow context update\n\nAgent `b` is now running.")
+            })
+            .count();
+        assert_eq!(updates, 1);
+    }
+
+    #[test]
+    fn retry_events_saved_before_the_rate_limit_flag_still_load() {
+        let event: AgentEvent = serde_json::from_value(serde_json::json!({
+            "RetryScheduled": {"attempt": 2, "delay_ms": 1000, "elapsed_ms": 50}
+        }))
+        .unwrap();
+        assert_eq!(
+            event,
+            AgentEvent::RetryScheduled {
+                attempt: 2,
+                delay_ms: 1000,
+                elapsed_ms: 50,
+                rate_limit: false,
+            }
+        );
     }
 
     /// Cancels the task at every call.

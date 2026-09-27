@@ -503,6 +503,20 @@ mod tests {
             },
         ];
         for original in states {
+            // Naming every variant here makes a new one fail to compile until
+            // it is added to this list (and to `TaskStateRepr`).
+            match &original {
+                TaskState::Pending
+                | TaskState::InProgress
+                | TaskState::AwaitingToolApproval { .. }
+                | TaskState::AwaitingBatchToolApproval { .. }
+                | TaskState::AwaitingUserResponse { .. }
+                | TaskState::AwaitingErrorRecoveryApproval { .. }
+                | TaskState::Interrupted { .. }
+                | TaskState::Completed { .. }
+                | TaskState::Failed { .. }
+                | TaskState::Cancelled { .. } => {}
+            }
             let json = serde_json::to_value(&original).unwrap();
             assert_eq!(state(json), original);
         }

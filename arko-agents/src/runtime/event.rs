@@ -116,6 +116,10 @@ pub enum AgentEvent {
         attempt: u32,
         delay_ms: u64,
         elapsed_ms: u64,
+        /// The retry waits out a provider rate limit (`false` in events
+        /// saved before this field existed).
+        #[serde(default)]
+        rate_limit: bool,
     },
     /// The LLM attempted to use a tool that is not available.
     UnavailableToolAttempted { tool_name: String },

@@ -137,6 +137,9 @@ pub(crate) async fn execute_command_from_template(
     cmd.current_dir(task_cwd);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // A task stopped mid-call (its runtime aborted) doesn't leave the
+    // command running.
+    cmd.kill_on_drop(true);
 
     let output = cmd
         .spawn()
