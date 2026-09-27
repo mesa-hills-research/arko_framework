@@ -14,15 +14,6 @@ The design philosophy is **maximum moldability balanced with maximum intuitivene
 
 ## Installation
 
-Memory reads return exact versioned changes after the first full read. Distillers
-can select tools/agents and configure size thresholds, models, and reasoning.
-See [context management](../docs/context-efficiency.md) for the response contract,
-delivery baselines, and a Luna High configuration example.
-
-For interactive shell work, register the `arko-agents` terminal tools with
-`WorkflowBuilder::agent_tool`. See [terminal integration](../docs/interactive-terminals.md)
-for input requests, background notifications, and host lifecycle handling.
-
 Add to your `Cargo.toml`:
 
 ```toml
@@ -33,12 +24,9 @@ arko-ai = { path = "../arko-ai" }
 tokio = { version = "1.37", features = ["full"] }
 ```
 
-For Python bindings (requires [Maturin](https://github.com/PyO3/maturin)):
-
-```bash
-cd arko-workflows
-maturin develop --features python
-```
+Python bindings live behind the `python` feature (`cargo check -p arko-workflows --features python`).
+The crate is not yet packaged as a Python extension module: it builds only an `rlib` (no `cdylib`)
+and has no `pyproject.toml`, so `maturin develop` does not work as is. Packaging needs both.
 
 ## Quick Start (Rust)
 
@@ -50,9 +38,8 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), WorkflowError> {
-    let client = Arc::new(
-        LLMClient::new().with_anthropic_api_key(&std::env::var("ANTHROPIC_API_KEY").unwrap())
-    );
+    // Every provider whose credentials are in the environment.
+    let client = Arc::new(LLMClient::from_env());
 
     let workflow = Workflow::builder()
         .name("my-workflow")
@@ -70,6 +57,11 @@ async fn main() -> Result<(), WorkflowError> {
     Ok(())
 }
 ```
+
+`LLMClient::from_env()` configures OpenAI (ChatGPT OAuth from `OPENAI_OAUTH_ACCESS_TOKEN` and
+`OPENAI_OAUTH_ACCOUNT_ID`, else `OPENAI_API_KEY`), Anthropic (`ANTHROPIC_API_KEY`), Google
+(`GOOGLE_API_KEY`, else `GEMINI_API_KEY`) and OpenRouter (`OPENROUTER_API_KEY`). Build the client
+yourself for anything else, such as credentials from a Codex `auth.json` (`arko_ai::CodexAuthFile`).
 
 ## Quick Start (Python)
 
@@ -94,6 +86,8 @@ async def main():
 
 asyncio.run(main())
 ```
+
+The Python builder calls `LLMClient::from_env()` during `build`, so it uses the same environment variables.
 
 For a complete sequential orchestrator/coder/correctness-verifier/efficiency-verifier workflow, see
 the [DeepCoder example](examples/deepcoder/README.md).
@@ -131,6 +125,8 @@ let result = handle.wait().await?;
 
 **Custom Event Handling**
 ```rust
+use arko_agents::{AgentEvent, UserCommand};
+
 let handle = workflow.spawn_agent("agent", "task").await?;
 let (mut events, commands, join, _name) = handle.into_parts();
 
@@ -147,7 +143,7 @@ while let Some(event) = events.recv().await {
         _ => {}
     }
 }
-let _task = join.await??;
+let _task = join.await.expect("agent task panicked")?;
 ```
 
 **Agent-Driven (via custom tools)**
@@ -191,6 +187,8 @@ let workflow = Workflow::builder()
 ```
 
 Agents interact with memory via injected tools: `read_memory`, `write_memory`, `list_memories`. Writes retain author, task, timestamp, and entry identity. Reads can request a bounded window, and tiers can enforce a byte limit.
+
+Memory reads return exact versioned changes after the first full read. See [context management](../docs/context-efficiency.md) for the response contract and delivery baselines.
 
 ### Hooks
 
@@ -285,7 +283,7 @@ Recipients are validated against the workflow roster. Messages carry stable IDs,
 
 ### Human Input and Suspension
 
-Register a `UserInputHandler` to route an agent's `ask_user` request to an application, chat service, or UI. If no handler is configured, the runtime issues internal `SuspendTask`, preserves `AwaitingUserResponse`, returns `AgentRunStatus::WaitingForInput`, and checkpoints the task. Resume it with `continue_agent(agent_run_id, response)`.
+Register a `UserInputHandler` to route an agent's `ask_user` request to an application, chat service, or UI. If no handler is configured, the runtime issues internal `SuspendTask` and preserves `AwaitingUserResponse`: `run_agent` returns `WorkflowError::UserInputRequired { agent, task_id, questions }` and records an `AgentRunStatus::WaitingForInput` result in `workflow.result().agent_results` (with persistence configured, the task is also saved and auto-checkpointed). Resume by passing that result and the answer to `continue_agent(&waiting_result, answer)`.
 
 `SuspendTask` is intentionally different from cancellation: it stops the live runtime without turning the task into failed or cancelled state. It is a runtime control command, not an agent-facing tool.
 
@@ -295,8 +293,9 @@ Wrap non-workflow side effects in a durable step with a stable key, input hash, 
 
 ```rust
 let receipt: Receipt = workflow
-    .durable_step(DurableStepSpec::new("pay-bill"), &bill, |step| async move {
-        provider.pay(&bill, step.operation_id()).await
+    .durable_step(DurableStepSpec::new("pay-bill"), &bill, |step| {
+        let bill = &bill;
+        async move { provider.pay(bill, step.operation_id()).await }
     })
     .await?;
 ```
@@ -309,7 +308,7 @@ This is replay safety, not a universal exactly-once guarantee. An external syste
 
 Completion verifiers gate the actual `complete_task` tool call. A correctness verifier can approve, request a bounded minor repair, or reject major. An efficiency verifier is advisory: even if it emits a major rejection, the workflow coerces that to a capped minor repair, so efficiency alone cannot hard-fail completion. Verifier configurations can opt into same-conversation rechecks and bounded tracked file/memory repair deltas, retaining a fresh first review while avoiding repeated whole-project inspection after localized repairs.
 
-Tool-result distillers are opt-in, agent/tool scoped, LLM-backed interceptors for large outputs. Their calls are budget-accounted, recorded, and composed with application interceptors; `complete_task` is never distilled.
+Tool-result distillers are opt-in, agent/tool scoped, LLM-backed interceptors for large outputs. They can select tools/agents and configure size thresholds, models, and reasoning. Their calls are budget-accounted, recorded, and composed with application interceptors; `complete_task` is never distilled. A summary replaces the tool output only when the model finished it: a refusal or a summary cut off by its output limit keeps the raw output. See [context management](../docs/context-efficiency.md) for a Luna High configuration example.
 
 ### Code-Defined Services and Voting
 
@@ -374,6 +373,10 @@ let workflow = Workflow::builder()
     .build()?;
 ```
 
+For interactive shell work, register the `arko-agents` terminal tools with
+`WorkflowBuilder::agent_tool`. See [terminal integration](../docs/interactive-terminals.md)
+for input requests, background notifications, and host lifecycle handling.
+
 ## Architecture
 
 ```text
@@ -401,7 +404,7 @@ let workflow = Workflow::builder()
 │        │    └──────────┘  └──────────┘             │
 ├─────────────────────────────────────────────────────┤
 │                    arko_ai                          │
-│           LLMClient (OpenAI / Anthropic / Google)   │
+│   LLMClient (OpenAI/Anthropic/Google/OpenRouter)    │
 └─────────────────────────────────────────────────────┘
 ```
 

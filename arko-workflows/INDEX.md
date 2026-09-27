@@ -81,7 +81,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). Types: `workflow::Workflow`, `wo
 | --- | --- |
 | `name(self, name: impl Into<String>) -> Self` | Workflow identity used in results, hooks, and checkpoint name checks. Required. |
 | `workspace(self, path: impl Into<PathBuf>) -> Self` | Existing working directory for every agent. Required; the builder does not create it. |
-| `llm_client(self, client: Arc<LLMClient>) -> Self` | Shared configured model client. Required; Rust builder does not load credentials from environment itself. |
+| `llm_client(self, client: Arc<LLMClient>) -> Self` | Shared configured model client. Required; Rust builder does not load credentials from environment itself (use `LLMClient::from_env()` to configure every provider found in the environment). |
 | `agent(self, name: impl Into<String>, config: AgentConfig) -> Self` | Register a configured agent under a unique workflow name. At least one required. |
 | `metadata(self, metadata: WorkflowMetadata) -> Self` | Replace discovery metadata, including supported-host restrictions. |
 | `memory(self, config: MemoryConfig) -> Self` | Configure shared memory tiers and access policies. Default empty. |
@@ -682,7 +682,7 @@ Conversation reuse supplies the previous verdict, new completion summary, and fo
 
 ### Verdict protocol and records
 
-`pub const VERIFIER_OUTPUT_CONTRACT: &str` provides the plain-text response instructions for verifier prompts. The first non-empty line is one of `ACCEPTED`, `REJECTED_MINOR`, or `REJECTED_MAJOR`. Rejections require non-empty feedback on following lines; acceptance permits no feedback. Leading blank lines, surrounding whitespace on the decision line, and CRLF are accepted. JSON, Markdown wrappers, or feedback appended to the decision line do not match the decision protocol; subsequent feedback is opaque text. One continuation attempt repairs malformed formatting, then the target fails if the response remains unusable.
+`pub const VERIFIER_OUTPUT_CONTRACT: &str` provides the plain-text response instructions for verifier prompts. The first non-empty line is one of `ACCEPTED`, `REJECTED_MINOR`, or `REJECTED_MAJOR`. Rejections require non-empty feedback on following lines; acceptance may omit feedback. Leading blank lines, surrounding whitespace on the decision line, and CRLF are accepted. JSON, Markdown wrappers, or feedback appended to the decision line do not match the decision protocol; subsequent feedback is opaque text. One continuation attempt repairs malformed formatting, then the target fails if the response remains unusable.
 
 `VerificationDecision` is cloneable, comparable (`PartialEq`, `Eq`), and Serde serializable/deserializable:
 
@@ -1041,7 +1041,7 @@ The table uses Python-facing signatures: the implicit `self` and PyO3 interprete
 | `global_memory_tier(name: str, max_bytes: int \| None = None) -> None` | Add globally readable/writable append-only memory tier; optional byte cap. |
 | `build() -> PyWorkflow` | Load agent files, build LLM client, and construct workflow. Load/build failures raise `ValueError`. Builder is borrowed and can be reused. |
 
-The Python client reads available `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `GOOGLE_API_KEY` values from the process environment during `build`. No Python method accepts a custom client, OAuth configuration, custom tools, hooks, verifiers, distillers, or service settings. These capabilities require the Rust API or an extension of the bindings.
+During `build`, the Python builder calls `LLMClient::from_env()`, which configures every provider found in the process environment: OpenAI (ChatGPT OAuth from `OPENAI_OAUTH_ACCESS_TOKEN` and `OPENAI_OAUTH_ACCOUNT_ID`, with optional `OPENAI_OAUTH_REFRESH_TOKEN`, else `OPENAI_API_KEY`), Anthropic (`ANTHROPIC_API_KEY`), Google (`GOOGLE_API_KEY`, else `GEMINI_API_KEY`) and OpenRouter (`OPENROUTER_API_KEY`); blank values are ignored. A Codex `auth.json` is not read, and refreshed OAuth tokens are kept only in memory. No Python method accepts a custom client, custom tools, hooks, verifiers, distillers, or service settings. These capabilities require the Rust API or an extension of the bindings.
 
 ### PyWorkflow
 
@@ -1061,7 +1061,7 @@ Workflow execution, accounting, checkpoint, and memory errors raise `RuntimeErro
 
 ### PyAgentResult
 
-Read-only Python properties: `agent_name: str`, `summary: str`, `total_cost: float`, `status: str`, `agent_run_id: str`. `status` is the Rust debug variant name (`Completed`, `Failed`, `Interrupted`, `Cancelled`, or `WaitingForInput`); run ID is a UUID string. The Rust wrapper's five corresponding fields are public (`String`, `String`, `f64`, `String`, `String`). No full task, token totals, or detailed error field is exposed. No Python constructor is exposed.
+Read-only Python properties: `agent_name: str`, `summary: str`, `total_cost: float` (the billed amount, zero for ChatGPT OAuth calls), `status: str`, `agent_run_id: str`. `status` is the Rust debug variant name (`Completed`, `Failed`, `Interrupted`, `Cancelled`, or `WaitingForInput`); run ID is a UUID string. The Rust wrapper's five corresponding fields are public (`String`, `String`, `f64`, `String`, `String`). No full task, token totals, or detailed error field is exposed. No Python constructor is exposed.
 
 ## Workflow errors
 

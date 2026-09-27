@@ -5,6 +5,7 @@ how the reusable `arko_workflows` primitives replace application-specific orches
 
 ```text
 orchestrator
+  -> run_workflow_agent(researcher)   (optional, bounded repository questions)
   -> run_workflow_agent(coder)
        -> correctness verifier
        -> efficiency verifier (minor-only)
@@ -26,20 +27,23 @@ batch-safe is rejected without executing any call in that batch.
 
 ## Run
 
-Set either an OpenAI API key:
+The example uses OpenAI models only. Credentials are tried in this order:
 
-```bash
-export OPENAI_API_KEY=...
-```
+1. ChatGPT OAuth environment values (the refresh token is optional):
 
-The example prefers ChatGPT OAuth and automatically discovers `$CODEX_HOME/auth.json` or
-`$HOME/.codex/auth.json`. Explicit OAuth environment values can also be used:
+   ```bash
+   export OPENAI_OAUTH_ACCESS_TOKEN=...
+   export OPENAI_OAUTH_REFRESH_TOKEN=...
+   export OPENAI_OAUTH_ACCOUNT_ID=...
+   ```
 
-```bash
-export OPENAI_OAUTH_ACCESS_TOKEN=...
-export OPENAI_OAUTH_REFRESH_TOKEN=...
-export OPENAI_OAUTH_ACCOUNT_ID=...
-```
+2. A Codex login at `$CODEX_HOME/auth.json` or `$HOME/.codex/auth.json`. Tokens the client
+   refreshes are saved back to that file every 30 seconds and once more at exit.
+3. An OpenAI API key:
+
+   ```bash
+   export OPENAI_API_KEY=...
+   ```
 
 Then run:
 
@@ -62,6 +66,9 @@ Useful controls:
 --resume /run/directory/or/checkpoint.json
 --ephemeral
 ```
+
+Budgets count billed cost: ChatGPT OAuth calls bill $0, so `--budget` and the reported total cost
+apply only to API-key runs.
 
 With persistence enabled, the default run directory is a uniquely named sibling under
 `.arko-deepcoder-runs`. Resume accepts either a checkpoint or a run directory containing the

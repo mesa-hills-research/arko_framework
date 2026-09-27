@@ -1,13 +1,12 @@
 //! Basic example: sequential multi-agent workflow.
 //!
 //! Usage:
-//!   cargo run --example basic_workflow -- \
-//!     --workspace ./my-project \
-//!     --architect configs/architect.json \
-//!     --coder configs/coder.json
+//!   cargo run -p arko-workflows --example basic_workflow
 //!
-//! Requires ANTHROPIC_API_KEY (or another provider's credentials; see
-//! `LLMClient::from_env`) in env.
+//! Takes no arguments: it expects the workspace `./my-project` and the agent
+//! configurations `configs/architect.json` and `configs/coder.json` (edit the
+//! paths in `main`). Needs credentials for the providers those configurations
+//! use, from the environment (see `LLMClient::from_env`).
 
 use std::sync::Arc;
 
