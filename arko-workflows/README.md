@@ -263,9 +263,9 @@ let workflow = Workflow::builder()
 ```
 
 The mapping from tool names to resources is configurable. Notices state that a
-resource changed; they do not include the change. `enable_mesi` and `mesi`
-configure the older name-based file tracker, which is also mapped onto freshness
-tracking. See [context freshness](INDEX.md#context-freshness).
+resource changed; they do not include the change. The older `enable_mesi` and
+`mesi` builder settings derive an equivalent freshness configuration for the file
+tools. See [context freshness](INDEX.md#context-freshness).
 
 ## Budgets
 
