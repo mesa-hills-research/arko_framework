@@ -116,9 +116,10 @@ cargo run -p arko-agents --example arko_agents_cli -- \
 
 Its options include `--tool-calling-mode native|output_based`, `--mcp-config PATH`,
 `--openai-auth-json PATH` (ChatGPT OAuth from a Codex `auth.json`), `--save-task-state
-PATH` (the final task as JSON), and `--user-command-timeout SECONDS`. The example loads a
-`.env` file and then reads other credentials from the environment with
-`LLMClient::from_env()`.
+PATH` (the final task as JSON), and the opt-in `--user-command-timeout SECONDS`, after
+which a task waiting for a command is returned `Interrupted`; without it the task waits
+until a command arrives. The example loads a `.env` file and then reads other credentials
+from the environment with `LLMClient::from_env()`.
 
 ## Agent configuration
 
@@ -150,7 +151,7 @@ runtime validates them again when a task starts. The quick start's agent as JSON
 | `environment_details_config` | Nothing included | Working directory, file tree, date and time, and operating system, each placed in the system prompt, the task prompt, or every user message. |
 | `error_recovery_config` | `InformAgentAndContinue` | What a failed tool execution does. |
 | `llm_error_policy`, `llm_retry_config` | 3 attempts, then pause | What a failed model request does; see [Model-call recovery](#model-call-recovery). |
-| `user_command_timeout_seconds` | None | How long an awaiting task waits for a command before it is returned `Interrupted`. |
+| `user_command_timeout_seconds` | None (waits indefinitely) | Opt-in: how long an awaiting task waits for a command before it is returned `Interrupted`. |
 | `user_reminder` | None | Text appended as `# Reminder` to the task prompt, every user message, or every Nth message. |
 | `skills_config` | None | Skill sources; see [Skills](#skills). |
 | `monitoring` | Nothing monitored | Plan-usage and prompt-cache monitors; see [Monitoring](#monitoring). |
@@ -205,7 +206,9 @@ text and tool events are emitted once the response has been parsed.
 ### Approvals and workspace paths
 
 Tool calls wait for approval unless `default_auto_approve_tool_use` or a per-tool
-`auto_approve_tool_use` override is set. When a response holds one call that needs
+`auto_approve_tool_use` override is set. `ask_user` runs without approval, since its
+question already waits for an answer, unless its own override sets `auto_approve_tool_use:
+Some(false)`. When a response holds one call that needs
 approval, the runtime emits `ToolCallAwaitingApproval`; when it holds several calls, it
 emits `BatchToolCallAwaitingApproval` listing those that need approval. Answer with
 `ApproveToolUse`, `RejectToolUse`, or `SubmitBatchToolApprovals`, where a call without a
@@ -223,17 +226,39 @@ byte, is rejected this way under every policy.
 The check and the built-in file tools resolve a path the same way, with
 `arko_agents::utils::resolve_path`: surrounding whitespace is trimmed, `~` and `$VAR` are
 not expanded (`~/notes` names a directory called `~`), a relative path is joined to the
-working directory, and `.` and `..` are resolved lexically. A custom tool with an
-`is_path` parameter should open the path `resolve_path` returns, so the check judges the
-path the tool opens. The check is not a sandbox: symbolic links are not followed, so a
-link inside the workspace can lead outside it.
+working directory, and the result is made absolute and its `.` and `..` resolved. On
+Windows this follows Win32: `\` and `/` both separate components, a drive-relative
+`C:dir` uses that drive's current directory, trailing dots and spaces are dropped, and a
+verbatim `\\?\` path is kept as written. A custom tool with an `is_path` parameter should
+open the path `resolve_path` returns, so the check judges the path the tool opens;
+end-user command tools receive that path. A non-string value for an `is_path` parameter
+is rejected.
+
+The check compares the resolved path with the working directory component by component.
+On Windows it ignores ASCII case (`c:\work\x` is inside `C:\Work`) and matches a verbatim
+prefix with its ordinary form (`\\?\C:\` with `C:\`, `\\?\UNC\server\share` with
+`\\server\share`), also in a directory with case sensitivity turned on. Elsewhere the
+comparison is exact, so on a macOS file system that ignores case, a path spelled in
+another case is judged outside. The check is not a sandbox: symbolic links are not
+followed, so a link inside the workspace can lead outside it, and a path spelled through
+a link is compared as written. On macOS, for example, `/var` links to `/private/var`,
+where temporary directories live. Give the working directory in canonical form
+(`std::fs::canonicalize`, as the quick start does), since programs such as `pwd` report
+canonical paths.
 
 ### Tool errors
 
 `error_recovery_config.on_tool_execution_error` handles a tool that returns an error:
-`InformAgentAndContinue` (the default) sends the error to the agent,
-`PauseAndAwaitApproval` waits for `ApproveErrorRecovery` or `RejectErrorRecovery`, and
-`FailTask` fails the task.
+
+- `InformAgentAndContinue` (the default) reports the error as that call's result (a
+  native error result, or a text result in output-based mode) and emits
+  `ErrorEncountered`; the other calls of the response run as usual.
+- `PauseAndAwaitApproval` (opt-in) lets the other calls of the response run first,
+  including calls that wait for approval, and then pauses once, whatever number of calls
+  failed, for `ApproveErrorRecovery` or `RejectErrorRecovery`.
+- `FailTask` (opt-in) fails the task at the first error. The calls of the response it
+  did not run get a result saying so ("The task failed on an earlier tool error, so this
+  call was not run."), so every call keeps its result.
 
 ### Custom tools
 
@@ -300,8 +325,11 @@ End-user tools wrap a command without Rust code: a `ToolDefinition` whose
 `ToolRegistry::load_end_user_tool`. The template's `~` and environment variables are
 expanded and it is split on whitespace, without interpreting quotes. String parameters
 without a `flag` follow as positional arguments, in order, and then flagged string
-parameters as `flag value` and each true boolean parameter as its flag. The command runs
-in the task's working directory without a shell, and its standard output is the result;
+parameters as `flag value` and each true boolean parameter as its flag. An `is_path`
+parameter passes the path the workspace check judged: absolute and resolved, so the
+program cannot read it as an option and a symbolic link cannot redirect its `..`. The
+command runs in the task's working directory without a shell, and its standard output is
+the result;
 a nonzero exit status is a tool error. A boolean parameter takes a JSON boolean or the
 text `true` or `false`, so it works in both tool calling modes.
 
@@ -399,12 +427,20 @@ returned task again continues it: a task that is pending, in progress, or interr
 makes its next model request, and a task awaiting a command waits for it.
 `prepare_for_resumption_with_user_response` answers a saved `AwaitingUserResponse` task
 before it runs, and `prepare_for_resumption_from_completed` adds a follow-up prompt to a
-completed one. A wait that ends in `Interrupted` (a command timeout or a closed command
-channel) does not keep the awaiting state. In native mode, calls still awaiting approval
-are then rejected with an error result and `ToolRejected`, and the turn's results are
-added to the conversation, so every call keeps its result and the task can run again; in
-output-based mode, the task's next request asks the model to continue. `SuspendTask`
-keeps the awaiting state instead.
+completed one. A wait that ends in `Interrupted` (the opt-in command timeout or a closed
+command channel) does not keep the awaiting state. Calls still awaiting approval are
+answered with the reason they did not run, which `ToolRejected` also carries ("Human
+approval timed out after 60 seconds, so this call was not run. You can call it again if
+it is still needed.", or "The approval wait ended because the host stopped responding,
+so this call was not run."), and the turn's results are added to the conversation with
+them, so every call keeps its result and the task can run again. A pause on a tool
+error that waited for those decisions is dropped. `SuspendTask` keeps the awaiting state
+instead.
+
+In output-based mode, the results of the calls that ran in a turn that then waits, for
+the approval of its other calls or on a pause, wait with the task, including when it is
+suspended and saved (`Task::pending_text_tool_results`), and go to the model with the
+outcome of the wait.
 
 `Task::total_usage()` sums the usage of every model call. `Task::total_usage_cost()` is
 what the account is billed: ChatGPT OAuth calls are covered by the subscription and add
