@@ -57,7 +57,9 @@ cargo run -p arko-agents --example arko_agents_cli -- --help
 (`server_is_overloaded`, ...) are retried under either `RetryThen*` policy after
 the provider's delay (`Retry-After`, rate-limit reset headers, a delay in the body)
 plus jitter, or with backoff from 1 s to 60 s when it gives none, until success or
-cancellation. These retries don't count against the attempt limit or the elapsed
+cancellation. Rate limits without a delay are waited out for at most `max_wait_ms`
+(15 minutes) in all per recovery episode; after that they are handled as a usage
+limit. These retries don't count against the attempt limit or the elapsed
 budget and add nothing to the conversation. A rate limit asking for more than
 `max_wait_ms` (15 minutes) is handled as a usage limit. Set `rate_limit_retry: None`
 (JSON `null`) for ordinary bounded recovery.
@@ -67,16 +69,20 @@ by arko-ai as `RetryClass::UsageLimit`) emits `UsageLimitReached` with the reset
 and, under the default `UsageLimitPolicy::Pause`, stops retrying like exhausted
 recovery (awaiting approval, or interrupted under the informing policies). Opt in to
 `UsageLimitPolicy::WaitUntilReset { max_wait_ms }` to wait (cancellably) until the
-reported reset plus up to 31 seconds and retry unchanged; resets further off, or not
-reported, still pause.
+reported reset plus up to 31 seconds and retry unchanged, under every error policy;
+a wait that wouldn't fit in `max_wait_ms` (margin and jitter included), or a reset
+that isn't reported, still pauses.
 
 **Plan usage reports.** ChatGPT OAuth calls report plan usage (`x-codex-*` headers)
 in `ModelCallUsage::plan_usage` and a `PlanUsageReported` event. Opt in to
 `MonitoringConfig { plan_usage: Some(PlanUsageThreshold { percent, action }) }`
 (`AgentConfig::monitoring`) to act before a model request when the most-used window
 is at or above `percent`: `PlanUsageThresholdReached` is emitted once per window and
-reset, then `PlanUsageAction::Pause` pauses once, or `SlowDown { delay_ms }` waits
-before every request while usage stays that high.
+reset (saved in `Task::plan_usage_threshold_reported`, so a resumed task doesn't
+repeat it; reports whose window has since reset are ignored), then
+`PlanUsageAction::Pause` pauses once, or `SlowDown { delay_ms }` waits before every
+request while usage stays that high. Approving a monitor pause (this one or the
+cache monitor's) continues without telling the model about an error.
 
 **Reroutes and cache monitoring.** A call served by another model than the one
 requested (`ModelCallUsage::served_model_changed()`: an OpenRouter fallback, router
@@ -85,7 +91,9 @@ served model. Opt in to `MonitoringConfig { cache: Some(CacheMonitorConfig::defa
 for `CacheEfficiencyReported` after each call: cache reads divided by the most that
 could have been read (the smaller of the previous and the current input), per call
 and rolling over `window_calls` (default 5), ignoring the first `warmup_calls`
-(default 2) and calls without a cache figure. Below `warn_below` (default 0.5) it
+(default 2), calls without a cache figure, and calls to the refusal fallback model
+(the next call is compared with the configured model's previous one). Below
+`warn_below` (default 0.5) it
 emits `CacheEfficiencyLow` once until it recovers; the opt-in `pause_below` also
 pauses before the next request.
 
@@ -159,25 +167,51 @@ normalized to one attempt.
   get `ToolRejected("turn refused")`), and in output-based mode only the
   explanation (or the text without unrun tool-call markup) is kept. Classifier
   and content-filter refusals are removed from history.
-- Refusal recovery: a `RefusedInput` event (after `RefusalReceived`) names the
-  input the refused turn answered, `UserMessage { message_index }` or
-  `ToolResults { message_index, results }` with the provider call ids; it is
-  also kept in `Task::refused_input`. While the task awaits recovery approval,
-  `UserCommand::ResolveRefusal { resolution }` changes it and continues:
-  `RephraseUserMessage { text }`, `RemoveUserMessage` (not the task prompt when
-  it is the only user message) or `RedactToolResults { call_ids, replacement }`
-  (calls stay paired with their results). The refused turn is removed and the
-  changed input is sent as is; an invalid resolution is reported with
-  `ErrorEncountered` and the task keeps waiting. For a task returned
-  interrupted, call `Task::resolve_refusal` before running it again. The edits
-  are arko-ai `Conversation` operations (`rephrase_last_user_turn`,
-  `remove_last_user_turn`, `redact_tool_result`), usable directly.
-  `ApproveErrorRecovery` still continues without a change.
-- Opt-in `AgentConfig::refusal_fallback` (an `AgentLLMConfig`): a refusal from
-  the configured model sends the same input once to the fallback model
-  (`RefusalFallback` event; the refused turn is not kept), whose response
-  continues the task; later turns use the configured model. A refusal from the
-  fallback stops the task as above.
+- Refusal recovery: a `RefusedInput` event (after `RefusalReceived`) lists the
+  input the refused turn answered: every user message after the last assistant
+  turn (`RefusedMessage { message_index, runtime, tool_results, images }`, tool
+  results by provider call id). Messages the runtime added (file-tree updates,
+  error and recovery notes, requests to continue; tracked in
+  `Task::runtime_messages`) are marked `runtime` and can't be changed. The
+  input is also kept in `Task::refused_input` until it is resolved, recovery is
+  approved, or a later turn completes. While the task awaits recovery approval,
+  `UserCommand::ResolveRefusal { changes }` applies a list of changes together
+  (or none, if one is invalid: an `ErrorEncountered` follows and the task keeps
+  waiting) and continues:
+  - `RephraseUserMessage { message_index, text }` replaces the message's text
+    but keeps the sections the runtime appended to it (`# Initial Environment
+    Information`, `# Current Environment Information (updated this turn)`,
+    `# Reminder`); in a tool-results message it replaces the text beside the
+    results (such as a native `ask_user` answer). Rephrasing the task prompt
+    updates `Task::initial_task_prompt`.
+  - `RemoveUserMessage { message_index }` removes a message without tool
+    results (at least one user message must remain).
+  - `RemoveImages { message_index }` removes a message's images (tool
+    screenshots with their descriptions).
+  - `RedactToolResults { call_ids, replacement }` replaces tool outputs; calls
+    stay paired with their results.
+
+  The input must still be the conversation's last input (followed only by the
+  kept refused turn); the refused turn is then removed and the changed input
+  sent as is, and tools that track the history observe it from the start
+  again. For a task returned interrupted, call `Task::resolve_refusal(changes)`
+  before running it again. The underlying arko-ai `Conversation` operations
+  (`rephrase_last_user_turn`, `remove_last_user_turn`, `redact_tool_result`)
+  are usable directly. `ApproveErrorRecovery` still continues without a change.
+- Opt-in `AgentConfig::refusal_fallback` (an `AgentLLMConfig` on the configured
+  model's provider; configs with another provider are rejected, since
+  providers can't replay each other's turns): a refusal from the configured
+  model is reported (with its `RefusedInput`), then the same input goes once to
+  the fallback model (`RefusalFallback` event; the refused turn is not kept),
+  whose response continues the task; later turns use the configured model. If
+  the fallback also refuses or its request fails, the refusal stands and can be
+  resolved as above; approving recovery resends to the configured model. The
+  fallback request doesn't echo the configured model's ChatGPT turn-state
+  token, nor does the configured model later echo the fallback's. The
+  fallback's OpenAI reasoning items are replayed to the configured model only
+  when both are in one Codex compaction family (GPT-5.6 and GPT-6 models;
+  Codex replays history unchanged between such models and compacts it
+  otherwise); for other pairs they are dropped. Anthropic thinking is kept.
 - Waits that don't count against the ordinary limits (rate limits, opt-in
   `capacity_retry`, usage-limit waits)
   neither reset nor consume them: ordinary attempts keep counting across
@@ -191,8 +225,9 @@ normalized to one attempt.
   resumed after `SuspendTask` mid-stream) first gets a user message asking the
   model to continue; Claude 4.6 and later reject prefill.
 - Calls a native stream announced (`ToolCallInitiated`) but that never run,
-  because the stream failed, was interrupted or was refused, get a
-  `ToolRejected` event.
+  because the stream failed, was interrupted or was refused, or because the
+  final response doesn't hold them (for example cut off at the token limit),
+  get a `ToolRejected` event.
 - Tasks and conversations loaded from JSON take the registry's current data
   (pricing, limits) for their model, as `AgentLLMConfig` does; unknown ids and
   OpenRouter slugs keep their saved copy.

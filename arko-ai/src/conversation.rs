@@ -28,7 +28,9 @@ fn registry_model<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Model, D
 pub struct Conversation {
     /// The model the conversation is sent to. When a conversation is
     /// deserialized, a model the registry knows is replaced by its current
-    /// registry entry (see [`Model::get`]); other ids keep the saved copy.
+    /// registry entry (see [`Model::get`]), including a saved copy whose
+    /// fields were customized; other ids keep the saved copy. To keep custom
+    /// pricing or limits, use an id the registry doesn't know.
     #[serde(deserialize_with = "registry_model")]
     pub model: Model,
     pub system_message: Option<String>,

@@ -10,7 +10,7 @@ use crate::parsing::{
     ToolParsingConfig, assemble_tool_calls,
 };
 use crate::skill::SkillPromptContext;
-use crate::task::{PendingToolCallInfo, RefusedInput, RefusedToolResult, Task, TaskState};
+use crate::task::{PendingToolCallInfo, PlanUsageWindowMark, Task, TaskState};
 use crate::tool::{
     InterceptedResult, InterceptionFailurePolicy, InterceptorConfig, TaskContext, ToolCallContext,
     ToolDefinition, ToolExecutionContext, ToolExecutionDecision, ToolExecutionMiddleware,
@@ -82,6 +82,24 @@ fn describe_duration(duration: Duration) -> String {
 const INTERRUPTED_CALL: &str = "The model's response was interrupted before this call finished; it was not run.";
 const FAILED_STREAM_CALL: &str = "The model's response failed before this call finished; it was not run.";
 const REFUSED_TURN_CALL: &str = "turn refused";
+const UNDELIVERED_CALL: &str = "The model's final response did not include this call; it was not run.";
+
+/// Whether OpenAI encrypted reasoning produced by `from` is replayed to `to`.
+/// Codex replays history unchanged when it switches between models of one
+/// compaction family and compacts it otherwise (codex-rs
+/// `maybe_run_previous_model_inline_compact`; its bundled catalog,
+/// models-manager/models.json, gives every GPT-5.6 and GPT-6 model the same
+/// `comp_hash`). arko can't compact, so for other pairs the reasoning items
+/// are dropped and the reply's messages and calls replayed without them.
+fn openai_reasoning_replays(from: &ai::Model, to: &ai::Model) -> bool {
+    let family = |model: &ai::Model| {
+        model.provider == ai::Provider::OpenAI
+            && (model.is_openai_gpt_5_6()
+                || model.is_openai_gpt_6_astra()
+                || model.is_openai_gpt_6_sol_or_luna())
+    };
+    from.id == to.id || (family(from) && family(to))
+}
 
 /// The text of an output-based turn without its tool-call markup.
 fn parsed_plain_text(events: &[RawParserEvent]) -> String {
@@ -164,14 +182,16 @@ pub struct AgentLoop {
     /// Ordinary recovery time used before its clock was paused for such a
     /// wait.
     paused_recovery_elapsed: Option<Duration>,
-    /// The plan usage window (and its reset) last reported over the
-    /// threshold, so it is reported once.
-    plan_usage_threshold_reported: Option<(String, Option<u64>)>,
     /// The next request goes to the refusal fallback model; see
     /// [`AgentConfig::refusal_fallback`]. Cleared by a completed turn.
     fallback_pending: bool,
     /// The request in flight (or last made) went to the fallback model.
     current_request_is_fallback: bool,
+    /// The refusal the pending fallback request answers.
+    fallback_refusal: Option<ai::Refusal>,
+    /// Time spent in this recovery episode waiting out rate limits that
+    /// came without a delay.
+    rate_limit_waited: Duration,
     /// Cache monitor state: a low-efficiency warning is out, a pause
     /// episode is active, and the pause to apply before the next request.
     cache_warned: bool,
@@ -238,9 +258,10 @@ impl AgentLoop {
             capacity_retry_attempts: 0,
             indefinite_interactions: 0,
             paused_recovery_elapsed: None,
-            plan_usage_threshold_reported: None,
             fallback_pending: false,
             current_request_is_fallback: false,
+            fallback_refusal: None,
+            rate_limit_waited: Duration::ZERO,
             cache_warned: false,
             cache_pause_episode: false,
             cache_pause_pending: None,
@@ -328,6 +349,7 @@ impl AgentLoop {
         };
         if let Some(message) = message {
             self.task.conversation.add_user_message(&message);
+            self.task.mark_last_message_runtime();
             self.task.increment_user_message_count();
         }
     }
@@ -493,6 +515,9 @@ impl AgentLoop {
             Some(fallback) => {
                 let config = self.generation_config_for(&fallback.model, &fallback.generation_config);
                 conversation.model = fallback.model;
+                // The ChatGPT backend's turn-state token routes the configured
+                // model's turn; the fallback request starts its own.
+                conversation.openai_turn_state = None;
                 (conversation, config)
             }
             None => (conversation, self.build_generation_config()),
@@ -514,6 +539,7 @@ impl AgentLoop {
         self.capacity_retry_attempts = 0;
         self.indefinite_interactions = 0;
         self.paused_recovery_elapsed = None;
+        self.rate_limit_waited = Duration::ZERO;
     }
 
     /// Ordinary recovery attempts in this episode: requests made, less those
@@ -745,8 +771,20 @@ impl AgentLoop {
         let Some(config) = self.task.agent_config.monitoring.cache.clone() else {
             return Ok(());
         };
-        let Some(efficiency) = super::monitor::cache_efficiency(&self.task.usage_history, &config)
-        else {
+        // Calls to the refusal fallback model use another cache: they are
+        // not judged, and later calls compare with the configured model's.
+        if self.task.fallback_calls.last() == Some(&(self.task.usage_history.len().saturating_sub(1))) {
+            return Ok(());
+        }
+        let configured: Vec<ai::UsageInfo> = self
+            .task
+            .usage_history
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !self.task.fallback_calls.contains(index))
+            .map(|(_, usage)| usage.clone())
+            .collect();
+        let Some(efficiency) = super::monitor::cache_efficiency(&configured, &config) else {
             return Ok(());
         };
         self.emit_event(AgentEvent::CacheEfficiencyReported {
@@ -891,7 +929,7 @@ impl AgentLoop {
 
     /// Runs the agent loop to completion.
     pub async fn run(mut self) -> Result<Task, ArkoAgentsError> {
-        self.task.agent_config.llm_retry_config.validate()?;
+        self.task.agent_config.validate()?;
         log::info!(
             "Agent loop starting for task ID: {} (mode: {:?})",
             self.task.id,
@@ -902,6 +940,7 @@ impl AgentLoop {
             || matches!(self.task.current_state, TaskState::Interrupted { .. })
         {
             self.task.set_state(TaskState::InProgress);
+            self.task.monitor_pause = false;
         }
 
         if matches!(self.task.current_state, TaskState::InProgress) {
@@ -983,6 +1022,7 @@ impl AgentLoop {
                             continue 'main_loop;
                         }
                         let mut next_user_message_from_command = String::new();
+                        let mut next_message_is_runtime = false;
                         let mut native_handled = false;
                         let original_state_before_command_processing =
                             self.task.current_state.clone();
@@ -1352,26 +1392,37 @@ impl AgentLoop {
                                             "Task {}: Error recovery approved by user.",
                                             self.task.id
                                         );
-                                        let mut recovery_prompt = format!(
-                                            "The previous attempt resulted in an error: {}. The user has approved to continue.",
-                                            error_message
-                                        );
-                                        if let Some(user_input) = user_msg_on_recovery
-                                            && !(*user_input).is_empty()
-                                        {
-                                            recovery_prompt.push_str("\nUser provided additional context for recovery:\n");
-                                            recovery_prompt.push_str(user_input);
-                                        }
-
-                                        if self.is_native_mode()
-                                            && !self.task.pending_native_tool_results.is_empty()
-                                        {
-                                            self.flush_native_results_to_conversation(Some(
-                                                &recovery_prompt,
-                                            ));
-                                            native_handled = true;
+                                        if std::mem::take(&mut self.task.monitor_pause) {
+                                            // A monitor paused the task, not a
+                                            // model error: nothing to report to
+                                            // the model beyond the host's note.
+                                            match user_msg_on_recovery.as_deref().filter(|text| !text.is_empty()) {
+                                                Some(text) => next_user_message_from_command = text.to_string(),
+                                                None => native_handled = true,
+                                            }
                                         } else {
-                                            next_user_message_from_command = recovery_prompt;
+                                            let mut recovery_prompt = format!(
+                                                "The previous attempt resulted in an error: {}. The user has approved to continue.",
+                                                error_message
+                                            );
+                                            if let Some(user_input) = user_msg_on_recovery
+                                                && !(*user_input).is_empty()
+                                            {
+                                                recovery_prompt.push_str("\nUser provided additional context for recovery:\n");
+                                                recovery_prompt.push_str(user_input);
+                                            }
+
+                                            if self.is_native_mode()
+                                                && !self.task.pending_native_tool_results.is_empty()
+                                            {
+                                                self.flush_native_results_to_conversation(Some(
+                                                    &recovery_prompt,
+                                                ));
+                                                native_handled = true;
+                                            } else {
+                                                next_user_message_from_command = recovery_prompt;
+                                                next_message_is_runtime = true;
+                                            }
                                         }
                                         // Continuing without a change leaves no refused
                                         // input to resolve.
@@ -1379,15 +1430,20 @@ impl AgentLoop {
                                         self.task.set_state(TaskState::InProgress);
                                         self.reset_llm_recovery();
                                     }
-                                    UserCommand::ResolveRefusal { ref resolution } => {
-                                        match self.task.resolve_refusal(resolution.clone()) {
+                                    UserCommand::ResolveRefusal { ref changes } => {
+                                        match self.task.resolve_refusal(changes.clone()) {
                                             Ok(()) => {
                                                 log::info!(
                                                     "Task {}: Refused input changed; continuing.",
                                                     self.task.id
                                                 );
+                                                self.task.monitor_pause = false;
                                                 self.task.set_state(TaskState::InProgress);
                                                 self.reset_llm_recovery();
+                                                // Tools observed the old input:
+                                                // they see the changed history
+                                                // from the start again.
+                                                self.tool_context_cursor = usize::MAX;
                                                 // The changed input is sent as it is.
                                                 native_handled = true;
                                             }
@@ -1478,6 +1534,9 @@ impl AgentLoop {
                                         next_msg_num,
                                     )?;
                                 self.add_text_tool_results_to_conversation(&augmented_msg);
+                                if next_message_is_runtime {
+                                    self.task.mark_last_message_runtime();
+                                }
                                 self.task.increment_user_message_count();
                                 self.reset_llm_recovery();
                             } else {
@@ -1499,6 +1558,7 @@ impl AgentLoop {
                                 self.task
                                     .conversation
                                     .add_user_message(&augmented_generic_prompt);
+                                self.task.mark_last_message_runtime();
                                 self.task.increment_user_message_count();
                                 self.reset_llm_recovery();
                             }
@@ -1617,7 +1677,7 @@ impl AgentLoop {
                 continue 'main_loop;
             }
             if let Some(message) = self.cache_pause_pending.take() {
-                self.finish_llm_recovery(message, None).await?;
+                self.finish_monitor_pause(message).await?;
                 continue 'main_loop;
             }
             self.observe_committed_tool_context();
@@ -1712,6 +1772,7 @@ impl AgentLoop {
                                 if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
                                     self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
                                 }
+                                self.reject_announced_calls(&mut native_stream_call_ids, INTERRUPTED_CALL).await?;
                                 self.stop_requested = true;
                                 let reason = "Command channel disconnected during LLM streaming.".to_string();
                                 self.task.set_state(TaskState::Interrupted { reason: reason.clone() });
@@ -1756,7 +1817,10 @@ impl AgentLoop {
                                 streamed_refusal = Some(refusal);
                             }
                             Ok(Some(ai::StreamEvent::End(boxed_generation_response))) => {
-                                let generation_response = *boxed_generation_response;
+                                let mut generation_response = *boxed_generation_response;
+                                if self.current_request_is_fallback {
+                                    self.prepare_fallback_response(&mut generation_response);
+                                }
                                 self.task.usage_history.push(generation_response.usage.clone());
                                 self.emit_event(AgentEvent::UsageReported(generation_response.usage.clone())).await?;
                                 self.record_and_emit_model_call_usage(generation_response.model_call_usage.clone()).await?;
@@ -1778,8 +1842,10 @@ impl AgentLoop {
                                     had_stream_error = true;
                                     break;
                                 }
-                                // A completed turn ends any fallback after a refusal.
+                                // A completed turn ends any fallback after a
+                                // refusal and answers any refused input.
                                 self.fallback_pending = false;
+                                self.task.refused_input = None;
                                 self.task.conversation.add_assistant_message_from_response(generation_response.clone());
                                 final_generation_response = Some(generation_response);
                                 if let Some(ref mut p) = parser {
@@ -1856,6 +1922,7 @@ impl AgentLoop {
                         "LLM response for task {} did not contain a native tool call.",
                         self.task.id
                     );
+                    self.reject_announced_calls(&mut native_stream_call_ids, UNDELIVERED_CALL).await?;
                     self.handle_llm_error(ai::Error::ApiError("Agent failed to produce a tool call. You MUST use one or more tools in every response, even if it is just 'complete_task'.".to_string()), None).await?;
                     if self.task.current_state.is_terminal() {
                         break 'main_loop;
@@ -2017,6 +2084,10 @@ impl AgentLoop {
                         }
                     }
                 }
+                // Calls announced while streaming that the response doesn't
+                // hold (for example cut off at the token limit), or that the
+                // turn ended before reaching, are not run.
+                self.reject_announced_calls(&mut native_stream_call_ids, UNDELIVERED_CALL).await?;
 
                 if !calls_needing_approval.is_empty()
                     && matches!(self.task.current_state, TaskState::InProgress)
@@ -2526,6 +2597,7 @@ impl AgentLoop {
                     self.task
                         .conversation
                         .add_user_message(&augmented_generic_prompt);
+                    self.task.mark_last_message_runtime();
                     self.task.increment_user_message_count();
                 }
             }
@@ -2918,6 +2990,7 @@ impl AgentLoop {
             next_msg_num,
         )?;
         self.task.conversation.add_user_message(&augmented_message);
+        self.task.mark_last_message_runtime();
         self.task.increment_user_message_count();
         Ok(())
     }
@@ -2927,6 +3000,10 @@ impl AgentLoop {
         message: String,
         tool_call_id: Option<Uuid>,
     ) -> Result<(), ArkoAgentsError> {
+        // A fallback request that ends here doesn't carry over: approving
+        // recovery resends to the configured model.
+        self.fallback_pending = false;
+        self.task.monitor_pause = false;
         let pause = matches!(
             self.task.agent_config.llm_error_policy,
             LLMErrorPolicy::PauseAndAwaitApproval
@@ -2957,46 +3034,24 @@ impl AgentLoop {
         .await
     }
 
-    /// The input a refused turn answered: the last user message.
-    fn refused_input_now(&self) -> Option<RefusedInput> {
-        let messages = &self.task.conversation.messages;
-        let message_index = messages
-            .iter()
-            .rposition(|message| message.role == ai::Role::User)?;
-        let results: Vec<RefusedToolResult> = messages[message_index]
-            .content
-            .iter()
-            .filter_map(ai::Content::as_tool_result)
-            .map(|result| RefusedToolResult {
-                call_id: result.call_id.clone(),
-                tool_name: result.name.clone(),
-            })
-            .collect();
-        Some(if results.is_empty() {
-            RefusedInput::UserMessage { message_index }
-        } else {
-            RefusedInput::ToolResults {
-                message_index,
-                results,
-            }
-        })
-    }
-
     /// Reports a refusal and stops recovery: the same input is expected to be
     /// refused again, so it is never retried unchanged. With the opt-in
     /// [`AgentConfig::refusal_fallback`], a refusal from the configured model
-    /// instead sends the same input to the fallback model once.
+    /// instead sends the same input to the fallback model once; if that
+    /// request fails, the refusal stands (see
+    /// [`handle_llm_error`](Self::handle_llm_error)).
     ///
     /// A model's own refusal ([`ai::RefusalSource::keeps_turn`]) stays in
     /// history so the model can see what it declined, with the refusal
-    /// explanation as its text when the turn has none. Its tool calls are not
-    /// run, so they are not kept either (a call without a result would
-    /// invalidate the history; OpenAI output items stored with the turn
-    /// replay only the calls it still holds), and a turn with no text at all
-    /// is not kept. In output-based tool mode the turn's text holds tool-call
-    /// markup that was never run: `plain_text` is the text without it, and
-    /// only the refusal explanation (or else that plain text) is kept.
-    /// Classifier and content-filter refusals are removed from history.
+    /// explanation as its text when the turn has none (not when the fallback
+    /// answers instead). Its tool calls are not run, so they are not kept
+    /// either (a call without a result would invalidate the history; OpenAI
+    /// output items stored with the turn replay only the calls it still
+    /// holds), and a turn with no text at all is not kept. In output-based
+    /// tool mode the turn's text holds tool-call markup that was never run:
+    /// `plain_text` is the text without it, and only the refusal explanation
+    /// (or else that plain text) is kept. Classifier and content-filter
+    /// refusals are removed from history.
     ///
     /// The refused input is recorded in [`Task::refused_input`] and reported
     /// with `AgentEvent::RefusedInput`, for `UserCommand::ResolveRefusal`.
@@ -3010,17 +3065,14 @@ impl AgentLoop {
         self.flush_throttled_text().await?;
         let from_fallback = std::mem::take(&mut self.current_request_is_fallback);
         self.fallback_pending = false;
-        if !from_fallback && let Some(fallback) = self.task.agent_config.refusal_fallback.clone() {
-            self.emit_event(AgentEvent::RefusalReceived(refusal)).await?;
-            self.emit_event(AgentEvent::RefusalFallback {
-                model_id: fallback.model.id,
-            })
-            .await?;
-            self.fallback_pending = true;
-            return Ok(());
-        }
-        let input = self.refused_input_now();
-        if refusal.source.keeps_turn() {
+        let fallback = self
+            .task
+            .agent_config
+            .refusal_fallback
+            .clone()
+            .filter(|_| !from_fallback);
+        let input = self.task.current_input();
+        if refusal.source.keeps_turn() && fallback.is_none() {
             message.tool_calls.clear();
             let has_text = |message: &ai::Message| {
                 message
@@ -3062,14 +3114,53 @@ impl AgentLoop {
                 self.task.conversation.messages.push(message);
             }
         }
+        // Recorded before any fallback, so a failed fallback leaves the
+        // refusal resolvable.
         self.task.refused_input = input.clone();
         self.emit_event(AgentEvent::RefusalReceived(refusal.clone()))
             .await?;
         if let Some(input) = input {
             self.emit_event(AgentEvent::RefusedInput(input)).await?;
         }
+        if let Some(fallback) = fallback {
+            self.emit_event(AgentEvent::RefusalFallback {
+                model_id: fallback.model.id,
+            })
+            .await?;
+            self.fallback_pending = true;
+            self.fallback_refusal = Some(refusal);
+            return Ok(());
+        }
         self.handle_llm_error(ai::Error::Refusal(Box::new(refusal)), None)
             .await
+    }
+
+    /// A fallback model's response joins the configured model's
+    /// conversation: its ChatGPT turn-state token is not kept (it routed the
+    /// fallback's request, not the configured model's turn), OpenAI
+    /// reasoning items are dropped unless the configured model can read them
+    /// (see [`openai_reasoning_replays`]), and the cache monitor skips the
+    /// call.
+    fn prepare_fallback_response(&mut self, response: &mut ai::GenerationResponse) {
+        response.openai_turn_state = None;
+        self.task.fallback_calls.push(self.task.usage_history.len());
+        let Some(fallback) = &self.task.agent_config.refusal_fallback else {
+            return;
+        };
+        if openai_reasoning_replays(&fallback.model, &self.task.conversation.model) {
+            return;
+        }
+        let artifact = &mut response.message.reasoning_artifact;
+        match artifact {
+            Some(ai::ReasoningArtifact::OpenAIOutputItems { items }) => {
+                items.retain(|item| item.get("type").and_then(Value::as_str) != Some("reasoning"));
+                if items.is_empty() {
+                    *artifact = None;
+                }
+            }
+            Some(ai::ReasoningArtifact::OpenAIEncryptedReasoning { .. }) => *artifact = None,
+            _ => {}
+        }
     }
 
 
@@ -3095,9 +3186,13 @@ impl AgentLoop {
         if let Some(rate_limit) = &config.rate_limit_retry
             && (error.is_rate_limit() || error.is_capacity_error())
         {
-            let too_long = error
-                .retry_after()
-                .is_some_and(|hint| hint > Duration::from_millis(rate_limit.max_wait_ms));
+            let max_wait = Duration::from_millis(rate_limit.max_wait_ms);
+            let too_long = match error.retry_after() {
+                Some(hint) => hint > max_wait,
+                // Without a delay, a rate limit that has kept the task
+                // waiting this long is treated as a usage limit too.
+                None => error.is_rate_limit() && self.rate_limit_waited >= max_wait,
+            };
             if !too_long {
                 return RecoveryWait::RateLimit(rate_limit.clone());
             }
@@ -3119,7 +3214,11 @@ impl AgentLoop {
             return None;
         };
         let reset_in = error.retry_after()?;
-        if reset_in > Duration::from_millis(max_wait_ms) {
+        // The whole wait, margin and jitter included, must fit max_wait.
+        let longest = reset_in
+            .saturating_add(USAGE_LIMIT_RESET_MARGIN)
+            .saturating_add(USAGE_LIMIT_RESET_JITTER);
+        if longest > Duration::from_millis(max_wait_ms) {
             return None;
         }
         // A little past the reset, spread so that agents sharing a plan do
@@ -3152,7 +3251,9 @@ impl AgentLoop {
     /// `error`, unless the retry resends the request unchanged; see
     /// [`retries_unchanged`](Self::retries_unchanged).
     fn keep_partial_output(&mut self, text: &str, error: &ai::Error) {
-        if !text.is_empty() && !self.retries_unchanged(error) {
+        // A failed fallback request leaves the refused turn as it was.
+        let failed_fallback = self.fallback_pending && self.current_request_is_fallback;
+        if !text.is_empty() && !failed_fallback && !self.retries_unchanged(error) {
             self.task.conversation.add_assistant_message(text);
         }
     }
@@ -3179,6 +3280,24 @@ impl AgentLoop {
         error: ai::Error,
         tool_call_id: Option<Uuid>,
     ) -> Result<(), ArkoAgentsError> {
+        if self.fallback_pending && self.current_request_is_fallback {
+            // The fallback model couldn't answer the refused turn: the
+            // refusal stands, and the fallback's attempts don't count
+            // against the configured model's recovery.
+            self.fallback_pending = false;
+            self.reset_llm_recovery();
+            let refusal = self
+                .fallback_refusal
+                .take()
+                .map(|refusal| ai::Error::Refusal(Box::new(refusal)).to_string())
+                .unwrap_or_else(|| "The model refused the request".into());
+            return self
+                .finish_llm_recovery(
+                    format!("{refusal}. The fallback model could not answer instead: {error}"),
+                    tool_call_id,
+                )
+                .await;
+        }
         let mut config = self.task.agent_config.llm_retry_config.clone();
         let policy = self.task.agent_config.llm_error_policy.clone();
         let wait = self.recovery_wait(&error);
@@ -3276,6 +3395,12 @@ impl AgentLoop {
                 format!("Server retry delay cannot be represented safely. {message}"), tool_call_id,
             ).await;
         };
+        if matches!(wait, RecoveryWait::RateLimit(_))
+            && error.is_rate_limit()
+            && error.retry_after().is_none()
+        {
+            self.rate_limit_waited = self.rate_limit_waited.saturating_add(delay);
+        }
         self.emit_event(AgentEvent::ErrorEncountered {
             error_message: message,
             requires_approval_to_retry: false,
@@ -3375,6 +3500,17 @@ impl AgentLoop {
         }
     }
 
+    /// Pauses for a monitor (like exhausted recovery), marking the pause so
+    /// that approving it adds no error note to the conversation.
+    async fn finish_monitor_pause(&mut self, message: String) -> Result<(), ArkoAgentsError> {
+        self.finish_llm_recovery(message, None).await?;
+        self.task.monitor_pause = matches!(
+            self.task.current_state,
+            TaskState::AwaitingErrorRecoveryApproval { .. }
+        );
+        Ok(())
+    }
+
     /// Before a model request: applies the opt-in plan usage threshold
     /// ([`MonitoringConfig::plan_usage`](crate::agent_config::MonitoringConfig::plan_usage))
     /// to the most recent report. Returns whether to make the request.
@@ -3396,10 +3532,19 @@ impl AgentLoop {
         else {
             return Ok(true);
         };
-        let key = (window.to_string(), reached.resets_at);
-        let first = self.plan_usage_threshold_reported.as_ref() != Some(&key);
+        // A report whose window has reset since (a task resumed later) is
+        // no longer current.
+        let now_seconds = unix_millis_now() / 1000;
+        if reached.resets_at.is_some_and(|resets_at| resets_at <= now_seconds) {
+            return Ok(true);
+        }
+        let mark = PlanUsageWindowMark {
+            window: window.to_string(),
+            resets_at: reached.resets_at,
+        };
+        let first = self.task.plan_usage_threshold_reported.as_ref() != Some(&mark);
         if first {
-            self.plan_usage_threshold_reported = Some(key);
+            self.task.plan_usage_threshold_reported = Some(mark);
             self.emit_event(AgentEvent::PlanUsageThresholdReached {
                 window: window.to_string(),
                 used_percent: reached.used_percent,
@@ -3415,7 +3560,7 @@ impl AgentLoop {
                     "Plan usage reached {:.1}% of the {window} usage-limit window (threshold {:.1}%).",
                     reached.used_percent, threshold.percent
                 );
-                self.finish_llm_recovery(message, None).await?;
+                self.finish_monitor_pause(message).await?;
                 Ok(false)
             }
             PlanUsageAction::Pause => Ok(true),

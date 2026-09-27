@@ -393,10 +393,12 @@ pub enum UsageLimitPolicy {
     /// is interrupted (returned to the host) otherwise.
     #[default]
     Pause,
-    /// Opt-in: wait until the limit resets (plus a little jitter) and retry
-    /// unchanged, when the provider says when that is and it is at most
-    /// `max_wait_ms` away; otherwise pause. The wait is cancellable and
-    /// reported with `AgentEvent::UsageLimitReached`.
+    /// Opt-in: wait until the limit resets (plus a 1-second margin and up to
+    /// 30 seconds of jitter) and retry unchanged, when the provider says
+    /// when that is and the whole wait, margin and jitter included, fits in
+    /// `max_wait_ms`; otherwise pause. Applies under every error policy
+    /// (`PauseAndAwaitApproval` and `InformAgentAndContinue` too). The wait
+    /// is cancellable and reported with `AgentEvent::UsageLimitReached`.
     WaitUntilReset { max_wait_ms: u64 },
 }
 
@@ -671,7 +673,17 @@ pub struct AgentConfig {
     /// Opt-in: a model (with its generation settings) that a refused turn is
     /// sent to once, unchanged, before the refusal stops the task. The
     /// refused turn is not kept; the fallback's response continues the task,
-    /// and later turns use `llm_config` again. Off by default.
+    /// and later turns use `llm_config` again. If the fallback request fails
+    /// or also refuses, the refusal stands. Off by default.
+    ///
+    /// The fallback must use the configured model's provider ([`validate`](AgentConfig::validate)
+    /// rejects others): providers can't replay each other's assistant turns.
+    /// Its ChatGPT turn-state token is kept apart from the configured
+    /// model's, and its OpenAI reasoning items are replayed to the configured
+    /// model only when both are in one Codex compaction family (the GPT-5.6
+    /// and GPT-6 models); otherwise they are dropped and its messages and
+    /// calls replayed without them. Anthropic thinking is kept (a model that
+    /// can't read another model's thinking ignores it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal_fallback: Option<AgentLLMConfig>,
 }
@@ -753,6 +765,30 @@ impl AgentConfig {
     /// Returns true if this agent config uses native tool calling.
     pub fn is_native_tool_calling(&self) -> bool {
         self.tool_config.tool_calling_mode == ToolCallingMode::Native
+    }
+
+    /// Checks the settings the builder checks: retry timing, monitors, and
+    /// a refusal fallback on the configured model's provider. The runtime
+    /// checks them again when a task starts, since configs can be built or
+    /// loaded without the builder.
+    pub fn validate(&self) -> Result<(), ArkoAgentsError> {
+        self.llm_retry_config.validate()?;
+        self.monitoring.validate()?;
+        if let Some(fallback) = &self.refusal_fallback
+            && fallback.model.provider != self.llm_config.model.provider
+        {
+            // Providers can't replay each other's assistant turns (reasoning
+            // artifacts are provider-specific), so a cross-provider fallback
+            // would break every later request.
+            return Err(ArkoAgentsError::BuilderError {
+                struct_name: "AgentConfig".into(),
+                message: format!(
+                    "refusal_fallback must use the configured model's provider ({:?}), not {:?}.",
+                    self.llm_config.model.provider, fallback.model.provider
+                ),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -877,10 +913,8 @@ impl AgentConfigBuilder {
     /// Builds the `AgentConfig`, returning an error if required fields are missing.
     pub fn build(self) -> Result<AgentConfig, ArkoAgentsError> {
         let llm_retry_config = self.llm_retry_config.unwrap_or_default();
-        llm_retry_config.validate()?;
         let monitoring = self.monitoring.unwrap_or_default();
-        monitoring.validate()?;
-        Ok(AgentConfig {
+        let config = AgentConfig {
             id: self.id.ok_or_else(|| ArkoAgentsError::BuilderError {
                 struct_name: "AgentConfig".into(),
                 message: "ID is required".into(),
@@ -919,7 +953,9 @@ impl AgentConfigBuilder {
             skills_config: self.skills_config,
             monitoring,
             refusal_fallback: self.refusal_fallback,
-        })
+        };
+        config.validate()?;
+        Ok(config)
     }
 }
 

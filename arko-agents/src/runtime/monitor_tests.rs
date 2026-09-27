@@ -194,6 +194,12 @@ async fn the_cache_monitor_reports_warns_and_pauses_once_after_warm_up() {
         .filter(|event| matches!(event, AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })))
         .count();
     assert_eq!(pauses, 1);
+    // Not a model error: approving adds no error note to the conversation.
+    assert!(!task.conversation.messages.iter().any(|message| message
+        .content
+        .iter()
+        .filter_map(ai::Content::as_text)
+        .any(|text| text.contains("resulted in an error"))));
 }
 
 #[test]
@@ -209,4 +215,59 @@ fn cache_monitor_settings_load_with_defaults_and_are_validated() {
         let config = MonitoringConfig { cache: Some(invalid), ..Default::default() };
         assert!(config.validate().is_err());
     }
+}
+
+/// Calls to the refusal fallback model use another prompt cache: they are
+/// not judged, and the next configured call is compared with the configured
+/// model's previous call.
+#[tokio::test(start_paused = true)]
+async fn the_cache_monitor_skips_fallback_calls() {
+    let (mut agent, mut events, _commands) = harness();
+    agent.task.agent_config.monitoring = MonitoringConfig {
+        cache: Some(CacheMonitorConfig {
+            warmup_calls: 1,
+            window_calls: 1,
+            warn_below: Some(0.5),
+            pause_below: None,
+        }),
+        ..Default::default()
+    };
+    agent.task.agent_config.refusal_fallback = Some(crate::agent_config::AgentLLMConfig {
+        model: ai::Model::openai_gpt_6_sol(),
+        generation_config: Default::default(),
+    });
+    let ai::StreamEvent::End(mut refused) = super::retry_tests::refused_response(
+        ai::Message::new_assistant(""),
+        super::retry_tests::model_refusal(),
+    ) else {
+        unreachable!()
+    };
+    refused.usage = cached(2000, 900);
+    script(
+        &mut agent,
+        vec![
+            turn(cached(1000, 0), call("m")),
+            ai::StreamEvent::End(refused),
+            // The fallback's call reads nothing from the configured cache.
+            turn(cached(50_000, 0), call("gpt-6-sol")),
+            turn(cached(3000, 1800), call("m")),
+            complete_response(),
+        ],
+    );
+    let task = timeout(Duration::from_secs(60), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(task.fallback_calls, [2]);
+    let received = events_of(&mut events);
+    let calls: Vec<f64> = received
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::CacheEfficiencyReported { call_efficiency, .. } => Some(*call_efficiency),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls, [0.9, 0.9]);
+    assert!(!received.iter().any(|event| matches!(event, AgentEvent::CacheEfficiencyLow { .. })));
 }

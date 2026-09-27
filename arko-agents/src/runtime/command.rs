@@ -66,10 +66,10 @@ pub enum UserCommand {
     /// `AgentEvent::RefusedInput`) and continue: the refused turn is removed
     /// and the changed input is sent. Accepted while the refusal awaits
     /// error-recovery approval; see [`crate::task::Task::resolve_refusal`].
-    /// An invalid resolution is reported with `ErrorEncountered` and the task
-    /// keeps waiting.
+    /// The changes apply together, or none does: an invalid one is reported
+    /// with `ErrorEncountered` and the task keeps waiting.
     ResolveRefusal {
-        resolution: crate::task::RefusalResolution,
+        changes: Vec<crate::task::RefusalResolution>,
     },
 
     /// Request to gracefully cancel the currently running task.

@@ -35,7 +35,8 @@ pub use skill::{
     SkillPromptContext, SkillSource, SkillSummary, SkillsConfig,
 };
 pub use task::{
-    PendingToolCallInfo, RefusalResolution, RefusedInput, RefusedToolResult, Task, TaskState,
+    PendingToolCallInfo, PlanUsageWindowMark, RefusalResolution, RefusedInput, RefusedMessage,
+    RefusedToolResult, Task, TaskState,
 };
 pub use tool::{
     InterceptedResult, InterceptionFailurePolicy, InterceptorConfig, TaskContext, Tool,
