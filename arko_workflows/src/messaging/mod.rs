@@ -351,7 +351,16 @@ impl MessageBus {
         task_id: Uuid,
         sender: mpsc::Sender<UserCommand>,
     ) {
-        let mut state = self.state.lock();
+        self.register_locked(&mut self.state.lock(), agent_name, task_id, sender);
+    }
+
+    fn register_locked(
+        &self,
+        state: &mut BusState,
+        agent_name: &str,
+        task_id: Uuid,
+        sender: mpsc::Sender<UserCommand>,
+    ) {
         let active = state.active.entry(agent_name.to_string()).or_default();
         active.insert(
             task_id,
@@ -383,9 +392,11 @@ impl MessageBus {
         sender: mpsc::Sender<UserCommand>,
         in_prompt: &[Uuid],
     ) {
-        self.register_active(agent_name, task_id, sender);
+        // One critical section: a message sent meanwhile is either late here
+        // or delivered by `send`, never both.
         let mut guard = self.state.lock();
         let state = &mut *guard;
+        self.register_locked(state, agent_name, task_id, sender);
         let late = state
             .queues
             .get(agent_name)

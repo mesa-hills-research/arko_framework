@@ -393,6 +393,48 @@ async fn automatic_limits_follow_each_agents_prompt_cache() {
     assert_eq!(limit("fixed").limit().await, Duration::from_secs(270));
 }
 
+/// An automatic limit counts from the run's last model request, when its
+/// prompt cache was last used; a fixed limit doesn't.
+#[tokio::test(start_paused = true)]
+async fn an_automatic_limit_counts_from_the_last_model_request() {
+    let workspace = Workspace::new();
+    let client = Arc::new(LLMClient::new());
+    for (timeout, expected) in [
+        (WaitForMessageTimeout::Auto, "No messages after 170 s."),
+        (Duration::from_secs(200).into(), "No messages after 200 s."),
+    ] {
+        let workflow = builder(&workspace, &["lead", "worker"])
+            .wait_for_message_timeout(timeout)
+            .build()
+            .unwrap();
+        let context = workflow.context();
+        let lead = run(&workflow, "lead");
+        let tool = WaitForMessageTool::new(context.clone(), "lead".to_string(), client.clone());
+        // The runtime reports the conversation's new messages, then the model
+        // takes 100 s to answer with the call.
+        tool.observe_context(lead.id, &arko_ai::Message::new_user("Go."));
+        tokio::time::advance(Duration::from_secs(100)).await;
+        let task_context = TaskContext {
+            task_id: lead.id,
+            agent_name: "lead",
+            initial_task_prompt: "",
+            current_working_directory: &context.workspace,
+        };
+        let started = tokio::time::Instant::now();
+        let result = tool.execute(&task_context, HashMap::new()).await.unwrap();
+        assert_eq!(result, expected);
+        let waited = started.elapsed().as_secs();
+        assert_eq!(
+            waited,
+            if timeout == WaitForMessageTimeout::Auto {
+                170
+            } else {
+                200
+            }
+        );
+    }
+}
+
 /// A message sent while an agent waits ends the wait at once, is in the
 /// agent's command channel by then (so the runtime adds it at its next turn
 /// boundary), and others see the agent waiting meanwhile.

@@ -35,3 +35,4 @@ crate-type = ["lib"]
 [dev-dependencies]
 env_logger.workspace = true
 clap.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

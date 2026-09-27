@@ -41,6 +41,10 @@ pub const MAX_WAIT_FOR_MESSAGE_TIMEOUT: Duration = Duration::from_secs(24 * 60 *
 /// the end of the cache lifetime, for the model request that follows.
 const MIN_CACHE_MARGIN: Duration = Duration::from_secs(30);
 
+/// The least an automatic limit leaves for a wait, however long ago the last
+/// model request was.
+const MIN_AUTO_WAIT: Duration = Duration::from_secs(1);
+
 /// How long a wait that found a message still waits for the run's delivery
 /// worker to put it in the command channel, so that it arrives at the next
 /// turn boundary. It takes microseconds unless the channel is full.
@@ -64,6 +68,11 @@ const FORWARD_WAIT: Duration = Duration::from_secs(1);
 /// unknown lifetime, or caching off, it is
 /// [`DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT`]: with nothing to keep warm, a
 /// bounded wait still lets the agent look around now and then.
+///
+/// An automatic limit counts from the agent's last model request, when the
+/// cache was last used, so the time the model took to call the tool is
+/// included (a second is always left). A `Fixed` limit counts from the start
+/// of the wait.
 ///
 /// A `Fixed` limit may be longer than the cache lifetime, at the price of a
 /// possible cache miss on the next turn after a wait that runs to it.
@@ -135,6 +144,9 @@ pub struct WaitForMessageTool {
     context: Arc<SharedContext>,
     agent_name: String,
     llm_client: Arc<LLMClient>,
+    /// Per run, when its conversation last got new messages: just before a
+    /// model request, which is when its prompt cache was last used.
+    last_request: parking_lot::Mutex<HashMap<uuid::Uuid, Instant>>,
 }
 
 impl std::fmt::Debug for WaitForMessageTool {
@@ -156,7 +168,25 @@ impl WaitForMessageTool {
             context,
             agent_name,
             llm_client,
+            last_request: parking_lot::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// How long run `task_id` may wait: the agent's limit. An automatic
+    /// limit counts from the run's last model request, when the cache was
+    /// last used, so the time the model took to answer is included; at least
+    /// a second is left.
+    async fn wait_limit(&self, task_id: uuid::Uuid) -> Duration {
+        let limit = self.limit().await;
+        if self.context.wait_timeouts.for_agent(&self.agent_name) != WaitForMessageTimeout::Auto {
+            return limit;
+        }
+        let since = self
+            .last_request
+            .lock()
+            .get(&task_id)
+            .map_or(Duration::ZERO, |at| at.elapsed());
+        limit.saturating_sub(since).max(MIN_AUTO_WAIT)
     }
 
     /// The agent's time limit.
@@ -269,6 +299,8 @@ impl Tool for WaitForMessageTool {
         self.context
             .messages
             .observe_context(&self.agent_name, task_id, message);
+        // The runtime reports new messages just before each model request.
+        self.last_request.lock().insert(task_id, Instant::now());
     }
 
     async fn execute(
@@ -277,7 +309,7 @@ impl Tool for WaitForMessageTool {
         params: HashMap<String, Value>,
     ) -> Result<String, ToolError> {
         let requested = requested_timeout(&params)?;
-        let limit = self.limit().await;
+        let limit = self.wait_limit(task_context.task_id).await;
         // The model may only shorten the wait.
         let wait = match requested {
             Some(seconds) if seconds < limit.as_secs_f64() => Duration::from_secs_f64(seconds),
@@ -310,15 +342,19 @@ impl Tool for WaitForMessageTool {
             let unseen = context.messages.unseen_messages(&self.agent_name, task_id);
             let changes = status_changes(context, &peers, &baseline);
             let now = Instant::now();
-            if !unseen.senders.is_empty() {
+            if unseen.senders.is_empty() {
+                forward_deadline = None;
+                if !changes.is_empty() {
+                    return Ok(changes.join(" "));
+                }
+                if now >= deadline {
+                    return Ok(format!("No messages after {}.", describe_duration(wait)));
+                }
+            } else {
                 if unseen.forwarded || forward_deadline.is_some_and(|until| now >= until) {
                     return Ok(message_result(&unseen.senders, &changes));
                 }
                 forward_deadline.get_or_insert(now + FORWARD_WAIT);
-            } else if !changes.is_empty() {
-                return Ok(changes.join(" "));
-            } else if now >= deadline {
-                return Ok(format!("No messages after {}.", describe_duration(wait)));
             }
             let until = forward_deadline.unwrap_or(deadline);
             tokio::select! {
