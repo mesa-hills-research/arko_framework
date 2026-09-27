@@ -770,3 +770,119 @@ async fn full_runtime_bounds_a_retry_stream_and_preserves_partial_text() {
             .any(|content| content.as_text() == Some("partial work"))
     }));
 }
+
+#[tokio::test(start_paused = true)]
+async fn classifier_refusals_are_not_kept_or_retried() {
+    use futures::StreamExt;
+    let (mut agent, mut events, _commands) = harness();
+    agent.task.agent_config.llm_error_policy =
+        LLMErrorPolicy::RetryThenInformAgent { max_attempts: 3 };
+    agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
+    let messages_before = agent.task.conversation.messages.len();
+    let mut refusal = ai::Refusal::new(ai::RefusalSource::SafetyClassifier);
+    refusal.partial_output = Some("partial".into());
+    let refused = ai::StreamEvent::End(Box::new(ai::GenerationResponse {
+        message: ai::Message::new_assistant(""),
+        usage: ai::UsageInfo::new(0, 0),
+        model_call_usage: ai::ModelCallUsage::new(
+            "refused".into(),
+            "test".into(),
+            "test".into(),
+            0,
+            0,
+            1000,
+        ),
+        stop_reason: ai::StopReason::Refusal,
+        refusal: Some(refusal),
+    }));
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(Ok(futures::stream::iter([Ok(refused)]).boxed()));
+    let task = timeout(Duration::from_secs(1), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(&task.current_state, TaskState::Interrupted { reason } if reason.contains("refused")),
+        "{:?}",
+        task.current_state
+    );
+    assert!(
+        !task.conversation.messages[messages_before..]
+            .iter()
+            .any(|message| message.role == ai::Role::Assistant),
+        "the refused turn must not be added to history"
+    );
+    assert_eq!(task.usage_history.len(), 1, "refused calls are still accounted for");
+    while let Ok(event) = events.try_recv() {
+        assert!(!matches!(event, AgentEvent::RetryScheduled { .. }));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn tool_calls_with_invalid_json_arguments_are_rejected_not_run() {
+    use futures::StreamExt;
+    let (mut agent, mut events, _commands) = harness();
+    agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
+    agent
+        .task
+        .agent_config
+        .tool_config
+        .default_auto_approve_tool_use = true;
+    let mut message = ai::Message::new_assistant("");
+    message.tool_calls.push(ai::ToolCall {
+        id: Some("broken".into()),
+        name: "complete_task".into(),
+        arguments: serde_json::Value::Null,
+        thought_signature: None,
+        provider_id: None,
+        invalid_arguments: Some("{\"summary\":".into()),
+    });
+    let broken = ai::StreamEvent::End(Box::new(ai::GenerationResponse {
+        message,
+        usage: ai::UsageInfo::new(0, 0),
+        model_call_usage: ai::ModelCallUsage::new(
+            "broken".into(),
+            "test".into(),
+            "test".into(),
+            0,
+            0,
+            1000,
+        ),
+        stop_reason: ai::StopReason::ToolUse,
+        refusal: None,
+    }));
+    for response in [broken, complete_response()] {
+        agent
+            .scripted_responses
+            .get_mut()
+            .unwrap()
+            .push_back(Ok(futures::stream::iter([Ok(response)]).boxed()));
+    }
+    let task = timeout(Duration::from_secs(1), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let (mut rejected, mut results) = (0, 0);
+    while let Ok(event) = events.try_recv() {
+        match event {
+            AgentEvent::ToolRejected { reason: Some(reason), .. } => {
+                assert!(reason.contains("not valid JSON"), "{reason}");
+                rejected += 1;
+            }
+            AgentEvent::ToolResult { .. } => results += 1,
+            _ => {}
+        }
+    }
+    assert_eq!((rejected, results), (1, 1));
+    assert!(task.conversation.messages.iter().any(|message| {
+        message.content.iter().any(|content| {
+            content
+                .as_tool_result()
+                .is_some_and(|result| result.is_error && result.call_id.as_deref() == Some("broken"))
+        })
+    }));
+}

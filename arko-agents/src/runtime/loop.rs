@@ -1469,6 +1469,20 @@ impl AgentLoop {
                                 self.task.usage_history.push(generation_response.usage.clone());
                                 self.emit_event(AgentEvent::UsageReported(generation_response.usage.clone())).await?;
                                 self.record_and_emit_model_call_usage(generation_response.model_call_usage.clone()).await?;
+                                // A refused turn isn't kept in history, and
+                                // retrying it unchanged is expected to be refused again.
+                                if let Some(refusal) = generation_response
+                                    .refusal
+                                    .clone()
+                                    .filter(|refusal| !refusal.source.keeps_turn())
+                                {
+                                    if let Some(ref mut p) = parser {
+                                        raw_events_for_turn.extend(p.finalize());
+                                    }
+                                    self.handle_llm_error(ai::Error::Refusal(Box::new(refusal)), None).await?;
+                                    had_stream_error = true;
+                                    break;
+                                }
                                 self.task.conversation.add_assistant_message_from_response(generation_response.clone());
                                 final_generation_response = Some(generation_response);
                                 if let Some(ref mut p) = parser {
@@ -1567,6 +1581,22 @@ impl AgentLoop {
                         .await?;
                         self.task.pending_native_tool_results
                             .push(ai::ToolResult::error_from_tool_call(ai_tool_call, reason));
+                        continue;
+                    }
+
+                    if let Some(raw) = &ai_tool_call.invalid_arguments {
+                        let reason = format!(
+                            "The arguments for tool '{}' are not valid JSON, so the tool was not run. Call it again with a JSON object. Received: {}",
+                            ai_tool_call.name, raw
+                        );
+                        self.emit_event(AgentEvent::ToolRejected {
+                            tool_call_id,
+                            tool_name: ai_tool_call.name.clone(),
+                            reason: Some(reason.clone()),
+                        })
+                        .await?;
+                        self.task.pending_native_tool_results
+                            .push(ai::ToolResult::error_from_tool_call(ai_tool_call, &reason));
                         continue;
                     }
 
