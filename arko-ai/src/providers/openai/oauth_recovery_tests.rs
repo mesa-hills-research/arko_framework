@@ -282,6 +282,30 @@ async fn oauth_recovery_concurrent_rejections_rotate_once_and_share_the_new_cred
     .unwrap();
 }
 
+#[tokio::test]
+async fn public_http_client_refreshes_without_a_process_wide_crypto_provider() {
+    // Building the public client must not need an installed crypto provider.
+    let _ = crate::http_client();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (url, server) = server(vec![refreshed()]).await;
+        let http_client = crate::http_client_builder().no_proxy().build().unwrap();
+        let result = crate::refresh_chatgpt_oauth_token(
+            &http_client,
+            "synthetic-refresh",
+            Some("test-client"),
+            Some(&format!("{url}/token")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.access_token, "synthetic-new-access");
+        let requests = server.await.unwrap();
+        assert_eq!(requests[0].1["refresh_token"], "synthetic-refresh");
+        assert_eq!(requests[0].1["client_id"], "test-client");
+    })
+    .await
+    .unwrap();
+}
+
 #[test]
 fn credential_debug_output_redacts_tokens() {
     let credentials = ChatGptOAuthCredentials {

@@ -41,9 +41,23 @@ fn tls_config() -> rustls::ClientConfig {
     config
 }
 
-// No total request deadline: a connected generation may take arbitrarily long.
-// Keep connection establishment and idle connection-pool cleanup bounded.
-pub(crate) fn http_client_builder() -> reqwest::ClientBuilder {
+/// A [`reqwest::ClientBuilder`] with the setup this crate's providers use:
+/// rustls with the *ring* crypto provider passed explicitly (nothing is
+/// installed process-wide), the operating system's trust store, HTTP/1.1, a
+/// 30-second connect timeout and no total request deadline. Use it, or
+/// [`http_client`], to build a client passed to this crate, such as to
+/// [`refresh_chatgpt_oauth_token`](openai::refresh_chatgpt_oauth_token).
+///
+/// This crate builds reqwest without a default crypto provider, so
+/// `reqwest::Client::new()` and `reqwest::Client::builder().build()` panic
+/// unless the application installs a process-wide rustls `CryptoProvider` or
+/// enables one through reqwest's own features. The TLS setup here is complete:
+/// reqwest's TLS options (extra root certificates, TLS versions, disabling
+/// certificate verification) do not apply to this builder.
+pub fn http_client_builder() -> reqwest::ClientBuilder {
+    // No total request deadline: a connected generation may take arbitrarily
+    // long. Keep connection establishment and idle connection-pool cleanup
+    // bounded.
     reqwest::Client::builder()
         .tls_backend_preconfigured(tls_config())
         .connect_timeout(Duration::from_secs(30))
@@ -51,10 +65,15 @@ pub(crate) fn http_client_builder() -> reqwest::ClientBuilder {
         .pool_idle_timeout(Duration::from_secs(90))
 }
 
-pub(crate) fn default_http_client() -> reqwest::Client {
+/// A client built from [`http_client_builder`], as this crate's providers use.
+pub fn http_client() -> reqwest::Client {
     http_client_builder()
         .build()
         .expect("Failed to construct the arko_ai HTTP client")
+}
+
+pub(crate) fn default_http_client() -> reqwest::Client {
+    http_client()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

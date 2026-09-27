@@ -194,6 +194,17 @@ fn oauth_retry_delay(
     OAUTH_REFRESH_BACKOFF.next_delay(attempt.saturating_add(1), hint)
 }
 
+/// Exchanges a ChatGPT OAuth refresh token for new tokens, once; an HTTP
+/// failure (including a 429) is returned to the caller with its retry
+/// metadata. `client_id` and `token_url` default to the Codex CLI's.
+///
+/// Build `http_client` with [`crate::http_client`] or
+/// [`crate::http_client_builder`]. `reqwest::Client::new()` panics in
+/// applications that don't install a process-wide rustls crypto provider,
+/// since this crate builds reqwest without one.
+///
+/// The refresh token rotates: once this succeeds, the old one stops working,
+/// so store the returned tokens (see [`crate::CodexAuthFile`]).
 pub async fn refresh_chatgpt_oauth_token(
     http_client: &reqwest::Client,
     refresh_token: &str,
