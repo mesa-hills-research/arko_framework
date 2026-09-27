@@ -9,6 +9,16 @@ use std::{
     time::Duration,
 };
 
+/// How the fake backend rejects the chunk responses it is told to reject.
+#[derive(Clone, Copy)]
+enum Rejection {
+    /// A wrong tool call: transient, retried after the usual backoff.
+    WrongCall,
+    /// A wrong tool call the provider asks to retry in an hour.
+    WrongCallRetryLater,
+    /// A refusal: permanent.
+    Refusal,
+}
 struct Fake {
     profile: EmbeddingProfile,
     calls: Mutex<Vec<ModelRequest>>,
@@ -24,9 +34,13 @@ struct Fake {
     /// When > 1, each chunk call waits (bounded) until this many calls have overlapped,
     /// so concurrency assertions don't depend on how fast the host schedules work.
     overlap: usize,
-    /// Chunk calls that return a billed response the backend rejects as a
-    /// wrong tool call (retried as transient), before normal replies.
+    /// Chunk calls that return a billed response the backend rejects (see
+    /// `rejection`), before normal replies.
     rejected_chunks: AtomicUsize,
+    rejection: Rejection,
+    /// Embedding requests that return a billed response the backend rejects
+    /// (transient), before normal replies.
+    rejected_embeds: AtomicUsize,
     /// Report a NaN cost with each chunk reply.
     nan_cost: bool,
 }
@@ -49,6 +63,8 @@ impl Fake {
             invalid_repair_replies: AtomicUsize::new(0),
             overlap: 0,
             rejected_chunks: AtomicUsize::new(0),
+            rejection: Rejection::WrongCall,
+            rejected_embeds: AtomicUsize::new(0),
             nan_cost: false,
         }
     }
@@ -72,12 +88,25 @@ impl Backend for Fake {
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .is_ok()
         {
-            let rejection = arko_ai::Error::UnexpectedToolCalls {
+            let wrong_call = arko_ai::Error::UnexpectedToolCalls {
                 expected: r.tool.clone(),
                 stop_reason: arko_ai::StopReason::EndTurn,
                 found: vec![],
             };
-            return Err(Error::from(rejection).with_usage(chunk_usage()));
+            let error = match self.rejection {
+                Rejection::WrongCall => Error::from(wrong_call),
+                Rejection::WrongCallRetryLater => Error::Provider {
+                    message: wrong_call.to_string(),
+                    transient: true,
+                    retry_after: Some(Duration::from_secs(3600)),
+                    source: None,
+                    usage: None,
+                },
+                Rejection::Refusal => Error::from(arko_ai::Error::Refusal(Box::new(
+                    arko_ai::Refusal::new(arko_ai::RefusalSource::Model),
+                ))),
+            };
+            return Err(error.with_usage(chunk_usage()));
         }
         self.finished.fetch_add(1, Ordering::SeqCst);
         let mut out = serde_json::Map::new();
@@ -133,6 +162,20 @@ impl Backend for Fake {
             "embedding crossed chunking barrier"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
+        if !query
+            && self
+                .rejected_embeds
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+        {
+            return Err(Error::Provider {
+                message: "rejected embedding response".into(),
+                transient: true,
+                retry_after: None,
+                source: None,
+                usage: Some(Box::new(arko_ai::UsageInfo::for_embedding(500, 0.06))),
+            });
+        }
         let invalid = self.invalid_embedding.load(Ordering::SeqCst) > 0;
         Ok(VectorReply {
             vectors: texts
@@ -857,14 +900,15 @@ async fn six_file_batches_barrier_and_hybrid_search() {
     assert_eq!(status.phase, "ready", "{:?}", status.problem);
     assert_eq!(status.validated, 15);
     {
+        // The three batches are prepared concurrently, so they can reach the
+        // backend in any order.
         let calls = fake.calls.lock().unwrap();
-        assert_eq!(
-            calls
-                .iter()
-                .map(|r| r.schema["properties"].as_object().unwrap().len())
-                .collect::<Vec<_>>(),
-            vec![6, 6, 1]
-        );
+        let mut batches: Vec<_> = calls
+            .iter()
+            .map(|r| r.schema["properties"].as_object().unwrap().len())
+            .collect();
+        batches.sort_unstable();
+        assert_eq!(batches, [1, 6, 6]);
     }
     assert_eq!(fake.max.load(Ordering::SeqCst), 2);
     assert_eq!(fake.embeds.load(Ordering::SeqCst), 14);
@@ -1026,6 +1070,57 @@ async fn repair_is_local_and_accepted_work_survives_pause_and_restart() {
     assert_eq!(usage.unreported_calls, 0);
     assert!((usage.billed() - 0.00006 * embedded as f64).abs() < 1e-12);
 }
+/// Input tokens and number of the usages a job's events carry: accepted
+/// chunk replies (`request_finished`), rejected chunk responses (failed
+/// `request_attempt` events), and embedding responses, accepted or rejected.
+fn event_usage(events: &[Event]) -> (usize, usize) {
+    let mut usages: Vec<&Value> = vec![];
+    for event in events {
+        let detail = &event.detail;
+        let rejected = detail["rejected_usage"].as_array().into_iter().flatten();
+        match event.kind.as_str() {
+            "request_finished" => usages.push(&detail["usage"]),
+            "request_attempt" if detail["event"]["phase"] == "failed" => {
+                usages.push(&detail["event"]["detail"]["usage"])
+            }
+            "embedded" | "embedding_rejected" => {
+                usages.push(&detail["usage"]);
+                usages.extend(rejected);
+            }
+            "embedding_failed" => usages.extend(rejected),
+            _ => {}
+        }
+    }
+    usages.retain(|usage| !usage.is_null());
+    let tokens = usages.iter().map(|u| u["input_tokens"].as_u64().unwrap());
+    (tokens.sum::<u64>() as usize, usages.len())
+}
+/// Summed over the events, usage matches the job's totals.
+fn assert_events_match_totals(status: &JobStatus, events: &[Event]) {
+    let usage = &status.usage;
+    let responses =
+        usage.chunk_calls + usage.embedding_calls + usage.rejected_calls - usage.unreported_calls;
+    let tokens = usage.total().map_or(0, |total| total.input_tokens);
+    assert_eq!(event_usage(events), (tokens, responses));
+}
+/// Waits until the job's chunk request has been rejected and is waiting to
+/// retry.
+async fn wait_for_retry(index: &ArkoIndex, job: &str) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let events = index.events(job, 0, 1000).await.unwrap();
+            if events
+                .iter()
+                .any(|e| e.kind == "request_attempt" && e.detail["event"]["phase"] == "retry_wait")
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("no retry wait")
+}
 /// Builds one small file with `fake` and returns the settled status and the
 /// chunk request's artifact.
 async fn build_one_file(fake: Arc<Fake>, config: Config) -> (JobStatus, Vec<Event>, Value) {
@@ -1070,7 +1165,7 @@ async fn rejected_chunk_responses_count_when_a_retry_succeeds() {
         .find(|e| e.kind == "request_finished")
         .unwrap();
     assert_eq!(finished.detail["usage"]["input_tokens"], 100);
-    assert_eq!(finished.detail["rejected_usage"][0]["input_tokens"], 100);
+    assert_events_match_totals(&status, &events);
     let failures = artifact["response"]["usage"]["retry_failures"]
         .as_array()
         .unwrap();
@@ -1096,10 +1191,7 @@ async fn rejected_chunk_responses_count_when_retries_run_out() {
         .find(|e| e.kind == "request_finished")
         .unwrap();
     assert!(finished.detail["usage"].is_null());
-    assert_eq!(
-        finished.detail["rejected_usage"].as_array().unwrap().len(),
-        2
-    );
+    assert_events_match_totals(&status, &events);
     // The failed request's artifact keeps every attempt with its usage.
     assert!(artifact["response"].is_null());
     let failed: Vec<_> = artifact["attempts"]
@@ -1114,6 +1206,145 @@ async fn rejected_chunk_responses_count_when_retries_run_out() {
             .iter()
             .all(|a| a["detail"]["usage"]["input_tokens"] == 100)
     );
+}
+#[tokio::test]
+async fn a_permanent_rejection_counts_once_and_is_not_retried() {
+    let mut fake = Fake::new();
+    fake.rejection = Rejection::Refusal;
+    let fake = Arc::new(fake);
+    fake.rejected_chunks.store(1, Ordering::SeqCst);
+    let (status, events, artifact) = build_one_file(fake.clone(), config(&fake)).await;
+    assert_eq!(status.phase, "blocked");
+    assert_eq!(fake.calls.lock().unwrap().len(), 1);
+    let usage = &status.usage;
+    assert_eq!((usage.chunk_calls, usage.rejected_calls), (0, 1));
+    assert_eq!(usage.chunking.as_ref().unwrap().input_tokens, 100);
+    assert_events_match_totals(&status, &events);
+    let attempts = artifact["attempts"].as_array().unwrap();
+    assert!(attempts.iter().all(|a| a["phase"] != "retry_wait"));
+    let failed = attempts.iter().find(|a| a["phase"] == "failed").unwrap();
+    assert_eq!(failed["detail"]["usage"]["input_tokens"], 100);
+}
+async fn start_one_file(
+    fake: &Arc<Fake>,
+    path: &std::path::Path,
+    root: &std::path::Path,
+) -> (ArkoIndex, JobHandle) {
+    std::fs::write(root.join("a.txt"), "alpha\nbeta\n").unwrap();
+    let index = ArkoIndex::open(path, fake.clone(), config(fake))
+        .await
+        .unwrap();
+    let job = index
+        .start_build(BuildSpec::new("test", root))
+        .await
+        .unwrap();
+    (index, job)
+}
+#[tokio::test]
+async fn a_pause_during_a_retry_wait_counts_the_rejected_attempt_once() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let mut fake = Fake::new();
+    fake.rejection = Rejection::WrongCallRetryLater;
+    let fake = Arc::new(fake);
+    fake.rejected_chunks.store(1, Ordering::SeqCst);
+    let (index, job) = start_one_file(&fake, &db.path().join("i.db"), root.path()).await;
+    wait_for_retry(&index, &job.job).await;
+    index.pause(&job.job).await.unwrap();
+    let paused = settle(&index, &job.job).await;
+    assert_eq!(paused.phase, "paused");
+    assert_eq!(
+        (paused.usage.chunk_calls, paused.usage.rejected_calls),
+        (0, 1)
+    );
+    index.resume(&job.job).await.unwrap();
+    let done = settle(&index, &job.job).await;
+    assert_eq!(done.phase, "ready", "{:?}", done.problem);
+    assert_eq!((done.usage.chunk_calls, done.usage.rejected_calls), (1, 1));
+    assert_eq!(done.usage.chunking.as_ref().unwrap().input_tokens, 200);
+    let events = index.events(&job.job, 0, 1000).await.unwrap();
+    assert_events_match_totals(&done, &events);
+}
+#[test]
+fn a_crash_during_a_retry_wait_keeps_the_rejected_attempts_usage() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let path = db.path().join("i.db");
+    let mut fake = Fake::new();
+    fake.rejection = Rejection::WrongCallRetryLater;
+    let fake = Arc::new(fake);
+    fake.rejected_chunks.store(1, Ordering::SeqCst);
+    let runtime = || {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    };
+    let first = runtime();
+    let job = first.block_on(async {
+        let (index, job) = start_one_file(&fake, &path, root.path()).await;
+        wait_for_retry(&index, &job.job).await;
+        job
+    });
+    // Like a killed process: every task stops where it is, mid-wait.
+    drop(first);
+    runtime().block_on(async {
+        let index = ArkoIndex::open(&path, fake.clone(), config(&fake))
+            .await
+            .unwrap();
+        let interrupted = index.status(&job.job).await.unwrap();
+        assert_eq!(interrupted.phase, "paused");
+        let usage = &interrupted.usage;
+        assert_eq!((usage.chunk_calls, usage.rejected_calls), (0, 1));
+        assert_eq!(usage.chunking.as_ref().unwrap().input_tokens, 100);
+        // Resuming sends a new request and doesn't count the old one again.
+        index.resume(&job.job).await.unwrap();
+        let done = settle(&index, &job.job).await;
+        assert_eq!(done.phase, "ready", "{:?}", done.problem);
+        assert_eq!((done.usage.chunk_calls, done.usage.rejected_calls), (1, 1));
+        assert_eq!(done.usage.chunking.as_ref().unwrap().input_tokens, 200);
+        let events = index.events(&job.job, 0, 1000).await.unwrap();
+        assert_events_match_totals(&done, &events);
+    });
+}
+#[tokio::test]
+async fn rejected_embedding_responses_count_when_a_retry_succeeds() {
+    let fake = Arc::new(Fake::new());
+    fake.rejected_embeds.store(1, Ordering::SeqCst);
+    let (status, events, _) = build_one_file(fake.clone(), config(&fake)).await;
+    assert_eq!(status.phase, "ready", "{:?}", status.problem);
+    let usage = &status.usage;
+    assert_eq!((usage.embedding_calls, usage.rejected_calls), (1, 1));
+    assert_eq!(usage.embedding.as_ref().unwrap().input_tokens, 1_500);
+    let embedded = events.iter().find(|e| e.kind == "embedded").unwrap();
+    assert_eq!(embedded.detail["rejected_usage"][0]["input_tokens"], 500);
+    assert_events_match_totals(&status, &events);
+}
+#[tokio::test]
+async fn rejected_embedding_responses_count_when_retries_run_out() {
+    let fake = Arc::new(Fake::new());
+    fake.rejected_embeds.store(usize::MAX, Ordering::SeqCst);
+    let config = Config {
+        max_transient_attempts: 2,
+        ..config(&fake)
+    };
+    let (status, events, _) = build_one_file(fake.clone(), config).await;
+    assert_eq!(status.phase, "blocked");
+    let usage = &status.usage;
+    assert_eq!((usage.embedding_calls, usage.rejected_calls), (0, 2));
+    assert_eq!(usage.embedding.as_ref().unwrap().input_tokens, 1_000);
+    let failed = events
+        .iter()
+        .find(|e| e.kind == "embedding_failed")
+        .unwrap();
+    assert_eq!(failed.detail["rejected_usage"].as_array().unwrap().len(), 2);
+    assert!(
+        failed.detail["error"]
+            .as_str()
+            .unwrap()
+            .contains("rejected")
+    );
+    assert_events_match_totals(&status, &events);
 }
 #[tokio::test]
 async fn non_finite_costs_from_a_backend_do_not_break_status() {

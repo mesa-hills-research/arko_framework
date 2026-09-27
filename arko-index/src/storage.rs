@@ -107,21 +107,55 @@ pub(crate) fn required<T>(v: Option<T>, what: &str) -> Result<T> {
     v.ok_or_else(|| invalid(format!("unknown {what}")))
 }
 /// A job's usage totals. Jobs recorded before usage was tracked have none.
-/// Unreadable totals (such as a non-finite cost saved as `null` before costs
-/// were sanitized) are logged and restart from zero rather than failing the
-/// job's status and every later update.
+/// Totals saved with a cost that isn't a number (a non-finite cost was once
+/// saved as `null`) load with that cost as zero, keeping every count; totals
+/// that still can't be read are logged and restart from zero rather than
+/// failing the job's status and every later update.
 pub(crate) fn job_usage(c: &Connection, job: &str) -> Result<JobUsage> {
     let saved: Option<String> = c
         .query_row("SELECT usage FROM job_usage WHERE job=?1", [job], |r| {
             r.get(0)
         })
         .optional()?;
-    Ok(saved.map_or_else(JobUsage::default, |usage| {
-        decode(&usage).unwrap_or_else(|error| {
+    let Some(saved) = saved else {
+        return Ok(JobUsage::default());
+    };
+    Ok(decode(&saved)
+        .or_else(|error| {
+            let usage = salvage_usage(decode(&saved)?)?;
+            log::warn!("job {job}: usage totals had unreadable costs, now zero: {error}");
+            Ok::<_, Error>(usage)
+        })
+        .unwrap_or_else(|error| {
             log::warn!("job {job}: ignoring unreadable usage totals: {error}");
             JobUsage::default()
-        })
-    }))
+        }))
+}
+/// Saved totals with every cost that isn't a number set to zero. Optional
+/// costs may be `null` (absent).
+fn salvage_usage(mut saved: serde_json::Value) -> Result<JobUsage> {
+    const REQUIRED: [&str; 3] = ["input_cost", "output_cost", "total_cost"];
+    const OPTIONAL: [&str; 5] = [
+        "cache_read_cost",
+        "cache_write_cost",
+        "reported_cost",
+        "upstream_cost",
+        "billed_cost",
+    ];
+    for kind in ["chunking", "embedding"] {
+        let Some(usage) = saved.get_mut(kind).and_then(|u| u.as_object_mut()) else {
+            continue;
+        };
+        for field in REQUIRED.into_iter().chain(OPTIONAL) {
+            let Some(cost) = usage.get_mut(field) else {
+                continue;
+            };
+            if !cost.is_number() && (REQUIRED.contains(&field) || !cost.is_null()) {
+                *cost = 0.0.into();
+            }
+        }
+    }
+    Ok(serde_json::from_value(saved)?)
 }
 /// Adds to a job's usage totals, in the caller's transaction.
 pub(crate) fn add_job_usage(
@@ -164,14 +198,26 @@ mod tests {
         c.execute_batch(SCHEMA).unwrap();
         c.execute_batch(
             "INSERT INTO indexes VALUES('i','test','{}',NULL,'{}');
-             INSERT INTO jobs(id,index_id,phase,config) VALUES('j','i','chunking','{}');",
+             INSERT INTO jobs(id,index_id,phase,config) VALUES('j','i','chunking','{}');
+             INSERT INTO jobs(id,index_id,phase,config) VALUES('k','i','chunking','{}');",
         )
         .unwrap();
         // How a NaN cost used to be saved: serde_json writes it as null.
-        let broken = r#"{"chunk_calls":1,"chunking":{"input_tokens":1,"output_tokens":1,"input_cost":null,"output_cost":0.0,"total_cost":null}}"#;
+        let broken = r#"{"chunk_calls":4,"rejected_calls":2,"chunking":{"input_tokens":600,"output_tokens":60,"input_cost":null,"output_cost":0.5,"total_cost":null,"cache_read_cost":null,"billed_cost":"NaN"},"embedding":{"input_tokens":1000,"output_tokens":0,"input_cost":0.25,"output_cost":0.0,"total_cost":0.25}}"#;
         c.execute("INSERT INTO job_usage VALUES('j',?1)", [broken])
             .unwrap();
-        assert_eq!(job_usage(&c, "j").unwrap(), JobUsage::default());
+        // Counts and readable costs survive; unreadable costs become zero.
+        let salvaged = job_usage(&c, "j").unwrap();
+        assert_eq!((salvaged.chunk_calls, salvaged.rejected_calls), (4, 2));
+        let chunking = salvaged.chunking.as_ref().unwrap();
+        assert_eq!((chunking.input_tokens, chunking.output_tokens), (600, 60));
+        assert_eq!((chunking.input_cost, chunking.output_cost), (0.0, 0.5));
+        assert_eq!(chunking.total_cost, 0.0);
+        assert_eq!(chunking.cache_read_cost, None);
+        assert_eq!(chunking.billed_cost, Some(0.0));
+        assert_eq!(salvaged.embedding.as_ref().unwrap().total_cost, 0.25);
+        // Later updates keep adding to the salvaged totals, with non-finite
+        // costs counted as zero.
         let nan = arko_ai::UsageInfo {
             input_cost: f64::NAN,
             total_cost: f64::INFINITY,
@@ -181,10 +227,20 @@ mod tests {
             add_job_usage(&c, "j", |usage| usage.record_chunk(Some(&nan))).unwrap();
         }
         let usage = job_usage(&c, "j").unwrap();
-        assert_eq!(usage.chunk_calls, 2);
+        assert_eq!((usage.chunk_calls, usage.rejected_calls), (6, 2));
         let chunking = usage.chunking.unwrap();
-        assert_eq!(chunking.input_tokens, 200);
+        assert_eq!(chunking.input_tokens, 800);
         assert_eq!((chunking.input_cost, chunking.total_cost), (0.0, 0.0));
+        assert_eq!(usage.embedding.unwrap().input_tokens, 1000);
+        // Totals that can't be salvaged restart from zero.
+        c.execute(
+            "INSERT INTO job_usage VALUES('k','{\"chunk_calls\":\"many\"}')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(job_usage(&c, "k").unwrap(), JobUsage::default());
+        add_job_usage(&c, "k", |usage| usage.record_chunk(None)).unwrap();
+        assert_eq!(job_usage(&c, "k").unwrap().chunk_calls, 1);
         assert_eq!(job_usage(&c, "unknown").unwrap(), JobUsage::default());
     }
 }

@@ -37,7 +37,8 @@ pub struct JobStatus {
     #[serde(alias = "active_luna")]
     pub active_chunking: usize,
     pub active_embeddings: usize,
-    /// Token usage and cost of the provider responses this job received so far.
+    /// Token usage and cost of the provider responses this job received so
+    /// far. Saved costs that aren't numbers read as zero; see [`JobUsage`].
     #[serde(default)]
     pub usage: JobUsage,
 }
@@ -431,22 +432,21 @@ impl ArkoIndex {
                     tokio::select! {
                         outcome=&mut call => break outcome,
                         Some(event)=progress_rx.recv() => {
-                            this.inner.db.event(&job,"request_attempt",json!({"artifact":id,"repair":repair.is_some(),"event":event})).await?;
+                            this.record_attempt(&job,json!({"artifact":id,"repair":repair.is_some(),"event":event})).await?;
                         }
                     }
                 };
                 while let Ok(event)=progress_rx.try_recv() {
-                    this.inner.db.event(&job,"request_attempt",json!({"artifact":id,"repair":repair.is_some(),"event":event})).await?;
+                    this.record_attempt(&job,json!({"artifact":id,"repair":repair.is_some(),"event":event})).await?;
                 }
-                let (result, rejected) = (outcome.result, outcome.rejected);
+                // Rejected responses were counted with their attempt events.
+                let result = outcome.result;
                 let (response, usage) = match &result {
                     Ok(Reply::Chunk(r)) => (Some(encode(r)?), Some(r.usage_info.clone())),
                     _ => (None, None),
                 };
                 let error = result.as_ref().err().map(ToString::to_string);
-                // `usage` is the accepted reply's; `rejected_usage` lists the
-                // billed responses the backend rejected, retried or final.
-                let finished = encode(&json!({"artifact":id,"repair":repair.is_some(),"usage":usage.clone().flatten(),"rejected_usage":rejected}))?;
+                let finished = encode(&json!({"artifact":id,"repair":repair.is_some(),"usage":usage.clone().flatten()}))?;
                 let j = job.clone();
                 // The saved reply, its share of the job's usage and the event
                 // are recorded together.
@@ -458,15 +458,8 @@ impl ArkoIndex {
                             "UPDATE requests SET response=?2,error=?3 WHERE id=?1",
                             params![id, response, error],
                         )?;
-                        if usage.is_some() || !rejected.is_empty() {
-                            add_job_usage(&tx, &j, |total| {
-                                for usage in &rejected {
-                                    total.record_rejected_chunk(usage);
-                                }
-                                if let Some(usage) = &usage {
-                                    total.record_chunk(usage.as_ref());
-                                }
-                            })?;
+                        if let Some(usage) = &usage {
+                            add_job_usage(&tx, &j, |total| total.record_chunk(usage.as_ref()))?;
                         }
                         tx.execute(
                             "INSERT INTO events(job,kind,detail) VALUES(?1,'request_finished',?2)",
@@ -484,6 +477,35 @@ impl ArkoIndex {
             .await;
             (keys, repair, outcome)
         })
+    }
+    /// Saves a chunk request's attempt event. A failed attempt's
+    /// rejected-response usage is added to the job's totals in the same
+    /// transaction, so it is counted once, even if the process stops during
+    /// the retry wait that follows.
+    async fn record_attempt(&self, job: &str, detail: Value) -> Result<()> {
+        let event = &detail["event"];
+        let rejected: Option<arko_ai::UsageInfo> = match &event["detail"]["usage"] {
+            usage if event["phase"] == "failed" && !usage.is_null() => {
+                Some(serde_json::from_value(usage.clone())?)
+            }
+            _ => None,
+        };
+        let (job, detail) = (job.to_owned(), encode(&detail)?);
+        self.inner
+            .db
+            .call(move |c| {
+                let tx = c.transaction()?;
+                tx.execute(
+                    "INSERT INTO events(job,kind,detail) VALUES(?1,'request_attempt',?2)",
+                    params![job, detail],
+                )?;
+                if let Some(usage) = &rejected {
+                    add_job_usage(&tx, &job, |total| total.record_rejected_chunk(usage))?;
+                }
+                tx.commit()?;
+                Ok(())
+            })
+            .await
     }
     async fn canonicalize_cuts(
         &self,
@@ -778,17 +800,29 @@ impl ArkoIndex {
                         .await?;
                 }
                 Err(e) => {
-                    // Responses the backend rejected before the request failed.
-                    if !rejected.is_empty() {
+                    // Responses the backend rejected before the request
+                    // failed are counted with the event that lists them.
+                    if !rejected.is_empty() || !matches!(e, Error::Paused | Error::Cancelled) {
                         let j = job.to_owned();
+                        let detail =
+                            encode(&json!({"error":e.to_string(),"rejected_usage":rejected}))?;
                         self.inner
                             .db
                             .call(move |c| {
-                                add_job_usage(c, &j, |total| {
-                                    for usage in &rejected {
-                                        total.record_rejected_embedding(usage);
-                                    }
-                                })
+                                let tx = c.transaction()?;
+                                if !rejected.is_empty() {
+                                    add_job_usage(&tx, &j, |total| {
+                                        for usage in &rejected {
+                                            total.record_rejected_embedding(usage);
+                                        }
+                                    })?;
+                                }
+                                tx.execute(
+                                    "INSERT INTO events(job,kind,detail) VALUES(?1,'embedding_failed',?2)",
+                                    params![j, detail],
+                                )?;
+                                tx.commit()?;
+                                Ok(())
                             })
                             .await?;
                     }

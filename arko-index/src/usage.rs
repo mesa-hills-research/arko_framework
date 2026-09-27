@@ -4,9 +4,14 @@ use serde::{Deserialize, Serialize};
 
 /// Token usage and cost of one job's provider calls: chunk-model replies
 /// (initial requests and repairs) and embedding requests, summed across
-/// retries, pauses and resumes. [`JobStatus::usage`](crate::JobStatus::usage)
-/// reports it; `request_finished`, `embedded` and `embedding_rejected` events
-/// carry each call's share.
+/// retries, pauses, resumes and restarts.
+/// [`JobStatus::usage`](crate::JobStatus::usage) reports it. Each usage is
+/// saved in the same transaction as the one event that carries it, so the
+/// events add up to these totals: `usage` of `request_finished` (accepted
+/// chunk replies), `event.detail.usage` of failed `request_attempt` events
+/// (rejected chunk responses, saved before any retry wait), and `usage` and
+/// `rejected_usage` of `embedded`, `embedding_rejected` and
+/// `embedding_failed` events.
 ///
 /// A call counts when the provider returned a response: accepted replies,
 /// embedding replies whose vectors the index then rejects, and responses the
@@ -18,7 +23,10 @@ use serde::{Deserialize, Serialize};
 /// usage and are not included, although a provider may bill some of them.
 /// Search query embeddings belong to no job.
 ///
-/// Non-finite costs a custom backend reports are counted as zero.
+/// Non-finite costs a custom backend reports are counted as zero. Totals
+/// saved with a cost that isn't a number (a non-finite cost was once saved
+/// as `null`) load with that cost as zero and every count kept; totals that
+/// still can't be read are logged and start again from zero.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct JobUsage {
