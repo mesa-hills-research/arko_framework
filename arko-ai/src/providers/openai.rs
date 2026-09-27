@@ -2,6 +2,7 @@ use super::{GenerationResponse, ProviderClient, StreamEvent, take_refused_output
 use crate::{
     config::{GenerationConfig, OpenAIServiceTier},
     pricing::ServiceTier,
+    trace::{RequestTrace, TraceCall},
     conversation::Conversation,
     error::Error,
     message::{Content, Image, Message, Role},
@@ -28,6 +29,12 @@ mod oauth_recovery_tests;
 
 #[cfg(test)]
 mod refusal_tests;
+
+#[cfg(test)]
+mod trace_tests;
+
+mod request_hook;
+pub use request_hook::OpenAIRequestHook;
 
 type StreamingRefusals = BTreeMap<(String, u64), String>;
 
@@ -303,6 +310,8 @@ pub struct OpenAIClient {
     retry_oauth_rate_limits: bool,
     base_url: Option<String>,
     oauth_token_url: Option<String>,
+    trace: Option<RequestTrace>,
+    request_hook: Option<Arc<dyn OpenAIRequestHook>>,
 }
 
 impl OpenAIClient {
@@ -315,6 +324,8 @@ impl OpenAIClient {
             retry_oauth_rate_limits: false,
             base_url: None,
             oauth_token_url: None,
+            trace: None,
+            request_hook: None,
         }
     }
 
@@ -335,6 +346,8 @@ impl OpenAIClient {
             retry_oauth_rate_limits: false,
             base_url: None,
             oauth_token_url: None,
+            trace: None,
+            request_hook: None,
         }
     }
 
@@ -345,6 +358,8 @@ impl OpenAIClient {
             retry_oauth_rate_limits: false,
             base_url: None,
             oauth_token_url: None,
+            trace: None,
+            request_hook: None,
         }
     }
 
@@ -367,6 +382,18 @@ impl OpenAIClient {
     /// Configures whether OAuth refresh requests retry HTTP 429 responses.
     pub fn with_oauth_rate_limit_retries(mut self, enabled: bool) -> Self {
         self.retry_oauth_rate_limits = enabled;
+        self
+    }
+
+    /// Writes every request and response to `trace`; see [`RequestTrace`].
+    pub fn with_request_trace(mut self, trace: Option<RequestTrace>) -> Self {
+        self.trace = trace;
+        self
+    }
+
+    /// Installs a hook that can adjust each request; see [`OpenAIRequestHook`].
+    pub fn with_request_hook(mut self, hook: Option<Arc<dyn OpenAIRequestHook>>) -> Self {
+        self.request_hook = hook;
         self
     }
 
@@ -491,6 +518,8 @@ impl OpenAIClient {
         &self,
         request: &OpenAIRequest,
         mut auth: OpenAIAuth,
+        conversation_key: &str,
+        trace: &mut Option<TraceCall>,
     ) -> Result<(reqwest::Response, OpenAIAuth), Error> {
         for attempt in 0..2 {
             let url = self.responses_url(&auth);
@@ -498,10 +527,28 @@ impl OpenAIClient {
                 .http_client
                 .post(url)
                 .header("Content-Type", "application/json");
-            let response = Self::apply_auth_headers(&auth, builder)
-                .json(request)
-                .send()
-                .await?;
+            let http_request = self.prepare_http_request(
+                Self::apply_auth_headers(&auth, builder).json(request),
+                conversation_key,
+            )?;
+            if let Some(trace) = trace.as_mut() {
+                trace.record_request(&http_request);
+            }
+            let response = match self.http_client.execute(http_request).await {
+                Ok(response) => response,
+                Err(error) => {
+                    if let Some(trace) = trace.take() {
+                        trace.fail(&error.to_string(), None);
+                    }
+                    return Err(error.into());
+                }
+            };
+            if let Some(trace) = trace.as_mut() {
+                trace.record_response_head(&response);
+            }
+            if let Some(hook) = &self.request_hook {
+                hook.observe_response(conversation_key, response.headers());
+            }
             if response.status().is_success() {
                 return Ok((response, auth));
             }
@@ -527,10 +574,44 @@ impl OpenAIClient {
                 }
                 auth = updated;
             } else {
+                if let Some(trace) = trace.take() {
+                    trace.fail(&error.to_string(), serde_json::from_str(&body).ok().as_ref());
+                }
                 return Err(error);
             }
         }
         unreachable!("each request either returns or refreshes once")
+    }
+
+    /// Builds the HTTP request, letting an installed [`OpenAIRequestHook`]
+    /// adjust it. The body is re-serialized only if the hook changed it.
+    fn prepare_http_request(
+        &self,
+        builder: reqwest::RequestBuilder,
+        conversation_key: &str,
+    ) -> Result<reqwest::Request, Error> {
+        let mut request = builder.build()?;
+        if let Some(hook) = &self.request_hook {
+            let bytes = request.body().and_then(reqwest::Body::as_bytes).unwrap_or_default();
+            let original: Value = serde_json::from_slice(bytes).map_err(Error::JsonError)?;
+            let mut body = original.clone();
+            hook.prepare(conversation_key, request.headers_mut(), &mut body);
+            if body != original {
+                *request.body_mut() = Some(serde_json::to_vec(&body).map_err(Error::JsonError)?.into());
+            }
+        }
+        Ok(request)
+    }
+
+    fn begin_trace(
+        &self,
+        conversation: &Conversation,
+        request: &OpenAIRequest,
+        stream: bool,
+    ) -> Option<TraceCall> {
+        let trace = self.trace.as_ref()?;
+        let body = serde_json::to_value(request).unwrap_or(Value::Null);
+        Some(trace.begin(&conversation.prompt_cache_key, &conversation.model.id, &body, stream))
     }
 
     fn responses_url(&self, auth: &OpenAIAuth) -> String {
@@ -587,9 +668,19 @@ impl ProviderClient for OpenAIClient {
         let request =
             self.build_request(conversation, config, auth.is_chatgpt_oauth())?;
 
-        let (response, auth) = self.send_response_request(&request, auth).await?;
+        let mut trace = self.begin_trace(conversation, &request, false);
+        let (response, auth) = self
+            .send_response_request(&request, auth, &conversation.prompt_cache_key, &mut trace)
+            .await?;
 
-        let response_data: OpenAIResponse = response.json().await?;
+        let response_data: OpenAIResponse = match trace.take() {
+            None => response.json().await?,
+            Some(trace) => {
+                let value: Value = response.json().await?;
+                trace.finish(&value);
+                serde_json::from_value(value).map_err(Error::JsonError)?
+            }
+        };
         Ok(Self::generation_response(
             &response_data,
             &conversation.model,
@@ -625,13 +716,17 @@ impl ProviderClient for OpenAIClient {
             self.build_request(conversation, config, auth.is_chatgpt_oauth())?;
         request.stream = Some(true);
 
-        let (response, auth) = self.send_response_request(&request, auth).await?;
+        let mut trace = self.begin_trace(conversation, &request, true);
+        let (response, auth) = self
+            .send_response_request(&request, auth, &conversation.prompt_cache_key, &mut trace)
+            .await?;
 
-        Ok(Self::stream_events(
+        Ok(Self::stream_events_traced(
             response.bytes_stream(),
             conversation.model.clone(),
             config.clone(),
             auth.is_chatgpt_oauth(),
+            trace,
         ))
     }
 }
@@ -640,11 +735,28 @@ impl OpenAIClient {
     /// Parses a Responses API SSE byte stream. `End` is emitted only for a
     /// `response.completed` or `response.incomplete` event; a stream that
     /// ends earlier yields [`Error::StreamTruncated`].
+    #[cfg(test)]
     fn stream_events<S, B, E>(
         bytes: S,
         model: crate::model::Model,
         config: GenerationConfig,
         is_chatgpt_oauth: bool,
+    ) -> BoxStream<'static, Result<StreamEvent, Error>>
+    where
+        S: futures::Stream<Item = Result<B, E>> + Send + 'static,
+        B: AsRef<[u8]> + Send + 'static,
+        E: std::fmt::Display + Send + 'static,
+    {
+        Self::stream_events_traced(bytes, model, config, is_chatgpt_oauth, None)
+    }
+
+    /// [`stream_events`](Self::stream_events), recording each event in `trace`.
+    fn stream_events_traced<S, B, E>(
+        bytes: S,
+        model: crate::model::Model,
+        config: GenerationConfig,
+        is_chatgpt_oauth: bool,
+        mut trace: Option<TraceCall>,
     ) -> BoxStream<'static, Result<StreamEvent, Error>>
     where
         S: futures::Stream<Item = Result<B, E>> + Send + 'static,
@@ -658,11 +770,32 @@ impl OpenAIClient {
             let mut finished = false;
 
             while let Some(event) = event_stream.next().await {
-                let event =
-                    event.map_err(|error| Error::ApiError(format!("SSE error: {error}")))?;
+                let event = match event {
+                    Ok(event) => event,
+                    Err(error) => {
+                        let message = format!("SSE error: {error}");
+                        if let Some(trace) = trace.take() {
+                            trace.fail(&message, None);
+                        }
+                        Err(Error::ApiError(message))?;
+                        break;
+                    }
+                };
 
-                let value: Value =
-                    serde_json::from_str(&event.data).map_err(Error::JsonError)?;
+                let value: Value = match serde_json::from_str(&event.data) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if let Some(trace) = trace.take() {
+                            trace.fail(&format!("invalid event JSON: {error}"), None);
+                        }
+                        Err(Error::JsonError(error))?;
+                        break;
+                    }
+                };
+
+                if let Some(trace) = trace.as_mut() {
+                    trace.on_event(value.get("type").and_then(Value::as_str).unwrap_or(""), &value);
+                }
 
                 match value.get("type").and_then(Value::as_str) {
                     Some("response.output_text.delta") => {
@@ -770,6 +903,10 @@ impl OpenAIClient {
                             response: OpenAIResponse,
                         }
 
+                        if let Some(trace) = trace.take() {
+                            trace.finish(value.get("response").unwrap_or(&Value::Null));
+                        }
+
                         let completed: Completed =
                             serde_json::from_value(value).map_err(Error::JsonError)?;
 
@@ -807,6 +944,9 @@ impl OpenAIClient {
                             .or_else(|| value.get("message"))
                             .and_then(Value::as_str)
                             .unwrap_or("");
+                        if let Some(trace) = trace.take() {
+                            trace.fail(&format!("OpenAI stream error: {message}"), Some(value));
+                        }
 
                         Err(Error::provider_error(
                             &format!("OpenAI stream error: {message}"),
@@ -822,6 +962,9 @@ impl OpenAIClient {
             }
 
             if !finished {
+                if let Some(trace) = trace.take() {
+                    trace.fail("stream ended before the response completed", None);
+                }
                 Err(Error::StreamTruncated(
                     "OpenAI stream ended before the response completed".to_string(),
                 ))?;

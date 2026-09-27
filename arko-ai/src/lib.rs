@@ -11,6 +11,7 @@ pub mod reasoning;
 pub mod retry;
 pub mod stop;
 pub mod tool;
+pub mod trace;
 pub mod usage;
 
 pub mod embedding_client;
@@ -38,6 +39,7 @@ pub use reasoning::{
 pub use stop::{Refusal, RefusalSource, StopReason};
 pub use tool::{ToolCall, ToolChoice, ToolConfig, ToolDefinition, ToolResult};
 pub use retry::BackoffPolicy;
+pub use trace::RequestTrace;
 pub use usage::{BillingKind, ContextEvent, ContextEventType, ModelCallUsage, UsageInfo};
 
 pub use embedding_client::EmbeddingClient;
@@ -54,6 +56,6 @@ pub use providers::openrouter::{
 };
 
 pub use providers::openai::{
-    ChatGptOAuthCredentials, OAuthRefreshResult, OpenAIAuth,
+    ChatGptOAuthCredentials, OAuthRefreshResult, OpenAIAuth, OpenAIRequestHook,
     is_token_expired, parse_jwt_expiry, refresh_chatgpt_oauth_token,
 };

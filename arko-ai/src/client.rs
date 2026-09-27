@@ -4,8 +4,10 @@ use crate::{
     error::Error,
     model::{Model, Provider},
     providers::{self, GenerationResponse, ProviderClient, StreamEvent},
+    trace::RequestTrace,
 };
 use futures::stream::BoxStream;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct LLMClient {
@@ -13,6 +15,8 @@ pub struct LLMClient {
     anthropic_client: Option<providers::anthropic::AnthropicClient>,
     google_client: Option<providers::google::GoogleClient>,
     openrouter_client: Option<providers::openrouter::OpenRouterClient>,
+    request_trace: Option<RequestTrace>,
+    openai_request_hook: Option<Arc<dyn providers::openai::OpenAIRequestHook>>,
 }
 
 impl LLMClient {
@@ -22,6 +26,8 @@ impl LLMClient {
             anthropic_client: None,
             google_client: None,
             openrouter_client: None,
+            request_trace: None,
+            openai_request_hook: None,
         }
     }
 
@@ -73,8 +79,44 @@ impl LLMClient {
         self.get_provider(provider).is_ok()
     }
 
+    /// Writes every model request and response to `trace` for debugging;
+    /// see [`RequestTrace`]. Applies to providers configured before or after
+    /// this call. Currently implemented for the OpenAI provider.
+    pub fn with_request_trace(mut self, trace: RequestTrace) -> Self {
+        self.request_trace = Some(trace);
+        self.openai_client = self.openai_client.take().map(|client| self.configure_openai(client));
+        self
+    }
+
+    /// Installs a hook that can adjust each OpenAI request; see
+    /// [`OpenAIRequestHook`](providers::openai::OpenAIRequestHook).
+    pub fn with_openai_request_hook(
+        mut self,
+        hook: Arc<dyn providers::openai::OpenAIRequestHook>,
+    ) -> Self {
+        self.openai_request_hook = Some(hook);
+        self.openai_client = self.openai_client.take().map(|client| self.configure_openai(client));
+        self
+    }
+
+    /// Applies the OpenAI settings made on this `LLMClient`. Settings left
+    /// unset keep the OpenAI client's own, so a client installed with
+    /// [`with_openai_client`](Self::with_openai_client) keeps its trace or hook.
+    fn configure_openai(
+        &self,
+        mut client: providers::openai::OpenAIClient,
+    ) -> providers::openai::OpenAIClient {
+        if self.request_trace.is_some() {
+            client = client.with_request_trace(self.request_trace.clone());
+        }
+        if self.openai_request_hook.is_some() {
+            client = client.with_request_hook(self.openai_request_hook.clone());
+        }
+        client
+    }
+
     pub fn with_openai_api_key(mut self, key: &str) -> Self {
-        self.openai_client = Some(providers::openai::OpenAIClient::new(key));
+        self.openai_client = Some(self.configure_openai(providers::openai::OpenAIClient::new(key)));
         self
     }
 
@@ -121,14 +163,14 @@ impl LLMClient {
         account_id: &str,
         retry_rate_limits: bool,
     ) -> Self {
-        self.openai_client = Some(
+        self.openai_client = Some(self.configure_openai(
             providers::openai::OpenAIClient::new_chatgpt_oauth(
                 access_token,
                 refresh_token,
                 account_id,
             )
             .with_oauth_rate_limit_retries(retry_rate_limits),
-        );
+        ));
         self
     }
 
@@ -137,7 +179,7 @@ impl LLMClient {
     ///
     /// [`OpenAIAuth`]: crate::providers::openai::OpenAIAuth
     pub fn with_openai_auth(mut self, auth: providers::openai::OpenAIAuth) -> Self {
-        self.openai_client = Some(providers::openai::OpenAIClient::with_auth(auth));
+        self.openai_client = Some(self.configure_openai(providers::openai::OpenAIClient::with_auth(auth)));
         self
     }
 
@@ -283,7 +325,7 @@ impl LLMClient {
     /// Installs a preconfigured OpenAI client (for example one with
     /// [`with_base_url`](providers::openai::OpenAIClient::with_base_url)).
     pub fn with_openai_client(mut self, client: providers::openai::OpenAIClient) -> Self {
-        self.openai_client = Some(client);
+        self.openai_client = Some(self.configure_openai(client));
         self
     }
 

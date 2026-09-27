@@ -32,6 +32,7 @@ eventsource-stream = "0.2.3"
 tokenizers = { version = "0.23.2", default-features = false, features = ["http", "onig", "progressbar"] }
 httpdate = "1.0"
 uuid.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
