@@ -12,12 +12,12 @@
 //!
 //! - By the token endpoint they were spent at (in practice the default one,
 //!   so this covers every refresh the process makes). The client checks this
-//!   immediately before sending any refresh request, and before adopting
-//!   credentials from a credential store.
+//!   immediately before sending any refresh request and before adopting
+//!   credentials from a credential store, and passes it to the store.
 //! - By the Codex `auth.json` (canonical path) whose
 //!   [`CodexAuthStore`](crate::codex_auth::CodexAuthStore) saw the refresh.
-//!   The store checks this before adopting the file's credentials or saving
-//!   over them.
+//!   The store checks this and the client's record before offering the
+//!   file's credentials or saving over them.
 //!
 //! What this can't know: a refresh request whose answer is lost (the
 //! connection drops or the request times out after it was sent) may still

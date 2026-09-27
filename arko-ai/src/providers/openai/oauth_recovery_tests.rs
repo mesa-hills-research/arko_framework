@@ -1460,3 +1460,34 @@ async fn a_rate_limited_refresh_does_not_resend_a_token_spent_while_it_waited() 
     .await
     .unwrap();
 }
+
+/// A host refreshed the file's token itself (with
+/// `refresh_chatgpt_oauth_token`) and installed the result in a client of
+/// the file: the file now holds spent credentials, so the client's are saved
+/// over them and refreshed. The spent token is never sent again.
+#[tokio::test]
+async fn credentials_a_host_refreshed_itself_replace_the_spent_ones_in_the_file() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let server = TestServer::start(vec![refreshed(), second_refresh(), refreshed()], false).await;
+        let (_dir, path) = auth_file(&fresh_jwt());
+        let file = crate::codex_auth::CodexAuthFile::load(&path).unwrap();
+        let client = served_by(file.openai_client().unwrap(), &server.url);
+        let http_client = crate::http_client_builder().no_proxy().build().unwrap();
+        let token_url = format!("{}/token", server.url);
+        let result = crate::refresh_chatgpt_oauth_token(&http_client, "synthetic-refresh", None, Some(&token_url))
+            .await
+            .unwrap();
+        let installed = ChatGptOAuthCredentials {
+            access_token: result.access_token,
+            refresh_token: result.refresh_token,
+            account_id: "synthetic-account".into(),
+        };
+        client.update_auth(OpenAIAuth::ChatGptOAuth(installed)).await;
+        let refreshed_now = client.refresh_oauth_token_once().await.unwrap();
+        assert_eq!(refreshed_now.access_token, "second-access");
+        assert_eq!(file_credentials(&path), stored("second-access", "second-refresh"));
+        assert_eq!(sent_refresh_tokens(&server), ["synthetic-refresh", "synthetic-new-refresh"]);
+    })
+    .await
+    .unwrap();
+}

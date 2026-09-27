@@ -337,14 +337,16 @@ pub async fn refresh_chatgpt_oauth_token(
     token_url: Option<&str>,
 ) -> Result<OAuthRefreshResult, Error> {
     let timeout = Some(OAUTH_REFRESH_TIMEOUT);
-    request_oauth_refresh(http_client, refresh_token, client_id, token_url, timeout).await
+    request_oauth_refresh(http_client, refresh_token, None, client_id, token_url, timeout).await
 }
 
 /// [`refresh_chatgpt_oauth_token`] with the request timing out after
-/// `timeout`, if given.
+/// `timeout`, if given. `account_id`, when known, is the account the refresh
+/// token belongs to (a refusal names that account's recovery file, if any).
 async fn request_oauth_refresh(
     http_client: &reqwest::Client,
     refresh_token: &str,
+    account_id: Option<&str>,
     client_id: Option<&str>,
     token_url: Option<&str>,
     timeout: Option<Duration>,
@@ -354,7 +356,7 @@ async fn request_oauth_refresh(
     // Every refresh request passes here: a token this process already spent
     // is never sent again.
     if spent_tokens::spent_at_endpoint(resolved_token_url, refresh_token) {
-        return Err(crate::codex_auth::spent_refresh_token_error(refresh_token));
+        return Err(crate::codex_auth::spent_refresh_token_error(refresh_token, account_id));
     }
 
     let body = serde_json::json!({
@@ -868,8 +870,9 @@ impl OpenAIClient {
         // Another program sharing the credentials may have refreshed
         // already; refreshing again would reuse a rotated refresh token.
         // Never refresh without reading the store first.
+        let spent = |credentials: &ChatGptOAuthCredentials| self.refresh_token_spent(credentials);
         if let Some(store) = &self.credential_store
-            && let Some(newer) = store.before_refresh(&current)?
+            && let Some(newer) = store.before_refresh_knowing_spent(&current, &spent)?
         {
             let adopted = self.adopt_stored(&mut auth, &current, newer.clone())?;
             let expiring_too = matches!(target, RefreshTarget::Expiring(margin)
@@ -891,6 +894,7 @@ impl OpenAIClient {
         let result = match request_oauth_refresh(
             &self.http_client,
             refresh_token,
+            Some(&current.account_id),
             None,
             self.oauth_token_url.as_deref(),
             self.oauth_refresh_timeout,
@@ -905,7 +909,7 @@ impl OpenAIClient {
                 // The server rejects a refresh token another program rotated
                 // in the meantime; its new tokens are then in the store.
                 if let Some(store) = &self.credential_store
-                    && let Ok(Some(newer)) = store.before_refresh(&current)
+                    && let Ok(Some(newer)) = store.before_refresh_knowing_spent(&current, &spent)
                 {
                     return self.adopt_stored(&mut auth, &current, newer).map(Some);
                 }
@@ -967,7 +971,10 @@ impl OpenAIClient {
             ));
         }
         if let Some(spent) = stored.refresh_token.as_deref().filter(|token| self.spent(token)) {
-            return Err(crate::codex_auth::spent_refresh_token_error(spent));
+            return Err(crate::codex_auth::spent_refresh_token_error(
+                spent,
+                Some(&stored.account_id),
+            ));
         }
         let result = Self::result_for(&stored);
         self.install_auth(auth, OpenAIAuth::ChatGptOAuth(stored));
