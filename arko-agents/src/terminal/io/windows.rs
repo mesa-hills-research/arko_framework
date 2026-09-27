@@ -417,6 +417,10 @@ pub(super) fn spawn(
                 )));
             }
             group.console = Some(Console(console));
+            // Without this flag a child inherits this process's standard
+            // handles when they are redirected (as under CI), bypassing the
+            // pseudoconsole. Null handles select the pseudoconsole's own.
+            startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
             attributes.set(
                 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
                 console as *const c_void,

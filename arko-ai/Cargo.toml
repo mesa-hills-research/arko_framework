@@ -20,7 +20,9 @@ tokio-stream = { version = "0.1", features = ["full"] }
 bytes = "1.5"
 async-stream = "0.3"
 eventsource-stream = "0.2.3"
-tokenizers = { version = "0.23.2", features = ["http"] }
+# esaxx_fast (Unigram training only) links C++ built against the static CRT,
+# which conflicts with Rust's dynamic CRT on MSVC (LNK4098).
+tokenizers = { version = "0.23.2", default-features = false, features = ["http", "onig", "progressbar"] }
 httpdate = "1.0"
 uuid = { version = "1.8.0", features = ["v4"] }
 
