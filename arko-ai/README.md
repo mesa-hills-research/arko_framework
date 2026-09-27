@@ -280,7 +280,7 @@ conversation containing an update with `Error::UnsupportedFeature`.
 | --- | --- |
 | `stop` | `EndTurn` (`ToolUse` with tool calls; `StopSequence` for a native `stop_sequence`) |
 | `tool_calls` | `ToolUse` |
-| `length` | `MaxTokens`; a tool call whose arguments were cut off is dropped |
+| `length` | `MaxTokens`; the first tool call whose arguments were cut off is dropped with every call after it |
 | `content_filter` | `Refusal`: `SafetyClassifier` when `native_finish_reason` is `refusal` (Anthropic's classifier), `Model` when `message.refusal` is set, otherwise `ContentFilter` |
 | `error` | an error (see below) |
 | anything else | `Other` with the raw value |
@@ -296,10 +296,15 @@ metadata only recognizable changes count: routers, `~` aliases and presets, conf
 fallbacks, or another vendor. With it, the served model is compared with the catalog's
 canonical slug. Variant suffixes and trailing dates never count.
 
-Streams skip `: OPENROUTER PROCESSING` keep-alives, assemble tool calls by `index`, and treat
-the final usage chunk, which repeats the finish reason, as accounting rather than a second
-end. `End` follows a finish reason once `[DONE]` or the usage chunk arrives; a stream that
-stops earlier yields `Error::StreamTruncated`.
+Streams skip `: OPENROUTER PROCESSING` keep-alives, assemble tool calls by `index` (a new
+id at an index already in use starts another call), and treat the final usage chunk, which
+repeats the finish reason, as accounting rather than a second end. `ToolCallStart` and
+`ToolCallArgumentsDelta` carry the call's 0-based position in the final
+`message.tool_calls` (calls in the order they first appear), not OpenRouter's raw index. A
+token limit keeps only the calls before the first cut-off one, so every kept call keeps
+its announced position; a dropped call may have had a `ToolCallStart`. `End` follows a
+finish reason once `[DONE]` or the usage chunk arrives; a stream that stops earlier yields
+`Error::StreamTruncated`.
 
 ### Usage and cost
 

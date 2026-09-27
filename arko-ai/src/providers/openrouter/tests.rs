@@ -1674,6 +1674,197 @@ async fn interleaved_tool_call_deltas_are_assembled_by_index() {
     );
 }
 
+/// A `delta.tool_calls` chunk; `index` is OpenRouter's raw index.
+fn tool_call_chunk(
+    index: Option<u64>,
+    id: Option<&str>,
+    name: Option<&str>,
+    arguments: &str,
+) -> Value {
+    let mut function = json!({"arguments": arguments});
+    if let Some(name) = name {
+        function["name"] = json!(name);
+    }
+    let mut value = json!({"type": "function", "function": function});
+    if let Some(index) = index {
+        value["index"] = json!(index);
+    }
+    if let Some(id) = id {
+        value["id"] = json!(id);
+    }
+    chunk(json!({"tool_calls": [value]}), None)
+}
+
+async fn tool_call_stream(chunks: Vec<Value>, finish: &str) -> Vec<StreamEvent> {
+    let mut chunks = chunks;
+    chunks.push(chunk(json!({}), Some(finish)));
+    chunks.push(usage_chunk(finish));
+    let (events, error) = parse_stream(format!("{}data: [DONE]\n\n", sse(&chunks))).await;
+    assert!(error.is_none(), "{error:?}");
+    events
+}
+
+fn tool_call_starts(events: &[StreamEvent]) -> Vec<(usize, &str)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::ToolCallStart { index, name } => Some((*index, name.as_str())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every final tool call was announced at its position in
+/// `message.tool_calls`, with the arguments streamed under that position.
+fn assert_stream_positions_match_final_calls(events: &[StreamEvent]) {
+    let starts = tool_call_starts(events);
+    for (position, call) in end(events).message.tool_calls.iter().enumerate() {
+        let announced: Vec<&str> = starts
+            .iter()
+            .filter(|(index, _)| *index == position)
+            .map(|(_, name)| *name)
+            .collect();
+        assert_eq!(announced, [call.name.as_str()], "position {position}");
+        let streamed: String = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::ToolCallArgumentsDelta { index, delta } if *index == position => {
+                    Some(delta.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            serde_json::from_str::<Value>(&streamed).unwrap(),
+            call.arguments,
+            "position {position}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_new_id_at_an_index_in_use_starts_a_new_tool_call() {
+    // Some upstreams number every call 0; the new id marks the next call.
+    let events = tool_call_stream(
+        vec![
+            tool_call_chunk(Some(0), Some("call_a"), Some("lookup"), "{\"q\":"),
+            tool_call_chunk(Some(0), None, None, "\"a\"}"),
+            tool_call_chunk(Some(0), Some("call_b"), Some("fetch"), "{\"url\":"),
+            tool_call_chunk(Some(0), None, None, "\"b\"}"),
+            // A repeated id continues its call.
+            tool_call_chunk(Some(0), Some("call_c"), Some("search"), "{\"s\":"),
+            tool_call_chunk(Some(0), Some("call_c"), None, "\"c\"}"),
+        ],
+        "tool_calls",
+    )
+    .await;
+    let calls = &end(&events).message.tool_calls;
+    let summary: Vec<_> = calls
+        .iter()
+        .map(|call| {
+            (
+                call.id.as_deref(),
+                call.name.as_str(),
+                call.arguments.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (Some("call_a"), "lookup", json!({"q": "a"})),
+            (Some("call_b"), "fetch", json!({"url": "b"})),
+            (Some("call_c"), "search", json!({"s": "c"})),
+        ]
+    );
+    assert_eq!(
+        tool_call_starts(&events),
+        [(0, "lookup"), (1, "fetch"), (2, "search")]
+    );
+    assert_stream_positions_match_final_calls(&events);
+}
+
+#[tokio::test]
+async fn tool_call_events_carry_the_position_in_the_final_calls() {
+    // Raw indexes needn't start at 0 or be contiguous (a proxy may pass
+    // through the upstream's content-block index).
+    let events = tool_call_stream(
+        vec![
+            tool_call_chunk(Some(1), Some("call_a"), Some("lookup"), "{\"q\":\"a\"}"),
+            tool_call_chunk(Some(3), Some("call_b"), Some("fetch"), "{\"url\":"),
+            tool_call_chunk(Some(3), None, None, "\"b\"}"),
+        ],
+        "tool_calls",
+    )
+    .await;
+    assert_eq!(tool_call_starts(&events), [(0, "lookup"), (1, "fetch")]);
+    assert_eq!(end(&events).message.tool_calls.len(), 2);
+    assert_stream_positions_match_final_calls(&events);
+
+    // A call whose name arrives after a later call started keeps the
+    // position of its first delta.
+    let events = tool_call_stream(
+        vec![
+            tool_call_chunk(Some(0), Some("call_a"), None, ""),
+            tool_call_chunk(Some(1), Some("call_b"), Some("fetch"), "{}"),
+            tool_call_chunk(Some(0), None, Some("lookup"), "{\"q\":\"a\"}"),
+        ],
+        "tool_calls",
+    )
+    .await;
+    assert_eq!(tool_call_starts(&events), [(1, "fetch"), (0, "lookup")]);
+    let names: Vec<_> = end(&events)
+        .message
+        .tool_calls
+        .iter()
+        .map(|call| call.name.as_str())
+        .collect();
+    assert_eq!(names, ["lookup", "fetch"]);
+    assert_stream_positions_match_final_calls(&events);
+}
+
+#[tokio::test]
+async fn calls_cut_off_by_the_token_limit_leave_the_kept_positions_intact() {
+    // Interleaved calls: the middle one is unfinished when the limit hits.
+    let events = tool_call_stream(
+        vec![
+            tool_call_chunk(Some(0), Some("call_a"), Some("lookup"), "{\"q\":\"a\"}"),
+            tool_call_chunk(Some(1), Some("call_b"), Some("fetch"), "{\"url\":"),
+            tool_call_chunk(Some(2), Some("call_c"), Some("search"), "{\"s\":\"c\"}"),
+        ],
+        "length",
+    )
+    .await;
+    let response = end(&events);
+    assert_eq!(response.stop_reason, StopReason::MaxTokens);
+    let ids: Vec<_> = response
+        .message
+        .tool_calls
+        .iter()
+        .map(|call| call.id.as_deref())
+        .collect();
+    // The unfinished call and every call after it are dropped.
+    assert_eq!(ids, [Some("call_a")]);
+    assert_stream_positions_match_final_calls(&events);
+
+    // The same rule applies to non-streaming responses.
+    let mut value = documented_response();
+    value["choices"][0] = json!({"finish_reason": "length", "native_finish_reason": "max_tokens",
+    "message": {"role": "assistant", "content": null, "tool_calls": [
+        {"id": "a", "type": "function", "function": {"name": "lookup", "arguments": "{\"q\":\"x\"}"}},
+        {"id": "b", "type": "function", "function": {"name": "fetch", "arguments": "{\"url\":"}},
+        {"id": "c", "type": "function", "function": {"name": "search", "arguments": "{}"}},
+    ]}});
+    let ids: Vec<_> = parse(&value, CLAUDE)
+        .unwrap()
+        .message
+        .tool_calls
+        .iter()
+        .map(|call| call.id.clone().unwrap())
+        .collect();
+    assert_eq!(ids, ["a"]);
+}
+
 #[tokio::test]
 async fn streamed_reasoning_details_merge_by_index_and_only_readable_text_is_shown() {
     let details = |items: Value, reasoning: Option<&str>| {

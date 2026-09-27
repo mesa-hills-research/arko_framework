@@ -113,6 +113,7 @@ fn has_error(value: &Value) -> bool {
 /// A tool call being assembled.
 #[derive(Debug, Default)]
 struct PendingToolCall {
+    /// OpenRouter's `index`, used only to route deltas to their call.
     index: u64,
     id: Option<String>,
     name: String,
@@ -134,49 +135,68 @@ fn arguments_text(value: Option<&Value>) -> String {
     }
 }
 
-/// Assembles streamed `delta.tool_calls` by `index`, so interleaved calls
-/// keep their own arguments. Ids are opaque.
+/// Assembles streamed `delta.tool_calls` by OpenRouter's `index`, so
+/// interleaved calls keep their own arguments. A delta that brings a new id
+/// at an index whose call already has a different id starts a new call (some
+/// upstreams number every call 0). Ids are otherwise opaque.
+///
+/// Calls keep the order of their first delta, and a call's position in that
+/// order is the `index` of its `ToolCallStart` and `ToolCallArgumentsDelta`
+/// events and its position in the final `message.tool_calls` (as with the
+/// other providers' 0-based counters). OpenRouter's raw index is used only
+/// for assembly: it needn't start at 0 or be contiguous.
 #[derive(Debug, Default)]
 struct ToolCallAssembler {
     calls: Vec<PendingToolCall>,
 }
 
 impl ToolCallAssembler {
-    fn push(&mut self, delta: &Value) -> Vec<StreamEvent> {
-        let id = non_empty(str_field(delta, "id"));
-        let index = delta
-            .get("index")
-            .and_then(Value::as_u64)
-            .or_else(|| {
-                id.and_then(|id| {
-                    self.calls
-                        .iter()
-                        .find(|call| call.id.as_deref() == Some(id))
-                })
-                .map(|call| call.index)
-            })
-            .or_else(|| {
-                (id.is_none())
-                    .then(|| self.calls.last().map(|call| call.index))
-                    .flatten()
-            })
-            .unwrap_or_else(|| {
+    /// The position of the call a delta belongs to, starting a call when it
+    /// belongs to none.
+    fn position(&mut self, index: Option<u64>, id: Option<&str>) -> usize {
+        let with_id = |call: &PendingToolCall| id.is_some() && call.id.as_deref() == id;
+        let found = match index {
+            Some(index) => {
+                // The latest call at this index, unless the delta names a
+                // different call.
+                let latest = self.calls.iter().rposition(|call| call.index == index);
+                match latest {
+                    Some(position)
+                        if id.is_some()
+                            && self.calls[position].id.is_some()
+                            && !with_id(&self.calls[position]) =>
+                    {
+                        self.calls
+                            .iter()
+                            .position(|call| call.index == index && with_id(call))
+                    }
+                    latest => latest,
+                }
+            }
+            // Without an index, an id names its call; a delta with neither
+            // continues the latest call.
+            None if id.is_some() => self.calls.iter().position(with_id),
+            None => self.calls.len().checked_sub(1),
+        };
+        found.unwrap_or_else(|| {
+            let index = index.unwrap_or_else(|| {
                 self.calls
                     .iter()
                     .map(|call| call.index + 1)
                     .max()
                     .unwrap_or(0)
             });
-        let position = match self.calls.iter().position(|call| call.index == index) {
-            Some(position) => position,
-            None => {
-                self.calls.push(PendingToolCall {
-                    index,
-                    ..PendingToolCall::default()
-                });
-                self.calls.len() - 1
-            }
-        };
+            self.calls.push(PendingToolCall {
+                index,
+                ..PendingToolCall::default()
+            });
+            self.calls.len() - 1
+        })
+    }
+
+    fn push(&mut self, delta: &Value) -> Vec<StreamEvent> {
+        let id = non_empty(str_field(delta, "id"));
+        let position = self.position(delta.get("index").and_then(Value::as_u64), id);
         let call = &mut self.calls[position];
         if call.id.is_none() {
             call.id = id.map(String::from);
@@ -191,12 +211,12 @@ impl ToolCallAssembler {
         if !call.started && !call.name.is_empty() {
             call.started = true;
             events.push(StreamEvent::ToolCallStart {
-                index: index as usize,
+                index: position,
                 name: call.name.clone(),
             });
             if !call.arguments.is_empty() {
                 events.push(StreamEvent::ToolCallArgumentsDelta {
-                    index: index as usize,
+                    index: position,
                     delta: call.arguments.clone(),
                 });
             }
@@ -206,7 +226,7 @@ impl ToolCallAssembler {
             call.arguments.push_str(&arguments);
             if call.started {
                 events.push(StreamEvent::ToolCallArgumentsDelta {
-                    index: index as usize,
+                    index: position,
                     delta: arguments,
                 });
             }
@@ -214,8 +234,8 @@ impl ToolCallAssembler {
         events
     }
 
-    fn finish(mut self) -> Vec<PendingToolCall> {
-        self.calls.sort_by_key(|call| call.index);
+    /// The calls in the order of their event positions.
+    fn finish(self) -> Vec<PendingToolCall> {
         self.calls
     }
 }
@@ -534,11 +554,18 @@ where
 /// |---|---|
 /// | `stop` | `EndTurn` (`ToolUse` with tool calls, `StopSequence` for a native `stop_sequence`) |
 /// | `tool_calls` | `ToolUse` |
-/// | `length` | `MaxTokens`; tool calls with unfinished (invalid JSON) arguments are dropped |
+/// | `length` | `MaxTokens`; the first tool call with unfinished (invalid JSON) arguments is dropped with every call after it |
 /// | `content_filter` | `Refusal`: `SafetyClassifier` for a native `refusal`, `Model` when `message.refusal` is set, else `ContentFilter` |
 /// | other | `Other(raw)` |
 ///
 /// A `message.refusal` with any other finish reason is a `Model` refusal.
+///
+/// Under `length`, calls after an unfinished one are dropped even when their
+/// arguments are complete (interleaved streams can finish a later call
+/// first): removing only the unfinished call would shift the later calls
+/// away from the positions their `ToolCallStart` events announced. The calls
+/// kept are a prefix, so each keeps its position; a dropped call may have
+/// been announced by a `ToolCallStart` without appearing in the response.
 fn stop_and_refusal(
     message: &mut Message,
     finish_reason: Option<&str>,
@@ -574,9 +601,13 @@ fn stop_and_refusal(
         Some("stop") if !message.tool_calls.is_empty() => (StopReason::ToolUse, None),
         Some("stop") => (StopReason::EndTurn, None),
         Some("length") => {
-            message
+            if let Some(cut) = message
                 .tool_calls
-                .retain(|call| call.invalid_arguments.is_none());
+                .iter()
+                .position(|call| call.invalid_arguments.is_some())
+            {
+                message.tool_calls.truncate(cut);
+            }
             (StopReason::MaxTokens, None)
         }
         Some(other) => (StopReason::Other(other.to_string()), None),
