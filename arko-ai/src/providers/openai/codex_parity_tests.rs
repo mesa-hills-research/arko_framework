@@ -516,6 +516,36 @@ fn saved_conversations_with_reasoning_items_replay_through_reconstruction() {
 }
 
 #[tokio::test]
+async fn plan_usage_headers_are_reported_with_the_call() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (url, server) = server(vec![
+            reply("/responses", 200, &text_turn_stream("ok"))
+                .with_header("x-codex-plan-type", "pro")
+                .with_header("x-codex-primary-used-percent", "92.5")
+                .with_header("x-codex-primary-window-minutes", "300")
+                .with_header("x-codex-primary-reset-at", "1791108021")
+                .with_header("x-codex-secondary-used-percent", "40")
+                .with_header("x-codex-secondary-window-minutes", "10080"),
+            reply("/responses", 200, &text_turn_stream("ok")),
+        ])
+        .await;
+        let client = client(&url);
+        let response = client.generate_text(&conversation(), &GenerationConfig::default()).await.unwrap();
+        let usage = response.model_call_usage.plan_usage.unwrap();
+        assert_eq!(usage.plan_type.as_deref(), Some("pro"));
+        let (window, most_used) = usage.most_used_window().unwrap();
+        assert_eq!((window, most_used.used_percent), ("primary", 92.5));
+        assert_eq!(most_used.resets_at, Some(1_791_108_021));
+        assert_eq!(usage.secondary.unwrap().window_minutes, Some(10080));
+        let without = client.generate_text(&conversation(), &GenerationConfig::default()).await.unwrap();
+        assert_eq!(without.model_call_usage.plan_usage, None);
+        server.await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn a_served_model_other_than_the_requested_one_is_a_reroute() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let (url, server) = server(vec![
@@ -547,6 +577,7 @@ async fn a_served_model_other_than_the_requested_one_is_a_reroute() {
         requested_model: requested.into(),
         served_model: header.map(String::from),
         turn_state: None,
+        plan_usage: None,
     };
     let served = |head: &ResponseHead, model: &str, created: Option<&str>| {
         OpenAIClient::served_model(head, &response(model), created)

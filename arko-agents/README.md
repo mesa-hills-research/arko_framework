@@ -47,8 +47,36 @@ cargo run -p arko-agents --example arko_agents_cli -- --help
     max_elapsed_ms: 300_000,
     jitter: true,
     capacity_retry: None,
+    rate_limit_retry: Some(LLMRateLimitRetryConfig::default()),
+    usage_limit_policy: UsageLimitPolicy::Pause,
 })
 ```
+
+**Rate limits (on by default).** Short rate limits (HTTP 429, `rate_limit_exceeded`,
+`slow_down`) and, unless `capacity_retry` is set, capacity errors
+(`server_is_overloaded`, ...) are retried under either `RetryThen*` policy after
+the provider's delay (`Retry-After`, rate-limit reset headers, a delay in the body)
+plus jitter, or with backoff from 1 s to 60 s when it gives none, until success or
+cancellation. These retries don't count against the attempt limit or the elapsed
+budget and add nothing to the conversation. A rate limit asking for more than
+`max_wait_ms` (15 minutes) is handled as a usage limit. Set `rate_limit_retry: None`
+(JSON `null`) for ordinary bounded recovery.
+
+**Plan usage limits.** A ChatGPT plan usage limit (`usage_limit_reached`, classified
+by arko-ai as `RetryClass::UsageLimit`) emits `UsageLimitReached` with the reset time
+and, under the default `UsageLimitPolicy::Pause`, stops retrying like exhausted
+recovery (awaiting approval, or interrupted under the informing policies). Opt in to
+`UsageLimitPolicy::WaitUntilReset { max_wait_ms }` to wait (cancellably) until the
+reported reset plus up to 31 seconds and retry unchanged; resets further off, or not
+reported, still pause.
+
+**Plan usage reports.** ChatGPT OAuth calls report plan usage (`x-codex-*` headers)
+in `ModelCallUsage::plan_usage` and a `PlanUsageReported` event. Opt in to
+`MonitoringConfig { plan_usage: Some(PlanUsageThreshold { percent, action }) }`
+(`AgentConfig::monitoring`) to act before a model request when the most-used window
+is at or above `percent`: `PlanUsageThresholdReached` is emitted once per window and
+reset, then `PlanUsageAction::Pause` pauses once, or `SlowDown { delay_ms }` waits
+before every request while usage stays that high.
 
 To wait through explicit provider capacity errors until service recovers, opt in:
 
@@ -65,11 +93,11 @@ retryable `server_is_overloaded`, `overloaded_error`, and
 at five minutes, with the same jitter and server-minimum handling. Cancel,
 suspend, and channel closure remain interruptible. Capacity retries emit events
 without adding repeated errors to the model conversation. Success clears the
-capacity episode; another error category begins ordinary bounded recovery, and
+capacity episode; another error category continues ordinary bounded recovery, and
 permanent errors stop promptly. A new runtime starts a new backoff episode.
 `PauseAndAwaitApproval` remains an immediate pause even with this option enabled.
-Other applications retain bounded recovery by default. Rust `LLMRetryConfig`
-struct literals must supply `capacity_retry` or use `..Default::default()`.
+Rust `LLMRetryConfig` struct literals must supply `capacity_retry`,
+`rate_limit_retry` and `usage_limit_policy` or use `..Default::default()`.
 
 These timing values are the defaults. Old serialized configurations receive them
 through serde defaults. Zero timing values and a maximum delay smaller than the
@@ -118,13 +146,15 @@ normalized to one attempt.
   refusals) stays in history with its explanation as the assistant text, so the
   model can see what it declined; its tool calls are not run. Classifier and
   content-filter refusals are removed from history.
-- Waits that don't count against the ordinary limits (opt-in `capacity_retry`)
+- Waits that don't count against the ordinary limits (rate limits, opt-in
+  `capacity_retry`, usage-limit waits)
   neither reset nor consume them: ordinary attempts keep counting across
   interleaved capacity failures, and the ordinary elapsed clock stops while such
   a wait lasts.
 - Output a failed stream delivered is kept (followed by the error message) when
   recovery adds a message, and dropped when the retry resends the request
-  unchanged (capacity waits), so no retried request ends on an assistant turn.
+  unchanged (rate-limit, capacity and usage-limit waits), so no retried request
+  ends on an assistant turn.
   A request whose conversation still ends on assistant text (for example a task
   resumed after `SuspendTask` mid-stream) first gets a user message asking the
   model to continue; Claude 4.6 and later reject prefill.

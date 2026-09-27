@@ -285,7 +285,8 @@ async fn stream_capacity_error_retries_without_requesting_configuration_changes(
         })
         .await
         .unwrap();
-    assert_eq!(started.elapsed(), Duration::from_millis(250));
+    // Retried by the default rate-limit retry: 1 s without a server delay.
+    assert_eq!(started.elapsed(), Duration::from_secs(1));
     assert_eq!(
         agent
             .run_llm_attempt(async { Ok("recovered") })
@@ -389,6 +390,8 @@ async fn permanent_failures_pause_immediately_and_inform_policy_returns_to_host(
 async fn excessive_server_delay_stops_without_retrying_early() {
     let (mut agent, _events, _commands) = harness();
     agent.task.agent_config.llm_retry_config.max_elapsed_ms = 30_000;
+    // Ordinary recovery (the default rate-limit retry would wait the 60 s).
+    agent.task.agent_config.llm_retry_config.rate_limit_retry = None;
     let started = tokio::time::Instant::now();
     agent
         .run_llm_attempt::<()>(async { Err(provider_failure(429, Some(Duration::from_secs(60)))) })

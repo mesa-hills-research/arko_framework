@@ -41,6 +41,97 @@ pub struct ModelCallUsage {
     /// covers both.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rerouted: bool,
+    /// Subscription plan usage the provider reported with the call (the
+    /// ChatGPT backend's `x-codex-*` headers on ChatGPT OAuth requests).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_usage: Option<PlanUsage>,
+}
+
+/// How much of a subscription plan's usage limits is used, as the ChatGPT
+/// backend reports it on every ChatGPT OAuth response (`x-codex-*` headers,
+/// which Codex shows as its rate-limit status). Requests fail with a usage
+/// limit error ([`RetryClass::UsageLimit`](crate::error::RetryClass::UsageLimit))
+/// once a window is used up, until it resets.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PlanUsage {
+    /// The account's plan (`x-codex-plan-type`, such as `plus` or `pro`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_type: Option<String>,
+    /// The limit currently applied (`x-codex-active-limit`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_limit: Option<String>,
+    /// The primary window (`x-codex-primary-*`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary: Option<PlanUsageWindow>,
+    /// The secondary window (`x-codex-secondary-*`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary: Option<PlanUsageWindow>,
+}
+
+/// One usage-limit window of a [`PlanUsage`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PlanUsageWindow {
+    /// Percentage of the window's limit used (`-used-percent`).
+    pub used_percent: f64,
+    /// The window's length in minutes (`-window-minutes`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_minutes: Option<u64>,
+    /// When the window resets, in Unix seconds (`-reset-at`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<u64>,
+    /// Seconds until the window resets, as of the response
+    /// (`-reset-after-seconds`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_after_seconds: Option<u64>,
+}
+
+impl PlanUsage {
+    /// Reads the ChatGPT backend's `x-codex-*` plan usage headers. `None`
+    /// when the response has none.
+    pub fn from_codex_headers(headers: &reqwest::header::HeaderMap) -> Option<Self> {
+        let text = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        };
+        let number = |name: &str| text(name).and_then(|value| value.parse::<f64>().ok()).filter(|n| n.is_finite());
+        let whole = |name: &str| {
+            number(name)
+                .filter(|n| *n >= 0.0)
+                .map(|n| n as u64)
+        };
+        let window = |prefix: &str| {
+            let used_percent = number(&format!("x-codex-{prefix}-used-percent"))?;
+            let window = PlanUsageWindow {
+                used_percent,
+                window_minutes: whole(&format!("x-codex-{prefix}-window-minutes")).filter(|m| *m > 0),
+                resets_at: whole(&format!("x-codex-{prefix}-reset-at")).filter(|t| *t > 0),
+                reset_after_seconds: whole(&format!("x-codex-{prefix}-reset-after-seconds")),
+            };
+            // A window with nothing used, no length and no reset time is a
+            // placeholder (the backend sends zeros for an unused secondary).
+            (used_percent != 0.0 || window.window_minutes.is_some() || window.resets_at.is_some())
+                .then_some(window)
+        };
+        let usage = Self {
+            plan_type: text("x-codex-plan-type").map(String::from),
+            active_limit: text("x-codex-active-limit").map(String::from),
+            primary: window("primary"),
+            secondary: window("secondary"),
+        };
+        (usage != Self::default()).then_some(usage)
+    }
+
+    /// The window with the highest used percentage, named `"primary"` or
+    /// `"secondary"`.
+    pub fn most_used_window(&self) -> Option<(&'static str, &PlanUsageWindow)> {
+        [("primary", self.primary.as_ref()), ("secondary", self.secondary.as_ref())]
+            .into_iter()
+            .filter_map(|(name, window)| Some((name, window?)))
+            .max_by(|a, b| a.1.used_percent.total_cmp(&b.1.used_percent))
+    }
 }
 
 impl ModelCallUsage {
@@ -73,7 +164,13 @@ impl ModelCallUsage {
             upstream_provider: None,
             served_model: None,
             rerouted: false,
+            plan_usage: None,
         }
+    }
+
+    pub fn with_plan_usage(mut self, plan_usage: Option<PlanUsage>) -> Self {
+        self.plan_usage = plan_usage;
+        self
     }
 
     /// Whether the provider served a different model than the one requested:
@@ -505,6 +602,52 @@ mod tests {
 
     fn close(actual: f64, expected: f64) -> bool {
         (actual - expected).abs() < 1e-9
+    }
+
+    #[test]
+    fn codex_plan_usage_headers_parse_and_old_records_load() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in [
+            ("x-codex-plan-type", "prolite"),
+            ("x-codex-active-limit", "premium"),
+            ("x-codex-primary-used-percent", "11"),
+            ("x-codex-primary-window-minutes", "10080"),
+            ("x-codex-primary-reset-at", "1791108021"),
+            ("x-codex-primary-reset-after-seconds", "593594"),
+            // An unused secondary window is sent as zeros and an empty reset.
+            ("x-codex-secondary-used-percent", "0"),
+            ("x-codex-secondary-window-minutes", "0"),
+            ("x-codex-secondary-reset-at", ""),
+            ("x-codex-secondary-reset-after-seconds", "0"),
+        ] {
+            headers.insert(name, value.parse().unwrap());
+        }
+        let usage = PlanUsage::from_codex_headers(&headers).unwrap();
+        assert_eq!(usage.plan_type.as_deref(), Some("prolite"));
+        assert_eq!(usage.active_limit.as_deref(), Some("premium"));
+        assert_eq!(
+            usage.primary,
+            Some(PlanUsageWindow {
+                used_percent: 11.0,
+                window_minutes: Some(10080),
+                resets_at: Some(1_791_108_021),
+                reset_after_seconds: Some(593_594),
+            })
+        );
+        assert_eq!(usage.secondary, None);
+        assert_eq!(usage.most_used_window().unwrap().0, "primary");
+        assert_eq!(PlanUsage::from_codex_headers(&reqwest::header::HeaderMap::new()), None);
+
+        let call = ModelCallUsage::new("c".into(), "openai".into(), "m".into(), 1, 1, 10)
+            .with_plan_usage(Some(usage.clone()));
+        let round_trip: ModelCallUsage =
+            serde_json::from_str(&serde_json::to_string(&call).unwrap()).unwrap();
+        assert_eq!(round_trip.plan_usage, Some(usage));
+        // Records saved before plan usage existed load without it.
+        let old = r#"{"call_id":"c","provider":"openai","model":"m","input_tokens":1,"output_tokens":1}"#;
+        let old: ModelCallUsage = serde_json::from_str(old).unwrap();
+        assert_eq!(old.plan_usage, None);
+        assert!(!serde_json::to_string(&old).unwrap().contains("plan_usage"));
     }
 
     fn priced(model: &Model, usage: UsageInfo, config: Option<&GenerationConfig>) -> UsageInfo {

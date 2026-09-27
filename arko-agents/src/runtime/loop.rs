@@ -1,7 +1,8 @@
 use super::command::{ToolApprovalDecision, UserCommand};
 use super::event::AgentEvent;
 use crate::agent_config::{
-    AgentConfig, LLMErrorPolicy, PathSafetyPolicy, ToolCallingMode, ToolErrorPolicy,
+    AgentConfig, LLMErrorPolicy, PathSafetyPolicy, PlanUsageAction, ToolCallingMode,
+    ToolErrorPolicy, UsageLimitPolicy,
 };
 use crate::error::ArkoAgentsError;
 use crate::parsing::{
@@ -27,6 +28,55 @@ use tokio::time::{Duration, sleep as tokio_sleep, timeout};
 use uuid::Uuid;
 
 const OAUTH_REFRESH_MARGIN_SECS: u64 = 5 * 60;
+
+/// A usage-limit wait retries this long after the reported reset, plus up
+/// to [`USAGE_LIMIT_RESET_JITTER`].
+const USAGE_LIMIT_RESET_MARGIN: Duration = Duration::from_secs(1);
+const USAGE_LIMIT_RESET_JITTER: Duration = Duration::from_secs(30);
+
+/// How recovery from a failed model request waits.
+enum RecoveryWait {
+    /// Bounded by the error policy's attempts and the elapsed budget; a
+    /// message about the error is added before the retry.
+    Ordinary,
+    /// Opt-in indefinite capacity recovery (`capacity_retry`).
+    Capacity(crate::agent_config::LLMCapacityRetryConfig),
+    /// Default recovery from short rate limits and capacity errors
+    /// (`rate_limit_retry`).
+    RateLimit(crate::agent_config::LLMRateLimitRetryConfig),
+    /// A plan usage limit, handled under `usage_limit_policy`.
+    UsageLimit,
+}
+
+fn unix_millis_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, duration_millis)
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// `3h 12m`, `12m 5s` or `40s`.
+fn describe_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let (days, hours, minutes, rest) = (
+        seconds / 86_400,
+        seconds % 86_400 / 3_600,
+        seconds % 3_600 / 60,
+        seconds % 60,
+    );
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m {rest}s")
+    } else {
+        format!("{rest}s")
+    }
+}
 
 /// `ToolRejected` reasons for calls a stream announced but never finished.
 const INTERRUPTED_CALL: &str = "The model's response was interrupted before this call finished; it was not run.";
@@ -102,6 +152,9 @@ pub struct AgentLoop {
     /// Ordinary recovery time used before its clock was paused for such a
     /// wait.
     paused_recovery_elapsed: Option<Duration>,
+    /// The plan usage window (and its reset) last reported over the
+    /// threshold, so it is reported once.
+    plan_usage_threshold_reported: Option<(String, Option<u64>)>,
     stop_requested: bool,
     #[cfg(test)]
     scripted_responses: std::sync::Mutex<VecDeque<ScriptedStreamResult>>,
@@ -160,6 +213,7 @@ impl AgentLoop {
             capacity_retry_attempts: 0,
             indefinite_interactions: 0,
             paused_recovery_elapsed: None,
+            plan_usage_threshold_reported: None,
             stop_requested: false,
             #[cfg(test)]
             scripted_responses: std::sync::Mutex::new(VecDeque::new()),
@@ -594,8 +648,13 @@ impl AgentLoop {
         raw_usage: ai::ModelCallUsage,
     ) -> Result<(), ArkoAgentsError> {
         let usage_with_delta = self.task.record_model_call_usage(raw_usage);
+        let plan_usage = usage_with_delta.plan_usage.clone();
         self.emit_event(AgentEvent::ModelCallUsageReported(usage_with_delta))
-            .await
+            .await?;
+        if let Some(plan_usage) = plan_usage {
+            self.emit_event(AgentEvent::PlanUsageReported(plan_usage)).await?;
+        }
+        Ok(())
     }
 
     /// Applies tool result interception if configured and the tool is eligible.
@@ -1389,6 +1448,9 @@ impl AgentLoop {
 
             self.refresh_file_tree_context();
             self.ensure_user_turn_before_request()?;
+            if !self.apply_plan_usage_threshold().await? {
+                continue 'main_loop;
+            }
             self.observe_committed_tool_context();
 
             let llm_client = Arc::clone(&self.llm_client);
@@ -2765,19 +2827,67 @@ impl AgentLoop {
             .await
     }
 
-    /// The opt-in indefinite capacity wait `error` gets, if any.
-    fn capacity_wait(&self, error: &ai::Error) -> Option<crate::agent_config::LLMCapacityRetryConfig> {
+    /// How recovery from `error` waits.
+    fn recovery_wait(&self, error: &ai::Error) -> RecoveryWait {
+        if error.is_usage_limit() {
+            return RecoveryWait::UsageLimit;
+        }
         let retrying = matches!(
             self.task.agent_config.llm_error_policy,
             LLMErrorPolicy::RetryThenInformAgent { .. }
                 | LLMErrorPolicy::RetryThenPauseAndAwaitApproval { .. }
         );
-        self.task
-            .agent_config
-            .llm_retry_config
-            .capacity_retry
-            .clone()
-            .filter(|_| retrying && error.is_capacity_error())
+        if !retrying {
+            return RecoveryWait::Ordinary;
+        }
+        let config = &self.task.agent_config.llm_retry_config;
+        if error.is_capacity_error()
+            && let Some(capacity) = &config.capacity_retry
+        {
+            return RecoveryWait::Capacity(capacity.clone());
+        }
+        if let Some(rate_limit) = &config.rate_limit_retry
+            && (error.is_rate_limit() || error.is_capacity_error())
+        {
+            let too_long = error
+                .retry_after()
+                .is_some_and(|hint| hint > Duration::from_millis(rate_limit.max_wait_ms));
+            if !too_long {
+                return RecoveryWait::RateLimit(rate_limit.clone());
+            }
+            // A rate limit that resets this far off is a usage limit in all
+            // but name.
+            if error.is_rate_limit() {
+                return RecoveryWait::UsageLimit;
+            }
+        }
+        RecoveryWait::Ordinary
+    }
+
+    /// When a usage limit is waited out under
+    /// [`UsageLimitPolicy::WaitUntilReset`], the delay before the retry.
+    fn usage_limit_wait(&self, error: &ai::Error) -> Option<Duration> {
+        let UsageLimitPolicy::WaitUntilReset { max_wait_ms } =
+            self.task.agent_config.llm_retry_config.usage_limit_policy
+        else {
+            return None;
+        };
+        let reset_in = error.retry_after()?;
+        if reset_in > Duration::from_millis(max_wait_ms) {
+            return None;
+        }
+        // A little past the reset, spread so that agents sharing a plan do
+        // not all retry at once.
+        let jitter = if self.task.agent_config.llm_retry_config.jitter {
+            ai::retry::random_sample() % (USAGE_LIMIT_RESET_JITTER.as_millis() as u64 + 1)
+        } else {
+            0
+        };
+        Some(
+            reset_in
+                .saturating_add(USAGE_LIMIT_RESET_MARGIN)
+                .saturating_add(Duration::from_millis(jitter)),
+        )
     }
 
     /// Whether recovering from `error` resends the same request without
@@ -2785,7 +2895,11 @@ impl AgentLoop {
     /// dropped: kept, it would end the retried request on an assistant turn
     /// (a prefill, which Claude 4.6 and later reject).
     fn retries_unchanged(&self, error: &ai::Error) -> bool {
-        self.capacity_wait(error).is_some()
+        match self.recovery_wait(error) {
+            RecoveryWait::Capacity(_) | RecoveryWait::RateLimit(_) => true,
+            RecoveryWait::UsageLimit => self.usage_limit_wait(error).is_some(),
+            RecoveryWait::Ordinary => false,
+        }
     }
 
     /// Records the output a failed stream delivered before it failed with
@@ -2821,11 +2935,14 @@ impl AgentLoop {
     ) -> Result<(), ArkoAgentsError> {
         let mut config = self.task.agent_config.llm_retry_config.clone();
         let policy = self.task.agent_config.llm_error_policy.clone();
-        let capacity = self.capacity_wait(&error);
-        let indefinite_capacity = capacity.is_some();
-        let (attempt, started) = if let Some(capacity) = capacity {
-            // Capacity waits neither consume nor reset ordinary recovery:
-            // its elapsed clock stops while they last, and the requests they
+        let wait = self.recovery_wait(&error);
+        if let RecoveryWait::UsageLimit = wait {
+            return self.handle_usage_limit(error, tool_call_id).await;
+        }
+        let indefinite = !matches!(wait, RecoveryWait::Ordinary);
+        let (attempt, started) = if indefinite {
+            // These waits neither consume nor reset ordinary recovery: its
+            // elapsed clock stops while they last, and the requests they
             // make are not counted as its attempts.
             self.pause_ordinary_recovery_clock();
             self.indefinite_interactions = self.indefinite_interactions.saturating_add(1);
@@ -2833,8 +2950,6 @@ impl AgentLoop {
                 .capacity_recovery_started
                 .get_or_insert_with(tokio::time::Instant::now);
             self.capacity_retry_attempts = self.capacity_retry_attempts.saturating_add(1);
-            config.initial_delay_ms = capacity.initial_delay_ms;
-            config.max_delay_ms = capacity.max_delay_ms;
             (self.capacity_retry_attempts, started)
         } else {
             self.resume_ordinary_recovery_clock();
@@ -2845,6 +2960,17 @@ impl AgentLoop {
                     .get_or_insert_with(tokio::time::Instant::now),
             )
         };
+        match &wait {
+            RecoveryWait::Capacity(capacity) => {
+                config.initial_delay_ms = capacity.initial_delay_ms;
+                config.max_delay_ms = capacity.max_delay_ms;
+            }
+            RecoveryWait::RateLimit(rate_limit) => {
+                config.initial_delay_ms = rate_limit.initial_delay_ms;
+                config.max_delay_ms = rate_limit.max_delay_ms;
+            }
+            RecoveryWait::Ordinary | RecoveryWait::UsageLimit => {}
+        }
         let elapsed = started.elapsed();
         let max_attempts = match policy {
             LLMErrorPolicy::RetryThenInformAgent { max_attempts }
@@ -2854,14 +2980,21 @@ impl AgentLoop {
             LLMErrorPolicy::InformAgentAndContinue => u32::MAX,
             LLMErrorPolicy::PauseAndAwaitApproval => 1,
         };
-        let message = if indefinite_capacity {
-            format!("LLM capacity error (attempt {attempt}; waiting until service recovers): {error}")
-        } else {
-            format!("LLM error (attempt {attempt}/{max_attempts}): {error}")
+        let message = match &wait {
+            RecoveryWait::Capacity(_) => format!(
+                "LLM capacity error (attempt {attempt}; waiting until service recovers): {error}"
+            ),
+            RecoveryWait::RateLimit(_) => {
+                let kind = if error.is_capacity_error() { "capacity error" } else { "rate limit" };
+                format!("LLM {kind} (attempt {attempt}; retrying when the provider allows): {error}")
+            }
+            RecoveryWait::Ordinary | RecoveryWait::UsageLimit => {
+                format!("LLM error (attempt {attempt}/{max_attempts}): {error}")
+            }
         };
         let stop_reason = if !error.is_retryable() {
             Some("Failure requires a request, credential, or configuration change")
-        } else if !indefinite_capacity && attempt >= max_attempts {
+        } else if !indefinite && attempt >= max_attempts {
             Some("Retry attempt limit exhausted")
         } else {
             None
@@ -2871,13 +3004,19 @@ impl AgentLoop {
                 .finish_llm_recovery(format!("{reason}. {message}"), tool_call_id)
                 .await;
         }
+        // A rate limit's own delay is followed as given (plus jitter) rather
+        // than grown by backoff; backoff applies when there is none.
+        let backoff_attempt = match wait {
+            RecoveryWait::RateLimit(_) if error.retry_after().is_some() => 1,
+            _ => attempt,
+        };
         let delay = super::retry::retry_delay(
             &config,
-            attempt,
+            backoff_attempt,
             error.retry_after(),
             ai::retry::random_sample(),
         );
-        if !indefinite_capacity
+        if !indefinite
             && elapsed.saturating_add(delay) >= Duration::from_millis(config.max_elapsed_ms) {
             return self
                 .finish_llm_recovery(
@@ -2903,9 +3042,73 @@ impl AgentLoop {
             elapsed_ms: elapsed.as_millis() as u64,
         })
         .await?;
-        if !indefinite_capacity {
+        if !indefinite {
             self.append_error_recovery_user_message(&format!("An error occurred during the previous LLM call (attempt {attempt}): {error}. Please retry or adjust your approach."))?;
         }
+        self.wait_before_retry(retry_at, tool_call_id).await
+    }
+
+    /// Handles a plan usage limit under
+    /// [`LLMRetryConfig::usage_limit_policy`](crate::agent_config::LLMRetryConfig::usage_limit_policy):
+    /// waits for the reset and retries unchanged (opt-in), or stops
+    /// retrying.
+    async fn handle_usage_limit(
+        &mut self,
+        error: ai::Error,
+        tool_call_id: Option<Uuid>,
+    ) -> Result<(), ArkoAgentsError> {
+        let now_ms = unix_millis_now();
+        let reset_in = error.retry_after();
+        let resets_at_unix_ms =
+            reset_in.map(|delay| now_ms.saturating_add(duration_millis(delay)));
+        let when = match reset_in {
+            Some(delay) => format!("resets in about {}", describe_duration(delay)),
+            None => "reset time not reported".to_string(),
+        };
+        let retry_at = self
+            .usage_limit_wait(&error)
+            .and_then(|delay| tokio::time::Instant::now().checked_add(delay).map(|at| (delay, at)));
+        let Some((delay, retry_at)) = retry_at else {
+            self.emit_event(AgentEvent::UsageLimitReached {
+                resets_at_unix_ms,
+                waiting_until_unix_ms: None,
+                error_message: error.to_string(),
+            })
+            .await?;
+            return self
+                .finish_llm_recovery(format!("Usage limit reached ({when}). {error}"), tool_call_id)
+                .await;
+        };
+        // Like the other unchanged retries, the wait doesn't count against
+        // ordinary recovery.
+        self.pause_ordinary_recovery_clock();
+        self.indefinite_interactions = self.indefinite_interactions.saturating_add(1);
+        self.emit_event(AgentEvent::UsageLimitReached {
+            resets_at_unix_ms,
+            waiting_until_unix_ms: Some(now_ms.saturating_add(duration_millis(delay))),
+            error_message: error.to_string(),
+        })
+        .await?;
+        self.emit_event(AgentEvent::ErrorEncountered {
+            error_message: format!(
+                "Usage limit reached ({when}); waiting {} before retrying. {error}",
+                describe_duration(delay)
+            ),
+            requires_approval_to_retry: false,
+            tool_call_id,
+        })
+        .await?;
+        self.wait_before_retry(retry_at, tool_call_id).await
+    }
+
+    /// Waits until `retry_at` before a retry, handling commands; the task is
+    /// then in progress again. An ordinary recovery deadline that passes
+    /// first ends recovery.
+    async fn wait_before_retry(
+        &mut self,
+        retry_at: tokio::time::Instant,
+        tool_call_id: Option<Uuid>,
+    ) -> Result<(), ArkoAgentsError> {
         let deadline = self.recovery_deadline();
         let sleep = tokio::time::sleep_until(retry_at);
         tokio::pin!(sleep);
@@ -2921,6 +3124,71 @@ impl AgentLoop {
                 _ = &mut sleep => {
                     self.task.set_state(TaskState::InProgress);
                     return Ok(());
+                }
+            }
+        }
+    }
+
+    /// Before a model request: applies the opt-in plan usage threshold
+    /// ([`MonitoringConfig::plan_usage`](crate::agent_config::MonitoringConfig::plan_usage))
+    /// to the most recent report. Returns whether to make the request.
+    async fn apply_plan_usage_threshold(&mut self) -> Result<bool, ArkoAgentsError> {
+        let Some(threshold) = self.task.agent_config.monitoring.plan_usage.clone() else {
+            return Ok(true);
+        };
+        let Some(usage) = self
+            .task
+            .model_call_usage_history
+            .last()
+            .and_then(|call| call.plan_usage.clone())
+        else {
+            return Ok(true);
+        };
+        let Some((window, reached)) = usage
+            .most_used_window()
+            .filter(|(_, window)| window.used_percent >= threshold.percent)
+        else {
+            return Ok(true);
+        };
+        let key = (window.to_string(), reached.resets_at);
+        let first = self.plan_usage_threshold_reported.as_ref() != Some(&key);
+        if first {
+            self.plan_usage_threshold_reported = Some(key);
+            self.emit_event(AgentEvent::PlanUsageThresholdReached {
+                window: window.to_string(),
+                used_percent: reached.used_percent,
+                threshold_percent: threshold.percent,
+                resets_at_unix_ms: reached.resets_at.map(|seconds| seconds.saturating_mul(1000)),
+                action: threshold.action.clone(),
+            })
+            .await?;
+        }
+        match threshold.action {
+            PlanUsageAction::Pause if first => {
+                let message = format!(
+                    "Plan usage reached {:.1}% of the {window} usage-limit window (threshold {:.1}%).",
+                    reached.used_percent, threshold.percent
+                );
+                self.finish_llm_recovery(message, None).await?;
+                Ok(false)
+            }
+            PlanUsageAction::Pause => Ok(true),
+            PlanUsageAction::SlowDown { delay_ms } => {
+                let Some(until) =
+                    tokio::time::Instant::now().checked_add(Duration::from_millis(delay_ms))
+                else {
+                    return Ok(true);
+                };
+                let sleep = tokio::time::sleep_until(until);
+                tokio::pin!(sleep);
+                loop {
+                    tokio::select! {
+                        biased;
+                        command = self.command_receiver.recv() => {
+                            if self.handle_recovery_command(command).await? { return Ok(false); }
+                        }
+                        _ = &mut sleep => return Ok(true),
+                    }
                 }
             }
         }
@@ -3240,6 +3508,10 @@ mod retry_tests;
 #[cfg(test)]
 #[path = "recovery_tests.rs"]
 mod recovery_tests;
+
+#[cfg(test)]
+#[path = "long_run_tests.rs"]
+mod long_run_tests;
 
 #[cfg(test)]
 #[path = "image_tests.rs"]

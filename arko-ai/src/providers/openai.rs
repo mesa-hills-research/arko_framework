@@ -191,6 +191,8 @@ struct ResponseHead {
     served_model: Option<String>,
     /// `x-codex-turn-state` header.
     turn_state: Option<String>,
+    /// The ChatGPT backend's `x-codex-*` plan usage headers.
+    plan_usage: Option<crate::usage::PlanUsage>,
 }
 
 impl ResponseHead {
@@ -207,6 +209,7 @@ impl ResponseHead {
             requested_model: requested_model.to_string(),
             served_model: header("openai-model").or_else(|| header("x-openai-model")),
             turn_state: header(TURN_STATE_HEADER),
+            plan_usage: crate::usage::PlanUsage::from_codex_headers(headers),
         }
     }
 }
@@ -1250,7 +1253,9 @@ impl OpenAIClient {
             Self::with_response_stop_metadata(model_call_usage, response, &output, &streamed.refusals);
         let (served_model, rerouted) =
             Self::served_model(head, response, streamed.created_model.as_deref());
-        let model_call_usage = model_call_usage.with_served_model(served_model, rerouted);
+        let model_call_usage = model_call_usage
+            .with_served_model(served_model, rerouted)
+            .with_plan_usage(head.plan_usage.clone());
 
         if refusal_texts.is_empty() {
             refusal_texts = streamed.refusals.values().cloned().collect();

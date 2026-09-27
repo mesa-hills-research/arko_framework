@@ -313,6 +313,17 @@ pub struct LLMRetryConfig {
     /// None retains bounded recovery. Some retries explicit capacity errors until
     /// success or cancellation, without consuming the ordinary recovery budget.
     pub capacity_retry: Option<LLMCapacityRetryConfig>,
+    /// On by default: short rate limits (HTTP 429, `rate_limit_exceeded`,
+    /// `slow_down`) and, unless `capacity_retry` is set, capacity errors
+    /// (`server_is_overloaded`, ...) are retried after the provider's delay
+    /// (with jitter), until success or cancellation, without consuming the
+    /// ordinary recovery budget or adding to the conversation. `None` (JSON
+    /// `null`) handles them with ordinary bounded recovery.
+    pub rate_limit_retry: Option<LLMRateLimitRetryConfig>,
+    /// What happens when a plan usage limit is reached (ChatGPT
+    /// `usage_limit_reached`, or a rate limit whose reset is further off than
+    /// [`LLMRateLimitRetryConfig::max_wait_ms`]). Pauses by default.
+    pub usage_limit_policy: UsageLimitPolicy,
 }
 
 impl Default for LLMRetryConfig {
@@ -323,14 +334,93 @@ impl Default for LLMRetryConfig {
             max_elapsed_ms: 300_000,
             jitter: true,
             capacity_retry: None,
+            rate_limit_retry: Some(LLMRateLimitRetryConfig::default()),
+            usage_limit_policy: UsageLimitPolicy::default(),
         }
     }
+}
+
+/// Recovery from short rate limits and capacity errors; see
+/// [`LLMRetryConfig::rate_limit_retry`]. The provider's delay (`Retry-After`,
+/// rate-limit reset headers, a delay in the error body) is a minimum, with
+/// jitter added; without one the delay backs off exponentially.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct LLMRateLimitRetryConfig {
+    /// First backoff delay when the provider gives none.
+    pub initial_delay_ms: u64,
+    /// Cap of that backoff.
+    pub max_delay_ms: u64,
+    /// The longest provider delay followed as a short rate limit. A rate
+    /// limit asking for a longer wait is handled as a usage limit
+    /// ([`LLMRetryConfig::usage_limit_policy`]); a capacity error asking for
+    /// one gets ordinary bounded recovery.
+    pub max_wait_ms: u64,
+}
+
+impl Default for LLMRateLimitRetryConfig {
+    fn default() -> Self {
+        Self {
+            initial_delay_ms: 1_000,
+            max_delay_ms: 60_000,
+            max_wait_ms: 15 * 60 * 1000,
+        }
+    }
+}
+
+impl LLMRateLimitRetryConfig {
+    fn validate(&self) -> Result<(), ArkoAgentsError> {
+        if self.initial_delay_ms == 0
+            || self.max_delay_ms < self.initial_delay_ms
+            || !representable_ms(self.max_delay_ms)
+            || !representable_ms(self.max_wait_ms)
+        {
+            return Err(ArkoAgentsError::BuilderError {
+                struct_name: "LLMRateLimitRetryConfig".into(),
+                message: "Rate-limit retry delays must be positive, ordered, and representable.".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// What the runtime does when a plan usage limit is reached; see
+/// [`LLMRetryConfig::usage_limit_policy`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum UsageLimitPolicy {
+    /// Stop retrying and return control like exhausted recovery: the task
+    /// awaits error-recovery approval under the pausing error policies, or
+    /// is interrupted (returned to the host) otherwise.
+    #[default]
+    Pause,
+    /// Opt-in: wait until the limit resets (plus a little jitter) and retry
+    /// unchanged, when the provider says when that is and it is at most
+    /// `max_wait_ms` away; otherwise pause. The wait is cancellable and
+    /// reported with `AgentEvent::UsageLimitReached`.
+    WaitUntilReset { max_wait_ms: u64 },
+}
+
+fn representable_ms(milliseconds: u64) -> bool {
+    std::time::Instant::now()
+        .checked_add(std::time::Duration::from_millis(milliseconds))
+        .is_some()
 }
 
 impl LLMRetryConfig {
     pub fn validate(&self) -> Result<(), ArkoAgentsError> {
         if let Some(capacity) = &self.capacity_retry {
             capacity.validate()?;
+        }
+        if let Some(rate_limit) = &self.rate_limit_retry {
+            rate_limit.validate()?;
+        }
+        if let UsageLimitPolicy::WaitUntilReset { max_wait_ms } = self.usage_limit_policy
+            && !representable_ms(max_wait_ms)
+        {
+            return Err(ArkoAgentsError::BuilderError {
+                struct_name: "UsageLimitPolicy".into(),
+                message: "WaitUntilReset max_wait_ms must be representable.".into(),
+            });
         }
         if self.initial_delay_ms == 0
             || self.max_delay_ms < self.initial_delay_ms
@@ -380,6 +470,62 @@ impl LLMCapacityRetryConfig {
         }
         Ok(())
     }
+}
+
+/// Opt-in monitors of model calls. Nothing is monitored by default.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct MonitoringConfig {
+    /// Act when subscription plan usage (reported by the ChatGPT backend on
+    /// ChatGPT OAuth calls) reaches a percentage of a usage-limit window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_usage: Option<PlanUsageThreshold>,
+}
+
+impl MonitoringConfig {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn validate(&self) -> Result<(), ArkoAgentsError> {
+        if let Some(threshold) = &self.plan_usage {
+            let delay_ok = match threshold.action {
+                PlanUsageAction::SlowDown { delay_ms } => representable_ms(delay_ms),
+                PlanUsageAction::Pause => true,
+            };
+            if !(threshold.percent > 0.0 && threshold.percent <= 100.0) || !delay_ok {
+                return Err(ArkoAgentsError::BuilderError {
+                    struct_name: "PlanUsageThreshold".into(),
+                    message: "percent must be in (0, 100] and a slow-down delay representable.".into(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// See [`MonitoringConfig::plan_usage`]. Checked before each model request
+/// against the most recent report: when the most-used window is at or above
+/// `percent`, `AgentEvent::PlanUsageThresholdReached` is emitted (once per
+/// window and reset) and `action` applies.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlanUsageThreshold {
+    pub percent: f64,
+    #[serde(default)]
+    pub action: PlanUsageAction,
+}
+
+/// What a [`PlanUsageThreshold`] does.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub enum PlanUsageAction {
+    /// Pause once per window and reset, like exhausted recovery (awaiting
+    /// error-recovery approval, or interrupted under the informing error
+    /// policies).
+    #[default]
+    Pause,
+    /// Wait `delay_ms` (cancellable) before every model request while usage
+    /// stays at or above the threshold.
+    SlowDown { delay_ms: u64 },
 }
 
 /// Configuration for error recovery behavior.
@@ -474,6 +620,9 @@ pub struct AgentConfig {
     /// system prompt. When absent, skills are completely disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skills_config: Option<SkillsConfig>,
+    /// Opt-in monitors of model calls; see [`MonitoringConfig`].
+    #[serde(default, skip_serializing_if = "MonitoringConfig::is_empty")]
+    pub monitoring: MonitoringConfig,
 }
 
 impl AgentConfig {
@@ -574,6 +723,7 @@ pub struct AgentConfigBuilder {
     user_command_timeout_seconds: Option<u64>,
     user_reminder: Option<UserReminder>,
     skills_config: Option<SkillsConfig>,
+    monitoring: Option<MonitoringConfig>,
 }
 
 impl AgentConfigBuilder {
@@ -659,10 +809,18 @@ impl AgentConfigBuilder {
         self
     }
 
+    /// Sets the opt-in model-call monitors.
+    pub fn monitoring(mut self, config: MonitoringConfig) -> Self {
+        self.monitoring = Some(config);
+        self
+    }
+
     /// Builds the `AgentConfig`, returning an error if required fields are missing.
     pub fn build(self) -> Result<AgentConfig, ArkoAgentsError> {
         let llm_retry_config = self.llm_retry_config.unwrap_or_default();
         llm_retry_config.validate()?;
+        let monitoring = self.monitoring.unwrap_or_default();
+        monitoring.validate()?;
         Ok(AgentConfig {
             id: self.id.ok_or_else(|| ArkoAgentsError::BuilderError {
                 struct_name: "AgentConfig".into(),
@@ -700,6 +858,7 @@ impl AgentConfigBuilder {
             user_command_timeout_seconds: self.user_command_timeout_seconds,
             user_reminder: self.user_reminder,
             skills_config: self.skills_config,
+            monitoring,
         })
     }
 }

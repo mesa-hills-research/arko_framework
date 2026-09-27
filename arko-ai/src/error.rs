@@ -15,6 +15,11 @@ pub enum RetryClass {
     /// An explicit provider capacity signal (overloaded / unavailable). Also
     /// retryable; callers may choose a longer wait.
     Capacity,
+    /// A plan usage limit (ChatGPT `usage_limit_reached`): requests fail
+    /// until the limit resets, typically hours or days later
+    /// ([`Error::retry_after`] holds the time left when the provider said).
+    /// Retryable after that wait, not within a short recovery budget.
+    UsageLimit,
 }
 
 impl RetryClass {
@@ -211,6 +216,21 @@ const CODE_STATUSES: &[(&str, u16)] = &[
     ("DEADLINE_EXCEEDED", 504),
 ];
 
+/// Plan usage limits (the ChatGPT backend's HTTP 429 `usage_limit_reached`,
+/// with the reset time in `resets_at`; codex-rs `api_bridge.rs`).
+const USAGE_LIMIT_CODES: &[&str] = &["usage_limit_reached"];
+
+/// Short request-rate limits besides HTTP 429 itself: OpenAI/Codex
+/// `rate_limit_exceeded` and `slow_down` (sent with a 503 or on a stream
+/// error), and the 429 names of other providers.
+const RATE_LIMIT_CODES: &[&str] = &[
+    "rate_limit_exceeded",
+    "slow_down",
+    "too_many_requests",
+    "rate_limit_error",
+    "RESOURCE_EXHAUSTED",
+];
+
 fn code_status(code: &str) -> Option<u16> {
     CODE_STATUSES
         .iter()
@@ -321,6 +341,9 @@ impl Error {
                 if code.is_some_and(|code| PERMANENT_CODES.contains(&code)) {
                     return RetryClass::Permanent;
                 }
+                if code.is_some_and(|code| USAGE_LIMIT_CODES.contains(&code)) {
+                    return RetryClass::UsageLimit;
+                }
                 let capacity = code.is_some_and(|code| CAPACITY_CODES.contains(&code));
                 // Without an HTTP status (an error reported after the 200), a
                 // documented code stands in for it.
@@ -377,6 +400,33 @@ impl Error {
     /// Explicit temporary capacity signals, excluding permanent status/code failures.
     pub fn is_capacity_error(&self) -> bool {
         self.retry_class() == RetryClass::Capacity
+    }
+
+    /// A plan usage limit; see [`RetryClass::UsageLimit`].
+    pub fn is_usage_limit(&self) -> bool {
+        self.retry_class() == RetryClass::UsageLimit
+    }
+
+    /// A short request-rate limit: a retryable HTTP 429 (or a 429 code on an
+    /// error reported after the response started), or `rate_limit_exceeded`
+    /// / `slow_down`. Such errors are [`RetryClass::Transient`]; this
+    /// refines that class. Quota walls (`insufficient_quota`, ...) are
+    /// permanent and plan usage limits are [`RetryClass::UsageLimit`], so
+    /// neither is a rate limit. [`retry_after`](Self::retry_after) holds the
+    /// provider's delay when it sent one.
+    pub fn is_rate_limit(&self) -> bool {
+        if self.retry_class() != RetryClass::Transient {
+            return false;
+        }
+        match self {
+            Self::ProviderError { status, code, .. } => {
+                let code = code.as_deref();
+                code.is_some_and(|code| RATE_LIMIT_CODES.contains(&code))
+                    || status.or_else(|| code.and_then(code_status)) == Some(429)
+            }
+            Self::HttpError(error) => error.status().is_some_and(|status| status.as_u16() == 429),
+            _ => false,
+        }
     }
 
     /// Whether another model/refresh request may recover without changing configuration.
@@ -1060,6 +1110,46 @@ mod tests {
         // A capped hint can be added to the current time.
         let _ = std::time::Instant::now() + cap;
         let _ = std::time::SystemTime::now() + cap;
+    }
+
+    #[test]
+    fn plan_usage_limits_and_short_rate_limits_are_told_apart() {
+        // The ChatGPT backend's usage limit: a 429 with the reset time.
+        let resets_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3 * 3600;
+        let body = format!(
+            r#"{{"error":{{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"pro","resets_at":{resets_at}}}}}"#
+        );
+        let error = Error::provider_error("OpenAI request failed", Some(429), None, &body);
+        assert_eq!(error.retry_class(), RetryClass::UsageLimit);
+        assert!(error.is_usage_limit() && error.is_retryable());
+        assert!(!error.is_rate_limit() && !error.is_capacity_error());
+        let wait = error.retry_after().unwrap();
+        assert!(wait > Duration::from_secs(3 * 3600 - 60) && wait <= Duration::from_secs(3 * 3600));
+
+        for (status, body) in [
+            (Some(429), r#"{"error":{"message":"Rate limit exceeded"}}"#),
+            (Some(503), r#"{"error":{"code":"slow_down","message":"Slow down"}}"#),
+            (None, r#"{"error":{"code":"rate_limit_exceeded","message":"Try again in 11s"}}"#),
+            (None, r#"{"type":"error","error":{"type":"rate_limit_error"}}"#),
+        ] {
+            let error = Error::provider_error("test", status, Some(Duration::from_secs(36)), body);
+            assert!(error.is_rate_limit(), "{body}");
+            assert_eq!(error.retry_class(), RetryClass::Transient, "{body}");
+            assert!(!error.is_usage_limit());
+        }
+        // Quota walls, capacity signals and other outages are not rate limits.
+        for (status, body) in [
+            (Some(429), r#"{"error":{"code":"insufficient_quota"}}"#),
+            (None, r#"{"error":{"code":"server_is_overloaded"}}"#),
+            (Some(503), "{}"),
+            (Some(400), r#"{"error":{"code":"rate_limit_exceeded"}}"#),
+        ] {
+            assert!(!Error::provider_error("test", status, None, body).is_rate_limit(), "{body}");
+        }
     }
 
     #[test]

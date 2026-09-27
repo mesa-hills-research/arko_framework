@@ -1,5 +1,6 @@
+use crate::agent_config::PlanUsageAction;
 use crate::task::{PendingToolCallInfo, TaskState};
-use arko_ai::{ModelCallUsage, Refusal, UsageInfo};
+use arko_ai::{ModelCallUsage, PlanUsage, Refusal, UsageInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -120,4 +121,36 @@ pub enum AgentEvent {
     /// and `input_delta_from_previous_call` (computed by the agent runtime).
     /// Emitted once per LLM call, immediately after `UsageReported`.
     ModelCallUsageReported(ModelCallUsage),
+    /// Subscription plan usage the provider reported with a model call (the
+    /// ChatGPT backend on ChatGPT OAuth calls; see
+    /// [`ModelCallUsage::plan_usage`]). Emitted after
+    /// `ModelCallUsageReported` for every call that reports it.
+    PlanUsageReported(PlanUsage),
+    /// Plan usage reached the opt-in threshold
+    /// ([`MonitoringConfig::plan_usage`](crate::agent_config::MonitoringConfig::plan_usage)),
+    /// before a model request. Reported once per window and reset; `action`
+    /// follows.
+    PlanUsageThresholdReached {
+        /// `"primary"` or `"secondary"`.
+        window: String,
+        used_percent: f64,
+        threshold_percent: f64,
+        /// When the window resets, in Unix milliseconds, when reported.
+        resets_at_unix_ms: Option<u64>,
+        action: PlanUsageAction,
+    },
+    /// A plan usage limit was reached (ChatGPT `usage_limit_reached`, or a
+    /// rate limit whose reset is further off than
+    /// [`LLMRateLimitRetryConfig::max_wait_ms`](crate::agent_config::LLMRateLimitRetryConfig::max_wait_ms)).
+    /// Under [`UsageLimitPolicy::WaitUntilReset`](crate::agent_config::UsageLimitPolicy::WaitUntilReset)
+    /// the runtime waits until `waiting_until_unix_ms` and retries; otherwise
+    /// it stops retrying (a task state change and `ErrorEncountered` follow).
+    UsageLimitReached {
+        /// When the limit resets, in Unix milliseconds, when the provider
+        /// said.
+        resets_at_unix_ms: Option<u64>,
+        /// When the runtime retries, in Unix milliseconds, if it waits.
+        waiting_until_unix_ms: Option<u64>,
+        error_message: String,
+    },
 }
