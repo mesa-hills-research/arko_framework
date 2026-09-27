@@ -24,6 +24,11 @@ struct Fake {
     /// When > 1, each chunk call waits (bounded) until this many calls have overlapped,
     /// so concurrency assertions don't depend on how fast the host schedules work.
     overlap: usize,
+    /// Chunk calls that return a billed response the backend rejects as a
+    /// wrong tool call (retried as transient), before normal replies.
+    rejected_chunks: AtomicUsize,
+    /// Report a NaN cost with each chunk reply.
+    nan_cost: bool,
 }
 impl Fake {
     fn new() -> Self {
@@ -43,6 +48,8 @@ impl Fake {
             invalid_embedding: AtomicUsize::new(0),
             invalid_repair_replies: AtomicUsize::new(0),
             overlap: 0,
+            rejected_chunks: AtomicUsize::new(0),
+            nan_cost: false,
         }
     }
 }
@@ -60,6 +67,18 @@ impl Backend for Fake {
         }
         tokio::time::sleep(self.delay).await;
         self.active.fetch_sub(1, Ordering::SeqCst);
+        if self
+            .rejected_chunks
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            let rejection = arko_ai::Error::UnexpectedToolCalls {
+                expected: r.tool.clone(),
+                stop_reason: arko_ai::StopReason::EndTurn,
+                found: vec![],
+            };
+            return Err(Error::from(rejection).with_usage(chunk_usage()));
+        }
         self.finished.fetch_add(1, Ordering::SeqCst);
         let mut out = serde_json::Map::new();
         for (id, _) in r.schema["properties"].as_object().unwrap() {
@@ -91,10 +110,15 @@ impl Backend for Fake {
                 out.insert(id.clone(), json!({"cuts":[]}));
             }
         }
+        let mut usage = chunk_usage();
+        if self.nan_cost {
+            usage.total_cost = f64::NAN;
+            usage.billed_cost = Some(f64::NAN);
+        }
         Ok(ModelReply {
             value: Value::Object(out),
             usage: json!({}),
-            usage_info: Some(chunk_usage()),
+            usage_info: Some(usage),
         })
     }
     async fn embed(&self, texts: Vec<String>, query: bool) -> Result<VectorReply> {
@@ -407,6 +431,7 @@ async fn judged_search_rejects_invalid_partitions_and_never_hides_provider_error
             transient: true,
             retry_after: Some(Duration::from_secs(2)),
             source: None,
+            usage: None,
         })
     });
     assert!(matches!(
@@ -1000,6 +1025,110 @@ async fn repair_is_local_and_accepted_work_survives_pause_and_restart() {
     );
     assert_eq!(usage.unreported_calls, 0);
     assert!((usage.billed() - 0.00006 * embedded as f64).abs() < 1e-12);
+}
+/// Builds one small file with `fake` and returns the settled status and the
+/// chunk request's artifact.
+async fn build_one_file(fake: Arc<Fake>, config: Config) -> (JobStatus, Vec<Event>, Value) {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+    let index = ArkoIndex::open(db.path().join("i.db"), fake, config)
+        .await
+        .unwrap();
+    let job = index
+        .start_build(BuildSpec::new("test", root.path()))
+        .await
+        .unwrap();
+    let status = settle(&index, &job.job).await;
+    let events = index.events(&job.job, 0, 1000).await.unwrap();
+    let finished: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == "request_finished")
+        .collect();
+    assert_eq!(finished.len(), 1);
+    let artifact = index
+        .request_artifact(&job.job, finished[0].detail["artifact"].as_i64().unwrap())
+        .await
+        .unwrap();
+    (status, events, artifact)
+}
+#[tokio::test]
+async fn rejected_chunk_responses_count_when_a_retry_succeeds() {
+    let fake = Arc::new(Fake::new());
+    fake.rejected_chunks.store(1, Ordering::SeqCst);
+    let (status, events, artifact) = build_one_file(fake.clone(), config(&fake)).await;
+    assert_eq!(status.phase, "ready", "{:?}", status.problem);
+    assert_eq!(fake.calls.lock().unwrap().len(), 2);
+    // Both billed responses count; only the second was accepted.
+    let usage = &status.usage;
+    assert_eq!((usage.chunk_calls, usage.rejected_calls), (1, 1));
+    let chunking = usage.chunking.as_ref().unwrap();
+    assert_eq!(chunking.input_tokens, 200);
+    assert_eq!(chunking.total_cost, 0.5);
+    let finished = events
+        .iter()
+        .find(|e| e.kind == "request_finished")
+        .unwrap();
+    assert_eq!(finished.detail["usage"]["input_tokens"], 100);
+    assert_eq!(finished.detail["rejected_usage"][0]["input_tokens"], 100);
+    let failures = artifact["response"]["usage"]["retry_failures"]
+        .as_array()
+        .unwrap();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0]["usage"]["input_tokens"], 100);
+}
+#[tokio::test]
+async fn rejected_chunk_responses_count_when_retries_run_out() {
+    let fake = Arc::new(Fake::new());
+    fake.rejected_chunks.store(usize::MAX, Ordering::SeqCst);
+    let config = Config {
+        max_transient_attempts: 2,
+        ..config(&fake)
+    };
+    let (status, events, artifact) = build_one_file(fake.clone(), config).await;
+    assert_eq!(status.phase, "blocked");
+    assert_eq!(fake.calls.lock().unwrap().len(), 2);
+    let usage = &status.usage;
+    assert_eq!((usage.chunk_calls, usage.rejected_calls), (0, 2));
+    assert_eq!(usage.chunking.as_ref().unwrap().input_tokens, 200);
+    let finished = events
+        .iter()
+        .find(|e| e.kind == "request_finished")
+        .unwrap();
+    assert!(finished.detail["usage"].is_null());
+    assert_eq!(
+        finished.detail["rejected_usage"].as_array().unwrap().len(),
+        2
+    );
+    // The failed request's artifact keeps every attempt with its usage.
+    assert!(artifact["response"].is_null());
+    let failed: Vec<_> = artifact["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["phase"] == "failed")
+        .collect();
+    assert_eq!(failed.len(), 2);
+    assert!(
+        failed
+            .iter()
+            .all(|a| a["detail"]["usage"]["input_tokens"] == 100)
+    );
+}
+#[tokio::test]
+async fn non_finite_costs_from_a_backend_do_not_break_status() {
+    let mut fake = Fake::new();
+    fake.nan_cost = true;
+    let fake = Arc::new(fake);
+    let (status, _, artifact) = build_one_file(fake.clone(), config(&fake)).await;
+    assert_eq!(status.phase, "ready", "{:?}", status.problem);
+    let chunking = status.usage.chunking.as_ref().unwrap();
+    assert_eq!(chunking.input_tokens, 100);
+    assert_eq!(chunking.total_cost, 0.0);
+    assert_eq!(chunking.billed(), 0.0);
+    // The saved reply loads as a ModelReply again.
+    let reply: ModelReply = serde_json::from_value(artifact["response"].clone()).unwrap();
+    assert_eq!(reply.usage_info.unwrap().total_cost, 0.0);
 }
 #[tokio::test]
 async fn usage_totals_load_from_databases_saved_before_usage_tracking() {

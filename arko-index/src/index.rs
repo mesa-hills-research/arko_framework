@@ -37,7 +37,7 @@ pub struct JobStatus {
     #[serde(alias = "active_luna")]
     pub active_chunking: usize,
     pub active_embeddings: usize,
-    /// Token usage and cost of this job's completed provider calls so far.
+    /// Token usage and cost of the provider responses this job received so far.
     #[serde(default)]
     pub usage: JobUsage,
 }
@@ -324,9 +324,14 @@ impl ArkoIndex {
             .await
     }
     /// Detailed saved model request/response; never included in routine status/search.
+    /// `attempts` lists the request's attempt events in order (starts,
+    /// failures with the usage of rejected responses, retry waits,
+    /// completion), for failed requests too.
     pub async fn request_artifact(&self, job: &str, id: i64) -> Result<Value> {
         let job = job.to_owned();
-        self.inner.db.call(move|c|{let(request,response,error):(String,Option<String>,Option<String>)=required(c.query_row("SELECT request,response,error FROM requests WHERE job=?1 AND id=?2",params![job,id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?,"request")?;Ok(json!({"request":decode::<Value>(&request)?,"response":response.map(|v|decode::<Value>(&v)).transpose()?,"error":error}))}).await
+        self.inner.db.call(move|c|{let(request,response,error):(String,Option<String>,Option<String>)=required(c.query_row("SELECT request,response,error FROM requests WHERE job=?1 AND id=?2",params![job,id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?,"request")?;
+            let attempts:Vec<String>=c.prepare("SELECT json_extract(detail,'$.event') FROM events WHERE job=?1 AND kind='request_attempt' AND json_extract(detail,'$.artifact')=?2 ORDER BY sequence")?.query_map(params![job,id],|r|r.get(0))?.collect::<std::result::Result<_,_>>()?;
+            Ok(json!({"request":decode::<Value>(&request)?,"response":response.map(|v|decode::<Value>(&v)).transpose()?,"error":error,"attempts":attempts.iter().map(|a|decode::<Value>(a)).collect::<Result<Vec<_>>>()?}))}).await
     }
     /// Coalesced additions, modifications, deletions and unambiguous moves.
     pub async fn changes(&self, job: &str) -> Result<Vec<crate::FileChange>> {
@@ -422,9 +427,9 @@ impl ArkoIndex {
                 let (progress_tx,mut progress_rx)=tokio::sync::mpsc::unbounded_channel();
                 let call=this.inner.chunking.call_tracked(Operation::Chunk(request),repair.is_none(),&control,Some(progress_tx));
                 tokio::pin!(call);
-                let result=loop {
+                let outcome=loop {
                     tokio::select! {
-                        result=&mut call => break result,
+                        outcome=&mut call => break outcome,
                         Some(event)=progress_rx.recv() => {
                             this.inner.db.event(&job,"request_attempt",json!({"artifact":id,"repair":repair.is_some(),"event":event})).await?;
                         }
@@ -433,12 +438,15 @@ impl ArkoIndex {
                 while let Ok(event)=progress_rx.try_recv() {
                     this.inner.db.event(&job,"request_attempt",json!({"artifact":id,"repair":repair.is_some(),"event":event})).await?;
                 }
+                let (result, rejected) = (outcome.result, outcome.rejected);
                 let (response, usage) = match &result {
                     Ok(Reply::Chunk(r)) => (Some(encode(r)?), Some(r.usage_info.clone())),
                     _ => (None, None),
                 };
                 let error = result.as_ref().err().map(ToString::to_string);
-                let finished = encode(&json!({"artifact":id,"repair":repair.is_some(),"usage":usage.clone().flatten()}))?;
+                // `usage` is the accepted reply's; `rejected_usage` lists the
+                // billed responses the backend rejected, retried or final.
+                let finished = encode(&json!({"artifact":id,"repair":repair.is_some(),"usage":usage.clone().flatten(),"rejected_usage":rejected}))?;
                 let j = job.clone();
                 // The saved reply, its share of the job's usage and the event
                 // are recorded together.
@@ -450,8 +458,15 @@ impl ArkoIndex {
                             "UPDATE requests SET response=?2,error=?3 WHERE id=?1",
                             params![id, response, error],
                         )?;
-                        if let Some(usage) = &usage {
-                            add_job_usage(&tx, &j, |total| total.record_chunk(usage.as_ref()))?;
+                        if usage.is_some() || !rejected.is_empty() {
+                            add_job_usage(&tx, &j, |total| {
+                                for usage in &rejected {
+                                    total.record_rejected_chunk(usage);
+                                }
+                                if let Some(usage) = &usage {
+                                    total.record_chunk(usage.as_ref());
+                                }
+                            })?;
                         }
                         tx.execute(
                             "INSERT INTO events(job,kind,detail) VALUES(?1,'request_finished',?2)",
@@ -683,19 +698,20 @@ impl ArkoIndex {
         for bin in bins {
             let (scheduler, control) = (self.inner.embeddings.clone(), control.clone());
             requests.push(async move {
-                let result = scheduler
+                let outcome = scheduler
                     .call(
                         Operation::Embed(bin.iter().map(|p| p.text.clone()).collect(), false),
                         true,
                         &control,
                     )
                     .await;
-                (bin, result)
+                (bin, outcome)
             });
         }
         let mut failure = None;
-        while let Some((bin, result)) = requests.next().await {
-            let result = match result {
+        while let Some((bin, outcome)) = requests.next().await {
+            let rejected = outcome.rejected;
+            let result = match outcome.result {
                 Ok(Reply::Embed(result)) => Ok(result),
                 Ok(_) => Err(error::invalid("unexpected embedding response")),
                 Err(e) => Err(e),
@@ -717,11 +733,11 @@ impl ArkoIndex {
                     let (kind, detail) = match &vectors {
                         Ok(_) => (
                             "embedded",
-                            json!({"billed_tokens":result.billed_tokens,"reserved_tokens":estimated,"usage":result.usage_info}),
+                            json!({"billed_tokens":result.billed_tokens,"reserved_tokens":estimated,"usage":result.usage_info,"rejected_usage":rejected}),
                         ),
                         Err(e) => (
                             "embedding_rejected",
-                            json!({"error":e.to_string(),"billed_tokens":result.billed_tokens,"usage":result.usage_info}),
+                            json!({"error":e.to_string(),"billed_tokens":result.billed_tokens,"usage":result.usage_info,"rejected_usage":rejected}),
                         ),
                     };
                     let (j, usage, detail) = (job.to_owned(), result.usage_info, encode(&detail)?);
@@ -746,7 +762,12 @@ impl ArkoIndex {
                                     params![p.id, profile, p.tokens, blob],
                                 )?;
                             }
-                            add_job_usage(&tx, &j, |total| total.record_embedding(usage.as_ref()))?;
+                            add_job_usage(&tx, &j, |total| {
+                                for usage in &rejected {
+                                    total.record_rejected_embedding(usage);
+                                }
+                                total.record_embedding(usage.as_ref());
+                            })?;
                             tx.execute(
                                 "INSERT INTO events(job,kind,detail) VALUES(?1,?2,?3)",
                                 params![j, kind, detail],
@@ -756,7 +777,23 @@ impl ArkoIndex {
                         })
                         .await?;
                 }
-                Err(e) => failure = Some(e),
+                Err(e) => {
+                    // Responses the backend rejected before the request failed.
+                    if !rejected.is_empty() {
+                        let j = job.to_owned();
+                        self.inner
+                            .db
+                            .call(move |c| {
+                                add_job_usage(c, &j, |total| {
+                                    for usage in &rejected {
+                                        total.record_rejected_embedding(usage);
+                                    }
+                                })
+                            })
+                            .await?;
+                    }
+                    failure = Some(e);
+                }
             }
         }
         control.check()?;

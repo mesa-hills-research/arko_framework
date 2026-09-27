@@ -107,13 +107,21 @@ pub(crate) fn required<T>(v: Option<T>, what: &str) -> Result<T> {
     v.ok_or_else(|| invalid(format!("unknown {what}")))
 }
 /// A job's usage totals. Jobs recorded before usage was tracked have none.
+/// Unreadable totals (such as a non-finite cost saved as `null` before costs
+/// were sanitized) are logged and restart from zero rather than failing the
+/// job's status and every later update.
 pub(crate) fn job_usage(c: &Connection, job: &str) -> Result<JobUsage> {
     let saved: Option<String> = c
         .query_row("SELECT usage FROM job_usage WHERE job=?1", [job], |r| {
             r.get(0)
         })
         .optional()?;
-    saved.map_or_else(|| Ok(JobUsage::default()), |usage| decode(&usage))
+    Ok(saved.map_or_else(JobUsage::default, |usage| {
+        decode(&usage).unwrap_or_else(|error| {
+            log::warn!("job {job}: ignoring unreadable usage totals: {error}");
+            JobUsage::default()
+        })
+    }))
 }
 /// Adds to a job's usage totals, in the caller's transaction.
 pub(crate) fn add_job_usage(
@@ -145,3 +153,38 @@ CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY AUTOINCREMENT,job TEX
 CREATE TABLE IF NOT EXISTS job_usage(job TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,usage TEXT NOT NULL);
 PRAGMA user_version=1;
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unreadable_or_non_finite_usage_never_blocks_status_or_updates() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute_batch(
+            "INSERT INTO indexes VALUES('i','test','{}',NULL,'{}');
+             INSERT INTO jobs(id,index_id,phase,config) VALUES('j','i','chunking','{}');",
+        )
+        .unwrap();
+        // How a NaN cost used to be saved: serde_json writes it as null.
+        let broken = r#"{"chunk_calls":1,"chunking":{"input_tokens":1,"output_tokens":1,"input_cost":null,"output_cost":0.0,"total_cost":null}}"#;
+        c.execute("INSERT INTO job_usage VALUES('j',?1)", [broken])
+            .unwrap();
+        assert_eq!(job_usage(&c, "j").unwrap(), JobUsage::default());
+        let nan = arko_ai::UsageInfo {
+            input_cost: f64::NAN,
+            total_cost: f64::INFINITY,
+            ..arko_ai::UsageInfo::new(100, 10)
+        };
+        for _ in 0..2 {
+            add_job_usage(&c, "j", |usage| usage.record_chunk(Some(&nan))).unwrap();
+        }
+        let usage = job_usage(&c, "j").unwrap();
+        assert_eq!(usage.chunk_calls, 2);
+        let chunking = usage.chunking.unwrap();
+        assert_eq!(chunking.input_tokens, 200);
+        assert_eq!((chunking.input_cost, chunking.total_cost), (0.0, 0.0));
+        assert_eq!(job_usage(&c, "unknown").unwrap(), JobUsage::default());
+    }
+}

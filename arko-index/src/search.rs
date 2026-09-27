@@ -245,7 +245,8 @@ impl ArkoIndex {
                             false,
                             &Control::new(),
                         )
-                        .await?
+                        .await
+                        .result?
                     {
                         Reply::Embed(mut response) if response.vectors.len() == 1 => {
                             packing::normalize(

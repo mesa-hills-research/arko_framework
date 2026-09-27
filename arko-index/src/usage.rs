@@ -2,31 +2,43 @@
 use arko_ai::UsageInfo;
 use serde::{Deserialize, Serialize};
 
-/// Token usage and cost of one job's completed provider calls: chunk-model
-/// replies (initial requests and repairs) and embedding requests, summed
-/// across pauses and resumes. [`JobStatus::usage`](crate::JobStatus::usage)
+/// Token usage and cost of one job's provider calls: chunk-model replies
+/// (initial requests and repairs) and embedding requests, summed across
+/// retries, pauses and resumes. [`JobStatus::usage`](crate::JobStatus::usage)
 /// reports it; `request_finished`, `embedded` and `embedding_rejected` events
 /// carry each call's share.
 ///
-/// Calls report usage when the backend returns a reply, including embedding
-/// replies whose vectors the index then rejects. Failed attempts, including
-/// chunk responses the backend rejected (refusals, token limits, a wrong tool
-/// call), and calls cancelled mid-flight are not included, although the
-/// provider may have billed them. Search query embeddings belong to no job.
+/// A call counts when the provider returned a response: accepted replies,
+/// embedding replies whose vectors the index then rejects, and responses the
+/// backend rejected and reported with [`Error::with_usage`](crate::Error::with_usage)
+/// (for [`ArkoBackend`](crate::backend::ArkoBackend): refusals, token limits,
+/// a missing, extra or malformed tool call), including every retried attempt.
+/// Failures without a response (connection errors, provider error statuses,
+/// streams cut off mid-response) and calls cancelled mid-flight carry no
+/// usage and are not included, although a provider may bill some of them.
+/// Search query embeddings belong to no job.
+///
+/// Non-finite costs a custom backend reports are counted as zero.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct JobUsage {
-    /// Completed chunk-model calls.
+    /// Chunk-model replies the backend accepted.
     pub chunk_calls: usize,
-    /// Summed usage of the chunk-model calls that reported it.
+    /// Summed usage of the chunk-model responses that reported it, accepted
+    /// and rejected.
     pub chunking: Option<UsageInfo>,
-    /// Completed embedding requests.
+    /// Embedding replies the backend accepted.
     pub embedding_calls: usize,
-    /// Summed usage of the embedding requests that reported it.
+    /// Summed usage of the embedding responses that reported it, accepted and
+    /// rejected.
     pub embedding: Option<UsageInfo>,
-    /// Completed calls whose backend reported no usage; their tokens and
+    /// Accepted replies whose backend reported no usage; their tokens and
     /// cost are unknown and not included.
     pub unreported_calls: usize,
+    /// Responses the backend rejected, with their usage, whether the request
+    /// was then retried or failed. Their usage is in `chunking` or
+    /// `embedding`; they are not in `chunk_calls` or `embedding_calls`.
+    pub rejected_calls: usize,
 }
 
 impl JobUsage {
@@ -50,23 +62,73 @@ impl JobUsage {
 
     pub(crate) fn record_chunk(&mut self, usage: Option<&UsageInfo>) {
         self.chunk_calls = self.chunk_calls.saturating_add(1);
-        add(&mut self.chunking, usage, &mut self.unreported_calls);
+        match usage {
+            Some(usage) => add(&mut self.chunking, usage),
+            None => self.unreported_calls = self.unreported_calls.saturating_add(1),
+        }
     }
 
     pub(crate) fn record_embedding(&mut self, usage: Option<&UsageInfo>) {
         self.embedding_calls = self.embedding_calls.saturating_add(1);
-        add(&mut self.embedding, usage, &mut self.unreported_calls);
+        match usage {
+            Some(usage) => add(&mut self.embedding, usage),
+            None => self.unreported_calls = self.unreported_calls.saturating_add(1),
+        }
+    }
+
+    pub(crate) fn record_rejected_chunk(&mut self, usage: &UsageInfo) {
+        self.rejected_calls = self.rejected_calls.saturating_add(1);
+        add(&mut self.chunking, usage);
+    }
+
+    pub(crate) fn record_rejected_embedding(&mut self, usage: &UsageInfo) {
+        self.rejected_calls = self.rejected_calls.saturating_add(1);
+        add(&mut self.embedding, usage);
     }
 }
 
-fn add(total: &mut Option<UsageInfo>, usage: Option<&UsageInfo>, unreported: &mut usize) {
-    match (total.as_mut(), usage) {
-        (_, None) => *unreported = unreported.saturating_add(1),
-        (Some(total), Some(usage)) => *total += usage,
+fn add(total: &mut Option<UsageInfo>, usage: &UsageInfo) {
+    let usage = finite(usage);
+    match total {
+        Some(total) => {
+            *total += &usage;
+            *total = finite(total);
+        }
         // Summing keeps the first call's billing kind (a default total would
         // turn it into Mixed) and its billed cost.
-        (None, Some(usage)) => *total = Some(std::iter::once(usage).sum()),
+        None => *total = Some(std::iter::once(&usage).sum()),
     }
+}
+
+/// `usage` with every non-finite cost set to zero. JSON has no NaN or
+/// infinity: serde_json writes them as `null`, which then fails to load.
+pub(crate) fn finite(usage: &UsageInfo) -> UsageInfo {
+    let zero_if_not_finite = |cost: &mut f64| {
+        if !cost.is_finite() {
+            *cost = 0.0;
+        }
+    };
+    let mut usage = usage.clone();
+    for cost in [
+        &mut usage.input_cost,
+        &mut usage.output_cost,
+        &mut usage.total_cost,
+    ] {
+        zero_if_not_finite(cost);
+    }
+    for cost in [
+        &mut usage.cache_read_cost,
+        &mut usage.cache_write_cost,
+        &mut usage.reported_cost,
+        &mut usage.upstream_cost,
+        &mut usage.billed_cost,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        zero_if_not_finite(cost);
+    }
+    usage
 }
 
 #[cfg(test)]
@@ -125,7 +187,63 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(usage.chunk_calls, 2);
+        assert_eq!(usage.rejected_calls, 0);
         // A record from before billing kinds existed bills its estimate.
         assert_eq!(usage.billed(), 0.25);
+    }
+
+    #[test]
+    fn rejected_responses_add_to_the_totals_but_not_the_accepted_calls() {
+        let mut usage = JobUsage::default();
+        let call = UsageInfo::new(100, 10).with_reported_cost(0.5);
+        usage.record_rejected_chunk(&call);
+        usage.record_rejected_chunk(&call);
+        usage.record_chunk(Some(&call));
+        usage.record_rejected_embedding(&UsageInfo::for_embedding(1_000, 1.0));
+        assert_eq!(
+            (
+                usage.chunk_calls,
+                usage.embedding_calls,
+                usage.rejected_calls
+            ),
+            (1, 0, 3)
+        );
+        assert_eq!(usage.chunking.as_ref().unwrap().input_tokens, 300);
+        assert_eq!(usage.embedding.as_ref().unwrap().input_tokens, 1_000);
+        assert!((usage.billed() - 1.501).abs() < 1e-12);
+    }
+
+    #[test]
+    fn non_finite_costs_count_as_zero_and_totals_still_save_and_load() {
+        let broken = UsageInfo {
+            input_cost: f64::NAN,
+            output_cost: f64::INFINITY,
+            cache_read_cost: Some(f64::NEG_INFINITY),
+            total_cost: f64::NAN,
+            reported_cost: Some(f64::NAN),
+            ..UsageInfo::new(100, 10)
+        }
+        .with_billing(BillingKind::ProviderReported);
+        let mut usage = JobUsage::default();
+        usage.record_chunk(Some(&broken));
+        usage.record_rejected_chunk(&broken);
+        usage.record_rejected_chunk(&UsageInfo {
+            total_cost: f64::MAX,
+            billed_cost: Some(f64::MAX),
+            ..UsageInfo::new(1, 1)
+        });
+        usage.record_rejected_chunk(&UsageInfo {
+            total_cost: f64::MAX,
+            billed_cost: Some(f64::MAX),
+            ..UsageInfo::new(1, 1)
+        });
+        let saved = serde_json::to_string(&usage).unwrap();
+        let loaded: JobUsage = serde_json::from_str(&saved).unwrap();
+        let chunking = loaded.chunking.as_ref().unwrap();
+        assert_eq!(chunking.input_tokens, 202);
+        assert_eq!(chunking.input_cost, 0.0);
+        assert_eq!(chunking.cache_read_cost, Some(0.0));
+        // Two finite costs that overflow when summed are zeroed too.
+        assert!(chunking.total_cost.is_finite() && loaded.billed().is_finite());
     }
 }

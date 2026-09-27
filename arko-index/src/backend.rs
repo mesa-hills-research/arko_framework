@@ -1,5 +1,5 @@
 //! Provider boundary. Tests and offline applications can supply deterministic backends.
-use crate::{EmbeddingProfile, Result, error::invalid};
+use crate::{EmbeddingProfile, Error, Result, error::invalid};
 use arko_ai::{
     EmbeddingClient, EmbeddingConfig, EmbeddingModelDetails, EmbeddingProviderIdentifier,
     GenerationConfig, GenerationResponse, LLMClient, Model, OpenAIEffort, ReasoningConfig,
@@ -233,7 +233,9 @@ impl Backend for ArkoBackend {
             if let StreamEvent::End(response) = event? {
                 // Refusals and token limits are permanent failures; a missing,
                 // extra or malformed call is resampled as a transient failure.
-                let call = completed_tool_call(&response, &request.tool)?;
+                // Either way the response was billed, so its usage goes along.
+                let call = completed_tool_call(&response, &request.tool)
+                    .map_err(|error| Error::from(error).with_usage(response.usage.clone()))?;
                 return Ok(ModelReply {
                     value: call.arguments.clone(),
                     // Keeps the provider's raw stop reason with the call record.
