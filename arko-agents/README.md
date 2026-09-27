@@ -108,6 +108,12 @@ normalized to one attempt.
   it no longer enters an unbounded second retry cycle. `InformAgentAndContinue`
   is also subject to classification and the elapsed limit. Explicit approval or
   a new runtime can begin a new recovery episode.
+- Refusals are never retried unchanged: a `RefusalReceived` event carries the
+  `arko_ai::Refusal`, then the refusal follows the permanent-error path above.
+  A model's own refusal (`RefusalSource::Model`, such as OpenAI structured
+  refusals) stays in history with its explanation as the assistant text, so the
+  model can see what it declined; its tool calls are not run. Classifier and
+  content-filter refusals are removed from history.
 - `RetryScheduled` events expose attempt, delay, and elapsed milliseconds.
   Tool executions are not replayed by model recovery. Interrupted streams may
   have incurred provider usage without delivering final usage metadata.

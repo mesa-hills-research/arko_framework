@@ -439,6 +439,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+            AgentEvent::RefusalReceived(refusal) => {
+                close_active_blocks(&mut in_reasoning_block, &mut in_assistant_response_block)?;
+                println!("\n[REFUSAL] {}", refusal);
+            }
             AgentEvent::TaskLog(log_msg) => {
                 println!("\n[LOG] {}", log_msg);
             }

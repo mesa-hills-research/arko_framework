@@ -1,5 +1,5 @@
 use crate::task::{PendingToolCallInfo, TaskState};
-use arko_ai::{ModelCallUsage, UsageInfo};
+use arko_ai::{ModelCallUsage, Refusal, UsageInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -93,6 +93,13 @@ pub enum AgentEvent {
         requires_approval_to_retry: bool,
         tool_call_id: Option<Uuid>,
     },
+    /// The model or a filter around it refused the turn. Emitted before the
+    /// refusal is handled as a non-retryable error (an `ErrorEncountered`
+    /// event and task state change follow). For a model's own refusal
+    /// ([`arko_ai::RefusalSource::Model`]) the turn stays in history with the
+    /// refusal explanation as its text; classifier and content-filter
+    /// refusals are removed from history.
+    RefusalReceived(Refusal),
     /// A retry is scheduled; delay includes any provider minimum.
     RetryScheduled {
         attempt: u32,

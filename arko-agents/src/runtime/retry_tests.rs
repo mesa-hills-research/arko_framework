@@ -816,8 +816,163 @@ async fn classifier_refusals_are_not_kept_or_retried() {
         "the refused turn must not be added to history"
     );
     assert_eq!(task.usage_history.len(), 1, "refused calls are still accounted for");
+    let mut reported = 0;
     while let Ok(event) = events.try_recv() {
         assert!(!matches!(event, AgentEvent::RetryScheduled { .. }));
+        if let AgentEvent::RefusalReceived(refusal) = event {
+            assert_eq!(refusal.source, ai::RefusalSource::SafetyClassifier);
+            reported += 1;
+        }
+    }
+    assert_eq!(reported, 1);
+}
+
+/// Runs one scripted stream to the end under a policy that returns to the host.
+async fn run_refused_turn(
+    mode: ToolCallingMode,
+    stream: Vec<ai::StreamEvent>,
+) -> (Task, usize, Vec<AgentEvent>) {
+    use futures::StreamExt;
+    let (mut agent, mut events, _commands) = harness();
+    agent.task.agent_config.llm_error_policy =
+        LLMErrorPolicy::RetryThenInformAgent { max_attempts: 3 };
+    agent.task.agent_config.tool_config.tool_calling_mode = mode;
+    agent
+        .task
+        .agent_config
+        .tool_config
+        .default_auto_approve_tool_use = true;
+    let messages_before = agent.task.conversation.messages.len();
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(Ok(futures::stream::iter(stream.into_iter().map(Ok)).boxed()));
+    let task = timeout(Duration::from_secs(1), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut received = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        received.push(event);
+    }
+    (task, messages_before, received)
+}
+
+fn model_refusal() -> ai::Refusal {
+    let mut refusal = ai::Refusal::new(ai::RefusalSource::Model);
+    refusal.explanation = Some("I can't help with that.".into());
+    refusal
+}
+
+fn refused_response(message: ai::Message, refusal: ai::Refusal) -> ai::StreamEvent {
+    ai::StreamEvent::End(Box::new(ai::GenerationResponse {
+        message,
+        usage: ai::UsageInfo::new(0, 0),
+        model_call_usage: ai::ModelCallUsage::new(
+            "refused".into(),
+            "test".into(),
+            "test".into(),
+            0,
+            0,
+            1000,
+        ),
+        stop_reason: ai::StopReason::Refusal,
+        refusal: Some(refusal),
+    }))
+}
+
+/// A model's own refusal is kept in history, reported once as a refusal and
+/// handled as a non-retryable error rather than a missing tool call.
+fn assert_model_refusal_reported(task: &Task, messages_before: usize, events: &[AgentEvent]) {
+    assert!(
+        matches!(&task.current_state, TaskState::Interrupted { reason } if reason.contains("I can't help with that.")),
+        "{:?}",
+        task.current_state
+    );
+    let added: Vec<_> = task.conversation.messages[messages_before..]
+        .iter()
+        .filter(|message| message.role == ai::Role::Assistant)
+        .collect();
+    assert_eq!(added.len(), 1, "the refused turn is kept once");
+    let text: String = added[0].content.iter().filter_map(ai::Content::as_text).collect();
+    assert_eq!(text, "I can't help with that.");
+    assert!(added[0].tool_calls.is_empty(), "calls of a refused turn are not kept");
+    assert_eq!(task.usage_history.len(), 1);
+    let refusals: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::RefusalReceived(refusal) => Some(refusal),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(refusals, [&model_refusal()]);
+    for event in events {
+        match event {
+            AgentEvent::RetryScheduled { .. } => panic!("a refusal must not be retried"),
+            AgentEvent::ToolResult { .. } => panic!("a refused turn's tools must not run"),
+            AgentEvent::ErrorEncountered { error_message, .. } => {
+                assert!(!error_message.contains("tool call"), "{error_message}");
+                assert!(error_message.contains("refused"), "{error_message}");
+            }
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn native_mode_model_refusals_are_kept_reported_and_not_retried() {
+    let mut message = ai::Message::new_assistant("");
+    message.tool_calls.push(ai::ToolCall {
+        id: Some("refused-call".into()),
+        name: "complete_task".into(),
+        arguments: serde_json::json!({"summary":"done"}),
+        thought_signature: None,
+        provider_id: None,
+        invalid_arguments: None,
+    });
+    let (task, messages_before, events) = run_refused_turn(
+        ToolCallingMode::Native,
+        vec![
+            ai::StreamEvent::Refusal(model_refusal()),
+            refused_response(message, model_refusal()),
+        ],
+    )
+    .await;
+    assert_model_refusal_reported(&task, messages_before, &events);
+}
+
+#[tokio::test(start_paused = true)]
+async fn text_mode_model_refusals_are_kept_reported_and_not_retried() {
+    let (task, messages_before, events) = run_refused_turn(
+        ToolCallingMode::OutputBased,
+        vec![
+            ai::StreamEvent::Refusal(model_refusal()),
+            refused_response(ai::Message::new_assistant(""), model_refusal()),
+        ],
+    )
+    .await;
+    assert_model_refusal_reported(&task, messages_before, &events);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_streamed_model_refusal_without_a_final_response_is_still_a_refusal() {
+    for mode in [ToolCallingMode::Native, ToolCallingMode::OutputBased] {
+        let (task, messages_before, events) =
+            run_refused_turn(mode, vec![ai::StreamEvent::Refusal(model_refusal())]).await;
+        assert!(
+            matches!(&task.current_state, TaskState::Interrupted { reason } if reason.contains("refused")),
+            "{:?}",
+            task.current_state
+        );
+        let kept: Vec<String> = task.conversation.messages[messages_before..]
+            .iter()
+            .filter(|message| message.role == ai::Role::Assistant)
+            .map(|message| message.content.iter().filter_map(ai::Content::as_text).collect())
+            .collect();
+        assert_eq!(kept, ["I can't help with that."]);
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::RefusalReceived(_))));
+        assert!(!events.iter().any(|event| matches!(event, AgentEvent::RetryScheduled { .. })));
     }
 }
 

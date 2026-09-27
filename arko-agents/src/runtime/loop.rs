@@ -1388,6 +1388,7 @@ impl AgentLoop {
             let mut final_generation_response: Option<ai::GenerationResponse> = None;
             let mut current_assistant_response_text_for_conv = String::new();
             let mut native_stream_call_ids: HashMap<usize, Uuid> = HashMap::new();
+            let mut streamed_refusal: Option<ai::Refusal> = None;
 
             let stream_recovery_deadline = self.recovery_deadline();
             loop {
@@ -1466,24 +1467,24 @@ impl AgentLoop {
                                 }
                             }
                             Ok(Some(ai::StreamEvent::ToolCallArgumentsDelta { .. })) => {}
-                            // The same refusal arrives with `End`.
-                            Ok(Some(ai::StreamEvent::Refusal(_))) => {}
+                            // Providers repeat the refusal on `End`; it is
+                            // kept only for a stream that ends without one.
+                            Ok(Some(ai::StreamEvent::Refusal(refusal))) => {
+                                streamed_refusal = Some(refusal);
+                            }
                             Ok(Some(ai::StreamEvent::End(boxed_generation_response))) => {
                                 let generation_response = *boxed_generation_response;
                                 self.task.usage_history.push(generation_response.usage.clone());
                                 self.emit_event(AgentEvent::UsageReported(generation_response.usage.clone())).await?;
                                 self.record_and_emit_model_call_usage(generation_response.model_call_usage.clone()).await?;
-                                // A refused turn isn't kept in history, and
-                                // retrying it unchanged is expected to be refused again.
-                                if let Some(refusal) = generation_response
-                                    .refusal
-                                    .clone()
-                                    .filter(|refusal| !refusal.source.keeps_turn())
-                                {
+                                // A refused turn is reported, never retried
+                                // unchanged, and never treated as a turn that
+                                // failed to call a tool.
+                                if let Some(refusal) = generation_response.refusal.clone() {
                                     if let Some(ref mut p) = parser {
                                         raw_events_for_turn.extend(p.finalize());
                                     }
-                                    self.handle_llm_error(ai::Error::Refusal(Box::new(refusal)), None).await?;
+                                    self.handle_refusal(refusal, generation_response.message).await?;
                                     had_stream_error = true;
                                     break;
                                 }
@@ -1497,6 +1498,12 @@ impl AgentLoop {
                             Ok(None) => {
                                 if let Some(ref mut p) = parser {
                                     raw_events_for_turn.extend(p.finalize());
+                                }
+                                if let Some(refusal) = streamed_refusal.take() {
+                                    let partial = ai::Message::new_assistant(&current_assistant_response_text_for_conv);
+                                    self.handle_refusal(refusal, partial).await?;
+                                    had_stream_error = true;
+                                    break;
                                 }
                                 if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
                                     self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
@@ -2621,6 +2628,50 @@ impl AgentLoop {
             tool_call_id,
         })
         .await
+    }
+
+    /// Reports a refusal and stops recovery: the same input is expected to be
+    /// refused again, so it is never retried unchanged. A model's own refusal
+    /// ([`ai::RefusalSource::keeps_turn`]) stays in history so the model can
+    /// see what it declined, with the refusal explanation as its text when the
+    /// turn has none. Its tool calls are not run, so they are not kept either
+    /// (a call without a result would invalidate the history), and a turn
+    /// with no text at all is not kept. Classifier and content-filter
+    /// refusals are removed from history.
+    async fn handle_refusal(
+        &mut self,
+        refusal: ai::Refusal,
+        mut message: ai::Message,
+    ) -> Result<(), ArkoAgentsError> {
+        self.flush_throttled_reasoning().await?;
+        self.flush_throttled_text().await?;
+        if refusal.source.keeps_turn() {
+            message.tool_calls.clear();
+            let has_text = |message: &ai::Message| {
+                message
+                    .content
+                    .iter()
+                    .filter_map(ai::Content::as_text)
+                    .any(|text| !text.trim().is_empty())
+            };
+            if !has_text(&message)
+                && let Some(explanation) = refusal.explanation.as_deref()
+            {
+                message
+                    .content
+                    .retain(|content| content.as_text().is_none());
+                message
+                    .content
+                    .insert(0, ai::Content::Text(explanation.to_string()));
+            }
+            if has_text(&message) {
+                self.task.conversation.messages.push(message);
+            }
+        }
+        self.emit_event(AgentEvent::RefusalReceived(refusal.clone()))
+            .await?;
+        self.handle_llm_error(ai::Error::Refusal(Box::new(refusal)), None)
+            .await
     }
 
     async fn handle_llm_error(
