@@ -1548,11 +1548,14 @@ impl OpenAIClient {
                 Some(vec!["reasoning.encrypted_content".to_string()]);
         }
 
-        // Render replayed reasoning from earlier turns too. GPT-5.6 defaults
-        // to this and Codex sends it for GPT-6; earlier models default to
-        // `current_turn` and don't document `all_turns`, so they get nothing.
+        // Render replayed reasoning from earlier turns too. The API documents
+        // `all_turns` only for GPT-5.6 ("GPT-5.6 models support this value",
+        // https://developers.openai.com/api/docs/guides/reasoning), its
+        // default. Over ChatGPT OAuth, Codex also sends it for GPT-6 (and the
+        // backend echoes it); with an API key GPT-6 gets nothing until it is
+        // documented there. Earlier models default to `current_turn`.
         let reasoning_context = (conversation.model.model_type == ModelType::Reasoning
-            && (is_gpt5_6 || is_gpt6))
+            && (is_gpt5_6 || (is_gpt6 && is_chatgpt_oauth)))
             .then_some(OpenAIReasoningContext::AllTurns);
 
         if let Some(crate::reasoning::ReasoningConfig::OpenAI {
@@ -2666,7 +2669,13 @@ mod tests {
                 let value = serde_json::to_value(request).unwrap();
 
                 assert_eq!(value["model"], "gpt-6-astra");
-                assert_eq!(value["reasoning"]["context"], "all_turns");
+                // `all_turns` over OAuth only (Codex parity); undocumented
+                // for GPT-6 with API keys.
+                if oauth {
+                    assert_eq!(value["reasoning"]["context"], "all_turns");
+                } else {
+                    assert!(value["reasoning"].get("context").is_none());
+                }
                 assert_eq!(value["stream"], oauth);
                 assert_eq!(value["reasoning"]["mode"], "pro");
                 assert_eq!(
@@ -2720,7 +2729,11 @@ mod tests {
                     let value = serde_json::to_value(request).unwrap();
 
                     assert_eq!(value["model"], id);
-                    assert_eq!(value["reasoning"]["context"], "all_turns");
+                    if oauth {
+                        assert_eq!(value["reasoning"]["context"], "all_turns");
+                    } else {
+                        assert!(value["reasoning"].get("context").is_none());
+                    }
                     assert_eq!(value["reasoning"]["mode"], "pro");
                     assert_eq!(
                         value["reasoning"]["effort"],
@@ -2745,13 +2758,13 @@ mod tests {
                 Err(Error::InvalidRequest(_))
             ));
 
-            // API key: no effort configured means the model default applies;
-            // only the reasoning context is sent.
+            // API key: no effort configured means the model default applies,
+            // and no reasoning object is sent.
             let request = client
                 .build_request(&conversation, &GenerationConfig::default(), false)
                 .unwrap();
             let value = serde_json::to_value(request).unwrap();
-            assert_eq!(value["reasoning"], serde_json::json!({"context": "all_turns"}));
+            assert!(value.get("reasoning").is_none());
 
             // ChatGPT OAuth keeps sending medium (owned by the OAuth request path).
             let request = client
@@ -3271,13 +3284,14 @@ mod model_rule_tests {
             Model::openai_gpt_5_1(),
             Model::openai_gpt_5_4(),
             Model::openai_gpt_5_5_pro(),
+            Model::openai_gpt_5_6_sol(),
             Model::openai_gpt_6_astra(),
         ] {
             let value = request(model.clone(), &GenerationConfig::default()).unwrap();
             assert!(value["reasoning"].get("effort").is_none(), "{}", model.id);
-            // GPT-6 still asks for reasoning from all turns; older models send
-            // no reasoning object at all.
-            if model.id.starts_with("gpt-6") {
+            // GPT-5.6 still asks for reasoning from all turns (documented for
+            // API keys); the others send no reasoning object at all.
+            if model.is_openai_gpt_5_6() {
                 assert_eq!(value["reasoning"], serde_json::json!({"context": "all_turns"}));
             } else {
                 assert!(value.get("reasoning").is_none(), "{}", model.id);

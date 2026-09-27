@@ -156,8 +156,8 @@ async fn oauth_requests_carry_the_conversation_identity_and_api_key_requests_do_
         assert_eq!(header(api, "authorization").as_deref(), Some("Bearer synthetic-key"));
         assert_eq!(api_body["stream"], false);
         assert_eq!(api_body["prompt_cache_key"], key);
-        assert_eq!(api_body["reasoning"]["context"], "all_turns");
-        assert!(api_body["reasoning"].get("effort").is_none(), "API key: model default effort");
+        // `all_turns` is documented for API keys on GPT-5.6 only.
+        assert!(api_body.get("reasoning").is_none(), "API key: model default effort, no context");
         assert_eq!(api_body["prompt_cache_options"]["mode"], "implicit");
 
         for (raw, _) in &requests[2..] {
@@ -559,4 +559,38 @@ async fn a_served_model_other_than_the_requested_one_is_a_reroute() {
     assert_eq!(served(&head("gpt-6-astra", Some("gpt-5.2")), "gpt-6-astra", None), (Some("gpt-5.2".into()), true));
     assert_eq!(served(&head("gpt-6-astra", None), "", None), (None, false));
     assert!(served(&head("gpt-6-astra", None), "gpt-6-astra-é", None).1);
+}
+
+/// `reasoning.context: "all_turns"` is documented for API-key requests only
+/// on GPT-5.6 ("GPT-5.6 models support this value"); over ChatGPT OAuth it
+/// is sent for GPT-5.6 and GPT-6, as Codex does (verified live).
+#[test]
+fn all_turns_reasoning_context_goes_where_documented_or_verified() {
+    let context = |model: Model, oauth: bool, config: &GenerationConfig| {
+        let request = OpenAIClient::new("test").build_request(&Conversation::new(model), config, oauth).unwrap();
+        serde_json::to_value(request).unwrap()["reasoning"]["context"].as_str().map(String::from)
+    };
+    let effort = GenerationConfig::default()
+        .with_reasoning(crate::reasoning::ReasoningConfig::openai(OpenAIEffort::High, false));
+    for config in [GenerationConfig::default(), effort] {
+        for model in [Model::openai_gpt_5_6_sol(), Model::openai_gpt_5_6_luna(), Model::openai_gpt_5_6()] {
+            for oauth in [false, true] {
+                assert_eq!(context(model.clone(), oauth, &config).as_deref(), Some("all_turns"), "{} oauth={oauth}", model.id);
+            }
+        }
+        for model in [Model::openai_gpt_6_astra(), Model::openai_gpt_6_sol(), Model::openai_gpt_6_luna()] {
+            assert_eq!(context(model.clone(), true, &config).as_deref(), Some("all_turns"), "{} OAuth", model.id);
+            assert_eq!(context(model.clone(), false, &config), None, "{} API key", model.id);
+        }
+        for model in [Model::openai_gpt_5_5(), Model::openai_gpt_5_4()] {
+            for oauth in [false, true] {
+                assert_eq!(context(model.clone(), oauth, &config), None, "{} oauth={oauth}", model.id);
+            }
+        }
+    }
+    // GPT-6 over an API key without an effort or mode sends no reasoning object.
+    let request = OpenAIClient::new("test")
+        .build_request(&Conversation::new(Model::openai_gpt_6_astra()), &GenerationConfig::default(), false)
+        .unwrap();
+    assert!(serde_json::to_value(request).unwrap().get("reasoning").is_none());
 }
