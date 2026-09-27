@@ -86,8 +86,10 @@ provider and the output limit must be positive. Distillers see the task prompt,
 tool name, parameters, and raw result. Their output is model-authored, not a
 deterministic accuracy guarantee. Keep source evidence accessible through tools.
 Interception events and the `PostToolResultInterception` hook expose original and
-effective text; use a host hook to retain source artifacts when needed. Configured
-interceptor-error policies still fall back to raw output. Bound huge outputs in the producing tool
+effective text; use a host hook to retain source artifacts when needed. A summary
+is used only when the model finished it: a refusal, a summary cut off by the output
+limit, or any other early stop is an interceptor error (the call is still charged).
+Configured interceptor-error policies still fall back to raw output. Bound huge outputs in the producing tool
 when raw fallback would be unsuitable.
 
 ## Shell tools and background jobs

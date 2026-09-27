@@ -736,9 +736,9 @@ Register `DistillationConfig` through `WorkflowBuilder::distiller` to replace su
 | `pub fn instructions(mut self, instructions: impl Into<String>) -> Self` | Replace distillation instructions. |
 | `pub fn reasoning(mut self, reasoning: arko_ai::ReasoningConfig) -> Self` | Set reasoning; workflow build rejects a provider that differs from the model's provider. |
 
-There is no `Default` implementation. Build validates token limit and reasoning/provider compatibility; it does not validate target agent/tool names. Model errors and empty generated text produce interceptor errors handled by the workflow's interception failure policy. Non-empty output replaces the result even if it is longer than its input; `max_output_tokens` is a generation cap, not a guaranteed compression ratio.
+There is no `Default` implementation. Build validates token limit and reasoning/provider compatibility; it does not validate target agent/tool names. Only a finished summary replaces the result: model errors, refusals (`GenerationResponse::refusal`, even when text accompanies it), responses that stopped for any reason other than `StopReason::EndTurn` or `StopReason::StopSequence` (such as `MaxTokens` when the summary hit `max_output_tokens`), and empty text produce interceptor errors handled by the workflow's interception failure policy, which keeps the raw result. A finished, non-empty summary replaces the result even if it is longer than its input; `max_output_tokens` is a generation cap, not a guaranteed compression ratio.
 
-Distillation charges the billed amount `response.usage.billed()` (zero for subscription calls such as ChatGPT OAuth) as a **manual workflow cost**, with description `distillation: <name>` and agent/task/tool metadata. It therefore affects the workflow budget and does not add to the agent's own LLM-spend counter. Warning/exceeded hooks run when indicated; normal managed execution enforces the exceeded workflow budget. Charges are recorded after validating non-empty response text, and the distillation record is appended after the budget hooks succeed.
+Distillation charges the billed amount `response.usage.billed()` (zero for subscription calls such as ChatGPT OAuth) as a **manual workflow cost**, with description `distillation: <name>` and agent/task/tool metadata. It therefore affects the workflow budget and does not add to the agent's own LLM-spend counter. Warning/exceeded hooks run when indicated; normal managed execution enforces the exceeded workflow budget. Every response the model returns is charged, including refused, cut-off, and empty ones, since they are billed too; the distillation record is appended after the budget hooks succeed.
 
 ### `DistillationRecord`
 
@@ -751,9 +751,10 @@ pub config_name: String;
 pub input_chars: usize;
 pub output_chars: usize;
 pub cost: f64;
+pub rejection: Option<String>;
 ```
 
-Public fields identify the target task/agent/tool and configuration, UTC timestamp, input/output Unicode character counts, and reported dollar cost. Records are available through `SharedContext::distillation_records` and checkpoint state.
+Public fields identify the target task/agent/tool and configuration, UTC timestamp, input/output Unicode character counts, and reported dollar cost. `rejection` is `None` when the distilled text replaced the result; otherwise it says why the text was not used (the refusal, the stop reason, or no text), and `output_chars` counts the unused text. It is omitted when serializing `None`, and records saved before it existed load as `None`. Records are available through `SharedContext::distillation_records` and checkpoint state.
 
 ## Budget and cost accounting
 
