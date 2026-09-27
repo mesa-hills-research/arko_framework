@@ -43,7 +43,7 @@ Root re-exports: `Workflow`, `WorkflowBuilder`, `AgentHandle`, `WorkflowError`, 
 | `freshness` | `ActorId`, `ContextFreshnessConfig`, `FreshnessConflict`, `ResourceId`, `ResourceTracker`, `ToolResourceEffect` |
 | `hooks` | `HookCallback`, `HookPoint`, `HookResult` |
 | `memory` | `AccessScope`, `MemoryConfig`, `MemoryEntry`, `MemoryTier`, `WriteMode` |
-| `messaging` | `AgentMessage`, `MessageAttachment`, `MessagingPolicy` |
+| `messaging`, `messaging::registry` | `AgentMessage`, `MessageAttachment`, `MessagingPolicy`, `AgentStatus`, `WaitReason` |
 | `persistence` | `PersistenceConfig` |
 | `services` | `WorkflowServices`, `WorkflowServicesConfig` |
 | `user_input` | `UserInputHandler`, `UserInputRequest` |
@@ -58,7 +58,8 @@ Other public modules: `context`, `hooks::context`, `memory::tools`, `messaging::
 | Sequential, parallel, or background agent execution | `run_agent`, `continue_agent`, `run_agents_parallel`, `spawn_agent` |
 | Monitor progress or control the lifecycle | `subscribe_events`, hooks, `pause`, `resume`, `finish` |
 | Stop a run from any task, or from a hook | `cancel_handle` / `WorkflowCancelHandle`, `HookResult::Abort` |
-| Share structured text and deliver messages | `MemoryConfig`, `MemoryStore`, `MessageBus` |
+| Share structured text and deliver messages | `MemoryConfig`, `MemoryStore`, `MessagingPolicy`, `MessageBus` |
+| See which agents are running, waiting, or finished | `agent_status`, `AgentStatus` |
 | Track stale files, directories, memory, or custom resources | `ContextFreshnessConfig`, `ResourceTracker` |
 | Gate completion and retain repair context | `CompletionVerifierConfig` |
 | Condense selected tool outputs | `DistillationConfig`, custom tool result interceptors |
@@ -101,7 +102,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 | `distiller(self, config: DistillationConfig) -> Self` | Append an LLM distiller; distillers run after all custom interceptors. See [Tool-result distillation](#tool-result-distillation). |
 | `workflow_services(self, config: WorkflowServicesConfig) -> Self` | Enable bounded agent-to-agent delegation through the `run_workflow_agent` tool. |
 | `messaging(self, policy: MessagingPolicy) -> Self` | Set whom each agent may message with `send_message`. Default `MessagingPolicy::all()`: every agent may message every other agent. See [Messaging policy](#messaging-policy). |
-| `disable_messaging(self) -> Self` | Offer no agent `send_message`. |
+| `disable_messaging(self) -> Self` | Offer no agent `send_message` or `list_recipients`. |
 | `user_input_handler(self, handler: Arc<dyn UserInputHandler>) -> Self` | Answer agents' `ask_user` questions asynchronously. Without a handler, the run suspends and returns `UserInputRequired`. |
 | `enable_voting(self) -> Self` | Create an in-memory ballot store and give every agent the `cast_vote` tool. |
 | `cancel_grace_period(self, grace_period: std::time::Duration) -> Self` | How long a stopped run waits for each running agent to stop before aborting it. Default `workflow::cancel::DEFAULT_CANCEL_GRACE_PERIOD`, 30 seconds. See [Stopping a run](#stopping-a-run). |
@@ -121,9 +122,9 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 
 Checkpoint read and parse failures return `Io` or `Json`. A warning threshold may exceed the budget limit. Metadata dependencies are descriptive: the builder neither installs nor checks executables.
 
-Tool names: duplicate global tool names, duplicate names within one agent's tools, and a name shared by a global and an agent-local tool are rejected. Global tools cannot use the reserved names `complete_task`, `ask_user`, `read_memory`, `write_memory`, `list_memories`, `run_workflow_agent`, or `cast_vote`, nor `send_message` while any agent is offered the workflow's `send_message`; an agent-local tool named `send_message` is rejected for an agent that is offered it. Agent-local tools are not checked against reserved names: an agent-local tool with a reserved name replaces that workflow or built-in tool for its agent, except `complete_task`, which `arko_agents` never lets a non-built-in tool replace. Custom tools are registered after the workflow tools, so a custom tool named like an `arko_agents` built-in (for example `read_file`) replaces it for the agents that receive it.
+Tool names: duplicate global tool names, duplicate names within one agent's tools, and a name shared by a global and an agent-local tool are rejected. Global tools cannot use the reserved names `complete_task`, `ask_user`, `read_memory`, `write_memory`, `list_memories`, `run_workflow_agent`, or `cast_vote`, nor `send_message` or `list_recipients` while any agent is offered the workflow's messaging tools; an agent-local tool with either name is rejected for an agent that is offered them. Agent-local tools are not checked against reserved names: an agent-local tool with a reserved name replaces that workflow or built-in tool for its agent, except `complete_task`, which `arko_agents` never lets a non-built-in tool replace. Custom tools are registered after the workflow tools, so a custom tool named like an `arko_agents` built-in (for example `read_file`) replaces it for the agents that receive it.
 
-Tools added automatically: `send_message` for each agent with at least one recipient under the messaging policy; `read_memory`, `write_memory`, and `list_memories` when at least one memory tier exists; `run_workflow_agent` for permitted callers when services are enabled; `cast_vote` when voting is enabled. When more than one agent is registered, each prompt is extended with the agent roster, sorted by name, with role descriptions. Pending messages for the agent are appended to its prompt. Skills configured on an agent are initialized against the workspace. There is no separate graph or scheduler configuration.
+Tools added automatically: `send_message` and `list_recipients` for each agent with at least one permitted recipient under the messaging policy; `read_memory`, `write_memory`, and `list_memories` when at least one memory tier exists; `run_workflow_agent` for permitted callers when services are enabled; `cast_vote` when voting is enabled. The agent's pending messages are appended to the prompt of each new run and continuation, under `# Messages from other agents:`. A new run's initial prompt also lists the agents it may message; see [What agents are told about their recipients](#what-agents-are-told-about-their-recipients). Skills configured on an agent are initialized against the workspace. There is no separate graph or scheduler configuration.
 
 Interceptors run in this order: global interceptors, the agent's own interceptors, then the distillers that target the agent, each group in registration order. Each stage receives the previous stage's result. An interceptor that still fails after the retries allowed by the failure policy is skipped, and the chain continues with the result so far. Every agent's tool calls pass through the workflow's execution middleware, which enforces a stopped run and runs tool hooks, freshness checks, and completion verification at tool execution, so these also apply to automatically approved and batched calls.
 
@@ -156,9 +157,9 @@ Source: [workflow/mod.rs](src/workflow/mod.rs), [engine](src/workflow/engine.rs)
 
 | Signature | Parameters, result, and behavior |
 | --- | --- |
-| `async run_agent(&self, agent_name: &str, prompt: &str) -> Result<AgentResult, WorkflowError>` | Start a new invocation of a registered agent and await it. Adds the roster and pending messages to the prompt, runs the managed driver, and records costs and the result. An unknown name returns `AgentNotFound`. |
-| `async continue_agent(&self, previous: &AgentResult, prompt: &str) -> Result<AgentResult, WorkflowError>` | Resume a `Completed` or `WaitingForInput` result with its task, conversation, and run ID. `prompt` is the follow-up task or the user's answer. Other statuses return `BuilderInvalid`. The new result replaces the recorded result with the same run ID; token and cost totals are cumulative. |
-| `async run_agents_parallel(&self, agents: Vec<(&str, String)>) -> Result<Vec<AgentResult>, WorkflowError>` | Run agent-name/prompt pairs concurrently; one agent may appear several times. Waits for every invocation, then returns the results in input order, or the first error in input order. Finalized outcomes are recorded either way. |
+| `async run_agent(&self, agent_name: &str, prompt: &str) -> Result<AgentResult, WorkflowError>` | Start a new invocation of a registered agent and await it. Adds pending messages and the list of agents it may message to the prompt, runs the managed driver, and records costs and the result. An unknown name returns `AgentNotFound`. |
+| `async continue_agent(&self, previous: &AgentResult, prompt: &str) -> Result<AgentResult, WorkflowError>` | Resume a `Completed` or `WaitingForInput` result with its task, conversation, and run ID. `prompt` is the follow-up task or the user's answer; pending messages are appended, and no recipient list is added. Other statuses, or a task whose state does not match its status, return `BuilderInvalid`. The new result replaces the recorded result with the same run ID; token and cost totals are cumulative. |
+| `async run_agents_parallel(&self, agents: Vec<(&str, String)>) -> Result<Vec<AgentResult>, WorkflowError>` | Run agent-name/prompt pairs concurrently; one agent may appear several times. All the agents are marked running before any is prompted, so each one's recipient list shows the others as running. Waits for every invocation, then returns the results in input order, or the first error in input order. Finalized outcomes are recorded either way. |
 | `async spawn_agent(&self, agent_name: &str, prompt: &str) -> Result<AgentHandle, WorkflowError>` | Set up and start the agent and return its handle. Nothing drives its events until `wait` is called or the raw channels are used. |
 
 All four return `BudgetExceeded` without starting an agent when the workflow budget is already exceeded. Once the run is stopped, all four return the stop's error (`Cancelled` or `AbortedByHook`) at once, without firing `PreAgentSpawn` or starting an agent; see [Stopping a run](#stopping-a-run).
@@ -184,7 +185,9 @@ fn into_parts(self) -> (
 );
 ```
 
-`agent_name` returns the registration name. `wait` consumes the handle, runs the managed driver, finalizes and persists the task, and returns the completed result or the same errors as `run_agent`. Messages delivered in the agent's prompt are acknowledged when it completes, and the agent is unregistered from the message bus whatever the outcome. `into_parts` consumes the handle and returns the event receiver, command sender, task join handle, and agent name. With the raw parts, the caller is responsible for event handling, approvals, usage accounting, event broadcasting and persistence, result recording, and message acknowledgment and unregistration (through `context().messages`). Execution middleware and interceptors are installed at spawn, so tool hooks, freshness checks, verification, and interception still run. A stopped run still reaches the agent: it is sent `CancelTask`, and the middleware cancels it at its next tool call. The caller must keep receiving its events until it ends.
+`agent_name` returns the registration name. `wait` consumes the handle, runs the managed driver, finalizes and persists the task, and returns the completed result or the same errors as `run_agent`. Messages delivered in the agent's prompt are acknowledged when it completes, and the agent is unregistered from the message bus whatever the outcome. `into_parts` consumes the handle and returns the event receiver, command sender, task join handle, and agent name. With the raw parts, the caller is responsible for event handling, approvals, usage accounting, event broadcasting and persistence, result recording, and message acknowledgment and unregistration (through `context().messages`). Execution middleware and interceptors are installed at spawn, so tool hooks, freshness checks, verification, and interception still run. A stopped run still reaches the agent: it is sent `CancelTask`, and the middleware cancels it at its next tool call. The caller must keep receiving its events until it ends. The workflow cannot observe the end of an agent driven through `into_parts`, so it counts as running for the rest of the run.
+
+Dropping a handle without calling `wait` or `into_parts` aborts the agent's runtime task, unregisters it, and marks it finished (cancelled); no result is recorded.
 
 ### Results, state, costs, events, and pause
 
@@ -192,8 +195,9 @@ fn into_parts(self) -> (
 | --- | --- |
 | `context(&self) -> &Arc<SharedContext>` | Shared stores, recorded results, and extension state. See [Shared context](#shared-context). |
 | `result(&self) -> WorkflowResult` | Snapshot of recorded results, metadata, the cost ledger, and the run's `cancellation`. Does not finish or checkpoint; also available once the run is stopped. |
+| `agent_status(&self, agent_name: &str) -> Option<AgentStatus>` | A registered agent's status in this run, as `list_recipients` reports it; `None` for an unknown name. See [Agent statuses](#agent-statuses). |
 | `cost_ledger(&self) -> CostLedger` | Clone of the chronological ledger of automatic and manual costs. |
-| `add_manual_cost(&self, amount: f64, description: &str, metadata: Option<String>) -> Result<AddCostResult, WorkflowError>` | Record a finite, nonnegative dollar cost with a description and optional free-form metadata. Fires `OnBudgetWarning` and `OnBudgetExceeded` as applicable; a hook `Abort` stops the run and returns `AbortedByHook`. Returns `BudgetExceeded` when spending exceeds the limit; the cost stays recorded. An invalid amount returns `InvalidCost` and records nothing. |
+| `add_manual_cost(&self, amount: f64, description: &str, metadata: Option<String>) -> Result<AddCostResult, WorkflowError>` | Record a finite, nonnegative dollar cost with a description and optional free-form metadata. Fires `OnBudgetWarning` and `OnBudgetExceeded` as applicable; a hook `Abort` stops the run and returns the stop's error. Returns `BudgetExceeded` when spending exceeds the limit; the cost stays recorded. An invalid amount returns `InvalidCost` and records nothing. |
 | `subscribe_events(&self) -> tokio::sync::broadcast::Receiver<WorkflowEvent>` | Receive events that managed drivers emit after subscription; there is no replay. The buffer holds 1,024 events; slow receivers can lag. |
 | `async checkpoint(&self) -> Result<(), WorkflowError>` | Save a checkpoint. Succeeds without writing when persistence is not configured. |
 | `async finish(&self) -> Result<WorkflowResult, WorkflowError>` | Fire `PostWorkflow`, save a checkpoint, and return the result snapshot. Does not wait for outstanding agents or prevent later runs; each call repeats the hook and checkpoint. On a stopped run, saves a checkpoint without firing `PostWorkflow` and returns the stop's error. |
@@ -212,7 +216,7 @@ fn begin_ballot(&self, config: BallotConfig) -> Result<Uuid, WorkflowError>;
 fn finish_ballot(&self, ballot_id: Uuid) -> Result<BallotResult, WorkflowError>;
 ```
 
-The resource methods require freshness tracking and return `BuilderInvalid` otherwise. `actor` is the observing or writing actor; `resource` identifies the context. `register_resource_read` records the actor's observation of the current version. `mark_resource_dirty` increments the version, returns the actors whose reads became stale, queues a notice for each active stale reader, and fires `OnFreshnessConflict` once per stale reader; a hook `Abort` stops the run and returns `AbortedByHook`. The version change is recorded before any notification or hook error is returned. See [Resource tracker](#resource-tracker) for identity and overlap rules.
+The resource methods require freshness tracking and return `BuilderInvalid` otherwise. `actor` is the observing or writing actor; `resource` identifies the context. `register_resource_read` records the actor's observation of the current version. `mark_resource_dirty` increments the version, returns the actors whose reads became stale, queues a notice for each active stale reader, and fires `OnFreshnessConflict` once per stale reader; a hook `Abort` stops the run and returns the stop's error. The version change is recorded before any notification or hook error is returned. See [Resource tracker](#resource-tracker) for identity and overlap rules.
 
 The ballot methods require `enable_voting` and return `BuilderInvalid` otherwise. `begin_ballot` validates and stores the configuration and returns the new ballot's UUID. `finish_ballot` tallies the current votes without closing the ballot. Validation and tally errors are returned as `WorkflowError::Deliberation`.
 
@@ -263,7 +267,7 @@ Once the run is stopped, `durable_step` and `durable_step_with_resolver` return 
 
 ### Stopping a run
 
-Source: [workflow/cancel.rs](src/workflow/cancel.rs). A `Workflow` is one run. The run is stopped when a `WorkflowCancelHandle` cancels it or when any hook returns `HookResult::Abort` (see [Hook registration and results](#hook-registration-and-results)); the first cause stands, and a stopped run stays stopped.
+Source: [workflow/cancel.rs](src/workflow/cancel.rs). A `Workflow` is one run. The run is stopped when a `WorkflowCancelHandle` cancels it or when any hook returns `HookResult::Abort` (see [Hook registration and results](#hook-registration-and-results)). The first cause stands, and a stopped run stays stopped: a hook's `Abort` on a run that is already stopped returns the first cause's error wherever it surfaces.
 
 ```rust
 // Workflow
@@ -293,10 +297,11 @@ Stopping the run has these effects:
 
 - Every running agent of the run is sent `CancelTask` at once, queued before its next step. This includes agents started with `spawn_agent`, whether driven by `AgentHandle::wait` or through `into_parts` (see [AgentHandle](#agenthandle)).
 - Every run call in progress (`run_agent`, `continue_agent`, `run_agents_parallel`, `AgentHandle::wait`) waits for its agents to end while recording their remaining events (event journal and broadcast) and usage (budget), then returns the stop's error: `Cancelled` or `AbortedByHook`. It does so even when an agent completed during the wind-down; that agent's `Completed` result is still recorded. A `durable_step` or `durable_step_with_resolver` call in progress returns the stop's error once its closure returns. Every later call returns the error at once without starting anything: no `PreAgentSpawn` and no journal record.
-- An agent stops at its next step; model streams and waits are interrupted at once, and an agent running a long tool call stops when the call returns. An agent that has not ended within the grace period is aborted (its Tokio task is dropped) and recorded as `Cancelled` with the task as the run started it, so the record does not contain this invocation's conversation; the event journal does. Its reason is the stop reason described below followed by `The agent did not stop within <grace period> and was aborted.`, with the period in `Duration` debug form (for example `30s`). The same bounded wait applies whenever the managed driver stops an agent, for example over budget, after an interruption, or after a hook's abort. A grace period too long to represent waits as long as possible.
+- An agent stops at its next step; model streams and waits are interrupted at once, and an agent running a long tool call stops when the call returns. The grace period counts from the moment the run stopped. An agent that has not ended within it is aborted: its Tokio task is dropped with any tool call in progress (an `arko_agents` command-template tool's child process is killed), and it is recorded as `Cancelled` with the task as the run started it, so the record does not contain this invocation's conversation; the event journal does. Its reason is the stop reason described below followed by `The agent did not stop within <grace period> and was aborted.`, with the configured period in `Duration` debug form (for example `30s`). The same bounded wait applies whenever the managed driver stops an agent, for example over budget, after an interruption, or after a hook's abort; when the run itself is not stopped, it counts from that moment. A grace period too long to represent waits as long as possible.
+- An agent running inside another agent's tool call, such as a completion verifier or an agent delegated through the `run_workflow_agent` tool, gets half its parent's grace period at each level of nesting, so it is stopped and recorded before its parent can be aborted. Dropping the driver of a running agent, for example a `run_agent` future, aborts the agent's task instead of leaving it running unsupervised.
 - A paused workflow does not delay the stop, and a `UserInputHandler` still waiting for an answer is abandoned.
 - Once the run is stopped, the execution middleware answers every tool call with `ToolExecutionDecision::CancelTask`: the call does not run (a `cast_vote` is not recorded, for example), and the agent ends `Cancelled` with the cause's agent reason. A completion verifier stopped with the run decides nothing, so its target agent is cancelled, not failed. Distillers make no further requests and leave tool output unchanged.
-- An agent the managed driver stops records why in its `TaskState::Cancelled` reason (and `AgentResult::error`), in place of the runtime's generic `Task cancelled by user.` (`arko_agents::task::CANCELLED_BY_USER`): the cause's agent reason when the run is stopped, and otherwise `Stopped by the workflow: <error>`, with the error the driver stopped it for (for example `BudgetExceeded`). An agent that ends because of the stop has status `AgentRunStatus::Cancelled`, and `PostAgentCancellation` fires for it.
+- An agent the managed driver stops records why in its `TaskState::Cancelled` reason (and `AgentResult::error`), in place of the runtime's generic `Task cancelled by user.` (`arko_agents::task::CANCELLED_BY_USER`): the cause's agent reason when the run is stopped, and otherwise `Stopped by the workflow: <error>`, with the error the driver stopped it for (for example `BudgetExceeded`). The cancellation's `TaskStateChanged` event, as recorded in the event journal and broadcast during the wind-down, carries the same reason. An agent that ends because of the stop has status `AgentRunStatus::Cancelled`, and `PostAgentCancellation` fires for it.
 - Budgets and limits are unchanged; usage reported while agents wind down is charged.
 - Votes cast before the stop stand, and `finish_ballot` works as usual, although the quorum may be unmet.
 - `finish` saves a checkpoint and returns the stop's error without firing `PostWorkflow`; `result` still returns the recorded results, with `cancellation` set. `OnWorkflowFailed` does not fire for `Cancelled`.
@@ -347,9 +352,9 @@ fn has_hooks(&self, point: &HookPoint) -> bool;
 
 Callbacks are synchronous and receive an immutable context; capture shared state to act on it. `register` appends to a point's list, `get` borrows the ordered list, and `has_hooks` reports whether the list is nonempty. `Continue` proceeds to the next callback; the first `Skip` or `Abort` ends the chain for that point. `Skip` has an effect only at `PreToolExecution`, where it rejects the tool call with the message `Skipped by PreToolExecution hook`; at other points it only ends the chain. Hooks cannot replace tool output; use a tool result interceptor for that.
 
-`Abort(reason)` at any point stops the whole run with `CancelCause::AbortedByHook { hook_point, reason }`, where `hook_point` is the point's variant name: running agents are cancelled, and run calls in progress or made later return `AbortedByHook`. See [Stopping a run](#stopping-a-run). Where the abort surfaces depends on the point:
+`Abort(reason)` at any point stops the whole run with `CancelCause::AbortedByHook { hook_point, reason }`, where `hook_point` is the point's variant name: running agents are cancelled, and run calls in progress or made later return `AbortedByHook`. On a run that is already stopped, the first cause stands, and its error is returned wherever the abort surfaces. See [Stopping a run](#stopping-a-run). Where the abort surfaces depends on the point:
 
-- At lifecycle points (`PreAgentSpawn`, the `PostAgent*` points, `OnWorkflowPause`, `OnWorkflowResume`, `PostWorkflow`, `OnBudgetWarning` and `OnBudgetExceeded` from `add_manual_cost`, and others), the operation that fired the hook also returns `AbortedByHook`. The managed driver ignores the return value of budget hooks fired for automatic usage reports, including usage reported while agents wind down, but an `Abort` from them still stops the run. Budget hooks fired by a distillation charge also turn an `Abort` into an interceptor error.
+- At lifecycle points (`PreAgentSpawn`, the `PostAgent*` points, `OnWorkflowPause`, `OnWorkflowResume`, `PostWorkflow`, `OnBudgetWarning` and `OnBudgetExceeded` from `add_manual_cost`, and others), the operation that fired the hook also returns the stop's error. The managed driver ignores the return value of budget hooks fired for automatic usage reports, including usage reported while agents wind down, but an `Abort` from them still stops the run. Budget hooks fired by a distillation charge also turn an `Abort` into an interceptor error.
 - At `PreToolExecution`, the call does not run, and the agent ends `Cancelled` with the reason `Workflow aborted by PreToolExecution hook: <reason>`; the run call driving the agent returns `AbortedByHook` with `hook_point` `"PreToolExecution"`. `Skip` still rejects only that call.
 - At `PostToolExecution`, and at `OnFreshnessConflict` fired from the execution middleware, the call has run and its result stands; the agent is sent `CancelTask` and ends before its next model request, and the run call returns `AbortedByHook`. The middleware never returns an error for a hook result.
 - Hooks fired inside workflow tools (`OnAgentMessage` from `send_message`, `OnFreshnessConflict` from `write_memory`) return a tool error to the agent after the message or write has been made, and the run stops.
@@ -456,7 +461,7 @@ Custom domain tools implement `arko_agents::tool::Tool` and are registered with 
 
 ## Shared context
 
-Source: [context/mod.rs](src/context/mod.rs). `context::SharedContext`, returned by `Workflow::context`, exposes the public fields below and has no public constructor or inherent methods. The lock-protected fields expose live workflow state; prefer the `Workflow` methods where they add hooks, notifications, or accounting.
+Source: [context/mod.rs](src/context/mod.rs). `context::SharedContext`, returned by `Workflow::context`, exposes the public fields below and the messaging methods listed with the `messaging` field; it has no public constructor. The lock-protected fields expose live workflow state; prefer the `Workflow` methods where they add hooks, notifications, or accounting.
 
 | Field | Type | Purpose |
 | --- | --- | --- |
@@ -468,7 +473,7 @@ Source: [context/mod.rs](src/context/mod.rs). `context::SharedContext`, returned
 | `durable_store` | `Option<Arc<durable::DurableStore>>` | Present when persistence is configured. |
 | `memory` | `memory::MemoryStore` | Shared tier store. |
 | `messages` | `messaging::MessageBus` | Queued and live messaging. |
-| `messaging` | `Option<messaging::MessagingPolicy>` | Whom each agent may message with `send_message`; `None` when messaging is disabled. `fn message_recipients(&self, agent_name: &str) -> Vec<String>` returns an agent's permitted recipients, sorted (empty when disabled). |
+| `messaging` | `Option<messaging::MessagingPolicy>` | Whom each agent may message with `send_message`; `None` when messaging is disabled. `fn message_recipients(&self, agent_name: &str) -> Vec<String>` returns an agent's permitted recipients, sorted by name (empty when disabled). `fn recipient_statuses(&self, agent_name: &str) -> Vec<(String, AgentStatus)>` pairs them with their current statuses, and `fn recipient_status(&self, agent: &str) -> AgentStatus` returns one agent's status (`NotStarted` for an unknown name). |
 | `resource_tracker` | `Option<freshness::ResourceTracker>` | Context freshness tracker. |
 | `hooks` | `Arc<hooks::HookRegistry>` | Registered callbacks. |
 | `agent_configs` | `HashMap<String, AgentConfig>` | Agent configurations keyed by registration name. |
@@ -580,9 +585,9 @@ fn observe_context(&self, task_id: uuid::Uuid, message: &arko_ai::Message);
 
 ## Messaging
 
-Module: `arko_workflows::messaging`. Sources: [message bus and data](src/messaging/mod.rs), [agent tool](src/messaging/tools.rs).
+Module: `arko_workflows::messaging`. Sources: [message bus, data, and policy](src/messaging/mod.rs), [agent statuses](src/messaging/registry.rs), [agent tools and start notices](src/messaging/tools.rs).
 
-Messages are addressed to an agent name in a fixed roster. They stay queued until drained or acknowledged. Every active task of the recipient receives a live injection at its next safe turn boundary. Below, `UserCommand` is `arko_agents::runtime::command::UserCommand`.
+Messages are addressed to an agent name in a fixed roster. They stay queued until drained or acknowledged. Every active task of the recipient receives a live injection at its next safe turn boundary, in a `# Workflow context update` user message. Below, `UserCommand` is `arko_agents::runtime::command::UserCommand`.
 
 | Public type | Fields or variants |
 | --- | --- |
@@ -612,7 +617,7 @@ Methods on `MessageBus`. `Default` is an empty roster with no queues or active r
 | `fn register_active(&self, agent_name: &str, task_id: Uuid, sender: tokio::sync::mpsc::Sender<UserCommand>)` | Register a task's command channel and start its delivery worker. Registering the same task again replaces the registration and stops the old worker. Can be called outside a Tokio runtime; delivery then starts at the next `send` or `inject_task` inside one. |
 | `fn unregister_active(&self, agent_name: &str, task_id: Uuid)` | Remove the registration and stop forwarding; unacknowledged messages stay queued. |
 | `async fn inject_task(&self, task_id: Uuid, content: String) -> bool` | Queue a context notice for one active task without waiting for channel capacity. Creates an `AgentMessage` from `workflow-context` that checkpoints persist like any message. `true` means queued (not yet consumed or saved); an unknown or inactive task returns `false`. |
-| `async fn send(&self, from: &str, from_task_id: Option<Uuid>, to: &str, content: String, attachments: Vec<MessageAttachment>) -> Result<AgentMessage, String>` | Validate the recipient, queue the message, and return it. Active delivery workers forward it without blocking the sender on a busy recipient. An unknown recipient's error lists the valid names. A closed channel unregisters that task; its unacknowledged messages stay queued. The sender name is not validated. |
+| `async fn send(&self, from: &str, from_task_id: Option<Uuid>, to: &str, content: String, attachments: Vec<MessageAttachment>) -> Result<AgentMessage, String>` | Validate the recipient, queue the message, and return it. Active delivery workers forward it without blocking the sender on a busy recipient. A message to the sender itself returns `'<to>' is not a permitted recipient`; an unknown recipient's error lists the valid names. The messaging policy and recipient statuses are not checked. A closed channel unregisters that task; its unacknowledged messages stay queued. The sender name is not validated. |
 | `fn drain(&self, agent_name: &str) -> Vec<AgentMessage>` | Remove and return the agent's whole queue; `[]` for an unknown or empty name. |
 | `fn pending(&self, agent_name: &str) -> Vec<AgentMessage>` | Clone of the queue without removing messages. |
 | `fn acknowledge(&self, agent_name: &str, message_ids: &[Uuid])` | Remove the given IDs from the agent's queue. |
@@ -632,9 +637,10 @@ Queueing, channel acceptance, context confirmation, and acknowledgment are separ
 | `fn all() -> Self` | No restrictions; the same as `default()` and the builder's default. |
 | `fn can_message<I, S>(self, agent: impl Into<String>, recipients: I) -> Self` (`I: IntoIterator<Item = S>`, `S: Into<String>`) | Restrict `agent` to `recipients`; an empty list means no one. Replaces an earlier setting for the agent. |
 | `fn cannot_message(self, agent: impl Into<String>) -> Self` | `agent` may message no one. |
+| `fn permits(&self, sender: &str, recipient: &str) -> bool` | Whether the policy lets `sender` message `recipient`; never itself. Does not check that either name is registered. |
 | `fn recipients_of(&self, sender: &str, roster: &[String]) -> Vec<String>` | The roster agents `sender` may message, in roster order, never `sender` itself. |
 
-An agent is offered `send_message` only when it has at least one permitted recipient: a single-agent workflow, an agent restricted to no one, and every agent of a workflow built with `disable_messaging` get none. Names are registration names, and `build` rejects a policy naming an unregistered agent. The policy is read whenever an agent run starts, so it applies to runs started through workflow services and to resumed runs alike. Message queues restored from a checkpoint are delivered whatever the policy; it governs only new `send_message` calls, not `MessageBus::send`.
+An agent is offered `send_message` and `list_recipients` only when it has at least one permitted recipient: a single-agent workflow, an agent restricted to no one, and every agent of a workflow built with `disable_messaging` get neither. The offer depends on the policy alone, not on recipient statuses. Names are registration names, and `build` rejects a policy naming an unregistered agent. The policy is read whenever an agent run starts, so it applies to runs started through workflow services and to resumed runs alike. Message queues restored from a checkpoint are delivered whatever the policy; it governs only new `send_message` calls, not `MessageBus::send`.
 
 ```rust
 use arko_workflows::messaging::MessagingPolicy;
@@ -646,9 +652,46 @@ let policy = MessagingPolicy::all()
     .cannot_message("auditor");
 ```
 
-### Send-message tool
+### Agent statuses
 
-`messaging::tools::SEND_MESSAGE_TOOL_NAME: &str = "send_message"`. `SendMessageTool` implements `Debug` and `arko_agents::tool::Tool`:
+One registry per workflow run records each agent's status, under one lock, with a version that every status change increases. `AgentStatus` and `WaitReason` are defined in `messaging::registry` and re-exported in the prelude. Both implement `Debug`, `Clone`, `PartialEq`, `Eq`, and Serde, with variant names in snake case.
+
+| Type | Variants and meaning |
+| --- | --- |
+| `AgentStatus` | `NotStarted`: no run of the agent has started. `Running`: a run of the agent is running. `Waiting(WaitReason)`: every running run of the agent is waiting. `Finished(AgentRunStatus)`: no run is running, and the latest ended with this outcome. |
+| `WaitReason` | `RateLimited { until: Option<chrono::DateTime<chrono::Utc>> }`: waiting out a provider rate limit. `Retrying { until }`: waiting to retry another failed model request. `UsageLimit { until }`: waiting for a plan usage limit to reset. `AwaitingApproval`: a tool call or error recovery awaits approval. `AwaitingInput`: questions await an answer. `Paused`: the workflow is paused. |
+
+`AgentStatus` methods:
+
+```rust
+fn is_reachable(&self) -> bool; // Running or Waiting: messages are delivered
+fn describe(&self) -> String;
+```
+
+`describe` returns the form agents are shown: `not_started`, `running`, `waiting (<reason>)` or `waiting (<reason> until <time>)`, and `finished (<outcome>)`. The reasons are `rate_limited`, `retrying`, `usage_limit`, `awaiting_approval`, `awaiting_input`, and `paused`; the time is RFC 3339 UTC to the second, for example `waiting (rate_limited until 2026-09-27T12:00:00Z)`. The outcomes are `completed`, `failed`, `interrupted`, `cancelled`, and `waiting_for_input`.
+
+Statuses follow the managed driver's events:
+
+- `RetryScheduled` starts a `RateLimited` wait when its `rate_limit` flag is set and a `Retrying` wait otherwise, until the current time plus its delay.
+- `UsageLimitReached` starts a `UsageLimit` wait until its `waiting_until_unix_ms`, when known.
+- A task state awaiting tool, batch, or error-recovery approval starts `AwaitingApproval`; `AwaitingUserResponse` and `UserQuestionsAsked` start `AwaitingInput`.
+- Error reports, task logs, plan-usage and cache-efficiency reports, and the stream end leave a wait in place; any other event ends it.
+
+While the workflow is paused, every agent with a running run is `Waiting(Paused)`. With several runs of one agent, the agent is `Running` while any run is not waiting; otherwise it is waiting for the reason of one of its runs. A run started while another run of the same agent is running is not a new start.
+
+`Workflow::agent_status`, `SharedContext::recipient_statuses`, and `list_recipients` read the registry. An agent driven through `AgentHandle::into_parts` counts as running for the rest of the run, and one whose `AgentHandle` is dropped unused counts as finished (cancelled). Checkpoints save the registry; see [Checkpoint payloads](#checkpoint-payloads).
+
+### What agents are told about their recipients
+
+An agent learns about the agents it may message in exactly three places. The workflow adds nothing about them to its system prompt or tool definitions, so both stay the same during a task and remain cacheable.
+
+1. **The initial prompt of a new run** ends with a `# Agents you can message` section when the agent has permitted recipients: a sentence on how to reach them, then one line per recipient with its role description and its status when the run started, such as `` - `lead` (Coordinates the work): running ``. The agent's pending messages come before it. Continuations (`continue_agent`, including an answer to `ask_user`, and a verifier's re-review or format retry) add no list. A completion verifier's prompt has no list, and the target's task prompt that it quotes has its list removed.
+2. **Start notices** arrive in `# Workflow context update` user messages, added at each safe turn boundary before a model request, one line per recipient: `` Agent `worker` (role: <role description>) is now running. You can message it with send_message. `` A run is told about every permitted recipient that started after the registry version it last saw (from its list or its previous notices) and is still running, and then has seen the current version, so no ordering of starts loses or repeats a notice. A continued run is told about recipients that started since it last ran, and a run whose task comes from a checkpoint saved without the registry is told about every running recipient once. Agents started together by `run_agents_parallel` are marked running before any is prompted, so each sees the others as running and gets no notice. There are no finish notices.
+3. **`list_recipients`** reports current statuses on request.
+
+### Messaging tools
+
+`messaging::tools` defines `SEND_MESSAGE_TOOL_NAME: &str = "send_message"` and `LIST_RECIPIENTS_TOOL_NAME: &str = "list_recipients"`. `SendMessageTool` and `ListRecipientsTool` implement `Debug` and `arko_agents::tool::Tool`:
 
 ```rust
 fn new(context: Arc<crate::context::SharedContext>, agent_name: String) -> Self;
@@ -660,7 +703,21 @@ async fn execute(
 ) -> Result<String, arko_agents::tool::ToolError>;
 ```
 
-Parameters: required `to: string` and `content: string`; optional `attachments_json: string`, a JSON array in the attachment format above (default: no attachments). The tool description lists the agent's permitted recipients, never the agent itself. Invalid attachment JSON is a `ParameterValidation` error; a non-string `attachments_json` is ignored. A `to` that is not a permitted recipient, including the agent itself and unknown names, is a `ParameterValidation` error listing the valid recipients, and nothing is queued. On success the tool records the current task as the sender's task, fires `OnAgentMessage`, and returns `Message {id} sent to agent '{to}'.` Not batch-safe. A hook's `Abort` is returned as an `ExecutionFailed` error even though the message has already been queued, and it stops the run.
+Their definitions name no agent, so they are the same for every agent and never change during a task.
+
+| Tool | Parameters | Output and behavior |
+| --- | --- | --- |
+| `send_message` | Required `to: string` and `content: string`; optional `attachments_json: string`, a JSON array in the attachment format above (default: no attachments). | Delivers a message to a permitted recipient that is running or waiting. Not batch-safe. |
+| `list_recipients` | None. | One line per permitted recipient, never the agent itself, in the initial prompt's format with current statuses; `There are no agents you can message.` when there are none. Batch-safe. |
+
+`send_message` checks its parameters first: a missing `to` or `content` is a `MissingParameter` error, invalid attachment JSON is a `ParameterValidation` error, and a non-string `attachments_json` is ignored. A `to` that is not a permitted recipient, including the agent itself and unknown names, is a `ParameterValidation` error that names only the permitted recipients: `'<to>' is not an agent you can message. The agents you can message: <recipients>.` The recipient's status decides the rest:
+
+- `not_started`: an `ExecutionFailed` error, `Agent '<to>' has not started, so it can't receive messages. A workflow context update will tell you when it starts.` Nothing is queued for later.
+- `finished (<outcome>)`: an `ExecutionFailed` error, `Agent '<to>' is finished (<outcome>); it no longer receives messages.`
+- `running`: the message is queued and delivered at the recipient's next safe turn boundary; the tool returns `Message <id> sent to agent '<to>'.`
+- `waiting (<reason>)`: the message is queued and delivered likewise, and the result says so, for example `Message <id> sent to agent 'lead', which is waiting (usage_limit); it receives the message when it continues.`
+
+On success the tool records the current task as the sender's task and fires `OnAgentMessage`. A hook's `Abort` is returned as an `ExecutionFailed` error even though the message has already been queued, and it stops the run.
 
 ## Context freshness
 
@@ -1037,7 +1094,9 @@ impl PersistenceManager {
 
 Filesystem and serialization failures are returned as `WorkflowError`. A run directory holds checkpoints, task snapshots, the event log, and the durable journal; running futures and ballots are not persisted.
 
-`resume_from` restores memory tiers and their history, pending messages, the cost ledger, finalized agent results, and verification and distillation records. The saved memory replaces any `MemoryConfig` given to the new builder. Freshness state is restored only when freshness tracking is configured again. Agents, the client, tools, hooks, policies, budget limits, and metadata come from the new builder, not the checkpoint. The pause flag starts cleared, and active message channels, ballots, and verification repair counts and baselines start empty. Restoring does not continue agents or replay workflow control flow. Accounting is rebuilt from `cost_ledger`; `budget_spent` and `completed_agents` are not used on restore. A recorded `cancellation` is not restored: the resumed run starts again, as described under [Stopping a run](#stopping-a-run).
+`resume_from` restores memory tiers and their history, pending messages, the cost ledger, finalized agent results, verification and distillation records, and the agent status registry. The saved memory replaces any `MemoryConfig` given to the new builder. Freshness state is restored only when freshness tracking is configured again. Agents, the client, tools, hooks, policies, budget limits, and metadata come from the new builder, not the checkpoint. The pause flag starts cleared, and active message channels, ballots, and verification repair counts and baselines start empty. Restoring does not continue agents or replay workflow control flow. Accounting is rebuilt from `cost_ledger`; `budget_spent` and `completed_agents` are not used on restore. A recorded `cancellation` is not restored: the resumed run starts again, as described under [Stopping a run](#stopping-a-run).
+
+No agent is running after a resume. From `agent_registry`, an agent that was running when the checkpoint was saved counts as finished (interrupted), and each continuable run keeps the registry version it has seen, so a continued run is told only about recipients that started after that. From a checkpoint without `agent_registry`, an agent with recorded results takes its latest result's outcome, and any other agent is not started.
 
 ### Checkpoint payloads
 
@@ -1060,6 +1119,9 @@ Filesystem and serialization failures are returned as `WorkflowError`. A run dir
 | `distillation_records` | `Vec<crate::distillation::DistillationRecord>` | Distillation history; empty. |
 | `completed_agents` | `Vec<SerializableAgentResult>` | Name and summary of each recorded result; empty. |
 | `cancellation` | `Option<crate::workflow::cancel::Cancellation>` | The run's stop, in checkpoints written after it (omitted from JSON when `None`); `None`. |
+| `agent_registry` | `Option<crate::messaging::registry::RegistrySnapshot>` | Agent statuses and what each agent run has seen of them (omitted from JSON when `None`); `None`. |
+
+`RegistrySnapshot` has public fields `version: u64`, which every status change increases; `agents: std::collections::BTreeMap<String, AgentRecord>`, keyed by registration name; and `seen: HashMap<Uuid, u64>`, the registry version each agent run (by task ID) has been told about. `AgentRecord` has `last_start: u64`, the version at the agent's latest start (`0` if it never started), and `finished: Option<AgentRunStatus>`, how its latest run ended when none is running (omitted from JSON when `None`). Every field defaults when missing. Both types implement `Debug`, `Clone`, `Default`, `PartialEq`, `Eq`, and Serde. What a run that cannot be continued (any status other than `Completed` or `WaitingForInput`) has seen is dropped when it ends.
 
 Unknown fields are ignored on load, so checkpoints written by earlier versions with fields since removed, such as `oauth_exempt_agents`, still load; their ledger entries keep their recorded amounts. A task state saved as `Failed` with exactly the reason `Task cancelled by user.` deserializes as `TaskState::Cancelled`, in checkpoints, task files, and event-log records alike. Budget accounting records `UsageInfo::billed()`, which is zero for subscription calls such as ChatGPT OAuth.
 
@@ -1158,7 +1220,7 @@ Source: [error.rs](src/error.rs). `WorkflowError` is re-exported at the root and
 | `BudgetExceeded { spent: f64, limit: f64 }` | Workflow spending strictly exceeds the dollar limit. |
 | `AgentBudgetExceeded { agent: String, spent: f64, limit: f64 }` | The agent's cumulative LLM spending strictly exceeds its limit. |
 | `InvalidCost(f64)` | A manual cost is negative or non-finite. |
-| `AbortedByHook { hook_point: String, reason: String }` | A hook returned `Abort`, which stopped the run. Returned by the operation that fired a lifecycle hook and by every run call in progress or made later. `hook_point` is the `HookPoint` variant name. |
+| `AbortedByHook { hook_point: String, reason: String }` | A hook returned `Abort`, which stopped the run. Returned by the operation that fired a lifecycle hook and by every run call in progress or made later. `hook_point` is the `HookPoint` variant name. A later hook `Abort` on the stopped run returns this first cause's error, not a new `AbortedByHook`. |
 | `Persistence(String)` | Run identity, journal, or other persisted-state failure. |
 | `DurableUnavailable` | A durable operation was requested without persistence. |
 | `DurableDefinitionMismatch { step: String, details: String }` | The recorded step definition or input differs from the request, or an operator resolution found no unresolved attempt. |

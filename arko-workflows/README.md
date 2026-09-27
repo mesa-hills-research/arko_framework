@@ -203,12 +203,14 @@ results (status `AgentRunStatus::Cancelled` for a stopped agent), and returns
 `WorkflowError::Cancelled`; every later call returns it at once without starting
 anything. An agent stops at its next step, or when a long tool call it is running
 returns. One that has not stopped within the grace period (30 seconds by default,
-set with `cancel_grace_period`) is aborted. `cancel()` returns `false` if the run
-was already stopped. The `OnWorkflowCancelled` hook fires once, and
-`PostAgentCancellation` fires for each cancelled agent.
+set with `cancel_grace_period`, counted from the stop) is aborted; an agent running
+inside another agent's tool call, such as a completion verifier, gets half its
+parent's time. `cancel()` returns `false` if the run was already stopped. The
+`OnWorkflowCancelled` hook fires once, and `PostAgentCancellation` fires for each
+cancelled agent.
 
 A hook that returns `Abort(reason)` stops the run the same way, and the calls
-return `WorkflowError::AbortedByHook` instead.
+return `WorkflowError::AbortedByHook` instead. Whichever stop comes first stands.
 
 With persistence, the checkpoints written after the stop record it in
 `cancellation`, and `finish()` saves one and returns the stop's error. Resuming
@@ -343,18 +345,30 @@ the model calls. See [budget and cost accounting](INDEX.md#budget-and-cost-accou
 
 ## Messaging
 
-Agents send messages with the injected `send_message` tool. A message stays queued
-until a run of the recipient that received it completes successfully. A recipient
-that is already running receives the message at its next turn boundary.
-Messages carry stable IDs, sender task IDs, typed attachments, and timestamps, all
-of which survive checkpoints.
+Agents send messages with the injected `send_message` tool, to agents that are
+running or waiting (for example on a rate limit or for approval); a recipient
+receives the message at its next turn boundary. Messages to agents that have not
+started or have finished are refused with their status, not queued. An accepted
+message stays queued until a run of the recipient that received it completes
+successfully, so a later run receives it again otherwise. Messages carry stable
+IDs, sender task IDs, typed attachments, and timestamps, all of which survive
+checkpoints.
+
+Agents learn whom they can reach from three sources: the initial prompt of each
+new run lists the agents it may message with their roles and statuses, a
+"Workflow context update" tells a running agent when one of them starts, and the
+`list_recipients` tool reports current statuses. The workflow adds no agent names
+to tool definitions or system prompts, so they stay the same during a task.
+`workflow.agent_status(name)` gives the same status to your code: not started,
+running, waiting (with the reason), or finished (with the outcome). Agents started
+together with `run_agents_parallel` see each other as running from the start.
 
 A `MessagingPolicy` sets whom each agent may message. By default every agent may
-message every other registered agent. An agent is offered `send_message` only when
-it has at least one permitted recipient, so a single-agent workflow has no such
-tool. The tool lists exactly that agent's recipients, and a message to anyone else
-is rejected. Restrict an agent with `can_message`, or turn messaging off with
-`disable_messaging`:
+message every other registered agent. An agent is offered `send_message` and
+`list_recipients` only when it has at least one permitted recipient, so a
+single-agent workflow has neither tool. A message to anyone else is rejected
+without naming other agents. Restrict an agent with `can_message`, or turn
+messaging off with `disable_messaging`:
 
 ```rust
 use arko_workflows::messaging::MessagingPolicy;
@@ -375,8 +389,9 @@ let workflow = Workflow::builder()
 
 Names in the policy are registration names; an unknown one fails the build. The
 policy applies to every run of an agent, including runs started through workflow
-services. With messaging disabled, or for agents that are not offered it, the name
-`send_message` is free for a tool of your own.
+services. With messaging disabled, or for agents that are not offered the tools,
+the names `send_message` and `list_recipients` are free for tools of your own. See
+[messaging](INDEX.md#messaging) for the statuses, notices, and tool results.
 
 The optional `attachments_json` parameter is a JSON array of typed references.
 They are described to the recipient; files, memory, and transcripts are not loaded
