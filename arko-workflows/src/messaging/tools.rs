@@ -42,7 +42,7 @@ impl Tool for SendMessageTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: SEND_MESSAGE_TOOL_NAME.to_string(),
-            description: "Send a message to another workflow agent that is running (or waiting); it receives the message at its next safe turn boundary. Your task lists the agents you can message, workflow context updates tell you when one starts, and list_recipients reports their current status.".to_string(),
+            description: "Send a message to another workflow agent that is running (or waiting); it receives the message at its next safe turn boundary. list_recipients reports the agents you can message and their current status; workflow context updates tell you when one starts.".to_string(),
             output_based_example: None,
             parameters: vec![
                 ToolParameterDefinition {

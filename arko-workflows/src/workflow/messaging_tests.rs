@@ -328,6 +328,34 @@ async fn statuses_follow_a_rate_limited_run() {
     );
 }
 
+/// An agent that may delegate learns the agents it can run from
+/// run_workflow_agent's definition, whatever the messaging policy.
+#[test]
+fn delegation_targets_are_named_in_the_delegation_tool() {
+    let workspace = Workspace::new();
+    for services in [
+        crate::services::WorkflowServicesConfig::default(),
+        crate::services::WorkflowServicesConfig::default().allow_target("reviewer"),
+    ] {
+        let restricted = !services.allowed_targets.is_empty();
+        let workflow = builder(&workspace, &["coder", "reviewer", "writer"])
+            .disable_messaging()
+            .workflow_services(services)
+            .build()
+            .unwrap();
+        let registry = workflow
+            .engine
+            .build_tool_registry("coder", workflow.context(), 0);
+        let definition = registry
+            .get(crate::services::RUN_WORKFLOW_AGENT_TOOL_NAME)
+            .unwrap()
+            .definition();
+        let targets = &definition.parameters[0].description;
+        assert!(targets.contains("`reviewer` (reviewer role)"), "{targets}");
+        assert_eq!(targets.contains("`writer`"), !restricted, "{targets}");
+    }
+}
+
 /// A restricted sender sees and reaches only its recipients; an
 /// unrestricted one reaches every other agent; one permitted no one isn't
 /// offered the tools; not-started and finished recipients are refused,

@@ -269,7 +269,7 @@ pub(crate) async fn drive_event_loop(
         publish_event(agent_name, agent_run_id, &event, ctx, persistence).await?;
         ctx.registry.observe(agent_run_id, &event);
         if ctx.budget.is_exceeded() && !matches!(&event, AgentEvent::UsageReported(_)) {
-            let _ = cmd_tx.send(UserCommand::CancelTask).await;
+            let _ = cmd_tx.try_send(UserCommand::CancelTask);
             return Err(WorkflowError::BudgetExceeded {
                 spent: ctx.budget.total_spent(),
                 limit: ctx.budget.limit().unwrap_or(0.0),
@@ -311,14 +311,14 @@ pub(crate) async fn drive_event_loop(
             AgentEvent::UsageReported(ref usage) => {
                 let cost_result = charge_usage(agent_name, usage, ctx);
                 if cost_result.exceeded {
-                    let _ = cmd_tx.send(UserCommand::CancelTask).await;
+                    let _ = cmd_tx.try_send(UserCommand::CancelTask);
                     return Err(WorkflowError::BudgetExceeded {
                         spent: cost_result.new_total,
                         limit: ctx.budget.limit().unwrap_or(0.0),
                     });
                 }
                 if ctx.budget.is_agent_exceeded(agent_name) {
-                    let _ = cmd_tx.send(UserCommand::CancelTask).await;
+                    let _ = cmd_tx.try_send(UserCommand::CancelTask);
                     return Err(WorkflowError::AgentBudgetExceeded {
                         agent: agent_name.to_string(),
                         spent: ctx.budget.agent_spent(agent_name),
@@ -327,7 +327,7 @@ pub(crate) async fn drive_event_loop(
                 }
 
                 if ctx.budget.is_exceeded() {
-                    let _ = cmd_tx.send(UserCommand::CancelTask).await;
+                    let _ = cmd_tx.try_send(UserCommand::CancelTask);
                     return Err(WorkflowError::BudgetExceeded {
                         spent: ctx.budget.total_spent(),
                         limit: ctx.budget.limit().unwrap_or(0.0),
@@ -407,7 +407,7 @@ pub(crate) async fn drive_event_loop(
                 // The agent runtime can wait for commands after a persistent
                 // transport failure. A workflow invocation must return its error
                 // instead of waiting forever for TaskStreamEnd.
-                let _ = cmd_tx.send(UserCommand::CancelTask).await;
+                let _ = cmd_tx.try_send(UserCommand::CancelTask);
                 return Err(WorkflowError::AgentInterrupted {
                     agent: agent_name.to_string(),
                     reason,
@@ -436,6 +436,8 @@ pub(crate) struct StartOptions {
     pub roster: bool,
     /// See [`StartedRun::depth`].
     pub depth: u32,
+    /// Already admitted (`PreAgentSpawn` fired, budget and stop checked).
+    pub admitted: bool,
 }
 
 impl Default for StartOptions {
@@ -444,6 +446,41 @@ impl Default for StartOptions {
             reserved: None,
             roster: true,
             depth: 0,
+            admitted: false,
+        }
+    }
+}
+
+/// Spawned agent drivers, aborted if the call holding them is dropped.
+struct AbortAll<T>(Vec<tokio::task::JoinHandle<T>>);
+
+impl<T> Drop for AbortAll<T> {
+    fn drop(&mut self) {
+        for handle in &self.0 {
+            handle.abort();
+        }
+    }
+}
+
+/// A run marked running in the registry before its start: abandoned unless
+/// released once the start has been attempted (the start abandons it itself
+/// if it fails).
+struct Reservation {
+    ctx: Arc<SharedContext>,
+    task_id: uuid::Uuid,
+    armed: bool,
+}
+
+impl Reservation {
+    fn release(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.ctx.registry.abandon(self.task_id);
         }
     }
 }
@@ -653,10 +690,11 @@ pub(crate) async fn drive_to_result(
         Some(Err(error)) => Err(WorkflowError::Channel(format!("Agent join error: {error}"))),
         None => {
             let mut task = started_task;
+            let reason = stop_reason(ctx, &drive_result);
+            let separator = if reason.ends_with('.') { " " } else { ". " };
             task.set_state(TaskState::Cancelled {
                 reason: format!(
-                    "{} The agent did not stop within {:?} and was aborted.",
-                    stop_reason(ctx, &drive_result),
+                    "{reason}{separator}The agent did not stop within {:?} and was aborted.",
                     ctx.run_control.grace_period()
                 ),
             });
@@ -1142,7 +1180,12 @@ impl WorkflowEngine {
         ctx: &Arc<SharedContext>,
         options: StartOptions,
     ) -> Result<StartedRun, WorkflowError> {
-        let prepared = self.admit(agent_name, None, ctx).and_then(|()| {
+        let admission = if options.admitted {
+            Ok(())
+        } else {
+            self.admit(agent_name, None, ctx)
+        };
+        let prepared = admission.and_then(|()| {
             let base_config = ctx
                 .agent_configs
                 .get(agent_name)
@@ -1227,8 +1270,12 @@ impl WorkflowEngine {
             interceptor_config,
             Some(execution_middleware),
         );
-        ctx.messages
-            .register_active(agent_name, agent_run_id, cmd_tx.clone());
+        ctx.messages.register_run(
+            agent_name,
+            agent_run_id,
+            cmd_tx.clone(),
+            &pending_message_ids,
+        );
         ctx.run_control.register(agent_run_id, &cmd_tx);
         StartedRun {
             agent_name: agent_name.to_string(),
@@ -1297,40 +1344,53 @@ impl WorkflowEngine {
         ctx: &Arc<SharedContext>,
     ) -> Result<Vec<AgentResult>, WorkflowError> {
         ctx.run_control.check()?;
+        // Each agent is admitted (PreAgentSpawn, budget, the run's stop)
+        // before any is marked running; one refused is that agent's error.
+        let admitted = agents
+            .iter()
+            .map(|(name, _)| self.admit(name, None, ctx))
+            .collect::<Vec<_>>();
         let reserved = agents
             .iter()
-            .map(|(name, _)| (uuid::Uuid::new_v4(), *name))
+            .zip(&admitted)
+            .filter(|(_, admission)| admission.is_ok())
+            .map(|((name, _), _)| (uuid::Uuid::new_v4(), *name))
             .collect::<Vec<_>>();
         ctx.registry.start(&reserved);
-        let mut join_handles = Vec::new();
+        let mut reserved = reserved.into_iter();
+        // Dropping this call stops its agents.
+        let mut join_handles = AbortAll(Vec::new());
 
-        for ((task_id, name), (_, prompt)) in reserved.into_iter().zip(agents) {
-            let engine_client = self.llm_client.clone();
-            let persistence = self.persistence.clone();
+        for ((name, prompt), admission) in agents.into_iter().zip(admitted) {
+            let engine = WorkflowEngine {
+                llm_client: self.llm_client.clone(),
+                persistence: self.persistence.clone(),
+            };
             let ctx_clone = ctx.clone();
             let name_owned = name.to_string();
-
-            let handle = tokio::spawn({
-                let engine = WorkflowEngine {
-                    llm_client: engine_client,
-                    persistence,
-                };
-                async move {
-                    let options = StartOptions {
-                        reserved: Some(task_id),
-                        ..StartOptions::default()
-                    };
-                    let run = engine.start_agent(&name_owned, &prompt, &ctx_clone, options)?;
-                    drive_to_result(run, &ctx_clone, engine.persistence.as_ref()).await
-                }
+            let reservation = admission.map(|()| Reservation {
+                ctx: ctx.clone(),
+                task_id: reserved.next().expect("an admitted agent is reserved").0,
+                armed: true,
             });
-            join_handles.push(handle);
+
+            let handle = tokio::spawn(async move {
+                let reservation = reservation?;
+                let options = StartOptions {
+                    reserved: Some(reservation.task_id),
+                    admitted: true,
+                    ..StartOptions::default()
+                };
+                let run = engine.start_agent(&name_owned, &prompt, &ctx_clone, options);
+                reservation.release();
+                drive_to_result(run?, &ctx_clone, engine.persistence.as_ref()).await
+            });
+            join_handles.0.push(handle);
         }
 
         let mut results = Vec::new();
         let mut first_error = None;
-        while !join_handles.is_empty() {
-            let handle = join_handles.remove(0);
+        for handle in &mut join_handles.0 {
             match handle.await {
                 Ok(Ok(result)) => results.push(result),
                 Ok(Err(error)) => {

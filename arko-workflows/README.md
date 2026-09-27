@@ -357,8 +357,11 @@ checkpoints.
 Agents learn whom they can reach from three sources: the initial prompt of each
 new run lists the agents it may message with their roles and statuses, a
 "Workflow context update" tells a running agent when one of them starts, and the
-`list_recipients` tool reports current statuses. The workflow adds no agent names
-to tool definitions or system prompts, so they stay the same during a task.
+`list_recipients` tool reports current statuses. Recipient information never goes
+into tool definitions or system prompts, which stay the same during a task. (An agent
+allowed to delegate through workflow services finds the agents it can run, with
+their roles, in the `run_workflow_agent` tool's definition; that list is fixed by
+the configuration.)
 `workflow.agent_status(name)` gives the same status to your code: not started,
 running, waiting (with the reason), or finished (with the outcome). Agents started
 together with `run_agents_parallel` see each other as running from the start.

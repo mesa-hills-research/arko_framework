@@ -319,6 +319,40 @@ impl MessageBus {
         self.start_pump(agent_name, task_id, active.get_mut(&task_id).unwrap());
     }
 
+    /// Registers a run started with the messages `in_prompt` in its prompt,
+    /// and delivers live any message queued for the agent since the prompt
+    /// was built.
+    pub(crate) fn register_run(
+        &self,
+        agent_name: &str,
+        task_id: Uuid,
+        sender: mpsc::Sender<UserCommand>,
+        in_prompt: &[Uuid],
+    ) {
+        self.register_active(agent_name, task_id, sender);
+        let mut state = self.state.lock();
+        let late = state
+            .queues
+            .get(agent_name)
+            .into_iter()
+            .flatten()
+            .filter(|message| !in_prompt.contains(&message.id))
+            .map(|message| (message.id, injection(message)))
+            .collect::<Vec<_>>();
+        if late.is_empty() {
+            return;
+        }
+        let Some(active) = state
+            .active
+            .get_mut(agent_name)
+            .and_then(|instances| instances.get_mut(&task_id))
+        else {
+            return;
+        };
+        active.outbound.extend(late);
+        active.wake.notify_one();
+    }
+
     fn start_pump(&self, agent_name: &str, task_id: Uuid, active: &mut ActiveRecipient) {
         if active.pump.as_ref().is_some_and(|pump| !pump.is_finished()) {
             return;
@@ -782,6 +816,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![unread.id]
         );
+    }
+
+    /// A message queued after a run's prompt was built, before the run was
+    /// registered, is delivered to it live; one in its prompt is not
+    /// delivered again.
+    #[tokio::test]
+    async fn a_run_receives_messages_sent_while_it_started() {
+        let bus = MessageBus::new(["coder".to_string(), "reviewer".to_string()]);
+        let in_prompt = bus
+            .send("coder", None, "reviewer", "in the prompt".into(), vec![])
+            .await
+            .unwrap();
+        bus.send("coder", None, "reviewer", "sent meanwhile".into(), vec![])
+            .await
+            .unwrap();
+        let (sender, mut receiver) = mpsc::channel(4);
+        bus.register_run("reviewer", Uuid::new_v4(), sender, &[in_prompt.id]);
+        let delivered = received(&mut receiver).await;
+        assert!(delivered.contains("sent meanwhile"), "{delivered}");
+        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]

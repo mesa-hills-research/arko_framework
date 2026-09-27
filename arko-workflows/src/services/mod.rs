@@ -89,6 +89,23 @@ impl WorkflowServices {
         self.config.allowed_targets.is_empty() || self.config.allowed_targets.contains(target)
     }
 
+    /// The `agent` parameter's description: the agents it may run, with
+    /// their roles (every registered agent unless targets are restricted).
+    /// Configuration only, so it doesn't change during a task.
+    fn target_guidance(&self) -> String {
+        let Some(context) = self.context.upgrade() else {
+            return "Use only a configured agent name.".to_string();
+        };
+        let mut targets = context
+            .agent_configs
+            .iter()
+            .filter(|(name, _)| self.is_target_allowed(name))
+            .map(|(name, config)| format!("`{name}` ({})", config.role_description))
+            .collect::<Vec<_>>();
+        targets.sort();
+        format!("The agent to run, one of: {}.", targets.join("; "))
+    }
+
     fn allowed_target_names(&self) -> Vec<String> {
         let mut targets = self
             .config
@@ -187,12 +204,7 @@ impl RunWorkflowAgentTool {
 #[async_trait]
 impl Tool for RunWorkflowAgentTool {
     fn definition(&self) -> ToolDefinition {
-        let allowed_targets = self.services.allowed_target_names();
-        let target_guidance = if allowed_targets.is_empty() {
-            "Use only a configured agent name.".to_string()
-        } else {
-            format!("Allowed targets: {}.", allowed_targets.join(", "))
-        };
+        let target_guidance = self.services.target_guidance();
         ToolDefinition {
             name: RUN_WORKFLOW_AGENT_TOOL_NAME.to_string(),
             description: "Run another configured workflow agent for a bounded subtask and return its verified completion summary. Use only when delegation is materially useful.".to_string(),

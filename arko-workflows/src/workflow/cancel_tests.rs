@@ -665,6 +665,32 @@ async fn a_dropped_run_call_stops_its_agent() {
     assert!(workflow.context().messages.snapshot().is_empty());
 }
 
+/// Dropping a parallel run call stops every agent it started.
+#[tokio::test]
+async fn a_dropped_parallel_call_stops_its_agents() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|_, _| None).await;
+    let workflow = builder(&server, &workspace).build().unwrap();
+    let call = workflow.run_agents_parallel(vec![
+        ("coder", "Write it.".to_string()),
+        ("reviewer", "Review it.".to_string()),
+    ]);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), call)
+            .await
+            .is_err()
+    );
+    let stopped = crate::messaging::registry::AgentStatus::Finished(AgentRunStatus::Cancelled);
+    within(async {
+        while workflow.agent_status("coder") != Some(stopped.clone())
+            || workflow.agent_status("reviewer") != Some(stopped.clone())
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+}
+
 /// A verifier running when the run is cancelled decides nothing: the target
 /// is cancelled, not failed.
 #[tokio::test]
@@ -735,6 +761,39 @@ async fn an_agent_stopped_over_budget_records_why() {
             .starts_with("Stopped by the workflow: Budget exceeded"),
         "{:?}",
         result.error
+    );
+}
+
+/// An agent the workflow stops over budget and that doesn't stop is
+/// aborted, and its reason reads as sentences.
+#[tokio::test]
+async fn an_agent_aborted_over_budget_records_why() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|index, _| {
+        (index == 0).then(|| tool_call_turn("block", "block", json!({})))
+    })
+    .await;
+    let workflow = builder(&server, &workspace)
+        .agent_tool("coder", ProbeTool::new("block", true))
+        .budget(0.0)
+        .cancel_grace_period(Duration::from_millis(100))
+        .build()
+        .unwrap();
+    let error = within(workflow.run_agent("coder", "Block."))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, WorkflowError::BudgetExceeded { .. }),
+        "{error:?}"
+    );
+    let reason = workflow.result().agent_results[0].error.clone().unwrap();
+    assert!(
+        reason.starts_with("Stopped by the workflow: Budget exceeded"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains(". The agent did not stop within 100ms and was aborted."),
+        "{reason}"
     );
 }
 

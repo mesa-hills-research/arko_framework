@@ -139,6 +139,9 @@ struct Run {
     /// The agent's record before this run started, restored if the run is
     /// abandoned before it starts.
     previous: AgentRecord,
+    /// The version of the start this run made, if it made one (no other run
+    /// of the agent was running).
+    started: Option<u64>,
 }
 
 #[derive(Default)]
@@ -206,40 +209,47 @@ impl AgentRegistry {
             let already_running = state.runs.values().any(|run| run.agent == *agent);
             let record = state.saved.agents.entry((*agent).to_string()).or_default();
             let previous = record.clone();
-            if !already_running {
+            let started = (!already_running).then(|| {
                 state.saved.version += 1;
                 record.last_start = state.saved.version;
                 record.finished = None;
-            }
+                state.saved.version
+            });
             state.runs.insert(
                 *task_id,
                 Run {
                     agent: (*agent).to_string(),
                     waiting: None,
                     previous,
+                    started,
                 },
             );
         }
     }
 
-    /// Removes a run marked running whose start then failed, restoring its
-    /// agent's previous record when no other run of it is running.
+    /// Removes a run marked running whose start then failed. When no other
+    /// run of its agent is running and this run made the agent's latest
+    /// start, the agent's previous record is restored; otherwise the record
+    /// keeps the outcome of the agent's runs that did run.
     pub fn abandon(&self, task_id: Uuid) {
         let mut guard = self.state.lock();
         let state = &mut *guard;
         let Some(run) = state.runs.remove(&task_id) else {
             return;
         };
+        state.saved.version += 1;
         if !state.runs.values().any(|other| other.agent == run.agent) {
-            state.saved.version += 1;
-            state.saved.agents.insert(run.agent, run.previous);
+            let record = state.saved.agents.entry(run.agent).or_default();
+            if run.started == Some(record.last_start) {
+                *record = run.previous;
+            }
         }
         state.saved.seen.remove(&task_id);
     }
 
-    /// Records that a run ended with `outcome`. Its agent is finished once
-    /// no other run of it is running. What a run that can't be continued
-    /// has seen is forgotten.
+    /// Records that a run ended with `outcome`, the agent's latest outcome;
+    /// the agent is finished once no other run of it is running. What a run
+    /// that can't be continued has seen is forgotten.
     pub fn finish(&self, task_id: Uuid, outcome: AgentRunStatus) {
         let mut guard = self.state.lock();
         let state = &mut *guard;
@@ -254,9 +264,7 @@ impl AgentRegistry {
             return;
         };
         state.saved.version += 1;
-        if !state.runs.values().any(|other| other.agent == run.agent) {
-            state.saved.agents.entry(run.agent).or_default().finished = Some(outcome);
-        }
+        state.saved.agents.entry(run.agent).or_default().finished = Some(outcome);
     }
 
     /// Updates a running run's waiting state from one of its events.
@@ -371,6 +379,15 @@ impl AgentRegistry {
     }
 }
 
+fn until_passed(reason: &WaitReason, now: DateTime<Utc>) -> bool {
+    match reason {
+        WaitReason::RateLimited { until }
+        | WaitReason::Retrying { until }
+        | WaitReason::UsageLimit { until } => until.is_some_and(|until| until <= now),
+        _ => false,
+    }
+}
+
 fn status(state: &RegistryState, agent: &str, paused: bool) -> AgentStatus {
     let mut runs = state
         .runs
@@ -381,13 +398,15 @@ fn status(state: &RegistryState, agent: &str, paused: bool) -> AgentStatus {
         if paused {
             return AgentStatus::Waiting(WaitReason::Paused);
         }
+        let now = Utc::now();
         let mut first_wait = None;
         for run in runs {
             match &run.waiting {
-                None => return AgentStatus::Running,
-                Some(reason) => {
+                // A wait whose time has passed is over: the retry is under way.
+                Some(reason) if !until_passed(reason, now) => {
                     first_wait.get_or_insert_with(|| reason.clone());
                 }
+                _ => return AgentStatus::Running,
             }
         }
         return AgentStatus::Waiting(first_wait.unwrap_or(WaitReason::Paused));
@@ -586,6 +605,35 @@ mod tests {
         // A run abandoned before it started restores its agent's status.
         registry.abandon(b);
         assert_eq!(status_of(&registry, "b"), AgentStatus::NotStarted);
+
+        // Two runs of one agent in a batch: the first runs and completes,
+        // the second is abandoned; the agent is finished, not unstarted.
+        let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
+        registry.start(&[(first, "c"), (second, "c")]);
+        registry.finish(first, AgentRunStatus::Completed);
+        assert_eq!(status_of(&registry, "c"), AgentStatus::Running);
+        registry.abandon(second);
+        assert_eq!(
+            status_of(&registry, "c"),
+            AgentStatus::Finished(AgentRunStatus::Completed)
+        );
+    }
+
+    #[test]
+    fn a_wait_whose_time_has_passed_is_over() {
+        let registry = AgentRegistry::default();
+        let run = Uuid::new_v4();
+        registry.start(&[(run, "worker")]);
+        registry.observe(
+            run,
+            &AgentEvent::RetryScheduled {
+                attempt: 1,
+                delay_ms: 0,
+                elapsed_ms: 0,
+                rate_limit: false,
+            },
+        );
+        assert_eq!(status_of(&registry, "worker"), AgentStatus::Running);
     }
 
     #[test]
