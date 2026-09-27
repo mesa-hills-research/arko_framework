@@ -21,6 +21,9 @@ struct Fake {
     fail_file: Mutex<Option<String>>,
     invalid_embedding: AtomicUsize,
     invalid_repair_replies: AtomicUsize,
+    /// When > 1, each chunk call waits (bounded) until this many calls have overlapped,
+    /// so concurrency assertions don't depend on how fast the host schedules work.
+    overlap: usize,
 }
 impl Fake {
     fn new() -> Self {
@@ -39,6 +42,7 @@ impl Fake {
             fail_file: Mutex::new(None),
             invalid_embedding: AtomicUsize::new(0),
             invalid_repair_replies: AtomicUsize::new(0),
+            overlap: 0,
         }
     }
 }
@@ -48,6 +52,12 @@ impl Backend for Fake {
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.max.fetch_max(active, Ordering::SeqCst);
         self.calls.lock().unwrap().push(r.clone());
+        let overlap_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while self.max.load(Ordering::SeqCst) < self.overlap
+            && tokio::time::Instant::now() < overlap_deadline
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         tokio::time::sleep(self.delay).await;
         self.active.fetch_sub(1, Ordering::SeqCst);
         self.finished.fetch_add(1, Ordering::SeqCst);
@@ -791,7 +801,9 @@ async fn six_file_batches_barrier_and_hybrid_search() {
     }
     std::fs::write(root.path().join("small.md"), "# Small\n\nalpha tips").unwrap();
     std::fs::write(root.path().join("empty.txt"), " \n").unwrap();
-    let fake = Arc::new(Fake::new());
+    let mut f = Fake::new();
+    f.overlap = 2;
+    let fake = Arc::new(f);
     let index = ArkoIndex::open(db.path().join("index.db"), fake.clone(), config(&fake))
         .await
         .unwrap();
@@ -1449,4 +1461,19 @@ async fn only_actual_embedding_limits_split_large_impls_and_keep_fitting_methods
         code
     );
     assert!(!page.hits.is_empty());
+}
+#[tokio::test]
+async fn a_second_open_of_a_live_database_is_rejected() {
+    let db = tempfile::tempdir().unwrap();
+    let path = db.path().join("index.db");
+    let fake = Arc::new(Fake::new());
+    let first = ArkoIndex::open(&path, fake.clone(), config(&fake))
+        .await
+        .unwrap();
+    let second = ArkoIndex::open(&path, fake.clone(), config(&fake)).await;
+    assert!(matches!(second, Err(Error::Invalid(ref message)) if message.contains("already open")));
+    drop(first);
+    ArkoIndex::open(&path, fake.clone(), config(&fake))
+        .await
+        .unwrap();
 }

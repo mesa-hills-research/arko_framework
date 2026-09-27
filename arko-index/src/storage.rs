@@ -18,7 +18,16 @@ impl Db {
             if let Some(parent)=path.parent().filter(|p|!p.as_os_str().is_empty()) {std::fs::create_dir_all(parent)?;}
             let mut lock_path=path.as_os_str().to_owned();lock_path.push(".lock");
             let lock=std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(lock_path)?;
-            lock.try_lock().map_err(|e|invalid(format!("index database is already open, or filesystem locking is unsupported: {e}")))?;
+            // A just-dropped index can still be releasing the lock from a background
+            // task in this process, so wait briefly before reporting a conflict.
+            let deadline=std::time::Instant::now()+std::time::Duration::from_secs(1);
+            loop {
+                match lock.try_lock() {
+                    Ok(())=>break,
+                    Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now()<deadline=>std::thread::sleep(std::time::Duration::from_millis(10)),
+                    Err(e)=>return Err(invalid(format!("index database is already open, or filesystem locking is unsupported: {e}"))),
+                }
+            }
             let c=Connection::open(path)?;
             c.busy_timeout(std::time::Duration::from_secs(5))?;
             c.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")?;
