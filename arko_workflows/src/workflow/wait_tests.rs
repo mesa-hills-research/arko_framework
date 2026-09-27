@@ -678,6 +678,17 @@ fn tool_results(body: &str) -> Vec<(String, String)> {
 /// request, once, and acknowledged when its run completes.
 #[tokio::test]
 async fn a_lead_and_a_worker_wait_for_each_other_in_native_mode() {
+    lead_and_worker_wait_for_each_other(true).await;
+}
+
+/// The same with every tool call approved by the workflow's driver (the
+/// agents' default): the message still reaches the very next request.
+#[tokio::test]
+async fn approved_waits_deliver_the_message_with_the_next_request() {
+    lead_and_worker_wait_for_each_other(false).await;
+}
+
+async fn lead_and_worker_wait_for_each_other(auto_approve: bool) {
     let workspace = Workspace::new();
     const REQUEST: &str = "Please review the parser.";
     const REPLY: &str = "The parser looks fine.";
@@ -737,10 +748,17 @@ async fn a_lead_and_a_worker_wait_for_each_other_in_native_mode() {
         }
     })
     .await;
-    let workflow = builder_with(server.client(), &workspace, &["lead", "worker"])
-        .wait_for_message_timeout(Duration::from_secs(20))
-        .build()
-        .unwrap();
+    let mut builder = Workflow::builder()
+        .name("wait-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .wait_for_message_timeout(Duration::from_secs(20));
+    for name in ["lead", "worker"] {
+        let mut config = agent(name);
+        config.tool_config.default_auto_approve_tool_use = auto_approve;
+        builder = builder.agent(name, config);
+    }
+    let workflow = builder.build().unwrap();
     let results = tokio::time::timeout(
         Duration::from_secs(15),
         workflow.run_agents_parallel(vec![

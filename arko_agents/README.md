@@ -427,8 +427,8 @@ Besides answers to the waiting states, a running task accepts:
 
 - `InjectContext { content }`: queued and added at the next turn boundary as a user
   message headed `# Workflow context update`; a stream in progress is not changed. Every
-  injection sent before the boundary (including while a tool call ran) joins that one
-  message, in the order sent. A `TurnContextSource` given to
+  injection sent before the boundary (including while a tool call ran, approved or not)
+  joins that one message, in the order sent. A `TurnContextSource` given to
   `AgentRuntime::with_turn_context` is also asked for context at each such boundary,
   before each model request, and its answer joins that message.
 - `CancelTask`: the task ends as `Cancelled { reason }` with `CANCELLED_BY_USER` ("Task
@@ -436,7 +436,8 @@ Besides answers to the waiting states, a running task accepts:
   saved by an older version as `Failed { reason: "Task cancelled by user." }` loads as
   `Cancelled`.
 - `SuspendTask`: the runtime stops and returns the task in its current state, for example
-  to save it. A task suspended while it awaits a command, in any awaiting state, keeps
+  to save it. Context injections taken at the same turn boundary are added to its
+  conversation first. A task suspended while it awaits a command, in any awaiting state, keeps
   its pending calls and results and waits for that command when it runs again.
 
 Tasks serialize to JSON (`Task::save_to_path`, `Task::load_from_path`). Running a

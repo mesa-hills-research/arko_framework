@@ -1863,10 +1863,12 @@ impl AgentLoop {
                         break 'main_loop;
                     }
                 }
-            } else {
-                // Every command queued by now, so all context sent before
-                // this boundary (for example while a tool call ran) reaches
-                // the next request together.
+            }
+            // Every command queued by now, also after an approved call ran,
+            // so all context sent before this boundary (for example while a
+            // tool call ran) reaches the next request together. A terminal
+            // state (set by the approved call) keeps its reason.
+            if !self.task.current_state.is_terminal() {
                 loop {
                     match self.command_receiver.try_recv() {
                         Ok(UserCommand::CancelTask) => {
@@ -1880,6 +1882,14 @@ impl AgentLoop {
                             break 'main_loop;
                         }
                         Ok(UserCommand::SuspendTask) => {
+                            // Context taken from the channel here would
+                            // otherwise be lost with the loop: the suspended
+                            // task keeps it.
+                            if !self.pending_context_injections.is_empty()
+                                && self.task.fallback_for.is_none()
+                            {
+                                self.flush_context_injections()?;
+                            }
                             break 'main_loop;
                         }
                         Ok(UserCommand::InjectContext { content }) => {
@@ -4465,6 +4475,38 @@ mod tests {
             .position(|message| message.role == ai::Role::Assistant)
             .unwrap();
         assert!(update < answer, "the update precedes the only request");
+    }
+
+    /// Context taken from the channel together with a suspension stays with
+    /// the suspended task.
+    #[tokio::test]
+    async fn an_injection_taken_with_a_suspension_is_kept() {
+        let (agent, _events, commands) = super::retry_tests::harness();
+        commands
+            .try_send(UserCommand::InjectContext {
+                content: "Late note.".into(),
+            })
+            .unwrap();
+        commands.try_send(UserCommand::SuspendTask).unwrap();
+        let task = timeout(Duration::from_secs(10), agent.run())
+            .await
+            .unwrap()
+            .unwrap();
+        let kept = task.conversation.messages.iter().any(|message| {
+            message
+                .content
+                .iter()
+                .filter_map(ai::Content::as_text)
+                .any(|text| text.starts_with("# Workflow context update\n\nLate note."))
+        });
+        assert!(kept, "{:?}", task.conversation.messages);
+        assert!(
+            task.conversation
+                .messages
+                .iter()
+                .all(|message| message.role != ai::Role::Assistant),
+            "no request was made"
+        );
     }
 
     #[test]
