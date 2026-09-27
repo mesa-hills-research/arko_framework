@@ -183,6 +183,10 @@ pub struct AgentToolConfig {
     pub available_tool_names: Vec<String>,
     #[serde(default)]
     pub allow_batched_tool_calls: bool,
+    /// Whether calls run without approval, unless a tool's
+    /// `tool_specific_configs` entry says otherwise. `ask_user` runs without
+    /// approval either way, unless its own entry sets
+    /// `auto_approve_tool_use: Some(false)`.
     #[serde(default = "default_auto_approve_tool_use_false")]
     pub default_auto_approve_tool_use: bool,
     #[serde(default)]
@@ -737,13 +741,20 @@ impl AgentConfig {
         })
     }
 
-    /// Determines if tool use should be auto-approved for a given tool.
+    /// Determines if tool use should be auto-approved for a given tool: its
+    /// `tool_specific_configs` override, or else
+    /// `default_auto_approve_tool_use`. `ask_user` is auto-approved unless
+    /// its override says otherwise, since the question already waits for an
+    /// answer.
     pub fn should_auto_approve_tool(&self, tool_name: &str) -> bool {
         self.tool_config
             .tool_specific_configs
             .get(tool_name)
             .and_then(|override_cfg| override_cfg.auto_approve_tool_use)
-            .unwrap_or(self.tool_config.default_auto_approve_tool_use)
+            .unwrap_or(
+                self.tool_config.default_auto_approve_tool_use
+                    || tool_name == crate::tool::builtins::ASK_USER_TOOL_NAME,
+            )
     }
 
     /// Gets the path safety policy for a given tool.

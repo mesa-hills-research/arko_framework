@@ -1186,6 +1186,88 @@ fn an_answer_given_through_the_task_carries_the_waiting_results_of_the_question(
     }));
 }
 
+// `ask_user` without an approval step.
+
+#[test]
+fn ask_user_is_auto_approved_unless_its_override_says_otherwise() {
+    let mut config = config(ToolCallingMode::Native, &["ask_user", "read_file"]);
+    config.tool_config.default_auto_approve_tool_use = false;
+    config.tool_config.tool_specific_configs.clear();
+    assert!(config.should_auto_approve_tool("ask_user"));
+    // complete_task keeps its approval behaviour.
+    assert!(!config.should_auto_approve_tool("complete_task"));
+    assert!(!config.should_auto_approve_tool("read_file"));
+    config.tool_config.tool_specific_configs.insert(
+        "ask_user".into(),
+        PerToolConfigOverride {
+            auto_approve_tool_use: Some(false),
+            ..Default::default()
+        },
+    );
+    assert!(!config.should_auto_approve_tool("ask_user"));
+}
+
+#[tokio::test]
+async fn ask_user_asks_without_an_approval_step_by_default() {
+    for mode in [ToolCallingMode::Native, ToolCallingMode::OutputBased] {
+        let workspace = workspace();
+        let mut config = config(mode.clone(), &["ask_user"]);
+        config.tool_config.default_auto_approve_tool_use = false;
+        let native = mode == ToolCallingMode::Native;
+        let (mut agent, mut events, commands) = agent(config, ToolRegistry::new(), &workspace);
+        let (question, done) = if native {
+            (
+                turn(vec![native_call(
+                    "ask",
+                    "ask_user",
+                    serde_json::json!({"questions": "Which file?"}),
+                )]),
+                complete(),
+            )
+        } else {
+            (
+                text_turn("<ask_user>\n<questions>Which file?</questions>\n</ask_user>"),
+                text_turn("<complete_task>\n<summary>done</summary>\n</complete_task>"),
+            )
+        };
+        agent
+            .scripted_responses
+            .get_mut()
+            .unwrap()
+            .extend([question, done]);
+        let run = tokio::spawn(agent.run());
+        let mut seen = Vec::new();
+        wait_for(&mut events, &mut seen, |event| {
+            matches!(event, AgentEvent::UserQuestionsAsked { .. }).then_some(())
+        })
+        .await;
+        assert!(
+            !seen.iter().any(|event| matches!(
+                event,
+                AgentEvent::ToolCallAwaitingApproval { .. }
+                    | AgentEvent::BatchToolCallAwaitingApproval { .. }
+            )),
+            "{mode:?}"
+        );
+        commands
+            .send(UserCommand::SubmitUserResponse {
+                response: "README.md".into(),
+            })
+            .await
+            .unwrap();
+        let task = timeout(Duration::from_secs(10), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(task.current_state, TaskState::Completed { .. }),
+            "{mode:?}"
+        );
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+}
+
 // Output-based results of a turn that waits.
 
 #[tokio::test]
