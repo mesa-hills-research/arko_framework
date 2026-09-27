@@ -139,8 +139,7 @@ impl PersistenceManager {
             .join(format!("checkpoint-{}.json", ws.checkpoint_id));
         let json = serde_json::to_string_pretty(&ws)?;
         let temporary = path.with_extension("json.tmp");
-        tokio::fs::write(&temporary, json).await?;
-        tokio::fs::File::open(&temporary).await?.sync_all().await?;
+        write_synced(&temporary, json.as_bytes()).await?;
         tokio::fs::rename(&temporary, &path).await?;
         let latest = self.config.checkpoint_dir.join("latest-checkpoint");
         let latest_temporary = self.config.checkpoint_dir.join("latest-checkpoint.tmp");
@@ -201,8 +200,7 @@ impl PersistenceManager {
         tokio::fs::create_dir_all(&directory).await?;
         let path = directory.join(format!("{}.json", task.id));
         let temporary = directory.join(format!("{}.json.tmp", task.id));
-        tokio::fs::write(&temporary, serde_json::to_vec_pretty(task)?).await?;
-        tokio::fs::File::open(&temporary).await?.sync_all().await?;
+        write_synced(&temporary, &serde_json::to_vec_pretty(task)?).await?;
         tokio::fs::rename(&temporary, &path).await?;
         Ok(path)
     }
@@ -223,4 +221,14 @@ impl PersistenceManager {
         let ws: state::WorkflowState = serde_json::from_str(&content)?;
         Ok(ws)
     }
+}
+
+/// Writes `bytes` to `path` and flushes them to disk through the same handle.
+/// Windows can only flush a handle opened for writing, so reopening the file
+/// read-only to sync it fails there with "Access is denied".
+async fn write_synced(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::File::create(path).await?;
+    file.write_all(bytes).await?;
+    file.sync_all().await
 }
