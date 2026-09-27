@@ -46,8 +46,12 @@ impl Tool for Counter {
     }
 }
 
+/// A new directory under the canonical temporary directory (on macOS,
+/// `/private/var/...` rather than the `/var/...` link).
 fn workspace() -> PathBuf {
-    let path = std::env::temp_dir().join(format!("arko-tool-calls-{}", Uuid::new_v4()));
+    let path = std::fs::canonicalize(std::env::temp_dir())
+        .unwrap()
+        .join(format!("arko-tool-calls-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&path).unwrap();
     path
 }
@@ -192,6 +196,35 @@ fn result_for<'a>(conversation: &'a ai::Conversation, call_id: &str) -> Vec<&'a 
 }
 
 // The workspace path check.
+
+#[tokio::test]
+async fn a_non_string_value_for_a_path_parameter_is_rejected_not_run() {
+    let workspace = workspace();
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(Counter(Arc::clone(&runs))));
+    let (mut agent, _events, _commands) = agent(
+        config(ToolCallingMode::Native, &["counter"]),
+        registry,
+        &workspace,
+    );
+    agent.scripted_responses.get_mut().unwrap().extend([
+        turn(vec![native_call(
+            "list",
+            "counter",
+            serde_json::json!({"path": ["../../etc/passwd"]}),
+        )]),
+        complete(),
+    ]);
+    let task = timeout(Duration::from_secs(5), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+    let result = &result_for(&task.conversation, "list")[0];
+    assert!(result.is_error && result.output.contains("must be a string"));
+    std::fs::remove_dir_all(workspace).unwrap();
+}
 
 #[tokio::test]
 async fn a_native_path_check_error_answers_the_call_once_without_running_it() {
@@ -364,14 +397,20 @@ async fn native_calls_to_registered_tools_the_agent_is_not_offered_do_not_run() 
 #[tokio::test]
 async fn an_approved_call_to_a_tool_the_run_does_not_offer_is_answered_as_unavailable() {
     // A call saved awaiting approval (by an older version, or with another
-    // configuration) whose tool this run does not offer.
+    // configuration) whose tool this run does not offer, approved with or
+    // without output the host provides.
     let workspace = workspace();
     let runs = Arc::new(AtomicUsize::new(0));
-    for mode in [ToolCallingMode::Native, ToolCallingMode::OutputBased] {
+    let modes = [ToolCallingMode::Native, ToolCallingMode::OutputBased];
+    for (mode, custom_output) in modes
+        .iter()
+        .flat_map(|mode| [(mode.clone(), None), (mode.clone(), Some("from the host"))])
+    {
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(Counter(Arc::clone(&runs))));
         let (mut agent, mut events, _commands) =
             agent(config(mode.clone(), &[]), registry, &workspace);
+        let custom_output = custom_output.map(String::from);
         let answer = if mode == ToolCallingMode::Native {
             let result = agent
                 .execute_native_tool_for_approval(
@@ -379,7 +418,7 @@ async fn an_approved_call_to_a_tool_the_run_does_not_offer_is_answered_as_unavai
                     Uuid::new_v4(),
                     "counter",
                     HashMap::new(),
-                    None,
+                    custom_output,
                     None,
                 )
                 .await
@@ -393,7 +432,7 @@ async fn an_approved_call_to_a_tool_the_run_does_not_offer_is_answered_as_unavai
                     "counter",
                     HashMap::new(),
                     Uuid::new_v4(),
-                    None,
+                    custom_output,
                     None,
                 )
                 .await
@@ -641,8 +680,14 @@ async fn an_approval_wait_that_ends_without_a_decision_leaves_a_resumable_native
         assert!(task.pending_native_tool_calls.is_empty());
         assert!(task.pending_native_tool_results.is_empty());
         assert_calls_paired(&task.conversation);
+        // The result says why the call didn't run.
+        let why = if timed_out {
+            "Human approval timed out after 1 seconds, so this call was not run. You can call it again if it is still needed."
+        } else {
+            "The approval wait ended because the host stopped responding, so this call was not run."
+        };
         let undecided = result_for(&task.conversation, "call_write");
-        assert!(undecided[0].is_error && undecided[0].output == UNDECIDED_CALL);
+        assert!(undecided[0].is_error && undecided[0].output == why);
         assert!(
             result_for(&task.conversation, "call_read")[0]
                 .output
@@ -651,7 +696,7 @@ async fn an_approval_wait_that_ends_without_a_decision_leaves_a_resumable_native
         assert!(drain(&mut events).iter().any(|event| matches!(
             event,
             AgentEvent::ToolRejected { tool_name, reason: Some(reason), .. }
-                if tool_name == "write_file" && reason == UNDECIDED_CALL
+                if tool_name == "write_file" && reason == why
         )));
         assert!(!workspace.join("b.txt").exists());
 
@@ -743,13 +788,135 @@ async fn next_event<T>(
     }
 }
 
+/// Waits for the first event `pick` accepts, keeping every event seen in
+/// `seen`.
+async fn wait_for<T>(
+    events: &mut mpsc::Receiver<AgentEvent>,
+    seen: &mut Vec<AgentEvent>,
+    mut pick: impl FnMut(&AgentEvent) -> Option<T>,
+) -> T {
+    loop {
+        match timeout(Duration::from_secs(10), events.recv())
+            .await
+            .unwrap()
+        {
+            Some(event) => {
+                let picked = pick(&event);
+                seen.push(event);
+                if let Some(picked) = picked {
+                    return picked;
+                }
+            }
+            None => panic!("the run ended before the expected event: {seen:#?}"),
+        }
+    }
+}
+
+fn paused(events: &[AgentEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                AgentEvent::ErrorEncountered {
+                    requires_approval_to_retry: true,
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+/// A native batch where the middle `read_file` fails on a missing file.
+fn failing_batch(first: ai::ToolCall) -> ScriptedStreamResult {
+    turn(vec![
+        first,
+        native_call(
+            "missing",
+            "read_file",
+            serde_json::json!({"path": "missing.txt"}),
+        ),
+        native_call("c", "read_file", serde_json::json!({"path": "c.txt"})),
+    ])
+}
+
+fn read_a() -> ai::ToolCall {
+    native_call("a", "read_file", serde_json::json!({"path": "a.txt"}))
+}
+
+fn batch_workspace() -> PathBuf {
+    let workspace = workspace();
+    std::fs::write(workspace.join("a.txt"), "A-CONTENTS").unwrap();
+    std::fs::write(workspace.join("c.txt"), "C-CONTENTS").unwrap();
+    workspace
+}
+
 #[tokio::test]
-async fn a_native_turn_a_paused_tool_error_stops_still_answers_every_call() {
-    // write_file waits for approval, the missing file's read_file pauses
-    // the task, and the turn never reaches the last read_file.
+async fn a_failed_call_in_a_native_batch_gets_its_own_error_result_and_the_others_run() {
+    // The default tool error policy.
+    let workspace = batch_workspace();
+    let (mut agent, mut events, _commands) = agent(
+        config(ToolCallingMode::Native, &["read_file"]),
+        ToolRegistry::new(),
+        &workspace,
+    );
+    assert_eq!(
+        agent
+            .task
+            .agent_config
+            .error_recovery_config
+            .on_tool_execution_error,
+        ToolErrorPolicy::InformAgentAndContinue
+    );
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .extend([failing_batch(read_a()), complete()]);
+    let task = timeout(Duration::from_secs(10), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_calls_paired(&task.conversation);
+    // One message answers the batch with three results and nothing else.
+    let turn = task
+        .conversation
+        .messages
+        .iter()
+        .position(|message| message.tool_calls.len() == 3)
+        .unwrap();
+    let answer = &task.conversation.messages[turn + 1];
+    assert_eq!(answer.content.len(), 3, "{answer:#?}");
+    let results: Vec<_> = answer
+        .content
+        .iter()
+        .map(|content| content.as_tool_result().unwrap())
+        .collect();
+    assert!(!results[0].is_error && results[0].output.contains("A-CONTENTS"));
+    assert!(results[1].is_error && results[1].output.contains("execution failed"));
+    assert!(!results[2].is_error && results[2].output.contains("C-CONTENTS"));
+    assert!(
+        !serde_json::to_string(&task.conversation)
+            .unwrap()
+            .contains("failed during execution")
+    );
+    let events = drain(&mut events);
+    assert_eq!(paused(&events), 0);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ErrorEncountered { requires_approval_to_retry: false, error_message, .. }
+            if error_message.contains("read_file")
+    )));
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[tokio::test]
+async fn under_pause_a_native_batch_finishes_before_pausing_once() {
+    // write_file waits for approval, read_file runs without it, and the
+    // missing file's read fails.
     for timed_out in [false, true] {
-        let workspace = workspace();
-        std::fs::write(workspace.join("c.txt"), "C-CONTENTS").unwrap();
+        let workspace = batch_workspace();
         let mut config = config(ToolCallingMode::Native, &["read_file", "write_file"]);
         config.tool_config.default_auto_approve_tool_use = false;
         config.tool_config.tool_specific_configs.insert(
@@ -763,97 +930,417 @@ async fn a_native_turn_a_paused_tool_error_stops_still_answers_every_call() {
             ToolErrorPolicy::PauseAndAwaitApproval;
         config.user_command_timeout_seconds = timed_out.then_some(1);
         let (mut agent, mut events, commands) = agent(config, ToolRegistry::new(), &workspace);
-        agent.scripted_responses.get_mut().unwrap().extend([
-            turn(vec![
-                native_call(
-                    "write",
-                    "write_file",
-                    serde_json::json!({"path": "b.txt", "content": "x"}),
-                ),
-                native_call(
-                    "missing",
-                    "read_file",
-                    serde_json::json!({"path": "missing.txt"}),
-                ),
-                native_call("c", "read_file", serde_json::json!({"path": "c.txt"})),
-            ]),
-            complete(),
-        ]);
+        let write = native_call(
+            "write",
+            "write_file",
+            serde_json::json!({"path": "b.txt", "content": "x"}),
+        );
+        agent
+            .scripted_responses
+            .get_mut()
+            .unwrap()
+            .extend([failing_batch(write), complete()]);
         let run = tokio::spawn(agent.run());
-        next_event(&mut events, |event| match event {
-            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. }) => {
-                Some(())
-            }
+        let mut seen = Vec::new();
+        // The rest of the batch ran; the pause waits for write_file's
+        // approval.
+        let (batch_id, pending) = wait_for(&mut events, &mut seen, |event| match event {
+            AgentEvent::BatchToolCallAwaitingApproval {
+                batch_id,
+                pending_calls,
+            } => Some((*batch_id, pending_calls.clone())),
             _ => None,
         })
         .await;
-        // The call left awaiting an approval that won't be asked is rejected.
-        let rejected = next_event(&mut events, |event| match event {
-            AgentEvent::ToolRejected {
-                tool_name,
-                reason: Some(reason),
-                ..
-            } if reason == UNREACHED_CALL => Some(tool_name),
-            _ => None,
-        })
-        .await;
-        assert_eq!(rejected, "write_file");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].tool_name, "write_file");
+        assert_eq!(paused(&seen), 0);
         let task = if timed_out {
             let task = timeout(Duration::from_secs(10), run)
                 .await
                 .unwrap()
                 .unwrap()
                 .unwrap();
+            // The wait ended without a decision: no pause follows.
             assert!(matches!(task.current_state, TaskState::Interrupted { .. }));
+            assert!(task.deferred_tool_errors.is_empty());
             assert_calls_paired(&task.conversation);
-            let (mut agent, _events, _commands) =
+            seen.extend(drain(&mut events));
+            let (mut agent, mut events, _commands) =
                 agent_for(task, ToolRegistry::new(), Arc::new(ai::LLMClient::new()));
             agent
                 .scripted_responses
                 .get_mut()
                 .unwrap()
                 .push_back(complete());
-            timeout(Duration::from_secs(10), agent.run())
+            let task = timeout(Duration::from_secs(10), agent.run())
                 .await
                 .unwrap()
-                .unwrap()
+                .unwrap();
+            seen.extend(drain(&mut events));
+            task
         } else {
+            commands
+                .send(UserCommand::SubmitBatchToolApprovals {
+                    batch_id,
+                    decisions: HashMap::from([(
+                        pending[0].tool_call_id,
+                        ToolApprovalDecision::Approve {
+                            custom_tool_output: None,
+                            message_to_agent: None,
+                        },
+                    )]),
+                })
+                .await
+                .unwrap();
+            let error = wait_for(&mut events, &mut seen, |event| match event {
+                AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
+                    error_message,
+                }) => Some(error_message.clone()),
+                _ => None,
+            })
+            .await;
+            assert!(error.contains("read_file"), "{error}");
+            // write_file ran before the pause.
+            assert!(workspace.join("b.txt").exists());
             commands
                 .send(UserCommand::ApproveErrorRecovery { message: None })
                 .await
                 .unwrap();
-            timeout(Duration::from_secs(10), run)
+            let task = timeout(Duration::from_secs(10), run)
                 .await
                 .unwrap()
                 .unwrap()
-                .unwrap()
+                .unwrap();
+            seen.extend(drain(&mut events));
+            task
         };
         assert!(matches!(task.current_state, TaskState::Completed { .. }));
         assert_calls_paired(&task.conversation);
+        assert_eq!(paused(&seen), usize::from(!timed_out), "{seen:#?}");
         assert!(result_for(&task.conversation, "missing")[0].is_error);
-        for id in ["write", "c"] {
-            let results = result_for(&task.conversation, id);
-            assert_eq!(results.len(), 1, "{id}");
-            assert_eq!(results[0].output, UNREACHED_CALL, "{id}");
+        assert!(
+            result_for(&task.conversation, "c")[0]
+                .output
+                .contains("C-CONTENTS")
+        );
+        let write = &result_for(&task.conversation, "write")[0];
+        assert_eq!(write.is_error, timed_out, "{write:?}");
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn under_fail_task_a_native_batch_stops_and_answers_the_calls_it_did_not_run() {
+    for approvals in [false, true] {
+        let workspace = batch_workspace();
+        let mut config = config(ToolCallingMode::Native, &["read_file"]);
+        config.tool_config.default_auto_approve_tool_use = !approvals;
+        config.error_recovery_config.on_tool_execution_error = ToolErrorPolicy::FailTask;
+        let (mut agent, mut events, commands) = agent(config, ToolRegistry::new(), &workspace);
+        agent
+            .scripted_responses
+            .get_mut()
+            .unwrap()
+            .push_back(failing_batch(read_a()));
+        let run = tokio::spawn(agent.run());
+        let mut seen = Vec::new();
+        if approvals {
+            let (batch_id, pending) = wait_for(&mut events, &mut seen, |event| match event {
+                AgentEvent::BatchToolCallAwaitingApproval {
+                    batch_id,
+                    pending_calls,
+                } => Some((*batch_id, pending_calls.clone())),
+                _ => None,
+            })
+            .await;
+            let approve = || ToolApprovalDecision::Approve {
+                custom_tool_output: None,
+                message_to_agent: None,
+            };
+            commands
+                .send(UserCommand::SubmitBatchToolApprovals {
+                    batch_id,
+                    decisions: pending
+                        .iter()
+                        .map(|call| (call.tool_call_id, approve()))
+                        .collect(),
+                })
+                .await
+                .unwrap();
         }
+        let task = timeout(Duration::from_secs(10), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        seen.extend(drain(&mut events));
+        assert!(matches!(task.current_state, TaskState::Failed { .. }));
+        assert_calls_paired(&task.conversation);
+        assert!(
+            result_for(&task.conversation, "a")[0]
+                .output
+                .contains("A-CONTENTS")
+        );
+        assert!(result_for(&task.conversation, "missing")[0].is_error);
+        let not_run = &result_for(&task.conversation, "c")[0];
+        assert!(not_run.is_error);
+        assert_eq!(not_run.output, TASK_FAILED_CALL);
         assert!(
             !serde_json::to_string(&task.conversation)
                 .unwrap()
                 .contains("C-CONTENTS")
         );
-        assert!(!workspace.join("b.txt").exists());
+        // A call that waited for approval is reported as not run.
+        assert_eq!(
+            seen.iter().any(|event| matches!(
+                event,
+                AgentEvent::ToolRejected { reason: Some(reason), .. } if reason == TASK_FAILED_CALL
+            )),
+            approvals
+        );
         std::fs::remove_dir_all(workspace).unwrap();
     }
+}
+
+#[tokio::test]
+async fn recovery_approval_answers_calls_an_older_version_stranded() {
+    // Saved by a version that paused on a tool error mid-batch and left the
+    // rest of the turn without results.
+    let workspace = workspace();
+    let (mut agent, _events, commands) = agent(
+        config(ToolCallingMode::Native, &["read_file"]),
+        ToolRegistry::new(),
+        &workspace,
+    );
+    let failed = native_call("failed", "read_file", serde_json::json!({"path": "x"}));
+    let stranded = native_call("stranded", "read_file", serde_json::json!({"path": "y"}));
+    let mut assistant = ai::Message::new_assistant("");
+    assistant.tool_calls = vec![failed.clone(), stranded.clone()];
+    let task = &mut agent.task;
+    task.conversation.system_message = Some("system".into());
+    task.conversation.add_user_message("Do the task");
+    task.conversation.messages.push(assistant);
+    task.pending_native_tool_results =
+        vec![ai::ToolResult::error_from_tool_call(&failed, "not found")];
+    task.pending_native_tool_calls
+        .insert(Uuid::new_v4(), stranded);
+    task.set_state(TaskState::AwaitingErrorRecoveryApproval {
+        error_message: "Tool 'read_file' execution failed: not found".into(),
+    });
+    let saved = serde_json::to_value(&agent.task).unwrap();
+    agent.task = serde_json::from_value(saved).unwrap();
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(complete());
+    commands
+        .send(UserCommand::ApproveErrorRecovery { message: None })
+        .await
+        .unwrap();
+    let task = timeout(Duration::from_secs(10), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_calls_paired(&task.conversation);
+    assert_eq!(
+        result_for(&task.conversation, "stranded")[0].output,
+        UNREACHED_CALL
+    );
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn an_answer_given_through_the_task_carries_the_waiting_results_of_the_question() {
+    // Saved by a version that kept an approved `ask_user`'s result waiting.
+    let mut task = Task::new(
+        config(ToolCallingMode::Native, &["ask_user"]),
+        "Do the task".into(),
+        std::env::temp_dir(),
+        None,
+    );
+    let ask = native_call(
+        "ask",
+        "ask_user",
+        serde_json::json!({"questions": "Which file?"}),
+    );
+    let mut assistant = ai::Message::new_assistant("");
+    assistant.tool_calls = vec![ask.clone()];
+    task.conversation.add_user_message("Do the task");
+    task.conversation.messages.push(assistant);
+    task.pending_native_tool_results = vec![ai::ToolResult::from_tool_call(&ask, "Which file?")];
+    task.set_state(TaskState::AwaitingUserResponse {
+        questions: "Which file?".into(),
+    });
+    task.prepare_for_resumption_with_user_response("README.md".into())
+        .unwrap();
+    assert_calls_paired(&task.conversation);
+    assert!(task.pending_native_tool_results.is_empty());
+    let answer = task.conversation.messages.last().unwrap();
+    assert!(answer.content.iter().any(|content| {
+        content
+            .as_text()
+            .is_some_and(|text| text.contains("README.md"))
+    }));
+}
+
+// Output-based results of a turn that waits.
+
+#[tokio::test]
+async fn output_based_batch_results_wait_for_the_calls_awaiting_approval() {
+    // The read inside the workspace runs at once; the one outside waits
+    // for approval (`RequireApproval`).
+    for ending in ["approve", "suspend", "timeout"] {
+        let root = workspace();
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("inside.txt"), "INSIDE-CONTENTS").unwrap();
+        std::fs::write(root.join("outside.txt"), "OUTSIDE-CONTENTS").unwrap();
+        let mut config = config(ToolCallingMode::OutputBased, &["read_file"]);
+        config.tool_config.default_out_of_workspace_path_policy = PathSafetyPolicy::RequireApproval;
+        config.user_command_timeout_seconds = (ending == "timeout").then_some(1);
+        let (mut agent, mut events, commands) = agent(config, ToolRegistry::new(), &workspace);
+        agent.scripted_responses.get_mut().unwrap().extend([
+            text_turn(
+                "<batched_tool_call>\n<read_file>\n<path>inside.txt</path>\n</read_file>\n<read_file>\n<path>../outside.txt</path>\n</read_file>\n</batched_tool_call>",
+            ),
+            text_turn("<complete_task>\n<summary>done</summary>\n</complete_task>"),
+        ]);
+        let run = tokio::spawn(agent.run());
+        let mut seen = Vec::new();
+        let (batch_id, pending) = wait_for(&mut events, &mut seen, |event| match event {
+            AgentEvent::BatchToolCallAwaitingApproval {
+                batch_id,
+                pending_calls,
+            } => Some((*batch_id, pending_calls.clone())),
+            _ => None,
+        })
+        .await;
+        assert_eq!(pending.len(), 1);
+        let approve = UserCommand::SubmitBatchToolApprovals {
+            batch_id,
+            decisions: HashMap::from([(
+                pending[0].tool_call_id,
+                ToolApprovalDecision::Approve {
+                    custom_tool_output: None,
+                    message_to_agent: None,
+                },
+            )]),
+        };
+        let task = match ending {
+            "approve" => {
+                commands.send(approve).await.unwrap();
+                timeout(Duration::from_secs(10), run)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()
+            }
+            "suspend" => {
+                commands.send(UserCommand::SuspendTask).await.unwrap();
+                let task = timeout(Duration::from_secs(10), run)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert!(task.pending_text_tool_results[0].contains("INSIDE-CONTENTS"));
+                let path = root.join("task.json");
+                task.save_to_path(&path).unwrap();
+                let task = Task::load_from_path(&path).unwrap();
+                let (mut agent, _events, commands) =
+                    agent_for(task, ToolRegistry::new(), Arc::new(ai::LLMClient::new()));
+                agent
+                    .scripted_responses
+                    .get_mut()
+                    .unwrap()
+                    .push_back(text_turn(
+                        "<complete_task>\n<summary>done</summary>\n</complete_task>",
+                    ));
+                commands.send(approve).await.unwrap();
+                timeout(Duration::from_secs(10), agent.run())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+            _ => {
+                let task = timeout(Duration::from_secs(10), run)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert!(matches!(task.current_state, TaskState::Interrupted { .. }));
+                seen.extend(drain(&mut events));
+                assert!(seen.iter().any(|event| matches!(
+                    event,
+                    AgentEvent::ToolRejected { reason: Some(reason), .. }
+                        if reason.starts_with("Human approval timed out after 1 seconds")
+                )));
+                task
+            }
+        };
+        assert!(task.pending_text_tool_results.is_empty(), "{ending}");
+        // One message holds the result that ran at once and the outcome of
+        // the call that waited.
+        let answer = task
+            .conversation
+            .messages
+            .iter()
+            .filter_map(|message| message.content.first()?.as_text())
+            .find(|text| text.contains("INSIDE-CONTENTS"))
+            .unwrap_or_else(|| panic!("{ending}: {:#?}", task.conversation.messages));
+        let outcome = if ending == "timeout" {
+            "Tool read_file: Human approval timed out after 1 seconds"
+        } else {
+            "OUTSIDE-CONTENTS"
+        };
+        assert!(answer.contains(outcome), "{ending}: {answer}");
+        if ending != "timeout" {
+            assert!(
+                matches!(task.current_state, TaskState::Completed { .. }),
+                "{ending}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn an_output_based_batch_stops_when_a_path_rejection_fails_the_task() {
+    let workspace = workspace();
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(Counter(Arc::clone(&runs))));
+    let mut config = config(ToolCallingMode::OutputBased, &["counter"]);
+    config.error_recovery_config.on_tool_execution_error = ToolErrorPolicy::FailTask;
+    let (mut agent, _events, _commands) = agent(config, registry, &workspace);
+    agent.scripted_responses.get_mut().unwrap().push_back(text_turn(
+        "<batched_tool_call>\n<counter>\n<path>../outside</path>\n</counter>\n<counter>\n<path>inside</path>\n</counter>\n</batched_tool_call>",
+    ));
+    let task = timeout(Duration::from_secs(10), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Failed { .. }));
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+    std::fs::remove_dir_all(workspace).unwrap();
 }
 
 #[tokio::test]
 async fn an_approved_ask_user_answered_through_the_task_keeps_its_result() {
     // A host that suspends while the agent waits for an answer and gives
     // it with `prepare_for_resumption_with_user_response` (arko-workflows'
-    // `continue_agent`).
+    // `continue_agent`). `ask_user`'s own override brings its approval back.
     let workspace = workspace();
     let mut config = config(ToolCallingMode::Native, &["ask_user"]);
-    config.tool_config.default_auto_approve_tool_use = false;
+    config.tool_config.tool_specific_configs.insert(
+        "ask_user".into(),
+        PerToolConfigOverride {
+            auto_approve_tool_use: Some(false),
+            ..Default::default()
+        },
+    );
     let (mut agent, mut events, commands) = agent(config, ToolRegistry::new(), &workspace);
     agent
         .scripted_responses

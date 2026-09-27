@@ -10,7 +10,9 @@ use crate::parsing::{
     ToolParsingConfig, assemble_tool_calls,
 };
 use crate::skill::SkillPromptContext;
-use crate::task::{CANCELLED_BY_USER, PendingToolCallInfo, PlanUsageWindowMark, Task, TaskState};
+use crate::task::{
+    CANCELLED_BY_USER, DeferredToolError, PendingToolCallInfo, PlanUsageWindowMark, Task, TaskState,
+};
 use crate::tool::{
     InterceptedResult, InterceptionFailurePolicy, InterceptorConfig, TaskContext, ToolCallContext,
     ToolDefinition, ToolExecutionContext, ToolExecutionDecision, ToolExecutionMiddleware,
@@ -84,9 +86,24 @@ const FAILED_STREAM_CALL: &str = "The model's response failed before this call f
 const REFUSED_TURN_CALL: &str = "turn refused";
 const UNDELIVERED_CALL: &str = "The model's final response did not include this call; it was not run.";
 const UNREACHED_CALL: &str = "The turn ended before this call ran; it was not run.";
-/// Error result of a native call whose approval wait ended without a
-/// decision; see [`AgentLoop::settle_native_turn`].
-const UNDECIDED_CALL: &str = "The wait for approval ended without a decision; the call was not run.";
+/// Why a call awaiting approval was not run, when its wait ended without a
+/// decision; see [`AgentLoop::settle_interrupted_wait`]. For a task saved
+/// that way by an older version.
+const UNDECIDED_CALL: &str =
+    "The approval wait ended without a decision, so this call was not run.";
+/// When the host's command channel closed during the wait.
+const HOST_STOPPED_CALL: &str =
+    "The approval wait ended because the host stopped responding, so this call was not run.";
+/// Results of calls a tool error under `ToolErrorPolicy::FailTask` stopped.
+const TASK_FAILED_CALL: &str =
+    "The task failed on an earlier tool error, so this call was not run.";
+
+/// When `user_command_timeout_seconds` ran out during the wait.
+fn approval_timed_out_call(seconds: u64) -> String {
+    format!(
+        "Human approval timed out after {seconds} seconds, so this call was not run. You can call it again if it is still needed."
+    )
+}
 
 /// Whether OpenAI encrypted reasoning produced by `from` is replayed to `to`.
 /// Codex replays history unchanged when it switches between models of one
@@ -163,6 +180,14 @@ async fn wait_for_recovery_deadline(deadline: Option<tokio::time::Instant>) {
     }
 }
 
+/// The workspace check of a call's `is_path` parameters.
+enum PathCheck {
+    Inside,
+    /// This parameter's path is outside the workspace.
+    Outside(String),
+    /// A path couldn't be judged; the call is rejected with this reason.
+    Invalid(String),
+}
 
 /// Tool names excluded from result interception because their results
 /// carry semantic meaning used directly by the runtime (task state
@@ -237,6 +262,8 @@ pub struct AgentLoop {
     cache_pause_episode: bool,
     cache_pause_pending: Option<String>,
     stop_requested: bool,
+    /// A batch of tool calls is running; see [`begin_tool_batch`](Self::begin_tool_batch).
+    deferring_tool_errors: bool,
     #[cfg(test)]
     scripted_responses: std::sync::Mutex<VecDeque<ScriptedStreamResult>>,
     /// The model of every request made, in order.
@@ -310,6 +337,7 @@ impl AgentLoop {
             cache_pause_episode: false,
             cache_pause_pending: None,
             stop_requested: false,
+            deferring_tool_errors: false,
             #[cfg(test)]
             scripted_responses: std::sync::Mutex::new(VecDeque::new()),
             #[cfg(test)]
@@ -503,6 +531,41 @@ impl AgentLoop {
 
     fn is_native_mode(&self) -> bool {
         self.task.agent_config.tool_config.tool_calling_mode == ToolCallingMode::Native
+    }
+
+    /// Checks a call's `is_path` parameters against the workspace, as
+    /// [`crate::utils::is_path_in_workspace`] resolves them. A missing,
+    /// null or empty value is not checked; any other non-string value is
+    /// invalid, since a tool could read it as a path the check never saw.
+    fn check_path_parameters(
+        &self,
+        definition: &ToolDefinition,
+        params: &HashMap<String, Value>,
+    ) -> PathCheck {
+        for param_def in definition.parameters.iter().filter(|param| param.is_path) {
+            let path = match params.get(&param_def.name) {
+                None | Some(Value::Null) => continue,
+                Some(Value::String(path)) if path.is_empty() => continue,
+                Some(Value::String(path)) => path,
+                Some(other) => {
+                    return PathCheck::Invalid(format!(
+                        "Path validation failed for parameter '{}': a path must be a string, not {other}.",
+                        param_def.name
+                    ));
+                }
+            };
+            match crate::utils::is_path_in_workspace(path, &self.task.current_working_directory) {
+                Ok(true) => {}
+                Ok(false) => return PathCheck::Outside(param_def.name.clone()),
+                Err(error) => {
+                    return PathCheck::Invalid(format!(
+                        "Path validation failed for parameter '{}': {error}",
+                        param_def.name
+                    ));
+                }
+            }
+        }
+        PathCheck::Inside
     }
 
     fn build_native_tool_config(&self, model: &ai::Model) -> ai::ToolConfig {
@@ -762,17 +825,7 @@ impl AgentLoop {
     }
 
     fn flush_native_results_to_conversation(&mut self, extra_text: Option<&str>) {
-        let results = std::mem::take(&mut self.task.pending_native_tool_results);
-        if results.is_empty() && extra_text.is_none() && self.task.pending_tool_images.is_empty() {
-            return;
-        }
-        let mut content: Vec<_> = results.into_iter().map(ai::Content::ToolResult).collect();
-        if let Some(text) = extra_text {
-            content.push(ai::Content::Text(text.to_string()));
-        }
-        content.extend(self.take_tool_image_content());
-        self.task.conversation.add_user_message_with_contents(content);
-        self.task.increment_user_message_count();
+        self.task.add_pending_tool_results(extra_text);
     }
 
     /// Whether an approved native turn's results go into the conversation
@@ -806,15 +859,7 @@ impl AgentLoop {
     }
 
     fn take_tool_image_content(&mut self) -> Vec<ai::Content> {
-        std::mem::take(&mut self.task.pending_tool_images)
-            .into_iter()
-            .flat_map(|attachment| {
-                [
-                    ai::Content::Text(attachment.description),
-                    ai::Content::Image(attachment.image),
-                ]
-            })
-            .collect()
+        self.task.take_tool_image_content()
     }
 
     fn add_text_tool_results_to_conversation(&mut self, text: &str) {
@@ -1041,7 +1086,7 @@ impl AgentLoop {
         if interrupted {
             // Older versions left a native turn without results when an
             // approval wait ended this way.
-            self.settle_native_turn(UNDECIDED_CALL).await?;
+            self.settle_interrupted_wait(UNDECIDED_CALL).await?;
         }
 
         if self.task.conversation.system_message.is_none() {
@@ -1141,6 +1186,7 @@ impl AgentLoop {
                                         continue 'main_loop;
                                     }
 
+                                    self.begin_tool_batch();
                                     if self.is_native_mode() {
                                         if let Some(ai_call) =
                                             self.task.pending_native_tool_calls.remove(&tool_call_id)
@@ -1165,6 +1211,7 @@ impl AgentLoop {
                                         ) {
                                             self.task.set_state(TaskState::InProgress);
                                         }
+                                        self.end_tool_batch().await?;
                                         if self.native_results_are_due() {
                                             self.flush_native_results_to_conversation(None);
                                         }
@@ -1195,6 +1242,7 @@ impl AgentLoop {
                                         {
                                             self.task.set_state(TaskState::InProgress);
                                         }
+                                        self.end_tool_batch().await?;
                                     }
                                 }
                                 UserCommand::RejectToolUse {
@@ -1280,6 +1328,7 @@ impl AgentLoop {
                                         continue 'main_loop;
                                     }
 
+                                    self.begin_tool_batch();
                                     if self.is_native_mode() {
                                         for pending_call_info in pending_calls {
                                             match decisions.get(&pending_call_info.tool_call_id) {
@@ -1345,12 +1394,40 @@ impl AgentLoop {
                                                 break;
                                             }
                                         }
+                                        // A task that failed on a tool error
+                                        // still answers the calls it didn't run.
+                                        if self.task.current_state.is_terminal() {
+                                            for pending_call_info in pending_calls {
+                                                if let Some(ai_call) = self
+                                                    .task
+                                                    .pending_native_tool_calls
+                                                    .remove(&pending_call_info.tool_call_id)
+                                                {
+                                                    self.emit_event(AgentEvent::ToolRejected {
+                                                        tool_call_id: pending_call_info
+                                                            .tool_call_id,
+                                                        tool_name: pending_call_info
+                                                            .tool_name
+                                                            .clone(),
+                                                        reason: Some(TASK_FAILED_CALL.into()),
+                                                    })
+                                                    .await?;
+                                                    self.task.pending_native_tool_results.push(
+                                                        ai::ToolResult::error_from_tool_call(
+                                                            &ai_call,
+                                                            TASK_FAILED_CALL,
+                                                        ),
+                                                    );
+                                                }
+                                            }
+                                        }
                                         if matches!(
                                             self.task.current_state,
                                             TaskState::AwaitingBatchToolApproval { .. }
                                         ) {
                                             self.task.set_state(TaskState::InProgress);
                                         }
+                                        self.end_tool_batch().await?;
                                         if self.native_results_are_due() {
                                             self.flush_native_results_to_conversation(None);
                                         }
@@ -1423,12 +1500,16 @@ impl AgentLoop {
                                                 break;
                                             }
                                         }
-                                        next_user_message_from_command =
-                                            combined_results_for_llm.join("\n\n---\n\n");
+                                        next_user_message_from_command = combined_results_for_llm
+                                            .into_iter()
+                                            .filter(|result| !result.is_empty())
+                                            .collect::<Vec<_>>()
+                                            .join("\n\n---\n\n");
                                         if matches!(self.task.current_state, TaskState::AwaitingBatchToolApproval { batch_id: current_state_batch_id, .. } if current_state_batch_id == cmd_batch_id)
                                         {
                                             self.task.set_state(TaskState::InProgress);
                                         }
+                                        self.end_tool_batch().await?;
                                     }
                                 } else if matches!(
                                     cmd,
@@ -1509,6 +1590,12 @@ impl AgentLoop {
                                                 recovery_prompt.push_str(user_input);
                                             }
 
+                                            if self.is_native_mode() {
+                                                // Calls an older version left
+                                                // without results get them now.
+                                                self.answer_open_native_calls(UNREACHED_CALL)
+                                                    .await?;
+                                            }
                                             if self.is_native_mode()
                                                 && !self.task.pending_native_tool_results.is_empty()
                                             {
@@ -1616,6 +1703,24 @@ impl AgentLoop {
                             break 'main_loop;
                         }
 
+                        // Output-based results of a command that leaves the
+                        // task waiting (a pause on a tool error) wait with it;
+                        // the message that ends a wait carries them first.
+                        if !self.is_native_mode() && !native_handled {
+                            if self.task.current_state.is_awaiting_approval() {
+                                if !next_user_message_from_command.is_empty() {
+                                    self.task
+                                        .pending_text_tool_results
+                                        .push(std::mem::take(&mut next_user_message_from_command));
+                                }
+                            } else if !self.task.pending_text_tool_results.is_empty() {
+                                next_user_message_from_command = self
+                                    .task
+                                    .with_pending_text_tool_results(next_user_message_from_command);
+                                next_message_is_runtime = false;
+                            }
+                        }
+
                         if matches!(self.task.current_state, TaskState::InProgress)
                             && !native_handled
                         {
@@ -1672,7 +1777,7 @@ impl AgentLoop {
                         let reason =
                             "Command channel disconnected during approval state.".to_string();
                         log::error!("Task {}: {}", self.task.id, reason);
-                        self.settle_native_turn(UNDECIDED_CALL).await?;
+                        self.settle_interrupted_wait(HOST_STOPPED_CALL).await?;
                         self.task.set_state(TaskState::Interrupted {
                             reason: reason.clone(),
                         });
@@ -1699,7 +1804,8 @@ impl AgentLoop {
                             seconds, self.task.current_state
                         );
                         log::error!("Task {}: {}", self.task.id, reason);
-                        self.settle_native_turn(UNDECIDED_CALL).await?;
+                        self.settle_interrupted_wait(&approval_timed_out_call(seconds))
+                            .await?;
                         self.task.set_state(TaskState::Interrupted {
                             reason: reason.clone(),
                         });
@@ -2040,6 +2146,7 @@ impl AgentLoop {
                     &tool_calls,
                 );
 
+                self.begin_tool_batch();
                 let mut reached = tool_calls.len();
                 for (call_index, ai_tool_call) in tool_calls.iter().enumerate() {
                     let tool_call_id = native_stream_call_ids
@@ -2092,57 +2199,31 @@ impl AgentLoop {
                     };
                     let tool_definition = tool_arc.definition();
 
-                    let mut is_out_of_workspace = false;
-                    let mut offending_param_name: Option<String> = None;
-                    let mut path_check_error: Option<String> = None;
-                    for param_def in &tool_definition.parameters {
-                        if param_def.is_path
-                            && let Some(path_str) =
-                                params_map.get(&param_def.name).and_then(|v| v.as_str())
-                            && !path_str.is_empty()
-                        {
-                            match crate::utils::is_path_in_workspace(
-                                path_str,
-                                &self.task.current_working_directory,
-                            ) {
-                                Ok(true) => {}
-                                Ok(false) => {
-                                    is_out_of_workspace = true;
-                                    offending_param_name = Some(param_def.name.clone());
-                                    break;
-                                }
-                                Err(e) => {
-                                    path_check_error = Some(format!(
-                                        "Path validation failed for parameter '{}': {}",
-                                        param_def.name, e
-                                    ));
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
                     let mut force_approval = false;
-                    if is_out_of_workspace {
-                        let path_policy = self
-                            .task
-                            .agent_config
-                            .get_path_safety_policy(&ai_tool_call.name);
-                        match path_policy {
-                            PathSafetyPolicy::AutoReject => {
-                                path_check_error = Some(format!(
-                                    "Path for parameter '{}' is outside the workspace.",
-                                    offending_param_name.unwrap_or_default()
-                                ));
+                    let path_rejection = match self
+                        .check_path_parameters(&tool_definition, &params_map)
+                    {
+                        PathCheck::Inside => None,
+                        PathCheck::Invalid(reason) => Some(reason),
+                        PathCheck::Outside(param_name) => {
+                            match self
+                                .task
+                                .agent_config
+                                .get_path_safety_policy(&ai_tool_call.name)
+                            {
+                                PathSafetyPolicy::AutoReject => Some(format!(
+                                    "Path for parameter '{param_name}' is outside the workspace."
+                                )),
+                                PathSafetyPolicy::RequireApproval => {
+                                    force_approval = true;
+                                    None
+                                }
+                                PathSafetyPolicy::AutoApprove => None,
                             }
-                            PathSafetyPolicy::RequireApproval => {
-                                force_approval = true;
-                            }
-                            PathSafetyPolicy::AutoApprove => {}
                         }
-                    }
+                    };
                     // A rejected call gets this one result and is not run.
-                    if let Some(reason) = path_check_error {
+                    if let Some(reason) = path_rejection {
                         self.emit_event(AgentEvent::ToolRejected {
                             tool_call_id,
                             tool_name: ai_tool_call.name.clone(),
@@ -2180,9 +2261,14 @@ impl AgentLoop {
                         }
                     }
                 }
-                // A turn a tool stopped (an error that pauses or fails the
-                // task) still answers every call once: calls left awaiting an
-                // approval that won't be asked, and calls it didn't reach.
+                // A turn a tool stopped (an error that fails the task) still
+                // answers every call once: calls left awaiting an approval
+                // that won't be asked, and calls it didn't reach.
+                let not_run = if self.task.current_state.is_terminal() {
+                    TASK_FAILED_CALL
+                } else {
+                    UNREACHED_CALL
+                };
                 if !matches!(self.task.current_state, TaskState::InProgress) {
                     for pending in calls_needing_approval.drain(..) {
                         if let Some(call) = self
@@ -2193,19 +2279,19 @@ impl AgentLoop {
                             self.emit_event(AgentEvent::ToolRejected {
                                 tool_call_id: pending.tool_call_id,
                                 tool_name: pending.tool_name,
-                                reason: Some(UNREACHED_CALL.into()),
+                                reason: Some(not_run.into()),
                             })
                             .await?;
                             self.task
                                 .pending_native_tool_results
-                                .push(ai::ToolResult::error_from_tool_call(&call, UNREACHED_CALL));
+                                .push(ai::ToolResult::error_from_tool_call(&call, not_run));
                         }
                     }
                 }
                 for ai_tool_call in &tool_calls[reached..] {
-                    self.task.pending_native_tool_results.push(
-                        ai::ToolResult::error_from_tool_call(ai_tool_call, UNREACHED_CALL),
-                    );
+                    self.task
+                        .pending_native_tool_results
+                        .push(ai::ToolResult::error_from_tool_call(ai_tool_call, not_run));
                 }
                 // Announced calls the turn ended before reaching, and calls
                 // announced while streaming that the response doesn't hold
@@ -2262,11 +2348,11 @@ impl AgentLoop {
                         })
                         .await?;
                     }
-                } else if matches!(
-                    self.task.current_state,
-                    TaskState::AwaitingUserResponse { .. }
-                ) || !self.task.current_state.is_awaiting_approval()
-                {
+                }
+                // Pauses on the turn's tool errors now, or after the calls
+                // still awaiting approval are decided.
+                self.end_tool_batch().await?;
+                if self.native_results_are_due() {
                     self.flush_native_results_to_conversation(None);
                 }
             } else {
@@ -2452,6 +2538,7 @@ impl AgentLoop {
                             } else {
                                 None
                             };
+                            self.begin_tool_batch();
 
                             for (parsed_tool_call_ref, tool_call_id_ref) in
                                 &calls_to_process_with_ids
@@ -2489,44 +2576,38 @@ impl AgentLoop {
                                     };
                                 let tool_definition = tool_arc.definition();
 
-                                let mut is_out_of_workspace = false;
-                                let mut path_check_error: Option<ArkoAgentsError> = None;
-                                let mut offending_param_name: Option<String> = None;
-
-                                for param_def in &tool_definition.parameters {
-                                    if param_def.is_path
-                                        && let Some(path_str) = parsed_tool_call_ref
-                                            .parameters
-                                            .get(&param_def.name)
-                                            .and_then(|v| v.as_str())
-                                        && !path_str.is_empty()
-                                    {
-                                        match crate::utils::is_path_in_workspace(
-                                            path_str,
-                                            &self.task.current_working_directory,
-                                        ) {
-                                            Ok(true) => {}
-                                            Ok(false) => {
-                                                is_out_of_workspace = true;
-                                                offending_param_name = Some(param_def.name.clone());
-                                                break;
-                                            }
-                                            Err(e) => {
-                                                path_check_error = Some(e);
-                                                offending_param_name = Some(param_def.name.clone());
-                                                break;
-                                            }
-                                        }
+                                let mut force_approval = false;
+                                let path_rejection = match self.check_path_parameters(
+                                    &tool_definition,
+                                    &parsed_tool_call_ref.parameters,
+                                ) {
+                                    PathCheck::Inside => None,
+                                    PathCheck::Invalid(reason) => {
+                                        Some(crate::tool::ToolError::ExecutionFailed(reason))
                                     }
-                                }
-
-                                if let Some(err) = path_check_error {
-                                    let tool_error =
-                                        crate::tool::ToolError::ExecutionFailed(format!(
-                                            "Path validation failed for parameter '{}': {}",
-                                            offending_param_name.unwrap_or_default(),
-                                            err
-                                        ));
+                                    PathCheck::Outside(param_name) => match self
+                                        .task
+                                        .agent_config
+                                        .get_path_safety_policy(&parsed_tool_call_ref.name)
+                                    {
+                                        PathSafetyPolicy::AutoReject => {
+                                            Some(crate::tool::ToolError::PathAccessRejected {
+                                                param_name,
+                                                workspace_path: self
+                                                    .task
+                                                    .current_working_directory
+                                                    .to_string_lossy()
+                                                    .to_string(),
+                                            })
+                                        }
+                                        PathSafetyPolicy::RequireApproval => {
+                                            force_approval = true;
+                                            None
+                                        }
+                                        PathSafetyPolicy::AutoApprove => None,
+                                    },
+                                };
+                                if let Some(tool_error) = path_rejection {
                                     let error_message_for_llm = self
                                         .handle_tool_exec_error(
                                             &parsed_tool_call_ref.name,
@@ -2535,42 +2616,11 @@ impl AgentLoop {
                                         )
                                         .await?;
                                     auto_approved_call_results.push(error_message_for_llm);
-                                    continue;
-                                }
-
-                                let mut force_approval = false;
-                                if is_out_of_workspace {
-                                    let path_policy = self
-                                        .task
-                                        .agent_config
-                                        .get_path_safety_policy(&parsed_tool_call_ref.name);
-                                    match path_policy {
-                                        PathSafetyPolicy::AutoReject => {
-                                            let tool_error =
-                                                crate::tool::ToolError::PathAccessRejected {
-                                                    param_name: offending_param_name
-                                                        .unwrap_or_default(),
-                                                    workspace_path: self
-                                                        .task
-                                                        .current_working_directory
-                                                        .to_string_lossy()
-                                                        .to_string(),
-                                                };
-                                            let error_message_for_llm = self
-                                                .handle_tool_exec_error(
-                                                    &parsed_tool_call_ref.name,
-                                                    tool_error,
-                                                    Some(tool_call_id),
-                                                )
-                                                .await?;
-                                            auto_approved_call_results.push(error_message_for_llm);
-                                            continue;
-                                        }
-                                        PathSafetyPolicy::RequireApproval => {
-                                            force_approval = true;
-                                        }
-                                        PathSafetyPolicy::AutoApprove => {}
+                                    // Under `FailTask` the rest of the batch stops.
+                                    if self.task.current_state.is_terminal() {
+                                        break;
                                     }
+                                    continue;
                                 }
 
                                 let normal_approval_needed = !self
@@ -2654,20 +2704,17 @@ impl AgentLoop {
                                     })
                                     .await?;
                                 }
-                                if !auto_approved_call_results.is_empty() {
-                                    next_user_message_str_accumulated =
-                                        auto_approved_call_results.join("\n\n---\n\n");
-                                }
-                                if self.task.current_state.is_terminal() {
-                                    break 'main_loop;
-                                }
-                                if self.task.current_state.is_awaiting_approval() {
-                                    continue 'main_loop;
-                                }
-                            } else {
-                                next_user_message_str_accumulated =
-                                    auto_approved_call_results.join("\n\n---\n\n");
                             }
+                            // Pauses on the batch's tool errors now, or after
+                            // the calls still awaiting approval are decided.
+                            self.end_tool_batch().await?;
+                            // The results of the calls that ran, which wait
+                            // with the task below if it now waits.
+                            next_user_message_str_accumulated = auto_approved_call_results
+                                .into_iter()
+                                .filter(|result| !result.is_empty())
+                                .collect::<Vec<_>>()
+                                .join("\n\n---\n\n");
                         }
                     }
                     Err(e) => {
@@ -2695,6 +2742,15 @@ impl AgentLoop {
                     self.reset_llm_recovery();
                 }
 
+                // Results of calls that ran in a turn that now waits (for
+                // other calls' approval, or on a pause) wait with it.
+                if !next_user_message_str_accumulated.is_empty()
+                    && self.task.current_state.is_awaiting_approval()
+                {
+                    self.task
+                        .pending_text_tool_results
+                        .push(std::mem::take(&mut next_user_message_str_accumulated));
+                }
                 if !next_user_message_str_accumulated.is_empty()
                     && !self.task.current_state.is_terminal()
                     && !self.task.current_state.is_awaiting_approval()
@@ -2810,18 +2866,57 @@ impl AgentLoop {
         .await
     }
 
-    /// When an approval wait ends without a decision (the command timeout or
-    /// a closed command channel), rejects the native calls still awaiting
-    /// approval with `reason` and adds the turn's results to the
-    /// conversation. A call of the turn with no result at all (a turn an
-    /// older version left early) is answered as unreached. The task returned
-    /// `Interrupted` then pairs every call of its last turn with a result,
-    /// as providers require, and can run again. Does nothing in output-based
-    /// mode, whose calls have no provider-side pairing.
-    async fn settle_native_turn(&mut self, reason: &str) -> Result<(), ArkoAgentsError> {
-        if !self.is_native_mode() {
+    /// Starts running a batch of tool calls (a turn's, or an approval's):
+    /// under `ToolErrorPolicy::PauseAndAwaitApproval` a failed call no longer
+    /// pauses the task at once, so the batch's other calls run first, and
+    /// [`end_tool_batch`](Self::end_tool_batch) pauses once.
+    fn begin_tool_batch(&mut self) {
+        self.deferring_tool_errors = true;
+    }
+
+    /// Ends a batch begun with [`begin_tool_batch`](Self::begin_tool_batch):
+    /// pauses once on its tool errors, with any a batch of the same turn
+    /// left while calls awaited approval. While calls of the turn still
+    /// await approval the pause waits for their decisions; a task that
+    /// stopped doesn't pause.
+    async fn end_tool_batch(&mut self) -> Result<(), ArkoAgentsError> {
+        self.deferring_tool_errors = false;
+        if self.task.current_state.is_terminal() {
+            self.task.deferred_tool_errors.clear();
+        }
+        if self.task.deferred_tool_errors.is_empty()
+            || !matches!(self.task.current_state, TaskState::InProgress)
+        {
             return Ok(());
         }
+        let errors = std::mem::take(&mut self.task.deferred_tool_errors);
+        let error_message = errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.task
+            .set_state(TaskState::AwaitingErrorRecoveryApproval {
+                error_message: error_message.clone(),
+            });
+        self.emit_event(AgentEvent::TaskStateChanged(
+            self.task.current_state.clone(),
+        ))
+        .await?;
+        self.emit_event(AgentEvent::ErrorEncountered {
+            error_message,
+            requires_approval_to_retry: true,
+            tool_call_id: errors[0].tool_call_id,
+        })
+        .await
+    }
+
+    /// Answers the native calls of the last turn that have no result yet,
+    /// alongside its other waiting results: a call still awaiting approval
+    /// is rejected with `reason` (and `ToolRejected`), and a call with no
+    /// result at all (a turn an older version left early) is answered as
+    /// unreached.
+    async fn answer_open_native_calls(&mut self, reason: &str) -> Result<(), ArkoAgentsError> {
         // The turn's results are not in the conversation yet while the
         // assistant turn is its last message.
         let turn_calls = match self.task.conversation.messages.last() {
@@ -2836,7 +2931,15 @@ impl AgentLoop {
                 .position(|turn_call| turn_call.id == call.id)
                 .unwrap_or(usize::MAX)
         });
+        let answered = |task: &Task, call: &ai::ToolCall| {
+            task.pending_native_tool_results
+                .iter()
+                .any(|result| result.call_id == call.id)
+        };
         for (tool_call_id, call) in undecided {
+            if call.id.is_some() && answered(&self.task, &call) {
+                continue;
+            }
             self.emit_event(AgentEvent::ToolRejected {
                 tool_call_id,
                 tool_name: call.name.clone(),
@@ -2848,18 +2951,58 @@ impl AgentLoop {
                 .push(ai::ToolResult::error_from_tool_call(&call, reason));
         }
         for call in &turn_calls {
-            let answered = self
-                .task
-                .pending_native_tool_results
-                .iter()
-                .any(|result| result.call_id == call.id);
-            if call.id.is_some() && !answered {
+            if call.id.is_some() && !answered(&self.task, call) {
                 self.task
                     .pending_native_tool_results
                     .push(ai::ToolResult::error_from_tool_call(call, UNREACHED_CALL));
             }
         }
-        self.flush_native_results_to_conversation(None);
+        Ok(())
+    }
+
+    /// When a wait for a command ends without one (the command timeout or a
+    /// closed command channel), answers the calls still awaiting approval
+    /// with `reason` (and `ToolRejected`) and adds the turn's results to the
+    /// conversation. The task returned `Interrupted` then pairs every native
+    /// call of its last turn with a result, as providers require, the model
+    /// learns why the calls did not run, and it can run again. A pause
+    /// waiting for those decisions is dropped.
+    async fn settle_interrupted_wait(&mut self, reason: &str) -> Result<(), ArkoAgentsError> {
+        self.task.deferred_tool_errors.clear();
+        if self.is_native_mode() {
+            self.answer_open_native_calls(reason).await?;
+            self.flush_native_results_to_conversation(None);
+            return Ok(());
+        }
+        let undecided = match &self.task.current_state {
+            TaskState::AwaitingToolApproval {
+                tool_call_id,
+                tool_name,
+                ..
+            } => vec![(*tool_call_id, tool_name.clone())],
+            TaskState::AwaitingBatchToolApproval { pending_calls, .. } => pending_calls
+                .iter()
+                .map(|call| (call.tool_call_id, call.tool_name.clone()))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let mut notes = Vec::new();
+        for (tool_call_id, tool_name) in undecided {
+            self.emit_event(AgentEvent::ToolRejected {
+                tool_call_id,
+                tool_name: tool_name.clone(),
+                reason: Some(reason.to_string()),
+            })
+            .await?;
+            notes.push(format!("Tool {tool_name}: {reason}"));
+        }
+        let message = self
+            .task
+            .with_pending_text_tool_results(notes.join("\n\n---\n\n"));
+        if !message.is_empty() {
+            self.add_text_tool_results_to_conversation(&message);
+            self.task.increment_user_message_count();
+        }
         Ok(())
     }
 
@@ -3060,6 +3203,11 @@ impl AgentLoop {
         } else {
             None
         };
+        // A call saved awaiting approval whose tool this run does not offer
+        // is answered like any unavailable tool, even with caller output.
+        let Some(tool_arc) = self.tool_registry.get(tool_name) else {
+            return self.unavailable_native_tool(ai_call).await.map(Some);
+        };
 
         let mut output_str = if let Some(output) = custom_output {
             self.after_tool_execution(
@@ -3071,11 +3219,6 @@ impl AgentLoop {
             .await?;
             output
         } else {
-            // A call saved awaiting approval whose tool this run does not
-            // offer is answered like any unavailable tool.
-            let Some(tool_arc) = self.tool_registry.get(tool_name) else {
-                return self.unavailable_native_tool(ai_call).await.map(Some);
-            };
             match self
                 .before_tool_execution(internal_id, tool_name, &parameters)
                 .await?
@@ -3827,6 +3970,7 @@ impl AgentLoop {
             .error_recovery_config
             .on_tool_execution_error;
         match policy {
+            // The call's own result reports the error, and the batch goes on.
             ToolErrorPolicy::InformAgentAndContinue => {
                 self.emit_event(AgentEvent::ErrorEncountered {
                     error_message: error_message_for_event.clone(),
@@ -3834,8 +3978,15 @@ impl AgentLoop {
                     tool_call_id,
                 })
                 .await?;
-                self.task.set_state(TaskState::InProgress);
                 Ok(error_message_for_llm)
+            }
+            // The batch's other calls run first; `end_tool_batch` pauses.
+            ToolErrorPolicy::PauseAndAwaitApproval if self.deferring_tool_errors => {
+                self.task.deferred_tool_errors.push(DeferredToolError {
+                    message: error_message_for_event,
+                    tool_call_id,
+                });
+                Ok(String::new())
             }
             ToolErrorPolicy::PauseAndAwaitApproval => {
                 self.task

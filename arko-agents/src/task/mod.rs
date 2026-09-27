@@ -217,6 +217,17 @@ pub struct Task {
     pub pending_native_tool_calls: HashMap<Uuid, arko_ai::ToolCall>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_tool_images: Vec<crate::tool::ToolImage>,
+    /// Output-based tool results of a turn or approval that ended waiting
+    /// for a command (an approval, or a pause on a tool error): they are
+    /// added before the message that ends the wait. The output-based
+    /// counterpart of `pending_native_tool_results`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_text_tool_results: Vec<String>,
+    /// Tool errors the task pauses on under
+    /// `ToolErrorPolicy::PauseAndAwaitApproval` once the other calls of
+    /// their turn are done, including calls still awaiting approval.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred_tool_errors: Vec<DeferredToolError>,
 
     /// The input of the latest refused turn, until the refusal is resolved,
     /// recovery is approved without a change, or a later turn completes.
@@ -250,6 +261,15 @@ pub struct Task {
     /// rather than an error; approving it adds no error note.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub monitor_pause: bool,
+}
+
+/// A failed tool call the task will pause on; see
+/// [`Task::deferred_tool_errors`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeferredToolError {
+    /// The error, as `AgentEvent::ErrorEncountered` reports it.
+    pub message: String,
+    pub tool_call_id: Option<Uuid>,
 }
 
 /// A plan-usage window and its reset; see
@@ -291,6 +311,8 @@ impl Task {
             pending_native_tool_results: Vec::new(),
             pending_native_tool_calls: HashMap::new(),
             pending_tool_images: Vec::new(),
+            pending_text_tool_results: Vec::new(),
+            deferred_tool_errors: Vec::new(),
             refused_input: None,
             runtime_messages: BTreeSet::new(),
             runtime_text_messages: BTreeSet::new(),
@@ -375,6 +397,9 @@ impl Task {
     }
 
     /// Resume a task suspended by `ask_user` with the application's answer.
+    /// Tool results of the question's turn that are still waiting (a task
+    /// saved by an older version can hold an approved `ask_user`'s result)
+    /// are added with the answer, so every call keeps its result.
     pub fn prepare_for_resumption_with_user_response(
         &mut self,
         response: String,
@@ -388,11 +413,60 @@ impl Task {
             }
         };
         self.set_state(TaskState::InProgress);
-        self.conversation.add_user_message(&format!(
+        let answer = self.with_pending_text_tool_results(format!(
             "Response to the agent's questions:\nQuestions: {questions}\nResponse: {response}"
         ));
-        self.user_message_count += 1;
+        self.add_pending_tool_results(Some(&answer));
         Ok(())
+    }
+
+    /// `message` after the output-based tool results still waiting (see
+    /// [`Task::pending_text_tool_results`]), which it takes.
+    pub(crate) fn with_pending_text_tool_results(&mut self, message: String) -> String {
+        let mut parts = std::mem::take(&mut self.pending_text_tool_results);
+        if parts.is_empty() {
+            return message;
+        }
+        if !message.is_empty() {
+            parts.push(message);
+        }
+        parts.join("\n\n---\n\n")
+    }
+
+    /// Adds the tool results waiting for this turn to the conversation as
+    /// one user message: the native results, then `text`, then the tool
+    /// images, each after its description. Adds nothing when there is
+    /// nothing to add; returns whether a message was added.
+    pub(crate) fn add_pending_tool_results(&mut self, text: Option<&str>) -> bool {
+        let results = std::mem::take(&mut self.pending_native_tool_results);
+        if results.is_empty() && text.is_none() && self.pending_tool_images.is_empty() {
+            return false;
+        }
+        let mut content: Vec<_> = results
+            .into_iter()
+            .map(arko_ai::Content::ToolResult)
+            .collect();
+        if let Some(text) = text {
+            content.push(arko_ai::Content::Text(text.to_string()));
+        }
+        content.extend(self.take_tool_image_content());
+        self.conversation.add_user_message_with_contents(content);
+        self.increment_user_message_count();
+        true
+    }
+
+    /// The waiting tool images, each after its description, as message
+    /// content.
+    pub(crate) fn take_tool_image_content(&mut self) -> Vec<arko_ai::Content> {
+        std::mem::take(&mut self.pending_tool_images)
+            .into_iter()
+            .flat_map(|attachment| {
+                [
+                    arko_ai::Content::Text(attachment.description),
+                    arko_ai::Content::Image(attachment.image),
+                ]
+            })
+            .collect()
     }
 
     /// Returns the summed usage of every LLM call in this task.
