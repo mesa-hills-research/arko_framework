@@ -20,6 +20,9 @@ mod tests;
 #[cfg(test)]
 mod mock_server_tests;
 
+#[cfg(test)]
+mod live_tests;
+
 pub use catalog::{CatalogSource, OpenRouterCatalog, OpenRouterModelInfo, OpenRouterReasoningInfo};
 pub use options::{
     AppAttribution, AutoExactoPolicy, AutoRouterCostTier, AutoRouterOptions, DataCollection,
