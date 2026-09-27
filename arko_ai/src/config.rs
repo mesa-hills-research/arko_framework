@@ -16,7 +16,8 @@ pub enum Verbosity {
 #[serde(default)]
 pub struct GenerationConfig {
     /// Sent only when `temperature_specified` is set; otherwise the model's
-    /// default applies. Google's Interactions API no longer accepts it.
+    /// default applies. Google's Interactions API has no temperature, so a
+    /// specified one is an error for requests to Google.
     pub temperature: f64,
     pub temperature_specified: bool,
     pub max_tokens: Option<usize>,

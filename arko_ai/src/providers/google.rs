@@ -566,7 +566,7 @@ impl GoogleClient {
         }
     }
 
-    /// Per-model defaults, checked 2026-09-27 against
+    /// Per-model defaults from
     /// https://ai.google.dev/gemini-api/docs/thinking
     fn default_thinking_level(model: &crate::model::Model) -> GeminiThinkingLevel {
         if model.is_gemini_3_5_flash()
