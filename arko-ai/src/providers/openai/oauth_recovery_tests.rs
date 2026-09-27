@@ -74,7 +74,7 @@ pub(super) fn client(url: &str) -> OpenAIClient {
         Some("synthetic-refresh"),
         "synthetic-account",
     );
-    client.http_client = reqwest::Client::builder().no_proxy().build().unwrap();
+    client.http_client = crate::providers::http_client_builder().no_proxy().build().unwrap();
     client.test_responses_url = Some(format!("{url}/responses"));
     client.test_token_url = Some(format!("{url}/token"));
     client

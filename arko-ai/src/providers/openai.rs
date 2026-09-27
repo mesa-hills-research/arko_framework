@@ -1974,7 +1974,7 @@ mod tests {
                 socket.write_all(response.as_bytes()).await.unwrap();
             }
         });
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = crate::providers::http_client_builder().no_proxy().build().unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             let error = super::refresh_chatgpt_oauth_token(
                 &client,

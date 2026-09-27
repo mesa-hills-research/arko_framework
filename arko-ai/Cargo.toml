@@ -7,7 +7,13 @@ description = "All-in-one Rust crate for interfacing with LLMs from various prov
 license.workspace = true
 
 [dependencies]
-reqwest = { version = "0.11", features = ["json", "multipart", "stream"] }
+# TLS is rustls with the ring provider (already compiled for tokenizer
+# downloads) and the OS trust store. reqwest's default backend would add
+# aws-lc, another C build; see "Native (C) dependencies" in the README.
+# No http2 feature: requests use HTTP/1.1, as they did with reqwest 0.11.
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream", "charset", "system-proxy", "rustls-no-provider"] }
+rustls = { version = "0.23.27", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-platform-verifier = "0.7.1"
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

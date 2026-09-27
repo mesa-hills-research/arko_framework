@@ -20,7 +20,7 @@ impl VoyageClient {
     pub fn new(api_key: &str) -> Self {
         Self {
             api_key: api_key.to_string(),
-            http_client: reqwest::Client::new(),
+            http_client: super::default_http_client(),
         }
     }
 }
