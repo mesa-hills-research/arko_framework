@@ -1736,6 +1736,7 @@ impl OpenAIClient {
                 if let Some(ReasoningArtifact::OpenAIOutputItems { items }) =
                     &message.reasoning_artifact
                 {
+                    let start = request.input.len();
                     Self::replay_output_items(&mut request.input, message, items);
                     // Text the items don't hold (the application's own, such
                     // as the explanation kept for a refused turn) follows them.
@@ -1751,6 +1752,24 @@ impl OpenAIClient {
                         request.input.push(OpenAIInputEntry::Message(
                             self.convert_message_to_openai(message)?,
                         ));
+                    }
+                    // A reasoning item must be followed by the item it led
+                    // to; the API rejects one replayed with nothing after it
+                    // ("Item 'rs_…' of type 'reasoning' was provided without
+                    // its required following item", openai/codex#1498). A
+                    // response cut off after its reasoning (`incomplete`,
+                    // such as at `max_output_tokens`), or whose calls the
+                    // application dropped, ends that way, so its trailing
+                    // reasoning is left out rather than padded with an empty
+                    // assistant message. The items stay stored as received.
+                    while request.input.len() > start
+                        && matches!(
+                            request.input.last(),
+                            Some(OpenAIInputEntry::Item(item))
+                                if item.get("type").and_then(Value::as_str) == Some("reasoning")
+                        )
+                    {
+                        request.input.pop();
                     }
                     continue;
                 }

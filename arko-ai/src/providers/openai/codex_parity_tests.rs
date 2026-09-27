@@ -287,6 +287,82 @@ fn a_replayed_call_needs_the_message_to_still_hold_it() {
     assert_eq!(calls, ["reasoning:", "function_call:call_b", "function_call:call_c"]);
 }
 
+/// The Responses API rejects a replayed reasoning item that nothing follows
+/// ("Item 'rs_…' of type 'reasoning' was provided without its required
+/// following item", openai/codex#1498), as a response cut off after its
+/// reasoning leaves.
+#[tokio::test]
+async fn trailing_reasoning_without_a_following_item_is_not_replayed() {
+    let mut cut_off = completed(json!([]));
+    cut_off["status"] = "incomplete".into();
+    cut_off["incomplete_details"] = json!({"reason": "max_output_tokens"});
+    let body = sse(&[
+        json!({"type": "response.output_item.done", "output_index": 0, "item": reasoning_item()}),
+        json!({"type": "response.incomplete", "response": cut_off}),
+    ]);
+    let bytes = futures::stream::iter([Ok::<_, std::io::Error>(body)]);
+    let mut stream = OpenAIClient::stream_events(bytes, Model::openai_gpt_6_astra(), GenerationConfig::default(), true);
+    let mut response = None;
+    while let Some(event) = stream.next().await {
+        if let StreamEvent::End(end) = event.unwrap() {
+            response = Some(*end);
+        }
+    }
+    let response = response.unwrap();
+    assert_eq!(response.stop_reason, StopReason::MaxTokens);
+    let mut history = conversation();
+    history.add_assistant_message_from_response(response);
+    history.add_user_message("Continue.");
+    let request = OpenAIClient::new("test").build_request(&history, &GenerationConfig::default(), true).unwrap();
+    let input = serde_json::to_value(request).unwrap()["input"].clone();
+    // No dangling reasoning and no synthesized empty assistant message.
+    assert_eq!(input, json!([
+        {"role": "user", "type": "message", "content": "Audit src/lib.rs."},
+        {"role": "user", "type": "message", "content": "Continue."},
+    ]));
+
+    // Only the trailing run of reasoning goes; reasoning that something
+    // follows (an item, a call the message holds, or the message's own
+    // text) is replayed.
+    let second_reasoning = || {
+        let mut item = without_status(&reasoning_item());
+        item["id"] = "rs_2".into();
+        item
+    };
+    let replay = |items: Vec<Value>, text: &str, calls: &[&str]| {
+        let mut message = Message::new_assistant(text);
+        message.reasoning_artifact = Some(ReasoningArtifact::OpenAIOutputItems { items });
+        for call in calls {
+            message.tool_calls.push(ToolCall::from_argument_text(Some(format!("call_{call}")), "read_file".into(), "{}"));
+        }
+        let mut conversation = conversation();
+        conversation.messages.push(message);
+        conversation.add_user_message("Next.");
+        let request = OpenAIClient::new("test").build_request(&conversation, &GenerationConfig::default(), true).unwrap();
+        let input = serde_json::to_value(request).unwrap()["input"].clone();
+        input.as_array().unwrap().iter()
+            .map(|item| format!("{}:{}", item["type"].as_str().unwrap(), item["id"].as_str().or(item["role"].as_str()).unwrap_or("")))
+            .collect::<Vec<_>>()
+    };
+    let reasoning = || without_status(&reasoning_item());
+    let commentary = || without_status(&commentary_item());
+    assert_eq!(replay(vec![reasoning(), second_reasoning()], "", &[]), ["message:user", "message:user"]);
+    assert_eq!(
+        replay(vec![reasoning(), commentary(), second_reasoning()], "", &[]),
+        ["message:user", "reasoning:rs_1", "message:msg_1", "message:user"],
+    );
+    // The call was dropped by the application: nothing follows the reasoning.
+    assert_eq!(replay(vec![reasoning(), without_status(&call_item("a"))], "", &[]), ["message:user", "message:user"]);
+    assert_eq!(
+        replay(vec![reasoning()], "", &["b"]),
+        ["message:user", "reasoning:rs_1", "function_call:", "message:user"],
+    );
+    assert_eq!(
+        replay(vec![reasoning()], "Declined.", &[]),
+        ["message:user", "reasoning:rs_1", "message:assistant", "message:user"],
+    );
+}
+
 /// A refused turn an agent keeps (arko-agents' `handle_refusal`) loses its
 /// tool calls and gets the refusal explanation as its text when it has
 /// none. Its replay must not carry the dropped calls, and must still show
