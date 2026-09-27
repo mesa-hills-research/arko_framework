@@ -1383,7 +1383,7 @@ impl ToolExecutionMiddleware for WorkflowExecutionMiddleware {
                         .messages
                         .inject_task(reader.task_id, notice)
                         .await;
-                    fire_hooks_on_context(&self.context, HookPoint::OnMesiConflict, |hook| {
+                    fire_hooks_on_context(&self.context, HookPoint::OnFreshnessConflict, |hook| {
                         hook.agent_name = Some(reader.agent_name.clone());
                         hook.agent_run_id = Some(reader.task_id);
                         hook.metadata.insert(

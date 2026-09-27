@@ -15,10 +15,9 @@ use crate::distillation::DistillationConfig;
 use crate::durable::{DurableStepContext, DurableStepSpec, InDoubtContext, ResolveInDoubt};
 use crate::error::WorkflowError;
 use crate::freshness::{ActorId, ResourceId};
-use crate::freshness::{ContextFreshnessConfig, ResourceTracker, ToolResourceEffect};
+use crate::freshness::{ContextFreshnessConfig, ResourceTracker};
 use crate::hooks::{HookCallback, HookPoint, HookRegistry};
 use crate::memory::MemoryConfig;
-use crate::mesi::{FileTracker, MesiConfig};
 use crate::messaging::MessageBus;
 use crate::persistence::{PersistenceConfig, PersistenceManager};
 use crate::services::{RUN_WORKFLOW_AGENT_TOOL_NAME, WorkflowServices, WorkflowServicesConfig};
@@ -49,7 +48,7 @@ impl Workflow {
     /// Run a named agent with the given prompt. Blocks until the agent completes.
     ///
     /// This is the simplest way to execute an agent. The workflow engine handles
-    /// all event processing (hooks, MESI, budget) internally.
+    /// all event processing (hooks, context freshness, budget) internally.
     pub async fn run_agent(
         &self,
         agent_name: &str,
@@ -89,7 +88,7 @@ impl Workflow {
         result
     }
 
-    /// Run multiple agents in parallel. MESI tracking is active.
+    /// Run multiple agents in parallel.
     ///
     /// All agents run concurrently. Results are returned in the same order
     /// as the input. If any agent fails, the error is propagated.
@@ -109,7 +108,7 @@ impl Workflow {
     /// Spawn an agent without blocking. Returns a handle for driving it.
     ///
     /// Use [`AgentHandle::wait`] to drive the event loop with default behavior
-    /// (auto-approve, hooks, MESI, budget) and collect the result.
+    /// (auto-approve, hooks, context freshness, budget) and collect the result.
     ///
     /// Use [`AgentHandle::into_parts`] to get the raw channels for custom
     /// event processing.
@@ -239,7 +238,7 @@ impl Workflow {
                     ),
                 )
                 .await;
-            fire_hooks_on_context(&self.context, HookPoint::OnMesiConflict, |hook| {
+            fire_hooks_on_context(&self.context, HookPoint::OnFreshnessConflict, |hook| {
                 hook.agent_name = Some(reader.agent_name.clone());
                 hook.agent_run_id = Some(reader.task_id);
                 hook.metadata.insert(
@@ -435,7 +434,7 @@ impl Workflow {
 /// Obtained via [`Workflow::spawn_agent`]. Two usage modes:
 ///
 /// 1. **Default driving**: Call [`wait`](AgentHandle::wait) to let the workflow
-///    engine handle all events (hooks, MESI, budget) and return the result.
+///    engine handle all events (hooks, context freshness, budget) and return the result.
 ///
 /// 2. **Custom driving**: Call [`into_parts`](AgentHandle::into_parts) to get
 ///    the raw event receiver, command sender, and join handle for manual event
@@ -459,7 +458,7 @@ impl AgentHandle {
 
     /// Drive the event loop with default workflow behavior and wait for completion.
     ///
-    /// Handles hooks, MESI conflict detection, budget tracking, and error recovery
+    /// Handles hooks, context freshness, budget tracking, and error recovery
     /// automatically. Returns the agent result on completion.
     pub async fn wait(mut self) -> Result<AgentResult, WorkflowError> {
         let drive_result = engine::drive_event_loop(
@@ -528,7 +527,7 @@ impl AgentHandle {
     /// When using this, the caller is responsible for processing
     /// [`AgentEvent`](arko_agents::runtime::event::AgentEvent)s and sending
     /// appropriate [`UserCommand`](arko_agents::runtime::command::UserCommand)s.
-    /// Hooks, MESI, and budget tracking are **not** applied automatically.
+    /// Hooks and budget tracking are **not** applied automatically.
     #[allow(clippy::type_complexity)]
     pub fn into_parts(
         self,
@@ -561,7 +560,6 @@ pub struct WorkflowBuilder {
     hooks: Vec<(HookPoint, HookCallback)>,
     persistence_config: Option<PersistenceConfig>,
     resume_from: Option<PathBuf>,
-    mesi_config: Option<MesiConfig>,
     freshness_config: Option<ContextFreshnessConfig>,
     global_tools: Vec<Arc<dyn arko_agents::tool::Tool>>,
     agent_tools: HashMap<String, Vec<Arc<dyn arko_agents::tool::Tool>>>,
@@ -590,7 +588,6 @@ impl WorkflowBuilder {
             hooks: Vec::new(),
             persistence_config: None,
             resume_from: None,
-            mesi_config: None,
             freshness_config: None,
             global_tools: Vec::new(),
             agent_tools: HashMap::new(),
@@ -656,18 +653,6 @@ impl WorkflowBuilder {
     /// Configure persistence.
     pub fn persistence(mut self, config: PersistenceConfig) -> Self {
         self.persistence_config = Some(config);
-        self
-    }
-
-    /// Enable MESI file conflict tracking with default config.
-    pub fn enable_mesi(mut self) -> Self {
-        self.mesi_config = Some(MesiConfig::default());
-        self
-    }
-
-    /// Enable MESI file conflict tracking with custom config.
-    pub fn mesi(mut self, config: MesiConfig) -> Self {
-        self.mesi_config = Some(config);
         self
     }
 
@@ -986,38 +971,7 @@ impl WorkflowBuilder {
         } else {
             MessageBus::new(agent_names.iter().cloned())
         };
-        let legacy_mesi_config = self.mesi_config.clone();
-        let file_tracker = legacy_mesi_config.clone().map(FileTracker::with_config);
-        let freshness_config = self.freshness_config.or_else(|| {
-            legacy_mesi_config.map(|legacy| {
-                let mut config = ContextFreshnessConfig {
-                    block_on_conflict: legacy.block_on_conflict,
-                    tool_effects: HashMap::new(),
-                };
-                for tool in legacy.read_tools {
-                    let effect = if tool == "list_files" {
-                        ToolResourceEffect::ReadDirectoryTree {
-                            parameter: "directory".to_string(),
-                        }
-                    } else {
-                        ToolResourceEffect::ReadFile {
-                            parameter: "path".to_string(),
-                        }
-                    };
-                    config.tool_effects.insert(tool, effect);
-                }
-                for tool in legacy.write_tools {
-                    config.tool_effects.insert(
-                        tool,
-                        ToolResourceEffect::WriteFile {
-                            parameter: "path".to_string(),
-                        },
-                    );
-                }
-                config
-            })
-        });
-        let resource_tracker = freshness_config.map(|config| {
+        let resource_tracker = self.freshness_config.map(|config| {
             if let Some(snapshot) = resume_state
                 .as_ref()
                 .and_then(|state| state.freshness_snapshot.clone())
@@ -1043,7 +997,6 @@ impl WorkflowBuilder {
             durable_store,
             memory,
             messages,
-            file_tracker,
             resource_tracker,
             hooks: Arc::new(hook_registry),
             agent_configs: self.agents.iter().cloned().collect(),

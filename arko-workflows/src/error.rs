@@ -54,13 +54,6 @@ pub enum WorkflowError {
     #[error("Workflow aborted by hook at {hook_point}: {reason}")]
     AbortedByHook { hook_point: String, reason: String },
 
-    #[error("MESI conflict: agent '{agent}' write to '{path}' conflicts with '{modifier}'")]
-    MesiConflict {
-        agent: String,
-        path: String,
-        modifier: String,
-    },
-
     #[error("Persistence error: {0}")]
     Persistence(String),
 

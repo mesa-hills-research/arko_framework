@@ -26,7 +26,9 @@ pub enum HookPoint {
     OnBudgetExceeded,
     OnBudgetWarning,
     OnAgentMessage,
-    OnMesiConflict,
+    /// A tracked write made another actor's read of the same context stale.
+    #[serde(alias = "OnMesiConflict")]
+    OnFreshnessConflict,
 }
 
 /// The result of a hook invocation, directing the engine how to proceed.
@@ -74,5 +76,20 @@ impl HookRegistry {
 impl Default for HookRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_former_conflict_hook_name_loads_as_the_freshness_hook() {
+        let point: HookPoint = serde_json::from_str("\"OnMesiConflict\"").unwrap();
+        assert_eq!(point, HookPoint::OnFreshnessConflict);
+        assert_eq!(
+            serde_json::to_string(&HookPoint::OnFreshnessConflict).unwrap(),
+            "\"OnFreshnessConflict\""
+        );
     }
 }

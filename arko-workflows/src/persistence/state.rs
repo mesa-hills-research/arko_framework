@@ -88,4 +88,38 @@ mod tests {
         assert_eq!(restored.workflow_run_id, run_id);
         assert!(restored.freshness_snapshot.is_some());
     }
+
+    /// A checkpoint from an early version, with fields since removed (the
+    /// OAuth exemption set, MESI file tracking settings), still loads.
+    #[test]
+    fn an_early_checkpoint_with_removed_fields_still_loads() {
+        let checkpoint = serde_json::json!({
+            "workflow_name": "legacy",
+            "checkpoint_id": uuid::Uuid::new_v4(),
+            "timestamp": "2026-09-01T12:00:00Z",
+            "memory_snapshot": [],
+            "message_queues": {},
+            "budget_spent": 0.25,
+            "oauth_exempt_agents": ["coder"],
+            "mesi_config": {
+                "block_on_conflict": true,
+                "write_tools": ["write_file"],
+                "read_tools": ["read_file"]
+            },
+            "file_tracker": {"files": {}}
+        });
+        let state: WorkflowState = serde_json::from_value(checkpoint).unwrap();
+        assert_eq!(state.workflow_name, "legacy");
+        assert_eq!(state.workflow_run_id, uuid::Uuid::nil());
+        assert!(state.agent_results.is_empty());
+
+        let config: crate::workflow::config::WorkflowConfig =
+            serde_json::from_value(serde_json::json!({
+                "name": "legacy",
+                "workspace": "/workspace",
+                "mesi_config": {"block_on_conflict": false}
+            }))
+            .unwrap();
+        assert_eq!(config.name, "legacy");
+    }
 }

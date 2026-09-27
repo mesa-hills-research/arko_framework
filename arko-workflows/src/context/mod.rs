@@ -11,7 +11,6 @@ use crate::budget::BudgetManager;
 use crate::freshness::ResourceTracker;
 use crate::hooks::HookRegistry;
 use crate::memory::MemoryStore;
-use crate::mesi::FileTracker;
 use crate::messaging::MessageBus;
 use crate::workflow::result::AgentResult;
 
@@ -25,7 +24,6 @@ pub struct SharedContext {
     pub durable_store: Option<Arc<crate::durable::DurableStore>>,
     pub memory: MemoryStore,
     pub messages: MessageBus,
-    pub file_tracker: Option<FileTracker>,
     pub resource_tracker: Option<ResourceTracker>,
     pub hooks: Arc<HookRegistry>,
     pub agent_configs: HashMap<String, AgentConfig>,

@@ -252,7 +252,7 @@ impl Tool for WriteMemoryTool {
                     .await;
                 crate::workflow::engine::fire_hooks_on_context(
                     &self.context,
-                    crate::hooks::HookPoint::OnMesiConflict,
+                    crate::hooks::HookPoint::OnFreshnessConflict,
                     |hook| {
                         hook.agent_name = Some(reader.agent_name.clone());
                         hook.agent_run_id = Some(reader.task_id);

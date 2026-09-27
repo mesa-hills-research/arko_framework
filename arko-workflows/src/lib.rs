@@ -4,7 +4,7 @@
 ///
 /// `arko_workflows` enables composing multiple LLM agent runs into cohesive
 /// workflows with shared memory, inter-agent messaging, budget management,
-/// lifecycle hooks, MESI-inspired file conflict detection, and persistence.
+/// lifecycle hooks, context freshness tracking, and persistence.
 ///
 /// ## Quick Start
 ///
@@ -39,7 +39,6 @@ pub mod error;
 pub mod freshness;
 pub mod hooks;
 pub mod memory;
-pub mod mesi;
 pub mod messaging;
 pub mod persistence;
 pub mod services;
@@ -71,7 +70,6 @@ pub mod prelude {
     };
     pub use crate::hooks::{HookCallback, HookPoint, HookResult};
     pub use crate::memory::{AccessScope, MemoryConfig, MemoryEntry, MemoryTier, WriteMode};
-    pub use crate::mesi::MesiConfig;
     pub use crate::messaging::{AgentMessage, MessageAttachment};
     pub use crate::persistence::PersistenceConfig;
     pub use crate::services::{WorkflowServices, WorkflowServicesConfig};
