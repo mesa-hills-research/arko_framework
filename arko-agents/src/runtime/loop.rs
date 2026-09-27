@@ -98,6 +98,19 @@ const HOST_STOPPED_CALL: &str =
 const TASK_FAILED_CALL: &str =
     "The task failed on an earlier tool error, so this call was not run.";
 
+/// Why a call of a turn was not run once the task stopped at an earlier
+/// call: failed on a tool error, cancelled (by the user or, through
+/// middleware, by a workflow), or otherwise ended.
+fn not_run_after_stop(state: &TaskState) -> String {
+    match state {
+        TaskState::Failed { .. } => TASK_FAILED_CALL.to_string(),
+        TaskState::Cancelled { reason } => {
+            format!("This call was not run: {}.", reason.trim_end_matches('.'))
+        }
+        _ => UNREACHED_CALL.to_string(),
+    }
+}
+
 /// When `user_command_timeout_seconds` ran out during the wait.
 fn approval_timed_out_call(seconds: u64) -> String {
     format!(
@@ -1394,9 +1407,12 @@ impl AgentLoop {
                                                 break;
                                             }
                                         }
-                                        // A task that failed on a tool error
-                                        // still answers the calls it didn't run.
+                                        // A task that stopped at a call (failed
+                                        // on a tool error, or cancelled) still
+                                        // answers the calls it didn't run.
                                         if self.task.current_state.is_terminal() {
+                                            let not_run =
+                                                not_run_after_stop(&self.task.current_state);
                                             for pending_call_info in pending_calls {
                                                 if let Some(ai_call) = self
                                                     .task
@@ -1409,13 +1425,12 @@ impl AgentLoop {
                                                         tool_name: pending_call_info
                                                             .tool_name
                                                             .clone(),
-                                                        reason: Some(TASK_FAILED_CALL.into()),
+                                                        reason: Some(not_run.clone()),
                                                     })
                                                     .await?;
                                                     self.task.pending_native_tool_results.push(
                                                         ai::ToolResult::error_from_tool_call(
-                                                            &ai_call,
-                                                            TASK_FAILED_CALL,
+                                                            &ai_call, &not_run,
                                                         ),
                                                     );
                                                 }
@@ -1679,6 +1694,11 @@ impl AgentLoop {
 
                         if let UserCommand::CancelTask = cmd {
                             log::info!("Task {}: Cancelled by user command.", self.task.id);
+                            // The calls it waited on are answered as not run.
+                            let not_run = not_run_after_stop(&TaskState::Cancelled {
+                                reason: CANCELLED_BY_USER.to_string(),
+                            });
+                            self.settle_interrupted_wait(&not_run).await?;
                             self.task.set_state(TaskState::Cancelled {
                                 reason: CANCELLED_BY_USER.to_string(),
                             });
@@ -2261,14 +2281,11 @@ impl AgentLoop {
                         }
                     }
                 }
-                // A turn a tool stopped (an error that fails the task) still
-                // answers every call once: calls left awaiting an approval
-                // that won't be asked, and calls it didn't reach.
-                let not_run = if self.task.current_state.is_terminal() {
-                    TASK_FAILED_CALL
-                } else {
-                    UNREACHED_CALL
-                };
+                // A turn a call stopped (a tool error that fails the task, or
+                // a cancellation) still answers every call once: calls left
+                // awaiting an approval that won't be asked, and calls it
+                // didn't reach.
+                let not_run = not_run_after_stop(&self.task.current_state);
                 if !matches!(self.task.current_state, TaskState::InProgress) {
                     for pending in calls_needing_approval.drain(..) {
                         if let Some(call) = self
@@ -2279,19 +2296,19 @@ impl AgentLoop {
                             self.emit_event(AgentEvent::ToolRejected {
                                 tool_call_id: pending.tool_call_id,
                                 tool_name: pending.tool_name,
-                                reason: Some(not_run.into()),
+                                reason: Some(not_run.clone()),
                             })
                             .await?;
                             self.task
                                 .pending_native_tool_results
-                                .push(ai::ToolResult::error_from_tool_call(&call, not_run));
+                                .push(ai::ToolResult::error_from_tool_call(&call, &not_run));
                         }
                     }
                 }
                 for ai_tool_call in &tool_calls[reached..] {
                     self.task
                         .pending_native_tool_results
-                        .push(ai::ToolResult::error_from_tool_call(ai_tool_call, not_run));
+                        .push(ai::ToolResult::error_from_tool_call(ai_tool_call, &not_run));
                 }
                 // Announced calls the turn ended before reaching, and calls
                 // announced while streaming that the response doesn't hold

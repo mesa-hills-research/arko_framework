@@ -1103,6 +1103,170 @@ async fn under_fail_task_a_native_batch_stops_and_answers_the_calls_it_did_not_r
     }
 }
 
+/// Cancels the task at a call to `b.txt`, as a workflow's cancellation does.
+struct CancelAtB;
+
+#[async_trait]
+impl ToolExecutionMiddleware for CancelAtB {
+    async fn before(
+        &self,
+        _: &ToolExecutionContext<'_>,
+        call: &ToolCallContext<'_>,
+    ) -> Result<ToolExecutionDecision, ToolError> {
+        Ok(
+            if call.parameters.get("path").and_then(Value::as_str) == Some("b.txt") {
+                ToolExecutionDecision::CancelTask {
+                    reason: "Workflow cancelled.".into(),
+                }
+            } else {
+                ToolExecutionDecision::Continue
+            },
+        )
+    }
+
+    async fn after(
+        &self,
+        _: &ToolExecutionContext<'_>,
+        _: &ToolCallContext<'_>,
+        _: ToolExecutionOutcome<'_>,
+    ) -> Result<(), ToolError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_cancelled_native_batch_answers_the_calls_it_did_not_run() {
+    for approvals in [false, true] {
+        let workspace = batch_workspace();
+        let mut config = config(ToolCallingMode::Native, &["read_file"]);
+        config.tool_config.default_auto_approve_tool_use = !approvals;
+        let (mut agent, mut events, commands) = agent(config, ToolRegistry::new(), &workspace);
+        agent.execution_middleware = Some(Arc::new(CancelAtB));
+        agent
+            .scripted_responses
+            .get_mut()
+            .unwrap()
+            .push_back(turn(vec![
+                read_a(),
+                native_call("b", "read_file", serde_json::json!({"path": "b.txt"})),
+                native_call("c", "read_file", serde_json::json!({"path": "c.txt"})),
+            ]));
+        let run = tokio::spawn(agent.run());
+        let mut seen = Vec::new();
+        if approvals {
+            let (batch_id, pending) = wait_for(&mut events, &mut seen, |event| match event {
+                AgentEvent::BatchToolCallAwaitingApproval {
+                    batch_id,
+                    pending_calls,
+                } => Some((*batch_id, pending_calls.clone())),
+                _ => None,
+            })
+            .await;
+            let approve = || ToolApprovalDecision::Approve {
+                custom_tool_output: None,
+                message_to_agent: None,
+            };
+            commands
+                .send(UserCommand::SubmitBatchToolApprovals {
+                    batch_id,
+                    decisions: pending
+                        .iter()
+                        .map(|call| (call.tool_call_id, approve()))
+                        .collect(),
+                })
+                .await
+                .unwrap();
+        }
+        let task = timeout(Duration::from_secs(10), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        seen.extend(drain(&mut events));
+        assert_eq!(
+            task.current_state,
+            TaskState::Cancelled {
+                reason: "Workflow cancelled.".into()
+            }
+        );
+        assert_calls_paired(&task.conversation);
+        assert!(
+            result_for(&task.conversation, "a")[0]
+                .output
+                .contains("A-CONTENTS")
+        );
+        assert_eq!(
+            result_for(&task.conversation, "b")[0].output,
+            "Workflow cancelled."
+        );
+        let not_run = "This call was not run: Workflow cancelled.";
+        assert_eq!(result_for(&task.conversation, "c")[0].output, not_run);
+        assert_eq!(
+            seen.iter().any(|event| matches!(
+                event,
+                AgentEvent::ToolRejected { reason: Some(reason), .. } if reason == not_run
+            )),
+            approvals
+        );
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn cancelling_during_an_approval_wait_answers_the_waiting_calls() {
+    let workspace = batch_workspace();
+    let mut config = config(ToolCallingMode::Native, &["read_file"]);
+    config.tool_config.default_auto_approve_tool_use = false;
+    let (mut agent, mut events, commands) = agent(config, ToolRegistry::new(), &workspace);
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(turn(vec![
+            read_a(),
+            native_call("c", "read_file", serde_json::json!({"path": "c.txt"})),
+        ]));
+    let run = tokio::spawn(agent.run());
+    let mut seen = Vec::new();
+    wait_for(&mut events, &mut seen, |event| {
+        matches!(event, AgentEvent::BatchToolCallAwaitingApproval { .. }).then_some(())
+    })
+    .await;
+    commands.send(UserCommand::CancelTask).await.unwrap();
+    let task = timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    seen.extend(drain(&mut events));
+    assert_eq!(
+        task.current_state,
+        TaskState::Cancelled {
+            reason: crate::task::CANCELLED_BY_USER.into()
+        }
+    );
+    assert_calls_paired(&task.conversation);
+    let not_run = "This call was not run: Task cancelled by user.";
+    for id in ["a", "c"] {
+        assert_eq!(
+            result_for(&task.conversation, id)[0].output,
+            not_run,
+            "{id}"
+        );
+    }
+    let rejected = seen
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                AgentEvent::ToolRejected { reason: Some(reason), .. } if reason == not_run
+            )
+        })
+        .count();
+    assert_eq!(rejected, 2);
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
 #[tokio::test]
 async fn recovery_approval_answers_calls_an_older_version_stranded() {
     // Saved by a version that paused on a tool error mid-batch and left the
