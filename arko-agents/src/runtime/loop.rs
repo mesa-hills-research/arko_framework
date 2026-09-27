@@ -1691,12 +1691,14 @@ impl AgentLoop {
                 if let Some(response) = scripted_response {
                     return response;
                 }
-                if conversation.model.provider == ai::Provider::OpenAI
-                    && llm_client
-                        .is_openai_token_expired(Duration::from_secs(OAUTH_REFRESH_MARGIN_SECS))
-                        .await
-                {
-                    llm_client.refresh_openai_oauth_token_once().await?;
+                if conversation.model.provider == ai::Provider::OpenAI {
+                    // Decided under the credential lock, so tasks sharing a
+                    // client (or an auth.json) don't rotate twice.
+                    llm_client
+                        .refresh_openai_oauth_token_if_expiring(Duration::from_secs(
+                            OAUTH_REFRESH_MARGIN_SECS,
+                        ))
+                        .await?;
                 }
                 llm_client.generate_stream(&conversation, gen_config).await
             };
