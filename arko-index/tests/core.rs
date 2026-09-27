@@ -141,6 +141,12 @@ impl Backend for Fake {
     fn output_tokenizer(&self) -> String {
         "fake-chars-div-4".into()
     }
+    fn chunk_model_info(&self) -> Option<ChunkModelInfo> {
+        Some(ChunkModelInfo {
+            model: "fake-chunker".into(),
+            reasoning: json!("none"),
+        })
+    }
 }
 fn config(fake: &Fake) -> Config {
     Config {
@@ -872,7 +878,7 @@ async fn rename_delete_atomic_generations_and_rebuild_warning() {
     std::fs::remove_file(root.path().join("delete.txt")).unwrap();
     std::fs::write(root.path().join("new.txt"), "alpha new\n".repeat(400)).unwrap();
     let update = index.start_update(&first.index).await.unwrap();
-    while index.status(&update.job).await.unwrap().active_luna == 0 {
+    while index.status(&update.job).await.unwrap().active_chunking == 0 {
         tokio::task::yield_now().await;
     }
     let during = index
@@ -1477,4 +1483,33 @@ async fn a_second_open_of_a_live_database_is_rejected() {
     ArkoIndex::open(&path, fake.clone(), config(&fake))
         .await
         .unwrap();
+}
+#[tokio::test]
+async fn snapshot_records_the_backends_chunk_model() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+    let fake = Arc::new(Fake::new());
+    let index = ArkoIndex::open(db.path().join("i.db"), fake.clone(), config(&fake))
+        .await
+        .unwrap();
+    let job = index
+        .start_build(BuildSpec::new("test", root.path()))
+        .await
+        .unwrap();
+    assert_eq!(settle(&index, &job.job).await.phase, "ready");
+    let events = index.events(&job.job, 0, 1000).await.unwrap();
+    let snapshot = events.iter().find(|e| e.kind == "snapshot").unwrap();
+    assert_eq!(snapshot.detail["model"], "fake-chunker");
+    assert_eq!(snapshot.detail["reasoning"], "none");
+}
+#[test]
+fn job_status_saved_with_the_former_field_name_still_loads() {
+    let status: JobStatus = serde_json::from_value(json!({
+        "job": "j", "index": "i", "phase": "ready", "problem": null, "files": 1,
+        "validated": 1, "bypassed": 0, "unchecked": 0, "active_luna": 2,
+        "active_embeddings": 0
+    }))
+    .unwrap();
+    assert_eq!(status.active_chunking, 2);
 }

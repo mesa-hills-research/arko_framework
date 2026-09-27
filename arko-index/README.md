@@ -1,6 +1,6 @@
 # arko-index
 
-A portable Rust library for indexing source code and documentation with Luna-selected boundaries, Voyage embeddings, and local SQLite retrieval. It accepts OpenAI OAuth or API-key clients through `arko-ai`.
+A portable Rust library for indexing source code and documentation with model-selected boundaries (GPT-5.6 Luna by default), Voyage embeddings, and local SQLite retrieval. It accepts OpenAI OAuth or API-key clients through `arko-ai`, or another `arko-ai` chunk model.
 
 ## Build and search
 
@@ -38,6 +38,22 @@ for hit in &page.hits {
 
 The host retains its `LLMClient` clone and can persist refreshed OAuth credentials using `openai_chatgpt_oauth_credentials()`. Credentials never enter index metadata or request artifacts. `with_openai_api_key()` also works. OAuth usage reported as $0 is valid; it is not treated as an authentication failure.
 
+### Chunk model
+
+`ArkoBackend::new` selects boundaries with GPT-5.6 Luna at high reasoning effort (with summaries) and low verbosity (`backend::default_chunk_config()`). `with_chunk_model` selects another `arko-ai` model and its generation settings; the client passed to `ArkoBackend::new` must hold credentials for that model's provider:
+
+```rust,no_run
+use arko_ai::{GenerationConfig, Model, OpenAIEffort, ReasoningConfig};
+# fn example(backend: arko_index::backend::ArkoBackend) {
+let backend = backend.with_chunk_model(
+    Model::openai_gpt_6_luna(),
+    GenerationConfig::default().with_reasoning(ReasoningConfig::openai(OpenAIEffort::Medium, true)),
+);
+# let _ = backend; }
+```
+
+The backend owns the tool configuration: the boundary tool replaces any `tool_config` in the settings, is forced where the model allows it, and parallel calls are disabled where supported. Every reply must be exactly one call to that tool in a completed turn (`StopReason::EndTurn` or `ToolUse`): refusals and token limits fail the request, while a missing, extra or malformed call is retried as a transient failure. Each job's `snapshot` event records the chunk `model` and `reasoning`. Boundaries are validated against the source the same way for every model, so an update after changing the model still reuses the boundaries of unchanged files; build a new index to re-chunk everything with the new model.
+
 ## Runnable example
 
 From the framework root:
@@ -59,15 +75,15 @@ Other commands: `update INDEX_ID`, `resume JOB_ID`, `status JOB_ID`, `list`, `re
 
 ## Source accuracy and scheduling
 
-Chunking follows complete logical components, with no preferred or maximum chunk size. Functions, methods, coherent impl/class/type definitions and their comments stay together regardless of length. Documentation follows topic sections and complete examples. Whole files are presented to Luna with LF-normalized snapshots and absolute, padded line numbers. Source files are untouched; the model returns internal boundaries and exact suffixes, and all stored text comes from the snapshots. There is no arbitrary anchor-length cap.
+Chunking follows complete logical components, with no preferred or maximum chunk size. Functions, methods, coherent impl/class/type definitions and their comments stay together regardless of length. Documentation follows topic sections and complete examples. Whole files are presented to the chunk model with LF-normalized snapshots and absolute, padded line numbers. Source files are untouched; the model returns internal boundaries and exact suffixes, and all stored text comes from the snapshots. There is no arbitrary anchor-length cap.
 
-Rust parser guards protect functions, impls, traits, structs, enums, modules and statements regardless of size. Markdown guards protect paragraphs, headings with content, examples and list items. Other languages or temporarily invalid syntax are marked `unchecked`. If the source has no legal internal boundary, its single chunk is established deterministically without asking Luna to select a boundary.
+Rust parser guards protect functions, impls, traits, structs, enums, modules and statements regardless of size. Markdown guards protect paragraphs, headings with content, examples and list items. Other languages or temporarily invalid syntax are marked `unchecked`. If the source has no legal internal boundary, its single chunk is established deterministically without asking the model to select a boundary.
 
 Repairs receive the complete source and all legal candidates inside each disputed interval. They can select multiple boundaries in order or return an empty array to merge the disputed intervals, preserving all source. Snapshot/revision validation prevents stale repairs. There is no repair-attempt cap, response token budget, request byte budget or model generation timeout. Source validity is required before publication; non-retryable provider errors remain explicit resumable failures.
 
 Initial and repair prompts share guidance to group import/include blocks, related module declarations, re-exports and constants, and adjacent helpers with the behavior they support. Documentation introductions, examples and the instructions needed to use them stay together. Candidate IDs are possible split positions, not a checklist; semantic grouping has no numeric size threshold. Rust guards additionally protect each complete import statement, including multiline import trees and attributes, using its existing `syn` AST span. Cross-statement and documentation grouping is model-guided; it is not a claim that every language or semantic relationship is deterministically checked. Changes to either prompt invalidate old boundary reuse on the next update.
 
-Six files per initial request and two simultaneously active Luna requests are scheduling settings (`batch_count` and `concurrency`). A finished slot is immediately refilled; initial batches have priority over repairs and retries. Embedding concurrency is separately configurable. Classified transient provider failures (rate limits, timeouts, server errors, truncated streams, malformed tool calls) retry with an increasing jittered wait (1 s doubling to a 60 s cap), honoring longer provider retry timing, for up to `max_transient_attempts` attempts (default 10); the request then fails with its last error, a `retries_exhausted` attempt event is recorded, and the job becomes `blocked` (resumable). Explicit capacity signals (overloaded / unavailable) keep waiting without consuming attempts. There is no configured maximum wait. Pause drains active calls into checkpoints; cancellation drops local request futures. `request_attempt` events record starts, failures, retry waits and completions as they happen.
+Six files per initial request and two simultaneously active chunk-model requests are scheduling settings (`batch_count` and `concurrency`). A finished slot is immediately refilled; initial batches have priority over repairs and retries. Embedding concurrency is separately configurable. Classified transient provider failures (rate limits, timeouts, server errors, truncated streams, malformed tool calls) retry with an increasing jittered wait (1 s doubling to a 60 s cap), honoring longer provider retry timing, for up to `max_transient_attempts` attempts (default 10); the request then fails with its last error, a `retries_exhausted` attempt event is recorded, and the job becomes `blocked` (resumable). Explicit capacity signals (overloaded / unavailable) keep waiting without consuming attempts. There is no configured maximum wait. Pause drains active calls into checkpoints; cancellation drops local request futures. `request_attempt` events record starts, failures, retry waits and completions as they happen.
 
 Only Voyage's actual API token and item constraints require payload splitting or embedding-bin limits. The default profile is `voyage-4`, 1,024-dimensional float32, with tokenizer `voyageai/voyage-4@44f3b2ae4ddf33403ed4dd66bec3fa48ff7dbbf9`. Token counts use the actual submitted source text with the selected cached tokenizer. Arbitrary safety reserves and chunk-size targets are absent. API truncation is disabled.
 
@@ -118,7 +134,7 @@ The judge receives complete chunks from an explicit candidate pool (default 20).
 
 Invalid selections retry up to `max_attempts` (default 2); provider errors are returned directly. Exhausted validation failures return an error, never an unannounced fallback to unjudged results. The library does not truncate candidate text to fit a model context window; choose a suitable model/pool size or handle provider context errors. Callers can impose their own timeout. Authentication and generation configuration belong to the supplied client/judge and are never saved in index metadata. The host retains responsibility for OAuth refresh persistence.
 
-`LlmSearchJudge` supports OpenAI and Anthropic clients/models through `arko-ai`; model-specific generation settings are supplied with `with_generation_config`. Anthropic thinking models use automatic tool choice, with the same strict response validation. The current Google adapter lacks completion metadata required by this built-in judge. Implement the exported `SearchJudge` trait for another provider, transport, or selection policy. Only OpenAI Luna has been exercised against the live Cloudflare corpus so far.
+`LlmSearchJudge` supports OpenAI and Anthropic clients/models through `arko-ai`; model-specific generation settings are supplied with `with_generation_config`. Anthropic thinking models use automatic tool choice, with the same strict response validation. The judge requires completion metadata (`Model::reports_stop_reason`), which every built-in provider now reports; Google and OpenRouter models have not been exercised with it. Implement the exported `SearchJudge` trait for another provider, transport, or selection policy. Only OpenAI Luna has been exercised against the live Cloudflare corpus so far.
 
 Enable it in the example CLI:
 

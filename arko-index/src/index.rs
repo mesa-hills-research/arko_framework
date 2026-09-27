@@ -33,7 +33,9 @@ pub struct JobStatus {
     pub validated: usize,
     pub bypassed: usize,
     pub unchecked: usize,
-    pub active_luna: usize,
+    /// Chunk-model requests in flight, across all jobs of this index service.
+    #[serde(alias = "active_luna")]
+    pub active_chunking: usize,
     pub active_embeddings: usize,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -68,7 +70,7 @@ pub(crate) struct Inner {
     pub db: Db,
     pub backend: Arc<dyn Backend>,
     pub config: Config,
-    pub luna: Scheduler,
+    pub chunking: Scheduler,
     pub embeddings: Scheduler,
     controls: Mutex<HashMap<String, Control>>,
     pub matrix: Arc<std::sync::Mutex<Option<crate::search::MatrixCache>>>,
@@ -90,7 +92,7 @@ impl ArkoIndex {
         Ok(Self {
             inner: Arc::new(Inner {
                 db,
-                luna: Scheduler::new(
+                chunking: Scheduler::new(
                     backend.clone(),
                     config.concurrency,
                     config.max_transient_attempts,
@@ -275,7 +277,7 @@ impl ArkoIndex {
                     validated: 0,
                     bypassed: 0,
                     unchecked: 0,
-                    active_luna: 0,
+                    active_chunking: 0,
                     active_embeddings: 0,
                 };
                 for s in states {
@@ -287,7 +289,7 @@ impl ArkoIndex {
                 Ok(result)
             })
             .await?;
-        status.active_luna = self.inner.luna.active.load(Ordering::SeqCst);
+        status.active_chunking = self.inner.chunking.active.load(Ordering::SeqCst);
         status.active_embeddings = self.inner.embeddings.active.load(Ordering::SeqCst);
         Ok(status)
     }
@@ -352,6 +354,7 @@ impl ArkoIndex {
         }
         let manifest = tokio::task::spawn_blocking(move || source::scan(&spec)).await??;
         let (j, config) = (job.to_owned(), self.inner.config.clone());
+        let chunk_model = self.inner.backend.chunk_model_info();
         self.inner.db.call(move|c|{
             let mut old=BTreeMap::<String,String>::new();let mut reuse=HashMap::<(String,String),FileState>::new();
             let policy=chunker::policy_hash();
@@ -377,7 +380,7 @@ impl ArkoIndex {
                 tx.execute("INSERT INTO files VALUES(?1,?2,?3,?4,?5)",params![j,s.path,s.hash,s.original_hash,encode(&state)?])?;
             }
             tx.execute("UPDATE jobs SET manifest=?2,excluded=?3,affected=?4,changes=?5 WHERE id=?1",params![j,manifest.hash,encode(&manifest.excluded)?,encode(&affected)?,encode(&crate::coalesce(&old,&current))?])?;
-            tx.execute("INSERT INTO events(job,kind,detail) VALUES(?1,'snapshot',?2)",params![j,encode(&json!({"manifest":manifest.hash,"files":manifest.files.len(),"excluded":manifest.excluded.len(),"affected":affected.len(),"prompt_hash":source::hash(chunker::initial_prompt()),"chunking_policy":policy,"policy_changed":policy_changed,"source_format":"lf-v1","extractors":"syn-2/pulldown-cmark-0.13","model":"gpt-5.6-luna","reasoning":"high"}))?])?;
+            tx.execute("INSERT INTO events(job,kind,detail) VALUES(?1,'snapshot',?2)",params![j,encode(&json!({"manifest":manifest.hash,"files":manifest.files.len(),"excluded":manifest.excluded.len(),"affected":affected.len(),"prompt_hash":source::hash(chunker::initial_prompt()),"chunking_policy":policy,"policy_changed":policy_changed,"source_format":"lf-v1","extractors":"syn-2/pulldown-cmark-0.13","model":chunk_model.as_ref().map(|m|&m.model),"reasoning":chunk_model.as_ref().map(|m|&m.reasoning)}))?])?;
             tx.commit()?;Ok(())}).await
     }
     async fn files(&self, job: &str) -> Result<Vec<(Snapshot, FileState)>> {
@@ -412,7 +415,7 @@ impl ArkoIndex {
                     })
                     .await?;
                 let (progress_tx,mut progress_rx)=tokio::sync::mpsc::unbounded_channel();
-                let call=this.inner.luna.call_tracked(Operation::Chunk(request),repair.is_none(),&control,Some(progress_tx));
+                let call=this.inner.chunking.call_tracked(Operation::Chunk(request),repair.is_none(),&control,Some(progress_tx));
                 tokio::pin!(call);
                 let result=loop {
                     tokio::select! {

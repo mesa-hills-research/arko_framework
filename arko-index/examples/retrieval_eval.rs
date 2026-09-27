@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ..Default::default()
     };
     let embeddings = EmbeddingClient::new().with_voyage_api_key(&std::env::var("VOYAGE_API_KEY")?);
-    // Search never invokes Luna, so no LLM/OAuth credentials are needed.
+    // Search never invokes the chunk model, so no LLM/OAuth credentials are needed.
     let backend =
         Arc::new(ArkoBackend::new(LLMClient::new(), embeddings, config.embedding.clone()).await?);
     let index = ArkoIndex::open(&args[0], backend, config).await?;
