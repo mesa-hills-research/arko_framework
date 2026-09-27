@@ -761,7 +761,7 @@ pub const MAX_WAIT_FOR_MESSAGE_TIMEOUT: std::time::Duration; // 24 hours
 | Gemini, and other OpenRouter models | unknown | 4 min 30 s |
 | Caching off where a request can turn it off, or a model without caching | disabled | 4 min 30 s |
 
-OpenAI documents in-memory retention of about 5 to 10 minutes and, for GPT-5.6 and later on the API, a `prompt_cache_options.ttl` of `30m`; the ChatGPT OAuth backend caches implicitly only, with a lifetime neither documented nor configurable. arko reports the conservative 5 minutes on purpose, since a longer wait can miss the cache. A live measurement on 2026-09-27 showed the ChatGPT OAuth cache surviving 4 minutes; longer gaps were inconclusive.
+OpenAI documents in-memory retention of about 5 to 10 minutes and, for GPT-5.6 and later on the API, a `prompt_cache_options.ttl` of `30m`; the ChatGPT OAuth backend caches implicitly only, with a lifetime neither documented nor configurable. arko reports the conservative 5 minutes on purpose, since a longer wait can miss the cache. A live measurement over ChatGPT OAuth (GPT-6 Astra, 2026-09-27) found the cache still warm after 4- and 40-minute idle gaps, but OpenAI only documents "typically around 30 minutes" (API) and nothing for the OAuth backend, so arko defaults to short waits. A longer fixed wait usually still hits the cache but isn't guaranteed to.
 
 `Fixed(duration)` applies as given, for the workflow or one agent, and may be longer than the cache lifetime; `build` rejects zero and more than 24 hours. A wait longer than the provider's cache lifetime can cause a cache miss on the next turn; an agent can instead call `wait_for_message` again to wait longer while keeping the cache warm. The model's `timeout_seconds` shortens a wait, never lengthens it.
 

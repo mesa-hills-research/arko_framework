@@ -21,10 +21,8 @@
 //!   OAuth (Codex) backend caches implicitly only; its lifetime is neither
 //!   documented nor configurable. This module reports OpenAI as a
 //!   conservative 5 minutes on every path, on purpose: a request after a
-//!   longer idle time can miss the cache and pay for the whole prompt again.
-//!   A live measurement on 2026-09-27 (the `oauth_cache_probe` example's
-//!   `--idle-gap` option, over ChatGPT OAuth) showed the cache surviving 4
-//!   minutes; longer gaps were inconclusive.
+//!   longer idle time can miss the cache and pay for the whole prompt again
+//!   (see [`OPENAI_PROMPT_CACHE_LIFETIME`]).
 
 use std::time::Duration;
 
@@ -59,6 +57,12 @@ pub const ANTHROPIC_EXTENDED_PROMPT_CACHE_LIFETIME: Duration = Duration::from_se
 /// later on the API, extended retention for many organizations) but aren't
 /// guaranteed on every path; the ChatGPT OAuth backend caches implicitly
 /// only, with a lifetime no request can configure.
+///
+/// A live measurement over ChatGPT OAuth (GPT-6 Astra, 2026-09-27) found the
+/// cache still warm after 4- and 40-minute idle gaps, but OpenAI only
+/// documents "typically around 30 minutes" (API) and nothing for the OAuth
+/// backend, so arko defaults to short waits. A longer fixed wait usually
+/// still hits the cache but isn't guaranteed to.
 pub const OPENAI_PROMPT_CACHE_LIFETIME: Duration = Duration::from_secs(5 * 60);
 
 impl AnthropicCacheTtl {
