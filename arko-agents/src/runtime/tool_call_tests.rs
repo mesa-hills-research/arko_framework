@@ -1,6 +1,7 @@
 //! Tool calls through the runtime loop.
 
 use super::image_tests::{call, response};
+use super::refusal_tests::{call_item, responses_server, stream_of};
 use super::*;
 use crate::agent_config::PerToolConfigOverride;
 use crate::tool::{Tool, ToolError, ToolParameterDefinition, ToolParameterType, ToolTypeDetails};
@@ -371,5 +372,313 @@ async fn an_approved_call_to_a_tool_the_run_does_not_offer_is_answered_as_unavai
         .unwrap();
     assert!(result.is_error && result.output.contains("is not available"));
     assert_eq!(runs.load(Ordering::SeqCst), 0);
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+// SuspendTask in every awaiting state.
+
+#[tokio::test]
+async fn suspend_returns_the_task_from_every_awaiting_state() {
+    let workspace = workspace();
+    let pending = |name: &str| PendingToolCallInfo {
+        tool_call_id: Uuid::new_v4(),
+        tool_name: name.into(),
+        parameters: HashMap::new(),
+        tool_description: String::new(),
+    };
+    let single = pending("read_file");
+    for mode in [ToolCallingMode::Native, ToolCallingMode::OutputBased] {
+        for state in [
+            TaskState::AwaitingToolApproval {
+                tool_call_id: single.tool_call_id,
+                tool_name: single.tool_name.clone(),
+                parameters: HashMap::new(),
+                tool_description: String::new(),
+            },
+            TaskState::AwaitingBatchToolApproval {
+                batch_id: Uuid::new_v4(),
+                pending_calls: vec![pending("read_file"), pending("list_files")],
+            },
+            TaskState::AwaitingUserResponse {
+                questions: "Which file?".into(),
+            },
+            TaskState::AwaitingErrorRecoveryApproval {
+                error_message: "failed".into(),
+            },
+        ] {
+            let mut config = config(mode.clone(), &["read_file", "list_files"]);
+            config.tool_config.default_auto_approve_tool_use = false;
+            let (mut agent, _events, commands) = agent(config, ToolRegistry::new(), &workspace);
+            agent.task.set_state(state.clone());
+            commands.send(UserCommand::SuspendTask).await.unwrap();
+            let task = timeout(Duration::from_secs(5), agent.run())
+                .await
+                .unwrap_or_else(|_| panic!("{mode:?} {state:?} ignored SuspendTask"))
+                .unwrap();
+            assert_eq!(task.current_state, state);
+        }
+    }
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[tokio::test]
+async fn a_native_batch_approval_survives_suspension_saving_and_resumption() {
+    let workspace = workspace();
+    std::fs::write(workspace.join("a.txt"), "CONTENTS-OF-A").unwrap();
+    let mut config = config(ToolCallingMode::Native, &["read_file", "write_file"]);
+    config.tool_config.default_auto_approve_tool_use = false;
+    let (mut agent, mut events, commands) = agent(config, ToolRegistry::new(), &workspace);
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(turn(vec![
+            native_call("read", "read_file", serde_json::json!({"path": "a.txt"})),
+            native_call(
+                "write",
+                "write_file",
+                serde_json::json!({"path": "b.txt", "content": "x"}),
+            ),
+        ]));
+    let run = tokio::spawn(agent.run());
+    let pending_calls = loop {
+        match timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+        {
+            Some(AgentEvent::BatchToolCallAwaitingApproval { pending_calls, .. }) => {
+                break pending_calls;
+            }
+            Some(_) => {}
+            None => panic!("the run ended without asking for approval"),
+        }
+    };
+    commands.send(UserCommand::SuspendTask).await.unwrap();
+    let task = timeout(Duration::from_secs(5), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let TaskState::AwaitingBatchToolApproval { batch_id, .. } = task.current_state.clone() else {
+        panic!("suspended in {:?}", task.current_state);
+    };
+    assert_eq!(task.pending_native_tool_calls.len(), 2);
+
+    let path = workspace.join("task.json");
+    task.save_to_path(&path).unwrap();
+    let task = Task::load_from_path(&path).unwrap();
+    let (mut agent, _events, commands) =
+        agent_for(task, ToolRegistry::new(), Arc::new(ai::LLMClient::new()));
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(complete());
+    let decision = |name: &str| match name {
+        "read_file" => ToolApprovalDecision::Approve {
+            custom_tool_output: None,
+            message_to_agent: None,
+        },
+        _ => ToolApprovalDecision::Reject {
+            reason: Some("Not now".into()),
+        },
+    };
+    commands
+        .send(UserCommand::SubmitBatchToolApprovals {
+            batch_id,
+            decisions: pending_calls
+                .iter()
+                .map(|call| (call.tool_call_id, decision(&call.tool_name)))
+                .collect(),
+        })
+        .await
+        .unwrap();
+    let task = timeout(Duration::from_secs(5), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_calls_paired(&task.conversation);
+    assert!(
+        result_for(&task.conversation, "read")[0]
+            .output
+            .contains("CONTENTS-OF-A")
+    );
+    assert!(result_for(&task.conversation, "write")[0].is_error);
+    assert!(!workspace.join("b.txt").exists());
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+// Approval waits that end without a decision.
+
+/// Every function call of the request's input has its output, as the
+/// Responses API requires.
+fn assert_request_pairs_calls(request: &Value) {
+    let input = request["input"].as_array().unwrap();
+    let ids = |kind: &str| {
+        let mut ids: Vec<_> = input
+            .iter()
+            .filter(|item| item["type"] == kind)
+            .map(|item| item["call_id"].as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(
+        ids("function_call"),
+        ids("function_call_output"),
+        "{input:#?}"
+    );
+}
+
+#[tokio::test]
+async fn an_approval_wait_that_ends_without_a_decision_leaves_a_resumable_native_turn() {
+    for timed_out in [true, false] {
+        let workspace = workspace();
+        std::fs::write(workspace.join("a.txt"), "CONTENTS-OF-A").unwrap();
+        let model = ai::Model::openai_gpt_5_6_luna();
+        let (url, captured) = responses_server(vec![
+            (
+                stream_of(
+                    &model.id,
+                    vec![
+                        call_item("read", "read_file", r#"{"path":"a.txt"}"#),
+                        call_item("write", "write_file", r#"{"path":"b.txt","content":"x"}"#),
+                    ],
+                ),
+                None,
+            ),
+            (
+                stream_of(
+                    &model.id,
+                    vec![call_item("done", "complete_task", r#"{"summary":"done"}"#)],
+                ),
+                None,
+            ),
+        ])
+        .await;
+        let client = Arc::new(ai::LLMClient::new().with_openai_client(
+            ai::providers::openai::OpenAIClient::new("test-key").with_base_url(url),
+        ));
+        let mut config = config(ToolCallingMode::Native, &["read_file", "write_file"]);
+        config.tool_config.default_auto_approve_tool_use = false;
+        config.tool_config.tool_specific_configs.insert(
+            "read_file".into(),
+            PerToolConfigOverride {
+                auto_approve_tool_use: Some(true),
+                ..Default::default()
+            },
+        );
+        config.user_command_timeout_seconds = timed_out.then_some(1);
+        let task = Task::new(config, "Do the task".into(), workspace.clone(), None);
+        let (agent, mut events, commands) =
+            agent_for(task, ToolRegistry::new(), Arc::clone(&client));
+        let run = tokio::spawn(agent.run());
+        // read_file ran; write_file, in the same turn, waits.
+        loop {
+            match timeout(Duration::from_secs(30), events.recv())
+                .await
+                .unwrap()
+            {
+                Some(AgentEvent::BatchToolCallAwaitingApproval { pending_calls, .. }) => {
+                    let names: Vec<_> = pending_calls
+                        .iter()
+                        .map(|call| call.tool_name.as_str())
+                        .collect();
+                    assert_eq!(names, ["write_file"]);
+                    break;
+                }
+                Some(_) => {}
+                None => panic!("the run ended without asking for approval"),
+            }
+        }
+        let _kept_open = if timed_out {
+            Some(commands)
+        } else {
+            drop(commands);
+            None
+        };
+        let task = timeout(Duration::from_secs(30), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(task.current_state, TaskState::Interrupted { .. }));
+        assert!(task.pending_native_tool_calls.is_empty());
+        assert!(task.pending_native_tool_results.is_empty());
+        assert_calls_paired(&task.conversation);
+        let undecided = result_for(&task.conversation, "call_write");
+        assert!(undecided[0].is_error && undecided[0].output == UNDECIDED_CALL);
+        assert!(
+            result_for(&task.conversation, "call_read")[0]
+                .output
+                .contains("CONTENTS-OF-A")
+        );
+        assert!(drain(&mut events).iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolRejected { tool_name, reason: Some(reason), .. }
+                if tool_name == "write_file" && reason == UNDECIDED_CALL
+        )));
+        assert!(!workspace.join("b.txt").exists());
+
+        // Run again, the request pairs every call with its output.
+        let (agent, _events, _commands) = agent_for(task, ToolRegistry::new(), client);
+        let task = timeout(Duration::from_secs(30), agent.run())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(task.current_state, TaskState::Completed { .. }),
+            "{:?}",
+            task.current_state
+        );
+        let requests = captured.lock().unwrap().clone();
+        assert_eq!(requests.len(), 2);
+        assert_request_pairs_calls(&requests[1].1);
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_native_turn_an_older_version_left_without_results_is_settled_when_run() {
+    // Saved by a version that dropped the approval wait on a timeout: the
+    // turn's auto-approved result and the undecided call are still pending.
+    let workspace = workspace();
+    let (mut agent, _events, _commands) = agent(
+        config(ToolCallingMode::Native, &["read_file", "write_file"]),
+        ToolRegistry::new(),
+        &workspace,
+    );
+    let read = native_call("read", "read_file", serde_json::json!({"path": "a.txt"}));
+    let write = native_call("write", "write_file", serde_json::json!({"path": "b.txt"}));
+    let mut assistant = ai::Message::new_assistant("");
+    assistant.tool_calls = vec![read.clone(), write.clone()];
+    let task = &mut agent.task;
+    task.conversation.system_message = Some("system".into());
+    task.conversation.add_user_message("Do the task");
+    task.conversation.messages.push(assistant);
+    task.pending_native_tool_results = vec![ai::ToolResult::from_tool_call(&read, "1 | a")];
+    task.pending_native_tool_calls.insert(Uuid::new_v4(), write);
+    task.set_state(TaskState::Interrupted {
+        reason: "Timeout (60s) waiting for user command".into(),
+    });
+    let saved = serde_json::to_value(&agent.task).unwrap();
+    agent.task = serde_json::from_value(saved).unwrap();
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(complete());
+    let task = timeout(Duration::from_secs(5), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_calls_paired(&task.conversation);
+    assert_eq!(
+        result_for(&task.conversation, "write")[0].output,
+        UNDECIDED_CALL
+    );
+    assert_eq!(result_for(&task.conversation, "read")[0].output, "1 | a");
     std::fs::remove_dir_all(workspace).unwrap();
 }

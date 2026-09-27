@@ -628,11 +628,13 @@ async fn output_based_refusals_keep_no_tool_call_markup() {
 // The fallback through the real OpenAI request builders, against a local
 // server speaking the Responses streaming protocol.
 
-type Captured = Arc<std::sync::Mutex<Vec<(String, Value)>>>;
+pub(super) type Captured = Arc<std::sync::Mutex<Vec<(String, Value)>>>;
 
 /// Serves one streamed response per request, in order, recording each
 /// request's headers and JSON body.
-async fn responses_server(replies: Vec<(String, Option<&'static str>)>) -> (String, Captured) {
+pub(super) async fn responses_server(
+    replies: Vec<(String, Option<&'static str>)>,
+) -> (String, Captured) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -679,7 +681,7 @@ async fn responses_server(replies: Vec<(String, Option<&'static str>)>) -> (Stri
 }
 
 /// A streamed Responses turn delivering `items`.
-fn stream_of(model: &str, items: Vec<Value>) -> String {
+pub(super) fn stream_of(model: &str, items: Vec<Value>) -> String {
     let mut events: Vec<Value> = items
         .into_iter()
         .enumerate()
@@ -695,7 +697,7 @@ fn stream_of(model: &str, items: Vec<Value>) -> String {
         .collect()
 }
 
-fn call_item(id: &str, name: &str, arguments: &str) -> Value {
+pub(super) fn call_item(id: &str, name: &str, arguments: &str) -> Value {
     serde_json::json!({"type": "function_call", "id": format!("fc_{id}"), "call_id": format!("call_{id}"),
         "name": name, "arguments": arguments, "status": "completed"})
 }

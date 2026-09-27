@@ -84,6 +84,9 @@ const FAILED_STREAM_CALL: &str = "The model's response failed before this call f
 const REFUSED_TURN_CALL: &str = "turn refused";
 const UNDELIVERED_CALL: &str = "The model's final response did not include this call; it was not run.";
 const UNREACHED_CALL: &str = "The turn ended before this call ran; it was not run.";
+/// Error result of a native call whose approval wait ended without a
+/// decision; see [`AgentLoop::settle_native_turn`].
+const UNDECIDED_CALL: &str = "The wait for approval ended without a decision; the call was not run.";
 
 /// Whether OpenAI encrypted reasoning produced by `from` is replayed to `to`.
 /// Codex replays history unchanged when it switches between models of one
@@ -1004,6 +1007,7 @@ impl AgentLoop {
             self.task.agent_config.tool_config.tool_calling_mode
         );
 
+        let interrupted = matches!(self.task.current_state, TaskState::Interrupted { .. });
         if matches!(self.task.current_state, TaskState::Pending)
             || matches!(self.task.current_state, TaskState::Interrupted { .. })
         {
@@ -1016,6 +1020,11 @@ impl AgentLoop {
                 self.task.current_state.clone(),
             ))
             .await?;
+        }
+        if interrupted {
+            // Older versions left a native turn without results when an
+            // approval wait ended this way.
+            self.settle_native_turn(UNDECIDED_CALL).await?;
         }
 
         if self.task.conversation.system_message.is_none() {
@@ -1404,7 +1413,10 @@ impl AgentLoop {
                                             self.task.set_state(TaskState::InProgress);
                                         }
                                     }
-                                } else if matches!(cmd, UserCommand::CancelTask) {
+                                } else if matches!(
+                                    cmd,
+                                    UserCommand::CancelTask | UserCommand::SuspendTask
+                                ) {
                                 } else {
                                     log::warn!(
                                         "Task {}: Received inappropriate command while AwaitingBatchToolApproval. Ignoring.",
@@ -1643,6 +1655,7 @@ impl AgentLoop {
                         let reason =
                             "Command channel disconnected during approval state.".to_string();
                         log::error!("Task {}: {}", self.task.id, reason);
+                        self.settle_native_turn(UNDECIDED_CALL).await?;
                         self.task.set_state(TaskState::Interrupted {
                             reason: reason.clone(),
                         });
@@ -1669,6 +1682,7 @@ impl AgentLoop {
                             seconds, self.task.current_state
                         );
                         log::error!("Task {}: {}", self.task.id, reason);
+                        self.settle_native_turn(UNDECIDED_CALL).await?;
                         self.task.set_state(TaskState::Interrupted {
                             reason: reason.clone(),
                         });
@@ -2738,6 +2752,48 @@ impl AgentLoop {
             self.task.current_state.clone(),
         ))
         .await
+    }
+
+    /// When an approval wait ends without a decision (the command timeout or
+    /// a closed command channel), rejects the native calls still awaiting
+    /// approval with `reason` and adds the turn's results to the
+    /// conversation. The task returned `Interrupted` then pairs every call
+    /// of its last turn with a result, as providers require, and can run
+    /// again. Does nothing in output-based mode, whose calls have no
+    /// provider-side pairing.
+    async fn settle_native_turn(&mut self, reason: &str) -> Result<(), ArkoAgentsError> {
+        if !self.is_native_mode() {
+            return Ok(());
+        }
+        let mut undecided: Vec<_> = self.task.pending_native_tool_calls.drain().collect();
+        // In the order the turn made them.
+        if let Some(turn) = self
+            .task
+            .conversation
+            .messages
+            .iter()
+            .rfind(|message| message.role == ai::Role::Assistant)
+        {
+            undecided.sort_by_key(|(_, call)| {
+                turn.tool_calls
+                    .iter()
+                    .position(|turn_call| turn_call.id == call.id)
+                    .unwrap_or(usize::MAX)
+            });
+        }
+        for (tool_call_id, call) in undecided {
+            self.emit_event(AgentEvent::ToolRejected {
+                tool_call_id,
+                tool_name: call.name.clone(),
+                reason: Some(reason.to_string()),
+            })
+            .await?;
+            self.task
+                .pending_native_tool_results
+                .push(ai::ToolResult::error_from_tool_call(&call, reason));
+        }
+        self.flush_native_results_to_conversation(None);
+        Ok(())
     }
 
     async fn emit_event(&self, event: AgentEvent) -> Result<(), ArkoAgentsError> {
