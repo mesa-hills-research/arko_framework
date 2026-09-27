@@ -35,7 +35,18 @@
 //! cargo run -p arko_ai --example oauth_cache_probe -- --out <dir> --legacy     # before the fix
 //! cargo run -p arko_ai --example oauth_cache_probe -- --out <dir> --legacy --session-id-header
 //! cargo run -p arko_ai --example oauth_cache_probe -- --summarize-only --out <dir>
+//! cargo run -p arko_ai --example oauth_cache_probe -- --out <dir> --idle-gap 240,600,1200,1800
 //! ```
+//!
+//! `--idle-gap` measures how long the cache outlives an idle conversation:
+//! each gap (seconds; repeat the flag or give a comma list) runs as its own
+//! conversation, all of them concurrently. Each makes its warm calls
+//! (`--turns`, default 2 in this mode), sleeps for its gap, then makes one
+//! more call. The summary compares the post-gap call's cached and input
+//! tokens with the last warm call's. Each such conversation's instructions
+//! start with a line naming it and the run, so no prefix is shared with
+//! another conversation or an earlier run: only the conversation's own
+//! cache entry can serve the post-gap call.
 //!
 //! A short-term rate limit (HTTP 429 that isn't a plan or quota limit) is
 //! retried after its `Retry-After` delay, up to three times per call; every
@@ -71,10 +82,19 @@ struct Args {
     /// Codex credentials file (default: ~/.codex/auth.json).
     #[arg(long)]
     auth_file: Option<PathBuf>,
-    #[arg(long, default_value_t = 3)]
-    conversations: usize,
-    #[arg(long, default_value_t = 15)]
-    turns: usize,
+    /// Conversations to run (default 3). Not with --idle-gap, which runs
+    /// one conversation per gap.
+    #[arg(long)]
+    conversations: Option<usize>,
+    /// Calls per conversation (default 15); with --idle-gap, the warm calls
+    /// before the gap (default 2).
+    #[arg(long)]
+    turns: Option<usize>,
+    /// Idle-gap mode: for each gap, in seconds (repeat the flag or give a
+    /// comma list), one conversation makes its warm calls, stays idle for
+    /// the gap, then makes one more call.
+    #[arg(long = "idle-gap", value_name = "SECS", value_delimiter = ',')]
+    idle_gaps: Vec<f64>,
     #[arg(long, default_value = "gpt-6-astra")]
     model: String,
     /// none, minimal, low, medium, high, xhigh or max.
@@ -275,6 +295,7 @@ async fn run(args: Args) -> Result<(), String> {
             "oauth_cache_probe: without --legacy, the header and replay flags are already the default"
         );
     }
+    let plans = plans(&args)?;
     if args.out.exists()
         && fs::read_dir(&args.out)
             .map_err(|e| e.to_string())?
@@ -295,51 +316,148 @@ async fn run(args: Args) -> Result<(), String> {
         .ok_or("no home directory to find ~/.codex/auth.json in; pass --auth-file")?;
     let tokens = TokenKeeper::load(&auth_path)?;
     fs::create_dir_all(&args.out).map_err(|e| e.to_string())?;
+    let client = probe_client(tokens.client()?, &args.out, &settings);
+    run_workload(&args, &settings, &plans, client, tokens, model, effort).await
+}
 
+/// The client as a run uses it: traced into `out`, its requests adjusted
+/// for the experiment `settings`.
+fn probe_client(client: LLMClient, out: &Path, settings: &Settings) -> LLMClient {
     let hook = Arc::new(ProbeHook {
         settings: settings.clone(),
     });
-    let client = tokens
-        .client()?
-        .with_request_trace(RequestTrace::new(&args.out))
-        .with_openai_request_hook(hook);
+    client
+        .with_request_trace(RequestTrace::new(out))
+        .with_openai_request_hook(hook)
+}
+
+/// What one conversation of a run does: its calls, and in idle-gap mode the
+/// gap after them and the one call that follows it.
+#[derive(Clone, Debug, PartialEq)]
+struct Plan {
+    /// Calls before the gap, or all of them without one.
+    warm_turns: usize,
+    /// The gap in seconds, as given.
+    gap_secs: Option<f64>,
+}
+
+impl Plan {
+    fn turns(&self) -> usize {
+        self.warm_turns + usize::from(self.gap_secs.is_some())
+    }
+
+    fn gap(&self) -> Option<Duration> {
+        self.gap_secs.map(Duration::from_secs_f64)
+    }
+}
+
+/// The conversations `args` ask for.
+fn plans(args: &Args) -> Result<Vec<Plan>, String> {
+    if args.idle_gaps.is_empty() {
+        let plan = Plan {
+            warm_turns: args.turns.unwrap_or(15),
+            gap_secs: None,
+        };
+        return Ok(vec![plan; args.conversations.unwrap_or(3)]);
+    }
+    if args.conversations.is_some() {
+        return Err(
+            "--conversations doesn't apply with --idle-gap: each gap runs as its own conversation"
+                .into(),
+        );
+    }
+    let warm_turns = args.turns.unwrap_or(2);
+    if warm_turns == 0 {
+        return Err("--idle-gap needs at least one warm turn before the gap".into());
+    }
+    args.idle_gaps
+        .iter()
+        .map(|&seconds| match Duration::try_from_secs_f64(seconds) {
+            Ok(_) => Ok(Plan {
+                warm_turns,
+                gap_secs: Some(seconds),
+            }),
+            Err(_) => Err(format!(
+                "invalid --idle-gap {seconds}: seconds must be 0 or more"
+            )),
+        })
+        .collect()
+}
+
+/// Runs the conversations of `plans` concurrently on `client` and writes the
+/// manifest and summary to `args.out`.
+async fn run_workload(
+    args: &Args,
+    settings: &Settings,
+    plans: &[Plan],
+    client: LLMClient,
+    tokens: Arc<TokenKeeper>,
+    model: Model,
+    effort: OpenAIEffort,
+) -> Result<(), String> {
     tokens.ensure_fresh(&client).await?;
 
     let started = SystemTime::now();
-    let manifest = json!({
+    let turns = plans
+        .first()
+        .map_or(args.turns.unwrap_or(15), |plan| plan.warm_turns);
+    let gaps: Vec<f64> = plans.iter().filter_map(|plan| plan.gap_secs).collect();
+    let mut manifest = json!({
         "started_unix_ms": unix_ms(started),
         "model": args.model,
         "effort": args.effort,
-        "conversations": args.conversations,
-        "turns": args.turns,
+        "conversations": plans.len(),
+        "turns": turns,
         "label": args.label,
         "experiment": settings.manifest(),
         "endpoint": "chatgpt.com/backend-api/codex/responses (ChatGPT OAuth, HTTP SSE)",
     });
+    if !gaps.is_empty() {
+        manifest["idle_gaps_secs"] = json!(gaps);
+    }
     fs::write(
         args.out.join("manifest.json"),
         serde_json::to_string_pretty(&manifest).unwrap(),
     )
     .map_err(|e| e.to_string())?;
-    println!(
-        "oauth_cache_probe: {} conversations x {} turns on {} ({}){} -> {}",
-        args.conversations,
-        args.turns,
-        args.model,
-        args.effort,
-        if settings.legacy { ", legacy" } else { "" },
-        args.out.display()
-    );
+    if gaps.is_empty() {
+        println!(
+            "oauth_cache_probe: {} conversations x {turns} turns on {} ({}){} -> {}",
+            plans.len(),
+            args.model,
+            args.effort,
+            if settings.legacy { ", legacy" } else { "" },
+            args.out.display()
+        );
+    } else {
+        println!(
+            "oauth_cache_probe: {} idle-gap conversations ({turns} warm turns, then a gap of {} seconds, then one more) on {} ({}){} -> {}",
+            plans.len(),
+            gaps.iter()
+                .map(|gap| gap.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            args.model,
+            args.effort,
+            if settings.legacy { ", legacy" } else { "" },
+            args.out.display()
+        );
+    }
 
+    let gap_log = GapLog::new(&args.out, plans);
+    let run_tag = unix_ms(started).to_string();
     let stop = Arc::new(AtomicBool::new(false));
     let mut tasks = Vec::new();
-    for index in 0..args.conversations {
-        let (client, model, args, stop, tokens) = (
+    for (index, plan) in plans.iter().enumerate() {
+        let (client, model, args, plan, stop, tokens, gap_log, run_tag) = (
             client.clone(),
             model.clone(),
             args.clone(),
+            plan.clone(),
             stop.clone(),
             tokens.clone(),
+            gap_log.clone(),
+            run_tag.clone(),
         );
         let legacy_replay = !settings.replay_output_items;
         tasks.push(tokio::spawn(async move {
@@ -349,9 +467,12 @@ async fn run(args: Args) -> Result<(), String> {
                 model,
                 effort,
                 &args,
+                &plan,
                 legacy_replay,
                 &stop,
                 &tokens,
+                &gap_log,
+                &run_tag,
             )
             .await
         }));
@@ -370,6 +491,66 @@ async fn run(args: Args) -> Result<(), String> {
     Ok(())
 }
 
+/// When each idle-gap conversation's gap ran, in `<out>/idle_gaps.json`,
+/// rewritten as each gap starts and ends; the summary reads it to find the
+/// last warm call and the post-gap call in the trace.
+#[derive(Clone)]
+struct GapLog {
+    path: PathBuf,
+    entries: Arc<Mutex<Vec<Value>>>,
+}
+
+impl GapLog {
+    fn new(out: &Path, plans: &[Plan]) -> Self {
+        let entries = plans
+            .iter()
+            .enumerate()
+            .map(|(index, plan)| {
+                json!({
+                    "index": index,
+                    "gap_secs": plan.gap_secs,
+                    "warm_turns": plan.warm_turns,
+                })
+            })
+            .collect();
+        Self {
+            path: out.join(IDLE_GAPS_FILE),
+            entries: Arc::new(Mutex::new(entries)),
+        }
+    }
+
+    /// Records `field` of conversation `index`'s entry.
+    fn record(&self, index: usize, field: &str, value: Value) {
+        let mut entries = self.entries.lock().unwrap();
+        entries[index][field] = value;
+        let text = serde_json::to_string_pretty(&*entries).unwrap();
+        if let Err(error) = fs::write(&self.path, text) {
+            eprintln!(
+                "oauth_cache_probe: cannot write {}: {error}",
+                self.path.display()
+            );
+        }
+    }
+}
+
+const IDLE_GAPS_FILE: &str = "idle_gaps.json";
+
+/// Waits out `gap`, or until another conversation stops the run; false
+/// when the run stopped.
+async fn idle(gap: Duration, stop: &AtomicBool) -> bool {
+    let deadline = tokio::time::Instant::now() + gap;
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return true;
+        }
+        tokio::time::sleep((deadline - now).min(Duration::from_secs(1))).await;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_conversation(
     index: usize,
@@ -377,24 +558,68 @@ async fn run_conversation(
     model: Model,
     effort: OpenAIEffort,
     args: &Args,
+    plan: &Plan,
     legacy_replay: bool,
     stop: &AtomicBool,
     tokens: &TokenKeeper,
+    gap_log: &GapLog,
+    run_tag: &str,
 ) -> String {
+    let instructions = match plan.gap_secs {
+        // Nothing before this line is shared with another conversation or
+        // run, so only this conversation's cache can serve its calls.
+        Some(_) => format!(
+            "Idle-gap session {}-{index} of run {run_tag}.\n\n{}",
+            args.label,
+            instructions()
+        ),
+        None => instructions(),
+    };
     let mut conversation = client
         .new_conversation(model)
-        .with_system_message(&instructions());
+        .with_system_message(&instructions);
     conversation.add_user_message(&task_prompt(index, &args.label));
+    if plan.gap_secs.is_some() {
+        gap_log.record(
+            index,
+            "conversation",
+            json!(conversation.prompt_cache_key.clone()),
+        );
+    }
     let config = GenerationConfig::default()
         .with_reasoning(ReasoningConfig::openai(effort, false))
         .with_tool_config(ToolConfig::new(tools()).with_parallel_tool_calls(false));
 
+    let turns = plan.turns();
     let mut consecutive_errors = 0;
     let mut turn = 0;
-    while turn < args.turns {
+    let mut idled = false;
+    while turn < turns {
         if stop.load(Ordering::SeqCst) {
             return format!(
                 "stopped after {turn} turns (another conversation hit a stop condition)"
+            );
+        }
+        if let Some(gap) = plan.gap()
+            && turn == plan.warm_turns
+            && !idled
+        {
+            idled = true;
+            gap_log.record(
+                index,
+                "gap_started_unix_ms",
+                json!(unix_ms(SystemTime::now())),
+            );
+            println!("conversation {index}: idle for {:.1}s", gap.as_secs_f64());
+            if !idle(gap, stop).await {
+                return format!(
+                    "stopped during its idle gap after {turn} turns (another conversation hit a stop condition)"
+                );
+            }
+            gap_log.record(
+                index,
+                "gap_ended_unix_ms",
+                json!(unix_ms(SystemTime::now())),
             );
         }
         if let Err(message) = tokens.ensure_fresh(client).await {
@@ -425,7 +650,7 @@ async fn run_conversation(
                     conversation.add_tool_results(results);
                 }
                 turn += 1;
-                println!("conversation {index}: turn {turn}/{}", args.turns);
+                println!("conversation {index}: turn {turn}/{turns}");
             }
             Err(error) => {
                 let text = error.to_string();
@@ -982,7 +1207,71 @@ fn summarize(out: &Path) -> Result<Value, String> {
     let manifest = fs::read_to_string(out.join("manifest.json"))
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok());
-    Ok(json!({"manifest": manifest, "overall": overall, "per_conversation": conversations}))
+    let mut summary =
+        json!({"manifest": manifest, "overall": overall, "per_conversation": conversations});
+    if let Ok(text) = fs::read_to_string(out.join(IDLE_GAPS_FILE)) {
+        let gaps: Vec<Value> = serde_json::from_str(&text)
+            .map_err(|e| format!("cannot read {}/{IDLE_GAPS_FILE}: {e}", out.display()))?;
+        summary["idle_gaps"] = json!(
+            gaps.iter()
+                .map(|gap| idle_gap_stats(gap, &calls))
+                .collect::<Vec<_>>()
+        );
+    }
+    Ok(summary)
+}
+
+/// For one idle-gap conversation: its gap, and the cached and input tokens
+/// of the last successful call before the gap and the first after it.
+fn idle_gap_stats(gap: &Value, calls: &[Value]) -> Value {
+    let mut ok: Vec<&Value> = calls
+        .iter()
+        .filter(|c| {
+            c["conversation"] == gap["conversation"]
+                && c["status"] != "error"
+                && c["status"] != "abandoned"
+        })
+        .collect();
+    ok.sort_by_key(|c| c["seq"].as_u64().unwrap_or(0));
+    let started = |c: &&Value| c["started_unix_ms"].as_u64().unwrap_or(0);
+    let last_warm = gap["gap_started_unix_ms"]
+        .as_u64()
+        .and_then(|start| ok.iter().rev().find(|c| started(c) < start));
+    let post_gap = gap["gap_ended_unix_ms"]
+        .as_u64()
+        .and_then(|end| ok.iter().find(|c| started(c) >= end));
+    let call = |c: Option<&&Value>| {
+        c.map_or(Value::Null, |c| {
+            let (input, cached) = (
+                c["input_tokens"].as_u64().unwrap_or(0),
+                c["cached_tokens"].as_u64().unwrap_or(0),
+            );
+            json!({
+                "seq": c["seq"], "input_tokens": input, "cached_tokens": cached,
+                "hit_rate": if input == 0 { Value::Null } else { json!(round(cached as f64 / input as f64)) },
+            })
+        })
+    };
+    let (last_warm, post_gap) = (call(last_warm), call(post_gap));
+    // How much of the last warm call's input the post-gap call found
+    // cached: near 100% when the entry outlived the gap.
+    let kept = match (
+        post_gap["cached_tokens"].as_u64(),
+        last_warm["input_tokens"].as_u64(),
+    ) {
+        (Some(cached), Some(input)) if input > 0 => json!(round(cached as f64 / input as f64)),
+        _ => Value::Null,
+    };
+    json!({
+        "gap_secs": gap["gap_secs"],
+        "conversation": gap["conversation"],
+        "warm_turns": gap["warm_turns"],
+        "gap_started_unix_ms": gap["gap_started_unix_ms"],
+        "gap_ended_unix_ms": gap["gap_ended_unix_ms"],
+        "last_warm": last_warm,
+        "post_gap": post_gap,
+        "post_gap_cached_of_last_warm_input": kept,
+    })
 }
 
 fn stats(calls: &[Value]) -> Value {
@@ -1168,6 +1457,28 @@ fn write_summary(out: &Path, summary: &Value) -> Result<(), String> {
                 .rev()
                 .collect::<String>(),
             conversation,
+        ));
+    }
+    for gap in summary["idle_gaps"].as_array().into_iter().flatten() {
+        let call = |c: &Value| {
+            if c.is_null() {
+                "-".to_string()
+            } else {
+                format!(
+                    "seq {} cached {}/{} ({})",
+                    c["seq"],
+                    c["cached_tokens"],
+                    c["input_tokens"],
+                    fmt(&c["hit_rate"])
+                )
+            }
+        };
+        text.push_str(&format!(
+            "idle gap {:>7}s  last warm: {:<36}  post-gap: {:<36}  post-gap cached / last warm input {}\n",
+            gap["gap_secs"],
+            call(&gap["last_warm"]),
+            call(&gap["post_gap"]),
+            fmt(&gap["post_gap_cached_of_last_warm_input"]),
         ));
     }
     let overall = &summary["overall"];
@@ -1521,6 +1832,14 @@ mod tests {
 
     impl Server {
         async fn start(answer: impl Fn(&str) -> (u16, String) + Send + 'static) -> Self {
+            Self::start_with_body(move |path, _| answer(path)).await
+        }
+
+        /// Like [`start`](Self::start), answering from the request body too.
+        /// An answer starting with `data:` is sent as an event stream.
+        async fn start_with_body(
+            answer: impl Fn(&str, &Value) -> (u16, String) + Send + 'static,
+        ) -> Self {
             use tokio::io::AsyncWriteExt;
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
@@ -1529,11 +1848,16 @@ mod tests {
             tokio::spawn(async move {
                 loop {
                     let (mut socket, _) = listener.accept().await.unwrap();
-                    let path = read_request(&mut socket).await;
+                    let (path, request) = read_request(&mut socket).await;
                     seen.lock().unwrap().push(path.clone());
-                    let (status, body) = answer(&path);
+                    let (status, body) = answer(&path, &request);
+                    let content_type = if body.starts_with("data:") {
+                        "text/event-stream"
+                    } else {
+                        "application/json"
+                    };
                     let reply = format!(
-                        "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     );
                     socket.write_all(reply.as_bytes()).await.unwrap();
@@ -1563,8 +1887,9 @@ mod tests {
         }
     }
 
-    /// Reads one request, body included; returns its path.
-    async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
+    /// Reads one request, body included; returns its path and JSON body
+    /// (`null` if it has none).
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> (String, Value) {
         use tokio::io::AsyncReadExt;
         let mut bytes = Vec::new();
         let mut chunk = [0; 4096];
@@ -1585,11 +1910,14 @@ mod tests {
                 })
                 .unwrap_or(0);
             if bytes.len() >= end + 4 + length {
-                return head
+                let path = head
                     .split_whitespace()
                     .nth(1)
                     .unwrap_or_default()
                     .to_string();
+                let body = serde_json::from_slice(&bytes[end + 4..end + 4 + length])
+                    .unwrap_or(Value::Null);
+                return (path, body);
             }
         }
     }
@@ -1803,6 +2131,166 @@ mod tests {
         assert_eq!(file_names(dir.path()), ["auth.json", "auth.json.bak"]);
         assert_eq!(on_disk(&dir.path().join("auth.json.bak")).1, "rt_backup_2");
         assert_eq!(tokens.refreshes().len(), 2);
+    }
+
+    #[test]
+    fn idle_gaps_come_from_repeated_flags_and_comma_lists() {
+        let parse = |flags: &[&str]| {
+            let mut argv = vec!["probe", "--out", "x"];
+            argv.extend_from_slice(flags);
+            plans(&Args::parse_from(argv))
+        };
+        let default = parse(&[]).unwrap();
+        assert_eq!(default.len(), 3);
+        assert!(
+            default
+                .iter()
+                .all(|plan| plan.warm_turns == 15 && plan.gap_secs.is_none())
+        );
+        assert_eq!(
+            parse(&["--conversations", "2", "--turns", "4"]).unwrap(),
+            vec![
+                Plan {
+                    warm_turns: 4,
+                    gap_secs: None
+                };
+                2
+            ]
+        );
+
+        let gaps = parse(&["--idle-gap", "240,0.5", "--idle-gap", "1800"]).unwrap();
+        assert_eq!(
+            gaps.iter().map(|plan| plan.gap_secs).collect::<Vec<_>>(),
+            [Some(240.0), Some(0.5), Some(1800.0)]
+        );
+        assert!(
+            gaps.iter()
+                .all(|plan| plan.warm_turns == 2 && plan.turns() == 3)
+        );
+        assert_eq!(
+            parse(&["--idle-gap", "60", "--turns", "3"]).unwrap()[0].turns(),
+            4
+        );
+
+        for flags in [
+            &["--idle-gap", "60", "--conversations", "2"][..],
+            &["--idle-gap", "60", "--turns", "0"],
+            &["--idle-gap=-1"],
+            &["--idle-gap", "NaN"],
+        ] {
+            assert!(parse(flags).is_err(), "{flags:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_gap_conversations_idle_between_warm_and_post_gap_calls() {
+        let (_auth_dir, path) = auth_file(&jwt("a1", now() + 3_600), "rt_idle_1");
+        // Usage grows with each conversation's calls; the conversation with
+        // the longer gap finds nothing cached after it.
+        let server = {
+            let calls = Arc::new(Mutex::new(BTreeMap::<String, u64>::new()));
+            Server::start_with_body(move |_, request| {
+                let key = request["prompt_cache_key"].as_str().unwrap().to_string();
+                let long_gap = request["instructions"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Idle-gap session idle-1 ");
+                let n = {
+                    let mut calls = calls.lock().unwrap();
+                    let n = calls.entry(key).or_default();
+                    *n += 1;
+                    *n
+                };
+                let cached = if n == 3 && long_gap {
+                    0
+                } else {
+                    1_000 * (n - 1)
+                };
+                let mut completed = json!({
+                    "id": format!("resp_idle{n}"), "object": "response", "created_at": 0,
+                    "status": "completed", "model": "gpt-6-astra",
+                    "output": [{"type": "message", "id": format!("msg_idle{n}"), "status": "completed",
+                        "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}],
+                    "metadata": {},
+                });
+                completed["usage"] = json!({
+                    "input_tokens": 1_000 * n,
+                    "input_tokens_details": {"cached_tokens": cached},
+                    "output_tokens": 1,
+                });
+                (
+                    200,
+                    format!(
+                        "data: {}\n\n",
+                        json!({"type": "response.completed", "response": completed})
+                    ),
+                )
+            })
+            .await
+        };
+        let tokens = TokenKeeper::load(&path).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let args = Args::parse_from([
+            "probe",
+            "--out",
+            out.path().to_str().unwrap(),
+            "--label",
+            "idle",
+            "--idle-gap",
+            "0,0.3",
+        ]);
+        let settings = Settings::new(&args);
+        let plans = plans(&args).unwrap();
+        let client = probe_client(server.client(&tokens), out.path(), &settings);
+        let model = Model::get(Provider::OpenAI, "gpt-6-astra").unwrap();
+        run_workload(
+            &args,
+            &settings,
+            &plans,
+            client,
+            tokens,
+            model,
+            OpenAIEffort::Low,
+        )
+        .await
+        .unwrap();
+        assert_eq!(server.requests("/responses"), 6);
+
+        let summary: Value =
+            serde_json::from_str(&fs::read_to_string(out.path().join("summary.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            summary["outcomes"],
+            json!(["completed 3 turns", "completed 3 turns"])
+        );
+        assert_eq!(summary["manifest"]["idle_gaps_secs"], json!([0.0, 0.3]));
+        let gaps = summary["idle_gaps"].as_array().unwrap();
+        assert_eq!(gaps.len(), 2);
+        for (gap, secs, post_cached, kept) in [(&gaps[0], 0.0, 2_000, 1.0), (&gaps[1], 0.3, 0, 0.0)]
+        {
+            assert_eq!(gap["gap_secs"], json!(secs));
+            assert_eq!(gap["warm_turns"], 2);
+            assert_eq!(
+                gap["last_warm"],
+                json!({"seq": 2, "input_tokens": 2_000, "cached_tokens": 1_000, "hit_rate": 0.5})
+            );
+            assert_eq!(gap["post_gap"]["seq"], 3);
+            assert_eq!(gap["post_gap"]["input_tokens"], 3_000);
+            assert_eq!(gap["post_gap"]["cached_tokens"], post_cached);
+            assert_eq!(gap["post_gap_cached_of_last_warm_input"], json!(kept));
+            let idled = gap["gap_ended_unix_ms"].as_u64().unwrap()
+                - gap["gap_started_unix_ms"].as_u64().unwrap();
+            // Wall-clock stamps of a monotonic sleep: allow a little slack.
+            assert!(idled + 10 >= (secs * 1_000.0) as u64, "{idled}");
+        }
+        // The two conversations share no prefix.
+        assert_ne!(gaps[0]["conversation"], gaps[1]["conversation"]);
+        let text = fs::read_to_string(out.path().join("summary.txt")).unwrap();
+        assert!(text.contains("idle gap"), "{text}");
+
+        // The summary is recomputed the same way from the files alone.
+        let recomputed = summarize(out.path()).unwrap();
+        assert_eq!(recomputed["idle_gaps"], summary["idle_gaps"]);
     }
 
     #[test]
