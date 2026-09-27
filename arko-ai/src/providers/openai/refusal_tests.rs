@@ -1,5 +1,5 @@
 use super::*;
-use super::oauth_recovery_tests::{client, completed_response, reply, server};
+use super::oauth_recovery_tests::{api_key_client, client, completed_response, reply, server};
 use crate::model::Model;
 
 fn event(value: Value) -> String {
@@ -65,9 +65,11 @@ async fn refusal_content_is_reported_as_a_refusal_for_text_and_stream_calls() {
         "type": "response.completed", "response": response
     }))).await;
     assert_model_refusal(&streamed_response);
+    // Non-streaming responses come from the API-key path; ChatGPT OAuth
+    // text calls stream.
     tokio::time::timeout(Duration::from_secs(5), async {
         let (url, server) = server(vec![reply("/responses", 200, &response.to_string())]).await;
-        let response = client(&url).generate_text(
+        let response = api_key_client(&url).generate_text(
             &Conversation::new(Model::openai_gpt_6_astra()), &GenerationConfig::default(),
         ).await.unwrap();
         assert_model_refusal(&response);
@@ -123,12 +125,12 @@ fn ordinary_text_mentioning_refusal_is_not_classified_as_refusal() {
     value["output"][0]["content"][0]["text"] = "The word refusal is just fixture text.".into();
     let response: OpenAIResponse = serde_json::from_value(value).unwrap();
     let usage = ModelCallUsage::new("test".into(), "openai".into(), "test".into(), 1, 1, 100);
-    let usage = OpenAIClient::with_response_stop_metadata(usage, &response, &StreamingRefusals::new());
+    let usage = OpenAIClient::with_response_stop_metadata(usage, &response, &response.output, &StreamingRefusals::new());
     assert_eq!(usage.stop_reason.as_deref(), Some("completed"));
     assert!(usage.stop_details.is_none());
     let response = OpenAIClient::generation_response(
         &response, &Model::openai_gpt_6_astra(), &GenerationConfig::default(), false,
-        &StreamingRefusals::new(), Vec::new(),
+        StreamedOutput::default(), &ResponseHead::default(),
     );
     assert_eq!(response.stop_reason, StopReason::EndTurn);
     assert!(response.refusal.is_none());
@@ -151,7 +153,7 @@ fn max_output_tokens_keeps_finished_calls_and_drops_cut_off_ones() {
     let response: OpenAIResponse = serde_json::from_value(value).unwrap();
     let response = OpenAIClient::generation_response(
         &response, &Model::openai_gpt_6_astra(), &GenerationConfig::default(), false,
-        &StreamingRefusals::new(), Vec::new(),
+        StreamedOutput::default(), &ResponseHead::default(),
     );
     assert_eq!(response.stop_reason, StopReason::MaxTokens);
     assert_eq!(response.message.tool_calls.len(), 1);
@@ -238,7 +240,7 @@ fn invalid_argument_json_is_kept_raw_and_replayed_verbatim() {
     let parsed: OpenAIResponse = serde_json::from_value(value).unwrap();
     let response = OpenAIClient::generation_response(
         &parsed, &Model::openai_gpt_6_astra(), &GenerationConfig::default(), false,
-        &StreamingRefusals::new(), Vec::new(),
+        StreamedOutput::default(), &ResponseHead::default(),
     );
     let call = &response.message.tool_calls[0];
     assert_eq!(call.invalid_arguments.as_deref(), Some("{not json"));
@@ -271,10 +273,15 @@ fn unknown_output_items_and_missing_optional_fields_are_tolerated() {
     let parsed: OpenAIResponse = serde_json::from_value(value).unwrap();
     let response = OpenAIClient::generation_response(
         &parsed, &Model::openai_gpt_6_astra(), &GenerationConfig::default(), false,
-        &StreamingRefusals::new(), Vec::new(),
+        StreamedOutput::default(), &ResponseHead::default(),
     );
     assert_eq!(response.text(), "ok");
-    assert!(response.message.reasoning_artifact.is_none(), "reasoning without encrypted content can't be replayed");
+    let Some(ReasoningArtifact::OpenAIOutputItems { items }) = &response.message.reasoning_artifact else {
+        panic!("expected output items");
+    };
+    // Reasoning without encrypted content can't be replayed, and item types
+    // arko doesn't request aren't kept.
+    assert_eq!(items.iter().map(|item| item["id"].as_str().unwrap()).collect::<Vec<_>>(), ["msg_test"]);
     assert_eq!(response.stop_reason, StopReason::EndTurn);
 }
 
@@ -289,12 +296,13 @@ fn every_reasoning_item_is_kept_and_replayed_in_order() {
     let parsed: OpenAIResponse = serde_json::from_value(value).unwrap();
     let response = OpenAIClient::generation_response(
         &parsed, &Model::openai_gpt_6_astra(), &GenerationConfig::default(), false,
-        &StreamingRefusals::new(), Vec::new(),
+        StreamedOutput::default(), &ResponseHead::default(),
     );
-    let Some(ReasoningArtifact::OpenAIEncryptedReasoning { items }) = &response.message.reasoning_artifact else {
-        panic!("expected OpenAI reasoning");
+    let Some(ReasoningArtifact::OpenAIOutputItems { items }) = &response.message.reasoning_artifact else {
+        panic!("expected OpenAI output items");
     };
-    assert_eq!(items.iter().map(|item| item.id.as_deref().unwrap()).collect::<Vec<_>>(), ["rs_1", "rs_2"]);
+    assert_eq!(items.iter().map(|item| item["id"].as_str().unwrap()).collect::<Vec<_>>(), ["rs_1", "rs_2", "fc_a"]);
+    assert!(items.iter().all(|item| item.get("status").is_none()));
 
     let mut conversation = Conversation::new(Model::openai_gpt_6_astra());
     conversation.add_user_message("go");

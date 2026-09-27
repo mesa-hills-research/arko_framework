@@ -458,6 +458,7 @@ impl AnthropicClient {
             model_call_usage,
             stop_reason,
             refusal,
+            openai_turn_state: None,
         }
     }
 
@@ -851,6 +852,7 @@ impl AnthropicClient {
                                 model_call_usage,
                                 stop_reason,
                                 refusal,
+                                openai_turn_state: None,
                             }));
 
                             finished = true;

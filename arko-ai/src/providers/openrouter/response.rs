@@ -755,5 +755,6 @@ fn finish(turn: Turn, context: &ResponseContext) -> GenerationResponse {
         model_call_usage,
         stop_reason,
         refusal,
+        openai_turn_state: None,
     }
 }

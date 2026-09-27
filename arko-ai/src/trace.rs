@@ -11,6 +11,10 @@
 //! <dir>/<conversation prompt_cache_key, sanitized>/NNNN-response.json
 //! ```
 //!
+//! The previous request is the last one that didn't fail: a failed or
+//! abandoned call is traced, but the call after it (typically its retry) is
+//! compared with the call before it.
+//!
 //! Credentials are redacted. Traces still contain prompt and response
 //! content, so keep them local. Tracing never fails a model call: I/O
 //! errors are logged and ignored.
@@ -153,12 +157,25 @@ impl RequestTrace {
             url: None,
             http_status: None,
             response_headers: Map::new(),
+            sent_turn_state: None,
             prefix,
-            previous_input_tokens: previous.and_then(|previous| previous.input_tokens),
+            previous_input_tokens: previous.as_ref().and_then(|previous| previous.input_tokens),
+            previous,
             created_model: None,
             streamed_items: Vec::new(),
             event_counts: BTreeMap::new(),
             finished: false,
+        }
+    }
+
+    /// Makes `previous` the conversation's previous request again, if call
+    /// `seq` (which failed) is still the latest.
+    fn restore_previous(&self, conversation_key: &str, seq: u64, previous: Option<PreviousRequest>) {
+        let mut conversations = lock(&self.inner.conversations);
+        if let Some(state) = conversations.get_mut(conversation_key)
+            && state.previous.as_ref().is_some_and(|latest| latest.seq == seq)
+        {
+            state.previous = previous;
         }
     }
 
@@ -211,8 +228,12 @@ pub(crate) struct TraceCall {
     url: Option<String>,
     http_status: Option<u16>,
     response_headers: Map<String, Value>,
+    /// The `x-codex-turn-state` request header of the last attempt.
+    sent_turn_state: Option<String>,
     prefix: Value,
     previous_input_tokens: Option<u64>,
+    /// The request this call is compared with, restored if the call fails.
+    previous: Option<PreviousRequest>,
     created_model: Option<String>,
     streamed_items: Vec<Value>,
     event_counts: BTreeMap<String, u64>,
@@ -225,6 +246,10 @@ impl TraceCall {
     pub(crate) fn record_request(&mut self, request: &reqwest::Request) {
         self.attempts += 1;
         self.url = Some(request.url().to_string());
+        self.sent_turn_state = request
+            .headers()
+            .get("x-codex-turn-state")
+            .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned());
         let bytes = request.body().and_then(reqwest::Body::as_bytes).unwrap_or_default();
         let body: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
         let document = json!({
@@ -304,8 +329,13 @@ impl TraceCall {
             .unwrap_or_default();
         let response_id = response.and_then(|response| response.get("id")).and_then(Value::as_str);
 
-        self.trace
-            .remember_input_tokens(&self.conversation_key, self.seq, input_tokens);
+        if error.is_some() {
+            self.trace
+                .restore_previous(&self.conversation_key, self.seq, self.previous.take());
+        } else {
+            self.trace
+                .remember_input_tokens(&self.conversation_key, self.seq, input_tokens);
+        }
 
         let document = json!({
             "conversation": self.conversation_key,
@@ -381,6 +411,8 @@ impl TraceCall {
             "response_service_tier": response.and_then(|response| response.get("service_tier")),
             "turn_state_present": turn_state.is_some(),
             "turn_state_sha256": turn_state.map(|value| hex_sha256(value.as_bytes())),
+            "turn_state_sent": self.sent_turn_state.is_some(),
+            "turn_state_sent_sha256": self.sent_turn_state.as_ref().map(|value| hex_sha256(value.as_bytes())),
             "headers": summary_headers,
             "timings_ms": {
                 "headers": self.headers_ms,
@@ -607,6 +639,30 @@ mod tests {
         assert_eq!(lines[1]["completed_output_count"], 0);
         assert_eq!(lines[1]["response_id_prefix"], "0123456789abcdef");
         assert!(dir.join("arko_conversation_x").join("0002-response.json").exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_retry_is_compared_with_the_call_before_the_failed_attempt() {
+        let dir = std::env::temp_dir().join(format!("arko-trace-unit-{}", uuid::Uuid::new_v4()));
+        let trace = RequestTrace::new(&dir);
+        let (a, b) = (json!({"role": "user", "content": "a"}), json!({"role": "user", "content": "b"}));
+        let usage = |input: u64, cached: u64| json!({"status": "completed",
+            "usage": {"input_tokens": input, "input_tokens_details": {"cached_tokens": cached}, "output_tokens": 1}});
+
+        trace.begin("k", "m", &body(std::slice::from_ref(&a), "s"), true).finish(&usage(4000, 0));
+        trace.begin("k", "m", &body(&[a.clone(), b.clone()], "s"), true).fail("rate limited", None);
+        let retry = trace.begin("k", "m", &body(&[a.clone(), b.clone()], "s"), true);
+        assert_eq!(retry.seq, 3);
+        assert_eq!(retry.prefix["previous_items"], 1);
+        assert_eq!(retry.previous_input_tokens, Some(4000));
+        retry.finish(&usage(4500, 3968));
+
+        let lines: Vec<Value> = fs::read_to_string(dir.join("calls.jsonl")).unwrap()
+            .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(lines[1]["status"], "error");
+        assert_eq!(lines[2]["previous_found"], true);
+        assert_eq!(lines[2]["turn_state_sent"], false);
         fs::remove_dir_all(&dir).ok();
     }
 }

@@ -541,6 +541,7 @@ impl GoogleClient {
             model_call_usage,
             stop_reason,
             refusal: None,
+            openai_turn_state: None,
         }
     }
 

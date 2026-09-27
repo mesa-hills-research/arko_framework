@@ -6,6 +6,7 @@ pub(super) struct Reply {
     path: &'static str,
     status: u16,
     body: String,
+    headers: Vec<(&'static str, String)>,
 }
 
 pub(super) fn reply(path: &'static str, status: u16, body: &str) -> Reply {
@@ -13,6 +14,14 @@ pub(super) fn reply(path: &'static str, status: u16, body: &str) -> Reply {
         path,
         status,
         body: body.into(),
+        headers: Vec::new(),
+    }
+}
+
+impl Reply {
+    pub(super) fn with_header(mut self, name: &'static str, value: &str) -> Self {
+        self.headers.push((name, value.into()));
+        self
     }
 }
 
@@ -53,10 +62,16 @@ pub(super) async fn server(replies: Vec<Reply>) -> (String, tokio::task::JoinHan
             } else {
                 "application/json"
             };
+            let extra: String = reply
+                .headers
+                .iter()
+                .map(|(name, value)| format!("{name}: {value}\r\n"))
+                .collect();
             let response = format!(
-                "HTTP/1.1 {} Test\r\nContent-Type: {}\r\nRetry-After: 60\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 {} Test\r\nContent-Type: {}\r\nRetry-After: 60\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
                 reply.status,
                 content_type,
+                extra,
                 reply.body.len(),
                 reply.body,
             );
@@ -77,6 +92,13 @@ pub(super) fn client(url: &str) -> OpenAIClient {
     .with_base_url(url)
     .with_oauth_token_url(format!("{url}/token"));
     client.http_client = crate::providers::http_client_builder().no_proxy().build().unwrap();
+    client
+}
+
+/// An API-key client sending to the test server.
+pub(super) fn api_key_client(url: &str) -> OpenAIClient {
+    let mut client = client(url);
+    client.auth = Arc::new(RwLock::new(OpenAIAuth::ApiKey("synthetic-key".into())));
     client
 }
 
@@ -105,15 +127,11 @@ pub(super) fn completed_response() -> Value {
 async fn oauth_recovery_handles_server_expiry_for_text_and_stream_without_an_output_cap() {
     tokio::time::timeout(Duration::from_secs(5), async {
         for streaming in [false, true] {
-            let completed = completed_response();
-            let body = if streaming {
-                format!(
-                    "data: {}\n\n",
-                    serde_json::json!({"type":"response.completed", "response":completed})
-                )
-            } else {
-                completed.to_string()
-            };
+            // ChatGPT OAuth text calls stream too.
+            let body = format!(
+                "data: {}\n\n",
+                serde_json::json!({"type":"response.completed", "response":completed_response()})
+            );
             let (url, server) = server(vec![
                 expired(),
                 refreshed(),
@@ -147,6 +165,7 @@ async fn oauth_recovery_handles_server_expiry_for_text_and_stream_without_an_out
                 "retry must preserve the model request"
             );
             assert!(calls[0].1.get("max_output_tokens").is_none());
+            assert_eq!(calls[0].1["stream"], true);
             assert_eq!(calls[1].1["refresh_token"], "synthetic-refresh");
             assert!(
                 calls[2]

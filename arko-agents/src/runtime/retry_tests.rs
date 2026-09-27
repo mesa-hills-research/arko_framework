@@ -615,6 +615,7 @@ fn complete_response() -> ai::StreamEvent {
         ),
         stop_reason: ai::StopReason::ToolUse,
         refusal: None,
+        openai_turn_state: None,
     }))
 }
 
@@ -794,6 +795,7 @@ async fn classifier_refusals_are_not_kept_or_retried() {
         ),
         stop_reason: ai::StopReason::Refusal,
         refusal: Some(refusal),
+        openai_turn_state: None,
     }));
     agent
         .scripted_responses
@@ -879,6 +881,7 @@ fn refused_response(message: ai::Message, refusal: ai::Refusal) -> ai::StreamEve
         ),
         stop_reason: ai::StopReason::Refusal,
         refusal: Some(refusal),
+        openai_turn_state: None,
     }))
 }
 
@@ -1008,6 +1011,7 @@ async fn tool_calls_with_invalid_json_arguments_are_rejected_not_run() {
         ),
         stop_reason: ai::StopReason::ToolUse,
         refusal: None,
+        openai_turn_state: None,
     }));
     for response in [broken, complete_response()] {
         agent

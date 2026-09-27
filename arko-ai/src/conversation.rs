@@ -1,5 +1,5 @@
 use crate::{
-    message::{ConfigurationUpdate, Content, Message},
+    message::{ConfigurationUpdate, Content, Message, Role},
     model::Model,
     providers::GenerationResponse,
     reasoning::{ReasoningArtifact, ReasoningEffort},
@@ -20,12 +20,46 @@ pub struct Conversation {
     /// Stable request-routing key for providers with prefix prompt caches.
     ///
     /// The key is generated once per conversation and serialized so restored
-    /// conversations continue to reach the same cache lineage. OpenRouter
-    /// always receives it as `session_id` (its sticky-routing key, at most 256
-    /// characters) and, with caching enabled, as `prompt_cache_key`.
+    /// conversations continue to reach the same cache lineage. OpenAI
+    /// requests send it as `prompt_cache_key`; ChatGPT OAuth requests also
+    /// send it as the `session-id`, `thread-id` and `x-client-request-id`
+    /// headers, since the ChatGPT backend derives cache affinity from
+    /// `session-id`. OpenRouter always receives it as `session_id` (its
+    /// sticky-routing key, at most 256 characters) and, with caching enabled,
+    /// as `prompt_cache_key`. Give each agent its own conversation (and key).
     #[serde(default = "new_prompt_cache_key")]
     pub prompt_cache_key: String,
     pub messages: Vec<Message>,
+    /// The ChatGPT backend's sticky-routing token for the current user turn.
+    ///
+    /// The backend returns `x-codex-turn-state` on its responses. Like Codex,
+    /// arko keeps the first token of a turn and echoes it, unchanged, on
+    /// every later ChatGPT OAuth request of the same turn: tool-result
+    /// follow-ups and retries. It is never sent in a different turn.
+    ///
+    /// A turn starts at a user message that holds no tool results. Adding
+    /// one with [`add_user_message`](Self::add_user_message),
+    /// [`add_user_message_with_image`](Self::add_user_message_with_image) or
+    /// [`add_user_message_with_contents`](Self::add_user_message_with_contents)
+    /// clears the token; [`add_tool_results`](Self::add_tool_results) and
+    /// [`add_tool_results_with_text`](Self::add_tool_results_with_text) keep
+    /// it. [`OpenAITurnState::turn_start`] also ties the token to its turn,
+    /// so a message pushed onto `messages` directly can't carry it into the
+    /// next turn. Serialized so a task resumed mid-turn keeps its routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_turn_state: Option<OpenAITurnState>,
+}
+
+/// A ChatGPT backend `x-codex-turn-state` token and the turn it belongs to;
+/// see [`Conversation::openai_turn_state`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenAITurnState {
+    /// Opaque token, echoed unchanged.
+    pub token: String,
+    /// Index in [`Conversation::messages`] of the user message that started
+    /// the turn (the last user message without tool results when the token
+    /// arrived); `None` when there was none.
+    pub turn_start: Option<usize>,
 }
 
 impl Conversation {
@@ -36,7 +70,45 @@ impl Conversation {
             enable_cache: true,
             prompt_cache_key: new_prompt_cache_key(),
             messages: Vec::new(),
+            openai_turn_state: None,
         }
+    }
+
+    /// Index of the message that started the current turn: the last user
+    /// message without tool results.
+    fn turn_start(&self) -> Option<usize> {
+        self.messages
+            .iter()
+            .rposition(|message| message.role == Role::User && !has_tool_results(&message.content))
+    }
+
+    /// The turn-state token the next request of the current turn should
+    /// echo, if the backend issued one in this turn.
+    pub fn current_openai_turn_state(&self) -> Option<&str> {
+        self.openai_turn_state
+            .as_ref()
+            .filter(|state| state.turn_start == self.turn_start())
+            .map(|state| state.token.as_str())
+    }
+
+    /// Records a turn-state token from a response. The first token of a
+    /// turn is kept for the rest of it; a token from a new turn replaces the
+    /// previous turn's.
+    pub fn record_openai_turn_state(&mut self, token: &str) {
+        if self.current_openai_turn_state().is_none() {
+            self.openai_turn_state = Some(OpenAITurnState {
+                token: token.to_string(),
+                turn_start: self.turn_start(),
+            });
+        }
+    }
+
+    /// Adds a user message; one without tool results starts a new turn.
+    fn push_turn_message(&mut self, message: Message) {
+        if !has_tool_results(&message.content) {
+            self.openai_turn_state = None;
+        }
+        self.messages.push(message);
     }
 
     pub fn with_system_message(mut self, message: &str) -> Self {
@@ -55,24 +127,26 @@ impl Conversation {
         self
     }
 
+    /// Adds a user message, which starts a new turn.
     pub fn add_user_message(&mut self, text: &str) -> &mut Self {
-        self.messages.push(Message::new_user(text));
+        self.push_turn_message(Message::new_user(text));
         self
     }
 
+    /// Adds a user message with an image, which starts a new turn.
     pub fn add_user_message_with_image(
         &mut self,
         text: &str,
         image: crate::message::Image,
     ) -> &mut Self {
-        self.messages
-            .push(Message::new_user_with_image(text, image));
+        self.push_turn_message(Message::new_user_with_image(text, image));
         self
     }
 
+    /// Adds a user message. It starts a new turn unless it holds tool
+    /// results.
     pub fn add_user_message_with_contents(&mut self, contents: Vec<Content>) -> &mut Self {
-        self.messages
-            .push(Message::new_user_with_contents(contents));
+        self.push_turn_message(Message::new_user_with_contents(contents));
         self
     }
 
@@ -134,11 +208,18 @@ impl Conversation {
     /// remain in history (see [`RefusalSource::keeps_turn`]) is not appended;
     /// the caller decides what to do with the input that triggered it.
     ///
+    /// The response's turn-state token is recorded either way (see
+    /// [`openai_turn_state`](Self::openai_turn_state)), so a retry in the
+    /// same turn keeps its routing.
+    ///
     /// [`RefusalSource::keeps_turn`]: crate::stop::RefusalSource::keeps_turn
     pub fn add_assistant_message_from_response(
         &mut self,
         response: GenerationResponse,
     ) -> &mut Self {
+        if let Some(token) = &response.openai_turn_state {
+            self.record_openai_turn_state(token);
+        }
         if response
             .refusal
             .as_ref()
@@ -187,9 +268,99 @@ impl Conversation {
     }
 }
 
+fn has_tool_results(content: &[Content]) -> bool {
+    content.iter().any(|content| content.as_tool_result().is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        stop::{Refusal, RefusalSource, StopReason},
+        tool::ToolCall,
+        usage::{ModelCallUsage, UsageInfo},
+    };
+
+    fn response(token: Option<&str>) -> GenerationResponse {
+        let mut message = Message::new_assistant("");
+        message.tool_calls.push(ToolCall::from_argument_text(Some("call_1".into()), "tool".into(), "{}"));
+        GenerationResponse {
+            message,
+            usage: UsageInfo::new(0, 0),
+            model_call_usage: ModelCallUsage::new("resp".into(), "openai".into(), "m".into(), 0, 0, 0),
+            stop_reason: StopReason::ToolUse,
+            refusal: None,
+            openai_turn_state: token.map(String::from),
+        }
+    }
+
+    fn result() -> ToolResult {
+        ToolResult::from_tool_call(&ToolCall::from_argument_text(Some("call_1".into()), "tool".into(), "{}"), "ok")
+    }
+
+    #[test]
+    fn turn_state_is_kept_for_its_turn_and_dropped_at_the_next_user_message() {
+        let mut conversation = Conversation::new(Model::openai_gpt_6_astra());
+        conversation.add_user_message("start");
+        assert_eq!(conversation.current_openai_turn_state(), None);
+
+        conversation.add_assistant_message_from_response(response(Some("t1")));
+        conversation.add_tool_results(vec![result()]);
+        assert_eq!(conversation.current_openai_turn_state(), Some("t1"));
+        // Later tokens of the same turn don't replace the first (Codex keeps
+        // it in a OnceLock for the whole turn).
+        conversation.add_assistant_message_from_response(response(Some("t2")));
+        conversation.add_tool_results_with_text(vec![result()], "and also");
+        assert_eq!(conversation.current_openai_turn_state(), Some("t1"));
+        // A response without the header keeps the turn's token.
+        conversation.add_assistant_message_from_response(response(None));
+        assert_eq!(conversation.current_openai_turn_state(), Some("t1"));
+
+        conversation.add_user_message("next task");
+        assert_eq!(conversation.openai_turn_state, None);
+        assert_eq!(conversation.current_openai_turn_state(), None);
+        conversation.add_assistant_message_from_response(response(Some("t3")));
+        assert_eq!(conversation.current_openai_turn_state(), Some("t3"));
+
+        // A user message pushed directly still ends the turn.
+        conversation.messages.push(Message::new_user("pushed"));
+        assert_eq!(conversation.current_openai_turn_state(), None);
+        conversation.add_assistant_message_from_response(response(Some("t4")));
+        assert_eq!(conversation.current_openai_turn_state(), Some("t4"));
+
+        // Tool results added as contents keep the turn.
+        conversation.add_user_message_with_contents(vec![Content::ToolResult(result())]);
+        assert_eq!(conversation.current_openai_turn_state(), Some("t4"));
+        conversation.add_user_message_with_contents(vec![Content::Text("new turn".into())]);
+        assert_eq!(conversation.current_openai_turn_state(), None);
+    }
+
+    #[test]
+    fn a_refused_turn_still_records_its_token_for_the_retry() {
+        let mut conversation = Conversation::new(Model::openai_gpt_6_astra());
+        conversation.add_user_message("start");
+        let mut refused = response(Some("t1"));
+        refused.refusal = Some(Refusal::new(RefusalSource::ContentFilter));
+        conversation.add_assistant_message_from_response(refused);
+        assert_eq!(conversation.messages.len(), 1);
+        assert_eq!(conversation.current_openai_turn_state(), Some("t1"));
+    }
+
+    #[test]
+    fn turn_state_survives_serialization_and_old_conversations_load() {
+        let mut conversation = Conversation::new(Model::openai_gpt_6_astra());
+        conversation.add_user_message("start");
+        conversation.add_assistant_message_from_response(response(Some("t1")));
+        let restored: Conversation =
+            serde_json::from_str(&serde_json::to_string(&conversation).unwrap()).unwrap();
+        assert_eq!(restored.current_openai_turn_state(), Some("t1"));
+
+        let mut saved = serde_json::to_value(Conversation::new(Model::openai_gpt_6_astra())).unwrap();
+        assert!(saved.get("openai_turn_state").is_none());
+        saved.as_object_mut().unwrap().remove("prompt_cache_key");
+        let restored: Conversation = serde_json::from_value(saved).unwrap();
+        assert_eq!(restored.openai_turn_state, None);
+    }
 
     #[test]
     fn prompt_cache_keys_are_unique_per_conversation() {

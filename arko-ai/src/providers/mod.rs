@@ -92,9 +92,30 @@ pub struct GenerationResponse {
     /// [`RefusalSource::keeps_turn`]: crate::stop::RefusalSource::keeps_turn
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal: Option<Refusal>,
+    /// Sticky-routing token the ChatGPT backend returned for this call in
+    /// the `x-codex-turn-state` response header.
+    /// [`Conversation::add_assistant_message_from_response`] keeps it so the
+    /// rest of the turn echoes it; see [`Conversation::openai_turn_state`].
+    ///
+    /// [`Conversation::add_assistant_message_from_response`]: crate::Conversation::add_assistant_message_from_response
+    /// [`Conversation::openai_turn_state`]: crate::Conversation::openai_turn_state
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_turn_state: Option<String>,
 }
 
 impl GenerationResponse {
+    /// The model the provider reports having served; see
+    /// [`ModelCallUsage::served_model`].
+    pub fn served_model(&self) -> Option<&str> {
+        self.model_call_usage.served_model.as_deref()
+    }
+
+    /// Whether the provider served a different model than the one
+    /// requested; see [`ModelCallUsage::served_model_changed`].
+    pub fn rerouted(&self) -> bool {
+        self.model_call_usage.served_model_changed()
+    }
+
     /// The concatenated text content of the assistant message.
     pub fn text(&self) -> String {
         self.message
@@ -240,6 +261,7 @@ mod response_tests {
             model_call_usage: ModelCallUsage::new("id".into(), "test".into(), "test".into(), 0, 0, 0),
             stop_reason,
             refusal,
+            openai_turn_state: None,
         }
     }
 

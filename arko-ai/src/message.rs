@@ -93,6 +93,9 @@ impl ConfigurationUpdate {
 pub struct Message {
     pub role: Role,
     pub content: Vec<Content>,
+    /// Provider state an assistant message needs to be replayed: reasoning
+    /// signatures, or for OpenAI the response's output items (see
+    /// [`ReasoningArtifact::OpenAIOutputItems`]).
     pub reasoning_artifact: Option<ReasoningArtifact>,
     /// Tool calls produced by the model in this assistant message.
     /// Empty for user messages and assistant messages without tool use.

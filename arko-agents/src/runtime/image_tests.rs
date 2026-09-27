@@ -308,6 +308,7 @@ pub(super) fn response(message: ai::Message) -> ScriptedStreamResult {
             ),
             stop_reason,
             refusal: None,
+            openai_turn_state: None,
         })))])
         .boxed(),
     )

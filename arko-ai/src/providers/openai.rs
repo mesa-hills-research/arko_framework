@@ -8,7 +8,7 @@ use crate::{
     message::{Content, Image, Message, Role},
     model::{ModelType, Provider as ProviderType},
     reasoning::{
-        OpenAIEffort, OpenAIReasoningItem, OpenAIReasoningMode, ReasoningArtifact,
+        OpenAIEffort, OpenAIReasoningMode, ReasoningArtifact,
     },
     retry::BackoffPolicy,
     stop::{Refusal, RefusalSource, StopReason},
@@ -19,9 +19,14 @@ use async_stream::try_stream;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use eventsource_stream::Eventsource;
 use futures::{StreamExt, stream::BoxStream};
+use reqwest::header::{ACCEPT, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::RwLock;
 
 #[cfg(test)]
@@ -33,6 +38,9 @@ mod refusal_tests;
 #[cfg(test)]
 mod trace_tests;
 
+#[cfg(test)]
+mod codex_parity_tests;
+
 mod request_hook;
 pub use request_hook::OpenAIRequestHook;
 
@@ -43,6 +51,8 @@ const CHATGPT_OAUTH_DEFAULT_TOKEN_URL: &str = "https://auth.openai.com/oauth/tok
 /// Default Responses API base URLs; requests go to `{base}/responses`.
 const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+/// ChatGPT backend sticky-routing token; see [`Conversation::openai_turn_state`].
+const TURN_STATE_HEADER: &str = "x-codex-turn-state";
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatGptOAuthCredentials {
@@ -139,6 +149,61 @@ impl StreamingToolCall {
         let mut call = ToolCall::from_argument_text(self.call_id, self.name, &self.arguments);
         call.provider_id = self.item_id;
         call
+    }
+
+    /// The `function_call` output item for a call whose item never arrived.
+    fn replay_item(&self) -> Value {
+        let mut item = serde_json::json!({
+            "type": "function_call", "call_id": self.call_id, "name": self.name,
+            "arguments": self.arguments,
+        });
+        if let Some(id) = &self.item_id {
+            item["id"] = Value::String(id.clone());
+        }
+        item
+    }
+}
+
+/// What a streamed response delivered besides its terminal event.
+#[derive(Default)]
+struct StreamedOutput {
+    /// `response.output_item.done` items with their `output_index`, in
+    /// arrival order.
+    items: Vec<(Option<u64>, Value)>,
+    refusals: StreamingRefusals,
+    /// Calls whose arguments finished streaming.
+    calls: Vec<StreamingToolCall>,
+    text: String,
+    /// The model named by `response.created`.
+    created_model: Option<String>,
+}
+
+/// What a response's HTTP headers say about the call.
+#[derive(Debug, Default)]
+struct ResponseHead {
+    /// The `model` the request asked for.
+    requested_model: String,
+    /// `openai-model` (or `x-openai-model`) header.
+    served_model: Option<String>,
+    /// `x-codex-turn-state` header.
+    turn_state: Option<String>,
+}
+
+impl ResponseHead {
+    fn new(requested_model: &str, headers: &HeaderMap) -> Self {
+        let header = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(String::from)
+        };
+        Self {
+            requested_model: requested_model.to_string(),
+            served_model: header("openai-model").or_else(|| header("x-openai-model")),
+            turn_state: header(TURN_STATE_HEADER),
+        }
     }
 }
 
@@ -312,6 +377,8 @@ pub struct OpenAIClient {
     oauth_token_url: Option<String>,
     trace: Option<RequestTrace>,
     request_hook: Option<Arc<dyn OpenAIRequestHook>>,
+    originator: Option<String>,
+    user_agent: Option<String>,
 }
 
 impl OpenAIClient {
@@ -326,6 +393,8 @@ impl OpenAIClient {
             oauth_token_url: None,
             trace: None,
             request_hook: None,
+            originator: None,
+            user_agent: None,
         }
     }
 
@@ -348,6 +417,8 @@ impl OpenAIClient {
             oauth_token_url: None,
             trace: None,
             request_hook: None,
+            originator: None,
+            user_agent: None,
         }
     }
 
@@ -360,6 +431,8 @@ impl OpenAIClient {
             oauth_token_url: None,
             trace: None,
             request_hook: None,
+            originator: None,
+            user_agent: None,
         }
     }
 
@@ -394,6 +467,21 @@ impl OpenAIClient {
     /// Installs a hook that can adjust each request; see [`OpenAIRequestHook`].
     pub fn with_request_hook(mut self, hook: Option<Arc<dyn OpenAIRequestHook>>) -> Self {
         self.request_hook = hook;
+        self
+    }
+
+    /// Sends `originator: <originator>` with every request, naming your
+    /// application to the ChatGPT backend. Nothing is sent by default. Use
+    /// your own application's name, never another client's.
+    pub fn with_originator(mut self, originator: Option<String>) -> Self {
+        self.originator = originator;
+        self
+    }
+
+    /// Sends `User-Agent: <user_agent>` with every request. Nothing is sent
+    /// by default.
+    pub fn with_user_agent(mut self, user_agent: Option<String>) -> Self {
+        self.user_agent = user_agent;
         self
     }
 
@@ -518,15 +606,18 @@ impl OpenAIClient {
         &self,
         request: &OpenAIRequest,
         mut auth: OpenAIAuth,
-        conversation_key: &str,
+        conversation: &Conversation,
         trace: &mut Option<TraceCall>,
     ) -> Result<(reqwest::Response, OpenAIAuth), Error> {
+        let conversation_key = conversation.prompt_cache_key.as_str();
         for attempt in 0..2 {
             let url = self.responses_url(&auth);
             let builder = self
                 .http_client
                 .post(url)
                 .header("Content-Type", "application/json");
+            let builder =
+                self.apply_request_headers(&auth, builder, conversation, request.stream == Some(true));
             let http_request = self.prepare_http_request(
                 Self::apply_auth_headers(&auth, builder).json(request),
                 conversation_key,
@@ -635,11 +726,58 @@ impl OpenAIClient {
                     "Authorization",
                     format!("Bearer {}", credentials.access_token),
                 )
-                .header("chatgpt-account-id", &credentials.account_id)
-                .header("OpenAI-Beta", "responses=experimental"),
+                .header("chatgpt-account-id", &credentials.account_id),
         }
     }
 
+    /// Headers other than authentication. The application's `originator`
+    /// and `User-Agent` go out only when configured. ChatGPT OAuth requests
+    /// carry the conversation's identity as Codex does: `session-id` (the
+    /// backend derives prompt-cache affinity from it), `thread-id` and
+    /// `x-client-request-id`, all set to the conversation's
+    /// `prompt_cache_key`, plus the turn's `x-codex-turn-state` when one is
+    /// held (see [`Conversation::openai_turn_state`]).
+    fn apply_request_headers(
+        &self,
+        auth: &OpenAIAuth,
+        mut builder: reqwest::RequestBuilder,
+        conversation: &Conversation,
+        stream: bool,
+    ) -> reqwest::RequestBuilder {
+        fn header(
+            builder: reqwest::RequestBuilder,
+            name: &'static str,
+            value: &str,
+        ) -> reqwest::RequestBuilder {
+            match HeaderValue::from_str(value) {
+                Ok(value) => builder.header(name, value),
+                Err(_) => {
+                    log::warn!("arko_ai: not sending the {name} header: its value is not a valid header value");
+                    builder
+                }
+            }
+        }
+
+        if let Some(originator) = &self.originator {
+            builder = header(builder, "originator", originator);
+        }
+        if let Some(user_agent) = &self.user_agent {
+            builder = header(builder, "user-agent", user_agent);
+        }
+        if auth.is_chatgpt_oauth() {
+            let key = conversation.prompt_cache_key.as_str();
+            builder = header(builder, "session-id", key);
+            builder = header(builder, "thread-id", key);
+            builder = header(builder, "x-client-request-id", key);
+            if let Some(token) = conversation.current_openai_turn_state() {
+                builder = header(builder, TURN_STATE_HEADER, token);
+            }
+            if stream {
+                builder = builder.header(ACCEPT, "text/event-stream");
+            }
+        }
+        builder
+    }
 }
 
 #[async_trait::async_trait]
@@ -665,13 +803,26 @@ impl ProviderClient for OpenAIClient {
         }
 
         let auth = self.snapshot_auth().await;
+        if auth.is_chatgpt_oauth() {
+            // Codex always streams on the ChatGPT backend; collect the stream.
+            let mut stream = self.generate_stream(conversation, config).await?;
+            while let Some(event) = stream.next().await {
+                if let StreamEvent::End(response) = event? {
+                    return Ok(*response);
+                }
+            }
+            return Err(Error::StreamTruncated(
+                "OpenAI stream ended before the response completed".to_string(),
+            ));
+        }
         let request =
             self.build_request(conversation, config, auth.is_chatgpt_oauth())?;
 
         let mut trace = self.begin_trace(conversation, &request, false);
         let (response, auth) = self
-            .send_response_request(&request, auth, &conversation.prompt_cache_key, &mut trace)
+            .send_response_request(&request, auth, conversation, &mut trace)
             .await?;
+        let head = ResponseHead::new(&request.model, response.headers());
 
         let response_data: OpenAIResponse = match trace.take() {
             None => response.json().await?,
@@ -686,8 +837,8 @@ impl ProviderClient for OpenAIClient {
             &conversation.model,
             config,
             auth.is_chatgpt_oauth(),
-            &StreamingRefusals::new(),
-            Vec::new(),
+            StreamedOutput::default(),
+            &head,
         ))
     }
 
@@ -718,14 +869,16 @@ impl ProviderClient for OpenAIClient {
 
         let mut trace = self.begin_trace(conversation, &request, true);
         let (response, auth) = self
-            .send_response_request(&request, auth, &conversation.prompt_cache_key, &mut trace)
+            .send_response_request(&request, auth, conversation, &mut trace)
             .await?;
+        let head = ResponseHead::new(&request.model, response.headers());
 
         Ok(Self::stream_events_traced(
             response.bytes_stream(),
             conversation.model.clone(),
             config.clone(),
             auth.is_chatgpt_oauth(),
+            head,
             trace,
         ))
     }
@@ -747,15 +900,22 @@ impl OpenAIClient {
         B: AsRef<[u8]> + Send + 'static,
         E: std::fmt::Display + Send + 'static,
     {
-        Self::stream_events_traced(bytes, model, config, is_chatgpt_oauth, None)
+        let head = ResponseHead { requested_model: model.id.clone(), ..ResponseHead::default() };
+        Self::stream_events_traced(bytes, model, config, is_chatgpt_oauth, head, None)
     }
 
     /// [`stream_events`](Self::stream_events), recording each event in `trace`.
+    ///
+    /// The assistant output is assembled from `response.output_item.done`
+    /// events, in stream order, as Codex does: the ChatGPT backend's
+    /// `response.completed` usually carries no output items. Items only the
+    /// terminal event holds are merged in (see [`Self::assemble_output`]).
     fn stream_events_traced<S, B, E>(
         bytes: S,
         model: crate::model::Model,
         config: GenerationConfig,
         is_chatgpt_oauth: bool,
+        head: ResponseHead,
         mut trace: Option<TraceCall>,
     ) -> BoxStream<'static, Result<StreamEvent, Error>>
     where
@@ -766,7 +926,7 @@ impl OpenAIClient {
         let stream = try_stream! {
             let mut event_stream = Box::pin(bytes.eventsource());
             let mut streaming_tool_calls: Vec<StreamingToolCall> = Vec::new();
-            let mut streaming_refusals = StreamingRefusals::new();
+            let mut streamed = StreamedOutput::default();
             let mut finished = false;
 
             while let Some(event) = event_stream.next().await {
@@ -798,18 +958,25 @@ impl OpenAIClient {
                 }
 
                 match value.get("type").and_then(Value::as_str) {
+                    Some("response.created") => {
+                        streamed.created_model = value
+                            .pointer("/response/model")
+                            .and_then(Value::as_str)
+                            .map(String::from);
+                    }
                     Some("response.output_text.delta") => {
                         let delta = value["delta"]
                             .as_str()
                             .unwrap_or("")
                             .to_string();
+                        streamed.text.push_str(&delta);
 
                         yield StreamEvent::TextChunk(delta);
                     }
                     // Refusal text is reported through `StreamEvent::Refusal`,
                     // never as ordinary text.
                     Some("response.refusal.delta" | "response.refusal.done") => {
-                        Self::record_stream_refusal(&mut streaming_refusals, &value);
+                        Self::record_stream_refusal(&mut streamed.refusals, &value);
                     }
                     Some("response.reasoning_summary_text.delta") => {
                         let delta = value["delta"]
@@ -896,6 +1063,9 @@ impl OpenAIClient {
                                 None | Some("completed")
                             );
                         }
+                        if item.is_object() {
+                            streamed.items.push((value.get("output_index").and_then(Value::as_u64), item.clone()));
+                        }
                     }
                     Some("response.completed" | "response.incomplete") => {
                         #[derive(Deserialize)]
@@ -910,10 +1080,9 @@ impl OpenAIClient {
                         let completed: Completed =
                             serde_json::from_value(value).map_err(Error::JsonError)?;
 
-                        let streamed_calls = streaming_tool_calls
+                        streamed.calls = streaming_tool_calls
                             .drain(..)
                             .filter(|tool_call| tool_call.completed)
-                            .map(StreamingToolCall::into_tool_call)
                             .collect();
 
                         let response = Self::generation_response(
@@ -921,8 +1090,8 @@ impl OpenAIClient {
                             &model,
                             &config,
                             is_chatgpt_oauth,
-                            &streaming_refusals,
-                            streamed_calls,
+                            std::mem::take(&mut streamed),
+                            &head,
                         );
 
                         if let Some(refusal) = &response.refusal {
@@ -979,10 +1148,11 @@ impl OpenAIClient {
         model: &crate::model::Model,
         config: &GenerationConfig,
         is_chatgpt_oauth: bool,
-        streamed_refusals: &StreamingRefusals,
-        streamed_calls: Vec<ToolCall>,
+        streamed: StreamedOutput,
+        head: &ResponseHead,
     ) -> GenerationResponse {
-        let (mut message, mut refusal_texts) = Self::parse_response(response);
+        let output = Self::assemble_output(&streamed.items, &response.output);
+        let (mut message, mut refusal_texts, mut replay_items) = Self::parse_output(&output);
         let mut usage = Self::calculate_usage(response);
         // ChatGPT OAuth calls are covered by the subscription: the estimate
         // stays visible while nothing is billed per call.
@@ -1000,17 +1170,36 @@ impl OpenAIClient {
             model.max_input_tokens,
         );
         let model_call_usage =
-            Self::with_response_stop_metadata(model_call_usage, response, streamed_refusals);
+            Self::with_response_stop_metadata(model_call_usage, response, &output, &streamed.refusals);
+        let (served_model, rerouted) =
+            Self::served_model(head, response, streamed.created_model.as_deref());
+        let model_call_usage = model_call_usage.with_served_model(served_model, rerouted);
 
         if refusal_texts.is_empty() {
-            refusal_texts = streamed_refusals.values().cloned().collect();
+            refusal_texts = streamed.refusals.values().cloned().collect();
         }
 
-        // The ChatGPT Codex backend can finish a stream without repeating its
-        // output items, so use the calls whose arguments finished streaming.
-        if message.tool_calls.is_empty() && refusal_texts.is_empty() {
-            message.tool_calls = streamed_calls;
+        // A stream whose output items never arrived still delivered its text
+        // and finished calls through delta events; keep them, with output
+        // items that replay them.
+        let has_message = replay_items
+            .iter()
+            .any(|item| item.get("type").and_then(Value::as_str) == Some("message"));
+        if !has_message && refusal_texts.is_empty() && !streamed.text.is_empty() {
+            replay_items.push(serde_json::json!({
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": streamed.text}],
+            }));
+            message.content = vec![Content::Text(streamed.text)];
         }
+        if message.tool_calls.is_empty() && refusal_texts.is_empty() {
+            for call in streamed.calls {
+                replay_items.push(call.replay_item());
+                message.tool_calls.push(call.into_tool_call());
+            }
+        }
+        message.reasoning_artifact = (!replay_items.is_empty())
+            .then_some(ReasoningArtifact::OpenAIOutputItems { items: replay_items });
 
         let (stop_reason, refusal) = Self::finish_turn(
             &mut message,
@@ -1025,7 +1214,62 @@ impl OpenAIClient {
             model_call_usage,
             stop_reason,
             refusal,
+            openai_turn_state: head.turn_state.clone(),
         }
+    }
+
+    /// The response's output items, in output order. Items streamed as
+    /// `response.output_item.done` come first, as Codex builds its output
+    /// only from those; items only `response.completed.output` holds are
+    /// merged in at their output index. A non-streaming response has only
+    /// the latter.
+    fn assemble_output(streamed: &[(Option<u64>, Value)], completed: &[Value]) -> Vec<Value> {
+        if streamed.is_empty() {
+            return completed.to_vec();
+        }
+        let same_item = |a: &Value, b: &Value| {
+            match (a.get("id").and_then(Value::as_str), b.get("id").and_then(Value::as_str)) {
+                (Some(a), Some(b)) => a == b,
+                _ => a == b,
+            }
+        };
+        let mut output = streamed.to_vec();
+        for (index, item) in completed.iter().enumerate() {
+            if output.iter().any(|(_, streamed)| same_item(streamed, item)) {
+                continue;
+            }
+            let index = index as u64;
+            let position = output
+                .iter()
+                .position(|(streamed_index, _)| streamed_index.is_some_and(|i| i > index))
+                .unwrap_or(output.len());
+            output.insert(position, (Some(index), item.clone()));
+        }
+        output.into_iter().map(|(_, item)| item).collect()
+    }
+
+    /// The model the provider reports having served, and whether any
+    /// reported model differs from the requested one.
+    fn served_model(
+        head: &ResponseHead,
+        response: &OpenAIResponse,
+        created_model: Option<&str>,
+    ) -> (Option<String>, bool) {
+        let reported = [
+            head.served_model.as_deref(),
+            Some(response.model.as_str()),
+            created_model,
+        ];
+        let mut reported = reported.into_iter().flatten().filter(|model| !model.is_empty());
+        let served = reported.clone().next().map(String::from);
+        // Reported models are untrusted text: only ASCII ids are sliced.
+        fn base(id: &str) -> &str {
+            if id.is_ascii() { OpenAIClient::strip_openai_snapshot_suffix(id) } else { id }
+        }
+        let requested = base(&head.requested_model);
+        let rerouted = !requested.is_empty()
+            && reported.any(|model| !base(model).eq_ignore_ascii_case(requested));
+        (served, rerouted)
     }
 
     /// Normalizes a finished response. Refusal parts are the model declining
@@ -1089,11 +1333,12 @@ impl OpenAIClient {
     fn with_response_stop_metadata(
         usage: ModelCallUsage,
         response: &OpenAIResponse,
+        output: &[Value],
         streamed: &StreamingRefusals,
     ) -> ModelCallUsage {
         let mut refusals = Vec::new();
-        for output in &response.output {
-            if let OpenAIOutput::Message { id, content, .. } = output {
+        for item in output {
+            if let Ok(OpenAIOutput::Message { id, content, .. }) = OpenAIOutput::deserialize(item) {
                 for (index, part) in content.iter().enumerate() {
                     if part.type_ == "refusal" {
                         refusals.push(serde_json::json!({
@@ -1212,33 +1457,31 @@ impl OpenAIClient {
             temperature: (conversation.model.model_type != ModelType::Reasoning
                 && config.temperature_specified)
                 .then_some(config.temperature),
-            stream: Some(false),
+            // The ChatGPT backend is always streamed, as Codex does.
+            stream: Some(is_chatgpt_oauth),
             tools: None,
             tool_choice: None,
             parallel_tool_calls: None,
-            prompt_cache_key: None,
+            // Every model: the key routes requests of one conversation to the
+            // same prompt cache.
+            prompt_cache_key: Some(conversation.prompt_cache_key.clone()),
             prompt_cache_options: None,
             service_tier: config.openai_service_tier,
         };
 
-        if conversation.model.supports_openai_prompt_cache_options() {
-            request.prompt_cache_key =
-                Some(conversation.prompt_cache_key.clone());
+        if conversation.model.supports_openai_prompt_cache_options() && !is_chatgpt_oauth {
+            let enabled = config
+                .prompt_caching
+                .unwrap_or(conversation.enable_cache);
 
-            if !is_chatgpt_oauth {
-                let enabled = config
-                    .prompt_caching
-                    .unwrap_or(conversation.enable_cache);
-
-                request.prompt_cache_options =
-                    Some(OpenAIPromptCacheOptions {
-                        mode: if enabled {
-                            OpenAIPromptCacheMode::Implicit
-                        } else {
-                            OpenAIPromptCacheMode::Explicit
-                        },
-                    });
-            }
+            request.prompt_cache_options =
+                Some(OpenAIPromptCacheOptions {
+                    mode: if enabled {
+                        OpenAIPromptCacheMode::Implicit
+                    } else {
+                        OpenAIPromptCacheMode::Explicit
+                    },
+                });
         }
 
         if config.reasoning.is_some()
@@ -1304,6 +1547,13 @@ impl OpenAIClient {
             request.include =
                 Some(vec!["reasoning.encrypted_content".to_string()]);
         }
+
+        // Render replayed reasoning from earlier turns too. GPT-5.6 defaults
+        // to this and Codex sends it for GPT-6; earlier models default to
+        // `current_turn` and don't document `all_turns`, so they get nothing.
+        let reasoning_context = (conversation.model.model_type == ModelType::Reasoning
+            && (is_gpt5_6 || is_gpt6))
+            .then_some(OpenAIReasoningContext::AllTurns);
 
         if let Some(crate::reasoning::ReasoningConfig::OpenAI {
             effort,
@@ -1421,14 +1671,16 @@ impl OpenAIClient {
                 } else {
                     None
                 },
+                context: reasoning_context,
             });
         } else if is_chatgpt_oauth && (is_gpt5_family || is_gpt6) {
             request.reasoning = Some(OpenAIReasoning {
                 mode: config.openai_reasoning_mode,
                 effort: Some(OpenAIEffort::Medium),
                 summary: None,
+                context: reasoning_context,
             });
-        } else if config.openai_reasoning_mode.is_some() {
+        } else if config.openai_reasoning_mode.is_some() || reasoning_context.is_some() {
             // API key: without a configured effort the model's own default
             // applies (none on GPT-5.1/5.2/5.4, high on GPT-5.5 Pro, medium on
             // GPT-5.5/5.6/6). https://developers.openai.com/api/docs/guides/reasoning
@@ -1436,6 +1688,7 @@ impl OpenAIClient {
                 mode: config.openai_reasoning_mode,
                 effort: None,
                 summary: None,
+                context: reasoning_context,
             });
         }
 
@@ -1480,6 +1733,16 @@ impl OpenAIClient {
 
         for message in &conversation.messages {
             if let Role::Assistant = message.role {
+                if let Some(ReasoningArtifact::OpenAIOutputItems { items }) =
+                    &message.reasoning_artifact
+                {
+                    Self::replay_output_items(&mut request.input, message, items);
+                    continue;
+                }
+
+                // Messages without output items (saved by earlier versions,
+                // built by the application, or from another provider) are
+                // reconstructed: reasoning, function calls, then the text.
                 if let Some(ReasoningArtifact::OpenAIEncryptedReasoning { items }) =
                     &message.reasoning_artifact
                 {
@@ -1504,22 +1767,17 @@ impl OpenAIClient {
                 }
 
                 for tool_call in &message.tool_calls {
-                    // Invalid arguments are replayed exactly as the model wrote them.
-                    let arguments = match &tool_call.invalid_arguments {
-                        Some(raw) => raw.clone(),
-                        None => serde_json::to_string(&tool_call.arguments)
-                            .unwrap_or_else(|_| "{}".to_string()),
-                    };
+                    request.input.push(Self::function_call_entry(tool_call));
+                }
 
-                    request.input.push(OpenAIInputEntry::FunctionCall(
-                        OpenAIInputFunctionCall {
-                            type_: "function_call".to_string(),
-                            id: tool_call.provider_id.clone(),
-                            call_id: tool_call.id.clone().unwrap_or_default(),
-                            name: tool_call.name.clone(),
-                            arguments,
-                        },
-                    ));
+                // A tool-only turn has no message to replay.
+                let has_content = message.content.iter().any(|content| match content {
+                    Content::Text(text) => !text.is_empty(),
+                    Content::Image(_) => true,
+                    Content::ToolResult(_) => false,
+                });
+                if !message.tool_calls.is_empty() && !has_content {
+                    continue;
                 }
             }
 
@@ -1579,6 +1837,51 @@ impl OpenAIClient {
         }
 
         Ok(request)
+    }
+
+    /// Replays a response's stored output items verbatim and in order (see
+    /// [`ReasoningArtifact::OpenAIOutputItems`]). A `function_call` item is
+    /// replayed only if the message still holds that call, so every
+    /// replayed call gets an output; calls the message holds without an
+    /// item follow in the reconstructed shape.
+    fn replay_output_items(input: &mut Vec<OpenAIInputEntry>, message: &Message, items: &[Value]) {
+        let held: HashSet<&str> = message
+            .tool_calls
+            .iter()
+            .filter_map(|call| call.id.as_deref())
+            .collect();
+        let mut replayed = HashSet::new();
+        for item in items {
+            if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                let call_id = item.get("call_id").and_then(Value::as_str);
+                if !call_id.is_some_and(|id| held.contains(id) && replayed.insert(id)) {
+                    continue;
+                }
+            }
+            input.push(OpenAIInputEntry::Item(item.clone()));
+        }
+        for tool_call in &message.tool_calls {
+            if !tool_call.id.as_deref().is_some_and(|id| replayed.contains(id)) {
+                input.push(Self::function_call_entry(tool_call));
+            }
+        }
+    }
+
+    fn function_call_entry(tool_call: &ToolCall) -> OpenAIInputEntry {
+        // Invalid arguments are replayed exactly as the model wrote them.
+        let arguments = match &tool_call.invalid_arguments {
+            Some(raw) => raw.clone(),
+            None => serde_json::to_string(&tool_call.arguments)
+                .unwrap_or_else(|_| "{}".to_string()),
+        };
+
+        OpenAIInputEntry::FunctionCall(OpenAIInputFunctionCall {
+            type_: "function_call".to_string(),
+            id: tool_call.provider_id.clone(),
+            call_id: tool_call.id.clone().unwrap_or_default(),
+            name: tool_call.name.clone(),
+            arguments,
+        })
     }
 
     fn convert_filtered_to_openai_message(
@@ -1742,45 +2045,40 @@ impl OpenAIClient {
         }
     }
 
-    /// Returns the assistant message and any refusal texts. Refusal text is
-    /// never part of the message text. Function calls that didn't finish
-    /// (an `incomplete` response cut them off) are dropped.
-    fn parse_response(response: &OpenAIResponse) -> (Message, Vec<String>) {
+    /// Returns the assistant message, any refusal texts and the output items
+    /// kept for replay. Refusal text is never part of the message text.
+    /// Function calls that didn't finish (an `incomplete` response cut them
+    /// off) are dropped. The caller stores the replay items on the message.
+    fn parse_output(output: &[Value]) -> (Message, Vec<String>, Vec<Value>) {
         let mut text = String::new();
         let mut refusals = Vec::new();
-        let mut reasoning_items = Vec::new();
+        let mut replay_items = Vec::new();
         let mut message_id = None;
         let mut tool_calls = Vec::new();
 
-        for output in &response.output {
-            match output {
+        for item in output {
+            if let Some(replay) = Self::replay_item(item) {
+                replay_items.push(replay);
+            }
+            let parsed = match OpenAIOutput::deserialize(item) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    log::debug!("Skipping an OpenAI output item that doesn't parse: {error}");
+                    continue;
+                }
+            };
+            match parsed {
                 OpenAIOutput::Message { content, id, .. } => {
-                    message_id = Some(id.clone());
+                    message_id = Some(id);
 
-                    for item in content {
-                        match item.type_.as_str() {
-                            "output_text" => text.push_str(&item.text),
-                            "refusal" => refusals.push(item.refusal.clone().unwrap_or_default()),
+                    for part in content {
+                        match part.type_.as_str() {
+                            "output_text" => text.push_str(&part.text),
+                            "refusal" => refusals.push(part.refusal.unwrap_or_default()),
                             _ => {}
                         }
                     }
                 }
-                OpenAIOutput::Reasoning {
-                    encrypted_content: Some(encrypted_content),
-                    summary,
-                    id,
-                } => reasoning_items.push(OpenAIReasoningItem {
-                    encrypted_content: encrypted_content.clone(),
-                    summaries: summary.as_ref().map(|summaries| {
-                        summaries
-                            .iter()
-                            .map(|summary| summary.text.clone())
-                            .collect()
-                    }),
-                    id: Some(id.clone()),
-                }),
-                // Without encrypted content a reasoning item can't be replayed
-                // statelessly (store=false).
                 OpenAIOutput::Reasoning { .. } => {}
                 OpenAIOutput::FunctionCall {
                     id,
@@ -1793,9 +2091,8 @@ impl OpenAIClient {
                         continue;
                     }
 
-                    let mut call =
-                        ToolCall::from_argument_text(Some(call_id.clone()), name.clone(), arguments);
-                    call.provider_id = Some(id.clone());
+                    let mut call = ToolCall::from_argument_text(Some(call_id), name, &arguments);
+                    call.provider_id = Some(id);
                     tool_calls.push(call);
                 }
                 OpenAIOutput::Unknown => {
@@ -1807,17 +2104,38 @@ impl OpenAIClient {
         let message = Message {
             role: Role::Assistant,
             content: vec![Content::Text(text)],
-            reasoning_artifact: (!reasoning_items.is_empty()).then_some(
-                ReasoningArtifact::OpenAIEncryptedReasoning {
-                    items: reasoning_items,
-                },
-            ),
+            reasoning_artifact: None,
             tool_calls,
             id: message_id,
             configuration_update: None,
         };
 
-        (message, refusals)
+        (message, refusals, replay_items)
+    }
+
+    /// The form of an output item that later requests replay, or `None` for
+    /// items that aren't replayed: reasoning without `encrypted_content`
+    /// (it can't be replayed with `store: false`), unfinished function
+    /// calls, and item types arko doesn't request. Like Codex, `status` is
+    /// dropped; everything else is kept as sent.
+    fn replay_item(item: &Value) -> Option<Value> {
+        let replayable = match item.get("type").and_then(Value::as_str)? {
+            "message" => true,
+            "reasoning" => item
+                .get("encrypted_content")
+                .and_then(Value::as_str)
+                .is_some_and(|content| !content.is_empty()),
+            "function_call" => {
+                matches!(item.get("status").and_then(Value::as_str), None | Some("completed"))
+            }
+            _ => false,
+        };
+        if !replayable {
+            return None;
+        }
+        let mut item = item.clone();
+        item.as_object_mut()?.remove("status");
+        Some(item)
     }
 
     /// `input_tokens` already includes cached and written tokens and
@@ -1864,6 +2182,8 @@ enum OpenAIInputEntry {
     Reasoning(OpenAIInputReasoning),
     FunctionCall(OpenAIInputFunctionCall),
     FunctionCallOutput(OpenAIInputFunctionCallOutput),
+    /// A stored output item, replayed verbatim.
+    Item(Value),
 }
 
 #[derive(Debug, Serialize)]
@@ -1963,6 +2283,15 @@ struct OpenAIReasoning {
     effort: Option<OpenAIEffort>,
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<OpenAIReasoningContext>,
+}
+
+/// Which earlier reasoning the model sees (`reasoning.context`).
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum OpenAIReasoningContext {
+    AllTurns,
 }
 
 #[derive(Debug, Serialize)]
@@ -2029,8 +2358,11 @@ struct OpenAIResponse {
     error: Option<Value>,
     #[serde(default)]
     incomplete_details: Option<Value>,
+    #[serde(default)]
     model: String,
-    output: Vec<OpenAIOutput>,
+    /// Output items as sent; see [`OpenAIClient::assemble_output`].
+    #[serde(default)]
+    output: Vec<Value>,
     usage: OpenAIUsage,
     #[serde(default)]
     user: Option<String>,
@@ -2299,6 +2631,8 @@ mod tests {
                 let value = serde_json::to_value(request).unwrap();
 
                 assert_eq!(value["model"], "gpt-6-astra");
+                assert_eq!(value["reasoning"]["context"], "all_turns");
+                assert_eq!(value["stream"], oauth);
                 assert_eq!(value["reasoning"]["mode"], "pro");
                 assert_eq!(
                     value["reasoning"]["effort"],
@@ -2351,6 +2685,7 @@ mod tests {
                     let value = serde_json::to_value(request).unwrap();
 
                     assert_eq!(value["model"], id);
+                    assert_eq!(value["reasoning"]["context"], "all_turns");
                     assert_eq!(value["reasoning"]["mode"], "pro");
                     assert_eq!(
                         value["reasoning"]["effort"],
@@ -2375,12 +2710,13 @@ mod tests {
                 Err(Error::InvalidRequest(_))
             ));
 
-            // API key: no effort configured means the model default applies.
+            // API key: no effort configured means the model default applies;
+            // only the reasoning context is sent.
             let request = client
                 .build_request(&conversation, &GenerationConfig::default(), false)
                 .unwrap();
             let value = serde_json::to_value(request).unwrap();
-            assert!(value.get("reasoning").is_none());
+            assert_eq!(value["reasoning"], serde_json::json!({"context": "all_turns"}));
 
             // ChatGPT OAuth keeps sending medium (owned by the OAuth request path).
             let request = client
@@ -2388,6 +2724,7 @@ mod tests {
                 .unwrap();
             let value = serde_json::to_value(request).unwrap();
             assert_eq!(value["reasoning"]["effort"], "medium");
+            assert_eq!(value["reasoning"]["context"], "all_turns");
             assert!(value["reasoning"].get("mode").is_none());
         }
     }
@@ -2588,21 +2925,26 @@ mod tests {
     }
 
     #[test]
-    fn older_openai_models_omit_prompt_cache_options() {
+    fn older_openai_models_send_the_cache_key_without_cache_options() {
         let client = OpenAIClient::new("test");
-        let conversation =
-            Conversation::new(Model::openai_gpt_5_5());
         let config =
             GenerationConfig::default().with_prompt_caching(false);
 
-        let request = client
-            .build_request(&conversation, &config, false)
-            .unwrap();
+        for model in [Model::openai_gpt_5_5(), Model::openai_gpt_4_1()] {
+            let conversation = Conversation::new(model);
+            for oauth in [false, true] {
+                let request = client
+                    .build_request(&conversation, &config, oauth)
+                    .unwrap();
 
-        let value = serde_json::to_value(request).unwrap();
+                let value = serde_json::to_value(request).unwrap();
 
-        assert!(value.get("prompt_cache_key").is_none());
-        assert!(value.get("prompt_cache_options").is_none());
+                assert_eq!(value["prompt_cache_key"], conversation.prompt_cache_key);
+                assert!(value.get("prompt_cache_options").is_none());
+                // Only GPT-5.6 and GPT-6 get `reasoning.context`.
+                assert!(value.pointer("/reasoning/context").is_none());
+            }
+        }
     }
 
     #[test]
@@ -2683,7 +3025,10 @@ mod tests {
 
         let value = serde_json::to_value(request).unwrap();
 
-        assert!(value.get("reasoning").is_none());
+        // API key: no effort is sent, only the reasoning context.
+        assert!(value["reasoning"].get("mode").is_none());
+        assert!(value["reasoning"].get("effort").is_none());
+        assert_eq!(value["reasoning"]["context"], "all_turns");
     }
 
     #[test]
@@ -2788,8 +3133,8 @@ mod tests {
             &Model::openai_gpt_6_astra(),
             config,
             oauth,
-            &super::StreamingRefusals::new(),
-            Vec::new(),
+            super::StreamedOutput::default(),
+            &super::ResponseHead::default(),
         )
         .usage
     }
@@ -2894,7 +3239,14 @@ mod model_rule_tests {
             Model::openai_gpt_6_astra(),
         ] {
             let value = request(model.clone(), &GenerationConfig::default()).unwrap();
-            assert!(value.get("reasoning").is_none(), "{}", model.id);
+            assert!(value["reasoning"].get("effort").is_none(), "{}", model.id);
+            // GPT-6 still asks for reasoning from all turns; older models send
+            // no reasoning object at all.
+            if model.id.starts_with("gpt-6") {
+                assert_eq!(value["reasoning"], serde_json::json!({"context": "all_turns"}));
+            } else {
+                assert!(value.get("reasoning").is_none(), "{}", model.id);
+            }
             assert_eq!(value["include"][0], "reasoning.encrypted_content");
         }
     }

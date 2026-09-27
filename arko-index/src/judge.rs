@@ -330,6 +330,7 @@ mod tests {
             .with_stop_metadata(Some("completed".into()), None),
             stop_reason: arko_ai::StopReason::ToolUse,
             refusal: None,
+            openai_turn_state: None,
         }
     }
 

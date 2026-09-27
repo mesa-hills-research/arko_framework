@@ -17,6 +17,8 @@ pub struct LLMClient {
     openrouter_client: Option<providers::openrouter::OpenRouterClient>,
     request_trace: Option<RequestTrace>,
     openai_request_hook: Option<Arc<dyn providers::openai::OpenAIRequestHook>>,
+    openai_originator: Option<String>,
+    openai_user_agent: Option<String>,
 }
 
 impl LLMClient {
@@ -28,6 +30,8 @@ impl LLMClient {
             openrouter_client: None,
             request_trace: None,
             openai_request_hook: None,
+            openai_originator: None,
+            openai_user_agent: None,
         }
     }
 
@@ -79,6 +83,25 @@ impl LLMClient {
         self.get_provider(provider).is_ok()
     }
 
+    /// Sends `originator: <originator>` with every OpenAI request, naming
+    /// your application to the ChatGPT backend. Nothing is sent by default.
+    /// Use your own application's name, never another client's. Applies to
+    /// the OpenAI provider whether configured before or after this call.
+    pub fn with_openai_originator(mut self, originator: impl Into<String>) -> Self {
+        self.openai_originator = Some(originator.into());
+        self.openai_client = self.openai_client.take().map(|client| self.configure_openai(client));
+        self
+    }
+
+    /// Sends `User-Agent: <user_agent>` with every OpenAI request. Nothing is
+    /// sent by default. Applies to the OpenAI provider whether configured
+    /// before or after this call.
+    pub fn with_openai_user_agent(mut self, user_agent: impl Into<String>) -> Self {
+        self.openai_user_agent = Some(user_agent.into());
+        self.openai_client = self.openai_client.take().map(|client| self.configure_openai(client));
+        self
+    }
+
     /// Writes every model request and response to `trace` for debugging;
     /// see [`RequestTrace`]. Applies to providers configured before or after
     /// this call. Currently implemented for the OpenAI provider.
@@ -101,7 +124,8 @@ impl LLMClient {
 
     /// Applies the OpenAI settings made on this `LLMClient`. Settings left
     /// unset keep the OpenAI client's own, so a client installed with
-    /// [`with_openai_client`](Self::with_openai_client) keeps its trace or hook.
+    /// [`with_openai_client`](Self::with_openai_client) keeps its trace,
+    /// hook, originator and User-Agent.
     fn configure_openai(
         &self,
         mut client: providers::openai::OpenAIClient,
@@ -111,6 +135,12 @@ impl LLMClient {
         }
         if self.openai_request_hook.is_some() {
             client = client.with_request_hook(self.openai_request_hook.clone());
+        }
+        if self.openai_originator.is_some() {
+            client = client.with_originator(self.openai_originator.clone());
+        }
+        if self.openai_user_agent.is_some() {
+            client = client.with_user_agent(self.openai_user_agent.clone());
         }
         client
     }

@@ -632,6 +632,23 @@ fn print_reasoning_artifact(artifact: Option<&ReasoningArtifact>) {
                     }
                 }
             }
+            ReasoningArtifact::OpenAIOutputItems { items } => {
+                let summaries: Vec<&str> = items
+                    .iter()
+                    .filter(|item| item["type"] == "reasoning")
+                    .filter_map(|item| item["summary"].as_array())
+                    .flatten()
+                    .filter_map(|summary| summary["text"].as_str())
+                    .collect();
+                if summaries.is_empty() {
+                    println!("\nOpenAI Output Items: {} (no reasoning summaries)", items.len());
+                } else {
+                    println!("\nReasoning Summaries:");
+                    for summary in summaries {
+                        println!("- {}", summary);
+                    }
+                }
+            }
             ReasoningArtifact::AnthropicReasoning { fragments } => {
                 println!("\nAnthropic Reasoning Artifact:");
                 for fragment in fragments {

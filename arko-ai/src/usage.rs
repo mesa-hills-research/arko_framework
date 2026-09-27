@@ -28,6 +28,19 @@ pub struct ModelCallUsage {
     /// example OpenRouter's `provider`, such as `Anthropic` or `Google Vertex`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_provider: Option<String>,
+    /// The model the provider reports having served, when it reports one.
+    /// For OpenAI: the `openai-model` (or `x-openai-model`) response header,
+    /// else the response's `model`, else the model in `response.created`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served_model: Option<String>,
+    /// Whether any model the provider reported for the call differs from
+    /// the requested one (ignoring case and snapshot date suffixes), for
+    /// example when the ChatGPT backend routes a request to a fallback model.
+    /// Set by the OpenAI provider; OpenRouter reports a change through
+    /// `requested_model`. [`served_model_changed`](Self::served_model_changed)
+    /// covers both.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rerouted: bool,
 }
 
 impl ModelCallUsage {
@@ -58,12 +71,21 @@ impl ModelCallUsage {
             stop_details: None,
             requested_model: None,
             upstream_provider: None,
+            served_model: None,
+            rerouted: false,
         }
     }
 
-    /// Whether the provider served a different model than the one requested.
+    /// Whether the provider served a different model than the one requested:
+    /// OpenRouter set `requested_model`, or OpenAI reported a reroute.
     pub fn served_model_changed(&self) -> bool {
-        self.requested_model.is_some()
+        self.requested_model.is_some() || self.rerouted
+    }
+
+    pub fn with_served_model(mut self, served_model: Option<String>, rerouted: bool) -> Self {
+        self.served_model = served_model;
+        self.rerouted = rerouted;
+        self
     }
 
     pub fn with_input_delta(mut self, delta: isize) -> Self {
@@ -489,6 +511,17 @@ mod tests {
         let mut usage = usage;
         usage.calculate_cost(model, config);
         usage
+    }
+
+    #[test]
+    fn served_model_changed_covers_openrouter_and_openai_reports() {
+        let usage = ModelCallUsage::new("id".into(), "p".into(), "m".into(), 0, 0, 0);
+        assert!(!usage.served_model_changed());
+        let mut routed = usage.clone();
+        routed.requested_model = Some("openrouter/auto".into());
+        assert!(routed.served_model_changed());
+        let rerouted = usage.with_served_model(Some("gpt-5.2".into()), true);
+        assert!(rerouted.served_model_changed());
     }
 
     #[test]

@@ -25,7 +25,7 @@ pub use codex_auth::{CodexAuthFile, CodexAuthSync};
 pub use config::{
     AnthropicCacheTtl, AnthropicInferenceGeo, GenerationConfig, OpenAIServiceTier, Verbosity,
 };
-pub use conversation::Conversation;
+pub use conversation::{Conversation, OpenAITurnState};
 pub use error::{Error, RetryClass};
 pub use message::{ConfigurationUpdate, Content, Image, Message, Role};
 pub use model::{Model, ModelPricing, Provider};

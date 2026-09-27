@@ -1,5 +1,6 @@
 use crate::model::Provider;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Defines the effort level for OpenAI reasoning models.
 ///
@@ -477,8 +478,28 @@ pub struct OpenAIReasoningItem {
 pub enum ReasoningArtifact {
     /// Every reasoning item of one OpenAI response, in output order. All of
     /// them are replayed, ahead of the turn's function calls.
+    ///
+    /// Written by earlier versions; responses now keep
+    /// [`OpenAIOutputItems`](Self::OpenAIOutputItems). Conversations saved
+    /// with this form still replay as before: the reasoning items, then the
+    /// message's function calls, then its text.
     OpenAIEncryptedReasoning {
         items: Vec<OpenAIReasoningItem>,
+    },
+    /// The replayable output items of one OpenAI Responses call, in output
+    /// order and exactly as the provider returned them, minus `status`:
+    /// `reasoning` items that carry `encrypted_content`, `message` items
+    /// (with their `phase`, if any) and finished `function_call` items.
+    ///
+    /// Later requests replay them verbatim and in this order, for example
+    /// `reasoning`, `message` (commentary), `function_call`, followed by the
+    /// call's `function_call_output`. That keeps the prompt the server
+    /// renders the same from request to request (prompt caching) and lets
+    /// reasoning carry across turns with `store: false`. A `function_call`
+    /// item is replayed only while the message still holds that call (by
+    /// `call_id`), so every replayed call has an output.
+    OpenAIOutputItems {
+        items: Vec<Value>,
     },
     AnthropicReasoning {
         fragments: Vec<AnthropicReasoningFragment>,
@@ -502,6 +523,9 @@ pub enum ReasoningArtifact {
 #[allow(clippy::enum_variant_names)] // Names must match the serialized tags.
 enum ReasoningArtifactRepr {
     OpenAIEncryptedReasoning(OpenAIReasoningRepr),
+    OpenAIOutputItems {
+        items: Vec<Value>,
+    },
     AnthropicReasoning {
         fragments: Vec<AnthropicReasoningFragment>,
     },
@@ -529,6 +553,7 @@ impl From<ReasoningArtifactRepr> for ReasoningArtifact {
             ReasoningArtifactRepr::OpenAIEncryptedReasoning(OpenAIReasoningRepr::Single(item)) => {
                 Self::OpenAIEncryptedReasoning { items: vec![item] }
             }
+            ReasoningArtifactRepr::OpenAIOutputItems { items } => Self::OpenAIOutputItems { items },
             ReasoningArtifactRepr::AnthropicReasoning { fragments } => {
                 Self::AnthropicReasoning { fragments }
             }
@@ -583,7 +608,8 @@ impl ReasoningArtifact {
 
     pub fn provider(&self) -> Provider {
         match self {
-            ReasoningArtifact::OpenAIEncryptedReasoning { .. } => Provider::OpenAI,
+            ReasoningArtifact::OpenAIEncryptedReasoning { .. }
+            | ReasoningArtifact::OpenAIOutputItems { .. } => Provider::OpenAI,
             ReasoningArtifact::AnthropicReasoning { .. } => Provider::Anthropic,
             ReasoningArtifact::GoogleReasoning { .. } => Provider::Google,
             ReasoningArtifact::OpenRouter { .. } => Provider::OpenRouter,
@@ -627,9 +653,62 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&artifact).unwrap()).unwrap();
         assert!(matches!(round_trip, ReasoningArtifact::OpenAIEncryptedReasoning { items } if items.len() == 2));
 
+        let items = serde_json::json!([
+            {"type": "reasoning", "id": "rs_1", "encrypted_content": "enc", "summary": []},
+            {"type": "message", "id": "msg_1", "role": "assistant", "phase": "commentary", "content": []},
+        ]);
+        let artifact = ReasoningArtifact::OpenAIOutputItems {
+            items: items.as_array().unwrap().clone(),
+        };
+        let round_trip: ReasoningArtifact =
+            serde_json::from_value(serde_json::to_value(&artifact).unwrap()).unwrap();
+        assert!(matches!(&round_trip, ReasoningArtifact::OpenAIOutputItems { items: kept } if Value::from(kept.clone()) == items));
+        assert_eq!(round_trip.provider(), Provider::OpenAI);
+
         let anthropic = ReasoningArtifact::new_anthropic_redacted("data");
         let round_trip: ReasoningArtifact =
             serde_json::from_value(serde_json::to_value(&anthropic).unwrap()).unwrap();
         assert_eq!(round_trip.provider(), Provider::Anthropic);
+    }
+
+    /// Artifacts load through `ReasoningArtifactRepr`, so a variant missing
+    /// there still compiles but fails to load. Every variant must round-trip.
+    #[test]
+    fn every_reasoning_artifact_variant_round_trips() {
+        // Exhaustive on purpose: a new variant fails to compile here until it
+        // gets a sample below.
+        fn tag(artifact: &ReasoningArtifact) -> &'static str {
+            match artifact {
+                ReasoningArtifact::OpenAIEncryptedReasoning { .. } => "OpenAIEncryptedReasoning",
+                ReasoningArtifact::OpenAIOutputItems { .. } => "OpenAIOutputItems",
+                ReasoningArtifact::AnthropicReasoning { .. } => "AnthropicReasoning",
+                ReasoningArtifact::GoogleReasoning { .. } => "GoogleReasoning",
+                ReasoningArtifact::OpenRouter { .. } => "OpenRouter",
+            }
+        }
+        let samples = [
+            ReasoningArtifact::new_openai_encrypted("enc", Some(vec!["s".into()])),
+            ReasoningArtifact::OpenAIOutputItems {
+                items: vec![serde_json::json!({"type": "reasoning", "id": "rs_1", "encrypted_content": "enc", "summary": []})],
+            },
+            ReasoningArtifact::new_anthropic_mixed(vec![
+                AnthropicReasoningFragment::Thinking { thinking: "t".into(), signature: "sig".into() },
+                AnthropicReasoningFragment::RedactedThinking { data: "data".into() },
+            ]),
+            ReasoningArtifact::new_google_reasoning(vec![GoogleReasoningFragment {
+                summary: "s".into(),
+                signature: "sig".into(),
+            }]),
+            ReasoningArtifact::new_openrouter(vec![serde_json::json!({"type": "reasoning.encrypted", "data": "enc"})]),
+        ];
+        let tags: std::collections::BTreeSet<_> = samples.iter().map(tag).collect();
+        assert_eq!(tags.len(), samples.len(), "one sample per variant");
+        for artifact in &samples {
+            let saved = serde_json::to_value(artifact).unwrap();
+            let loaded: ReasoningArtifact = serde_json::from_value(saved.clone())
+                .unwrap_or_else(|error| panic!("{} did not load: {error}", tag(artifact)));
+            assert_eq!(tag(&loaded), tag(artifact));
+            assert_eq!(serde_json::to_value(&loaded).unwrap(), saved);
+        }
     }
 }
