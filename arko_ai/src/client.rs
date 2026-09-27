@@ -592,12 +592,11 @@ mod tests {
         assert!(partial.has_provider(&Provider::OpenAI));
     }
 
-    /// The client's OpenAI auth decides OpenAI models' cache lifetime.
+    /// The client's OpenAI auth decides whether turning caching off
+    /// disables it: the ChatGPT OAuth backend caches regardless.
     #[tokio::test]
     async fn prompt_cache_lifetime_reads_the_openai_auth() {
-        use crate::prompt_cache::{
-            CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME, OPENAI_PROMPT_CACHE_LIFETIME, PromptCacheLifetime,
-        };
+        use crate::prompt_cache::{OPENAI_PROMPT_CACHE_LIFETIME, PromptCacheLifetime};
         let off = GenerationConfig::default().with_prompt_caching(false);
         let model = Model::openai_gpt_6_astra();
         let key = client(&[("OPENAI_API_KEY", "sk-test")]);
@@ -616,7 +615,7 @@ mod tests {
         ]);
         assert_eq!(
             oauth.prompt_cache_lifetime(&model, &off).await,
-            PromptCacheLifetime::Known(CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME)
+            PromptCacheLifetime::Known(OPENAI_PROMPT_CACHE_LIFETIME)
         );
         // Other providers don't depend on it, nor on being configured.
         assert_eq!(

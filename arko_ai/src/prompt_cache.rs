@@ -13,12 +13,18 @@
 //!   (5 minutes by default, 1 hour with `ttl: "1h"`); OpenRouter passes
 //!   Claude models' `cache_control`, `ttl` included, through to Anthropic.
 //! - OpenAI: <https://developers.openai.com/api/docs/guides/prompt-caching>.
-//!   GPT-5.6 and later take `prompt_cache_options.ttl`, whose "only
-//!   supported value, `30m`, is also the default". Earlier models keep
-//!   entries "around 5 to 10 minutes of inactivity" in memory for
-//!   organizations with Zero Data Retention; other organizations default to
-//!   extended retention, which "typically keeps entries available for around
-//!   30 minutes and can retain them for up to 24 hours".
+//!   In-memory retention keeps entries "around 5 to 10 minutes of
+//!   inactivity" (the default before GPT-5.6 for organizations with Zero Data
+//!   Retention; others get extended retention, "around 30 minutes and ...
+//!   up to 24 hours"). GPT-5.6 and later take `prompt_cache_options.ttl`,
+//!   whose "only supported value, `30m`, is also the default". The ChatGPT
+//!   OAuth (Codex) backend caches implicitly only; its lifetime is neither
+//!   documented nor configurable. This module reports OpenAI as a
+//!   conservative 5 minutes on every path, on purpose: a request after a
+//!   longer idle time can miss the cache and pay for the whole prompt again.
+//!   A live measurement on 2026-09-27 (the `oauth_cache_probe` example's
+//!   `--idle-gap` option, over ChatGPT OAuth) showed the cache surviving 4
+//!   minutes; longer gaps were inconclusive.
 
 use std::time::Duration;
 
@@ -47,25 +53,13 @@ pub const ANTHROPIC_PROMPT_CACHE_LIFETIME: Duration = Duration::from_secs(5 * 60
 /// Anthropic's extended cache lifetime, [`AnthropicCacheTtl::OneHour`].
 pub const ANTHROPIC_EXTENDED_PROMPT_CACHE_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
-/// OpenAI's cache lifetime for GPT-5.6 and later models with an API key:
-/// `prompt_cache_options.ttl` accepts only `30m`, which is also the default,
-/// so this client sends none.
-pub const OPENAI_PROMPT_CACHE_LIFETIME: Duration = Duration::from_secs(30 * 60);
-
-/// The cache lifetime assumed for OpenAI models before GPT-5.6. Their
-/// retention depends on the organization, which a client can't see: Zero
-/// Data Retention organizations get in-memory retention ("around 5 to 10
-/// minutes of inactivity"), others extended retention (around 30 minutes,
-/// up to 24 hours). The lower bound holds for both.
-pub const OPENAI_IN_MEMORY_PROMPT_CACHE_LIFETIME: Duration = Duration::from_secs(5 * 60);
-
-/// The cache lifetime on the ChatGPT OAuth (Codex backend) path for GPT-5.6
-/// and later models, a fixed property of the backend: it caches implicitly
-/// only, and no request setting configures the lifetime (this client sends
-/// it no `prompt_cache_options`). The backend documents none; this is the
-/// API's 30 minutes, which a measurement with the `oauth_cache_probe`
-/// example's `--idle-gap` option is confirming.
-pub const CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME: Duration = Duration::from_secs(30 * 60);
+/// The cache lifetime reported for OpenAI models, with an API key or ChatGPT
+/// OAuth: a conservative 5 minutes, the lower end of the documented
+/// in-memory retention. Longer lifetimes exist (30 minutes for GPT-5.6 and
+/// later on the API, extended retention for many organizations) but aren't
+/// guaranteed on every path; the ChatGPT OAuth backend caches implicitly
+/// only, with a lifetime no request can configure.
+pub const OPENAI_PROMPT_CACHE_LIFETIME: Duration = Duration::from_secs(5 * 60);
 
 impl AnthropicCacheTtl {
     /// How long the entry lasts after its last use.
@@ -89,13 +83,11 @@ impl AnthropicCacheTtl {
 ///   [`GenerationConfig::prompt_caching`] is off, since no `cache_control` is
 ///   sent; otherwise [`GenerationConfig::anthropic_cache_ttl`]'s lifetime, 5
 ///   minutes by default.
-/// - OpenAI GPT-5.6 and later with an API key: `Disabled` when caching is off
-///   (explicit mode without breakpoints), otherwise 30 minutes.
-/// - OpenAI GPT-5.6 and later through ChatGPT OAuth:
-///   [`CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME`]. The backend caches implicitly
-///   only and can't be configured, so turning caching off doesn't change it.
-/// - Earlier OpenAI models: 5 minutes, the lifetime every organization gets
-///   at least; their caching is automatic and can't be turned off.
+/// - OpenAI: [`OPENAI_PROMPT_CACHE_LIFETIME`], a conservative 5 minutes, on
+///   every model and auth; `Disabled` only for GPT-5.6 and later with an API
+///   key and caching off (explicit mode without breakpoints). Earlier models
+///   cache automatically, and the ChatGPT OAuth backend caches implicitly,
+///   so turning caching off doesn't change them.
 /// - Gemini (implicit caching the provider manages) and other OpenRouter
 ///   models: `Unknown`.
 ///
@@ -127,14 +119,14 @@ pub fn prompt_cache_lifetime(
             anthropic()
         }
         Provider::OpenRouter | Provider::Google => PromptCacheLifetime::Unknown,
-        Provider::OpenAI if !model.supports_openai_prompt_cache_options() => {
-            PromptCacheLifetime::Known(OPENAI_IN_MEMORY_PROMPT_CACHE_LIFETIME)
+        Provider::OpenAI
+            if !enabled
+                && !openai_chatgpt_oauth
+                && model.supports_openai_prompt_cache_options() =>
+        {
+            PromptCacheLifetime::Disabled
         }
-        Provider::OpenAI if openai_chatgpt_oauth => {
-            PromptCacheLifetime::Known(CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME)
-        }
-        Provider::OpenAI if enabled => PromptCacheLifetime::Known(OPENAI_PROMPT_CACHE_LIFETIME),
-        Provider::OpenAI => PromptCacheLifetime::Disabled,
+        Provider::OpenAI => PromptCacheLifetime::Known(OPENAI_PROMPT_CACHE_LIFETIME),
     }
 }
 
@@ -177,8 +169,10 @@ mod tests {
         }
     }
 
+    /// OpenAI is a conservative 5 minutes on every model and auth; only an
+    /// API-key request that turns caching off is uncached.
     #[test]
-    fn openai_lifetimes_depend_on_the_model_generation_and_auth() {
+    fn openai_lifetimes_are_a_conservative_five_minutes() {
         let default = GenerationConfig::default();
         let off = GenerationConfig::default().with_prompt_caching(false);
         for model in [
@@ -188,7 +182,7 @@ mod tests {
         ] {
             assert_eq!(
                 lifetime(&model, &default),
-                Known(30 * MINUTE),
+                Known(5 * MINUTE),
                 "{}",
                 model.id
             );
@@ -197,12 +191,11 @@ mod tests {
             for config in [&default, &off] {
                 assert_eq!(
                     prompt_cache_lifetime(&model, config, true),
-                    Known(CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME)
+                    Known(5 * MINUTE)
                 );
             }
         }
-        // Before GPT-5.6: automatic caching, the lifetime every organization
-        // gets at least, on either auth.
+        // Before GPT-5.6 caching is automatic, on either auth.
         let older = Model::openai_gpt_5_5();
         for config in [&default, &off] {
             for oauth in [false, true] {
