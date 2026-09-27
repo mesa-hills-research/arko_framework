@@ -25,8 +25,8 @@ pub fn get_current_datetime_utc() -> String {
 /// This is crucial for handling paths that may not exist yet (e.g., for `write_file`).
 ///
 /// Symlinks are not followed, and a `..` with nothing left to remove (at the
-/// root, or leading a relative path) is dropped. No shell expansion is done;
-/// see [`is_path_in_workspace`] for that.
+/// root, or leading a relative path) is dropped, so normalize absolute paths
+/// (as [`resolve_path`] does). No shell expansion is done.
 pub fn normalize_path(path: &Path) -> PathBuf {
     let mut components = path.components().peekable();
     let mut ret = if let Some(c @ Component::Prefix(..)) = components.peek().cloned() {
@@ -52,44 +52,49 @@ pub fn normalize_path(path: &Path) -> PathBuf {
     ret
 }
 
-/// Checks if a given `path_to_check_str` resolves to a location within the `workspace_path`.
+/// Resolves a tool's path parameter against a task's working directory: the
+/// path the built-in file tools (`read_file`, `write_file`, `apply_diff`,
+/// `list_files`) open, and the path [`is_path_in_workspace`] checks.
 ///
-/// This function is platform-agnostic and handles various path formats including relative paths,
-/// parent traversals (`..`), and shell variables (`~`, `$HOME`, etc.).
+/// - Surrounding whitespace is trimmed.
+/// - The path is taken literally: `~` and `$VAR` are not expanded (`~/notes`
+///   names a directory called `~` in the working directory), and `\`
+///   separates components only on Windows.
+/// - A relative path is joined to the working directory, which is itself
+///   made absolute against the process's current directory when it is
+///   relative (such as `./project`).
+/// - `.` and `..` are then resolved lexically with [`normalize_path`];
+///   symbolic links are not followed.
 ///
-/// # Arguments
-/// * `path_to_check_str`: The path string to validate.
-/// * `workspace_path`: The absolute, canonical path of the agent's workspace.
-/// * `task_cwd`: The current working directory of the task, used as a base for resolving relative paths.
-///
-/// # Returns
-/// `Ok(true)` if the path is safely within the workspace, `Ok(false)` otherwise.
-/// `Err` if shell expansion fails.
-pub fn is_path_in_workspace(
-    path_to_check_str: &str,
-    workspace_path: &Path,
-    task_cwd: &Path,
-) -> Result<bool, ArkoAgentsError> {
-    let expanded_path_str = match shellexpand::full(path_to_check_str) {
-        Ok(p) => p.into_owned(),
-        Err(e) => {
-            return Err(ArkoAgentsError::Configuration(format!(
-                "Failed to expand path '{}': {}",
-                path_to_check_str, e
-            )));
-        }
-    };
-    let path_to_check = Path::new(&expanded_path_str);
+/// Fails when the path contains a NUL byte, or when a relative working
+/// directory needs the process's current directory and it is unavailable.
+pub fn resolve_path(path: &str, working_directory: &Path) -> std::io::Result<PathBuf> {
+    if path.contains('\0') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the path contains a NUL byte",
+        ));
+    }
+    Ok(normalize_path(
+        &absolute_working_directory(working_directory)?.join(path.trim()),
+    ))
+}
 
-    let absolute_path_to_check = if path_to_check.is_absolute() {
-        path_to_check.to_path_buf()
+fn absolute_working_directory(working_directory: &Path) -> std::io::Result<PathBuf> {
+    Ok(if working_directory.is_absolute() {
+        working_directory.to_path_buf()
     } else {
-        task_cwd.join(path_to_check)
-    };
+        env::current_dir()?.join(working_directory)
+    })
+}
 
-    let normalized_path = normalize_path(&absolute_path_to_check);
-
-    Ok(normalized_path.starts_with(workspace_path))
+/// Whether `path` resolves (with [`resolve_path`]) inside `workspace`, the
+/// task's working directory. The check is lexical, like the resolution: a
+/// symbolic link inside the workspace that points outside it is not
+/// detected.
+pub fn is_path_in_workspace(path: &str, workspace: &Path) -> Result<bool, ArkoAgentsError> {
+    let root = normalize_path(&absolute_working_directory(workspace)?);
+    Ok(resolve_path(path, workspace)?.starts_with(root))
 }
 
 /// Generates a file tree string for the given root path.
@@ -106,4 +111,75 @@ pub fn get_file_tree(
 ) -> Result<String, ArkoAgentsError> {
     crate::file_tree::FileTreeSnapshot::capture(root_path, max_depth)
         .map(|snapshot| snapshot.full())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn paths_resolve_literally_against_the_working_directory() {
+        let workspace = Path::new("/workspace/project");
+        let resolve = |path: &str| resolve_path(path, workspace).unwrap();
+        assert_eq!(resolve("src/./lib.rs"), workspace.join("src/lib.rs"));
+        assert_eq!(resolve(" src/lib.rs\n"), workspace.join("src/lib.rs"));
+        assert_eq!(resolve("/etc/hosts"), PathBuf::from("/etc/hosts"));
+        assert_eq!(resolve("."), workspace);
+        // No shell expansion, and `\` is an ordinary character on Unix.
+        assert_eq!(resolve("~/notes"), workspace.join("~/notes"));
+        assert_eq!(resolve("$HOME/notes"), workspace.join("$HOME/notes"));
+        assert_eq!(resolve(r"a\..\..\x"), workspace.join(r"a\..\..\x"));
+        assert!(resolve_path("a\0b", workspace).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_workspace_check_judges_the_path_the_tools_open() {
+        let workspace = Path::new("/workspace/project");
+        for (path, inside) in [
+            ("src/lib.rs", true),
+            ("src/../../project/lib.rs", true),
+            ("../outside", false),
+            (" ../outside", false),
+            ("/workspace/project-other/x", false),
+            // `$PWD`, `$HOME` and `~` are directory names, so two `..`
+            // leave the workspace whatever the variables hold.
+            ("$PWD/../../outside", false),
+            ("$HOME/..", true),
+            ("~/../../outside", false),
+            ("~/../inside", true),
+        ] {
+            assert_eq!(
+                is_path_in_workspace(path, workspace).unwrap(),
+                inside,
+                "{path}"
+            );
+            assert_eq!(
+                resolve_path(path, workspace)
+                    .unwrap()
+                    .starts_with(workspace),
+                inside,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn relative_working_directories_are_resolved_against_the_current_directory() {
+        let current = env::current_dir().unwrap();
+        for workspace in ["./ws", "ws", "ws/"] {
+            let workspace = Path::new(workspace);
+            assert_eq!(
+                resolve_path("a.txt", workspace).unwrap(),
+                current.join("ws").join("a.txt")
+            );
+            assert!(is_path_in_workspace("a.txt", workspace).unwrap());
+            assert!(is_path_in_workspace("./sub/../a.txt", workspace).unwrap());
+            assert!(!is_path_in_workspace("../a.txt", workspace).unwrap());
+            // Lexically, `ws/../../ws/x` would drop the leading `..` and stay
+            // in `ws`; it names `../ws/x`, outside.
+            assert!(!is_path_in_workspace("../../ws/x", workspace).unwrap());
+        }
+    }
 }

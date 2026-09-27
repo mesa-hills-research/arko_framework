@@ -2065,6 +2065,7 @@ impl AgentLoop {
 
                     let mut is_out_of_workspace = false;
                     let mut offending_param_name: Option<String> = None;
+                    let mut path_check_error: Option<String> = None;
                     for param_def in &tool_definition.parameters {
                         if param_def.is_path
                             && let Some(path_str) =
@@ -2074,7 +2075,6 @@ impl AgentLoop {
                             match crate::utils::is_path_in_workspace(
                                 path_str,
                                 &self.task.current_working_directory,
-                                &self.task.current_working_directory,
                             ) {
                                 Ok(true) => {}
                                 Ok(false) => {
@@ -2083,13 +2083,11 @@ impl AgentLoop {
                                     break;
                                 }
                                 Err(e) => {
-                                    self.task.pending_native_tool_results.push(
-                                        ai::ToolResult::error_from_tool_call(
-                                            ai_tool_call,
-                                            &format!("Path validation error: {}", e),
-                                        ),
-                                    );
-                                    continue;
+                                    path_check_error = Some(format!(
+                                        "Path validation failed for parameter '{}': {}",
+                                        param_def.name, e
+                                    ));
+                                    break;
                                 }
                             }
                         }
@@ -2103,22 +2101,29 @@ impl AgentLoop {
                             .get_path_safety_policy(&ai_tool_call.name);
                         match path_policy {
                             PathSafetyPolicy::AutoReject => {
-                                self.task.pending_native_tool_results.push(
-                                    ai::ToolResult::error_from_tool_call(
-                                        ai_tool_call,
-                                        &format!(
-                                            "Path for parameter '{}' is outside the workspace.",
-                                            offending_param_name.unwrap_or_default()
-                                        ),
-                                    ),
-                                );
-                                continue;
+                                path_check_error = Some(format!(
+                                    "Path for parameter '{}' is outside the workspace.",
+                                    offending_param_name.unwrap_or_default()
+                                ));
                             }
                             PathSafetyPolicy::RequireApproval => {
                                 force_approval = true;
                             }
                             PathSafetyPolicy::AutoApprove => {}
                         }
+                    }
+                    // A rejected call gets this one result and is not run.
+                    if let Some(reason) = path_check_error {
+                        self.emit_event(AgentEvent::ToolRejected {
+                            tool_call_id,
+                            tool_name: ai_tool_call.name.clone(),
+                            reason: Some(reason.clone()),
+                        })
+                        .await?;
+                        self.task
+                            .pending_native_tool_results
+                            .push(ai::ToolResult::error_from_tool_call(ai_tool_call, &reason));
+                        continue;
                     }
 
                     let normal_approval_needed = !self
@@ -2431,7 +2436,6 @@ impl AgentLoop {
                                     {
                                         match crate::utils::is_path_in_workspace(
                                             path_str,
-                                            &self.task.current_working_directory,
                                             &self.task.current_working_directory,
                                         ) {
                                             Ok(true) => {}
@@ -4142,3 +4146,7 @@ mod image_tests;
 #[cfg(test)]
 #[path = "context_tests.rs"]
 mod context_tests;
+
+#[cfg(test)]
+#[path = "tool_call_tests.rs"]
+mod tool_call_tests;

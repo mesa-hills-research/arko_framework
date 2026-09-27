@@ -103,7 +103,11 @@ impl Tool for WriteFileTool {
             });
         }
 
-        let absolute_path = context.current_working_directory.join(&file_path_str);
+        let absolute_path = super::resolve_path_parameter(
+            PATH_PARAM_NAME,
+            &file_path_str,
+            context.current_working_directory,
+        )?;
 
         log::debug!(
             "WriteFileTool: Attempting to write to file at absolute path: {:?}",

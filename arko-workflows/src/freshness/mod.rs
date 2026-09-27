@@ -2,7 +2,7 @@
 //! and workflow-defined resources.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -269,18 +269,18 @@ impl ResourceTracker {
             ToolResourceEffect::ReadFile { parameter } => parameters
                 .get(parameter)
                 .and_then(Value::as_str)
-                .map(|path| (ResourceId::File(self.normalize_path(path)), false)),
+                .and_then(|path| self.resolve_path(path))
+                .map(|path| (ResourceId::File(path), false)),
             ToolResourceEffect::ReadDirectoryTree { parameter } => parameters
                 .get(parameter)
                 .and_then(Value::as_str)
-                .map(|path| {
-                    let directory = list_files_directory(path);
-                    (ResourceId::DirectoryTree(self.normalize_path(&directory)), false)
-                }),
+                .and_then(|path| self.resolve_path(path))
+                .map(|path| (ResourceId::DirectoryTree(path), false)),
             ToolResourceEffect::WriteFile { parameter } => parameters
                 .get(parameter)
                 .and_then(Value::as_str)
-                .map(|path| (ResourceId::File(self.normalize_path(path)), true)),
+                .and_then(|path| self.resolve_path(path))
+                .map(|path| (ResourceId::File(path), true)),
         }
     }
 
@@ -410,38 +410,15 @@ impl ResourceTracker {
         self.state.write().reads.remove(actor);
     }
 
-    /// The resource key for a tool's path parameter, resolved as the built-in
-    /// file tools (`read_file`, `write_file`, `apply_diff`) resolve it:
-    /// surrounding whitespace is trimmed, a relative path is joined to the
-    /// workspace (the task's working directory, for workflow agents), and
-    /// `.` and `..` are resolved lexically with arko-agents'
-    /// [`normalize_path`](arko_agents::utils::normalize_path).
-    ///
-    /// This deliberately differs from
-    /// [`is_path_in_workspace`](arko_agents::utils::is_path_in_workspace),
-    /// which shell-expands `~` and `$VAR` before its containment check: the
-    /// tools open the path without expansion, and the key must name the file
-    /// they touch.
-    fn normalize_path(&self, input: &str) -> PathBuf {
-        let path = Path::new(input.trim());
-        let joined = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.workspace.join(path)
-        };
-        arko_agents::utils::normalize_path(&joined)
-    }
-}
-
-/// The directory the built-in `list_files` tool lists for `input`: trimmed,
-/// `\` read as `/`, trailing `/` dropped, and empty meaning the working
-/// directory. Directory-tree effects use it so their keys cover the files
-/// the listing showed.
-fn list_files_directory(input: &str) -> String {
-    let directory = input.trim().replace('\\', "/");
-    match directory.trim_end_matches('/') {
-        "" => ".".to_string(),
-        directory => directory.to_string(),
+    /// The resource key for a tool's path parameter: the path the built-in
+    /// file tools (`read_file`, `write_file`, `apply_diff`, `list_files`)
+    /// open, resolved against the workspace (the task's working directory,
+    /// for workflow agents) with arko-agents'
+    /// [`resolve_path`](arko_agents::utils::resolve_path), which the
+    /// runtime's workspace check also uses. `None` for a path that can't be
+    /// resolved, which no tool opens.
+    fn resolve_path(&self, input: &str) -> Option<PathBuf> {
+        arko_agents::utils::resolve_path(input, &self.workspace).ok()
     }
 }
 
@@ -491,17 +468,22 @@ mod tests {
         // No shell expansion: the tools open the path as given.
         assert_eq!(file("~/notes"), PathBuf::from("/workspace/~/notes"));
         assert_eq!(file("$HOME/notes"), PathBuf::from("/workspace/$HOME/notes"));
-        // list_files also reads `\` as `/` and drops trailing slashes, so a
-        // later write inside the listed directory conflicts with the read.
+        // A path no tool can open has no key.
+        let nul = HashMap::from([("path".to_string(), Value::from("a\0b"))]);
+        assert!(tracker.resource_for_tool("read_file", &nul).is_none());
+        // Trailing slashes don't change the directory list_files lists, so
+        // a later write inside it conflicts with the read.
         let directory = |path: &str| match key("list_files", "directory", path) {
             (ResourceId::DirectoryTree(path), false) => path,
             other => panic!("unexpected resource {other:?}"),
         };
-        assert_eq!(directory(r" src\core\ "), PathBuf::from("/workspace/src/core"));
+        assert_eq!(directory(" src/core/ "), PathBuf::from("/workspace/src/core"));
         assert_eq!(directory("src/core//"), PathBuf::from("/workspace/src/core"));
         assert_eq!(directory("."), PathBuf::from("/workspace"));
+        // `\` is an ordinary character on Unix, as for the tools.
+        assert_eq!(directory(r"src\core"), PathBuf::from(r"/workspace/src\core"));
         assert!(resources_overlap_for_write(
-            &ResourceId::DirectoryTree(directory(r"src\core")),
+            &ResourceId::DirectoryTree(directory("src/core")),
             &key("write_file", "path", "src/core/mod.rs").0,
         ));
     }

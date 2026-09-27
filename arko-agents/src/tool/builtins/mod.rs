@@ -24,3 +24,91 @@ pub use list_files::ListFilesTool;
 
 pub use ask_user::ASK_USER_TOOL_NAME;
 pub use ask_user::AskUserTool;
+
+/// The path a file tool opens for its `param_name` parameter: resolved with
+/// [`crate::utils::resolve_path`], which the runtime's workspace check also
+/// uses, so the check judges exactly this path.
+fn resolve_path_parameter(
+    param_name: &str,
+    path: &str,
+    working_directory: &std::path::Path,
+) -> Result<std::path::PathBuf, crate::tool::ToolError> {
+    crate::utils::resolve_path(path, working_directory).map_err(|error| {
+        crate::tool::ToolError::ParameterValidation {
+            param_name: param_name.to_string(),
+            message: format!("Invalid path '{path}': {error}"),
+        }
+    })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::tool::{TaskContext, Tool};
+    use crate::utils::{is_path_in_workspace, resolve_path};
+    use serde_json::{Value, json};
+    use std::collections::HashMap;
+
+    fn params(value: Value) -> HashMap<String, Value> {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[tokio::test]
+    async fn file_tools_open_the_path_the_workspace_check_judges() {
+        let root = std::env::temp_dir().join(format!("arko-file-tools-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("ws");
+        for directory in ["~", "$HOME", "sub"] {
+            std::fs::create_dir_all(workspace.join(directory)).unwrap();
+        }
+        let context = TaskContext {
+            task_id: uuid::Uuid::new_v4(),
+            agent_name: "tester",
+            initial_task_prompt: "",
+            current_working_directory: &workspace,
+        };
+        for (path, inside) in [
+            ("~/a.txt", true),
+            ("$HOME/b.txt", true),
+            (" sub/../c.txt\n", true),
+            ("~/../../outside.txt", false),
+        ] {
+            let target = resolve_path(path, &workspace).unwrap();
+            assert_eq!(target.starts_with(&workspace), inside, "{path}");
+            assert_eq!(
+                is_path_in_workspace(path, &workspace).unwrap(),
+                inside,
+                "{path}"
+            );
+            WriteFileTool
+                .execute(&context, params(json!({"path": path, "content": "one"})))
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "one", "{path}");
+            let diff = "<<<<<<< SEARCH\n:start_line:1\n-------\none\n=======\ntwo\n>>>>>>> REPLACE";
+            ApplyDiffTool
+                .execute(&context, params(json!({"path": path, "diff": diff})))
+                .await
+                .unwrap();
+            let read = ReadFileTool
+                .execute(&context, params(json!({"path": path})))
+                .await
+                .unwrap();
+            assert_eq!(read, "1 | two", "{path}");
+        }
+        let listed = ListFilesTool
+            .execute(&context, params(json!({"directory": " ~/ "})))
+            .await
+            .unwrap();
+        assert!(
+            listed.contains("a.txt") && !listed.contains("b.txt"),
+            "{listed}"
+        );
+        assert!(root.join("outside.txt").exists());
+        let error = ReadFileTool
+            .execute(&context, params(json!({"path": "a\u{0}b"})))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("NUL"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

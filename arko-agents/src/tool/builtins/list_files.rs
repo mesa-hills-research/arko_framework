@@ -16,19 +16,6 @@ impl ListFilesTool {
     pub fn new() -> Self {
         Self {}
     }
-
-    fn normalize_directory_path(path_str: &str) -> String {
-        let normalized = path_str
-            .replace('\\', "/")
-            .trim_end_matches('/')
-            .to_string();
-
-        if normalized.is_empty() {
-            ".".to_string()
-        } else {
-            normalized
-        }
-    }
 }
 
 impl Default for ListFilesTool {
@@ -91,11 +78,14 @@ impl Tool for ListFilesTool {
             });
         }
 
-        let normalized_dir = Self::normalize_directory_path(&directory_path_str);
-        let target_path = context.current_working_directory.join(&normalized_dir);
+        let target_path = super::resolve_path_parameter(
+            DIRECTORY_PARAM_NAME,
+            &directory_path_str,
+            context.current_working_directory,
+        )?;
 
         log::debug!(
-            "ListFilesTool: Normalized directory '{}' to target path: {:?}",
+            "ListFilesTool: Resolved directory '{}' to target path: {:?}",
             directory_path_str,
             target_path
         );

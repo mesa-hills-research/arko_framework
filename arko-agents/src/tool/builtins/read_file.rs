@@ -73,7 +73,11 @@ impl Tool for ReadFileTool {
             });
         }
 
-        let absolute_path = context.current_working_directory.join(&file_path_str);
+        let absolute_path = super::resolve_path_parameter(
+            PATH_PARAM_NAME,
+            &file_path_str,
+            context.current_working_directory,
+        )?;
 
         log::debug!(
             "ReadFileTool: Attempting to read file at absolute path: {:?}",

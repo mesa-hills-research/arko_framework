@@ -692,7 +692,11 @@ Best Practices:
             });
         }
 
-        let absolute_path = context.current_working_directory.join(&path_str);
+        let absolute_path = super::resolve_path_parameter(
+            PATH_PARAM_NAME,
+            &path_str,
+            context.current_working_directory,
+        )?;
         if !absolute_path.exists() {
             return Err(ToolError::Io {
                 tool_name: self.name(),
