@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["arko-ai", "arko-agents", "arko-workflows", "arko-index"]
+members = ["arko_ai", "arko_agents", "arko_workflows", "arko_index"]
 
 [workspace.package]
 edition = "2024"
@@ -10,8 +10,8 @@ license = "MIT OR Apache-2.0"
 # Dependencies used by more than one member. Members opt in with
 # `name.workspace = true` and may add features; features are additive.
 [workspace.dependencies]
-arko-ai = { path = "arko-ai" }
-arko-agents = { path = "arko-agents" }
+arko_ai = { path = "arko_ai" }
+arko_agents = { path = "arko_agents" }
 async-trait = "0.1.79"
 chrono = { version = "0.4.38", features = ["serde"] }
 futures = "0.3.30"

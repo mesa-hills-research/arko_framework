@@ -10,7 +10,7 @@ stays retrievable through tools.
 ## Memory reads
 
 In an agent runtime, the `read_memory` tool from
-[arko-workflows](../arko-workflows/README.md) returns a full, versioned snapshot on
+[arko_workflows](../arko_workflows/README.md) returns a full, versioned snapshot on
 the first read of a tier. Later reads return the exact change since the last
 snapshot the agent received, or an unchanged record. `full: true` requests a fresh
 snapshot. When the new text extends the previous text, as appends do, the change
@@ -31,7 +31,7 @@ Responses are JSON records with `tier`, `version`, and `kind`:
 Lines keep their newline terminators, so applying a change reproduces the current
 text byte for byte. A version counts the tier's accepted writes. A `partial`
 response is not a complete snapshot and does not establish a baseline. The
-[API index](../arko-workflows/INDEX.md#memory) documents the full record contract.
+[API index](../arko_workflows/INDEX.md#memory) documents the full record contract.
 
 Baselines are kept per task and tier, and advance only once the exact result has
 entered that task's conversation; reads still waiting on a tool batch do not
@@ -129,13 +129,13 @@ no further requests and leave tool output unchanged.
 
 If a raw fallback would be unsuitable for very large outputs, bound the output in
 the tool that produces it. `complete_task` results are never distilled. The
-[API index](../arko-workflows/INDEX.md#tool-result-distillation) documents
+[API index](../arko_workflows/INDEX.md#tool-result-distillation) documents
 configuration fields, records, and cost accounting.
 
 ## Background shell jobs
 
 The [interactive terminal tools](interactive-terminals.md) in
-`arko-agents::terminal` run commands as background jobs on Linux, macOS, and
+`arko_agents::terminal` run commands as background jobs on Linux, macOS, and
 Windows, accept input while they run, and notify the owning agent on completion.
 
 A workflow that provides its own shell tool should follow the same pattern: long

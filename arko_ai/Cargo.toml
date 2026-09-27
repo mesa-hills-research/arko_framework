@@ -1,0 +1,51 @@
+[package]
+name = "arko_ai"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "All-in-one Rust crate for interfacing with LLMs from various providers"
+license.workspace = true
+
+[dependencies]
+# TLS is rustls with the ring provider (already compiled for tokenizer
+# downloads) and the OS trust store. reqwest's default backend would add
+# aws-lc, another C build; CI rejects aws-lc and OpenSSL.
+# No http2 feature: requests use HTTP/1.1, as they did with reqwest 0.11.
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream", "charset", "system-proxy", "rustls-no-provider"] }
+rustls = { version = "0.23.27", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-platform-verifier = "0.7.1"
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+base64 = "0.22"
+url = "2.4"
+log.workspace = true
+futures.workspace = true
+tokio-stream = { version = "0.1", features = ["full"] }
+bytes = "1.5"
+async-stream = "0.3"
+eventsource-stream = "0.2.3"
+# esaxx_fast (Unigram training only) links C++ built against the static CRT,
+# which conflicts with Rust's dynamic CRT on MSVC (LNK4098).
+tokenizers = { version = "0.23.2", default-features = false, features = ["http", "onig", "progressbar"] }
+httpdate = "1.0"
+uuid.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+clap.workspace = true
+dotenv.workspace = true
+env_logger.workspace = true
+tempfile.workspace = true
+
+[[example]]
+name = "llm_client_cli"
+
+[[example]]
+name = "embeddings_demo"
+
+[[example]]
+name = "oauth_cache_probe"

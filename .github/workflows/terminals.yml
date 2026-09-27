@@ -25,7 +25,7 @@ jobs:
         with:
           python-version: '3.12'
       # Keeps aws-lc and OpenSSL out of the dependency graph. --all-features
-      # also resolves optional dependencies (e.g. arko-workflows' pyo3 bindings).
+      # also resolves optional dependencies (e.g. arko_workflows' pyo3 bindings).
       - name: Reject aws-lc and OpenSSL builds
         if: runner.os == 'Linux'
         run: |
@@ -38,6 +38,6 @@ jobs:
       - name: Framework library tests, including native terminal interactions
         run: cargo test --workspace --lib --locked --no-fail-fast
       - name: Index pipeline and watcher tests
-        run: cargo test -p arko-index --locked --no-fail-fast
+        run: cargo test -p arko_index --locked --no-fail-fast
       - name: Interactive terminal example
-        run: cargo run -p arko-agents --example interactive_terminal --locked
+        run: cargo run -p arko_agents --example interactive_terminal --locked

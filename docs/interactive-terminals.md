@@ -1,6 +1,6 @@
 # Interactive terminals
 
-`arko-agents::terminal` provides opt-in terminal tools for Linux, macOS, and
+`arko_agents::terminal` provides opt-in terminal tools for Linux, macOS, and
 Windows 10 1809 / Windows Server 2019 or later. A command starts as a background
 job and the tool call returns immediately. The job can accept input while it runs,
 and the host delivers input requests and completion notices to the owning agent
@@ -22,7 +22,7 @@ manager.register_tools(&mut registry);
 // For a plain AgentRuntime, add TerminalTool::NAMES to the agent's available tools.
 ```
 
-With `arko-workflows`, add the tools to the selected agent:
+With `arko_workflows`, add the tools to the selected agent:
 
 ```rust,ignore
 for tool in TerminalTool::all(manager.clone()) {
@@ -90,7 +90,7 @@ the request ID of each reply before applying it.
 
 Whether a process is waiting for terminal input cannot be determined reliably
 from outside it. The standalone Linux probe
-[`interactive_probe.py`](../arko-agents/tests/fixtures/interactive_probe.py)
+[`interactive_probe.py`](../arko_agents/tests/fixtures/interactive_probe.py)
 (Python standard library, real child processes) runs 14 scenarios against a PTY:
 
 - Prompt matching recognizes Y/N prompts without a newline, prompts on stderr,
@@ -108,7 +108,7 @@ descriptor writability as evidence that a question needs an answer. The probe
 runs independently of the Rust implementation:
 
 ```sh
-python3 arko-agents/tests/fixtures/interactive_probe.py
+python3 arko_agents/tests/fixtures/interactive_probe.py
 ```
 
 ## Reading output
@@ -142,7 +142,7 @@ and treat end-of-file as "no new bytes yet". The host polls the request stream
 every 20 ms, without a model call or a network listener. Keep the manager's
 directory on a local filesystem.
 
-This example uses the [`Replies` reader](../arko-agents/tests/fixtures/control_client.py)
+This example uses the [`Replies` reader](../arko_agents/tests/fixtures/control_client.py)
 from the test fixtures, which retains partial lines while waiting:
 
 ```python
@@ -243,8 +243,8 @@ backpressure, cancellation and deadlines, process-group cleanup, restart records
 and automatic runtime binding. CI runs them on Linux, macOS, and Windows.
 
 ```sh
-cargo test -p arko-agents --lib terminal:: --locked
-cargo run -p arko-agents --example interactive_terminal --locked
+cargo test -p arko_agents --lib terminal:: --locked
+cargo run -p arko_agents --example interactive_terminal --locked
 ```
 
 The example answers a fixed Y/N fixture with a predetermined answer and needs no
