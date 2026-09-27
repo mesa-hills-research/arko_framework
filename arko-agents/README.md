@@ -329,9 +329,10 @@ parameters as `flag value` and each true boolean parameter as its flag. An `is_p
 parameter passes the path the workspace check judged: absolute and resolved, so the
 program cannot read it as an option and a symbolic link cannot redirect its `..`. The
 command runs in the task's working directory without a shell, and its standard output is
-the result;
-a nonzero exit status is a tool error. A boolean parameter takes a JSON boolean or the
-text `true` or `false`, so it works in both tool calling modes.
+the result; a nonzero exit status is a tool error. The process is killed when its call is
+dropped, for example when the task's runtime is aborted mid-call. A boolean parameter
+takes a JSON boolean or the text `true` or `false`, so it works in both tool calling
+modes.
 
 ### Result interception and execution middleware
 
@@ -344,8 +345,12 @@ The last two `run_task` arguments wrap tool execution:
   the replacement. Results of `complete_task` and `ask_user` are never intercepted.
 - A `ToolExecutionMiddleware` runs `before` and `after` every execution, whether
   approved or auto-approved, native or output-based. `before` returns `Continue`,
-  `Reject { message_to_agent }`, or `FailTask { reason }`. A call answered with
-  `custom_tool_output` skips `before`, and `after` receives `CallerProvided`.
+  `Reject { message_to_agent }`, `FailTask { reason }`, or `CancelTask { reason }`,
+  which ends the task as `Cancelled { reason }` (arko-workflows uses it when a run is
+  cancelled). The rejected call gets `reason` as its result, and the calls of the
+  response the stopped task did not run get a result saying so ("This call was not run:
+  Workflow cancelled."). A call answered with `custom_tool_output` skips `before`, and
+  `after` receives `CallerProvided`.
 
 ### MCP servers
 
@@ -398,7 +403,8 @@ background and notify the agent of input requests and completion. See
 
 `TaskState` is one of `Pending`, `InProgress`, `AwaitingToolApproval`,
 `AwaitingBatchToolApproval`, `AwaitingUserResponse`, `AwaitingErrorRecoveryApproval`,
-`Interrupted`, `Completed`, or `Failed`; `Completed` and `Failed` are terminal.
+`Interrupted`, `Completed`, `Failed`, or `Cancelled { reason }`; `Completed`, `Failed`,
+and `Cancelled` are terminal.
 
 | Events | Meaning |
 | --- | --- |
@@ -407,7 +413,7 @@ background and notify the agent of input requests and completion. See
 | `ToolCallInitiated`, `ToolCallFormatted` | A tool call was announced, then parsed. Output-based mode with `simplified_tool_events` off also emits `ToolParamName`, `ToolParamValueChunk`, and `ToolParamEnd`. |
 | `ToolCallAwaitingApproval`, `BatchToolCallAwaitingApproval`, `UserQuestionsAsked` | The task waits for a command. |
 | `ToolResult`, `ToolResultIntercepted`, `ToolRejected`, `UnavailableToolAttempted` | Tool outcomes. |
-| `ErrorEncountered`, `RetryScheduled`, `UsageLimitReached` | Errors and recovery. `requires_approval_to_retry` marks a pause; `RetryScheduled` carries the attempt, delay, and elapsed milliseconds. |
+| `ErrorEncountered`, `RetryScheduled`, `UsageLimitReached` | Errors and recovery. `requires_approval_to_retry` marks a pause; `RetryScheduled` carries the attempt, delay, and elapsed milliseconds, and `rate_limit` when the retry waits out a provider rate limit. |
 | `RefusalReceived`, `RefusedInput`, `RefusalFallback` | Refusals. |
 | `UsageReported`, `ModelCallUsageReported`, `PlanUsageReported`, `ModelRerouted` | Usage after each model call. |
 | `CacheEfficiencyReported`, `CacheEfficiencyLow`, `PlanUsageThresholdReached` | Opt-in monitors. |
@@ -416,8 +422,13 @@ background and notify the agent of input requests and completion. See
 Besides answers to the waiting states, a running task accepts:
 
 - `InjectContext { content }`: queued and added at the next turn boundary as a user
-  message headed `# Workflow context update`; a stream in progress is not changed.
-- `CancelTask`: the task ends as `Failed { reason: "Task cancelled by user." }`.
+  message headed `# Workflow context update`; a stream in progress is not changed. A
+  `TurnContextSource` given to `AgentRuntime::with_turn_context` is also asked for context
+  at each such boundary, before each model request, and its answer joins that message.
+- `CancelTask`: the task ends as `Cancelled { reason }` with `CANCELLED_BY_USER` ("Task
+  cancelled by user."). Calls it waited on get a result saying they were not run. A task
+  saved by an older version as `Failed { reason: "Task cancelled by user." }` loads as
+  `Cancelled`.
 - `SuspendTask`: the runtime stops and returns the task in its current state, for example
   to save it. A task suspended while it awaits a command, in any awaiting state, keeps
   its pending calls and results and waits for that command when it runs again.
