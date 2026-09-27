@@ -273,7 +273,10 @@ impl ResourceTracker {
             ToolResourceEffect::ReadDirectoryTree { parameter } => parameters
                 .get(parameter)
                 .and_then(Value::as_str)
-                .map(|path| (ResourceId::DirectoryTree(self.normalize_path(path)), false)),
+                .map(|path| {
+                    let directory = list_files_directory(path);
+                    (ResourceId::DirectoryTree(self.normalize_path(&directory)), false)
+                }),
             ToolResourceEffect::WriteFile { parameter } => parameters
                 .get(parameter)
                 .and_then(Value::as_str)
@@ -407,24 +410,38 @@ impl ResourceTracker {
         self.state.write().reads.remove(actor);
     }
 
-    /// The resource key for a tool's path parameter: a relative path is
-    /// joined to the workspace, then `.` and `..` are resolved lexically with
-    /// arko-agents' [`normalize_path`](arko_agents::utils::normalize_path).
+    /// The resource key for a tool's path parameter, resolved as the built-in
+    /// file tools (`read_file`, `write_file`, `apply_diff`) resolve it:
+    /// surrounding whitespace is trimmed, a relative path is joined to the
+    /// workspace (the task's working directory, for workflow agents), and
+    /// `.` and `..` are resolved lexically with arko-agents'
+    /// [`normalize_path`](arko_agents::utils::normalize_path).
     ///
     /// This deliberately differs from
     /// [`is_path_in_workspace`](arko_agents::utils::is_path_in_workspace),
     /// which shell-expands `~` and `$VAR` before its containment check: the
-    /// built-in file tools open the literal path joined to the task's working
-    /// directory (the workspace, for workflow agents), and the key must name
-    /// the file they touch.
+    /// tools open the path without expansion, and the key must name the file
+    /// they touch.
     fn normalize_path(&self, input: &str) -> PathBuf {
-        let path = Path::new(input);
+        let path = Path::new(input.trim());
         let joined = if path.is_absolute() {
             path.to_path_buf()
         } else {
             self.workspace.join(path)
         };
         arko_agents::utils::normalize_path(&joined)
+    }
+}
+
+/// The directory the built-in `list_files` tool lists for `input`: trimmed,
+/// `\` read as `/`, trailing `/` dropped, and empty meaning the working
+/// directory. Directory-tree effects use it so their keys cover the files
+/// the listing showed.
+fn list_files_directory(input: &str) -> String {
+    let directory = input.trim().replace('\\', "/");
+    match directory.trim_end_matches('/') {
+        "" => ".".to_string(),
+        directory => directory.to_string(),
     }
 }
 
@@ -444,30 +461,49 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn tool_paths_resolve_against_the_workspace_lexically_and_literally() {
+    fn tool_paths_resolve_as_the_built_in_tools_open_them() {
+        // The default effects: read_file, write_file and apply_diff on
+        // `path`, list_files on `directory`.
         let tracker = ResourceTracker::new(
             PathBuf::from("/workspace"),
-            ContextFreshnessConfig::default().tool_effect(
-                "read_file",
-                ToolResourceEffect::ReadFile {
-                    parameter: "path".into(),
-                },
-            ),
+            ContextFreshnessConfig::default(),
         );
-        let key = |path: &str| {
-            let parameters = HashMap::from([("path".to_string(), Value::from(path))]);
-            match tracker.resource_for_tool("read_file", &parameters) {
-                Some((ResourceId::File(path), false)) => path,
-                other => panic!("unexpected resource {other:?}"),
-            }
+        let key = |tool: &str, parameter: &str, path: &str| {
+            let parameters = HashMap::from([(parameter.to_string(), Value::from(path))]);
+            tracker.resource_for_tool(tool, &parameters).unwrap()
         };
-        assert_eq!(key("src/./lib.rs"), PathBuf::from("/workspace/src/lib.rs"));
-        assert_eq!(key("src/../Cargo.toml"), PathBuf::from("/workspace/Cargo.toml"));
-        assert_eq!(key("/other/./a/../b"), PathBuf::from("/other/b"));
-        assert_eq!(key("../../../../etc/hosts"), PathBuf::from("/etc/hosts"));
-        // No shell expansion: the built-in tools open the literal path.
-        assert_eq!(key("~/notes"), PathBuf::from("/workspace/~/notes"));
-        assert_eq!(key("$HOME/notes"), PathBuf::from("/workspace/$HOME/notes"));
+        let file = |path: &str| match key("read_file", "path", path) {
+            (ResourceId::File(path), false) => path,
+            other => panic!("unexpected resource {other:?}"),
+        };
+        assert_eq!(file("src/./lib.rs"), PathBuf::from("/workspace/src/lib.rs"));
+        assert_eq!(file("src/../Cargo.toml"), PathBuf::from("/workspace/Cargo.toml"));
+        assert_eq!(file("/other/./a/../b"), PathBuf::from("/other/b"));
+        assert_eq!(file("../../../../etc/hosts"), PathBuf::from("/etc/hosts"));
+        // The tools trim the path first.
+        assert_eq!(file(" src/lib.rs\n"), PathBuf::from("/workspace/src/lib.rs"));
+        for tool in ["write_file", "apply_diff"] {
+            assert_eq!(
+                key(tool, "path", "\tsrc/lib.rs "),
+                (ResourceId::File(PathBuf::from("/workspace/src/lib.rs")), true)
+            );
+        }
+        // No shell expansion: the tools open the path as given.
+        assert_eq!(file("~/notes"), PathBuf::from("/workspace/~/notes"));
+        assert_eq!(file("$HOME/notes"), PathBuf::from("/workspace/$HOME/notes"));
+        // list_files also reads `\` as `/` and drops trailing slashes, so a
+        // later write inside the listed directory conflicts with the read.
+        let directory = |path: &str| match key("list_files", "directory", path) {
+            (ResourceId::DirectoryTree(path), false) => path,
+            other => panic!("unexpected resource {other:?}"),
+        };
+        assert_eq!(directory(r" src\core\ "), PathBuf::from("/workspace/src/core"));
+        assert_eq!(directory("src/core//"), PathBuf::from("/workspace/src/core"));
+        assert_eq!(directory("."), PathBuf::from("/workspace"));
+        assert!(resources_overlap_for_write(
+            &ResourceId::DirectoryTree(directory(r"src\core")),
+            &key("write_file", "path", "src/core/mod.rs").0,
+        ));
     }
 
     #[test]
