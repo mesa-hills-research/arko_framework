@@ -24,6 +24,8 @@ pub struct SharedContext {
     pub durable_store: Option<Arc<crate::durable::DurableStore>>,
     pub memory: MemoryStore,
     pub messages: MessageBus,
+    /// Who may message whom with `send_message`; `None` disables it.
+    pub messaging: Option<crate::messaging::MessagingPolicy>,
     pub resource_tracker: Option<ResourceTracker>,
     pub hooks: Arc<HookRegistry>,
     pub agent_configs: HashMap<String, AgentConfig>,
@@ -51,6 +53,17 @@ pub struct SharedContext {
     pub user_input_handler: Option<Arc<dyn crate::user_input::UserInputHandler>>,
     pub ballots: Option<Arc<crate::voting::BallotStore>>,
     pub event_tx: tokio::sync::broadcast::Sender<crate::workflow::result::WorkflowEvent>,
+}
+
+impl SharedContext {
+    /// The agents `agent_name` may message with `send_message`: registered
+    /// agents other than itself that the messaging policy permits. Empty when
+    /// messaging is disabled; the agent is then not offered the tool.
+    pub fn message_recipients(&self, agent_name: &str) -> Vec<String> {
+        self.messaging.as_ref().map_or_else(Vec::new, |policy| {
+            policy.recipients_of(agent_name, &self.messages.roster())
+        })
+    }
 }
 
 impl fmt::Debug for SharedContext {

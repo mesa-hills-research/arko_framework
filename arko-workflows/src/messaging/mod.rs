@@ -26,6 +26,86 @@ pub enum MessageAttachment {
     Text { name: String, content: String },
 }
 
+/// Whom each agent may message with the `send_message` tool.
+///
+/// Set with [`WorkflowBuilder::messaging`](crate::WorkflowBuilder::messaging).
+/// An agent the policy doesn't name may message every other registered agent
+/// (the default for every agent); [`can_message`](Self::can_message)
+/// restricts an agent to named recipients, or to none. An agent is offered
+/// `send_message` only when it has at least one permitted recipient, so a
+/// single-agent workflow has none.
+///
+/// ```rust
+/// use arko_workflows::messaging::MessagingPolicy;
+///
+/// // Workers report to the lead only; the lead may message everyone.
+/// let policy = MessagingPolicy::all()
+///     .can_message("worker_a", ["lead"])
+///     .can_message("worker_b", ["lead"]);
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct MessagingPolicy {
+    /// For each agent listed, the only agents it may message (none when the
+    /// set is empty); an agent without an entry may message every other
+    /// agent.
+    pub recipients: HashMap<String, HashSet<String>>,
+}
+
+impl MessagingPolicy {
+    /// Every agent may message every other agent (the default).
+    pub fn all() -> Self {
+        Self::default()
+    }
+
+    /// `agent` may message only `recipients`; an empty list means no one.
+    /// Replaces an earlier setting for `agent`.
+    pub fn can_message<I, S>(mut self, agent: impl Into<String>, recipients: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.recipients.insert(
+            agent.into(),
+            recipients.into_iter().map(Into::into).collect(),
+        );
+        self
+    }
+
+    /// `agent` may message no one and is not offered `send_message`.
+    pub fn cannot_message(self, agent: impl Into<String>) -> Self {
+        self.can_message(agent, std::iter::empty::<String>())
+    }
+
+    /// The agents of `roster` that `sender` may message, in roster order;
+    /// never the sender itself.
+    pub fn recipients_of(&self, sender: &str, roster: &[String]) -> Vec<String> {
+        let permitted = self.recipients.get(sender);
+        roster
+            .iter()
+            .filter(|agent| {
+                agent.as_str() != sender && permitted.is_none_or(|allowed| allowed.contains(*agent))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Every agent the policy names must be registered.
+    pub(crate) fn validate(&self, agents: &HashSet<String>) -> Result<(), crate::WorkflowError> {
+        let named = self
+            .recipients
+            .iter()
+            .flat_map(|(sender, recipients)| std::iter::once(sender).chain(recipients));
+        for agent in named {
+            if !agents.contains(agent) {
+                return Err(crate::WorkflowError::BuilderInvalid(format!(
+                    "messaging policy references unknown agent '{agent}'"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A message sent between agents in a workflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentMessage {

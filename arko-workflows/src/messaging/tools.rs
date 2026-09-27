@@ -16,6 +16,8 @@ use crate::context::SharedContext;
 pub const SEND_MESSAGE_TOOL_NAME: &str = "send_message";
 
 /// Tool allowing agents to send messages to other agents in the workflow.
+/// It lists, and accepts, only the recipients the workflow's messaging
+/// policy permits the agent.
 #[derive(Debug)]
 pub struct SendMessageTool {
     context: Arc<SharedContext>,
@@ -38,7 +40,7 @@ impl Tool for SendMessageTool {
             name: SEND_MESSAGE_TOOL_NAME.to_string(),
             description: format!(
                 "Send a message to another agent in the workflow. Active agents receive it at their next safe turn boundary. Valid recipients: {}.",
-                self.context.messages.roster().join(", ")
+                self.context.message_recipients(&self.agent_name).join(", ")
             ),
             output_based_example: None,
             parameters: vec![
@@ -102,6 +104,17 @@ impl Tool for SendMessageTool {
                 message: error.to_string(),
             })?
             .unwrap_or_default();
+
+        let recipients = self.context.message_recipients(&self.agent_name);
+        if !recipients.iter().any(|recipient| recipient == to) {
+            return Err(ToolError::ParameterValidation {
+                param_name: "to".to_string(),
+                message: format!(
+                    "'{to}' is not a recipient you may message; valid recipients: {}",
+                    recipients.join(", ")
+                ),
+            });
+        }
 
         let message = self
             .context

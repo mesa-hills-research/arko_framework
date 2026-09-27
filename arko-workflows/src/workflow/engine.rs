@@ -761,7 +761,11 @@ impl WorkflowEngine {
         }
     }
 
-    fn build_tool_registry(&self, agent_name: &str, ctx: &Arc<SharedContext>) -> ToolRegistry {
+    pub(crate) fn build_tool_registry(
+        &self,
+        agent_name: &str,
+        ctx: &Arc<SharedContext>,
+    ) -> ToolRegistry {
         let mut registry = ToolRegistry::new();
 
         if !ctx.memory.is_empty() {
@@ -779,10 +783,12 @@ impl WorkflowEngine {
             )));
         }
 
-        registry.register(Arc::new(SendMessageTool::new(
-            ctx.clone(),
-            agent_name.to_string(),
-        )));
+        if !ctx.message_recipients(agent_name).is_empty() {
+            registry.register(Arc::new(SendMessageTool::new(
+                ctx.clone(),
+                agent_name.to_string(),
+            )));
+        }
         if let Some(services) = ctx.workflow_services.get()
             && services.is_allowed(agent_name)
         {
@@ -870,7 +876,7 @@ impl WorkflowEngine {
         })
     }
 
-    fn prepare_agent_config(
+    pub(crate) fn prepare_agent_config(
         &self,
         agent_name: &str,
         base_config: &AgentConfig,
@@ -883,7 +889,9 @@ impl WorkflowEngine {
             ensure_tool_name(&mut config, WRITE_MEMORY_TOOL_NAME);
             ensure_tool_name(&mut config, LIST_MEMORIES_TOOL_NAME);
         }
-        ensure_tool_name(&mut config, SEND_MESSAGE_TOOL_NAME);
+        if !ctx.message_recipients(agent_name).is_empty() {
+            ensure_tool_name(&mut config, SEND_MESSAGE_TOOL_NAME);
+        }
         if let Some(services) = ctx.workflow_services.get()
             && services.is_allowed(agent_name)
         {

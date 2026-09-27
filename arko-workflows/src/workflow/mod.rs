@@ -19,7 +19,8 @@ use crate::freshness::{ActorId, ResourceId};
 use crate::freshness::{ContextFreshnessConfig, ResourceTracker};
 use crate::hooks::{HookCallback, HookPoint, HookRegistry};
 use crate::memory::MemoryConfig;
-use crate::messaging::MessageBus;
+use crate::messaging::tools::SEND_MESSAGE_TOOL_NAME;
+use crate::messaging::{MessageBus, MessagingPolicy};
 use crate::persistence::{PersistenceConfig, PersistenceManager};
 use crate::services::{RUN_WORKFLOW_AGENT_TOOL_NAME, WorkflowServices, WorkflowServicesConfig};
 use crate::user_input::UserInputHandler;
@@ -592,6 +593,7 @@ pub struct WorkflowBuilder {
     completion_verifiers: Vec<CompletionVerifierConfig>,
     distillation_configs: Vec<DistillationConfig>,
     services_config: Option<WorkflowServicesConfig>,
+    messaging: Option<MessagingPolicy>,
     user_input_handler: Option<Arc<dyn UserInputHandler>>,
     voting_enabled: bool,
     interception_failure_policy: Option<InterceptionFailurePolicy>,
@@ -621,6 +623,7 @@ impl WorkflowBuilder {
             completion_verifiers: Vec::new(),
             distillation_configs: Vec::new(),
             services_config: None,
+            messaging: Some(MessagingPolicy::default()),
             user_input_handler: None,
             voting_enabled: false,
             interception_failure_policy: None,
@@ -782,6 +785,20 @@ impl WorkflowBuilder {
         self
     }
 
+    /// Set whom each agent may message with the `send_message` tool. By
+    /// default every agent may message every other agent.
+    pub fn messaging(mut self, policy: MessagingPolicy) -> Self {
+        self.messaging = Some(policy);
+        self
+    }
+
+    /// Offer no agent the `send_message` tool. The tool name is then free
+    /// for a host tool.
+    pub fn disable_messaging(mut self) -> Self {
+        self.messaging = None;
+        self
+    }
+
     pub fn user_input_handler(mut self, handler: Arc<dyn UserInputHandler>) -> Self {
         self.user_input_handler = Some(handler);
         self
@@ -919,6 +936,22 @@ impl WorkflowBuilder {
             }
         }
 
+        // Agents offered the workflow's send_message tool: those with a
+        // permitted recipient.
+        let mut roster = agent_names.iter().cloned().collect::<Vec<_>>();
+        roster.sort();
+        let messaging_agents = match &self.messaging {
+            Some(policy) => {
+                policy.validate(&agent_names)?;
+                roster
+                    .iter()
+                    .filter(|agent| !policy.recipients_of(agent, &roster).is_empty())
+                    .cloned()
+                    .collect::<HashSet<_>>()
+            }
+            None => HashSet::new(),
+        };
+
         let mut global_tool_names = HashSet::new();
         for tool in &self.global_tools {
             let tool_name = tool.name();
@@ -929,10 +962,10 @@ impl WorkflowBuilder {
                     | "read_memory"
                     | "write_memory"
                     | "list_memories"
-                    | "send_message"
                     | RUN_WORKFLOW_AGENT_TOOL_NAME
                     | CAST_VOTE_TOOL_NAME
-            ) {
+            ) || (tool_name == SEND_MESSAGE_TOOL_NAME && !messaging_agents.is_empty())
+            {
                 return Err(WorkflowError::BuilderInvalid(format!(
                     "tool name '{tool_name}' is reserved"
                 )));
@@ -948,6 +981,11 @@ impl WorkflowBuilder {
             let mut names = global_tool_names.clone();
             for tool in tools {
                 let tool_name = tool.name();
+                if tool_name == SEND_MESSAGE_TOOL_NAME && messaging_agents.contains(agent_name) {
+                    return Err(WorkflowError::BuilderInvalid(format!(
+                        "tool name '{tool_name}' is reserved for agent '{agent_name}', which messaging permits to send"
+                    )));
+                }
                 if !names.insert(tool_name.clone()) {
                     return Err(WorkflowError::BuilderInvalid(format!(
                         "duplicate tool name '{tool_name}' for agent '{agent_name}'"
@@ -1045,6 +1083,7 @@ impl WorkflowBuilder {
             durable_store,
             memory,
             messages,
+            messaging: self.messaging,
             resource_tracker,
             hooks: Arc::new(hook_registry),
             agent_configs: self.agents.iter().cloned().collect(),
@@ -1118,3 +1157,7 @@ impl Default for WorkflowBuilder {
         Self::new()
     }
 }
+
+#[cfg(test)]
+#[path = "messaging_tests.rs"]
+mod messaging_tests;

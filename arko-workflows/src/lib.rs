@@ -73,7 +73,7 @@ pub mod prelude {
     };
     pub use crate::hooks::{HookCallback, HookPoint, HookResult};
     pub use crate::memory::{AccessScope, MemoryConfig, MemoryEntry, MemoryTier, WriteMode};
-    pub use crate::messaging::{AgentMessage, MessageAttachment};
+    pub use crate::messaging::{AgentMessage, MessageAttachment, MessagingPolicy};
     pub use crate::persistence::PersistenceConfig;
     pub use crate::services::{WorkflowServices, WorkflowServicesConfig};
     pub use crate::user_input::{UserInputHandler, UserInputRequest};
