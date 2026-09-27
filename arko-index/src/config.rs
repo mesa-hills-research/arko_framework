@@ -10,6 +10,12 @@ pub struct Config {
     pub embedding_concurrency: usize,
     pub embedding: EmbeddingProfile,
     pub vector_cache_bytes: usize,
+    /// Attempts of one provider request that may fail with transient errors
+    /// (rate limits, timeouts, server errors, truncated streams, malformed
+    /// tool calls) before the request fails with the last error. Explicit
+    /// capacity signals (overloaded / unavailable) keep waiting without
+    /// consuming attempts; pause and cancel interrupt any wait.
+    pub max_transient_attempts: usize,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -19,6 +25,7 @@ impl Default for Config {
             embedding_concurrency: 2,
             embedding: EmbeddingProfile::default(),
             vector_cache_bytes: 64 * 1024 * 1024,
+            max_transient_attempts: 10,
         }
     }
 }
@@ -44,6 +51,9 @@ impl Config {
             return Err(invalid(
                 "batch count and request concurrency must be positive",
             ));
+        }
+        if self.max_transient_attempts == 0 {
+            return Err(invalid("max_transient_attempts must be positive"));
         }
         if self.embedding.tokenizer_revision.is_empty() {
             return Err(invalid("pin a tokenizer revision"));

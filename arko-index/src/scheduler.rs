@@ -17,7 +17,9 @@ use tokio::{
 };
 
 /// Delay between transient provider failures: 1 s doubling to a 60 s cap,
-/// jittered, and never shorter than the provider's Retry-After.
+/// jittered, and never shorter than the provider's Retry-After. A request
+/// fails with its last error after `max_transient_attempts` transient
+/// failures; explicit capacity signals wait without consuming that budget.
 const RETRY_BACKOFF: arko_ai::BackoffPolicy =
     arko_ai::BackoffPolicy::new(Duration::from_secs(1), Duration::from_secs(60));
 
@@ -34,6 +36,8 @@ struct Task {
     operation: Operation,
     initial: bool,
     attempts: usize,
+    /// Failures that consumed the transient-attempt budget (not capacity).
+    transient_failures: usize,
     failures: Vec<serde_json::Value>,
     ready: Instant,
     control: watch::Receiver<u8>,
@@ -75,7 +79,7 @@ pub(crate) struct Scheduler {
     pub active: Arc<AtomicUsize>,
 }
 impl Scheduler {
-    pub fn new(backend: Arc<dyn Backend>, limit: usize) -> Self {
+    pub fn new(backend: Arc<dyn Backend>, limit: usize, max_transient_attempts: usize) -> Self {
         let (tx, mut rx) = mpsc::channel::<Task>(64);
         let active = Arc::new(AtomicUsize::new(0));
         let count = active.clone();
@@ -184,13 +188,19 @@ impl Scheduler {
                         // A panic closes that request's oneshot; callers persist its worker error.
                         if let Some(Ok((mut task, mut result))) = completed {
                                 if let Err(error)=&result {task.event("failed",serde_json::json!({"error":error.to_string()}));task.failures.push(serde_json::json!({"attempt":task.attempts,"error":error.to_string()}));}
-                                if let Err(Error::Provider { transient: true, retry_after, .. }) = &result
+                                if let Err(error @ Error::Provider { transient: true, retry_after, .. }) = &result
                                     && *task.control.borrow() == 0 {
-                                        let attempt = u32::try_from(task.attempts).unwrap_or(u32::MAX);
-                                        let delay = RETRY_BACKOFF.next_delay(attempt, *retry_after);
-                                        task.event("retry_wait",serde_json::json!({"delay_ms":delay.as_millis()}));
-                                        task.attempts = task.attempts.saturating_add(1); task.initial = false; task.ready = Instant::now()+delay;
-                                        queue.push_back(task); continue;
+                                        // Capacity signals wait without consuming the attempt budget.
+                                        let capacity = error.retry_class() == Some(arko_ai::RetryClass::Capacity);
+                                        if !capacity { task.transient_failures = task.transient_failures.saturating_add(1); }
+                                        if capacity || task.transient_failures < max_transient_attempts {
+                                            let attempt = u32::try_from(task.attempts).unwrap_or(u32::MAX);
+                                            let delay = RETRY_BACKOFF.next_delay(attempt, *retry_after);
+                                            task.event("retry_wait",serde_json::json!({"delay_ms":delay.as_millis(),"capacity":capacity}));
+                                            task.attempts = task.attempts.saturating_add(1); task.initial = false; task.ready = Instant::now()+delay;
+                                            queue.push_back(task); continue;
+                                        }
+                                        task.event("retries_exhausted",serde_json::json!({"transient_failures":task.transient_failures}));
                                     }
                                 if result.is_ok() {task.event("completed",serde_json::json!({}));}
                                 if let Ok(Reply::Chunk(reply))=&mut result {
@@ -227,6 +237,7 @@ impl Scheduler {
                 operation,
                 initial,
                 attempts: 1,
+                transient_failures: 0,
                 failures: vec![],
                 ready: Instant::now(),
                 control: control.0.subscribe(),
@@ -257,6 +268,8 @@ mod tests {
         tries: Mutex<Vec<usize>>,
         retry_attempts: usize,
         retry_delay: Duration,
+        /// Fail with an explicit capacity signal instead of a plain transient error.
+        capacity: bool,
     }
     #[async_trait::async_trait]
     impl Backend for Gate {
@@ -273,7 +286,14 @@ mod tests {
                     message: "temporary capacity".into(),
                     transient: true,
                     retry_after: Some(self.retry_delay),
-                    source: None,
+                    source: self.capacity.then(|| {
+                        Box::new(arko_ai::Error::ProviderError {
+                            message: "overloaded".into(),
+                            status: Some(529),
+                            code: Some("overloaded_error".into()),
+                            retry_after: None,
+                        })
+                    }),
                 });
             }
             self.gates[id].acquire().await.unwrap().forget();
@@ -315,8 +335,9 @@ mod tests {
             tries: Mutex::new(vec![0; count]),
             retry_attempts: usize::from(retry),
             retry_delay: Duration::from_secs(3600),
+            capacity: false,
         });
-        let scheduler = Scheduler::new(gate.clone(), concurrency);
+        let scheduler = Scheduler::new(gate.clone(), concurrency, 10);
         (gate, scheduler, rx)
     }
     fn enqueue(
@@ -429,8 +450,9 @@ mod tests {
             tries: Mutex::new(vec![0]),
             retry_attempts: 4,
             retry_delay: Duration::from_secs(10),
+            capacity: false,
         });
-        let scheduler = Scheduler::new(gate.clone(), 1);
+        let scheduler = Scheduler::new(gate.clone(), 1, 10);
         let control = Control::new();
         let (progress, mut events) = mpsc::unbounded_channel();
         let request = Operation::Chunk(ModelRequest {
@@ -486,5 +508,74 @@ mod tests {
         }
         assert!(observed.iter().all(|e| e["unix_ms"].is_u64()));
         assert_eq!(observed.last().unwrap()["phase"], "completed");
+    }
+    fn failing_gate(
+        failures: usize,
+        capacity: bool,
+    ) -> (Arc<Gate>, mpsc::UnboundedReceiver<usize>) {
+        let (started, started_rx) = mpsc::unbounded_channel();
+        let gate = Arc::new(Gate {
+            profile: Default::default(),
+            gates: vec![tokio::sync::Semaphore::new(0)],
+            started,
+            tries: Mutex::new(vec![0]),
+            retry_attempts: failures,
+            retry_delay: Duration::from_secs(10),
+            capacity,
+        });
+        (gate, started_rx)
+    }
+    fn chunk_request() -> Operation {
+        Operation::Chunk(ModelRequest {
+            system: String::new(),
+            prompt: "0".into(),
+            tool: "test".into(),
+            schema: json!({}),
+        })
+    }
+    #[tokio::test(start_paused = true)]
+    async fn transient_failures_stop_at_the_attempt_limit_with_the_last_error() {
+        let (gate, _started) = failing_gate(usize::MAX, false);
+        let scheduler = Scheduler::new(gate.clone(), 1, 3);
+        let control = Control::new();
+        let (progress, mut events) = mpsc::unbounded_channel();
+        let result = scheduler
+            .call_tracked(chunk_request(), true, &control, Some(progress))
+            .await;
+        assert!(matches!(
+            result,
+            Err(Error::Provider {
+                transient: true,
+                ..
+            })
+        ));
+        assert_eq!(gate.tries.lock().unwrap()[0], 3);
+        let mut observed = vec![];
+        while let Ok(event) = events.try_recv() {
+            observed.push(event);
+        }
+        let phases: Vec<_> = observed.iter().map(|e| e["phase"].clone()).collect();
+        assert_eq!(phases.iter().filter(|p| *p == "retry_wait").count(), 2);
+        assert_eq!(phases.iter().filter(|p| *p == "failed").count(), 3);
+        let exhausted = observed.last().unwrap();
+        assert_eq!(exhausted["phase"], "retries_exhausted");
+        assert_eq!(exhausted["detail"]["transient_failures"], 3);
+        assert_eq!(scheduler.active.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn capacity_waits_do_not_consume_the_attempt_limit() {
+        let (gate, _started) = failing_gate(5, true);
+        gate.gates[0].add_permits(1);
+        let scheduler = Scheduler::new(gate.clone(), 1, 2);
+        let control = Control::new();
+        let Reply::Chunk(reply) = scheduler
+            .call(chunk_request(), true, &control)
+            .await
+            .unwrap()
+        else {
+            panic!("wrong response")
+        };
+        assert_eq!(gate.tries.lock().unwrap()[0], 6);
+        assert_eq!(reply.usage["attempts"], 6);
     }
 }

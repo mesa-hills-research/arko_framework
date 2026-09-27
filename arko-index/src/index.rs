@@ -90,8 +90,16 @@ impl ArkoIndex {
         Ok(Self {
             inner: Arc::new(Inner {
                 db,
-                luna: Scheduler::new(backend.clone(), config.concurrency),
-                embeddings: Scheduler::new(backend.clone(), config.embedding_concurrency),
+                luna: Scheduler::new(
+                    backend.clone(),
+                    config.concurrency,
+                    config.max_transient_attempts,
+                ),
+                embeddings: Scheduler::new(
+                    backend.clone(),
+                    config.embedding_concurrency,
+                    config.max_transient_attempts,
+                ),
                 backend,
                 config,
                 controls: Mutex::new(HashMap::new()),

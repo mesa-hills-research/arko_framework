@@ -4,7 +4,7 @@
 
 The historical budgets and size targets described below have been removed. Code chunking preserves complete functions, impls and other logical components regardless of size; documentation follows topic/example boundaries. Only actual Voyage constraints require embedding subdivision. Whole source files are shown to Luna, and repairs receive complete source context and may return multiple legal boundaries.
 
-Search returns complete chunk text with no preview or response budget, no hidden candidate cap, and no default hit-count restriction. `top_k` is an optional caller-requested page size. Repairs and transient transport retries have no attempt limit. Per-attempt events now expose starts, failures, waits and completion immediately. Changing the chunking policy invalidates old boundary reuse. The earlier 1,200–2,400 and experimental 6,000–12,000 character targets are historical measurements, not current guidance.
+Search returns complete chunk text with no preview or response budget, no hidden candidate cap, and no default hit-count restriction. `top_k` is an optional caller-requested page size. Repairs have no attempt limit. (Update: transient retries are now capped by `Config::max_transient_attempts`, default 10; explicit capacity signals still wait without a cap.) Per-attempt events now expose starts, failures, waits and completion immediately. Changing the chunking policy invalidates old boundary reuse. The earlier 1,200–2,400 and experimental 6,000–12,000 character targets are historical measurements, not current guidance.
 
 The updated regression suite checks source preservation and retrieval beyond the removed limits. See the package README for the current API; the entries below retain the measured causes that led to these corrections.
 
@@ -18,7 +18,7 @@ One deterministic guard omission also surfaced: repair 121 selected L1 in `arko-
 
 These updates target observed causes. Live grouping checks are needed in addition to boundary validation: the earlier 39 repairs passed the then-implemented guards on their first attempts, but that did not establish semantic grouping quality or coverage of every Rust syntax construct.
 
-Transient provider errors retry automatically without an attempt limit. Each failure increases the previous wait by about one second plus jitter, or uses a longer provider-requested delay. There is no configured wait ceiling; pending waits release the provider slot and remain pausable/cancellable. The retry regression test uses virtual time to verify four increasing waits, provider retry timing and success on the fifth attempt.
+Transient provider errors retry automatically without an attempt limit. Each failure increases the previous wait by about one second plus jitter, or uses a longer provider-requested delay. There is no configured wait ceiling; pending waits release the provider slot and remain pausable/cancellable. The retry regression test uses virtual time to verify four increasing waits, provider retry timing and success on the fifth attempt. (Update: errors such as truncated streams and malformed tool calls became transient, so a deterministic failure could retry forever; transient retries are now capped by `Config::max_transient_attempts`, default 10, after which the request fails with its last error. Capacity signals are uncapped.)
 
 ## Historical: why an allowance existed
 
