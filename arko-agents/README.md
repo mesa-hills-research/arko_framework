@@ -1,267 +1,597 @@
 # Arko Agents
 
-`arko-agents` is a Rust library for building and running LLM-powered agents
-capable of interacting with their environment through a flexible system of tools.
-It builds upon the `arko-ai` crate for LLM interactions.
+Tool-using agents built on [arko-ai](../arko-ai/README.md). An `AgentConfig` describes an
+agent: its role and instructions, model, tools, and approval and error policies. A `Task`
+holds one run's conversation and state. `AgentRuntime` runs a task as a Tokio task,
+streams `AgentEvent`s, and accepts `UserCommand`s for approvals, answers, error recovery,
+context updates, cancellation, and suspension. [arko-workflows](../arko-workflows/README.md)
+builds multi-agent orchestration on this crate.
 
-## Features
+## Installation
 
-Opt-in [interactive background terminals](../docs/interactive-terminals.md) provide
-PTY/pipe sessions, correlated program input requests, optional prompt matching,
-bounded output, and automatic runtime notifications through four terminal tools.
+```toml
+[dependencies]
+arko-agents = { path = "../arko-agents" }
+arko-ai = { path = "../arko-ai" }
+tokio = { version = "1.37", features = ["full"] }
+```
 
-File-tree context defaults to a full first snapshot followed by changes at each
-model-call boundary. Unchanged trees add no message. Configure `file_tree_mode`
-in `EnvironmentDetailsConfig`; see [context management](../docs/context-efficiency.md)
-for refresh behavior, full mode, and move detection.
+## Quick start
 
-*   Define agents with specific roles, instructions, and LLM configurations.
-*   Equip agents with tools:
-    *   Built-in tools (e.g., task completion).
-    *   Developer-defined tools (custom Rust logic).
-    *   End-user defined tools (no-code shell command mapping).
-*   Runtime configuration of agents and end-user tools via JSON.
-*   Human-in-the-loop paradigm for tool usage and error recovery (configurable).
-*   Streaming of agent events for dynamic UIs.
-*   Customizable tool invocation syntax parsing.
-*   Environment details (CWD, file trees, time, OS) injectable into prompts.
+```rust
+use arko_agents::{
+    AgentConfig, AgentEvent, AgentLLMConfig, AgentRuntime, AgentToolConfig, Task, TaskState,
+    ToolCallingMode, ToolRegistry, UserCommand,
+};
+use arko_ai::{GenerationConfig, LLMClient, Model};
+use std::sync::Arc;
 
-## Getting Started
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let llm_config = AgentLLMConfig {
+        model: Model::anthropic_claude_sonnet_5(),
+        generation_config: GenerationConfig::default(),
+    };
+    let config = AgentConfig::builder("writer".into(), "Writer".into(), llm_config)
+        .role_description("You are a careful software engineer.".into())
+        .instructions("Make the requested change, then call complete_task with a summary.".into())
+        .tool_config(AgentToolConfig {
+            available_tool_names: vec![
+                "list_files".into(),
+                "read_file".into(),
+                "write_file".into(),
+                "complete_task".into(),
+            ],
+            tool_calling_mode: ToolCallingMode::Native,
+            ..AgentToolConfig::default()
+        })
+        .build()?;
 
-Run the included CLI example:
+    // Configures every provider whose credentials are in the environment.
+    let client = Arc::new(LLMClient::from_env());
+    let workspace = std::fs::canonicalize("./project")?;
+    let task = Task::new(config, "Add a README that explains how to build the project.".into(), workspace, None);
+
+    let (mut events, commands, join) = AgentRuntime::new(client).run_task(
+        task,
+        Arc::new(ToolRegistry::new()),
+        None, // event throttle
+        true, // simplified tool events
+        None, // skills
+        None, // tool-result interceptor
+        None, // tool execution middleware
+    );
+
+    while let Some(event) = events.recv().await {
+        match event {
+            AgentEvent::AssistantResponseChunk(text) => print!("{text}"),
+            AgentEvent::ToolCallAwaitingApproval { tool_call_id, tool_name, parameters, .. } => {
+                println!("\nApproving {tool_name}: {parameters:?}");
+                commands
+                    .send(UserCommand::ApproveToolUse {
+                        tool_call_id,
+                        custom_tool_output: None,
+                        message_to_agent: None,
+                    })
+                    .await?;
+            }
+            AgentEvent::ErrorEncountered { error_message, requires_approval_to_retry: true, .. } => {
+                eprintln!("\n{error_message}");
+                commands.send(UserCommand::RejectErrorRecovery { message: None }).await?;
+            }
+            AgentEvent::TaskStreamEnd => break,
+            _ => {}
+        }
+    }
+
+    let task = join.await??;
+    match &task.current_state {
+        TaskState::Completed { summary } => println!("\nCompleted: {summary}"),
+        state => println!("\nStopped: {state:?}"),
+    }
+    Ok(())
+}
+```
+
+`run_task` returns the event receiver, the command sender, and a join handle that
+resolves to the task in its final state; `TaskStreamEnd` is the last event of a run. Keep
+the command sender alive for the whole run: when every sender has been dropped, the
+runtime returns the task as `Interrupted`. Tools only hold weak senders.
+
+The task's working directory is the agent's workspace. File tools resolve relative paths
+against it, and paths outside it are rejected by default (see
+[Approvals and workspace paths](#approvals-and-workspace-paths)). Pass an absolute path.
+
+The `arko_agents_cli` example runs one agent from a JSON configuration, with interactive
+approvals, answers, and error recovery:
 
 ```bash
-cargo run -p arko-agents --example arko_agents_cli -- --help
+cargo run -p arko-agents --example arko_agents_cli -- \
+  --agent-config /path/to/agent.json \
+  --workspace-dir /path/to/workspace --prompt "Add a README"
 ```
 
-## Model and token-refresh recovery
+Its options include `--tool-calling-mode native|output_based`, `--mcp-config PATH`,
+`--openai-auth-json PATH` (ChatGPT OAuth from a Codex `auth.json`), `--save-task-state
+PATH` (the final task as JSON), and `--user-command-timeout SECONDS`. Other credentials
+come from the environment or a `.env` file, as `LLMClient::from_env()` reads them.
 
-`LLMErrorPolicy` controls attempt limits and whether recovery pauses for approval.
-`LLMRetryConfig` controls timing; it is available on `AgentConfig` and its builder:
+## Agent configuration
+
+`AgentConfig` is built with `AgentConfig::builder(id, name, llm_config)` or loaded from
+JSON with `AgentConfig::load_from_path`. The builder requires a role description and
+instructions and validates the retry, monitoring, and refusal-fallback settings; the
+runtime validates them again when a task starts. The quick start's agent as JSON:
+
+```json
+{
+  "id": "writer",
+  "name": "Writer",
+  "role_description": "You are a careful software engineer.",
+  "instructions": "Make the requested change, then call complete_task with a summary.",
+  "llm_config": { "provider": "Anthropic", "model_id": "claude-sonnet-5" },
+  "tool_config": {
+    "available_tool_names": ["list_files", "read_file", "write_file", "complete_task"],
+    "tool_calling_mode": "Native"
+  }
+}
+```
+
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `id`, `name` | Required | Identifier and display name; the name heads the system prompt and is the `agent_name` tools receive. |
+| `role_description`, `instructions` | Required | The system prompt's role and instructions sections. |
+| `llm_config` | Required | Model and `GenerationConfig`; see [Saved tasks and configurations](#saved-tasks-and-configurations). |
+| `tool_config` | `complete_task` only | Available tools, tool calling mode, approvals, batching, and workspace path policy. |
+| `environment_details_config` | Nothing included | Working directory, file tree, date and time, and operating system, each placed in the system prompt, the task prompt, or every user message. |
+| `error_recovery_config` | `InformAgentAndContinue` | What a failed tool execution does. |
+| `llm_error_policy`, `llm_retry_config` | 3 attempts, then pause | What a failed model request does; see [Model-call recovery](#model-call-recovery). |
+| `user_command_timeout_seconds` | None | How long an awaiting task waits for a command before it is returned `Interrupted`. |
+| `user_reminder` | None | Text appended as `# Reminder` to the task prompt, every user message, or every Nth message. |
+| `skills_config` | None | Skill sources; see [Skills](#skills). |
+| `monitoring` | Nothing monitored | Plan-usage and prompt-cache monitors; see [Monitoring](#monitoring). |
+| `refusal_fallback` | None | A model that answers a refused turn once; see [Refusals](#refusals). |
+| `complete_task_summary_prompt_override` | None | Replaces the description of `complete_task`'s `summary` parameter in output-based mode. |
+| `parsing_config_override` | Default tags | Tag syntax for output-based tool calls. |
+
+In `role_description` and `instructions`, text between `{{#output_based_only}}` and
+`{{/output_based_only}}` is kept, without the markers, in output-based mode and removed
+in native mode, so one configuration can carry tool-call examples for text-parsed calls.
+
+Developer-defined environment details are passed to `Task::new`; each has static content
+or a `Fn(&Task)` provider, which is not serialized. File-tree details default to a full
+first snapshot followed by changes at model-call boundaries; see
+[context management](../docs/context-efficiency.md#file-tree-context).
+
+## Tools
+
+`ToolRegistry::new()` registers the built-in tools: `complete_task`, `read_file`,
+`write_file`, `apply_diff`, `list_files`, and `ask_user`. An agent is offered the
+registered tools named in `tool_config.available_tool_names`, and always
+`complete_task`, which ends the task as `Completed { summary }`. `ask_user` puts the task
+in `AwaitingUserResponse` until `UserCommand::SubmitUserResponse` answers it.
+
+### Tool calling modes
+
+`tool_config.tool_calling_mode` selects how calls are exchanged with the model:
+
+- `OutputBased` (the default): the system prompt describes each tool with an XML-like
+  example, and the runtime parses calls from the response text. A response holds one call
+  or one batch of calls to the same tool. Every parameter value arrives as a JSON string.
+- `Native`: tools are sent through the provider's tool-calling API. A response can call
+  several different tools, but only when every tool in it allows batching; otherwise none
+  of the calls runs and each gets an error result explaining why.
+
+A tool allows batching when its definition sets `supports_batched_calls` and the
+configuration enables it: a per-tool `allow_batched_calls` override, or else
+`allow_batched_tool_calls` (default `false`). With `allow_batched_tool_calls` off, native requests also disable parallel
+tool calls on models that support that setting. Every response must call a tool; a
+response without one is handled as a failed model request.
+
+Response text is streamed as it arrives in native mode. In output-based mode, a turn's
+text and tool events are emitted once the response has been parsed.
+
+### Approvals and workspace paths
+
+Tool calls wait for approval unless `default_auto_approve_tool_use` or a per-tool
+`auto_approve_tool_use` override is set. A single call emits `ToolCallAwaitingApproval`;
+several emit `BatchToolCallAwaitingApproval`. Answer with `ApproveToolUse`,
+`RejectToolUse`, or `SubmitBatchToolApprovals`, where a call without a decision is
+rejected. An approval can carry `custom_tool_output`, which is used instead of running
+the tool, and a `message_to_agent`.
+
+Parameters marked `is_path` are resolved against the task's working directory. A path
+outside it is handled by `default_out_of_workspace_path_policy` or a per-tool override:
+`AutoReject` (the default) returns an error to the agent, `RequireApproval` asks for
+approval even for auto-approved tools, and `AutoApprove` allows it. The check is lexical:
+it expands `~` and environment variables and resolves `.` and `..`, but does not follow
+symbolic links.
+
+### Tool errors
+
+`error_recovery_config.on_tool_execution_error` handles a tool that returns an error:
+`InformAgentAndContinue` (the default) sends the error to the agent,
+`PauseAndAwaitApproval` waits for `ApproveErrorRecovery` or `RejectErrorRecovery`, and
+`FailTask` fails the task.
+
+### Custom tools
+
+Implement `Tool` (with the `async-trait` and `serde_json` crates) and register it:
 
 ```rust
-.llm_error_policy(LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts: 10 })
-.llm_retry_config(LLMRetryConfig {
-    initial_delay_ms: 250,
-    max_delay_ms: 64_000,
-    max_elapsed_ms: 300_000,
-    jitter: true,
-    capacity_retry: None,
-    rate_limit_retry: Some(LLMRateLimitRetryConfig::default()),
-    usage_limit_policy: UsageLimitPolicy::Pause,
-})
+use arko_agents::{
+    TaskContext, Tool, ToolDefinition, ToolError, ToolParameterDefinition, ToolParameterType,
+    ToolRegistry, ToolTypeDetails,
+};
+use async_trait::async_trait;
+use serde_json::Value;
+use std::{collections::HashMap, sync::Arc};
+
+#[derive(Debug)]
+struct WordCount;
+
+#[async_trait]
+impl Tool for WordCount {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "word_count".into(),
+            description: "Counts the words in a text.".into(),
+            output_based_example: None,
+            parameters: vec![ToolParameterDefinition {
+                name: "text".into(),
+                description: "The text to count.".into(),
+                param_type: ToolParameterType::String,
+                required: true,
+                is_path: false,
+                flag: None,
+                default_value: None,
+            }],
+            supports_batched_calls: true,
+            tool_type_details: ToolTypeDetails::DeveloperDefined,
+            raw_json_schema_override: None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _context: &TaskContext<'_>,
+        params: HashMap<String, Value>,
+    ) -> Result<String, ToolError> {
+        let text = params.get("text").and_then(Value::as_str).unwrap_or_default();
+        Ok(text.split_whitespace().count().to_string())
+    }
+}
+
+let mut registry = ToolRegistry::new();
+registry.register(Arc::new(WordCount));
+// Then add "word_count" to the agent's available_tool_names.
 ```
 
-**Rate limits (on by default).** Short rate limits (HTTP 429, `rate_limit_exceeded`,
-`slow_down`) and, unless `capacity_retry` is set, capacity errors
-(`server_is_overloaded`, ...) are retried under either `RetryThen*` policy after
-the provider's delay (`Retry-After`, rate-limit reset headers, a delay in the body)
-plus jitter, or with backoff from 1 s to 60 s when it gives none, until success or
-cancellation. Rate limits are waited out for at most `max_wait_ms` (15 minutes)
-in all per recovery episode, with or without delays (counting the time actually
-waited); after that they are handled as a usage limit. These retries don't count against the attempt limit or the elapsed
-budget and add nothing to the conversation. A rate limit asking for more than
-`max_wait_ms` (15 minutes) is handled as a usage limit. Set `rate_limit_retry: None`
-(JSON `null`) for ordinary bounded recovery.
+The runtime does not check arguments against the definition before calling `execute`;
+`ToolDefinition::validate_params` is available for tools that want the check. A tool can
+return images with `execute_with_output`, opt out of result interception with
+`allow_result_interception`, and track what reached the conversation with
+`reset_context` and `observe_context`. `bind_runtime` gives a background tool a weak
+command sender for the task, through which it can send `UserCommand::InjectContext`.
 
-**Plan usage limits.** A ChatGPT plan usage limit (`usage_limit_reached`, classified
-by arko-ai as `RetryClass::UsageLimit`) emits `UsageLimitReached` with the reset time
-and, under the default `UsageLimitPolicy::Pause`, stops retrying like exhausted
-recovery (awaiting approval, or interrupted under the informing policies). Opt in to
-`UsageLimitPolicy::WaitUntilReset { max_wait_ms }` to wait (cancellably) until the
-reported reset plus up to 31 seconds and retry unchanged, under every error policy;
-a wait that wouldn't fit in `max_wait_ms` (margin and jitter included), or a reset
-that isn't reported, still pauses.
+End-user tools wrap a command without Rust code: a `ToolDefinition` whose
+`tool_type_details` is `EndUserDefined { command_template }`, loaded with
+`ToolRegistry::load_end_user_tool`. The template is shell-expanded and split on
+whitespace; string parameters without a `flag` follow as positional arguments in order,
+flagged string parameters as `flag value`, and a true boolean parameter as its flag. The
+command runs in the task's working directory without a shell, and its standard output is
+the result; a nonzero exit status is a tool error.
 
-**Plan usage reports.** ChatGPT OAuth calls report plan usage (`x-codex-*` headers)
-in `ModelCallUsage::plan_usage` and a `PlanUsageReported` event. Opt in to
-`MonitoringConfig { plan_usage: Some(PlanUsageThreshold { percent, action }) }`
-(`AgentConfig::monitoring`) to act before a model request when the most-used window
-is at or above `percent`: `PlanUsageThresholdReached` is emitted once per window and
-reset (saved in `Task::plan_usage_threshold_reported`, so a resumed task doesn't
-repeat it; reports whose window has since reset are ignored), then
-`PlanUsageAction::Pause` pauses once, or `SlowDown { delay_ms }` waits before every
-request while usage stays that high. Approving a monitor pause (this one or the
-cache monitor's) continues without telling the model about an error.
+### Result interception and execution middleware
 
-**Reroutes and cache monitoring.** A call served by another model than the one
-requested (`ModelCallUsage::served_model_changed()`: an OpenRouter fallback, router
-or alias, or a ChatGPT backend reroute) emits `ModelRerouted` with the requested and
-served model. Opt in to `MonitoringConfig { cache: Some(CacheMonitorConfig::default()) }`
-for `CacheEfficiencyReported` after each call: cache reads divided by the most that
-could have been read (the smaller of the previous and the current input), per call
-and rolling over `window_calls` (default 5), ignoring the first `warmup_calls`
-(default 2), calls without a cache figure, and calls to the refusal fallback model
-(the next call is compared with the configured model's previous one). Below
-`warn_below` (default 0.5) it
-emits `CacheEfficiencyLow` once until it recovers; the opt-in `pause_below` also
-pauses before the next request.
+The last two `run_task` arguments wrap tool execution:
 
-To wait through explicit provider capacity errors until service recovers, opt in:
+- An `InterceptorConfig` holds a `ToolResultInterceptor`, which can replace a result
+  before it enters the conversation (for example with a summary), and an
+  `InterceptionFailurePolicy` for interceptor errors, which falls back to the original
+  result. `ToolResult` carries the original output; `ToolResultIntercepted` follows with
+  the replacement. Results of `complete_task` and `ask_user` are never intercepted.
+- A `ToolExecutionMiddleware` runs `before` and `after` every execution, whether
+  approved or auto-approved, native or output-based. `before` returns `Continue`,
+  `Reject { message_to_agent }`, or `FailTask { reason }`. A call answered with
+  `custom_tool_output` skips `before`, and `after` receives `CallerProvided`.
+
+### MCP servers
+
+`McpManager::from_config` starts each server in an `McpConfig` as a child process and
+discovers its tools, named `mcp__<server>__<tool>`:
+
+```json
+{
+  "mcpServers": [
+    {
+      "name": "filesystem",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/files"],
+      "env": {}
+    }
+  ]
+}
+```
+
+`register_tools` adds them to a registry and `tool_names` returns the names to add to
+`available_tool_names`; `shutdown` stops the servers. MCP tools require native tool
+calling, and the workspace path policy cannot apply to them.
+
+### Skills
+
+With `skills_config`, `SkillManager::load(&config, workspace_root)` reads skills from a
+`workspace_source` (relative to `workspace_root`) and any `global_sources`, each with
+optional `include` and `exclude` name lists. A skill is a directory with a `SKILL.md`
+(other Markdown files in it, outside `scripts/`, become loadable resources), a `.skill` zip
+bundle of the same layout, or a single Markdown file other than `README.md`. Its YAML
+front matter sets `name`, `description`, and `auto_load`. Identical skills are loaded
+once, and other name collisions get a numeric suffix. Invalid skills
+are skipped with a warning unless `on_invalid_skill` is `Error`.
+
+When there are on-demand skills, `SkillManager::setup` registers the `load_skill` tool and
+adds it to the agent's tools with auto-approval; it returns the `SkillPromptContext` to
+pass to `run_task`. Auto-loaded skills are placed in the system prompt; the others are
+listed there by name and description and loaded on demand.
+
+### Interactive terminals
+
+The opt-in `terminal` module provides PTY and pipe terminal tools that run commands in the
+background and notify the agent of input requests and completion. See
+[interactive terminals](../docs/interactive-terminals.md).
+
+## Running tasks
+
+`TaskState` is one of `Pending`, `InProgress`, `AwaitingToolApproval`,
+`AwaitingBatchToolApproval`, `AwaitingUserResponse`, `AwaitingErrorRecoveryApproval`,
+`Interrupted`, `Completed`, or `Failed`; `Completed` and `Failed` are terminal.
+
+| Events | Meaning |
+| --- | --- |
+| `TaskStateChanged` | The task's state changed. |
+| `AssistantResponseChunk`, `ReasoningChunk` | Response text and reasoning; `event_throttle_ms` coalesces chunks. |
+| `ToolCallInitiated`, `ToolCallFormatted` | A tool call was announced, then parsed. Output-based mode with `simplified_tool_events` off also emits `ToolParamName`, `ToolParamValueChunk`, and `ToolParamEnd`. |
+| `ToolCallAwaitingApproval`, `BatchToolCallAwaitingApproval`, `UserQuestionsAsked` | The task waits for a command. |
+| `ToolResult`, `ToolResultIntercepted`, `ToolRejected`, `UnavailableToolAttempted` | Tool outcomes. |
+| `ErrorEncountered`, `RetryScheduled`, `UsageLimitReached` | Errors and recovery. `requires_approval_to_retry` marks a pause; `RetryScheduled` carries the attempt, delay, and elapsed milliseconds. |
+| `RefusalReceived`, `RefusedInput`, `RefusalFallback` | Refusals. |
+| `UsageReported`, `ModelCallUsageReported`, `PlanUsageReported`, `ModelRerouted` | Usage after each model call. |
+| `CacheEfficiencyReported`, `CacheEfficiencyLow`, `PlanUsageThresholdReached` | Opt-in monitors. |
+| `TaskStreamEnd` | The run ended. |
+
+Besides answers to the waiting states, a running task accepts:
+
+- `InjectContext { content }`: queued and added as a user message at the next turn
+  boundary; a stream in progress is not changed.
+- `CancelTask`: the task ends as `Failed { reason: "Task cancelled by user." }`.
+- `SuspendTask`: the runtime stops and returns the task in its current state, for example
+  to save it.
+
+Tasks serialize to JSON (`Task::save_to_path`, `Task::load_from_path`). Running a
+returned task again continues it: a task that is pending, in progress, or interrupted
+makes its next model request, and a task awaiting a command waits for it.
+`prepare_for_resumption_with_user_response` answers a saved `AwaitingUserResponse` task
+before it runs, and `prepare_for_resumption_from_completed` adds a follow-up prompt to a
+completed one.
+
+`Task::total_usage()` sums the usage of every model call. `Task::total_usage_cost()` is
+what the account is billed: ChatGPT OAuth calls are covered by the subscription and add
+zero, while their `UsageInfo::total_cost` keeps the list-price estimate.
+
+## Model-call recovery
+
+`llm_error_policy` decides what a failed model request does, and `llm_retry_config` sets
+the timing:
+
+| Policy | Behavior |
+| --- | --- |
+| `RetryThenPauseAndAwaitApproval { max_attempts }` | The default, with 3 attempts. Retries with backoff; when recovery ends, the task waits in `AwaitingErrorRecoveryApproval`. |
+| `RetryThenInformAgent { max_attempts }` | Retries the same way; when recovery ends, the task is returned `Interrupted`. |
+| `InformAgentAndContinue` | Retries without an attempt limit until the elapsed budget ends, then returns the task `Interrupted`. |
+| `PauseAndAwaitApproval` | Waits in `AwaitingErrorRecoveryApproval` after the first failure. |
+
+Recovery ends when the attempts or the elapsed budget run out or the error cannot be
+retried. Attempt limits count the first request, and zero counts as one. Each ordinary
+retry adds a note about the error to the conversation. From a pause,
+`ApproveErrorRecovery { message }` adds a note about the error (with the message) and
+starts a new recovery episode, and `RejectErrorRecovery` fails the task. An interrupted
+task starts a new episode when it is run again.
+
+Errors are classified by arko-ai's `Error::retry_class()`. HTTP 408, 409, 429, and 5xx
+responses, connection failures and timeouts, truncated streams, errors reported after a
+stream started without a permanent code, and responses without a tool call are retried.
+Invalid requests, missing provider configuration, authentication failures, and permanent
+provider codes (such as quota exhaustion and invalid refresh grants) end recovery at once.
+
+| `LLMRetryConfig` field | Default | Meaning |
+| --- | --- | --- |
+| `initial_delay_ms` | 250 | First backoff delay. |
+| `max_delay_ms` | 64,000 | Cap of the exponential backoff. |
+| `max_elapsed_ms` | 300,000 | Recovery budget from the first failure, including waits, token refreshes, requests, and streams. |
+| `jitter` | `true` | Each backoff delay is drawn between half and all of its capped value. |
+| `rate_limit_retry` | On | Waits for short rate limits and capacity errors; see below. |
+| `capacity_retry` | `None` | Opt-in indefinite waits for capacity errors. |
+| `usage_limit_policy` | `Pause` | Handling of plan usage limits. |
+
+For example, ten attempts with indefinite capacity waits:
 
 ```rust
-.llm_retry_config(LLMRetryConfig {
-    capacity_retry: Some(LLMCapacityRetryConfig::default()),
-    ..Default::default()
-})
+use arko_agents::{LLMCapacityRetryConfig, LLMErrorPolicy, LLMRetryConfig};
+
+let builder = builder
+    .llm_error_policy(LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts: 10 })
+    .llm_retry_config(LLMRetryConfig {
+        capacity_retry: Some(LLMCapacityRetryConfig::default()),
+        ..LLMRetryConfig::default()
+    });
 ```
 
-Under either `RetryThen*` policy, this bypasses attempt and elapsed limits only for
-retryable `server_is_overloaded`, `overloaded_error`, and
-`service_unavailable_error` codes. Capacity backoff starts at 30 seconds and caps
-at five minutes, with the same jitter and server-minimum handling. Cancel,
-suspend, and channel closure remain interruptible. Capacity retries emit events
-without adding repeated errors to the model conversation. Success clears the
-capacity episode; another error category continues ordinary bounded recovery, and
-permanent errors stop promptly. A new runtime starts a new backoff episode.
-`PauseAndAwaitApproval` remains an immediate pause even with this option enabled.
-Rust `LLMRetryConfig` struct literals must supply `capacity_retry`,
-`rate_limit_retry` and `usage_limit_policy` or use `..Default::default()`.
+Zero delays, a zero budget, and a `max_delay_ms` below `initial_delay_ms` are rejected.
+A delay the provider asks for (`Retry-After`, rate-limit reset headers, or a delay in the
+error body, as `Error::retry_after()` reports it) is a minimum, and jitter is added above
+it so that agents sharing a reset do not retry together. It may exceed `max_delay_ms` but
+must fit in the remaining budget; otherwise recovery ends rather than retrying early. A
+turn with valid tool calls ends the recovery episode; a token refresh or an injected
+context message does not.
 
-These timing values are the defaults. Old serialized configurations receive them
-through serde defaults. Zero timing values and a maximum delay smaller than the
-initial delay are rejected. Attempt limits count the initial attempt; zero is
-normalized to one attempt.
+**Rate limits and capacity errors.** Under either `RetryThen*` policy, short rate limits
+(HTTP 429, `rate_limit_exceeded`, `slow_down`, and other providers' 429 codes) and,
+unless `capacity_retry` is set, capacity errors (explicit overloaded or unavailable
+signals) are retried after the provider's delay plus jitter, or with backoff from 1 s to
+60 s when it gives none, until they succeed or the task is cancelled or suspended. These
+retries resend the request unchanged, add nothing to the conversation, and neither use nor
+reset the attempt limit and elapsed budget; the budget's clock stops while they wait. Rate
+limits are waited out for at most `max_wait_ms` (15 minutes) in total per recovery
+episode. After that, or when a rate limit asks for a longer wait, the error is handled as
+a plan usage limit; a capacity error asking for a longer wait gets ordinary recovery.
+`rate_limit_retry: None` (JSON `null`) gives both ordinary recovery.
 
-- HTTP 408, 409, 429, and 5xx failures are eligible for bounded retries. Invalid
-  requests, missing provider configuration, authentication failures, and explicit
-  permanent provider codes (including quota exhaustion and invalid refresh grants)
-  stop automatic recovery. Unknown legacy `ApiError` values retain bounded retries.
-  Providers expose status, error code, and optional delay through `ProviderError`.
-- `Retry-After` seconds and HTTP dates set a minimum delay. OpenAI also supplies
-  reset-header and response-body hints. Server hints may exceed `max_delay_ms`,
-  which caps client-generated exponential backoff; they must fit the remaining
-  elapsed budget. Arko pauses/returns control if they cannot fit, rather than
-  retrying before the server's minimum.
-- Equal jitter randomizes client backoff between half and all of its capped
-  exponential delay. Server minimums also receive nonnegative jitter so shared
-  reset times do not synchronize agents. Disable jitter for
-  deterministic timing when needed.
-- The elapsed recovery clock starts at the first failure and includes subsequent
-  waits, token-refresh requests, model requests, and streams. A successful model
-  turn with valid tool calls clears recovery; token refresh alone and peer context
-  messages do not. The initial request remains subject to provider/host timeouts.
-- An OAuth request rejected with HTTP 401 `token_expired` triggers one provider
-  refresh and one resend, even if the JWT expiry is still in the future.
-  Concurrent rejections share rotated credentials. A second rejection, other
-  authentication errors, or a permanent refresh error returns to this policy.
-  Transient refresh errors also return here without a provider retry loop.
-- Proactive OAuth refresh participates in the same attempt and elapsed limits as
-  model calls. The runtime explicitly bypasses the legacy provider retry loop.
-  With credentials from a Codex `auth.json`, build the client with
-  `LLMClient::with_codex_auth_file` so both refresh paths re-read the file first
-  and save rotated tokens at once (see arko-ai's README, "Shared Codex
-  credentials"); the example CLI's `--openai-auth-json` does.
-  `CancelTask`, `SuspendTask`, and command-channel closure interrupt backoff and
-  pending requests. Suspending returns the current task for persistence.
-- At exhaustion, `RetryThenPauseAndAwaitApproval` waits for explicit recovery or
-  suspension. `RetryThenInformAgent` returns an `Interrupted` task to the host;
-  it no longer enters an unbounded second retry cycle. `InformAgentAndContinue`
-  is also subject to classification and the elapsed limit. Explicit approval or
-  a new runtime can begin a new recovery episode.
-- Refusals are never retried unchanged: a `RefusalReceived` event carries the
-  `arko_ai::Refusal`, then the refusal follows the permanent-error path above.
-  A model's own refusal (`RefusalSource::Model`, such as OpenAI structured
-  refusals) stays in history with its explanation as the assistant text, so the
-  model can see what it declined; its tool calls are not run (announced calls
-  get `ToolRejected("turn refused")`), and in output-based mode only the
-  explanation (or the text without unrun tool-call markup) is kept. Classifier
-  and content-filter refusals are removed from history.
-- Refusal recovery: a `RefusedInput` event (after `RefusalReceived`) lists the
-  input the refused turn answered: every user message after the last assistant
-  turn (`RefusedMessage { message_index, runtime, runtime_text, tool_results,
-  images }`, tool results by provider call id). Messages the runtime added
-  (file-tree updates, error and recovery notes, requests to continue; tracked in
-  `Task::runtime_messages`) are marked `runtime` and can't be changed, nor can a
-  recovery note the runtime put beside native tool results (`runtime_text`). The
-  input is also kept in `Task::refused_input` until it is resolved, recovery is
-  approved, or a later turn completes. While the task awaits recovery approval,
-  `UserCommand::ResolveRefusal { changes }` applies a list of changes together
-  (or none, if one is invalid: an `ErrorEncountered` follows and the task keeps
-  waiting) and continues:
-  - `RephraseUserMessage { message_index, text }` replaces the message's text
-    but keeps the sections the runtime appended to it (`# Initial Environment
-    Information`, `# Current Environment Information (updated this turn)`,
-    `# Reminder`); in a tool-results message it replaces the text beside the
-    results (such as a native `ask_user` answer). The text must not be empty.
-    Rephrasing the task prompt applies its `output_based_only` markers as the
-    prompt builder does and updates `Task::initial_task_prompt`.
-  - `RemoveUserMessage { message_index }` removes a message without tool
-    results; at least one user message not added by the runtime must remain,
-    so the task prompt can't be removed when it is the only one.
-  - `RemoveImages { message_index }` removes a message's images (tool
-    screenshots with their descriptions).
-  - `RedactToolResults { call_ids, replacement }` replaces tool outputs; calls
-    stay paired with their results.
+**Indefinite capacity waits.** `capacity_retry: Some(LLMCapacityRetryConfig::default())`
+retries capacity errors under either `RetryThen*` policy until the service recovers, with
+backoff from 30 seconds to 5 minutes and the same provider minimums and jitter, outside
+the ordinary limits. A success ends the capacity episode; another kind of error continues
+ordinary recovery. `PauseAndAwaitApproval` still pauses at the first failure.
 
-  The input must still be the conversation's last input (followed only by the
-  kept refused turn); the refused turn is then removed and the changed input
-  sent as is, and tools that track the history observe it from the start
-  again. For a task returned interrupted, call `Task::resolve_refusal(changes)`
-  before running it again. Change an agent task's input this way rather than
-  through the underlying arko-ai `Conversation` operations
-  (`rephrase_last_user_turn`, `remove_last_user_turn`, `redact_tool_result`),
-  which don't keep the task's bookkeeping (`runtime_messages`, the refused
-  input) in step. `ApproveErrorRecovery` still continues without a change; it
-  accepts the input as it is, so if the model refuses again, the reported input
-  is only the runtime's recovery note, which can't be changed.
-- Opt-in `AgentConfig::refusal_fallback` (an `AgentLLMConfig` on the configured
-  model's provider; configs with another provider are rejected, since
-  providers can't replay each other's turns): a refusal from the configured
-  model is reported (with its `RefusedInput`), then the same input goes once to
-  the fallback model (`RefusalFallback` event; the refused turn is not kept),
-  whose response continues the task; later turns use the configured model. The
-  pending fallback is saved with the task (`Task::fallback_for`), survives a
-  monitor pause, and holds back context updates and file-tree changes until it
-  has answered, so the refused input stays as it was. If the fallback also
-  refuses or its request fails (or a recovery deadline ends it), the refusal
-  stands and can be resolved as above; approving recovery resends to the
-  configured model. The fallback request doesn't echo the configured model's
-  ChatGPT turn-state token, nor does the configured model later echo the
-  fallback's. OpenAI reasoning is replayed between the two models, in both
-  directions, only when both are in one Codex compaction family (GPT-5.6 and
-  GPT-6 models; Codex replays history unchanged between such models and
-  compacts it otherwise); for other pairs it is dropped, together with the ids
-  of that response's other items (the Responses API rejects an `fc_` item sent
-  without its reasoning). The family rule applies to `Provider::OpenAI` only:
-  OpenRouter `openai/*` slugs keep their encrypted reasoning. Anthropic
-  thinking is kept. Whether a same-provider fallback replays correctly for
-  Gemini thought signatures and OpenRouter `reasoning_details` is unverified.
-- Waits that don't count against the ordinary limits (rate limits, opt-in
-  `capacity_retry`, usage-limit waits)
-  neither reset nor consume them: ordinary attempts keep counting across
-  interleaved capacity failures, and the ordinary elapsed clock stops while such
-  a wait lasts.
-- Output a failed stream delivered is kept (followed by the error message) when
-  recovery adds a message, and dropped when the retry resends the request
-  unchanged (rate-limit, capacity and usage-limit waits), so no retried request
-  ends on an assistant turn.
-  A request whose conversation still ends on assistant text (for example a task
-  resumed after `SuspendTask` mid-stream) first gets a user message asking the
-  model to continue; Claude 4.6 and later reject prefill.
-- Calls a native stream announced (`ToolCallInitiated`) but that never run,
-  because the stream failed, was interrupted or was refused, or because the
-  final response doesn't hold them (for example cut off at the token limit),
-  get a `ToolRejected` event.
-- Tasks and conversations loaded from JSON take the registry's current data
-  (pricing, limits) for their model, as `AgentLLMConfig` does; unknown ids and
-  OpenRouter slugs keep their saved copy.
-- `RetryScheduled` events expose attempt, delay, and elapsed milliseconds.
-  Tool executions are not replayed by model recovery. Interrupted streams may
-  have incurred provider usage without delivering final usage metadata.
+**Plan usage limits.** A ChatGPT plan usage limit (`usage_limit_reached`) emits
+`UsageLimitReached` with the reset time. The default `UsageLimitPolicy::Pause` ends
+recovery under every error policy. The opt-in `WaitUntilReset { max_wait_ms }` waits,
+under every error policy and cancellably, until the reported reset plus one second and,
+with jitter, up to 30 seconds more, then resends the request unchanged. If no reset time
+is reported, or the whole wait would not fit in `max_wait_ms`, recovery still ends.
 
-Compatibility: HTTP failures now use `arko_ai::Error::ProviderError` instead of
-string-only API/authentication variants. Update exhaustive error/event matches
-for `ProviderError` and `RetryScheduled`. Rust `AgentConfig` struct literals need
-the new `llm_retry_config` field; existing builder calls and saved JSON keep
-working through defaults.
+**Streams.** Output a failed stream delivered is kept, followed by the error note, when
+recovery adds a message, and dropped when the request is resent unchanged. A request
+whose conversation ends on assistant text, such as a task resumed after `SuspendTask`
+mid-stream, first gets a user message asking the model to continue, because some
+providers reject a conversation that ends on an assistant turn (Claude 4.6 and later
+reject prefill). Native calls announced with `ToolCallInitiated` that never run (the
+stream failed, was interrupted, or was refused, or the final response does not hold
+them) get a `ToolRejected` event. Model recovery never runs a tool call again. A stream
+that fails may have used provider tokens without reporting its usage.
 
-Tests use virtual time and synthetic errors; the refresh transport test uses only
-a local HTTP fixture and fake credentials. Run `cargo test --offline --locked -p
-arko-agents -p arko-ai -p arko-workflows --lib` from the framework workspace.
-Status classification follows [OpenAI's error guidance](https://developers.openai.com/api/docs/guides/error-codes)
-and [documented retry categories](https://developers.openai.com/api/reference/ruby).
+**ChatGPT OAuth.** Before each OpenAI request, the runtime refreshes ChatGPT OAuth
+credentials that expire within five minutes. The refresh makes at most one token request,
+under the same attempt and elapsed limits as model requests, and a failed refresh is
+recovered like a failed request. A request rejected with HTTP 401 `token_expired` is
+refreshed and resent once by arko-ai. With credentials from a Codex `auth.json`, build the
+client with `LLMClient::with_codex_auth_file`, so that every refresh re-reads the file
+first and rotated tokens are saved to it at once; see
+[arko-ai](../arko-ai/README.md#openai-responses-replay-prompt-caching-and-chatgpt-oauth).
+The example CLI's `--openai-auth-json` does this.
+
+`CancelTask`, `SuspendTask`, and closing the command channel interrupt recovery waits and
+requests in flight.
+
+## Monitoring
+
+Every ChatGPT OAuth call reports the plan's usage windows (from the backend's `x-codex-*`
+headers) in `ModelCallUsage::plan_usage` and a `PlanUsageReported` event. A call served by
+another model than the one requested (an OpenRouter fallback, router, or alias, or a
+ChatGPT backend reroute) emits `ModelRerouted` with both models.
+
+`AgentConfig::monitoring` adds opt-in monitors:
+
+- `plan_usage: Some(PlanUsageThreshold { percent, action })` is checked before each model
+  request against the latest report. When the most-used window is at or above `percent`,
+  `PlanUsageThresholdReached` is emitted once per window and reset, and
+  `PlanUsageAction::Pause` pauses once, or `SlowDown { delay_ms }` waits before every
+  request while usage stays that high. The reported window is saved in
+  `Task::plan_usage_threshold_reported`, so a resumed task does not report it again, and
+  a report whose window has since reset is ignored.
+- `cache: Some(CacheMonitorConfig::default())` emits `CacheEfficiencyReported` after each
+  call: cache reads divided by the most that could have been read (the smaller of the
+  previous and the current input), for the call and over the last `window_calls` (5)
+  calls. The first `warmup_calls` (2) calls, calls without a cache figure, and calls to
+  the refusal fallback model are not judged. Once `window_calls` calls have been judged,
+  a rolling efficiency below `warn_below` (0.5) emits `CacheEfficiencyLow` once until it
+  recovers; the opt-in `pause_below` also pauses before the next request.
+
+A monitor pause waits in `AwaitingErrorRecoveryApproval` under the pausing error policies
+and returns the task `Interrupted` under the others. Approving it continues without an
+error note; a message given with the approval is added as a user message.
+
+## Refusals
+
+A refusal is never retried unchanged. The runtime emits `RefusalReceived` with the
+`arko_ai::Refusal`, then `RefusedInput`, and handles the refusal as an error that cannot
+be retried: the task pauses or is returned `Interrupted`, as the error policy decides.
+
+A model's own refusal (`RefusalSource::Model`, such as an OpenAI structured refusal) stays
+in history with its explanation as the assistant text, so the model can see what it
+declined. Its tool calls are not run (announced calls get `ToolRejected` with the reason
+`turn refused`), and in output-based mode only the explanation, or the text without its
+tool-call markup, is kept. Classifier and content-filter refusals are removed from
+history.
+
+**Changing the refused input.** `RefusedInput` lists the user messages after the last
+assistant turn, each a `RefusedMessage` with its `message_index`, `runtime` and
+`runtime_text` flags, `tool_results` (by provider call ID), and image count. It is also
+kept in `Task::refused_input` until the refusal is resolved, recovery is approved, or a
+later turn completes. Messages the runtime added (file-tree updates, error and recovery notes,
+requests to continue) are marked `runtime` and cannot be changed, and neither can a
+recovery note beside native tool results (`runtime_text`). While the task awaits
+recovery approval, `UserCommand::ResolveRefusal { changes }` applies a list of changes;
+for a task returned interrupted, call `Task::resolve_refusal(changes)` before running it
+again. The changes apply together or not at all: an invalid one emits `ErrorEncountered`
+and the task keeps waiting.
+
+| `RefusalResolution` | Effect |
+| --- | --- |
+| `RephraseUserMessage { message_index, text }` | Replaces the message's text and keeps the sections the runtime appended to it (`# Initial Environment Information`, `# Current Environment Information (updated this turn)`, `# Reminder`). In a message with tool results, it replaces the text beside them, such as a native `ask_user` answer. The text must not be empty. Rephrasing the task prompt applies its `output_based_only` markers and updates `Task::initial_task_prompt`. |
+| `RemoveUserMessage { message_index }` | Removes a message without tool results. At least one user message not added by the runtime must remain. |
+| `RemoveImages { message_index }` | Removes a message's images, such as tool screenshots, with their descriptions. |
+| `RedactToolResults { call_ids, replacement }` | Replaces tool outputs; each call stays paired with its result. |
+
+The refused input must still be the conversation's last input, followed at most by the
+kept refused turn. The refused turn is removed, the changed input is sent as it is, and
+tools that track the conversation observe it from the start again. Change a task's input
+this way rather than with arko-ai's `Conversation` methods (`rephrase_last_user_turn`,
+`remove_last_user_turn`, `redact_tool_result`), which do not update the task's record of
+runtime messages or its refused input. `ApproveErrorRecovery` continues without a change,
+so if the model refuses again, the reported input is only the runtime's recovery note,
+which cannot be changed.
+
+**Fallback model.** The opt-in `AgentConfig::refusal_fallback` is an `AgentLLMConfig` on
+the configured model's provider; a fallback on another provider is rejected, since
+providers cannot replay each other's turns. A refusal from the configured model is
+reported (with its `RefusedInput`), and the same input goes once to the fallback model
+(`RefusalFallback`). The refused turn is not kept; the fallback's response continues the
+task, and later turns use the configured model again. The pending fallback is saved with
+the task (`Task::fallback_for`), survives a monitor pause, and holds back context updates
+and file-tree changes until it has answered. If the fallback also refuses or its request
+fails, the refusal stands and can be resolved as above; approving recovery resends to the
+configured model.
+
+Across the two models, the ChatGPT turn-state token of one is not sent with the other's
+requests. OpenAI reasoning is replayed between them only when both are `Provider::OpenAI`
+models of one Codex compaction family (the GPT-5.6 and GPT-6 models); otherwise it is
+dropped, together with the IDs of that response's other items, which the Responses API
+would reject without their reasoning. Anthropic thinking is kept. Gemini thought
+signatures and OpenRouter `reasoning_details`, including those of `openai/*` models, are
+replayed unchanged, and a different model of the same provider may not accept them.
+
+## Saved tasks and configurations
+
+`AgentLLMConfig` saves the provider, the model ID, and a copy of the model's data. When a
+configuration or task is loaded, a model the registry knows takes the registry's current
+data (pricing and limits); an unknown ID keeps its saved copy, and an OpenRouter slug
+without a saved copy loads without catalog metadata. A hand-written configuration can
+therefore give only `provider` and `model_id` for a registry model or an OpenRouter slug.
+Fields added to `AgentConfig` and `Task` have serde defaults, so files saved without them
+still load.
+
+## Testing
+
+The tests use scripted model responses, a paused clock, and local HTTP fixtures, so they
+make no provider calls and need no credentials:
+
+```bash
+cargo test -p arko-agents --locked
+```
+
+The terminal tests run Python fixtures; see
+[interactive terminals](../docs/interactive-terminals.md#testing).
 
 ## License
 
-Licensed under the MIT license.
+MIT OR Apache-2.0
