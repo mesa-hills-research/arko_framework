@@ -12,7 +12,8 @@ cost.
 [dependencies]
 arko-ai = { path = "../arko-ai" }
 tokio = { version = "1.37", features = ["full"] }
-futures = "0.3" # for consuming response streams
+futures = "0.3"    # for consuming response streams
+serde_json = "1"   # for tool definitions
 ```
 
 ## Quick start
@@ -38,7 +39,7 @@ async fn main() -> Result<(), arko_ai::Error> {
 
     // The same conversation, streamed.
     conversation.add_user_message("And what is a lifetime?");
-    let mut stream = client.generate_stream(&conversation, config).await?;
+    let mut stream = client.generate_stream(&conversation, config.clone()).await?;
     while let Some(event) = stream.next().await {
         match event? {
             StreamEvent::TextChunk(text) => print!("{text}"),
@@ -63,7 +64,7 @@ replay and leaves out refused turns that must not stay in history.
 ## Providers and credentials
 
 `LLMClient::from_env()` configures every provider whose credentials are set and ignores
-empty values. The library reads no environment variables unless it is called.
+empty values. `LLMClient` reads no environment variables unless it is called.
 
 | Provider | Variables |
 | --- | --- |
@@ -110,7 +111,7 @@ and the OpenRouter catalog supplies limits and prices on request; see
 
 `GenerationConfig` holds the per-request settings, built with methods such as
 `with_max_tokens`, `with_temperature` (sent only when set, otherwise the model's default
-applies; Gemini rejects it), `with_reasoning`, `with_verbosity`, `with_prompt_caching`,
+applies; rejected for Gemini), `with_reasoning`, `with_verbosity`, `with_prompt_caching`,
 and `with_tool_config`. Each provider takes its own `ReasoningConfig` variant:
 `ReasoningConfig::openai(effort, include_summaries)`, `anthropic(budget_tokens)` or
 `anthropic_adaptive()`, `gemini(thinking_level, include_summaries)` or
@@ -152,14 +153,19 @@ if !calls.is_empty() {
 ```
 
 `ToolConfig::with_tool_choice` selects `ToolChoice::Auto` (the default), `Required`,
-`None`, or `Specific(name)`, and `with_parallel_tool_calls(false)` asks for one call per
-response where the model supports it (`Model::supports_disabling_parallel_tool_calls`).
+`None`, or `Specific(name)`. A forced choice (`Required` or `Specific`) is rejected before
+sending where the model does not accept it: on Claude Fable 5.1 and Opus 5.5, and on
+Claude models with a manual thinking budget; `Model::supports_forced_tool_choice(config)`
+tells in advance. `with_parallel_tool_calls(false)` asks for one call per response. It
+is available where `Model::supports_disabling_parallel_tool_calls` is true (OpenAI,
+Anthropic, OpenRouter); for Gemini the request fails with `Error::UnsupportedFeature`.
+
 A call's `arguments` are parsed JSON; arguments that are not valid JSON are kept as text
 in `ToolCall::invalid_arguments`, with `arguments` set to `null`, and
 `ToolResult::error_from_tool_call` reports a failed call to the model.
 `GenerationResponse::single_tool_call(name)` returns the one call a forced tool choice
 asked for, or an error saying whether the response was refused, cut off by a limit, or
-called something else.
+called something else, or whether the call's arguments are not valid JSON.
 
 ## Stop reasons and refusals
 
@@ -288,27 +294,32 @@ step with its `auth.json`.
 **When a refresh happens.** A client refreshes when asked
 (`refresh_openai_oauth_token`, or `refresh_openai_oauth_token_if_expiring`, which the
 arko-agents runtime calls before each request), and once after an HTTP 401
-`token_expired`, then resends the request. Any other HTTP 401 re-reads the store, as
-Codex's unauthorized recovery re-reads `auth.json`: newer credentials there are adopted
-and the request is sent once more, without a refresh; otherwise the 401 is returned.
+`token_expired`, then resends the request. On a client with a store, any other HTTP 401
+re-reads the store, as Codex's unauthorized recovery re-reads `auth.json`: newer
+credentials there are adopted and the request is sent once more, without a refresh;
+otherwise the 401 is returned, as it is at once on a client without a store. When a
+refresh request fails, the store is read again, and credentials another program rotated
+in the meantime are adopted instead of returning the error.
 
 **Every refresh re-reads `auth.json` first.** What the file holds decides what happens;
 the first matching row applies:
 
 | The file holds | Then |
 | --- | --- |
-| Nothing readable (for example after `codex logout` deleted it), or another account | The refresh stops with an error. |
+| Nothing readable (for example after `codex logout` deleted it), or another account | The refresh stops with `Error::AuthenticationFailed`, a permanent error. |
 | Spent credentials (see below) | The client's credentials are saved over them and refreshed. If those are spent too, or have no refresh token, the refresh stops: sign in to Codex again. |
 | The client's credentials | They are refreshed. |
-| Other live credentials of the same account | They are adopted without a refresh: Codex refreshed, or the user signed in again. Credentials the host installed in the client, which the file never held, give way to the file's. |
+| Other live credentials of the same account | They are adopted without a refresh: Codex refreshed, or the user signed in again. Credentials the host installed in the client, which the file never held, give way to the file's. For `refresh_openai_oauth_token_if_expiring`, adopted credentials that also expire within the margin are refreshed. |
 
 An unsaved rotation of the client's account changes the first two rows (see "When the
 save fails" below). A file that is not valid JSON is read up to five times, 30 ms apart,
 before it counts as an error, since Codex writes `auth.json` in place.
 
 **Rotated tokens are saved at once.** As soon as a refresh succeeds, the new tokens and
-the refresh's `id_token` are written to `auth.json`, keeping every other field and the
-layout. The previous contents go to `auth.json.bak` (one backup, replaced each time), and
+the refresh's `id_token` are written to `auth.json`. Other fields and the token layout are
+kept; `last_refresh` is set to the current time (in Codex's nested layout, or when the
+file has the field), and the file is written back as pretty-printed JSON. The previous
+contents go to `auth.json.bak` (one backup, replaced each time), and
 the new contents go to a temporary file that is synced and then renamed over `auth.json`.
 On Unix the backup and the temporary file are readable only by the owner until they get
 `auth.json`'s permissions. Tokens another process wrote are never overwritten: when the
@@ -329,17 +340,19 @@ without this check.
 
 **When the save fails.** Rotated tokens that cannot be written to `auth.json` go to a new
 file next to it, `auth.json.recovered-<unix seconds>`, which on Unix only the owner can
-read (mode 0600), and the refresh returns an error naming that file. The client keeps
-using the new tokens. Every client of the same `auth.json` in the process, including ones
-created later, then knows of this unsaved rotation (the latest one of each account) until
-the file holds live credentials of that account again:
+read (mode 0600), and the refresh returns an error naming that file. If even that file
+cannot be written, the error says to sign in to Codex again. The client keeps using the
+new tokens. Every client of the same `auth.json` in the process, including ones created
+later, then knows of this unsaved rotation (the latest one of each account) until the
+file holds live credentials of that account again:
 
 - While the file still holds the spent credentials, the next refresh of the account
-  through any client saves the rotation first; the other clients then take it from the
-  file. No client is handed the rotated tokens before they are in the file.
+  through any client saves the rotation first, with its refresh's `id_token`; the other
+  clients then take it from the file. No client is handed the rotated tokens before they
+  are in the file.
 - While the rotation cannot be saved, or the file cannot be read or holds another
-  account, every refresh of the account stops with an error naming the recovery file, so
-  the client holding the rotation does not refresh it again.
+  account, every refresh of the account stops with an error naming the recovery file (if
+  there is one), so the client holding the rotation does not refresh it again.
 - If the file gets other live credentials meanwhile (the user signed in again), every
   client uses those, including the one holding the rotation, which is dropped; the tokens
   stay in the recovery file.
@@ -379,13 +392,16 @@ lock until its tokens are installed and saved, so the call returns after it.
   rotation of its account is dropped (the tokens stay in their recovery file).
 
 `CodexAuthFile::sync(&client)` brings a client configured another way into step with the
-file: it saves credentials the client rotated or loads newer ones the file holds, never
-for another account and never with a spent refresh token.
+file. Compared with the credentials that `CodexAuthFile` value last read or wrote, it
+saves credentials the client rotated or loads newer ones the file holds. It fails when
+both rotated, since only one rotation can be valid, and it never saves or loads another
+account's credentials or a spent refresh token.
 
 **Refreshing proactively.** `LLMClient::refresh_openai_oauth_token_if_expiring(margin)`
-refreshes only when the access token expires within `margin`, deciding under the
-credential lock after the store is re-read, so concurrent callers rotate once (checking
-`is_openai_token_expired` and then refreshing can rotate twice). It returns `Some` when it
+does nothing while the held access token expires later than `margin`. Otherwise it takes
+the credential lock, checks again, and re-reads the store before refreshing, so
+concurrent callers rotate once (checking `is_openai_token_expired` and then refreshing
+can rotate twice). It returns `Some` when it
 installed new credentials (refreshed, or adopted from the store) and `None` when nothing
 needed refreshing, including for API-key and unconfigured clients. An explicit
 `refresh_openai_oauth_token` that waits while another refresh replaces the credentials
@@ -502,9 +518,11 @@ Use `VoyageInputType::Query` when embedding a search query. Truncation is off un
 `with_voyage_truncation(true)` turns it on. Cost estimates use standard endpoint rates,
 before account credits or discounts.
 
-Requests are checked before sending: token counts use the matching `voyageai/<model_id>`
-tokenizer from Hugging Face, loaded on a blocking worker and cached per repository and
-revision (`with_tokenizer_revision` pins a revision). Responses are reordered by the
+Requests are checked against these limits before sending. Tokens are counted with the
+matching `voyageai/<model_id>` tokenizer from Hugging Face, on a blocking worker; the
+tokenizer is cached per repository and revision (`with_tokenizer_revision` pins a
+revision), with truncation and padding disabled, and concurrent first loads share one
+initialization. Responses are reordered by the
 provider's item indexes, and missing, duplicate, wrong-dimension, non-finite, or zero
 vectors are rejected. Provider failures keep the HTTP status and `Retry-After` for
 retries by the caller.
@@ -788,7 +806,7 @@ configured provider, reading credentials with `LLMClient::from_env()` (and a `.e
 file):
 
 ```bash
-cargo run -p arko-ai --example llm_client_cli -- models
+cargo run -p arko-ai --example llm_client_cli -- --help
 cargo run -p arko-ai --example llm_client_cli -- text -m claude-sonnet-5 -p "Hello"
 cargo run -p arko-ai --example llm_client_cli -- chat -m anthropic/claude-sonnet-5 --reasoning-level high
 ```
