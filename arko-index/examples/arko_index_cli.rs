@@ -4,6 +4,9 @@ use arko_index::{backend::ArkoBackend, *};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc, time::Duration};
+#[path = "support/search_judge.rs"]
+mod search_judge;
+use search_judge::JudgeArgs;
 type AnyResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 #[derive(Parser)]
 struct Args {
@@ -40,10 +43,21 @@ enum Command {
     Search {
         index: String,
         query: String,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "semantic")]
         lexical: bool,
+        /// Use vector-only retrieval instead of hybrid retrieval.
+        #[arg(long)]
+        semantic: bool,
+        /// Hide source fragments shorter than this many UTF-8 bytes; 0 keeps all.
+        #[arg(long, default_value_t = 40)]
+        min_chunk_bytes: usize,
+        /// Return this many complete results from the final combined ranking.
+        #[arg(long, default_value_t = 10)]
+        top_k: usize,
         #[arg(long)]
         rebuild_file_limit: Option<usize>,
+        #[command(flatten)]
+        judging: JudgeArgs,
     },
     Read {
         index: String,
@@ -170,7 +184,7 @@ async fn observe(
 #[tokio::main]
 async fn main() -> AnyResult<()> {
     let args = Args::parse();
-    let (client, mut oauth) = clients(args.oauth_file)?;
+    let (client, mut oauth) = clients(args.oauth_file.clone())?;
     let embeddings = match std::env::var("VOYAGE_API_KEY") {
         Ok(key) => EmbeddingClient::new().with_voyage_api_key(&key),
         Err(_) => EmbeddingClient::new(),
@@ -207,21 +221,40 @@ async fn main() -> AnyResult<()> {
             index: id,
             query,
             lexical,
+            semantic,
+            min_chunk_bytes,
+            top_k,
             rebuild_file_limit,
+            judging,
         } => {
             let options = SearchOptions {
                 mode: if lexical {
                     SearchMode::Lexical
+                } else if semantic {
+                    SearchMode::Semantic
                 } else {
                     SearchMode::Hybrid
                 },
                 rebuild_file_limit,
+                min_chunk_bytes,
+                top_k: Some(top_k),
                 ..Default::default()
             };
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&index.search(&id, &query, options).await?)?
-            );
+            let result = if judging.judge {
+                let mut session = judging.session(&client, args.oauth_file.as_deref())?;
+                let result = index
+                    .search_with_judge(&id, &query, options, &session.judge, judging.options())
+                    .await;
+                // Preserve rotated credentials even when selection fails.
+                session.persist().await?;
+                result
+            } else {
+                index.search(&id, &query, options).await
+            };
+            if let Some(oauth) = &mut oauth {
+                oauth.persist(&client).await?;
+            }
+            println!("{}", serde_json::to_string_pretty(&result?)?);
         }
         Command::Read {
             index: id,

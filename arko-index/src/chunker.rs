@@ -209,6 +209,12 @@ pub fn remove_impossible_cuts(
     }
     Ok(result)
 }
+fn candidate_ids(candidates: &BTreeMap<String, Vec<Cut>>) -> Vec<&str> {
+    let mut entries: Vec<_> = candidates.iter().collect();
+    entries.sort_by_key(|(_, cuts)| cuts[0].after_line);
+    entries.into_iter().map(|(id, _)| id.as_str()).collect()
+}
+
 pub fn repair(s: &Snapshot, guard: &Structure, w: &Window, cuts: &[Cut]) -> Result<Repair> {
     let mut regions = BTreeMap::new();
     let mut prompt = format!(
@@ -233,7 +239,7 @@ pub fn repair(s: &Snapshot, guard: &Structure, w: &Window, cuts: &[Cut]) -> Resu
             }
         }
         let key = format!("r{first}");
-        prompt.push_str(&format!("REGION {key}: fixed byte neighbors {lower}..{upper}\nDisputed={}\nLegal boundary IDs={}\n",serde_json::to_string(&cuts[first..=last])?,serde_json::to_string(&candidates.keys().collect::<Vec<_>>())?));
+        prompt.push_str(&format!("REGION {key}: fixed byte neighbors {lower}..{upper}\nDisputed={}\nLegal boundary IDs={}\n",serde_json::to_string(&cuts[first..=last])?,serde_json::to_string(&candidate_ids(&candidates))?));
         regions.insert(
             key,
             Region {
@@ -244,7 +250,7 @@ pub fn repair(s: &Snapshot, guard: &Structure, w: &Window, cuts: &[Cut]) -> Resu
         );
     }
     let properties:serde_json::Map<_,_>=regions.iter().map(|(key,r)| {
-        let schema=if r.candidates.is_empty() { json!({"type":"array","items":{"type":"string"},"maxItems":0}) } else { json!({"type":"array","items":{"type":"string","enum":r.candidates.keys().collect::<Vec<_>>()}}) };
+        let schema=if r.candidates.is_empty() { json!({"type":"array","items":{"type":"string"},"maxItems":0}) } else { json!({"type":"array","items":{"type":"string","enum":candidate_ids(&r.candidates)}}) };
         (key.clone(),schema)
     }).collect();
     let request = ModelRequest {

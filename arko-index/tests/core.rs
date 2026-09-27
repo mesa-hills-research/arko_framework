@@ -160,6 +160,340 @@ fn options(mode: SearchMode) -> SearchOptions {
         ..Default::default()
     }
 }
+
+struct TestJudge<F> {
+    calls: AtomicUsize,
+    select: F,
+}
+impl<F> TestJudge<F> {
+    fn new(select: F) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            select,
+        }
+    }
+}
+#[async_trait::async_trait]
+impl<F> SearchJudge for TestJudge<F>
+where
+    F: Fn(usize, &[SearchHit]) -> Result<JudgeSelection> + Send + Sync,
+{
+    async fn select(&self, query: &str, hits: &[SearchHit]) -> Result<JudgeSelection> {
+        assert_eq!(query, "alpha");
+        (self.select)(self.calls.fetch_add(1, Ordering::SeqCst), hits)
+    }
+}
+async fn judge_fixture() -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    ArkoIndex,
+    JobHandle,
+    Arc<Fake>,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    for i in 0..5 {
+        std::fs::write(
+            root.path().join(format!("{i}.mdx")),
+            format!("alpha example {i} with complete instructions and source code"),
+        )
+        .unwrap();
+    }
+    std::fs::write(root.path().join("tiny.mdx"), "alpha").unwrap();
+    let fake = Arc::new(Fake::new());
+    let index = ArkoIndex::open(db.path().join("i.db"), fake.clone(), config(&fake))
+        .await
+        .unwrap();
+    let job = index
+        .start_build(BuildSpec::new("judge-test", root.path()))
+        .await
+        .unwrap();
+    assert_eq!(settle(&index, &job.job).await.phase, "ready");
+    (root, db, index, job, fake)
+}
+
+#[tokio::test]
+async fn judged_search_filters_candidates_then_caps_and_preserves_sources() {
+    let (_root, _db, index, job, fake) = judge_fixture().await;
+    for mode in [
+        SearchMode::Lexical,
+        SearchMode::Semantic,
+        SearchMode::Hybrid,
+    ] {
+        let opts = SearchOptions {
+            mode,
+            top_k: Some(1),
+            min_chunk_bytes: 40,
+            ..Default::default()
+        };
+        let raw = index
+            .search(
+                &job.index,
+                "alpha",
+                SearchOptions {
+                    top_k: Some(3),
+                    ..opts.clone()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(raw.judge.is_none());
+        assert!(serde_json::to_value(&raw).unwrap().get("judge").is_none());
+        let judge = TestJudge::new(|_, hits: &[SearchHit]| {
+            assert_eq!(hits.len(), 3);
+            assert!(hits.iter().all(|h| h.text.len() >= 40));
+            Ok(JudgeSelection {
+                ordered_ids: vec![hits[2].id.clone(), hits[0].id.clone()],
+                excluded: vec![JudgeExclusion {
+                    id: hits[1].id.clone(),
+                    reason: "unrelated".into(),
+                }],
+            })
+        });
+        let page = index
+            .search_with_judge(
+                &job.index,
+                "alpha",
+                opts,
+                &judge,
+                JudgeOptions {
+                    candidate_limit: 3,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&page.hits[0]).unwrap(),
+            serde_json::to_value(&raw.hits[2]).unwrap()
+        );
+        assert_eq!(page.generation, raw.generation);
+        assert_eq!(page.mode, raw.mode);
+        assert_eq!(page.search_tokens, fake.tokens(&page.hits[0].text).unwrap());
+        assert_eq!(page.candidate_count, 5);
+        assert_eq!(page.omitted_hits, 4);
+        assert!(page.next.is_none());
+        let report = page.judge.unwrap();
+        assert_eq!(
+            (report.examined_candidates, report.unexamined_candidates),
+            (3, 2)
+        );
+        assert_eq!(
+            (
+                report.selected_count,
+                report.selected_beyond_limit,
+                report.excluded.len(),
+                report.attempts
+            ),
+            (2, 1, 1, 1)
+        );
+        // Judging must not mutate the database or raw ranking/paging.
+        let again = index
+            .search(
+                &job.index,
+                "alpha",
+                SearchOptions {
+                    mode: raw.mode,
+                    top_k: Some(3),
+                    min_chunk_bytes: 40,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(again.hits).unwrap(),
+            serde_json::to_value(raw.hits).unwrap()
+        );
+        assert!(again.next.is_some());
+    }
+}
+
+#[tokio::test]
+async fn judged_search_rejects_invalid_partitions_and_never_hides_provider_errors() {
+    let (_root, _db, index, job, _) = judge_fixture().await;
+    let opts = options(SearchMode::Lexical);
+    let judging = JudgeOptions {
+        candidate_limit: 3,
+        max_attempts: 2,
+    };
+    for failure in [
+        "unknown",
+        "duplicate",
+        "missing",
+        "empty-reason",
+        "invalid-json",
+    ] {
+        let judge = TestJudge::new(move |_, hits: &[SearchHit]| {
+            let mut selection = JudgeSelection {
+                ordered_ids: hits.iter().map(|h| h.id.clone()).collect(),
+                excluded: vec![],
+            };
+            match failure {
+                "unknown" => selection.ordered_ids[0] = "invented-id".into(),
+                "duplicate" => selection.ordered_ids[1] = selection.ordered_ids[0].clone(),
+                "missing" => {
+                    selection.ordered_ids.pop();
+                }
+                "empty-reason" => selection.excluded.push(JudgeExclusion {
+                    id: selection.ordered_ids.pop().unwrap(),
+                    reason: " ".into(),
+                }),
+                "invalid-json" => return Ok(serde_json::from_str("{broken")?),
+                _ => unreachable!(),
+            }
+            Ok(selection)
+        });
+        assert!(
+            index
+                .search_with_judge(&job.index, "alpha", opts.clone(), &judge, judging.clone())
+                .await
+                .is_err(),
+            "{failure}"
+        );
+        assert_eq!(judge.calls.load(Ordering::SeqCst), 2);
+    }
+    let recovering = TestJudge::new(|attempt, hits: &[SearchHit]| {
+        if attempt == 0 {
+            return Err(Error::Invalid("invalid first response".into()));
+        }
+        Ok(JudgeSelection {
+            ordered_ids: hits.iter().map(|h| h.id.clone()).collect(),
+            excluded: vec![],
+        })
+    });
+    let page = index
+        .search_with_judge(
+            &job.index,
+            "alpha",
+            opts.clone(),
+            &recovering,
+            judging.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.judge.unwrap().attempts, 2);
+    assert_eq!(page.hits.len(), 3);
+    let provider_failure = TestJudge::new(|_, _: &[SearchHit]| {
+        Err(Error::Provider {
+            message: "rate limit".into(),
+            transient: true,
+            retry_after: Some(Duration::from_secs(2)),
+        })
+    });
+    assert!(matches!(
+        index
+            .search_with_judge(&job.index, "alpha", opts, &provider_failure, judging)
+            .await,
+        Err(Error::Provider {
+            transient: true,
+            ..
+        })
+    ));
+    assert_eq!(provider_failure.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn judged_search_handles_empty_results_filters_and_invalid_options() {
+    let (_root, _db, index, job, _) = judge_fixture().await;
+    let reject = TestJudge::new(|_, hits: &[SearchHit]| {
+        Ok(JudgeSelection {
+            ordered_ids: vec![],
+            excluded: hits
+                .iter()
+                .map(|h| JudgeExclusion {
+                    id: h.id.clone(),
+                    reason: "no useful answer".into(),
+                })
+                .collect(),
+        })
+    });
+    let opts = SearchOptions {
+        mode: SearchMode::Lexical,
+        path_prefix: Some("0.mdx".into()),
+        literal: Some("complete instructions".into()),
+        ..Default::default()
+    };
+    let page = index
+        .search_with_judge(
+            &job.index,
+            "alpha",
+            opts.clone(),
+            &reject,
+            JudgeOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert!(page.hits.is_empty());
+    assert!(page.next.is_none());
+    assert_eq!(page.search_tokens, 0);
+    assert_eq!(page.judge.unwrap().excluded.len(), 1);
+    let empty = index
+        .search_with_judge(
+            &job.index,
+            "alpha",
+            SearchOptions {
+                path_prefix: Some("absent/".into()),
+                ..opts.clone()
+            },
+            &reject,
+            JudgeOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty.judge.unwrap().attempts, 0);
+    assert_eq!(reject.calls.load(Ordering::SeqCst), 1);
+    for (top_k, candidate_limit, max_attempts) in
+        [(Some(0), 2, 1), (Some(3), 2, 1), (None, 0, 1), (None, 2, 0)]
+    {
+        assert!(matches!(
+            index
+                .search_with_judge(
+                    &job.index,
+                    "alpha",
+                    SearchOptions {
+                        top_k,
+                        ..opts.clone()
+                    },
+                    &reject,
+                    JudgeOptions {
+                        candidate_limit,
+                        max_attempts
+                    }
+                )
+                .await,
+            Err(Error::Invalid(_))
+        ));
+    }
+    let raw = index
+        .search(
+            &job.index,
+            "alpha",
+            SearchOptions {
+                top_k: Some(1),
+                ..options(SearchMode::Lexical)
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        index
+            .search_with_judge(
+                &job.index,
+                "alpha",
+                SearchOptions {
+                    cursor: raw.next,
+                    ..opts
+                },
+                &reject,
+                JudgeOptions::default()
+            )
+            .await,
+        Err(Error::Invalid(_))
+    ));
+    assert_eq!(reject.calls.load(Ordering::SeqCst), 1);
+}
 #[test]
 fn normalized_rows_and_exact_unbounded_tails() {
     let s = Snapshot::new("a.rs", "α\r\nβ\rγ\n\nend".as_bytes()).unwrap();
@@ -297,6 +631,21 @@ fn grouped_repairs_have_complete_context_and_preserve_multiple_boundaries() {
     }
     assert!(r.regions["r0"].candidates.contains_key("L800"));
     assert!(!r.regions["r0"].candidates.contains_key("L900"));
+    let expected_ids: Vec<_> = (1..900).map(|row| format!("L{row}")).collect();
+    let menu = r
+        .request
+        .prompt
+        .lines()
+        .find_map(|line| line.strip_prefix("Legal boundary IDs="))
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Vec<String>>(menu).unwrap(),
+        expected_ids
+    );
+    assert_eq!(
+        r.request.schema["properties"]["r0"]["items"]["enum"],
+        json!(expected_ids)
+    );
     let fixed = apply_repair(&s, &guard, &w, &cuts, &r, &json!({"r0":["L100","L400"]})).unwrap();
     assert_eq!(
         fixed.iter().map(|c| c.after_line).collect::<Vec<_>>(),
@@ -899,6 +1248,122 @@ async fn full_search_and_read_are_not_truncated_by_former_caps() {
             .iter()
             .any(|h| h.path == "query.txt")
     );
+}
+
+#[tokio::test]
+async fn minimum_chunk_size_filters_all_modes_and_preserves_reads() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let texts = [
+        ("fragment.mdx", "<Tabs>\nalpha\n</Tabs>\n".to_owned()),
+        ("below.txt", format!("alpha {}", "a".repeat(33))),
+        ("exact.txt", format!("alpha {}", "é".repeat(17))),
+        ("large.txt", format!("alpha {}", "context ".repeat(20))),
+    ];
+    assert_eq!(texts[1].1.len(), 39);
+    assert_eq!(texts[2].1.len(), 40);
+    for (path, text) in &texts {
+        std::fs::write(root.path().join(path), text).unwrap();
+    }
+    let fake = Arc::new(Fake::new());
+    let index = ArkoIndex::open(db.path().join("i.db"), fake.clone(), config(&fake))
+        .await
+        .unwrap();
+    let job = index
+        .start_build(BuildSpec::new("test", root.path()))
+        .await
+        .unwrap();
+    assert_eq!(settle(&index, &job.job).await.phase, "ready");
+    for mode in [
+        SearchMode::Lexical,
+        SearchMode::Semantic,
+        SearchMode::Hybrid,
+    ] {
+        // Warm the unfiltered vector cache before changing eligibility.
+        let all = index
+            .search(&job.index, "alpha", options(mode.clone()))
+            .await
+            .unwrap();
+        assert_eq!(all.hits.len(), 4);
+        let filtered = SearchOptions {
+            min_chunk_bytes: 40,
+            top_k: Some(1),
+            ..options(mode.clone())
+        };
+        let first = index
+            .search(&job.index, "alpha", filtered.clone())
+            .await
+            .unwrap();
+        assert_eq!(first.candidate_count, 2);
+        assert_eq!(first.hits.len(), 1);
+        assert_eq!(first.omitted_hits, 1);
+        let next = first.next.clone().unwrap();
+        let second = index
+            .search(
+                &job.index,
+                "alpha",
+                SearchOptions {
+                    cursor: Some(next.clone()),
+                    ..filtered.clone()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.candidate_count, 2);
+        assert_eq!(second.hits.len(), 1);
+        assert_eq!(second.omitted_hits, 0);
+        assert!(second.next.is_none());
+        assert_ne!(first.hits[0].id, second.hits[0].id);
+        assert!(
+            first
+                .hits
+                .iter()
+                .chain(&second.hits)
+                .all(|h| h.text.len() >= 40)
+        );
+        assert!(matches!(
+            index
+                .search(
+                    &job.index,
+                    "alpha",
+                    SearchOptions {
+                        min_chunk_bytes: 0,
+                        cursor: Some(next),
+                        ..filtered
+                    }
+                )
+                .await,
+            Err(Error::Stale(_))
+        ));
+        // Small fragments stay available for exact source reads.
+        let short_ids: Vec<_> = all
+            .hits
+            .iter()
+            .filter(|h| h.text.len() < 40)
+            .map(|h| h.id.clone())
+            .collect();
+        let reads = index
+            .read_chunks(&job.index, &job.job, &short_ids, 0)
+            .await
+            .unwrap();
+        assert_eq!(reads.len(), 2);
+        for read in reads {
+            assert_eq!(
+                read.text,
+                std::fs::read_to_string(root.path().join(read.path)).unwrap()
+            );
+        }
+        // Returning to the unfiltered cache key must restore every candidate.
+        assert_eq!(
+            index
+                .search(&job.index, "alpha", options(mode))
+                .await
+                .unwrap()
+                .hits
+                .len(),
+            4
+        );
+    }
 }
 
 #[tokio::test]

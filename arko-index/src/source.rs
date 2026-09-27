@@ -196,7 +196,6 @@ pub fn scan(spec: &BuildSpec) -> Result<Manifest> {
                         | "__pycache__"
                         | ".venv"
                         | "dist"
-                        | "build"
                 )
         })
         .build();

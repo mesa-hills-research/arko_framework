@@ -26,6 +26,9 @@ pub struct SearchOptions {
     pub mode: SearchMode,
     /// Optional caller-requested number of complete results per page. None returns all.
     pub top_k: Option<usize>,
+    /// Exclude source chunks shorter than this many UTF-8 bytes before ranking.
+    /// Zero keeps every chunk. Source reads are unaffected.
+    pub min_chunk_bytes: usize,
     pub path_prefix: Option<String>,
     pub literal: Option<String>,
     pub cursor: Option<SearchCursor>,
@@ -37,6 +40,7 @@ impl Default for SearchOptions {
         Self {
             mode: SearchMode::Hybrid,
             top_k: None,
+            min_chunk_bytes: 0,
             path_prefix: None,
             literal: None,
             cursor: None,
@@ -88,6 +92,10 @@ pub struct SearchPage {
     pub search_tokens: usize,
     pub rebuild_tokens: usize,
     pub tokenizer: String,
+    /// Present only for explicitly judged searches. Scores remain original
+    /// retrieval scores; result order is the judge's selected order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge: Option<crate::JudgeReport>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChunkRead {
@@ -194,6 +202,7 @@ impl ArkoIndex {
             &options.path_prefix,
             &options.literal,
             options.top_k,
+            options.min_chunk_bytes,
         ))?);
         let offset = if let Some(cursor) = &options.cursor {
             if cursor.query_hash != query_hash {
@@ -253,25 +262,26 @@ impl ArkoIndex {
         } else {
             None
         };
-        let (g, prefix, literal, mode, fts) = (
+        let (g, prefix, literal, mode, fts, min_chunk_bytes) = (
             generation.clone(),
             options.path_prefix.clone().unwrap_or_default(),
             options.literal.clone().unwrap_or_default(),
             options.mode.clone(),
             fts_query(query),
+            options.min_chunk_bytes,
         );
         let matrix = self.inner.matrix.clone();
         let cache_budget = self.inner.config.vector_cache_bytes;
         let ranked=self.inner.db.call(move|c|{
             let mut lexical=vec![];let mut semantic=vec![];
             if mode!=SearchMode::Semantic&&!fts.is_empty(){
-                let mut statement=c.prepare("SELECT f.id,bm25(chunk_fts) FROM chunk_fts f JOIN chunks ch ON ch.id=f.id AND ch.job=f.job WHERE chunk_fts MATCH ?1 AND f.job=?2 AND substr(ch.path,1,length(?3))=?3 AND (?4='' OR instr(f.body,?4)>0) ORDER BY bm25(chunk_fts),f.id")?;
-                lexical=statement.query_map(params![fts,g,prefix,literal],|r|Ok((r.get::<_,String>(0)?,r.get::<_,f64>(1)?)))?.collect::<std::result::Result<_,_>>()?;
+                let mut statement=c.prepare("SELECT f.id,bm25(chunk_fts) FROM chunk_fts f JOIN chunks ch ON ch.id=f.id AND ch.job=f.job WHERE chunk_fts MATCH ?1 AND f.job=?2 AND substr(ch.path,1,length(?3))=?3 AND (?4='' OR instr(f.body,?4)>0) AND ch.end-ch.start>=?5 ORDER BY bm25(chunk_fts),f.id")?;
+                lexical=statement.query_map(params![fts,g,prefix,literal,min_chunk_bytes],|r|Ok((r.get::<_,String>(0)?,r.get::<_,f64>(1)?)))?.collect::<std::result::Result<_,_>>()?;
             }
             if let Some(vector)=vector{
                 // SQLite streams vector-only rows; source bodies are fetched only for finalists.
                 // Score every matching vector before ranking; the cache never limits candidates.
-                let cache_key=crate::source::hash(serde_json::to_vec(&(&g,&prefix,&literal))?);
+                let cache_key=crate::source::hash(serde_json::to_vec(&(&g,&prefix,&literal,min_chunk_bytes))?);
                 let mut cache=matrix.lock().map_err(|_|invalid("vector cache lock poisoned"))?;
                 let mut ranks=Vec::new();
                 let mut score_row=|id:String,values:&[f32]|->Result<()> {
@@ -283,8 +293,8 @@ impl ArkoIndex {
                 if let Some(cached)=cache.as_ref().filter(|c|c.key==cache_key){
                     for(id,values)in cached.ids.iter().zip(cached.vectors.chunks_exact(vector.len())){score_row(id.clone(),values)?;}
                 }else{
-                    let mut statement=c.prepare("SELECT min(ch.id),v.vector FROM chunks ch JOIN vectors v ON v.id=ch.payload JOIN snapshots s ON s.hash=ch.hash WHERE ch.job=?1 AND substr(ch.path,1,length(?2))=?2 AND (?3='' OR instr(CAST(substr(CAST(s.content AS BLOB),ch.start+1,ch.end-ch.start) AS TEXT),?3)>0) GROUP BY ch.payload")?;
-                    let mut rows=statement.query(params![g,prefix,literal])?;
+                    let mut statement=c.prepare("SELECT min(ch.id),v.vector FROM chunks ch JOIN vectors v ON v.id=ch.payload JOIN snapshots s ON s.hash=ch.hash WHERE ch.job=?1 AND substr(ch.path,1,length(?2))=?2 AND (?3='' OR instr(CAST(substr(CAST(s.content AS BLOB),ch.start+1,ch.end-ch.start) AS TEXT),?3)>0) AND ch.end-ch.start>=?4 GROUP BY ch.payload")?;
+                    let mut rows=statement.query(params![g,prefix,literal,min_chunk_bytes])?;
                     let mut candidate=Some(MatrixCache{key:cache_key,ids:vec![],vectors:vec![]});let mut bytes_used=0usize;
                     while let Some(row)=rows.next()?{
                         let id:String=row.get(0)?;let bytes:Vec<u8>=row.get(1)?;
@@ -335,6 +345,7 @@ impl ArkoIndex {
             search_tokens: 0,
             rebuild_tokens,
             tokenizer: self.inner.backend.output_tokenizer(),
+            judge: None,
         };
         for (mut hit, text) in ranked
             .into_iter()
