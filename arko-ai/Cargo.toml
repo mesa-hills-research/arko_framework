@@ -46,3 +46,6 @@ name = "llm_client_cli"
 
 [[example]]
 name = "embeddings_demo"
+
+[[example]]
+name = "oauth_cache_probe"
