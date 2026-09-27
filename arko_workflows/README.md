@@ -202,7 +202,7 @@ Every running agent of the run is told to stop, including agents started with
 results (status `AgentRunStatus::Cancelled` for a stopped agent), and returns
 `WorkflowError::Cancelled`; every later call returns it at once without starting
 anything. An agent stops at its next step, or when a long tool call it is running
-returns. One that has not stopped within the grace period (30 seconds by default,
+returns (`wait_for_message` returns at once). One that has not stopped within the grace period (30 seconds by default,
 set with `cancel_grace_period`, counted from the stop) is aborted; an agent running
 inside another agent's tool call, such as a completion verifier, gets half its
 parent's time. `cancel()` returns `false` if the run was already stopped. The
@@ -393,8 +393,46 @@ let workflow = Workflow::builder()
 Names in the policy are registration names; an unknown one fails the build. The
 policy applies to every run of an agent, including runs started through workflow
 services. With messaging disabled, or for agents that are not offered the tools,
-the names `send_message` and `list_recipients` are free for tools of your own. See
-[messaging](INDEX.md#messaging) for the statuses, notices, and tool results.
+the names `send_message`, `list_recipients` and `wait_for_message` are free for
+tools of your own. See [messaging](INDEX.md#messaging) for the statuses, notices,
+and tool results.
+
+### Waiting for a message
+
+An agent in native tool mode must call a tool every turn, so an agent that another
+agent may message is offered `wait_for_message` to wait for a reply. It returns as
+soon as a message for the agent arrives (the message itself is delivered, once, with
+the agent's next turn, never in the tool result), when an agent it may message or that
+may message it starts or finishes, or at the time limit, and says which: for example
+``A message from `lead` is waiting; it will be delivered with your next turn.`` or
+`No messages after 270 s.` While it waits, the agent's status is `waiting
+(awaiting_message)`. The model may pass `timeout_seconds` to wait less than the
+limit, never more. Cancelling the workflow, or the workflow stopping the agent (over
+its budget, for example), ends the wait at once.
+
+Every wait ends with a model request, and a request made within the provider's
+prompt-cache lifetime finds the prompt still cached (each cache hit starts the
+lifetime again). The default limit, `WaitForMessageTimeout::Auto`, therefore sits just
+inside each agent's cache lifetime, as `LLMClient::prompt_cache_lifetime` reports it
+for the agent's model and settings: the lifetime minus a tenth of it, at least 30
+seconds. That is 4 minutes 30 seconds for Anthropic's default 5-minute cache, 54
+minutes with a 1-hour cache (`GenerationConfig::anthropic_cache_ttl` set to
+`AnthropicCacheTtl::OneHour`), 27 minutes for OpenAI's GPT-5.6 and later (30-minute
+cache, also over ChatGPT OAuth), and 4 minutes 30 seconds when the lifetime is
+unknown or caching is off. A fixed limit (more than zero, at most 24 hours) applies to
+every agent or to one:
+
+```rust
+use std::time::Duration;
+
+let workflow = Workflow::builder()
+    // ...
+    .wait_for_message_timeout(Duration::from_secs(10 * 60))
+    .agent_wait_for_message_timeout("lead", WaitForMessageTimeout::Auto)
+    .build()?;
+```
+
+A limit longer than the cache lifetime means a cache write after each long wait.
 
 The optional `attachments_json` parameter is a JSON array of typed references.
 They are described to the recipient; files, memory, and transcripts are not loaded

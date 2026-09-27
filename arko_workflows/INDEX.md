@@ -43,14 +43,14 @@ Root re-exports: `Workflow`, `WorkflowBuilder`, `AgentHandle`, `WorkflowError`, 
 | `freshness` | `ActorId`, `ContextFreshnessConfig`, `FreshnessConflict`, `ResourceId`, `ResourceTracker`, `ToolResourceEffect` |
 | `hooks` | `HookCallback`, `HookPoint`, `HookResult` |
 | `memory` | `AccessScope`, `MemoryConfig`, `MemoryEntry`, `MemoryTier`, `WriteMode` |
-| `messaging`, `messaging::registry` | `AgentMessage`, `MessageAttachment`, `MessagingPolicy`, `AgentStatus`, `WaitReason` |
+| `messaging`, `messaging::registry`, `messaging::wait` | `AgentMessage`, `MessageAttachment`, `MessagingPolicy`, `AgentStatus`, `WaitReason`, `WaitForMessageTimeout` |
 | `persistence` | `PersistenceConfig` |
 | `services` | `WorkflowServices`, `WorkflowServicesConfig` |
 | `user_input` | `UserInputHandler`, `UserInputRequest` |
 | `verification` | `CompletionVerifierConfig`, `RepairContextConfig`, `VERIFIER_OUTPUT_CONTRACT`, `VerificationDecision`, `VerificationKind`, `VerificationRecord` |
 | `voting` | `BallotConfig`, `BallotResult`, `CastVote`, `TieBreak`, `VoteOption` |
 
-Other public modules: `context`, `hooks::context`, `memory::tools`, `messaging::tools`, `persistence::state`, and `python` (with the `python` feature). `workflow::engine` is public but exports no items; execution goes through `Workflow` and `AgentHandle`.
+Other public modules: `context`, `hooks::context`, `memory::tools`, `messaging::tools`, `messaging::wait`, `persistence::state`, and `python` (with the `python` feature). `workflow::engine` is public but exports no items; execution goes through `Workflow` and `AgentHandle`.
 
 | Need | Entry point |
 | --- | --- |
@@ -75,7 +75,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 
 ### Builder signatures and defaults
 
-`Workflow::builder() -> WorkflowBuilder`, `WorkflowBuilder::new() -> Self`, and `WorkflowBuilder::default() -> Self` return an empty builder. Required: a name, an existing workspace directory, an `Arc<LLMClient>`, and at least one uniquely named agent. By default a workflow has no memory tiers, spending limits, hooks, persistence, freshness tracking, custom tools, interceptors, verifiers, distillers, workflow services, input handler, or voting; metadata is empty, the interception failure policy is `InterceptionFailurePolicy::UseRawResult`, and the cancel grace period is 30 seconds.
+`Workflow::builder() -> WorkflowBuilder`, `WorkflowBuilder::new() -> Self`, and `WorkflowBuilder::default() -> Self` return an empty builder. Required: a name, an existing workspace directory, an `Arc<LLMClient>`, and at least one uniquely named agent. By default a workflow has no memory tiers, spending limits, hooks, persistence, freshness tracking, custom tools, interceptors, verifiers, distillers, workflow services, input handler, or voting; metadata is empty, the interception failure policy is `InterceptionFailurePolicy::UseRawResult`, the cancel grace period is 30 seconds, and `wait_for_message` waits up to an automatic limit inside each agent's prompt-cache lifetime.
 
 | Signature | Parameters, purpose, and default |
 | --- | --- |
@@ -102,7 +102,9 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 | `distiller(self, config: DistillationConfig) -> Self` | Append an LLM distiller; distillers run after all custom interceptors. See [Tool-result distillation](#tool-result-distillation). |
 | `workflow_services(self, config: WorkflowServicesConfig) -> Self` | Enable bounded agent-to-agent delegation through the `run_workflow_agent` tool. |
 | `messaging(self, policy: MessagingPolicy) -> Self` | Set whom each agent may message with `send_message`. Default `MessagingPolicy::all()`: every agent may message every other agent. See [Messaging policy](#messaging-policy). |
-| `disable_messaging(self) -> Self` | Offer no agent `send_message` or `list_recipients`. |
+| `disable_messaging(self) -> Self` | Offer no agent `send_message`, `list_recipients`, or `wait_for_message`. |
+| `wait_for_message_timeout(self, timeout: impl Into<WaitForMessageTimeout>) -> Self` | How long `wait_for_message` waits at most, for agents without their own setting. Default `WaitForMessageTimeout::Auto`, just inside each agent's prompt-cache lifetime; a `std::time::Duration` converts to a fixed limit, more than zero and at most 24 hours. See [Waiting for a message](#waiting-for-a-message). |
+| `agent_wait_for_message_timeout(self, agent: impl Into<String>, timeout: impl Into<WaitForMessageTimeout>) -> Self` | The same for one agent, in place of the workflow's setting. |
 | `user_input_handler(self, handler: Arc<dyn UserInputHandler>) -> Self` | Answer agents' `ask_user` questions asynchronously. Without a handler, the run suspends and returns `UserInputRequired`. |
 | `enable_voting(self) -> Self` | Create an in-memory ballot store and give every agent the `cast_vote` tool. |
 | `cancel_grace_period(self, grace_period: std::time::Duration) -> Self` | How long a stopped run waits for each running agent to stop before aborting it. Default `workflow::cancel::DEFAULT_CANCEL_GRACE_PERIOD`, 30 seconds. See [Stopping a run](#stopping-a-run). |
@@ -116,15 +118,16 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 - a host that matches none of a nonempty `metadata.supported_platforms` list;
 - duplicate agent names;
 - a negative or non-finite workflow budget, warning threshold, or agent budget;
-- an unknown agent name in `agent_tool`, `agent_tool_result_interceptor`, `agent_budget`, a completion verifier's verifier or targets, a distiller's targets (`distiller '<name>' targets unknown agent '<target>'`), or the messaging policy (`messaging policy references unknown agent '<name>'`);
+- an unknown agent name in `agent_tool`, `agent_tool_result_interceptor`, `agent_budget`, a completion verifier's verifier or targets, a distiller's targets (`distiller '<name>' targets unknown agent '<target>'`), the messaging policy (`messaging policy references unknown agent '<name>'`), or `agent_wait_for_message_timeout` (`wait_for_message timeout references unknown agent '<name>'`);
+- a fixed `wait_for_message` limit of zero or more than 24 hours, for the workflow or an agent;
 - a distiller whose `max_output_tokens` is zero or whose `reasoning` configuration is for a different provider than its model;
 - `resume_from` without `persistence`, a checkpoint for a different workflow name, or a checkpoint run ID that differs from the persistence directory's.
 
 Checkpoint read and parse failures return `Io` or `Json`. A warning threshold may exceed the budget limit. Metadata dependencies are descriptive: the builder neither installs nor checks executables.
 
-Tool names: duplicate global tool names, duplicate names within one agent's tools, and a name shared by a global and an agent-local tool are rejected. Global tools cannot use the reserved names `complete_task`, `ask_user`, `read_memory`, `write_memory`, `list_memories`, `run_workflow_agent`, or `cast_vote`, nor `send_message` or `list_recipients` while any agent is offered the workflow's messaging tools; an agent-local tool with either name is rejected for an agent that is offered them. Agent-local tools are not checked against reserved names: an agent-local tool with a reserved name replaces that workflow or built-in tool for its agent, except `complete_task`, which `arko_agents` never lets a non-built-in tool replace. Custom tools are registered after the workflow tools, so a custom tool named like an `arko_agents` built-in (for example `read_file`) replaces it for the agents that receive it.
+Tool names: duplicate global tool names, duplicate names within one agent's tools, and a name shared by a global and an agent-local tool are rejected. Global tools cannot use the reserved names `complete_task`, `ask_user`, `read_memory`, `write_memory`, `list_memories`, `run_workflow_agent`, or `cast_vote`, nor `send_message` or `list_recipients` while any agent is offered the workflow's messaging tools, nor `wait_for_message` while any agent is offered it; an agent-local tool with one of these names is rejected for an agent that is offered the workflow's tool. Agent-local tools are not checked against reserved names: an agent-local tool with a reserved name replaces that workflow or built-in tool for its agent, except `complete_task`, which `arko_agents` never lets a non-built-in tool replace. Custom tools are registered after the workflow tools, so a custom tool named like an `arko_agents` built-in (for example `read_file`) replaces it for the agents that receive it.
 
-Tools added automatically: `send_message` and `list_recipients` for each agent with at least one permitted recipient under the messaging policy; `read_memory`, `write_memory`, and `list_memories` when at least one memory tier exists; `run_workflow_agent` for permitted callers when services are enabled; `cast_vote` when voting is enabled. The agent's pending messages are appended to the prompt of each new run and continuation, under `# Messages from other agents:`. A new run's initial prompt also lists the agents it may message; see [What agents are told about their recipients](#what-agents-are-told-about-their-recipients). Skills configured on an agent are initialized against the workspace. There is no separate graph or scheduler configuration.
+Tools added automatically: `send_message` and `list_recipients` for each agent with at least one permitted recipient under the messaging policy; `wait_for_message` for each agent that another agent may message; `read_memory`, `write_memory`, and `list_memories` when at least one memory tier exists; `run_workflow_agent` for permitted callers when services are enabled; `cast_vote` when voting is enabled. The agent's pending messages are appended to the prompt of each new run and continuation, under `# Messages from other agents:`. A new run's initial prompt also lists the agents it may message; see [What agents are told about their recipients](#what-agents-are-told-about-their-recipients). Skills configured on an agent are initialized against the workspace. There is no separate graph or scheduler configuration.
 
 Interceptors run in this order: global interceptors, the agent's own interceptors, then the distillers that target the agent, each group in registration order. Each stage receives the previous stage's result. An interceptor that still fails after the retries allowed by the failure policy is skipped, and the chain continues with the result so far. Every agent's tool calls pass through the workflow's execution middleware, which enforces a stopped run and runs tool hooks, freshness checks, and completion verification at tool execution, so these also apply to automatically approved and batched calls.
 
@@ -297,7 +300,7 @@ Stopping the run has these effects:
 
 - Every running agent of the run is sent `CancelTask` at once, queued before its next step. This includes agents started with `spawn_agent`, whether driven by `AgentHandle::wait` or through `into_parts` (see [AgentHandle](#agenthandle)).
 - Every run call in progress (`run_agent`, `continue_agent`, `run_agents_parallel`, `AgentHandle::wait`) waits for its agents to end while recording their remaining events (event journal and broadcast) and usage (budget), then returns the stop's error: `Cancelled` or `AbortedByHook`. It does so even when an agent completed during the wind-down; that agent's `Completed` result is still recorded. A `durable_step` or `durable_step_with_resolver` call in progress returns the stop's error once its closure returns. Every later call returns the error at once without starting anything: no `PreAgentSpawn` and no journal record.
-- An agent stops at its next step; model streams and waits are interrupted at once, and an agent running a long tool call stops when the call returns. The grace period counts from the moment the run stopped. An agent that has not ended within it is aborted: its Tokio task is dropped with any tool call in progress (an `arko_agents` command-template tool's child process is killed), and it is recorded as `Cancelled` with the task as the run started it, so the record does not contain this invocation's conversation; the event journal does. Its reason is the stop reason described below followed by `The agent did not stop within <grace period> and was aborted.`, with the configured period in `Duration` debug form (for example `30s`). The same bounded wait applies whenever the managed driver stops an agent, for example over budget, after an interruption, or after a hook's abort; when the run itself is not stopped, it counts from that moment. A grace period too long to represent waits as long as possible.
+- An agent stops at its next step; model streams and waits are interrupted at once, `wait_for_message` returns at once, and an agent running another long tool call stops when the call returns. The grace period counts from the moment the run stopped. An agent that has not ended within it is aborted: its Tokio task is dropped with any tool call in progress (an `arko_agents` command-template tool's child process is killed), and it is recorded as `Cancelled` with the task as the run started it, so the record does not contain this invocation's conversation; the event journal does. Its reason is the stop reason described below followed by `The agent did not stop within <grace period> and was aborted.`, with the configured period in `Duration` debug form (for example `30s`). The same bounded wait applies whenever the managed driver stops an agent, for example over budget, after an interruption, or after a hook's abort; when the run itself is not stopped, it counts from that moment. A grace period too long to represent waits as long as possible.
 - An agent running inside another agent's tool call, such as a completion verifier or an agent delegated through the `run_workflow_agent` tool, gets half its parent's grace period at each level of nesting, so when the run stops it is stopped and recorded before its parent can be aborted. When only the parent is stopped (for example over its budget) and it doesn't end within the grace period, it is aborted with the agent running inside its tool call, which is not recorded. Dropping the driver of a running agent, for example a `run_agent` or `run_agents_parallel` future, aborts the agent's task instead of leaving it running unsupervised, and the agent counts as finished (cancelled); no result is recorded.
 - A paused workflow does not delay the stop, and a `UserInputHandler` still waiting for an answer is abandoned.
 - Once the run is stopped, the execution middleware answers every tool call with `ToolExecutionDecision::CancelTask`: the call does not run (a `cast_vote` is not recorded, for example), and the agent ends `Cancelled` with the cause's agent reason. A completion verifier stopped with the run decides nothing, so its target agent is cancelled, not failed. Distillers make no further requests and leave tool output unchanged.
@@ -473,7 +476,7 @@ Source: [context/mod.rs](src/context/mod.rs). `context::SharedContext`, returned
 | `durable_store` | `Option<Arc<durable::DurableStore>>` | Present when persistence is configured. |
 | `memory` | `memory::MemoryStore` | Shared tier store. |
 | `messages` | `messaging::MessageBus` | Queued and live messaging. |
-| `messaging` | `Option<messaging::MessagingPolicy>` | Whom each agent may message with `send_message`; `None` when messaging is disabled. `fn message_recipients(&self, agent_name: &str) -> Vec<String>` returns an agent's permitted recipients, sorted by name (empty when disabled). `fn recipient_statuses(&self, agent_name: &str) -> Vec<(String, AgentStatus)>` pairs them with their current statuses, and `fn recipient_status(&self, agent: &str) -> AgentStatus` returns one agent's status (`NotStarted` for an unknown name). |
+| `messaging` | `Option<messaging::MessagingPolicy>` | Whom each agent may message with `send_message`; `None` when messaging is disabled. `fn message_recipients(&self, agent_name: &str) -> Vec<String>` returns an agent's permitted recipients, sorted by name (empty when disabled). `fn recipient_statuses(&self, agent_name: &str) -> Vec<(String, AgentStatus)>` pairs them with their current statuses, and `fn recipient_status(&self, agent: &str) -> AgentStatus` returns one agent's status (`NotStarted` for an unknown name). `fn message_senders(&self, agent_name: &str) -> Vec<String>` returns the agents that may message it, sorted by name (empty when disabled); an agent with any is offered `wait_for_message`. |
 | `resource_tracker` | `Option<freshness::ResourceTracker>` | Context freshness tracker. |
 | `hooks` | `Arc<hooks::HookRegistry>` | Registered callbacks. |
 | `agent_configs` | `HashMap<String, AgentConfig>` | Agent configurations keyed by registration name. |
@@ -616,7 +619,7 @@ Methods on `MessageBus`. `Default` is an empty roster with no queues or active r
 | `fn roster(&self) -> Vec<String>` | Recipient names, sorted. |
 | `fn register_active(&self, agent_name: &str, task_id: Uuid, sender: tokio::sync::mpsc::Sender<UserCommand>)` | Register a task's command channel and start its delivery worker. Registering the same task again replaces the registration and stops the old worker. Can be called outside a Tokio runtime; delivery then starts at the next `send` or `inject_task` inside one. |
 | `fn unregister_active(&self, agent_name: &str, task_id: Uuid)` | Remove the registration and stop forwarding; unacknowledged messages stay queued. |
-| `async fn inject_task(&self, task_id: Uuid, content: String) -> bool` | Queue a context notice for one active task without waiting for channel capacity. Creates an `AgentMessage` from `workflow-context` that checkpoints persist like any message. `true` means queued (not yet consumed or saved); an unknown or inactive task returns `false`. |
+| `async fn inject_task(&self, task_id: Uuid, content: String) -> bool` | Queue a context notice for one active task without waiting for channel capacity. Creates an `AgentMessage` from `workflow-context` (`messaging::WORKFLOW_CONTEXT_SENDER`) that checkpoints persist like any message; it doesn't end a `wait_for_message`. `true` means queued (not yet consumed or saved); an unknown or inactive task returns `false`. |
 | `async fn send(&self, from: &str, from_task_id: Option<Uuid>, to: &str, content: String, attachments: Vec<MessageAttachment>) -> Result<AgentMessage, String>` | Validate the recipient, queue the message, and return it. Active delivery workers forward it without blocking the sender on a busy recipient. A message to the sender itself returns `'<to>' is not a permitted recipient`; an unknown recipient's error lists the valid names. The messaging policy and recipient statuses are not checked. A closed channel unregisters that task; its unacknowledged messages stay queued. The sender name is not validated. |
 | `fn drain(&self, agent_name: &str) -> Vec<AgentMessage>` | Remove and return the agent's whole queue; `[]` for an unknown or empty name. |
 | `fn pending(&self, agent_name: &str) -> Vec<AgentMessage>` | Clone of the queue without removing messages. |
@@ -659,7 +662,7 @@ One registry per workflow run records each agent's status, under one lock, with 
 | Type | Variants and meaning |
 | --- | --- |
 | `AgentStatus` | `NotStarted`: no run of the agent has started. `Running`: a run of the agent is running. `Waiting(WaitReason)`: every running run of the agent is waiting. `Finished(AgentRunStatus)`: no run is running, and the latest ended with this outcome. |
-| `WaitReason` | `RateLimited { until: Option<chrono::DateTime<chrono::Utc>> }`: waiting out a provider rate limit. `Retrying { until }`: waiting to retry another failed model request. `UsageLimit { until }`: waiting for a plan usage limit to reset. `AwaitingApproval`: a tool call or error recovery awaits approval. `AwaitingInput`: questions await an answer. `Paused`: the workflow is paused. |
+| `WaitReason` | `RateLimited { until: Option<chrono::DateTime<chrono::Utc>> }`: waiting out a provider rate limit. `Retrying { until }`: waiting to retry another failed model request. `UsageLimit { until }`: waiting for a plan usage limit to reset. `AwaitingApproval`: a tool call or error recovery awaits approval. `AwaitingInput`: questions await an answer. `AwaitingMessage`: waiting in `wait_for_message`. `Paused`: the workflow is paused. |
 
 `AgentStatus` methods:
 
@@ -668,7 +671,7 @@ fn is_reachable(&self) -> bool; // Running or Waiting: messages are delivered
 fn describe(&self) -> String;
 ```
 
-`describe` returns the form agents are shown: `not_started`, `running`, `waiting (<reason>)` or `waiting (<reason> until <time>)`, and `finished (<outcome>)`. The reasons are `rate_limited`, `retrying`, `usage_limit`, `awaiting_approval`, `awaiting_input`, and `paused`; the time is RFC 3339 UTC to the second, for example `waiting (rate_limited until 2026-09-27T12:00:00Z)`. The outcomes are `completed`, `failed`, `interrupted`, `cancelled`, and `waiting_for_input`.
+`describe` returns the form agents are shown: `not_started`, `running`, `waiting (<reason>)` or `waiting (<reason> until <time>)`, and `finished (<outcome>)`. The reasons are `rate_limited`, `retrying`, `usage_limit`, `awaiting_approval`, `awaiting_input`, `awaiting_message`, and `paused`; the time is RFC 3339 UTC to the second, for example `waiting (rate_limited until 2026-09-27T12:00:00Z)`. The outcomes are `completed`, `failed`, `interrupted`, `cancelled`, and `waiting_for_input`.
 
 Statuses follow the managed driver's events:
 
@@ -676,6 +679,7 @@ Statuses follow the managed driver's events:
 - `UsageLimitReached` starts a `UsageLimit` wait until its `waiting_until_unix_ms`, when known.
 - A task state awaiting tool, batch, or error-recovery approval starts `AwaitingApproval`; `AwaitingUserResponse` and `UserQuestionsAsked` start `AwaitingInput`.
 - Error reports, task logs, plan-usage and cache-efficiency reports, and the stream end leave a wait in place; any other event ends it.
+- `wait_for_message` marks its run `AwaitingMessage` for as long as it waits, whatever events arrive meanwhile, and running again when it returns or its task is aborted.
 
 A wait whose `until` time has passed counts as over: the agent is `Running` again while the retry is under way. While the workflow is paused, every agent with a running run is `Waiting(Paused)`. With several runs of one agent, the agent is `Running` while any run is not waiting; otherwise it is waiting for the reason of one of its runs. A run started while another run of the same agent is running is not a new start.
 
@@ -683,15 +687,16 @@ A wait whose `until` time has passed counts as over: the agent is `Running` agai
 
 ### What agents are told about their recipients
 
-An agent learns about the agents it may message in exactly three places. The workflow adds nothing about them to its system prompt or tool definitions, so both stay the same during a task and remain cacheable.
+An agent learns about the agents it may message in exactly four places. The workflow adds nothing about them to its system prompt or tool definitions, so both stay the same during a task and remain cacheable.
 
 1. **The initial prompt of a new run** ends with a `# Agents you can message` section when the agent has permitted recipients: a sentence on how to reach them, then one line per recipient with its role description and its status when the run started, such as `` - `lead` (Coordinates the work): running ``. The agent's pending messages come before it. Continuations (`continue_agent`, including an answer to `ask_user`, and a verifier's re-review or format retry) add no list. A completion verifier's prompt has no list, and the target's task prompt that it quotes has its list removed.
 2. **Start notices** arrive in `# Workflow context update` user messages, added at each safe turn boundary before a model request, one line per recipient: `` Agent `worker` (role: <role description>) is now running. You can message it with send_message. `` A run is told about every permitted recipient that started after the registry version it last saw (from its list or its previous notices) and is still running, and then has seen the current version, so no ordering of starts loses or repeats a notice. A continued run is told about recipients that started since it last ran, and a run whose task comes from a checkpoint saved without the registry is told about every running recipient once. Agents started together by `run_agents_parallel` are marked running before any is prompted, so each sees the others as running and gets no notice. There are no finish notices.
 3. **`list_recipients`** reports current statuses on request.
+4. **`wait_for_message`** results name an agent whose start or finish ended the wait; see [Waiting for a message](#waiting-for-a-message). The start notice still follows at the next turn boundary.
 
 ### Messaging tools
 
-`messaging::tools` defines `SEND_MESSAGE_TOOL_NAME: &str = "send_message"` and `LIST_RECIPIENTS_TOOL_NAME: &str = "list_recipients"`. `SendMessageTool` and `ListRecipientsTool` implement `Debug` and `arko_agents::tool::Tool`:
+`messaging::tools` defines `SEND_MESSAGE_TOOL_NAME: &str = "send_message"` and `LIST_RECIPIENTS_TOOL_NAME: &str = "list_recipients"`, and re-exports `WAIT_FOR_MESSAGE_TOOL_NAME: &str = "wait_for_message"` and `WaitForMessageTool` from `messaging::wait`. `SendMessageTool`, `ListRecipientsTool` and `WaitForMessageTool` implement `Debug` and `arko_agents::tool::Tool`; `WaitForMessageTool::new` also takes the `Arc<arko_ai::LLMClient>` whose `prompt_cache_lifetime` sets the automatic limit:
 
 ```rust
 fn new(context: Arc<crate::context::SharedContext>, agent_name: String) -> Self;
@@ -709,15 +714,55 @@ Their definitions name no agent, so they are the same for every agent and never 
 | --- | --- | --- |
 | `send_message` | Required `to: string` and `content: string`; optional `attachments_json: string`, a JSON array in the attachment format above (default: no attachments). | Delivers a message to a permitted recipient that is running or waiting. Not batch-safe. |
 | `list_recipients` | None. | One line per permitted recipient, never the agent itself, in the initial prompt's format with current statuses; `There are no agents you can message.` when there are none. Batch-safe. |
+| `wait_for_message` | Optional `timeout_seconds: string`, a positive number of seconds (a JSON number is accepted too). | Waits for a message; see [Waiting for a message](#waiting-for-a-message). Offered to each agent that another agent may message, whether or not it may send. Not batch-safe. |
 
 `send_message` checks its parameters first: a missing `to` or `content` is a `MissingParameter` error, invalid attachment JSON is a `ParameterValidation` error, and a non-string `attachments_json` is ignored. A `to` that is not a permitted recipient, including the agent itself and unknown names, is a `ParameterValidation` error that names only the permitted recipients: `'<to>' is not an agent you can message. The agents you can message: <recipients>.` The recipient's status decides the rest:
 
 - `not_started`: an `ExecutionFailed` error, `Agent '<to>' has not started, so it can't receive messages. A workflow context update will tell you when it starts.` Nothing is queued for later.
 - `finished (<outcome>)`: an `ExecutionFailed` error, `Agent '<to>' is finished (<outcome>); it no longer receives messages.`
 - `running`: the message is queued and delivered at the recipient's next safe turn boundary; the tool returns `Message <id> sent to agent '<to>'.`
-- `waiting (<reason>)`: the message is queued and delivered likewise, and the result says so, for example `Message <id> sent to agent 'lead', which is waiting (usage_limit); it receives the message when it continues.`
+- `waiting (<reason>)`: the message is queued and delivered likewise, and the result says so, for example `Message <id> sent to agent 'lead', which is waiting (usage_limit); it receives the message when it continues.` A recipient `waiting (awaiting_message)` stops waiting at once, and the result is the plain `Message <id> sent to agent '<to>'.`
 
 On success the tool records the current task as the sender's task and fires `OnAgentMessage`. A hook's `Abort` is returned as an `ExecutionFailed` error even though the message has already been queued, and it stops the run.
+
+### Waiting for a message
+
+Source: [messaging/wait.rs](src/messaging/wait.rs). An agent in native tool mode must call a tool every turn; `wait_for_message` lets it wait for a reply without polling. It is offered to each agent that another agent may message (`SharedContext::message_senders` is not empty), whether or not the agent may send. Its definition names no agent and no time, so it never changes during a task.
+
+A wait returns on the first of these, checked when it is called and whenever something changes:
+
+- **A message.** An agent message for the run that its conversation doesn't hold yet: one sent after the run started and not yet added by a context update. Messages in the initial prompt, messages already delivered (which stay queued until the run completes), and `workflow-context` notices don't count. The result names the senders, ``A message from `lead` is waiting; it will be delivered with your next turn.`` or ``Messages from `lead` and `worker_b` are waiting; they will be delivered with your next turn.``, followed by any start or finish as below. The message itself is never in the result: it is delivered once, through the usual context update, and acknowledged as before. The tool returns only once the message is in the run's command channel (it waits up to a second for the delivery worker, which normally takes microseconds), and the runtime takes every queued command at a turn boundary, so the message reaches the very next request.
+- **A start or finish** of an agent the run may message or that may message it: ``No messages yet. `worker` is now running.`` or ``No messages yet. `worker` is now finished (completed).`` Other status changes, such as another agent's rate-limit wait, don't end a wait. The start notice (see [What agents are told about their recipients](#what-agents-are-told-about-their-recipients)) still comes at the next turn boundary.
+- **The time limit**: `No messages after 270 s.`, or, when the model asked for longer than the limit, `No messages after 270 s, the longest the workflow waits.` Durations read like `270 s`, `27 min`, or `0.5 s`.
+- **A stop**: `The workflow is stopping; no message will arrive.` once the run is cancelled or aborted by a hook, and `You are being stopped; no message will arrive.` once the managed driver stops this run (over budget, or after an interruption). Either ends the wait at once, not at its limit; the agent then stops at the turn boundary. The runtime reads its `CancelTask` only after a tool call returns, so the wait watches the stop itself.
+
+While it waits, the agent's status is `waiting (awaiting_message)`, which `list_recipients`, rosters, and `Workflow::agent_status` show; a `send_message` to it ends the wait. The status returns to running when the wait ends, also when the agent's task is aborted mid-wait. A `timeout_seconds` that is not a positive number is a `ParameterValidation` error. Nothing is persisted: the waiting status is not part of a checkpoint.
+
+The time limit:
+
+```rust
+// messaging::wait; WaitForMessageTimeout is also in the prelude.
+pub enum WaitForMessageTimeout {
+    Auto,                      // the default
+    Fixed(std::time::Duration), // also From<Duration>
+}
+fn resolve(self, lifetime: arko_ai::PromptCacheLifetime) -> std::time::Duration;
+pub const DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT: std::time::Duration; // 270 seconds
+pub const MAX_WAIT_FOR_MESSAGE_TIMEOUT: std::time::Duration; // 24 hours
+```
+
+`WaitForMessageTimeout` implements `Debug`, `Clone`, `Copy`, `PartialEq`, `Eq`, and `Default`. Every wait ends with a model request, and a request within the provider's prompt-cache lifetime finds the prompt still cached, since each cache hit starts the lifetime again. `Auto` keeps waits inside that lifetime: at each wait it asks `LLMClient::prompt_cache_lifetime` about the agent's model and generation config (and, for OpenAI, the client's auth) and subtracts a tenth of the lifetime, at least 30 seconds, keeping at least 1 second and at most 24 hours. An unknown lifetime, or caching off, gives `DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT`: there is nothing to keep warm, but a bounded wait still lets the agent look around now and then.
+
+| Agent's model and settings | Prompt-cache lifetime | `Auto` limit |
+| --- | --- | --- |
+| Anthropic, or Claude on OpenRouter | 5 minutes | 4 min 30 s |
+| The same with `GenerationConfig::anthropic_cache_ttl` set to `AnthropicCacheTtl::OneHour` | 1 hour | 54 min |
+| OpenAI GPT-5.6 and later, with an API key or ChatGPT OAuth | 30 minutes | 27 min |
+| Earlier OpenAI models | 5 minutes (the least any organization gets) | 4 min 30 s |
+| Gemini, and other OpenRouter models | unknown | 4 min 30 s |
+| Caching off where a request can turn it off, or a model without caching | disabled | 4 min 30 s |
+
+`Fixed(duration)` applies as given, for the workflow or one agent; `build` rejects zero and more than 24 hours. A limit past the cache lifetime means a cache write after each wait that runs to it. The model's `timeout_seconds` shortens a wait, never lengthens it.
 
 ## Context freshness
 
@@ -1174,6 +1219,8 @@ The tables use Python-facing signatures: `self` and PyO3 interpreter arguments a
 | `resume_from(checkpoint: str) -> None` | Restore a checkpoint JSON file at build; requires `persistence`. |
 | `global_memory_tier(name: str, max_bytes: int \| None = None) -> None` | Add an append-only tier every agent can read and write, with an optional byte limit. |
 | `cancel_grace_period(seconds: float) -> None` | Seconds a stopped run waits for each running agent to stop before aborting it; default 30. A negative or non-finite value raises `ValueError`, and so does `build()` for a value too large for a duration. |
+| `wait_for_message_timeout(seconds: float \| None = None) -> None` | The longest `wait_for_message` wait in seconds, as `WorkflowBuilder::wait_for_message_timeout`; `None` selects the automatic limit (the default). A non-positive or non-finite value raises `ValueError`; `build()` raises it for more than 24 hours. |
+| `agent_wait_for_message_timeout(agent: str, seconds: float \| None = None) -> None` | The same for one agent, in place of the workflow's setting; `None` selects the automatic limit for it. `build()` raises `ValueError` for an unknown agent. |
 | `build() -> PyWorkflow` | Create the LLM client, load the agent files, and build the workflow. Load and build failures raise `ValueError`. The builder is not consumed and can be reused. |
 
 `build` creates the client with `LLMClient::from_env()`, which configures every provider whose credentials are in the process environment, ignoring blank values: OpenAI with ChatGPT OAuth from `OPENAI_OAUTH_ACCESS_TOKEN` and `OPENAI_OAUTH_ACCOUNT_ID` (plus optional `OPENAI_OAUTH_REFRESH_TOKEN`), otherwise with an OpenAI API key from `OPENAI_API_KEY`; Anthropic from `ANTHROPIC_API_KEY`; Google Gemini from `GOOGLE_API_KEY`, else `GEMINI_API_KEY`; and OpenRouter from `OPENROUTER_API_KEY`. A Codex `auth.json` is not read, and refreshed ChatGPT OAuth tokens are kept only in memory. The Python API accepts no custom client, custom tools, hooks, verifiers, distillers, or service settings; those require the Rust API.
