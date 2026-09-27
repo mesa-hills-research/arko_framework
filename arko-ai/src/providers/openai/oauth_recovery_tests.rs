@@ -175,14 +175,6 @@ pub(super) fn client(url: &str) -> OpenAIClient {
     )
 }
 
-/// `client` with no refresh timeout, for tests with a paused clock: that
-/// clock jumps to the next timer whenever the runtime waits, also while test
-/// I/O is under way, so a refresh could time out before its answer arrives.
-fn untimed(mut client: OpenAIClient) -> OpenAIClient {
-    client.oauth_refresh_timeout = None;
-    client
-}
-
 /// An API-key client sending to the test server.
 pub(super) fn api_key_client(url: &str) -> OpenAIClient {
     let mut client = client(url);
@@ -631,24 +623,46 @@ async fn a_failed_save_is_reported_but_the_client_keeps_the_new_tokens() {
     .unwrap();
 }
 
+/// Rate-limit retry timing in milliseconds, so loop tests run in real time
+/// (a paused clock jumps ahead while their loopback I/O is under way). One
+/// wait honors at most `max_server_hint` of a hint.
+fn quick_retries(mut client: OpenAIClient, max_server_hint: Duration) -> OpenAIClient {
+    client.oauth_refresh_retry = OAuthRefreshRetry {
+        backoff: crate::retry::BackoffPolicy {
+            initial: Duration::from_millis(5),
+            max: Duration::from_millis(20),
+            jitter: false,
+        },
+        max_server_hint,
+    };
+    client
+}
+
 /// Each rate-limited retry re-reads the store (Codex may refresh while this
-/// client waits), and the retries stop at the cap.
-#[tokio::test(start_paused = true)]
+/// client waits), and the retries stop at the cap. (The 900 s cap on one
+/// wait's server hint is unit-tested with the delay computation.)
+#[tokio::test]
 async fn rate_limited_refreshes_retry_a_bounded_number_of_times() {
-    let limited = || reply("/token", 429, r#"{"error":{"code":"rate_limit_exceeded"}}"#);
-    let (url, server) =
-        server((0..=OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES).map(|_| limited()).collect()).await;
-    let store = Arc::new(ScriptedStore::default());
-    let client = with_store(untimed(client(&url)), &store).with_oauth_rate_limit_retries(true);
-    let started = tokio::time::Instant::now();
-    let error = client.refresh_oauth_token().await.unwrap_err();
-    assert!(matches!(error, Error::ProviderError { status: Some(429), .. }), "{error}");
-    let requests = server.await.unwrap().len() as u32;
-    assert_eq!(requests, OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES + 1);
-    // One read before each request, plus one after the last failure.
-    assert_eq!(store.seen.lock().unwrap().len() as u32, requests + 1);
-    // Every wait honored the server's Retry-After: 60.
-    assert!(started.elapsed() >= Duration::from_secs(60) * OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let limited = || reply("/token", 429, r#"{"error":{"code":"rate_limit_exceeded"}}"#);
+        let (url, server) =
+            server((0..=OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES).map(|_| limited()).collect()).await;
+        let store = Arc::new(ScriptedStore::default());
+        // The server's Retry-After: 60 is honored up to 20 ms here.
+        let client = quick_retries(client(&url), Duration::from_millis(20));
+        let client = with_store(client, &store).with_oauth_rate_limit_retries(true);
+        let started = std::time::Instant::now();
+        let error = client.refresh_oauth_token().await.unwrap_err();
+        assert!(matches!(error, Error::ProviderError { status: Some(429), .. }), "{error}");
+        let requests = server.await.unwrap().len() as u32;
+        assert_eq!(requests, OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES + 1);
+        // One read before each request, plus one after the last failure.
+        assert_eq!(store.seen.lock().unwrap().len() as u32, requests + 1);
+        // Every wait honored the (capped) server hint.
+        assert!(started.elapsed() >= Duration::from_millis(20) * OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES);
+    })
+    .await
+    .unwrap();
 }
 
 fn permission_denied() -> Reply {
@@ -972,23 +986,23 @@ async fn a_stalled_token_endpoint_times_out_with_a_transient_error() {
     .unwrap();
 }
 
-/// The 429 asks for 30 days; one wait honors 15 minutes of that, with no
-/// lock held.
-#[tokio::test(start_paused = true)]
+/// A rate-limited refresh waits with no lock held: another caller refreshes
+/// meanwhile, and the waiting one then takes its tokens instead of sending a
+/// third request. Real time, with a one-second Retry-After. (That one wait
+/// honors at most 15 minutes of a longer hint is unit-tested with the delay
+/// computation.)
+#[tokio::test]
 async fn a_rate_limited_refresh_waits_without_holding_the_credentials() {
-    let asked = crate::retry::MAX_SERVER_DELAY_HINT;
-    // The paused clock also jumps ahead while the test server's replies are
-    // on their way (to the HTTP client's idle-pool timers), so the bounds on
-    // virtual time are loose; they still tell 15 minutes from 30 days.
-    tokio::time::timeout(asked * 2 / 3, async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         let limited = reply("/token", 429, r#"{"error":{"code":"rate_limit_exceeded"}}"#)
-            .with_header("Retry-After", &asked.as_secs().to_string());
+            .with_header("Retry-After", "1");
         let mut server = TestServer::start(vec![limited, refreshed()], false).await;
-        let client = untimed(client(&server.url)).with_oauth_rate_limit_retries(true);
+        let client = quick_retries(client(&server.url), OAUTH_REFRESH_RETRY.max_server_hint)
+            .with_oauth_rate_limit_retries(true);
         let waiting = tokio::spawn({
             let client = client.clone();
             async move {
-                let started = tokio::time::Instant::now();
+                let started = std::time::Instant::now();
                 let result = client.refresh_oauth_token().await;
                 (result, started.elapsed())
             }
@@ -1000,7 +1014,7 @@ async fn a_rate_limited_refresh_waits_without_holding_the_credentials() {
         // The waiting caller then finds the new tokens instead of refreshing.
         let (result, waited) = waiting.await.unwrap();
         assert_eq!(result.unwrap().access_token, "synthetic-new-access");
-        assert!(waited >= Duration::from_secs(900) && waited < asked / 2, "{waited:?}");
+        assert!(waited >= Duration::from_secs(1), "{waited:?}");
         assert_eq!(server.request_count(), 2);
     })
     .await

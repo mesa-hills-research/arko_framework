@@ -262,24 +262,36 @@ fn response_error(
     Error::provider_error(label, Some(status.as_u16()), header_delay, body)
 }
 
-/// Backoff for the opt-in OAuth refresh rate-limit loop: 30 s doubling to a
-/// 15-minute cap; a server hint is a minimum.
-const OAUTH_REFRESH_BACKOFF: BackoffPolicy =
-    BackoffPolicy::new(Duration::from_secs(30), Duration::from_secs(900));
 
 /// Retries of a rate-limited OAuth refresh when rate-limit retries are
 /// enabled: about an hour of backoff before the 429 is returned.
 const OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES: u32 = 8;
 
-/// The longest server hint one wait of that loop honors (the backoff's own
-/// cap), far below [`MAX_SERVER_DELAY_HINT`](crate::retry::MAX_SERVER_DELAY_HINT):
-/// each retry reads the store again, and another program may refresh
-/// meanwhile.
-const OAUTH_REFRESH_MAX_SERVER_HINT: Duration = Duration::from_secs(900);
+/// Timing of the opt-in OAuth refresh rate-limit loop.
+#[derive(Debug, Clone, Copy)]
+struct OAuthRefreshRetry {
+    /// 30 s doubling to a 15-minute cap; a server hint is a minimum.
+    backoff: BackoffPolicy,
+    /// The longest server hint one wait honors (the backoff's own cap), far
+    /// below [`MAX_SERVER_DELAY_HINT`](crate::retry::MAX_SERVER_DELAY_HINT):
+    /// each retry reads the store again, and another program may refresh
+    /// meanwhile.
+    max_server_hint: Duration,
+}
 
-fn oauth_retry_delay(server_hint: Option<Duration>, attempt: u32) -> Duration {
-    let server_hint = server_hint.map(|hint| hint.min(OAUTH_REFRESH_MAX_SERVER_HINT));
-    OAUTH_REFRESH_BACKOFF.next_delay(attempt.saturating_add(1), server_hint)
+const OAUTH_REFRESH_RETRY: OAuthRefreshRetry = OAuthRefreshRetry {
+    backoff: BackoffPolicy::new(Duration::from_secs(30), Duration::from_secs(900)),
+    max_server_hint: Duration::from_secs(900),
+};
+
+impl OAuthRefreshRetry {
+    /// The wait before rate-limit retry `attempt` (0 for the first), for a
+    /// uniformly random `sample` (see [`crate::retry::random_sample`]).
+    fn delay(&self, server_hint: Option<Duration>, attempt: u32, sample: u64) -> Duration {
+        let server_hint = server_hint.map(|hint| hint.min(self.max_server_hint));
+        self.backoff
+            .delay(attempt.saturating_add(1), server_hint, sample)
+    }
 }
 
 fn is_rate_limited_refresh(error: &Error) -> bool {
@@ -393,6 +405,8 @@ pub struct OpenAIClient {
     /// [`OAUTH_REFRESH_TIMEOUT`]. Tests shorten it, and turn it off under a
     /// paused clock (which jumps ahead while test I/O is under way).
     oauth_refresh_timeout: Option<Duration>,
+    /// Timing of the opt-in rate-limit retries of a refresh; tests shorten it.
+    oauth_refresh_retry: OAuthRefreshRetry,
 }
 
 /// What a refresh replaces; checked once the credential lock is held.
@@ -428,6 +442,7 @@ impl OpenAIClient {
             credential_store: None,
             auth_epoch: Arc::new(AtomicU64::new(0)),
             oauth_refresh_timeout: Some(OAUTH_REFRESH_TIMEOUT),
+            oauth_refresh_retry: OAUTH_REFRESH_RETRY,
         }
     }
 
@@ -455,6 +470,7 @@ impl OpenAIClient {
             credential_store: None,
             auth_epoch: Arc::new(AtomicU64::new(0)),
             oauth_refresh_timeout: Some(OAUTH_REFRESH_TIMEOUT),
+            oauth_refresh_retry: OAUTH_REFRESH_RETRY,
         }
     }
 
@@ -472,6 +488,7 @@ impl OpenAIClient {
             credential_store: None,
             auth_epoch: Arc::new(AtomicU64::new(0)),
             oauth_refresh_timeout: Some(OAUTH_REFRESH_TIMEOUT),
+            oauth_refresh_retry: OAUTH_REFRESH_RETRY,
         }
     }
 
@@ -720,7 +737,11 @@ impl OpenAIClient {
                 Err(error) if retry && is_rate_limited_refresh(&error) => error,
                 result => return result,
             };
-            let delay = oauth_retry_delay(error.retry_after(), rate_limit_retries);
+            let delay = self.oauth_refresh_retry.delay(
+                error.retry_after(),
+                rate_limit_retries,
+                crate::retry::random_sample(),
+            );
             rate_limit_retries += 1;
             log::warn!(
                 "ChatGPT OAuth refresh was rate limited; waiting {delay:?} before retry {rate_limit_retries}"
@@ -3563,19 +3584,21 @@ mod tests {
 
     #[test]
     fn oauth_refresh_backoff_doubles_to_a_cap_and_honors_server_hints() {
-        for _ in 0..50 {
-            let first = super::oauth_retry_delay(None, 0);
+        let retry = super::OAUTH_REFRESH_RETRY;
+        for sample in [0, 1, 7_777, u64::MAX / 3, u64::MAX] {
+            let first = retry.delay(None, 0, sample);
             assert!(first >= Duration::from_secs(15) && first <= Duration::from_secs(30));
-            let late = super::oauth_retry_delay(None, 20);
+            let late = retry.delay(None, 20, sample);
             assert!(late >= Duration::from_secs(450) && late <= Duration::from_secs(900));
             // A body hint reaches the delay through the error's retry_after.
             let hint = Error::provider_error("refresh", Some(429), None, r#"{"retry_after":600}"#)
                 .retry_after();
-            let hinted = super::oauth_retry_delay(hint, 0);
+            let hinted = retry.delay(hint, 0, sample);
             assert!(hinted >= Duration::from_secs(600) && hinted <= Duration::from_secs(615));
-            // One wait honors at most 15 minutes of a hint (plus jitter).
+            // One wait honors at most 15 minutes of a hint (plus jitter),
+            // even for the 30-day cap on parsed hints.
             for hint in [Duration::from_secs(1200), crate::retry::MAX_SERVER_DELAY_HINT] {
-                let capped = super::oauth_retry_delay(Some(hint), 0);
+                let capped = retry.delay(Some(hint), 0, sample);
                 assert!(capped >= Duration::from_secs(900) && capped <= Duration::from_secs(915));
             }
         }

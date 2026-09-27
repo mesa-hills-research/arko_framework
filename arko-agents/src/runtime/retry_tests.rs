@@ -988,7 +988,9 @@ async fn a_kept_openai_refusal_replays_its_items_without_the_dropped_calls() {
     assert_eq!(task.conversation.current_openai_turn_state(), Some("turn-1"));
 
     // The trace records the next request before it is sent; nothing listens
-    // on the port, so the call itself fails.
+    // on the port, so the call itself fails. Real sockets run on the real
+    // clock: a paused one would jump to the next timer while they wait.
+    tokio::time::resume();
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
