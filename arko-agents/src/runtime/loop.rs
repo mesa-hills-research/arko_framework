@@ -438,6 +438,10 @@ impl AgentLoop {
                 result = &mut operation => {
                     return match result {
                         Ok(value) => Ok(Some(value)),
+                        Err(ai::Error::Refusal(refusal)) => {
+                            self.handle_refusal(*refusal, ai::Message::new_assistant("")).await?;
+                            Ok(None)
+                        }
                         Err(error) => { self.handle_llm_error(error, None).await?; Ok(None) }
                     };
                 }
@@ -1512,6 +1516,14 @@ impl AgentLoop {
                                     self.handle_llm_error(ai::Error::ApiError("Stream ended prematurely with no output".to_string()), None).await?;
                                     had_stream_error = true;
                                 }
+                                break;
+                            }
+                            // A refusal reported as an error (Gemini
+                            // generation-blocked codes): its partial text is
+                            // not kept.
+                            Err(ai::Error::Refusal(refusal)) => {
+                                self.handle_refusal(*refusal, ai::Message::new_assistant("")).await?;
+                                had_stream_error = true;
                                 break;
                             }
                             Err(e) => {

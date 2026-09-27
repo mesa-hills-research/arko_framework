@@ -1041,3 +1041,60 @@ async fn tool_calls_with_invalid_json_arguments_are_rejected_not_run() {
         })
     }));
 }
+
+/// A refusal delivered as an error (Gemini generation-blocked codes), before
+/// or after the stream starts, is reported like other refusals; text
+/// streamed before it is not kept.
+#[tokio::test(start_paused = true)]
+async fn refusals_reported_as_errors_are_reported_and_drop_partial_text() {
+    use futures::StreamExt;
+    let blocked = || {
+        let mut refusal = ai::Refusal::new(ai::RefusalSource::ContentFilter);
+        refusal.category = Some("recitation".into());
+        refusal.partial_output = Some("Once upon".into());
+        ai::Error::Refusal(Box::new(refusal))
+    };
+    for mode in [ToolCallingMode::Native, ToolCallingMode::OutputBased] {
+        for mid_stream in [true, false] {
+            let (mut agent, mut events, _commands) = harness();
+            agent.task.agent_config.llm_error_policy =
+                LLMErrorPolicy::RetryThenInformAgent { max_attempts: 3 };
+            agent.task.agent_config.tool_config.tool_calling_mode = mode.clone();
+            let messages_before = agent.task.conversation.messages.len();
+            let response = if mid_stream {
+                Ok(futures::stream::iter([
+                    Ok(ai::StreamEvent::TextChunk("Once upon".into())),
+                    Err(blocked()),
+                ])
+                .boxed())
+            } else {
+                Err(blocked())
+            };
+            agent.scripted_responses.get_mut().unwrap().push_back(response);
+            let task = timeout(Duration::from_secs(1), agent.run())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(&task.current_state, TaskState::Interrupted { reason } if reason.contains("refused")),
+                "{:?}",
+                task.current_state
+            );
+            assert!(
+                !task.conversation.messages[messages_before..]
+                    .iter()
+                    .any(|message| message.role == ai::Role::Assistant),
+                "the refused output must not be added to history"
+            );
+            let mut reported = 0;
+            while let Ok(event) = events.try_recv() {
+                assert!(!matches!(event, AgentEvent::RetryScheduled { .. }));
+                if let AgentEvent::RefusalReceived(refusal) = event {
+                    assert_eq!(refusal.category.as_deref(), Some("recitation"));
+                    reported += 1;
+                }
+            }
+            assert_eq!(reported, 1, "{mode:?} mid_stream={mid_stream}");
+        }
+    }
+}
