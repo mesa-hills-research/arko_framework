@@ -803,11 +803,13 @@ extended context where the model has it.
 
 The `llm_client_cli` example sends one prompt or runs an interactive chat with any
 configured provider, reading credentials with `LLMClient::from_env()` (and a `.env`
-file):
+file). `--codex-auth` takes the OpenAI credentials from the Codex `auth.json` instead
+(`--codex-auth-json PATH` from another file), through `with_codex_auth_file`:
 
 ```bash
 cargo run -p arko-ai --example llm_client_cli -- --help
 cargo run -p arko-ai --example llm_client_cli -- text -m claude-sonnet-5 -p "Hello"
+cargo run -p arko-ai --example llm_client_cli -- text -m gpt-6-astra -p "Hello" --codex-auth
 cargo run -p arko-ai --example llm_client_cli -- chat -m anthropic/claude-sonnet-5 --reasoning-level high
 ```
 

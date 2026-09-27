@@ -4,11 +4,15 @@
 //! Credentials come from the environment (and a `.env` file) through
 //! `LLMClient::from_env`: ChatGPT OAuth or `OPENAI_API_KEY`,
 //! `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` or `GEMINI_API_KEY`, and
-//! `OPENROUTER_API_KEY`.
+//! `OPENROUTER_API_KEY`. `--codex-auth` (the default Codex `auth.json`) or
+//! `--codex-auth-json PATH` takes OpenAI's ChatGPT OAuth credentials from a
+//! Codex `auth.json` instead, kept in step with the file: every token
+//! refresh reads it again first, and rotated tokens are saved to it at once.
 //!
 //! ```text
 //! cargo run -p arko-ai --example llm_client_cli -- models
 //! cargo run -p arko-ai --example llm_client_cli -- text -m gpt-5.5 -p "Hello"
+//! cargo run -p arko-ai --example llm_client_cli -- text -m gpt-6-astra -p "Hello" --codex-auth
 //! cargo run -p arko-ai --example llm_client_cli -- chat -m anthropic/claude-sonnet-5 --reasoning-level high
 //! ```
 //!
@@ -19,7 +23,7 @@
 
 use arko_ai::{
     reasoning::{AnthropicReasoningFragment, OpenAIEffort},
-    AnthropicReasoningEffort, Content, Error, GeminiThinkingLevel, GenerationConfig,
+    AnthropicReasoningEffort, CodexAuthFile, Content, Error, GeminiThinkingLevel, GenerationConfig,
     GenerationResponse, Image, LLMClient, Model, OpenAIReasoningMode, OpenRouterReasoning,
     Provider, ReasoningArtifact, ReasoningConfig, ReasoningEffort, StreamEvent, UsageInfo,
 };
@@ -38,6 +42,21 @@ use std::{
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+
+    /// Use the ChatGPT OAuth login in the Codex auth.json
+    /// ($CODEX_HOME/auth.json, else ~/.codex/auth.json) for OpenAI instead of
+    /// the environment; token refreshes keep the file up to date
+    #[arg(long, global = true)]
+    codex_auth: bool,
+
+    /// --codex-auth with the auth.json at PATH
+    #[arg(
+        long,
+        value_name = "PATH",
+        global = true,
+        conflicts_with = "codex_auth"
+    )]
+    codex_auth_json: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -125,7 +144,7 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
     env_logger::init();
 
     let cli = Cli::parse();
-    let client = create_client()?;
+    let client = create_client(&cli)?;
 
     match cli.command {
         Commands::Models => print_models(),
@@ -331,8 +350,22 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
     Ok(())
 }
 
-fn create_client() -> Result<LLMClient, Error> {
-    Ok(LLMClient::from_env())
+/// `LLMClient::from_env`, with OpenAI from a Codex `auth.json` when asked.
+fn create_client(cli: &Cli) -> Result<LLMClient, Error> {
+    let client = LLMClient::from_env();
+    let path = match (&cli.codex_auth_json, cli.codex_auth) {
+        (Some(path), _) => path.clone(),
+        (None, true) => CodexAuthFile::default_path().ok_or_else(|| {
+            Error::AuthenticationFailed(
+                "No home directory to find ~/.codex/auth.json in; pass --codex-auth-json".into(),
+            )
+        })?,
+        (None, false) => return Ok(client),
+    };
+    let file = CodexAuthFile::load(&path).map_err(|error| {
+        Error::AuthenticationFailed(format!("Cannot use {}: {error}", path.display()))
+    })?;
+    client.with_codex_auth_file(&file)
 }
 
 /// The id without a trailing release date (`-2025-08-07`, `-20250514`) or
