@@ -497,7 +497,7 @@ recovered like a failed request. A request rejected with HTTP 401 `token_expired
 refreshed and resent once by arko-ai. With credentials from a Codex `auth.json`, build the
 client with `LLMClient::with_codex_auth_file`, so that every refresh re-reads the file
 first and rotated tokens are saved to it at once; see
-[arko-ai](../arko-ai/README.md#openai-responses-replay-prompt-caching-and-chatgpt-oauth).
+[ChatGPT OAuth credentials](../arko-ai/README.md#chatgpt-oauth-credentials).
 The example CLI's `--openai-auth-json` does this.
 
 `CancelTask`, `SuspendTask`, and closing the command channel interrupt recovery waits and

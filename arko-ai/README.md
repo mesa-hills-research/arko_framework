@@ -1,38 +1,492 @@
 # Arko AI
 
-Rust clients for language models (OpenAI, Anthropic, Google Gemini and
-[OpenRouter](#openrouter)) and embeddings, with provider configuration, streaming
-responses, tool calls, reasoning controls, usage metadata, and OpenAI OAuth support.
+Rust clients for language models from OpenAI (API key or ChatGPT OAuth), Anthropic,
+Google Gemini, and [OpenRouter](#openrouter), and for Voyage text embeddings. One
+`LLMClient` sends a `Conversation` to the provider of its model and returns a normalized
+response: text and reasoning, tool calls, stop reasons and refusals, token usage, and
+cost.
 
-## Use in a Rust project
+## Installation
 
 ```toml
 [dependencies]
 arko-ai = { path = "../arko-ai" }
+tokio = { version = "1.37", features = ["full"] }
+futures = "0.3" # for consuming response streams
 ```
 
-Rust imports use `arko_ai`, as in `use arko_ai::LLMClient;`.
+## Quick start
 
-## Examples and checks
+```rust
+use arko_ai::{GenerationConfig, LLMClient, Model, StreamEvent};
+use futures::StreamExt;
 
-From the framework workspace:
+#[tokio::main]
+async fn main() -> Result<(), arko_ai::Error> {
+    // Configures every provider whose credentials are in the environment.
+    let client = LLMClient::from_env();
+    let mut conversation = client
+        .new_conversation(Model::anthropic_claude_sonnet_5())
+        .with_system_message("Answer in one short paragraph.");
+    conversation.add_user_message("What does a borrow checker do?");
+
+    let config = GenerationConfig::default().with_max_tokens(2048);
+    let response = client.generate_text(&conversation, config.clone()).await?;
+    println!("{}", response.text());
+    println!("Billed: ${:.6}", response.usage.billed());
+    conversation.add_assistant_message_from_response(response);
+
+    // The same conversation, streamed.
+    conversation.add_user_message("And what is a lifetime?");
+    let mut stream = client.generate_stream(&conversation, config).await?;
+    while let Some(event) = stream.next().await {
+        match event? {
+            StreamEvent::TextChunk(text) => print!("{text}"),
+            StreamEvent::End(response) => {
+                conversation.add_assistant_message_from_response(*response);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+```
+
+`generate_text` returns a `GenerationResponse` with the assistant `message`, its
+`usage` and `model_call_usage`, a normalized `stop_reason`, and any `refusal`.
+`generate_stream` yields `TextChunk` and `ReasoningChunk` events, `ToolCallStart` and
+`ToolCallArgumentsDelta` for native tool calls, `Refusal`, and finally `End` with the
+complete response. Add each response to the conversation with
+`add_assistant_message_from_response`, which keeps the provider's reasoning artifacts for
+replay and leaves out refused turns that must not stay in history.
+
+## Providers and credentials
+
+`LLMClient::from_env()` configures every provider whose credentials are set and ignores
+empty values. The library reads no environment variables unless it is called.
+
+| Provider | Variables |
+| --- | --- |
+| OpenAI | ChatGPT OAuth from `OPENAI_OAUTH_ACCESS_TOKEN` and `OPENAI_OAUTH_ACCOUNT_ID` (optional `OPENAI_OAUTH_REFRESH_TOKEN`); otherwise `OPENAI_API_KEY` |
+| Anthropic | `ANTHROPIC_API_KEY` |
+| Google Gemini | `GOOGLE_API_KEY`, otherwise `GEMINI_API_KEY` |
+| OpenRouter | `OPENROUTER_API_KEY` |
+
+The builder methods configure providers explicitly: `with_openai_api_key`,
+`with_openai_chatgpt_oauth(access_token, refresh_token, account_id)`,
+`with_codex_auth_file` (ChatGPT OAuth from a Codex `auth.json`; see
+[ChatGPT OAuth credentials](#chatgpt-oauth-credentials)), `with_anthropic_api_key`,
+`with_google_api_key`, and `with_openrouter_api_key`. `with_openai_client`,
+`with_anthropic_client`, `with_google_client`, and `with_openrouter_client` install a
+provider client built with its own options, such as a base URL for a proxy or test
+server. A request to a provider that is not configured fails with
+`Error::MissingApiKey`. Clones of an `LLMClient` share its credentials.
+
+Gemini requests use Google's Interactions API. OpenAI requests carry no `originator` or
+`User-Agent` header unless the application sets one with `with_openai_originator` or
+`with_openai_user_agent`; use your own application's name. `with_request_trace` writes
+every OpenAI request and response to a directory for diagnosing prompt caching
+(`RequestTrace`), and `with_openai_request_hook` can adjust OpenAI requests before they
+are sent.
+
+## Models
+
+`Model` describes a model: its provider, ID, context and output limits, image support,
+and prices. The registry covers the OpenAI, Anthropic, and Google models arko-ai
+supports: `Model::list(provider)`, `Model::all()`, `Model::find(id)`, and
+`Model::get(provider, id)` look models up, and constructors such as
+`Model::anthropic_claude_sonnet_5()` or `Model::openai_gpt_6_sol()` name them directly.
+The example CLI lists the registered IDs and the aliases it accepts:
 
 ```bash
-cargo run -p arko-ai --example llm_client_cli -- --help
-cargo run -p arko-ai --example llm_client_cli -- models   # registered ids and aliases
-cargo test -p arko-ai --lib
+cargo run -p arko-ai --example llm_client_cli -- models
 ```
 
-The `embeddings_demo` example uses `VOYAGE_API_KEY` to request embeddings.
+OpenRouter models are not in the registry: `Model::openrouter(slug)` accepts any slug,
+and the OpenRouter catalog supplies limits and prices on request; see
+[Models and the catalog](#models-and-the-catalog).
 
-## Voyage text embeddings
+## Generation settings and tool calls
 
-`EmbeddingConfig::new(EmbeddingProviderIdentifier::Voyage, model_id)` accepts the
-current text embedding models below. Each supports 32,000 tokens per input,
-up to 1,000 inputs per request, and 256, 512, 1024 (default), or 2048 output
-dimensions. Token counting uses the matching `voyageai/<model_id>` tokenizer
-from Hugging Face. The tokenizer dependency is updated to 0.23.2 so these
-assets can be downloaded and loaded through the current Hub interface.
+`GenerationConfig` holds the per-request settings, built with methods such as
+`with_max_tokens`, `with_temperature` (sent only when set, otherwise the model's default
+applies; Gemini rejects it), `with_reasoning`, `with_verbosity`, `with_prompt_caching`,
+and `with_tool_config`. Each provider takes its own `ReasoningConfig` variant:
+`ReasoningConfig::openai(effort, include_summaries)`, `anthropic(budget_tokens)` or
+`anthropic_adaptive()`, `gemini(thinking_level, include_summaries)` or
+`google(thinking_budget, include_summaries)` (mapped to a thinking level), and
+`openrouter_effort(effort)`. Prompt caching is on by default
+(`Conversation::enable_cache`); a conversation's `prompt_cache_key` is a new random key,
+so give each independent agent or task its own conversation.
+
+Native tool calls use JSON Schema definitions (built here with `serde_json`), continuing
+the quick start's conversation:
+
+```rust
+use arko_ai::{ToolConfig, ToolDefinition, ToolResult};
+use serde_json::json;
+
+let weather = ToolDefinition::new(
+    "get_weather",
+    "Returns the current weather for a city.",
+    json!({
+        "type": "object",
+        "properties": { "city": { "type": "string" } },
+        "required": ["city"]
+    }),
+);
+let config = config.with_tool_config(ToolConfig::new(vec![weather]));
+
+let response = client.generate_text(&conversation, config.clone()).await?;
+let calls = response.message.tool_calls.clone();
+conversation.add_assistant_message_from_response(response);
+if !calls.is_empty() {
+    // Run each call, then send every result back in one message.
+    let results = calls
+        .iter()
+        .map(|call| ToolResult::from_tool_call(call, "18 °C and sunny"))
+        .collect();
+    conversation.add_tool_results(results);
+    let response = client.generate_text(&conversation, config).await?;
+}
+```
+
+`ToolConfig::with_tool_choice` selects `ToolChoice::Auto` (the default), `Required`,
+`None`, or `Specific(name)`, and `with_parallel_tool_calls(false)` asks for one call per
+response where the model supports it (`Model::supports_disabling_parallel_tool_calls`).
+A call's `arguments` are parsed JSON; arguments that are not valid JSON are kept as text
+in `ToolCall::invalid_arguments`, with `arguments` set to `null`, and
+`ToolResult::error_from_tool_call` reports a failed call to the model.
+`GenerationResponse::single_tool_call(name)` returns the one call a forced tool choice
+asked for, or an error saying whether the response was refused, cut off by a limit, or
+called something else.
+
+## Stop reasons and refusals
+
+Every `GenerationResponse` carries a normalized `stop_reason` (`EndTurn`, `ToolUse`,
+`MaxTokens`, `StopSequence`, `Refusal`, `PauseTurn`, `ContextWindowExceeded`, or `Other`
+with the provider's value) and, when the model or a filter declined, a `refusal`.
+Streams emit `StreamEvent::Refusal` once, just before `End`, which carries the same data.
+The provider's raw `stop_reason` and `stop_details` stay on
+`GenerationResponse::model_call_usage` (and in arko-agents' `ModelCallUsageReported`
+events and task usage history); saved records without them load with `None`.
+
+`Refusal.source` says how to treat the turn:
+
+- `SafetyClassifier`: Anthropic's `stop_reason: "refusal"`, with `stop_details.category`
+  and `explanation` when supplied (both can be null). Anthropic requires the refused turn
+  to be removed before continuing, so the message is left empty and text generated before
+  the refusal moves to `partial_output`. `Conversation::add_assistant_message_from_response`
+  doesn't append such a turn.
+- `Model`: OpenAI's structured `refusal` content. The refusal text is in `explanation`,
+  never in the message text or streamed as `TextChunk`. Ordinary text that mentions a
+  refusal is not classified as one.
+- `ContentFilter`: OpenAI `incomplete_details.reason: "content_filter"`. Partial output
+  moves to `partial_output`, as for classifier refusals.
+
+A stream that ends before the provider reports completion yields `Error::StreamTruncated`
+(retryable) instead of an `End`. When a token limit cuts a response short, tool calls
+whose arguments finished are kept and a call that was still being written is dropped.
+
+Google's Interactions API reports only an interaction `status`: `completed` maps to
+`EndTurn` (or `ToolUse` with function calls), `requires_action` to `ToolUse`, and
+`incomplete` to `MaxTokens`. It has no refusal or safety reason to report. Gemini
+generation-blocked error codes (`safety`, `recitation`, `prohibited_content`, ...) become
+`Error::Refusal` with a `ContentFilter` source.
+
+OpenRouter maps `finish_reason`, `native_finish_reason` and `message.refusal` onto the
+same sources, and reports refusals raised as errors as `Error::Refusal`; see
+[Responses and streams](#responses-and-streams).
+
+References: [Anthropic streaming refusals](https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/handle-streaming-refusals), [official Anthropic streaming event schema](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/types/raw_message_delta_event.py), [OpenAI refusal and content-filter handling](https://developers.openai.com/api/docs/guides/structured-outputs), [OpenAI streaming refusal events](https://platform.openai.com/docs/api-reference/responses-streaming/response/refusal), [Gemini Interactions API](https://ai.google.dev/api/interactions-api-v1).
+
+## OpenAI Responses: replay, prompt caching and ChatGPT OAuth
+
+OpenAI requests use the Responses API: `api.openai.com/v1/responses` with an API key,
+and the ChatGPT backend's `chatgpt.com/backend-api/codex/responses` with ChatGPT OAuth.
+
+**Prompt caching and reasoning context.** Every OpenAI request sends the conversation's
+`prompt_cache_key`, for every model; `prompt_cache_options` is sent only to GPT-5.6 and
+GPT-6 with API keys. Reasoning GPT-5.6 requests also send `reasoning.context:
+"all_turns"`, so reasoning from earlier turns is rendered back to the model; over ChatGPT
+OAuth, GPT-6 requests send it too, as Codex does. With API keys it is left out for GPT-6,
+since the API documents the value only for GPT-5.6. Without a configured effort, API-key
+requests send no `reasoning.effort` (the model's default applies), while ChatGPT OAuth
+requests send `medium`, as Codex always sends an effort.
+
+**Output items and replay.** A response's assistant output is assembled from the
+`response.output_item.done` stream events, in order, as Codex does; the ChatGPT backend's
+`response.completed` usually carries no items, and items only it holds are merged in. The
+assistant message keeps every replayable item (`reasoning` with `encrypted_content`,
+`message` with its `phase`, finished `function_call`) verbatim, minus `status`, in
+`ReasoningArtifact::OpenAIOutputItems`. Later requests replay them unchanged and in
+order, for example `reasoning`, `message` (commentary), `function_call`, then the call's
+`function_call_output`; no empty assistant message is added for tool-only turns. A
+replayed `function_call` needs the message to still hold that call (by `call_id`), and
+calls the message holds without an item follow in the reconstructed shape. When the items
+hold no `message`, the message's own text follows them; arko-agents relies on both when it
+keeps a model's refusal without its tool calls and with the refusal explanation as its
+text. Reasoning that nothing follows (a response cut off after its reasoning, or whose
+calls were all dropped) is left out of the replay, since the API rejects a reasoning item
+without its following item ([openai/codex#1498](https://github.com/openai/codex/issues/1498)).
+Messages without items (conversations saved with `OpenAIEncryptedReasoning`,
+application-built messages, and other providers' messages) are sent as reasoning,
+function calls, then the text.
+
+**ChatGPT OAuth requests** always stream (`generate_text` collects the stream) and carry
+the conversation's identity, like Codex: `session-id`, `thread-id` and
+`x-client-request-id`, all set to the conversation's `prompt_cache_key`. The backend
+derives prompt-cache affinity from `session-id`, so give each agent its own conversation.
+No `OpenAI-Beta` header is sent on either path.
+
+**Turn state.** The backend returns an `x-codex-turn-state` routing token.
+`GenerationResponse::openai_turn_state` carries it, and
+`Conversation::add_assistant_message_from_response` keeps the first token of each user
+turn in `Conversation::openai_turn_state` (serialized, so a resumed task keeps it). Every
+later OAuth request of that turn, tool-result follow-ups and retries alike, echoes it
+unchanged. A user message without tool results starts a new turn and drops the token; it
+is never sent in another turn or with API keys. The token is tied to its turn's starting
+message by index and by a hash of the message, so editing `messages` directly (rewinding
+and pushing a different message at the same index) also drops it.
+
+**Plan usage.** Every ChatGPT OAuth response reports the plan's usage-limit windows in
+`x-codex-*` headers; they are parsed into `ModelCallUsage::plan_usage` (`PlanUsage`: plan
+type, active limit, and the primary and secondary windows' used percentage, length, and
+reset time). arko-agents reports them as events and can act on a threshold.
+
+**Reroutes.** `ModelCallUsage::served_model` is the model the provider reports
+(`openai-model` / `x-openai-model` header, else the response's `model`, else
+`response.created`), and `rerouted` is true when any reported model differs from the
+requested one, ignoring case and snapshot date suffixes.
+`GenerationResponse::served_model()` reads the first; `GenerationResponse::rerouted()` and
+`ModelCallUsage::served_model_changed()` are true for an OpenAI reroute and for an
+OpenRouter call whose `requested_model` is set.
+
+References: [OpenAI reasoning context](https://developers.openai.com/api/docs/guides/reasoning), [openai/codex](https://github.com/openai/codex) (`codex-rs/core/src/client.rs`, `codex-rs/codex-api/src/sse/responses.rs`).
+
+### ChatGPT OAuth credentials
+
+ChatGPT OAuth refresh tokens rotate: a refresh returns a new refresh token and the old one
+stops working. The OAuth server treats a second use of the old token as a reused token,
+which signs the user out of Codex. Credentials shared with Codex therefore have to stay in
+step with its `auth.json`.
+
+**Where credentials come from.**
+
+- `with_openai_chatgpt_oauth(access_token, refresh_token, account_id)` and `from_env`
+  keep the credentials in memory only. Save rotated tokens yourself from
+  `LLMClient::openai_chatgpt_oauth_credentials()`.
+- A client built from a Codex `auth.json` keeps the file in step with it through a
+  `CodexAuthStore`. Load the file with `CodexAuthFile::load(path)` or
+  `CodexAuthFile::load_default()` (`$CODEX_HOME/auth.json`, else `~/.codex/auth.json`),
+  then build the client with `LLMClient::new().with_codex_auth_file(&file)?`,
+  `file.openai_client()?`, or `file.client()?`. Both the nested `tokens` layout Codex
+  writes and top-level token fields are read.
+- Other storage implements `ChatGptOAuthStore` and is installed with
+  `OpenAIClient::with_credential_store`.
+
+**When a refresh happens.** A client refreshes when asked
+(`refresh_openai_oauth_token`, or `refresh_openai_oauth_token_if_expiring`, which the
+arko-agents runtime calls before each request), and once after an HTTP 401
+`token_expired`, then resends the request. Any other HTTP 401 re-reads the store, as
+Codex's unauthorized recovery re-reads `auth.json`: newer credentials there are adopted
+and the request is sent once more, without a refresh; otherwise the 401 is returned.
+
+**Every refresh re-reads `auth.json` first.** What the file holds decides what happens;
+the first matching row applies:
+
+| The file holds | Then |
+| --- | --- |
+| Nothing readable (for example after `codex logout` deleted it), or another account | The refresh stops with an error. |
+| Spent credentials (see below) | The client's credentials are saved over them and refreshed. If those are spent too, or have no refresh token, the refresh stops: sign in to Codex again. |
+| The client's credentials | They are refreshed. |
+| Other live credentials of the same account | They are adopted without a refresh: Codex refreshed, or the user signed in again. Credentials the host installed in the client, which the file never held, give way to the file's. |
+
+An unsaved rotation of the client's account changes the first two rows (see "When the
+save fails" below). A file that is not valid JSON is read up to five times, 30 ms apart,
+before it counts as an error, since Codex writes `auth.json` in place.
+
+**Rotated tokens are saved at once.** As soon as a refresh succeeds, the new tokens and
+the refresh's `id_token` are written to `auth.json`, keeping every other field and the
+layout. The previous contents go to `auth.json.bak` (one backup, replaced each time), and
+the new contents go to a temporary file that is synced and then renamed over `auth.json`.
+On Unix the backup and the temporary file are readable only by the owner until they get
+`auth.json`'s permissions. Tokens another process wrote are never overwritten: when the
+file holds other credentials than the ones read before the refresh, nothing is written
+and the save fails, and the file is compared once more just before the rename. Codex
+takes no lock on `auth.json`, so a write in the last instant cannot be ruled out.
+
+**Spent refresh tokens are never used again.** A refresh token is spent once a refresh
+with it has returned a new one, or the server has refused it as reused, expired, or
+revoked (`refresh_token_reused`, `refresh_token_expired`, `refresh_token_invalidated`).
+The process keeps one record of spent tokens, as SHA-256 digests, and checks it just
+before every refresh request, including those of `refresh_chatgpt_oauth_token`. Refresh
+tokens are unique, so the record applies whichever client or token URL spent a token. A
+spent token is never sent again, and credentials holding one are neither adopted from the
+store nor saved to it; the refresh fails with `Error::AuthenticationFailed` instead.
+`CodexAuthFile::persist` and `persist_tokens` write the credentials they are given
+without this check.
+
+**When the save fails.** Rotated tokens that cannot be written to `auth.json` go to a new
+file next to it, `auth.json.recovered-<unix seconds>`, which on Unix only the owner can
+read (mode 0600), and the refresh returns an error naming that file. The client keeps
+using the new tokens. Every client of the same `auth.json` in the process, including ones
+created later, then knows of this unsaved rotation (the latest one of each account) until
+the file holds live credentials of that account again:
+
+- While the file still holds the spent credentials, the next refresh of the account
+  through any client saves the rotation first; the other clients then take it from the
+  file. No client is handed the rotated tokens before they are in the file.
+- While the rotation cannot be saved, or the file cannot be read or holds another
+  account, every refresh of the account stops with an error naming the recovery file, so
+  the client holding the rotation does not refresh it again.
+- If the file gets other live credentials meanwhile (the user signed in again), every
+  client uses those, including the one holding the rotation, which is dropped; the tokens
+  stay in the recovery file.
+
+To recover by hand, put the recovery file in place of `auth.json` before Codex next
+refreshes, or sign in to Codex again.
+
+**Concurrent refreshes.** Clones of a client share its credentials and refresh one at a
+time. Clients created separately from one `auth.json` (each `openai_client()` call
+creates its own store) share one refresh lock per file in the process, held from the
+re-read to the save, so the second client finds the first one's tokens in the file
+instead of refreshing with the rotated refresh token. A client takes that lock before its
+own credential lock, so while it waits for another client's refresh, its requests go on
+with the token it holds.
+
+**Timeouts and shutdown.** A refresh request times out after 60 seconds with a retryable
+error, so a stalled token endpoint cannot hold the credentials longer than that. Codex
+sets no such timeout: a server that rotates the token but answers after 60 seconds loses
+that rotation, as when the connection drops mid-answer. Once a refresh request is sent,
+the refresh runs to completion, installing and saving the new tokens, even if its caller
+is dropped. A Tokio runtime shutting down still cancels it, and tokens it had not saved
+are lost. A host that must not lose a rotation stops starting refreshes (finishes or
+cancels its agent runs) and then awaits `LLMClient::openai_chatgpt_oauth_credentials()`
+on each client before shutting the runtime down: a refresh in flight holds the credential
+lock until its tokens are installed and saved, so the call returns after it.
+
+**What cannot be detected.**
+
+- A refresh whose response is lost (the connection drops, or the request times out after
+  it was sent) may still have rotated the token. The old token is not recorded as spent,
+  so the next refresh sends it; the server refuses it, and it is recorded then.
+- Clients that share neither their credentials nor a store's refresh lock can send the
+  same token at the same time: a token is known to be spent only once a refresh with it
+  has been answered.
+- Tokens spent by another process, or by an earlier run of this one, look live. An old
+  `auth.json` restored from a backup is adopted like new credentials, and an unsaved
+  rotation of its account is dropped (the tokens stay in their recovery file).
+
+`CodexAuthFile::sync(&client)` brings a client configured another way into step with the
+file: it saves credentials the client rotated or loads newer ones the file holds, never
+for another account and never with a spent refresh token.
+
+**Refreshing proactively.** `LLMClient::refresh_openai_oauth_token_if_expiring(margin)`
+refreshes only when the access token expires within `margin`, deciding under the
+credential lock after the store is re-read, so concurrent callers rotate once (checking
+`is_openai_token_expired` and then refreshing can rotate twice). It returns `Some` when it
+installed new credentials (refreshed, or adopted from the store) and `None` when nothing
+needed refreshing, including for API-key and unconfigured clients. An explicit
+`refresh_openai_oauth_token` that waits while another refresh replaces the credentials
+returns those instead of refreshing again. The opt-in OAuth rate-limit retries of
+`refresh_openai_oauth_token` (`with_openai_chatgpt_oauth_rate_limit_retries`, or
+`OpenAIClient::with_oauth_rate_limit_retries`) stop after 8 retries and honor at most 15
+minutes of a server hint per wait; no lock is held while waiting, and a retry that finds
+the credentials replaced returns them.
+
+## Usage and cost
+
+`UsageInfo` token counts mean the same thing for every provider:
+
+- `input_tokens` is the total input, including cache reads (`cached_tokens`) and cache
+  writes (`cache_write_tokens`). Anthropic reports uncached input separately, so arko-ai
+  adds the cache counts back; for streams it uses the cumulative counts in the final
+  `message_delta`. Anthropic usage records saved by earlier versions of arko-ai hold only
+  the uncached input in `input_tokens`.
+- `output_tokens` includes reasoning tokens; `reasoning_tokens` reports them separately
+  when the provider does (OpenAI `output_tokens_details.reasoning_tokens`, Gemini thought
+  tokens).
+- `cache_write_1h_tokens` is the part of Anthropic cache writes made with a 1-hour TTL.
+
+Costs are estimates at list prices from the model registry, computed for what the call
+actually used:
+
+- **Service tier.** The tier the response reports wins over the one requested (OpenAI
+  echoes `service_tier`, for example `default` when a Fast request was downgraded;
+  Anthropic reports `speed: "fast"` and `service_tier`).
+  `GenerationConfig::with_openai_service_tier` requests OpenAI Flex or Fast (sent as
+  `priority`) on models that offer it, with API-key auth only. Tier prices are per model
+  (`ModelPricing::service_tiers`); tiers without a published price (Anthropic priority,
+  OpenAI scale) are estimated at standard rates.
+- **Cache TTL, residency and dates.** Anthropic 1-hour cache writes use their own rate;
+  `inference_geo: "us"` applies the 1.1x multiplier on Claude 4.6 and later;
+  `ModelPricing::schedule` switches prices on a date (for example the end of promotional
+  pricing). Tier and residency multipliers stack.
+- **Missing prices.** A token class without its own price (cached input on Pro models,
+  cache writes on models that don't charge extra for them) is billed at the input rate,
+  including long-context rates.
+
+`total_cost` is the estimate; `billed()` is what the account is charged, decided by
+`billing`: `Metered` (the estimate), `Subscription` (ChatGPT OAuth: zero, while the
+estimate stays visible), `NotCharged` (zero: an Anthropic classifier refusal before any
+output in a category Anthropic does not bill) or `ProviderReported` (`reported_cost` plus
+any bring-your-own-key `upstream_cost`, used by providers that report their actual
+charge, such as [OpenRouter](#usage-and-cost-1)). `UsageInfo` implements `AddAssign` and
+`Sum`; summing calls billed differently yields `BillingKind::Mixed` with the billed
+amounts added. Workflow budgets count `billed()`.
+
+## Errors and retries
+
+`Error::retry_class()` returns `Permanent`, `Transient`, `Capacity` or `UsageLimit` (a
+plan usage limit such as the ChatGPT backend's `usage_limit_reached`, retryable only once
+it resets; `retry_after()` holds the time left). `is_retryable()`, `is_capacity_error()`
+and `is_usage_limit()` are views of it, and `is_rate_limit()` picks the short rate limits
+out of `Transient` (HTTP 429, `rate_limit_exceeded`, `slow_down`).
+
+Provider error bodies are read generically: string codes (`error.code`, `error.type`,
+`error.status`), OpenRouter's `error.metadata.error_type`, and numeric HTTP-style codes,
+which stand in for the status on stream errors that arrive after a 200. Documented string
+codes stand in for it too (Gemini Interactions codes such as `service_unavailable` or
+`deadline_exceeded`, Anthropic error types such as `api_error` or `timeout_error`).
+Permanent codes (authentication, quota such as `insufficient_quota`,
+`organization_usage_limit_exceeded` or Gemini's daily `quota_exceeded`, the ChatGPT
+backend's `flex_unavailable`, invalid requests, context length, content policy, ...)
+always win, even on a 429; any other error reported after a 200 is `Transient`, so
+callers retry it a bounded number of times.
+
+Delay hints come from `Retry-After`, `x-ratelimit-reset-*` headers (on a 429 only, for
+the exhausted limit), or body fields (`retry_after_ms`, `retry_after`, `resets_at`,
+OpenRouter's `error.metadata.headers.X-RateLimit-Reset`) for every provider; a rate
+limit without any of these takes the wait its message names ("Please try again in 2.5s",
+read as Codex reads it). All are capped at `retry::MAX_SERVER_DELAY_HINT` (30 days), so a
+hint can always be added to the current time.
+
+arko-ai does not retry model calls itself. `arko_ai::retry::BackoffPolicy` is the shared
+backoff used by arko-agents, arko-index and the OAuth refresh retries: exponential with a
+cap and equal jitter, treating a server hint as a minimum with jitter above it.
+
+The shared model HTTP client has no total request deadline, since a response can stream
+for a long time; connection setup and idle pool connections are bounded separately, and
+a request is cancelled by dropping its future.
+
+## Voyage embeddings
+
+`EmbeddingClient` embeds text with Voyage (`with_voyage_api_key`, or `from_env`, which
+reads `VOYAGE_API_KEY`):
+
+```rust
+use arko_ai::{EmbeddingClient, EmbeddingConfig, EmbeddingProviderIdentifier, VoyageInputType};
+
+let client = EmbeddingClient::from_env();
+let config = EmbeddingConfig::new(EmbeddingProviderIdentifier::Voyage, "voyage-code-4")
+    .with_voyage_input_type(VoyageInputType::Document)
+    .with_output_dimensionality(1024);
+let response = client.embed(vec!["fn main() {}".into()], &config).await?;
+```
+
+The current text embedding models support 32,000 tokens per input, up to 1,000 inputs per
+request, and 256, 512, 1024 (default), or 2048 output dimensions:
 
 | Model ID | Total tokens per request | Standard USD per million tokens |
 | --- | ---: | ---: |
@@ -41,101 +495,24 @@ assets can be downloaded and loaded through the current Hub interface.
 | `voyage-4-lite` | 1,000,000 | $0.02 |
 | `voyage-code-4` | Not published | $0.12 |
 
-For `voyage-code-4`, `max_batch_total_tokens` is `None`: aggregate limits are
-validated by the provider. This does not mean unlimited requests. The known
-per-input and item-count limits still apply locally.
-
-```rust
-use arko_ai::{EmbeddingConfig, EmbeddingProviderIdentifier, VoyageInputType};
-
-let config = EmbeddingConfig::new(EmbeddingProviderIdentifier::Voyage, "voyage-code-4")
-    .with_voyage_input_type(VoyageInputType::Document)
-    .with_output_dimensionality(1024);
-```
-
-Use `VoyageInputType::Query` when embedding a search query. Truncation defaults
-to false. The existing `voyage-3.5`, `voyage-3.5-lite`, `voyage-3-large`, and
-`voyage-code-3` IDs remain supported. Cost estimates use standard endpoint rates
+`voyage-3.5`, `voyage-3.5-lite`, `voyage-3-large`, and `voyage-code-3` are also accepted.
+For `voyage-code-4`, `max_batch_total_tokens` is `None`: the provider validates the
+aggregate limit, and the per-input and item-count limits still apply locally.
+Use `VoyageInputType::Query` when embedding a search query. Truncation is off unless
+`with_voyage_truncation(true)` turns it on. Cost estimates use standard endpoint rates,
 before account credits or discounts.
 
-Model metadata checked 2026-09-13 against Voyage's [model guide](https://docs.voyageai.com/docs/embeddings),
+Requests are checked before sending: token counts use the matching `voyageai/<model_id>`
+tokenizer from Hugging Face, loaded on a blocking worker and cached per repository and
+revision (`with_tokenizer_revision` pins a revision). Responses are reordered by the
+provider's item indexes, and missing, duplicate, wrong-dimension, non-finite, or zero
+vectors are rejected. Provider failures keep the HTTP status and `Retry-After` for
+retries by the caller.
+
+Sources: Voyage's [model guide](https://docs.voyageai.com/docs/embeddings),
 [API reference](https://docs.voyageai.com/reference/embeddings-api),
 [pricing](https://docs.voyageai.com/docs/pricing), and
 [tokenizer documentation](https://docs.voyageai.com/docs/tokenization).
-
-## Stop reasons and refusals
-
-Every `GenerationResponse` carries a normalized `stop_reason` (`EndTurn`, `ToolUse`, `MaxTokens`, `StopSequence`, `Refusal`, `PauseTurn`, `ContextWindowExceeded`, or `Other` with the provider's value) and, when the model or a filter declined, a `refusal`. Streams emit `StreamEvent::Refusal` once, just before `End`, which carries the same data. `GenerationResponse::single_tool_call(name)` returns the one expected tool call or an error that says whether the response was refused, cut off by a limit, or called something else.
-
-The provider's raw `stop_reason` and `stop_details` remain on `GenerationResponse.model_call_usage` (and in the agent runtime's `ModelCallUsageReported` events and task usage history). Missing fields in older saved records deserialize as `None`.
-
-`Refusal.source` says how to treat the turn:
-
-- `SafetyClassifier`: Anthropic's `stop_reason: "refusal"`, with `stop_details.category` and `explanation` when supplied (both can be null). Anthropic requires the refused turn to be removed before continuing, so the message is left empty and text generated before the refusal moves to `partial_output`. `Conversation::add_assistant_message_from_response` doesn't append such a turn.
-- `Model`: OpenAI's structured `refusal` content. The refusal text is in `explanation`, never in the message text or streamed as `TextChunk`. Ordinary text mentioning refusal is not classified as a refusal.
-- `ContentFilter`: OpenAI `incomplete_details.reason: "content_filter"`. Partial output moves to `partial_output`, as for classifier refusals.
-
-A stream that ends before the provider reports completion yields `Error::StreamTruncated` (retryable) instead of an `End`. When a token limit cuts a response short, tool calls whose arguments finished are kept and a call that was still being written is dropped. Tool-call arguments that aren't valid JSON are kept in `ToolCall::invalid_arguments` (with `arguments` set to `null`) instead of being replaced by `{}`.
-
-Google's Interactions API reports only an interaction `status`: `completed` maps to `EndTurn` (or `ToolUse` with function calls), `requires_action` to `ToolUse`, and `incomplete` to `MaxTokens`. It has no refusal or safety reason to report.
-
-OpenRouter maps `finish_reason`, `native_finish_reason` and `message.refusal` onto the same sources, and reports refusals raised as errors as `Error::Refusal`; see [Responses and streams](#responses-and-streams).
-
-References: [Anthropic streaming refusals](https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/handle-streaming-refusals), [official Anthropic streaming event schema](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/types/raw_message_delta_event.py), [OpenAI refusal and content-filter handling](https://developers.openai.com/api/docs/guides/structured-outputs), [OpenAI streaming refusal events](https://platform.openai.com/docs/api-reference/responses-streaming/response/refusal), [Gemini Interactions API](https://ai.google.dev/api/interactions-api-v1).
-
-## OpenAI Responses: replay, prompt caching and ChatGPT OAuth
-
-Every OpenAI request sends the conversation's `prompt_cache_key` (for every model; `prompt_cache_options` stays limited to GPT-5.6 and GPT-6 with API keys). Reasoning GPT-5.6 requests also send `reasoning.context: "all_turns"`, so reasoning from earlier turns is rendered back to the model; over ChatGPT OAuth GPT-6 requests send it too, as Codex does. With API keys it is left out for GPT-6, since the API documents the value only for GPT-5.6. Without a configured effort, API-key requests send no `reasoning.effort` (the model's default applies), while ChatGPT OAuth requests send `medium`, as Codex always sends an effort.
-
-**Output items and replay.** A response's assistant output is assembled from the `response.output_item.done` stream events, in order, as Codex does; the ChatGPT backend's `response.completed` usually carries no items, and items only it holds are merged in. The assistant message keeps every replayable item (`reasoning` with `encrypted_content`, `message` with its `phase`, finished `function_call`) verbatim, minus `status`, in `ReasoningArtifact::OpenAIOutputItems`. Later requests replay them unchanged and in order, for example `reasoning`, `message` (commentary), `function_call`, then the call's `function_call_output`; no empty assistant message is added for tool-only turns. A replayed `function_call` needs the message to still hold that call (by `call_id`), and calls the message holds without an item follow in the reconstructed shape. When the items hold no `message`, the message's own text follows them; arko-agents relies on both when it keeps a model's refusal without its tool calls and with the refusal explanation as its text. Reasoning that nothing follows (a response cut off after its reasoning, or whose calls were all dropped) is left out of the replay, since the API rejects a reasoning item without its following item ([openai/codex#1498](https://github.com/openai/codex/issues/1498)). Messages without items (older saved conversations with `OpenAIEncryptedReasoning`, application-built messages, other providers) are reconstructed as before: reasoning, function calls, then the text.
-
-**ChatGPT OAuth requests** (`chatgpt.com/backend-api/codex/responses`) always stream (`generate_text` collects the stream) and carry the conversation identity, like Codex: `session-id`, `thread-id` and `x-client-request-id`, all set to the conversation's `prompt_cache_key`. The backend derives prompt-cache affinity from `session-id`, so give each agent its own conversation. `OpenAI-Beta: responses=experimental` is no longer sent on either path. No `originator` or `User-Agent` is sent unless the application sets one with `LLMClient::with_openai_originator` / `with_openai_user_agent` (use your own application's name).
-
-**Shared Codex credentials.** ChatGPT refresh tokens rotate, and a second use of a rotated one signs Codex out. A client built from a Codex `auth.json` (`CodexAuthFile::load(path)?` then `LLMClient::new().with_codex_auth_file(&file)?`, or `file.openai_client()?` / `file.client()?`) keeps the file in step through a `CodexAuthStore`: every refresh (proactive, or after an HTTP 401 `token_expired`) first re-reads the file and uses tokens Codex already refreshed instead of refreshing again, for the same account only (a file now holding another account, or one that can't be read, stops the refresh with a permanent error, as Codex does). Any other HTTP 401 re-reads the file too, like Codex's unauthorized recovery: newer tokens there are adopted and the request is sent once more, without a refresh; otherwise the 401 is returned. Rotated tokens, with the refresh's `id_token`, are written back as soon as the refresh succeeds: previous contents to `auth.json.bak`, new contents atomically, never over tokens another process wrote (the file is compared again just before the rename). The backup and temporary files are created owner-only (on Unix) before they get the file's own permissions, and a file that isn't valid JSON is read a few more times before that counts as an error, since Codex writes `auth.json` in place. The process never sends a refresh token that one of its refreshes already exchanged for a new one, or that the server refused as reused, expired or revoked, and neither the client nor its store adopts or saves credentials holding one: such tokens go into one process-wide record (SHA-256 digests only; refresh tokens are unique, so it doesn't matter which client or token URL spent them), and every refresh path checks it just before sending. What the record can't know: a refresh whose answer was lost can still spend a token unnoticed (the server then refuses the next use, and the token is recorded); two clients that share neither their credentials nor a store can send one token at the same time; and a token spent by another process or an earlier run looks live, so an old `auth.json` restored from a backup is adopted like new credentials, dropping unsaved tokens of its account (they stay in their recovery file). (`CodexAuthFile::persist` writes what it is given.) Tokens that can't be written back go to an owner-only `auth.json.recovered-<time>` file and the refresh returns an error naming it. Until they are saved, every client of that file in the process knows of them (the latest unsaved tokens of each account), also clients made after every earlier one was dropped: the next refresh through any of them saves them first (with the refresh's `id_token`), and the other clients then take them from the file. No client is handed them before that: while they can't be saved, every refresh for that account stops with an error naming the recovery file (the client holding them doesn't refresh them again), and so it does while the file can't be read (for example after `codex logout` deleted it) or holds another account. Once the file holds other live credentials (the user signed in again), every client uses those, also the one holding the unsaved tokens, which are dropped. A client holding credentials the file never had (installed by the host, say) takes the file's on its next refresh, unless the file's are spent: then the client's are saved over them. Clients made separately from one `auth.json` (each `openai_client()` call makes its own store) share a per-file refresh lock in the process, held from the re-read to the save, so the second finds the first one's tokens instead of reusing the rotated refresh token. A client takes that lock before its own credential lock, so while it waits for another client's refresh its requests go on with the token it holds. A refresh request times out after 60 seconds with a retryable error, so a stalled token endpoint holds the credentials no longer than that. Codex sets no such timeout: a server that rotates the token but answers later than that loses the rotation (the next refresh with the old token is refused), as when a connection drops mid-answer. Once a refresh request is sent, the refresh runs to completion (installing and saving the rotated tokens) even if its caller is dropped, but a Tokio runtime shutting down cancels it, and tokens it had not saved yet are lost. A host that must not lose a rotation stops starting refreshes (finishes or cancels its agent runs) and then awaits `LLMClient::openai_chatgpt_oauth_credentials()` on each client before shutting the runtime down: a refresh in flight holds the credential lock until its tokens are installed and saved, so the call returns after it. Other credential storage can implement `ChatGptOAuthStore` and install it with `OpenAIClient::with_credential_store`. `CodexAuthFile::sync` remains for clients configured another way; it never adopts or writes another account's tokens.
-
-**Refreshing proactively.** `LLMClient::refresh_openai_oauth_token_if_expiring(margin)` refreshes only when the access token expires within `margin`, deciding under the credential lock after the store is re-read, so concurrent callers rotate once (checking `is_openai_token_expired` and then refreshing can rotate twice). It returns `Some` when it installed new credentials (refreshed, or adopted from the store) and `None` when nothing needed refreshing, including for API-key and unconfigured clients. An explicit `refresh_openai_oauth_token` that waits while another refresh replaces the credentials returns those instead of refreshing again. Opt-in OAuth rate-limit retries (`with_oauth_rate_limit_retries`) stop after 8 retries and honor at most 15 minutes of a server hint per wait; no lock is held while waiting, and a retry that finds the credentials replaced returns them.
-
-**Plan usage.** Every ChatGPT OAuth response reports the plan's usage-limit windows in `x-codex-*` headers; they are parsed into `ModelCallUsage::plan_usage` (`PlanUsage`: plan type, active limit, and the primary and secondary windows' used percentage, length, reset time). arko-agents reports them as events and can act on a threshold.
-
-**Turn state.** The backend returns an `x-codex-turn-state` routing token. `GenerationResponse::openai_turn_state` carries it, and `Conversation::add_assistant_message_from_response` keeps the first token of each user turn in `Conversation::openai_turn_state` (serialized, so a resumed task keeps it). Every later OAuth request of that turn, tool-result follow-ups and retries, echoes it unchanged. A user message without tool results starts a new turn and drops the token; it is never sent in another turn or with API keys. The token is tied to its turn's starting message by index and by a hash of the message, so editing `messages` directly (rewinding and pushing a different message at the same index) also drops it.
-
-**Reroutes.** `ModelCallUsage::served_model` is the model the provider reports (`openai-model` / `x-openai-model` header, else the response's `model`, else `response.created`), and `rerouted` is true when any reported model differs from the requested one, ignoring case and snapshot date suffixes. `GenerationResponse::served_model()` reads the first; `GenerationResponse::rerouted()` and `ModelCallUsage::served_model_changed()` are true for an OpenAI reroute and for an OpenRouter call whose `requested_model` is set.
-
-References: [OpenAI reasoning context](https://developers.openai.com/api/docs/guides/reasoning), [openai/codex](https://github.com/openai/codex) (`codex-rs/core/src/client.rs`, `codex-rs/codex-api/src/sse/responses.rs`).
-
-## Usage and cost
-
-`UsageInfo` token counts mean the same thing for every provider:
-
-- `input_tokens` is the total input, including cache reads (`cached_tokens`) and cache writes (`cache_write_tokens`). Anthropic reports uncached input separately, so arko adds the cache counts back; for streams it uses the cumulative counts in the final `message_delta`. **Usage records saved before this change stored only uncached input for Anthropic.**
-- `output_tokens` includes reasoning tokens; `reasoning_tokens` reports them separately when the provider does (OpenAI `output_tokens_details.reasoning_tokens`, Gemini thought tokens).
-- `cache_write_1h_tokens` is the part of Anthropic cache writes made with a 1-hour TTL.
-
-Costs are estimates at list prices from `model.rs`, computed for what the call actually used:
-
-- **Service tier.** The tier the response reports wins over the one requested (OpenAI echoes `service_tier`, for example `default` when a Fast request was downgraded; Anthropic reports `speed: "fast"` and `service_tier`). `GenerationConfig::with_openai_service_tier` requests OpenAI Flex or Fast (sent as `priority`) on models that offer it, with API-key auth only. Tier prices are per model (`ModelPricing::service_tiers`); tiers without a published price (Anthropic priority, OpenAI scale) are estimated at standard rates.
-- **Cache TTL, residency and dates.** Anthropic 1-hour cache writes use their own rate; `inference_geo: "us"` applies the 1.1x multiplier on Claude 4.6 and later; `ModelPricing::schedule` switches prices on a date (for example the end of promotional pricing). Tier and residency multipliers stack.
-- **Missing prices.** A token class without its own price (cached input on Pro models, cache writes on models that don't charge extra for them) is billed at the input rate, including long-context rates.
-
-`total_cost` is the estimate; `billed()` is what the account is charged, decided by `billing`: `Metered` (the estimate), `Subscription` (ChatGPT OAuth: zero, while the estimate stays visible), `NotCharged` (zero: an Anthropic classifier refusal before any output in a category Anthropic does not bill) or `ProviderReported` (`reported_cost` plus any bring-your-own-key `upstream_cost`, used by providers that report their actual charge, such as [OpenRouter](#usage-and-cost-1)). `UsageInfo` implements `AddAssign` and `Sum`; summing calls billed differently yields `BillingKind::Mixed` with the billed amounts added. Workflow budgets count `billed()`.
-
-## Errors and retries
-
-`Error::retry_class()` returns `Permanent`, `Transient`, `Capacity` or `UsageLimit` (a plan usage limit such as the ChatGPT backend's `usage_limit_reached`, retryable only once it resets; `retry_after()` holds the time left); `is_retryable()`, `is_capacity_error()` and `is_usage_limit()` are views of it, and `is_rate_limit()` picks the short rate limits out of `Transient` (HTTP 429, `rate_limit_exceeded`, `slow_down`). Provider error bodies are read generically: string codes (`error.code`, `error.type`, `error.status`), OpenRouter's `error.metadata.error_type`, and numeric HTTP-style codes, which stand in for the status on stream errors that arrive after a 200. Documented string codes stand in for it too (Gemini Interactions codes such as `service_unavailable` or `deadline_exceeded`, Anthropic error types such as `api_error` or `timeout_error`). Permanent codes (authentication, quota such as `insufficient_quota`, `organization_usage_limit_exceeded` or Gemini's daily `quota_exceeded`, the ChatGPT backend's `flex_unavailable`, invalid requests, context length, content policy, ...) always win, even on a 429; any other error reported after a 200 is `Transient`, so callers retry it a bounded number of times. Gemini generation-blocked codes (`safety`, `recitation`, `prohibited_content`, ...) become `Error::Refusal` with a `ContentFilter` source. Delay hints come from `Retry-After`, OpenAI's `x-ratelimit-reset-*` headers (on a 429 only, for the exhausted limit), or body fields (`retry_after_ms`, `retry_after`, `resets_at`, OpenRouter's `error.metadata.headers.X-RateLimit-Reset`) for every provider; a rate limit without any of these takes the wait its message names ("Please try again in 2.5s", read as Codex reads it). All are capped at `retry::MAX_SERVER_DELAY_HINT` (30 days) so a hint can always be added to the current time.
-
-`arko_ai::retry::BackoffPolicy` is the shared backoff: exponential with a cap and equal jitter, treating a server hint as a minimum with jitter above it. arko-ai does not retry model calls itself; arko-agents, arko-index and the OpenAI OAuth refresh loop use this policy.
-
-### Long requests and embedding tokenizers
-
-The shared model HTTP client has no total request deadline. Connection setup and idle
-connection-pool cleanup are separately bounded. Hosts can cancel requests explicitly.
-
-`EmbeddingConfig::with_tokenizer_revision()` pins a Hugging Face tokenizer revision.
-Tokenizers are cached per repository/revision with truncation and padding disabled;
-concurrent first loads share initialization. Embedding tokenization runs on a blocking
-worker. Voyage responses are reordered by provider item indexes and reject missing,
-duplicate, dimension-invalid, nonfinite, or zero vectors. Provider failures preserve
-HTTP status and Retry-After metadata for caller-controlled retries.
 
 ## OpenRouter
 
@@ -403,3 +780,32 @@ extended context where the model has it.
   ```bash
   OPENROUTER_API_KEY=... cargo test -p arko-ai openrouter::live_tests -- --ignored --nocapture --test-threads=1
   ```
+
+## Examples and tests
+
+The `llm_client_cli` example sends one prompt or runs an interactive chat with any
+configured provider, reading credentials with `LLMClient::from_env()` (and a `.env`
+file):
+
+```bash
+cargo run -p arko-ai --example llm_client_cli -- models
+cargo run -p arko-ai --example llm_client_cli -- text -m claude-sonnet-5 -p "Hello"
+cargo run -p arko-ai --example llm_client_cli -- chat -m anthropic/claude-sonnet-5 --reasoning-level high
+```
+
+`embeddings_demo` requests Voyage embeddings with `VOYAGE_API_KEY`, and
+`oauth_cache_probe` measures prompt-cache hits on the ChatGPT OAuth path with the
+credentials in a Codex `auth.json`.
+
+The unit tests use local fixtures and make no provider calls:
+
+```bash
+cargo test -p arko-ai --lib
+```
+
+Tests that need the network (a Hugging Face tokenizer download, live OpenRouter
+requests) are marked `#[ignore]`; see [Known gaps](#known-gaps) for the OpenRouter suite.
+
+## License
+
+MIT OR Apache-2.0
