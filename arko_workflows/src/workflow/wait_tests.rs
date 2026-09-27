@@ -338,7 +338,7 @@ async fn automatic_limits_follow_each_agents_prompt_cache() {
         LLMClient::new().with_openai_api_key("sk-test"),
         LLMClient::new().with_openai_chatgpt_oauth("access", None, "account"),
     ];
-    for (client, openai) in clients.into_iter().zip([minutes(27), minutes(27)]) {
+    for client in clients {
         let client = Arc::new(client);
         let mut builder = Workflow::builder()
             .name("wait-test")
@@ -357,7 +357,8 @@ async fn automatic_limits_follow_each_agents_prompt_cache() {
             )
         };
         for (agent, expected) in [
-            ("openai", openai),
+            // OpenAI is a conservative 5 minutes on either auth.
+            ("openai", Duration::from_secs(270)),
             ("older", minutes(5) - Duration::from_secs(30)),
             ("claude", Duration::from_secs(270)),
             ("claude_hour", minutes(54)),
@@ -419,10 +420,7 @@ async fn a_message_ends_the_wait_at_once_and_is_ready_for_the_next_turn() {
         assert_eq!(listed, "- `lead` (lead role): waiting (awaiting_message)");
         send(&workflow, &worker, "worker", "lead", "The review is done.").await;
     });
-    assert_eq!(
-        result,
-        "A message from `worker` is waiting; it will be delivered with your next turn."
-    );
+    assert_eq!(result, "Message from `worker` waiting.");
     assert!(started.elapsed() < Duration::from_secs(5));
     let Ok(UserCommand::InjectContext { content }) = lead.commands.try_recv() else {
         panic!("the message is in the channel");
@@ -461,10 +459,7 @@ async fn a_wait_ends_at_its_limit_which_the_model_can_only_shorten() {
     )
     .await
     .unwrap();
-    assert_eq!(
-        result,
-        "No messages after 0.3 s, the longest the workflow waits."
-    );
+    assert_eq!(result, "No messages after 0.3 s.");
     let waited = started.elapsed();
     assert!(waited < Duration::from_secs(5), "{waited:?}");
     assert_eq!(workflow.agent_status("lead"), Some(AgentStatus::Running));
@@ -524,7 +519,7 @@ async fn a_start_or_finish_ends_the_wait_and_start_notices_still_come() {
         until_status(&workflow, "lead", WAITING).await;
         run(&workflow, "worker")
     });
-    assert_eq!(result, "No messages yet. `worker` is now running.");
+    assert_eq!(result, "`worker` started.");
     let notices = StartNotices {
         context: context.clone(),
         agent_name: "lead".to_string(),
@@ -541,10 +536,7 @@ async fn a_start_or_finish_ends_the_wait_and_start_notices_still_come() {
             .registry
             .finish(worker.id, AgentRunStatus::Completed);
     });
-    assert_eq!(
-        result,
-        "No messages yet. `worker` is now finished (completed)."
-    );
+    assert_eq!(result, "`worker` finished (completed).");
 
     // The auditor is no peer of the worker's.
     let worker = run(&workflow, "worker");
@@ -579,7 +571,7 @@ async fn stops_end_a_long_wait_at_once() {
         context.run_control.stop_agent(lead.id);
         Instant::now()
     });
-    assert_eq!(result, "You are being stopped; no message will arrive.");
+    assert_eq!(result, "Run stopping.");
     assert!(stopped.elapsed() < Duration::from_secs(1));
     context.registry.finish(lead.id, AgentRunStatus::Cancelled);
 
@@ -589,7 +581,7 @@ async fn stops_end_a_long_wait_at_once() {
         assert!(workflow.cancel());
         Instant::now()
     });
-    assert_eq!(result, "The workflow is stopping; no message will arrive.");
+    assert_eq!(result, "Workflow stopping.");
     assert!(cancelled.elapsed() < Duration::from_secs(1));
 }
 
@@ -609,7 +601,7 @@ async fn only_undelivered_agent_messages_end_a_wait() {
     let started = Instant::now();
     assert_eq!(
         wait(&workflow, "lead", lead.id).await,
-        "A message from `worker` is waiting; it will be delivered with your next turn."
+        "Message from `worker` waiting."
     );
     assert!(started.elapsed() < Duration::from_millis(250));
 
@@ -780,7 +772,7 @@ async fn a_lead_and_a_worker_wait_for_each_other_in_native_mode() {
             .find(|body| {
                 tool_results(body).last().is_some_and(|(name, output)| {
                     name == WAIT_FOR_MESSAGE_TOOL_NAME
-                        && output.contains(&format!("A message from `{from}` is waiting"))
+                        && output.contains(&format!("Message from `{from}` waiting."))
                 })
             })
             .unwrap_or_else(|| panic!("{prompt}: a wait found the message"));

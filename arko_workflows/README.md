@@ -403,24 +403,26 @@ An agent in native tool mode must call a tool every turn, so an agent that anoth
 agent may message is offered `wait_for_message` to wait for a reply. It returns as
 soon as a message for the agent arrives (the message itself is delivered, once, with
 the agent's next turn, never in the tool result), when an agent it may message or that
-may message it starts or finishes, or at the time limit, and says which: for example
-``A message from `lead` is waiting; it will be delivered with your next turn.`` or
-`No messages after 270 s.` While it waits, the agent's status is `waiting
-(awaiting_message)`. The model may pass `timeout_seconds` to wait less than the
-limit, never more. Cancelling the workflow, or the workflow stopping the agent (over
-its budget, for example), ends the wait at once.
+may message it starts or finishes, or at the time limit, with a short result such as
+``Message from `lead` waiting.``, `` `worker` started.`` or `No messages after 270 s.`
+To wait longer, the agent calls it again. While it waits, the agent's status is
+`waiting (awaiting_message)`. The model may pass `timeout_seconds` to wait less than
+the limit, never more. Cancelling the workflow, or the workflow stopping the agent
+(over its budget, for example), ends the wait at once.
 
-Every wait ends with a model request, and a request made within the provider's
-prompt-cache lifetime finds the prompt still cached (each cache hit starts the
-lifetime again). The default limit, `WaitForMessageTimeout::Auto`, therefore sits just
-inside each agent's cache lifetime, as `LLMClient::prompt_cache_lifetime` reports it
-for the agent's model and settings: the lifetime minus a tenth of it, at least 30
-seconds. That is 4 minutes 30 seconds for Anthropic's default 5-minute cache, 54
-minutes with a 1-hour cache (`GenerationConfig::anthropic_cache_ttl` set to
-`AnthropicCacheTtl::OneHour`), 27 minutes for OpenAI's GPT-5.6 and later (30-minute
-cache, also over ChatGPT OAuth), and 4 minutes 30 seconds when the lifetime is
-unknown or caching is off. A fixed limit (more than zero, at most 24 hours) applies to
-every agent or to one:
+Every wait ends with a model request. Within the provider's prompt-cache lifetime
+(each cache hit starts it again) that request pays only for cheap cached reads; after
+it, the whole prompt is read again at full price. So waits are short, and a long wait is
+several of them. The default limit, `WaitForMessageTimeout::Auto`, sits just inside
+each agent's cache lifetime, as `LLMClient::prompt_cache_lifetime` reports it for the
+agent's model and settings: the lifetime minus a tenth of it, at least 30 seconds.
+That is 4 minutes 30 seconds for Anthropic's default 5-minute cache and for OpenAI
+(reported as a conservative 5 minutes on every model, with an API key or ChatGPT
+OAuth), 54 minutes with Anthropic's 1-hour cache, an explicit opt-in
+(`GenerationConfig::anthropic_cache_ttl` set to `AnthropicCacheTtl::OneHour`; the same
+for Claude on OpenRouter), and 4 minutes 30 seconds when the lifetime is unknown or
+caching is off. A fixed limit (more than zero, at most 24 hours) applies to every
+agent or to one:
 
 ```rust
 use std::time::Duration;
@@ -432,7 +434,9 @@ let workflow = Workflow::builder()
     .build()?;
 ```
 
-A limit longer than the cache lifetime means a cache write after each long wait.
+A wait longer than the provider's cache lifetime can cause a cache miss on the next
+turn; with the automatic limit, an agent that needs to wait longer calls
+`wait_for_message` again and keeps the cache warm.
 
 The optional `attachments_json` parameter is a JSON array of typed references.
 They are described to the recipient; files, memory, and transcripts are not loaded

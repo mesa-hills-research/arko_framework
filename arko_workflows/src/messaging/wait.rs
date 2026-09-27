@@ -25,13 +25,13 @@ use arko_agents::tool::{
 use arko_ai::{LLMClient, PromptCacheLifetime};
 
 use crate::context::SharedContext;
-use crate::messaging::registry::{Activity, AgentRegistry};
+use crate::messaging::registry::{Activity, AgentRegistry, AgentStatus};
 
 pub const WAIT_FOR_MESSAGE_TOOL_NAME: &str = "wait_for_message";
 
-/// The time limit when the prompt cache's lifetime is unknown or caching is
-/// off: 4 minutes 30 seconds, inside the 5-minute cache lifetime most
-/// providers default to.
+/// The time limit for a 5-minute prompt cache (Anthropic's default, and
+/// OpenAI's as reported), and when the lifetime is unknown or caching is
+/// off: 4 minutes 30 seconds.
 pub const DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT: Duration = Duration::from_secs(270);
 
 /// The longest time limit the builder accepts: 24 hours.
@@ -51,15 +51,22 @@ const FORWARD_WAIT: Duration = Duration::from_secs(1);
 /// ([`WorkflowBuilder::agent_wait_for_message_timeout`]).
 ///
 /// Every wait ends with a model request, and a request within the
-/// provider's prompt-cache lifetime keeps the prompt cached (a cache hit
-/// restarts the lifetime), so a long wait costs no cache write when the limit
-/// stays inside that lifetime. `Auto` does that for each agent's model and
-/// settings, from [`LLMClient::prompt_cache_lifetime`]: the lifetime minus a
-/// margin of a tenth of it, at least 30 seconds (5 minutes gives 4 minutes 30
-/// seconds, 30 minutes 27 minutes, 1 hour 54 minutes). With an unknown
-/// lifetime, or caching off, it is [`DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT`]:
-/// with nothing to keep warm, a bounded wait still lets the agent look
-/// around now and then.
+/// provider's prompt-cache lifetime finds the prompt cached (a cache hit
+/// restarts the lifetime) and pays only for cheap cached reads; a request
+/// after it re-reads the whole prompt at full price. So waits are kept short,
+/// and a long wait is several of them: the agent calls `wait_for_message`
+/// again, keeping the cache warm. `Auto` keeps each wait inside the agent's
+/// lifetime, from [`LLMClient::prompt_cache_lifetime`] for its model and
+/// settings: the lifetime minus a margin of a tenth of it, at least 30
+/// seconds. That is 4 minutes 30 seconds for a 5-minute cache (Anthropic's
+/// default, and OpenAI's, reported conservatively on every model and auth)
+/// and 54 minutes with Anthropic's 1-hour TTL, an explicit opt-in. With an
+/// unknown lifetime, or caching off, it is
+/// [`DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT`]: with nothing to keep warm, a
+/// bounded wait still lets the agent look around now and then.
+///
+/// A `Fixed` limit may be longer than the cache lifetime, at the price of a
+/// possible cache miss on the next turn after a wait that runs to it.
 ///
 /// [`WorkflowBuilder::wait_for_message_timeout`]: crate::WorkflowBuilder::wait_for_message_timeout
 /// [`WorkflowBuilder::agent_wait_for_message_timeout`]: crate::WorkflowBuilder::agent_wait_for_message_timeout
@@ -241,11 +248,11 @@ impl Tool for WaitForMessageTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: WAIT_FOR_MESSAGE_TOOL_NAME.to_string(),
-            description: "Wait for a message from another workflow agent. Returns as soon as a message for you arrives (it is delivered with your next turn), when an agent you work with starts or finishes, or after the workflow's time limit, and says which. Use it instead of repeating other tools while you wait for a reply.".to_string(),
+            description: "Wait for a message from another agent. Returns when one arrives (delivered with your next turn), when an agent you work with starts or finishes, or at a time limit. Call again to keep waiting.".to_string(),
             output_based_example: None,
             parameters: vec![ToolParameterDefinition {
                 name: "timeout_seconds".to_string(),
-                description: "Optional: wait at most this many seconds, a positive number. The workflow's time limit applies when it is shorter.".to_string(),
+                description: "Optional: the most seconds to wait.".to_string(),
                 param_type: ToolParameterType::String,
                 required: false,
                 is_path: false,
@@ -271,12 +278,10 @@ impl Tool for WaitForMessageTool {
     ) -> Result<String, ToolError> {
         let requested = requested_timeout(&params)?;
         let limit = self.limit().await;
-        let (wait, clamped) = match requested {
-            Some(seconds) if seconds < limit.as_secs_f64() => {
-                (Duration::from_secs_f64(seconds), false)
-            }
-            Some(_) => (limit, true),
-            None => (limit, false),
+        // The model may only shorten the wait.
+        let wait = match requested {
+            Some(seconds) if seconds < limit.as_secs_f64() => Duration::from_secs_f64(seconds),
+            _ => limit,
         };
         let context = &self.context;
         let task_id = task_context.task_id;
@@ -297,10 +302,10 @@ impl Tool for WaitForMessageTool {
         let (mut arrivals_open, mut versions_open, mut stopping_open) = (true, true, true);
         loop {
             if context.run_control.is_stopped() {
-                return Ok("The workflow is stopping; no message will arrive.".to_string());
+                return Ok("Workflow stopping.".to_string());
             }
             if *stopping.borrow_and_update() {
-                return Ok("You are being stopped; no message will arrive.".to_string());
+                return Ok("Run stopping.".to_string());
             }
             let unseen = context.messages.unseen_messages(&self.agent_name, task_id);
             let changes = status_changes(context, &peers, &baseline);
@@ -311,14 +316,9 @@ impl Tool for WaitForMessageTool {
                 }
                 forward_deadline.get_or_insert(now + FORWARD_WAIT);
             } else if !changes.is_empty() {
-                return Ok(format!("No messages yet. {}", changes.join(" ")));
+                return Ok(changes.join(" "));
             } else if now >= deadline {
-                let waited = describe_duration(wait);
-                return Ok(if clamped {
-                    format!("No messages after {waited}, the longest the workflow waits.")
-                } else {
-                    format!("No messages after {waited}.")
-                });
+                return Ok(format!("No messages after {}.", describe_duration(wait)));
             }
             let until = forward_deadline.unwrap_or(deadline);
             tokio::select! {
@@ -334,33 +334,25 @@ impl Tool for WaitForMessageTool {
 }
 
 /// A sentence for each of `peers` that started or finished since `baseline`:
-/// `` `worker` is now running. ``
+/// `` `worker` started. `` or `` `worker` finished (completed). ``
 fn status_changes(context: &SharedContext, peers: &[String], baseline: &[Activity]) -> Vec<String> {
     let current = context.registry.activity(peers);
     peers
         .iter()
         .zip(baseline.iter().zip(&current))
         .filter(|(_, (before, now))| before != now)
-        .map(|(agent, _)| {
-            format!(
-                "`{agent}` is now {}.",
-                context.recipient_status(agent).describe()
-            )
+        .map(|(agent, _)| match context.recipient_status(agent) {
+            AgentStatus::Running | AgentStatus::Waiting(_) => format!("`{agent}` started."),
+            status => format!("`{agent}` {}.", status.describe()),
         })
         .collect()
 }
 
 fn message_result(senders: &[String], changes: &[String]) -> String {
     let mut result = if senders.len() == 1 {
-        format!(
-            "A message from {} is waiting; it will be delivered with your next turn.",
-            names(senders)
-        )
+        format!("Message from {} waiting.", names(senders))
     } else {
-        format!(
-            "Messages from {} are waiting; they will be delivered with your next turn.",
-            names(senders)
-        )
+        format!("Messages from {} waiting.", names(senders))
     };
     for change in changes {
         result.push(' ');
