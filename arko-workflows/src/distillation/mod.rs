@@ -688,9 +688,11 @@ impl ToolResultInterceptor for DistillationInterceptor {
         params: &HashMap<String, Value>,
         task_context: &TaskContext<'_>,
     ) -> Result<InterceptedResult, ToolError> {
-        if !self
-            .config
-            .applies(&self.agent_name, tool_name, raw_result.chars().count())
+        // A stopped run's agent is ending: no summary is paid for.
+        if self.context.run_control.is_stopped()
+            || !self
+                .config
+                .applies(&self.agent_name, tool_name, raw_result.chars().count())
         {
             return Ok(InterceptedResult::Unchanged);
         }

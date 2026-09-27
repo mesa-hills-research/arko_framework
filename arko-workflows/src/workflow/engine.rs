@@ -29,7 +29,8 @@ use crate::verification::{
     CompletionVerifierConfig, VerificationDecision, VerificationKind, VerificationRecord,
 };
 use crate::voting::{CAST_VOTE_TOOL_NAME, CastVoteTool};
-use crate::workflow::result::AgentResult;
+use crate::workflow::cancel::CancelCause;
+use crate::workflow::result::{AgentResult, AgentRunStatus};
 
 use super::AgentHandle;
 
@@ -104,50 +105,137 @@ impl ToolResultInterceptor for ChainedInterceptor {
 /// Fire lifecycle hooks using only the shared context.
 ///
 /// Iterates all hooks registered at the given point. If any hook returns
-/// `Abort`, the workflow is stopped with a `WorkflowError::AbortedByHook`.
-/// `Skip` is ignored where there is no operation to skip.
+/// `Abort`, the workflow run is stopped (see [`abort_run`]) and this returns
+/// `WorkflowError::AbortedByHook`. `Skip` is ignored where there is no
+/// operation to skip.
 pub(crate) fn fire_hooks_on_context(
     ctx: &Arc<SharedContext>,
     point: HookPoint,
     configure: impl FnOnce(&mut HookContext),
 ) -> Result<(), WorkflowError> {
-    let point_name = format!("{point:?}");
-    match fire_hooks_returning_impl(ctx, point, configure)? {
-        HookResult::Abort(reason) => Err(WorkflowError::AbortedByHook {
-            hook_point: point_name,
-            reason,
-        }),
+    match fire_hooks(ctx, &point, configure) {
+        HookResult::Abort(reason) => Err(abort_run(ctx, &point, reason)),
         _ => Ok(()),
     }
 }
 
-fn fire_hooks_returning_impl(
+/// Fires hooks at a point where their result has no effect.
+pub(crate) fn fire_hooks_ignoring_result(
     ctx: &Arc<SharedContext>,
     point: HookPoint,
     configure: impl FnOnce(&mut HookContext),
-) -> Result<HookResult, WorkflowError> {
-    let Some(hooks) = ctx.hooks.get(&point) else {
-        return Ok(HookResult::Continue);
+) {
+    let _ = fire_hooks(ctx, &point, configure);
+}
+
+/// Runs the hooks registered at `point` until one returns something other
+/// than `Continue`, and returns that result.
+fn fire_hooks(
+    ctx: &SharedContext,
+    point: &HookPoint,
+    configure: impl FnOnce(&mut HookContext),
+) -> HookResult {
+    let Some(hooks) = ctx.hooks.get(point) else {
+        return HookResult::Continue;
     };
 
     let mut hctx = HookContext::base(
         ctx.workflow_run_id,
         &ctx.workflow_name,
-        point,
+        point.clone(),
         ctx.budget.total_spent(),
         ctx.budget.limit(),
     );
     configure(&mut hctx);
 
     for hook in hooks {
-        let result = hook(&hctx);
-        match result {
+        match hook(&hctx) {
             HookResult::Continue => continue,
-            other => return Ok(other),
+            other => return other,
         }
     }
 
-    Ok(HookResult::Continue)
+    HookResult::Continue
+}
+
+/// Stops the run because a hook at `point` returned `Abort(reason)`: every
+/// running agent is told to stop and later run calls fail. Returns the
+/// hook's `AbortedByHook` error. A run already stopped keeps its first cause.
+pub(crate) fn abort_run(ctx: &SharedContext, point: &HookPoint, reason: String) -> WorkflowError {
+    let cause = CancelCause::AbortedByHook {
+        hook_point: format!("{point:?}"),
+        reason,
+    };
+    let error = cause.to_error();
+    ctx.run_control.stop(cause);
+    error
+}
+
+/// The error of a stopped run.
+fn stop_error(ctx: &SharedContext) -> WorkflowError {
+    ctx.run_control.error().unwrap_or(WorkflowError::Cancelled)
+}
+
+/// Waits while the workflow is paused. Fails with the stop's error if the
+/// run is stopped meanwhile.
+async fn wait_while_paused(ctx: &SharedContext) -> Result<(), WorkflowError> {
+    loop {
+        let resumed = ctx.resume_notify.notified();
+        if !ctx.paused.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
+        tokio::select! {
+            biased;
+            _ = ctx.run_control.stopped() => return Err(stop_error(ctx)),
+            _ = resumed => {}
+        }
+    }
+}
+
+/// Broadcasts an agent event to workflow subscribers and appends it to the
+/// run's event journal.
+async fn publish_event(
+    agent_name: &str,
+    agent_run_id: uuid::Uuid,
+    event: &AgentEvent,
+    ctx: &SharedContext,
+    persistence: Option<&Arc<PersistenceManager>>,
+) -> Result<(), WorkflowError> {
+    let _ = ctx.event_tx.send(crate::workflow::result::WorkflowEvent {
+        timestamp: chrono::Utc::now(),
+        workflow_run_id: ctx.workflow_run_id,
+        agent_name: agent_name.to_string(),
+        agent_run_id,
+        event: event.clone(),
+    });
+    if let Some(persistence) = persistence {
+        persistence
+            .append_event(agent_name, agent_run_id, event)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Charges reported usage to the budget and fires the budget hooks.
+fn charge_usage(
+    agent_name: &str,
+    usage: &arko_ai::UsageInfo,
+    ctx: &Arc<SharedContext>,
+) -> crate::budget::AddCostResult {
+    // Subscription (ChatGPT OAuth) calls are recorded with a billed amount
+    // of zero.
+    let cost_result = ctx.budget.add_agent_cost(agent_name, usage);
+    if cost_result.warning_triggered {
+        let _ = fire_hooks_on_context(ctx, HookPoint::OnBudgetWarning, |hctx| {
+            hctx.budget_spent = cost_result.new_total;
+        });
+    }
+    if cost_result.exceeded {
+        let _ = fire_hooks_on_context(ctx, HookPoint::OnBudgetExceeded, |hctx| {
+            hctx.budget_spent = cost_result.new_total;
+        });
+    }
+    cost_result
 }
 
 /// Drive the agent event loop with default workflow behavior.
@@ -156,8 +244,9 @@ fn fire_hooks_returning_impl(
 /// Tool hooks and freshness policy are enforced by execution middleware, so
 /// auto-approved and batched calls follow the same path.
 ///
-/// This is the shared implementation used by both `WorkflowEngine::run_agent`
-/// and `AgentHandle::wait`.
+/// Returns when the agent ends, or with an error when the workflow must stop
+/// it (including the stop's error once the run is cancelled or aborted); the
+/// caller then stops the agent.
 pub(crate) async fn drive_event_loop(
     agent_name: &str,
     agent_run_id: uuid::Uuid,
@@ -167,26 +256,17 @@ pub(crate) async fn drive_event_loop(
     persistence: Option<&Arc<PersistenceManager>>,
 ) -> Result<(), WorkflowError> {
     let mut approved_error_recoveries = 0_u32;
-    while let Some(event) = event_rx.recv().await {
-        loop {
-            let resumed = ctx.resume_notify.notified();
-            if !ctx.paused.load(std::sync::atomic::Ordering::Acquire) {
-                break;
-            }
-            resumed.await;
-        }
-        let _ = ctx.event_tx.send(crate::workflow::result::WorkflowEvent {
-            timestamp: chrono::Utc::now(),
-            workflow_run_id: ctx.workflow_run_id,
-            agent_name: agent_name.to_string(),
-            agent_run_id,
-            event: event.clone(),
-        });
-        if let Some(persistence) = persistence {
-            persistence
-                .append_event(agent_name, agent_run_id, &event)
-                .await?;
-        }
+    loop {
+        let event = tokio::select! {
+            biased;
+            _ = ctx.run_control.stopped() => return Err(stop_error(ctx)),
+            event = event_rx.recv() => match event {
+                Some(event) => event,
+                None => break,
+            },
+        };
+        wait_while_paused(ctx).await?;
+        publish_event(agent_name, agent_run_id, &event, ctx, persistence).await?;
         if ctx.budget.is_exceeded() && !matches!(&event, AgentEvent::UsageReported(_)) {
             let _ = cmd_tx.send(UserCommand::CancelTask).await;
             return Err(WorkflowError::BudgetExceeded {
@@ -228,20 +308,8 @@ pub(crate) async fn drive_event_loop(
             }
 
             AgentEvent::UsageReported(ref usage) => {
-                // Subscription (ChatGPT OAuth) calls are recorded with a
-                // billed amount of zero.
-                let cost_result = ctx.budget.add_agent_cost(agent_name, usage);
-
-                if cost_result.warning_triggered {
-                    let _ = fire_hooks_on_context(ctx, HookPoint::OnBudgetWarning, |hctx| {
-                        hctx.budget_spent = cost_result.new_total;
-                    });
-                }
-
+                let cost_result = charge_usage(agent_name, usage, ctx);
                 if cost_result.exceeded {
-                    let _ = fire_hooks_on_context(ctx, HookPoint::OnBudgetExceeded, |hctx| {
-                        hctx.budget_spent = cost_result.new_total;
-                    });
                     let _ = cmd_tx.send(UserCommand::CancelTask).await;
                     return Err(WorkflowError::BudgetExceeded {
                         spent: cost_result.new_total,
@@ -290,15 +358,19 @@ pub(crate) async fn drive_event_loop(
 
             AgentEvent::UserQuestionsAsked { questions } => {
                 if let Some(handler) = &ctx.user_input_handler {
-                    let response = handler
-                        .respond(crate::user_input::UserInputRequest {
-                            workflow_run_id: ctx.workflow_run_id,
-                            agent_run_id,
-                            agent_name: agent_name.to_string(),
-                            questions: questions.clone(),
-                        })
-                        .await
-                        .map_err(WorkflowError::Channel)?;
+                    let request = crate::user_input::UserInputRequest {
+                        workflow_run_id: ctx.workflow_run_id,
+                        agent_run_id,
+                        agent_name: agent_name.to_string(),
+                        questions: questions.clone(),
+                    };
+                    // The handler may wait on a person; a stop doesn't.
+                    let response = tokio::select! {
+                        biased;
+                        _ = ctx.run_control.stopped() => return Err(stop_error(ctx)),
+                        response = handler.respond(request) => response,
+                    }
+                    .map_err(WorkflowError::Channel)?;
                     cmd_tx
                         .send(UserCommand::SubmitUserResponse { response })
                         .await
@@ -354,6 +426,197 @@ pub(crate) async fn drive_event_loop(
     Ok(())
 }
 
+/// An agent run the engine started, to be driven to its result.
+pub(crate) struct StartedRun {
+    pub agent_name: String,
+    pub agent_run_id: uuid::Uuid,
+    pub event_rx: tokio::sync::mpsc::Receiver<AgentEvent>,
+    pub cmd_tx: tokio::sync::mpsc::Sender<UserCommand>,
+    pub join_handle: tokio::task::JoinHandle<Result<Task, arko_agents::ArkoAgentsError>>,
+    /// The task as the run started it: the record of an agent that had to be
+    /// aborted.
+    pub started_task: Task,
+    /// Messages delivered in the prompt, acknowledged once the agent
+    /// completes.
+    pub pending_message_ids: Vec<uuid::Uuid>,
+}
+
+/// What an agent runtime's task returned.
+type Joined = Result<Result<Task, arko_agents::ArkoAgentsError>, tokio::task::JoinError>;
+
+/// Waits for an agent that was sent `CancelTask` to end, recording its last
+/// events and usage, and aborts it at `deadline`. `None` means the agent was
+/// aborted.
+async fn wind_down(
+    agent_name: &str,
+    agent_run_id: uuid::Uuid,
+    event_rx: &mut tokio::sync::mpsc::Receiver<AgentEvent>,
+    join_handle: &mut tokio::task::JoinHandle<Result<Task, arko_agents::ArkoAgentsError>>,
+    deadline: tokio::time::Instant,
+    ctx: &Arc<SharedContext>,
+    persistence: Option<&Arc<PersistenceManager>>,
+) -> Option<Joined> {
+    let mut events_open = true;
+    loop {
+        tokio::select! {
+            biased;
+            event = event_rx.recv(), if events_open => match event {
+                Some(event) => {
+                    if let Err(error) =
+                        publish_event(agent_name, agent_run_id, &event, ctx, persistence).await
+                    {
+                        log::warn!("Could not record an event of stopping agent '{agent_name}': {error}");
+                    }
+                    if let AgentEvent::UsageReported(usage) = &event {
+                        charge_usage(agent_name, usage, ctx);
+                    }
+                }
+                None => events_open = false,
+            },
+            joined = &mut *join_handle => return Some(joined),
+            _ = tokio::time::sleep_until(deadline) => {
+                join_handle.abort();
+                return match join_handle.await {
+                    Err(error) if error.is_cancelled() => None,
+                    joined => Some(joined),
+                };
+            }
+        }
+    }
+}
+
+/// Drives a started agent run to its result: runs the event loop, stops the
+/// agent when the workflow must (waiting at most the run's grace period
+/// before aborting it), records the final task, and maps it to the call's
+/// outcome. Once the run is stopped the outcome is the stop's error; the
+/// agent's result is recorded either way.
+pub(crate) async fn drive_to_result(
+    run: StartedRun,
+    ctx: &Arc<SharedContext>,
+    persistence: Option<&Arc<PersistenceManager>>,
+) -> Result<AgentResult, WorkflowError> {
+    let StartedRun {
+        agent_name,
+        agent_run_id,
+        mut event_rx,
+        cmd_tx,
+        mut join_handle,
+        started_task,
+        pending_message_ids,
+    } = run;
+    let drive_result = drive_event_loop(
+        &agent_name,
+        agent_run_id,
+        &mut event_rx,
+        &cmd_tx,
+        ctx,
+        persistence,
+    )
+    .await;
+
+    let stopping = drive_result
+        .as_ref()
+        .is_err_and(|error| !matches!(error, WorkflowError::UserInputRequired { .. }));
+    let wound_down = if stopping {
+        let deadline = tokio::time::Instant::now() + ctx.run_control.grace_period();
+        let _ = tokio::time::timeout_at(deadline, cmd_tx.send(UserCommand::CancelTask)).await;
+        wind_down(
+            &agent_name,
+            agent_run_id,
+            &mut event_rx,
+            &mut join_handle,
+            deadline,
+            ctx,
+            persistence,
+        )
+        .await
+    } else {
+        Some((&mut join_handle).await)
+    };
+
+    let final_task = match wound_down {
+        Some(Ok(Ok(task))) => Ok(task),
+        Some(Ok(Err(error))) => Err(WorkflowError::Agent(error)),
+        Some(Err(error)) => Err(WorkflowError::Channel(format!("Agent join error: {error}"))),
+        None => {
+            let cause = ctx.run_control.cancellation().map_or_else(
+                || "Stopped by the workflow.".to_string(),
+                |cancellation| cancellation.cause.agent_reason(),
+            );
+            let mut task = started_task;
+            task.set_state(TaskState::Cancelled {
+                reason: format!(
+                    "{cause} The agent did not stop within {:?} and was aborted.",
+                    ctx.run_control.grace_period()
+                ),
+            });
+            Ok(task)
+        }
+    };
+
+    let result = match final_task {
+        Ok(task) => {
+            let completed = matches!(task.current_state, TaskState::Completed { .. });
+            let finalized = finalize_agent_task(agent_name.clone(), task, ctx, persistence).await;
+            if completed {
+                ctx.messages.acknowledge_active(&agent_name, agent_run_id);
+                ctx.messages.acknowledge(&agent_name, &pending_message_ids);
+            }
+            finalized
+        }
+        Err(error) => Err(error),
+    };
+    ctx.messages.unregister_active(&agent_name, agent_run_id);
+    ctx.run_control.unregister(agent_run_id);
+
+    if let Some(stop) = ctx.run_control.error() {
+        if let Err(error) = &result {
+            log::warn!("Agent '{agent_name}' stopped with the workflow run: {error}");
+        }
+        return Err(stop);
+    }
+    let result = result?;
+    drive_result?;
+    match result.status {
+        AgentRunStatus::Completed => Ok(result),
+        AgentRunStatus::WaitingForInput => Err(WorkflowError::UserInputRequired {
+            agent: agent_name,
+            task_id: result.agent_run_id,
+            questions: result.error.clone().unwrap_or_default(),
+        }),
+        AgentRunStatus::Interrupted => Err(WorkflowError::AgentInterrupted {
+            agent: agent_name,
+            reason: result.error.clone().unwrap_or_default(),
+        }),
+        AgentRunStatus::Cancelled => Err(WorkflowError::AgentCancelled {
+            agent: agent_name,
+            reason: result.error.clone().unwrap_or_default(),
+        }),
+        AgentRunStatus::Failed => Err(WorkflowError::Agent(
+            arko_agents::ArkoAgentsError::TaskExecution(
+                result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "Agent failed".to_string()),
+            ),
+        )),
+    }
+}
+
+/// With auto-checkpointing, saves the checkpoint recording the run's stop,
+/// once per run.
+pub(crate) async fn save_stop_checkpoint(
+    ctx: &SharedContext,
+    persistence: Option<&Arc<PersistenceManager>>,
+) {
+    if let Some(persistence) = persistence
+        && ctx.run_control.claim_stop_save()
+        && let Err(error) = persistence.auto_checkpoint(ctx).await
+    {
+        log::warn!("Could not save the checkpoint recording the workflow's stop: {error}");
+    }
+}
+
 pub(crate) async fn finalize_agent_task(
     agent_name: String,
     task: Task,
@@ -378,7 +641,7 @@ pub(crate) async fn finalize_agent_task(
             crate::workflow::result::AgentRunStatus::Cancelled,
             String::new(),
             Some(reason.clone()),
-            HookPoint::PostAgentFailure,
+            HookPoint::PostAgentCancellation,
         ),
         TaskState::Failed { reason } => (
             crate::workflow::result::AgentRunStatus::Failed,
@@ -571,25 +834,20 @@ impl WorkflowEngine {
         })
     }
 
-    fn build_execution_middleware(
+    /// The middleware every agent's tool calls pass through: the run's
+    /// cancellation, tool hooks, context freshness, and completion
+    /// verification.
+    pub(crate) fn build_execution_middleware(
         &self,
         agent_name: &str,
         ctx: &Arc<SharedContext>,
-    ) -> Option<Arc<dyn ToolExecutionMiddleware>> {
-        if ctx.resource_tracker.is_none()
-            && ctx.completion_verifiers.is_empty()
-            && !ctx.hooks.has_hooks(&HookPoint::PreToolExecution)
-            && !ctx.hooks.has_hooks(&HookPoint::PostToolExecution)
-        {
-            return None;
-        }
-
-        Some(Arc::new(WorkflowExecutionMiddleware {
+    ) -> Arc<dyn ToolExecutionMiddleware> {
+        Arc::new(WorkflowExecutionMiddleware {
             agent_name: agent_name.to_string(),
             context: ctx.clone(),
             llm_client: self.llm_client.clone(),
             persistence: self.persistence.clone(),
-        }))
+        })
     }
 
     fn prepare_agent_config(
@@ -666,23 +924,34 @@ impl WorkflowEngine {
         (augmented, message_ids)
     }
 
-    /// Run a single agent to completion, blocking until it finishes.
-    pub async fn run_agent(
+    /// Checks that the run may start an agent and fires `PreAgentSpawn`.
+    fn admit(
         &self,
         agent_name: &str,
-        prompt: &str,
+        agent_run_id: Option<uuid::Uuid>,
         ctx: &Arc<SharedContext>,
-    ) -> Result<AgentResult, WorkflowError> {
+    ) -> Result<(), WorkflowError> {
+        ctx.run_control.check()?;
         if ctx.budget.is_exceeded() {
             return Err(WorkflowError::BudgetExceeded {
                 spent: ctx.budget.total_spent(),
                 limit: ctx.budget.limit().unwrap_or(0.0),
             });
         }
-        fire_hooks_on_context(ctx, HookPoint::PreAgentSpawn, |hctx| {
-            hctx.agent_name = Some(agent_name.to_string());
-        })?;
+        fire_hooks_on_context(ctx, HookPoint::PreAgentSpawn, |hook| {
+            hook.agent_name = Some(agent_name.to_string());
+            hook.agent_run_id = agent_run_id;
+        })
+    }
 
+    /// Prepares a new run of a registered agent and starts it.
+    fn start_agent(
+        &self,
+        agent_name: &str,
+        prompt: &str,
+        ctx: &Arc<SharedContext>,
+    ) -> Result<StartedRun, WorkflowError> {
+        self.admit(agent_name, None, ctx)?;
         let base_config = ctx
             .agent_configs
             .get(agent_name)
@@ -692,87 +961,67 @@ impl WorkflowEngine {
         let mut config = self.prepare_agent_config(agent_name, &base_config, ctx);
         let mut registry = self.build_tool_registry(agent_name, ctx);
         let skill_prompt_context = Self::setup_skills(&mut config, &mut registry, &ctx.workspace)?;
-        let tool_registry = Arc::new(registry);
-        let interceptor_config = self.build_interceptor_config(agent_name, ctx);
-        let execution_middleware = self.build_execution_middleware(agent_name, ctx);
         let (augmented_prompt, pending_message_ids) =
             self.augment_prompt_with_messages(agent_name, prompt, ctx);
-
         let task = Task::new(config, augmented_prompt, ctx.workspace.clone(), None);
-        let agent_run_id = task.id;
-        let runtime = AgentRuntime::new(self.llm_client.clone());
-        let (mut event_rx, cmd_tx, join_handle) = runtime.run_task(
+        Ok(self.launch(
+            agent_name,
             task,
-            tool_registry,
+            registry,
+            skill_prompt_context,
+            pending_message_ids,
+            ctx,
+        ))
+    }
+
+    /// Starts the agent runtime on `task` and registers the running agent
+    /// with the message bus and the run's cancellation.
+    fn launch(
+        &self,
+        agent_name: &str,
+        task: Task,
+        registry: ToolRegistry,
+        skill_prompt_context: Option<SkillPromptContext>,
+        pending_message_ids: Vec<uuid::Uuid>,
+        ctx: &Arc<SharedContext>,
+    ) -> StartedRun {
+        let interceptor_config = self.build_interceptor_config(agent_name, ctx);
+        let execution_middleware = self.build_execution_middleware(agent_name, ctx);
+        let agent_run_id = task.id;
+        let started_task = task.clone();
+        let runtime = AgentRuntime::new(self.llm_client.clone());
+        let (event_rx, cmd_tx, join_handle) = runtime.run_task(
+            task,
+            Arc::new(registry),
             None,
             false,
             skill_prompt_context,
             interceptor_config,
-            execution_middleware,
+            Some(execution_middleware),
         );
         ctx.messages
             .register_active(agent_name, agent_run_id, cmd_tx.clone());
-
-        let drive_result = drive_event_loop(
-            agent_name,
+        ctx.run_control.register(agent_run_id, &cmd_tx);
+        StartedRun {
+            agent_name: agent_name.to_string(),
             agent_run_id,
-            &mut event_rx,
-            &cmd_tx,
-            ctx,
-            self.persistence.as_ref(),
-        )
-        .await;
-
-        if drive_result
-            .as_ref()
-            .is_err_and(|error| !matches!(error, WorkflowError::UserInputRequired { .. }))
-        {
-            let _ = cmd_tx.send(UserCommand::CancelTask).await;
+            event_rx,
+            cmd_tx,
+            join_handle,
+            started_task,
+            pending_message_ids,
         }
+    }
 
-        let join_result = join_handle.await;
-        let final_task = join_result
-            .map_err(|e| WorkflowError::Channel(format!("Agent join error: {}", e)))?
-            .map_err(WorkflowError::Agent)?;
-
-        let agent_result = finalize_agent_task(
-            agent_name.to_string(),
-            final_task,
-            ctx,
-            self.persistence.as_ref(),
-        )
-        .await?;
-        if agent_result.status == crate::workflow::result::AgentRunStatus::Completed {
-            ctx.messages.acknowledge_active(agent_name, agent_run_id);
-            ctx.messages.acknowledge(agent_name, &pending_message_ids);
-        }
-        ctx.messages.unregister_active(agent_name, agent_run_id);
-
-        drive_result?;
-        match agent_result.status {
-            crate::workflow::result::AgentRunStatus::Completed => Ok(agent_result),
-            crate::workflow::result::AgentRunStatus::WaitingForInput => {
-                Err(WorkflowError::UserInputRequired {
-                    agent: agent_name.to_string(),
-                    task_id: agent_result.agent_run_id,
-                    questions: agent_result.error.clone().unwrap_or_default(),
-                })
-            }
-            crate::workflow::result::AgentRunStatus::Interrupted => {
-                Err(WorkflowError::AgentInterrupted {
-                    agent: agent_name.to_string(),
-                    reason: agent_result.error.clone().unwrap_or_default(),
-                })
-            }
-            _ => Err(WorkflowError::Agent(
-                arko_agents::ArkoAgentsError::TaskExecution(
-                    agent_result
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| "Agent failed".to_string()),
-                ),
-            )),
-        }
+    /// Run a single agent to completion, blocking until it finishes.
+    pub async fn run_agent(
+        &self,
+        agent_name: &str,
+        prompt: &str,
+        ctx: &Arc<SharedContext>,
+    ) -> Result<AgentResult, WorkflowError> {
+        let run = self.start_agent(agent_name, prompt, ctx)?;
+        drive_to_result(run, ctx, self.persistence.as_ref()).await
     }
 
     /// Run multiple agents in parallel.
@@ -781,6 +1030,7 @@ impl WorkflowEngine {
         agents: Vec<(&str, String)>,
         ctx: &Arc<SharedContext>,
     ) -> Result<Vec<AgentResult>, WorkflowError> {
+        ctx.run_control.check()?;
         let mut join_handles = Vec::new();
 
         for (name, prompt) in agents {
@@ -819,6 +1069,7 @@ impl WorkflowEngine {
                 }
             }
         }
+        ctx.run_control.check()?;
         match first_error {
             Some(error) => Err(error),
             None => Ok(results),
@@ -840,55 +1091,11 @@ impl WorkflowEngine {
         prompt: &str,
         ctx: &Arc<SharedContext>,
     ) -> Result<AgentHandle, WorkflowError> {
-        if ctx.budget.is_exceeded() {
-            return Err(WorkflowError::BudgetExceeded {
-                spent: ctx.budget.total_spent(),
-                limit: ctx.budget.limit().unwrap_or(0.0),
-            });
-        }
-        fire_hooks_on_context(ctx, HookPoint::PreAgentSpawn, |hctx| {
-            hctx.agent_name = Some(agent_name.to_string());
-        })?;
-
-        let base_config = ctx
-            .agent_configs
-            .get(agent_name)
-            .ok_or_else(|| WorkflowError::AgentNotFound(agent_name.to_string()))?
-            .clone();
-
-        let mut config = self.prepare_agent_config(agent_name, &base_config, ctx);
-        let mut registry = self.build_tool_registry(agent_name, ctx);
-        let skill_prompt_context = Self::setup_skills(&mut config, &mut registry, &ctx.workspace)?;
-        let tool_registry = Arc::new(registry);
-        let interceptor_config = self.build_interceptor_config(agent_name, ctx);
-        let execution_middleware = self.build_execution_middleware(agent_name, ctx);
-        let (augmented_prompt, pending_message_ids) =
-            self.augment_prompt_with_messages(agent_name, prompt, ctx);
-
-        let task = Task::new(config, augmented_prompt, ctx.workspace.clone(), None);
-        let agent_run_id = task.id;
-        let runtime = AgentRuntime::new(self.llm_client.clone());
-        let (event_rx, cmd_tx, join_handle) = runtime.run_task(
-            task,
-            tool_registry,
-            None,
-            false,
-            skill_prompt_context,
-            interceptor_config,
-            execution_middleware,
-        );
-        ctx.messages
-            .register_active(agent_name, agent_run_id, cmd_tx.clone());
-
+        let run = self.start_agent(agent_name, prompt, ctx)?;
         Ok(AgentHandle {
-            event_rx,
-            cmd_tx,
-            join_handle,
-            agent_name: agent_name.to_string(),
-            agent_run_id,
+            run,
             context: ctx.clone(),
             persistence: self.persistence.clone(),
-            pending_message_ids,
         })
     }
 
@@ -900,32 +1107,22 @@ impl WorkflowEngine {
     ) -> Result<AgentResult, WorkflowError> {
         if !matches!(
             previous.status,
-            crate::workflow::result::AgentRunStatus::Completed
-                | crate::workflow::result::AgentRunStatus::WaitingForInput
+            AgentRunStatus::Completed | AgentRunStatus::WaitingForInput
         ) {
             return Err(WorkflowError::BuilderInvalid(
                 "only a completed or user-input-suspended agent run can be continued".to_string(),
             ));
         }
-        if ctx.budget.is_exceeded() {
-            return Err(WorkflowError::BudgetExceeded {
-                spent: ctx.budget.total_spent(),
-                limit: ctx.budget.limit().unwrap_or(0.0),
-            });
-        }
         let agent_name = &previous.agent_name;
-        fire_hooks_on_context(ctx, HookPoint::PreAgentSpawn, |hook| {
-            hook.agent_name = Some(agent_name.clone());
-            hook.agent_run_id = Some(previous.agent_run_id);
-        })?;
+        self.admit(agent_name, Some(previous.agent_run_id), ctx)?;
         let mut task = previous.task.clone();
         let (prompt, pending_message_ids) =
             self.augment_prompt_with_messages(agent_name, continuation_prompt, ctx);
         match previous.status {
-            crate::workflow::result::AgentRunStatus::Completed => {
+            AgentRunStatus::Completed => {
                 task.prepare_for_resumption_from_completed(prompt)?;
             }
-            crate::workflow::result::AgentRunStatus::WaitingForInput => {
+            AgentRunStatus::WaitingForInput => {
                 task.prepare_for_resumption_with_user_response(prompt)?;
             }
             _ => unreachable!(),
@@ -933,61 +1130,21 @@ impl WorkflowEngine {
         let mut registry = self.build_tool_registry(agent_name, ctx);
         let skill_prompt_context =
             Self::setup_skills(&mut task.agent_config, &mut registry, &ctx.workspace)?;
-        let tool_registry = Arc::new(registry);
-        let interceptor_config = self.build_interceptor_config(agent_name, ctx);
-        let execution_middleware = self.build_execution_middleware(agent_name, ctx);
-        let agent_run_id = task.id;
-        let runtime = AgentRuntime::new(self.llm_client.clone());
-        let (mut event_rx, cmd_tx, join_handle) = runtime.run_task(
-            task,
-            tool_registry,
-            None,
-            false,
-            skill_prompt_context,
-            interceptor_config,
-            execution_middleware,
-        );
-        ctx.messages
-            .register_active(agent_name, agent_run_id, cmd_tx.clone());
-        let drive_result = drive_event_loop(
+        let run = self.launch(
             agent_name,
-            agent_run_id,
-            &mut event_rx,
-            &cmd_tx,
+            task,
+            registry,
+            skill_prompt_context,
+            pending_message_ids,
             ctx,
-            self.persistence.as_ref(),
-        )
-        .await;
-        if drive_result
-            .as_ref()
-            .is_err_and(|error| !matches!(error, WorkflowError::UserInputRequired { .. }))
-        {
-            let _ = cmd_tx.send(UserCommand::CancelTask).await;
-        }
-        let join_result = join_handle.await;
-        let task = join_result
-            .map_err(|error| WorkflowError::Channel(format!("Agent join error: {error}")))?
-            .map_err(WorkflowError::Agent)?;
-        let result =
-            finalize_agent_task(agent_name.clone(), task, ctx, self.persistence.as_ref()).await?;
-        if result.status == crate::workflow::result::AgentRunStatus::Completed {
-            ctx.messages.acknowledge_active(agent_name, agent_run_id);
-            ctx.messages.acknowledge(agent_name, &pending_message_ids);
-        }
-        ctx.messages.unregister_active(agent_name, agent_run_id);
-        drive_result?;
-        if result.status == crate::workflow::result::AgentRunStatus::Completed {
-            Ok(result)
-        } else {
-            Err(WorkflowError::Agent(
-                arko_agents::ArkoAgentsError::TaskExecution(
-                    result
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| "Agent did not complete".to_string()),
-                ),
-            ))
-        }
+        );
+        drive_to_result(run, ctx, self.persistence.as_ref()).await
+    }
+
+    /// With auto-checkpointing, saves the checkpoint recording the run's
+    /// stop, once per run.
+    pub(crate) async fn save_stop_checkpoint(&self, ctx: &Arc<SharedContext>) {
+        save_stop_checkpoint(ctx, self.persistence.as_ref()).await;
     }
 
     /// Save a checkpoint of the current workflow state.
@@ -1025,6 +1182,15 @@ struct WorkflowExecutionMiddleware {
 }
 
 impl WorkflowExecutionMiddleware {
+    /// Once the run is stopped, every tool call cancels its agent.
+    fn stop_decision(&self) -> Option<ToolExecutionDecision> {
+        self.context.run_control.cancellation().map(|cancellation| {
+            ToolExecutionDecision::CancelTask {
+                reason: cancellation.cause.agent_reason(),
+            }
+        })
+    }
+
     fn applicable_completion_verifiers(&self) -> impl Iterator<Item = &CompletionVerifierConfig> {
         self.context
             .completion_verifiers
@@ -1289,25 +1455,30 @@ impl ToolExecutionMiddleware for WorkflowExecutionMiddleware {
         execution: &ToolExecutionContext<'_>,
         call: &ToolCallContext<'_>,
     ) -> Result<ToolExecutionDecision, ToolError> {
-        match fire_hooks_returning_impl(&self.context, HookPoint::PreToolExecution, |hook| {
+        if let Some(decision) = self.stop_decision() {
+            return Ok(decision);
+        }
+        match fire_hooks(&self.context, &HookPoint::PreToolExecution, |hook| {
             hook.agent_name = Some(self.agent_name.clone());
             hook.agent_run_id = Some(execution.task_id);
             hook.tool_name = Some(call.tool_name.to_string());
             hook.tool_call_id = Some(call.tool_call_id);
             hook.tool_params = Some(call.parameters.clone());
-        })
-        .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?
-        {
+        }) {
             HookResult::Continue => {}
             HookResult::Skip => {
                 return Ok(ToolExecutionDecision::Reject {
                     message_to_agent: "Skipped by PreToolExecution hook".to_string(),
                 });
             }
+            // The call doesn't run, and the whole run stops.
             HookResult::Abort(reason) => {
-                return Err(ToolError::ExecutionFailed(format!(
-                    "workflow aborted by PreToolExecution hook: {reason}"
-                )));
+                let error = abort_run(&self.context, &HookPoint::PreToolExecution, reason);
+                return Ok(self.stop_decision().unwrap_or_else(|| {
+                    ToolExecutionDecision::CancelTask {
+                        reason: error.to_string(),
+                    }
+                }));
             }
         }
 
@@ -1339,11 +1510,14 @@ impl ToolExecutionMiddleware for WorkflowExecutionMiddleware {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             if let Some(decision) = self.verify_completion(execution, summary).await {
-                return Ok(decision);
+                // A verifier stopped with the run decides nothing.
+                return Ok(self.stop_decision().unwrap_or(decision));
             }
         }
 
-        Ok(ToolExecutionDecision::Continue)
+        Ok(self
+            .stop_decision()
+            .unwrap_or(ToolExecutionDecision::Continue))
     }
 
     async fn after(
@@ -1387,17 +1561,21 @@ impl ToolExecutionMiddleware for WorkflowExecutionMiddleware {
                         .messages
                         .inject_task(reader.task_id, notice)
                         .await;
-                    fire_hooks_on_context(&self.context, HookPoint::OnFreshnessConflict, |hook| {
-                        hook.agent_name = Some(reader.agent_name.clone());
-                        hook.agent_run_id = Some(reader.task_id);
-                        hook.metadata.insert(
-                            "resource".to_string(),
-                            serde_json::json!(format!("{resource:?}")),
-                        );
-                        hook.metadata
-                            .insert("writer".to_string(), serde_json::json!(self.agent_name));
-                    })
-                    .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
+                    // An abort stops the run; the call's own result stands.
+                    let _ = fire_hooks_on_context(
+                        &self.context,
+                        HookPoint::OnFreshnessConflict,
+                        |hook| {
+                            hook.agent_name = Some(reader.agent_name.clone());
+                            hook.agent_run_id = Some(reader.task_id);
+                            hook.metadata.insert(
+                                "resource".to_string(),
+                                serde_json::json!(format!("{resource:?}")),
+                            );
+                            hook.metadata
+                                .insert("writer".to_string(), serde_json::json!(self.agent_name));
+                        },
+                    );
                 }
             } else {
                 tracker.record_read(&actor, resource);
@@ -1410,7 +1588,7 @@ impl ToolExecutionMiddleware for WorkflowExecutionMiddleware {
             | ToolExecutionOutcome::Error(output) => output,
         };
 
-        match fire_hooks_returning_impl(&self.context, HookPoint::PostToolExecution, |hook| {
+        let hook_result = fire_hooks(&self.context, &HookPoint::PostToolExecution, |hook| {
             hook.agent_name = Some(self.agent_name.clone());
             hook.agent_run_id = Some(execution.task_id);
             hook.tool_name = Some(call.tool_name.to_string());
@@ -1418,14 +1596,13 @@ impl ToolExecutionMiddleware for WorkflowExecutionMiddleware {
             hook.tool_params = Some(call.parameters.clone());
             hook.tool_result = Some(result.to_string());
             hook.original_tool_result = Some(result.to_string());
-        })
-        .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?
-        {
-            HookResult::Abort(reason) => Err(ToolError::ExecutionFailed(format!(
-                "workflow aborted by PostToolExecution hook: {reason}"
-            ))),
-            _ => Ok(()),
+        });
+        // The call has run; the run stops, and the stop's CancelTask ends the
+        // agent before its next step.
+        if let HookResult::Abort(reason) = hook_result {
+            abort_run(&self.context, &HookPoint::PostToolExecution, reason);
         }
+        Ok(())
     }
 }
 
@@ -1650,8 +1827,7 @@ mod tests {
         );
         let middleware = workflow
             .engine
-            .build_execution_middleware("coder", workflow.context())
-            .unwrap();
+            .build_execution_middleware("coder", workflow.context());
         let parameters = HashMap::new();
         let execution = ToolExecutionContext {
             task_id: uuid::Uuid::new_v4(),

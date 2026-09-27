@@ -4,12 +4,31 @@
 use pyo3::prelude::*;
 
 #[cfg(feature = "python")]
+pyo3::create_exception!(
+    arko_workflows,
+    WorkflowCancelled,
+    pyo3::exceptions::PyException,
+    "The workflow run was cancelled."
+);
+
+#[cfg(feature = "python")]
 #[pymodule]
 fn arko_workflows(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWorkflowBuilder>()?;
     m.add_class::<PyWorkflow>()?;
     m.add_class::<PyAgentResult>()?;
+    m.add("WorkflowCancelled", m.py().get_type::<WorkflowCancelled>())?;
     Ok(())
+}
+
+/// A cancelled run raises `WorkflowCancelled`; other errors raise
+/// `RuntimeError`.
+#[cfg(feature = "python")]
+fn run_error(error: crate::WorkflowError) -> PyErr {
+    match error {
+        crate::WorkflowError::Cancelled => WorkflowCancelled::new_err(error.to_string()),
+        error => pyo3::exceptions::PyRuntimeError::new_err(format!("Workflow error: {error}")),
+    }
 }
 
 #[cfg(feature = "python")]
@@ -23,6 +42,7 @@ pub struct PyWorkflowBuilder {
     auto_checkpoint: bool,
     resume_from: Option<String>,
     memory_tiers: Vec<(String, Option<usize>)>,
+    cancel_grace_period: Option<f64>,
 }
 
 #[cfg(feature = "python")]
@@ -39,6 +59,7 @@ impl PyWorkflowBuilder {
             auto_checkpoint: false,
             resume_from: None,
             memory_tiers: Vec::new(),
+            cancel_grace_period: None,
         }
     }
 
@@ -80,8 +101,23 @@ impl PyWorkflowBuilder {
         Ok(())
     }
 
+    /// Seconds a cancelled run waits for each agent to stop before
+    /// aborting it (default 30).
+    fn cancel_grace_period(&mut self, seconds: f64) -> PyResult<()> {
+        if !seconds.is_finite() || seconds < 0.0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "the grace period must be finite and non-negative",
+            ));
+        }
+        self.cancel_grace_period = Some(seconds);
+        Ok(())
+    }
+
     fn build(&self) -> PyResult<PyWorkflow> {
         let mut builder = crate::Workflow::builder();
+        if let Some(seconds) = self.cancel_grace_period {
+            builder = builder.cancel_grace_period(std::time::Duration::from_secs_f64(seconds));
+        }
 
         if let Some(ref name) = self.name {
             builder = builder.name(name.clone());
@@ -158,9 +194,7 @@ impl PyWorkflow {
             let result = workflow
                 .run_agent(&agent_name, &prompt)
                 .await
-                .map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!("Workflow error: {}", e))
-                })?;
+                .map_err(run_error)?;
             Ok(PyAgentResult::from(result))
         })
     }
@@ -185,8 +219,19 @@ impl PyWorkflow {
                         .map(PyAgentResult::from)
                         .collect::<Vec<_>>()
                 })
-                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))
+                .map_err(run_error)
         })
+    }
+
+    /// Cancels the run: running agents stop, and pending and later runs
+    /// raise `WorkflowCancelled`. Returns False when it was already stopped.
+    fn cancel(&self) -> bool {
+        self.inner.cancel()
+    }
+
+    /// Whether the run was cancelled or aborted by a hook.
+    fn is_cancelled(&self) -> bool {
+        self.inner.is_cancelled()
     }
 
     #[pyo3(signature = (amount, description, metadata=None))]

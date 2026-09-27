@@ -40,6 +40,10 @@ pub struct WorkflowState {
     pub distillation_records: Vec<crate::distillation::DistillationRecord>,
     #[serde(default)]
     pub completed_agents: Vec<SerializableAgentResult>,
+    /// Set when the run was stopped (cancelled, or aborted by a hook) before
+    /// this checkpoint. Resuming from the checkpoint starts the run again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation: Option<crate::workflow::cancel::Cancellation>,
 }
 
 /// Lightweight serializable agent result for checkpoints.
@@ -80,6 +84,7 @@ mod tests {
             verification_records: Vec::new(),
             distillation_records: Vec::new(),
             completed_agents: Vec::new(),
+            cancellation: None,
         };
 
         let json = serde_json::to_string_pretty(&state).unwrap();
@@ -113,6 +118,8 @@ mod tests {
         assert_eq!(state.workflow_run_id, uuid::Uuid::nil());
         assert!(state.agent_results.is_empty());
 
+        assert!(state.cancellation.is_none());
+
         let config: crate::workflow::config::WorkflowConfig =
             serde_json::from_value(serde_json::json!({
                 "name": "legacy",
@@ -121,5 +128,56 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(config.name, "legacy");
+    }
+
+    /// An agent cancelled before cancellation had its own task state was
+    /// saved as failed with the runtime's cancellation reason; it loads as
+    /// cancelled.
+    #[test]
+    fn a_checkpointed_legacy_cancellation_loads_as_cancelled() {
+        let config = arko_agents::AgentConfig::builder(
+            "coder".into(),
+            "Coder".into(),
+            arko_agents::AgentLLMConfig {
+                model: arko_ai::Model::openai_gpt_5_6_luna(),
+                generation_config: Default::default(),
+            },
+        )
+        .role_description("test".into())
+        .instructions("test".into())
+        .build()
+        .unwrap();
+        let task = arko_agents::Task::new(config, "prompt".into(), PathBuf::from("/w"), None);
+        let mut task_json = serde_json::to_value(&task).unwrap();
+        task_json["current_state"] =
+            serde_json::json!({"Failed": {"reason": "Task cancelled by user."}});
+        let checkpoint = serde_json::json!({
+            "workflow_run_id": uuid::Uuid::new_v4(),
+            "workflow_name": "legacy",
+            "checkpoint_id": uuid::Uuid::new_v4(),
+            "timestamp": "2026-09-01T12:00:00Z",
+            "memory_snapshot": [],
+            "message_queues": {},
+            "budget_spent": 0.0,
+            "agent_results": [{
+                "agent_run_id": task.id,
+                "agent_name": "coder",
+                "status": "Cancelled",
+                "summary": "",
+                "error": "Task cancelled by user.",
+                "task": task_json
+            }]
+        });
+        let state: WorkflowState = serde_json::from_value(checkpoint).unwrap();
+        let result = &state.agent_results[0];
+        assert_eq!(
+            result.status,
+            crate::workflow::result::AgentRunStatus::Cancelled
+        );
+        assert!(matches!(
+            result.task.current_state,
+            arko_agents::TaskState::Cancelled { .. }
+        ));
+        assert!(state.cancellation.is_none());
     }
 }

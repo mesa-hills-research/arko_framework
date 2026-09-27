@@ -46,6 +46,8 @@ pub struct SharedContext {
     pub workflow_services: std::sync::OnceLock<crate::services::WorkflowServices>,
     pub paused: std::sync::atomic::AtomicBool,
     pub resume_notify: tokio::sync::Notify,
+    /// Whether and why the run was stopped (cancelled or aborted by a hook).
+    pub(crate) run_control: Arc<crate::workflow::cancel::RunControl>,
     pub user_input_handler: Option<Arc<dyn crate::user_input::UserInputHandler>>,
     pub ballots: Option<Arc<crate::voting::BallotStore>>,
     pub event_tx: tokio::sync::broadcast::Sender<crate::workflow::result::WorkflowEvent>,
@@ -81,6 +83,7 @@ impl fmt::Debug for SharedContext {
             )
             .field("completion_verifiers", &self.completion_verifiers.len())
             .field("distillation_configs", &self.distillation_configs.len())
+            .field("cancellation", &self.run_control.cancellation())
             .finish_non_exhaustive()
     }
 }

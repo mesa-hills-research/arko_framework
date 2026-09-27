@@ -16,6 +16,9 @@ pub enum HookPoint {
     PostAgentCompletion,
     PostAgentInterruption,
     PostAgentFailure,
+    /// An agent run ended cancelled: stopped with the workflow run, or by the
+    /// workflow over its budget.
+    PostAgentCancellation,
     OnUserInputRequired,
     PreToolExecution,
     PostToolExecution,
@@ -23,6 +26,9 @@ pub enum HookPoint {
     OnWorkflowPause,
     OnWorkflowResume,
     OnWorkflowFailed,
+    /// A [`WorkflowCancelHandle`](crate::workflow::cancel::WorkflowCancelHandle)
+    /// cancelled the run; fires once, from the task that cancelled it.
+    OnWorkflowCancelled,
     OnBudgetExceeded,
     OnBudgetWarning,
     OnAgentMessage,
@@ -36,7 +42,9 @@ pub enum HookPoint {
 pub enum HookResult {
     /// Continue normal execution.
     Continue,
-    /// Abort the workflow with this reason.
+    /// Abort the workflow run with this reason: every running agent is
+    /// cancelled, and every run call in progress or made later returns
+    /// [`WorkflowError::AbortedByHook`](crate::WorkflowError::AbortedByHook).
     Abort(String),
     /// Skip the current operation.
     Skip,

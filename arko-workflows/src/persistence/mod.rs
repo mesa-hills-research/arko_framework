@@ -128,6 +128,7 @@ impl PersistenceManager {
                     summary: r.summary.clone(),
                 })
                 .collect(),
+            cancellation: ctx.run_control.cancellation(),
         };
 
         std::fs::create_dir_all(&self.config.checkpoint_dir)?;

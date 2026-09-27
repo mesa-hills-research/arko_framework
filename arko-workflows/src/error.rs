@@ -21,6 +21,11 @@ pub enum WorkflowError {
     #[error("Agent '{agent}' was interrupted: {reason}")]
     AgentInterrupted { agent: String, reason: String },
 
+    /// The agent's task was cancelled while the workflow run was not (for
+    /// example by a custom tool or middleware).
+    #[error("Agent '{agent}' was cancelled: {reason}")]
+    AgentCancelled { agent: String, reason: String },
+
     #[error("Agent '{agent}' requires user input: {questions}")]
     UserInputRequired {
         agent: String,
@@ -51,6 +56,7 @@ pub enum WorkflowError {
     #[error("Invalid cost amount {0}: costs must be finite and non-negative")]
     InvalidCost(f64),
 
+    /// A hook returned `HookResult::Abort`; the run is stopped.
     #[error("Workflow aborted by hook at {hook_point}: {reason}")]
     AbortedByHook { hook_point: String, reason: String },
 
@@ -81,6 +87,7 @@ pub enum WorkflowError {
     #[error("Durable step '{step}' exhausted its retry limit")]
     DurableAttemptsExhausted { step: String },
 
+    /// A `WorkflowCancelHandle` cancelled the run.
     #[error("Workflow cancelled")]
     Cancelled,
 
@@ -92,9 +99,6 @@ pub enum WorkflowError {
 
     #[error("Channel error: {0}")]
     Channel(String),
-
-    #[error("Hook error: {0}")]
-    Hook(String),
 
     #[error("Tool error: {0}")]
     Tool(#[from] arko_agents::ToolError),

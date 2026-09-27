@@ -1,3 +1,4 @@
+pub mod cancel;
 pub mod config;
 pub mod engine;
 pub mod result;
@@ -24,14 +25,22 @@ use crate::services::{RUN_WORKFLOW_AGENT_TOOL_NAME, WorkflowServices, WorkflowSe
 use crate::user_input::UserInputHandler;
 use crate::verification::CompletionVerifierConfig;
 use crate::voting::{BallotConfig, BallotResult, BallotStore, CAST_VOTE_TOOL_NAME};
+use crate::workflow::cancel::{
+    Cancellation, DEFAULT_CANCEL_GRACE_PERIOD, RunControl, WorkflowCancelHandle,
+};
 use crate::workflow::config::{WorkflowConfig, WorkflowMetadata};
-use crate::workflow::engine::{WorkflowEngine, fire_hooks_on_context};
+use crate::workflow::engine::{StartedRun, WorkflowEngine, fire_hooks_on_context};
 use crate::workflow::result::{AgentResult, WorkflowEvent, WorkflowResult};
 
 /// A configured multi-agent workflow.
 ///
 /// Created via [`WorkflowBuilder`]. Provides methods to run agents sequentially,
 /// in parallel, or via non-blocking spawn with manual driving.
+///
+/// A `Workflow` is one run. Once the run is stopped, by
+/// [`cancel`](Self::cancel) (or a [`WorkflowCancelHandle`]) or a hook's
+/// `Abort`, every run call in progress returns the stop's error after its
+/// agents have stopped, and every later one returns it at once.
 pub struct Workflow {
     #[allow(dead_code)]
     config: WorkflowConfig,
@@ -54,17 +63,55 @@ impl Workflow {
         agent_name: &str,
         prompt: &str,
     ) -> Result<AgentResult, WorkflowError> {
+        self.ensure_running().await?;
         let result = self
             .engine
             .run_agent(agent_name, prompt, &self.context)
             .await;
-        if let Err(error) = &result {
-            fire_hooks_on_context(&self.context, HookPoint::OnWorkflowFailed, |hook| {
-                hook.agent_name = Some(agent_name.to_string());
-                hook.error_message = Some(error.to_string());
-            })?;
+        self.finish_call(result, |hook| {
+            hook.agent_name = Some(agent_name.to_string());
+        })
+        .await
+    }
+
+    /// Settles a finished run call: a failure other than a cancellation
+    /// fires `OnWorkflowFailed` (whose abort replaces the error), and once
+    /// the run is stopped the call returns the stop's error and the stop is
+    /// checkpointed.
+    async fn finish_call<T>(
+        &self,
+        result: Result<T, WorkflowError>,
+        configure: impl FnOnce(&mut crate::hooks::context::HookContext),
+    ) -> Result<T, WorkflowError> {
+        let mut result = result;
+        if let Err(error) = &result
+            && !matches!(error, WorkflowError::Cancelled)
+            && let Err(hook_error) =
+                fire_hooks_on_context(&self.context, HookPoint::OnWorkflowFailed, |hook| {
+                    configure(hook);
+                    hook.error_message = Some(error.to_string());
+                })
+        {
+            result = Err(hook_error);
         }
-        result
+        self.apply_stop(result).await
+    }
+
+    /// `Err` with the stop's error once the run is stopped.
+    async fn ensure_running(&self) -> Result<(), WorkflowError> {
+        self.apply_stop(Ok(())).await
+    }
+
+    /// Once the run is stopped, replaces the call's outcome with the stop's
+    /// error and saves the checkpoint recording the stop.
+    async fn apply_stop<T>(&self, result: Result<T, WorkflowError>) -> Result<T, WorkflowError> {
+        match self.context.run_control.error() {
+            Some(stop) => {
+                self.engine.save_stop_checkpoint(&self.context).await;
+                Err(stop)
+            }
+            None => result,
+        }
     }
 
     /// Continue a completed agent with its prior conversation and stable run
@@ -74,35 +121,30 @@ impl Workflow {
         previous: &AgentResult,
         prompt: &str,
     ) -> Result<AgentResult, WorkflowError> {
+        self.ensure_running().await?;
         let result = self
             .engine
             .continue_agent(previous, prompt, &self.context)
             .await;
-        if let Err(error) = &result {
-            fire_hooks_on_context(&self.context, HookPoint::OnWorkflowFailed, |hook| {
-                hook.agent_name = Some(previous.agent_name.clone());
-                hook.agent_run_id = Some(previous.agent_run_id);
-                hook.error_message = Some(error.to_string());
-            })?;
-        }
-        result
+        self.finish_call(result, |hook| {
+            hook.agent_name = Some(previous.agent_name.clone());
+            hook.agent_run_id = Some(previous.agent_run_id);
+        })
+        .await
     }
 
     /// Run multiple agents in parallel.
     ///
     /// All agents run concurrently. Results are returned in the same order
-    /// as the input. If any agent fails, the error is propagated.
+    /// as the input. If any agent fails, the error is propagated once every
+    /// agent has finished.
     pub async fn run_agents_parallel(
         &self,
         agents: Vec<(&str, String)>,
     ) -> Result<Vec<AgentResult>, WorkflowError> {
+        self.ensure_running().await?;
         let result = self.engine.run_agents_parallel(agents, &self.context).await;
-        if let Err(error) = &result {
-            fire_hooks_on_context(&self.context, HookPoint::OnWorkflowFailed, |hook| {
-                hook.error_message = Some(error.to_string());
-            })?;
-        }
-        result
+        self.finish_call(result, |_| {}).await
     }
 
     /// Spawn an agent without blocking. Returns a handle for driving it.
@@ -117,9 +159,31 @@ impl Workflow {
         agent_name: &str,
         prompt: &str,
     ) -> Result<AgentHandle, WorkflowError> {
+        self.ensure_running().await?;
         self.engine
             .spawn_agent(agent_name, prompt, &self.context)
             .await
+    }
+
+    /// A handle that cancels this run from any task or thread.
+    pub fn cancel_handle(&self) -> WorkflowCancelHandle {
+        WorkflowCancelHandle::new(&self.context)
+    }
+
+    /// Cancels the run; see [`WorkflowCancelHandle::cancel`]. Returns
+    /// `false` when the run was already stopped.
+    pub fn cancel(&self) -> bool {
+        self.cancel_handle().cancel()
+    }
+
+    /// Whether the run is stopped, by cancellation or a hook's abort.
+    pub fn is_cancelled(&self) -> bool {
+        self.context.run_control.is_stopped()
+    }
+
+    /// Why and when the run stopped, once it has.
+    pub fn cancellation(&self) -> Option<Cancellation> {
+        self.context.run_control.cancellation()
     }
 
     /// Add a manual cost entry to the workflow budget.
@@ -193,6 +257,7 @@ impl Workflow {
             total_cost,
             cost_ledger,
             agent_results: results,
+            cancellation: self.context.run_control.cancellation(),
         }
     }
 
@@ -254,7 +319,15 @@ impl Workflow {
 
     /// Mark the workflow run complete, fire its final lifecycle hook, persist
     /// the final snapshot, and return the accumulated result.
+    ///
+    /// A stopped run is not complete: the snapshot, which records the stop,
+    /// is persisted, `PostWorkflow` doesn't fire, and the stop's error is
+    /// returned ([`result`](Self::result) still returns the results).
     pub async fn finish(&self) -> Result<WorkflowResult, WorkflowError> {
+        if let Some(stop) = self.context.run_control.error() {
+            self.checkpoint().await?;
+            return Err(stop);
+        }
         fire_hooks_on_context(&self.context, HookPoint::PostWorkflow, |_| {})?;
         self.checkpoint().await?;
         Ok(self.result())
@@ -328,12 +401,14 @@ impl Workflow {
         F: FnOnce(DurableStepContext) -> Fut,
         Fut: std::future::Future<Output = Result<O, WorkflowError>>,
     {
+        self.ensure_running().await?;
         let store = self
             .context
             .durable_store
             .as_ref()
             .ok_or(WorkflowError::DurableUnavailable)?;
-        store.execute(&spec, input, execute).await
+        let result = store.execute(&spec, input, execute).await;
+        self.apply_stop(result).await
     }
 
     /// Execute a durable step with developer-supplied reconciliation for an
@@ -352,14 +427,16 @@ impl Workflow {
         Fut: std::future::Future<Output = Result<O, WorkflowError>>,
         R: ResolveInDoubt<I, O>,
     {
+        self.ensure_running().await?;
         let store = self
             .context
             .durable_store
             .as_ref()
             .ok_or(WorkflowError::DurableUnavailable)?;
-        store
+        let result = store
             .execute_with_resolver(&spec, input, execute, resolver)
-            .await
+            .await;
+        self.apply_stop(result).await
     }
 
     /// List steps whose side-effect outcome is not known.
@@ -440,84 +517,29 @@ impl Workflow {
 ///    the raw event receiver, command sender, and join handle for manual event
 ///    processing.
 pub struct AgentHandle {
-    event_rx: tokio::sync::mpsc::Receiver<arko_agents::runtime::event::AgentEvent>,
-    cmd_tx: tokio::sync::mpsc::Sender<arko_agents::runtime::command::UserCommand>,
-    join_handle: tokio::task::JoinHandle<Result<arko_agents::Task, arko_agents::ArkoAgentsError>>,
-    agent_name: String,
-    agent_run_id: uuid::Uuid,
+    run: StartedRun,
     context: Arc<SharedContext>,
     persistence: Option<Arc<PersistenceManager>>,
-    pending_message_ids: Vec<uuid::Uuid>,
 }
 
 impl AgentHandle {
     /// Returns the name of the agent this handle controls.
     pub fn agent_name(&self) -> &str {
-        &self.agent_name
+        &self.run.agent_name
     }
 
     /// Drive the event loop with default workflow behavior and wait for completion.
     ///
     /// Handles hooks, context freshness, budget tracking, and error recovery
-    /// automatically. Returns the agent result on completion.
-    pub async fn wait(mut self) -> Result<AgentResult, WorkflowError> {
-        let drive_result = engine::drive_event_loop(
-            &self.agent_name,
-            self.agent_run_id,
-            &mut self.event_rx,
-            &self.cmd_tx,
-            &self.context,
-            self.persistence.as_ref(),
-        )
-        .await;
-
-        if drive_result
-            .as_ref()
-            .is_err_and(|error| !matches!(error, WorkflowError::UserInputRequired { .. }))
-        {
-            let _ = self
-                .cmd_tx
-                .send(arko_agents::runtime::command::UserCommand::CancelTask)
-                .await;
+    /// automatically. Returns the agent result on completion, and otherwise
+    /// the same errors as [`Workflow::run_agent`].
+    pub async fn wait(self) -> Result<AgentResult, WorkflowError> {
+        let result =
+            engine::drive_to_result(self.run, &self.context, self.persistence.as_ref()).await;
+        if self.context.run_control.is_stopped() {
+            engine::save_stop_checkpoint(&self.context, self.persistence.as_ref()).await;
         }
-
-        let join_result = self.join_handle.await;
-        let final_task = join_result
-            .map_err(|e| WorkflowError::Channel(format!("Agent join error: {}", e)))?
-            .map_err(WorkflowError::Agent)?;
-
-        let agent_result = engine::finalize_agent_task(
-            self.agent_name.clone(),
-            final_task,
-            &self.context,
-            self.persistence.as_ref(),
-        )
-        .await?;
-        if agent_result.status == result::AgentRunStatus::Completed {
-            self.context
-                .messages
-                .acknowledge_active(&self.agent_name, self.agent_run_id);
-            self.context
-                .messages
-                .acknowledge(&self.agent_name, &self.pending_message_ids);
-        }
-        self.context
-            .messages
-            .unregister_active(&self.agent_name, self.agent_run_id);
-
-        drive_result?;
-        if agent_result.status == result::AgentRunStatus::Completed {
-            Ok(agent_result)
-        } else {
-            Err(WorkflowError::Agent(
-                arko_agents::ArkoAgentsError::TaskExecution(
-                    agent_result
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| "Agent did not complete".to_string()),
-                ),
-            ))
-        }
+        result
     }
 
     /// Decompose the handle into raw parts for custom event processing.
@@ -527,7 +549,9 @@ impl AgentHandle {
     /// When using this, the caller is responsible for processing
     /// [`AgentEvent`](arko_agents::runtime::event::AgentEvent)s and sending
     /// appropriate [`UserCommand`](arko_agents::runtime::command::UserCommand)s.
-    /// Hooks and budget tracking are **not** applied automatically.
+    /// Hooks and budget tracking are **not** applied automatically. Cancelling
+    /// the run still sends the agent `CancelTask`, and the tool middleware
+    /// still cancels it at its next tool call.
     #[allow(clippy::type_complexity)]
     pub fn into_parts(
         self,
@@ -538,10 +562,10 @@ impl AgentHandle {
         String,
     ) {
         (
-            self.event_rx,
-            self.cmd_tx,
-            self.join_handle,
-            self.agent_name,
+            self.run.event_rx,
+            self.run.cmd_tx,
+            self.run.join_handle,
+            self.run.agent_name,
         )
     }
 }
@@ -571,6 +595,7 @@ pub struct WorkflowBuilder {
     user_input_handler: Option<Arc<dyn UserInputHandler>>,
     voting_enabled: bool,
     interception_failure_policy: Option<InterceptionFailurePolicy>,
+    cancel_grace_period: std::time::Duration,
 }
 
 impl WorkflowBuilder {
@@ -599,6 +624,7 @@ impl WorkflowBuilder {
             user_input_handler: None,
             voting_enabled: false,
             interception_failure_policy: None,
+            cancel_grace_period: DEFAULT_CANCEL_GRACE_PERIOD,
         }
     }
 
@@ -763,6 +789,15 @@ impl WorkflowBuilder {
 
     pub fn enable_voting(mut self) -> Self {
         self.voting_enabled = true;
+        self
+    }
+
+    /// How long a stopped run waits for each running agent to stop before
+    /// aborting it (default [`DEFAULT_CANCEL_GRACE_PERIOD`], 30 seconds). An
+    /// agent stops at its next step; one running a long tool call stops once
+    /// the call returns.
+    pub fn cancel_grace_period(mut self, grace_period: std::time::Duration) -> Self {
+        self.cancel_grace_period = grace_period;
         self
     }
 
@@ -1043,6 +1078,7 @@ impl WorkflowBuilder {
             workflow_services: std::sync::OnceLock::new(),
             paused: std::sync::atomic::AtomicBool::new(false),
             resume_notify: tokio::sync::Notify::new(),
+            run_control: Arc::new(RunControl::new(self.cancel_grace_period)),
             user_input_handler: self.user_input_handler,
             ballots: self
                 .voting_enabled

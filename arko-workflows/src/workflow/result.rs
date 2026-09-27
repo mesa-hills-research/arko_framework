@@ -18,6 +18,8 @@ pub enum AgentRunStatus {
     Completed,
     Failed,
     Interrupted,
+    /// The task ended `TaskState::Cancelled`: stopped with the workflow run
+    /// (cancelled, or aborted by a hook), or by the workflow (over budget).
     Cancelled,
     WaitingForInput,
 }
@@ -61,4 +63,7 @@ pub struct WorkflowResult {
     /// in chronological order.
     pub cost_ledger: CostLedger,
     pub agent_results: Vec<AgentResult>,
+    /// Set when the run was stopped (cancelled, or aborted by a hook).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation: Option<crate::workflow::cancel::Cancellation>,
 }

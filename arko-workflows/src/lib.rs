@@ -42,6 +42,8 @@ pub mod memory;
 pub mod messaging;
 pub mod persistence;
 pub mod services;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod user_input;
 pub mod verification;
 pub mod voting;
@@ -51,6 +53,7 @@ pub mod workflow;
 pub mod python;
 
 pub use error::WorkflowError;
+pub use workflow::cancel::{CancelCause, Cancellation, WorkflowCancelHandle};
 pub use workflow::config::{SupportedPlatform, WorkflowDependency, WorkflowMetadata};
 pub use workflow::result::{AgentResult, AgentRunStatus, WorkflowEvent, WorkflowResult};
 pub use workflow::{AgentHandle, Workflow, WorkflowBuilder};
@@ -79,6 +82,7 @@ pub mod prelude {
         VerificationDecision, VerificationKind, VerificationRecord,
     };
     pub use crate::voting::{BallotConfig, BallotResult, CastVote, TieBreak, VoteOption};
+    pub use crate::workflow::cancel::{CancelCause, Cancellation, WorkflowCancelHandle};
     pub use crate::workflow::config::{SupportedPlatform, WorkflowDependency, WorkflowMetadata};
     pub use crate::workflow::result::{AgentResult, AgentRunStatus, WorkflowEvent, WorkflowResult};
     pub use crate::workflow::{Workflow, WorkflowBuilder};
