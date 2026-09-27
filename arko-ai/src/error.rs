@@ -294,7 +294,7 @@ impl Error {
 
     pub(crate) async fn from_response(label: &str, response: reqwest::Response) -> Self {
         let status = response.status().as_u16();
-        let retry_after = retry_after_from_headers(response.headers());
+        let retry_after = retry_after_from_headers(status, response.headers());
         // Preserve the HTTP status even when reading the error body fails.
         let body = response
             .text()
@@ -305,16 +305,52 @@ impl Error {
 }
 
 /// Delay requested by response headers: `Retry-After` (seconds or an HTTP
-/// date), else the longer of OpenAI-style `x-ratelimit-reset-requests` /
-/// `x-ratelimit-reset-tokens` durations such as `1m2.5s`.
-pub(crate) fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+/// date) on any status; on a 429 without it, OpenAI-style
+/// `x-ratelimit-reset-requests` / `x-ratelimit-reset-tokens` durations such
+/// as `1m2.5s`.
+///
+/// Those headers are "the time until the rate limit ... resets to its
+/// initial state" (https://developers.openai.com/api/docs/guides/rate-limits):
+/// a full refill, sent on every response, so they say nothing about a
+/// non-rate-limit failure and overstate the wait for a limit that was not
+/// hit. Only the limits whose `x-ratelimit-remaining-*` is 0 count (the
+/// longest of them, since each must recover). When no remaining count is 0
+/// or none is reported, the limit that was hit is unknown and the shorter
+/// reset is used: it is the earliest point a limit is known to have fully
+/// recovered, and callers treat the hint as a minimum under their own
+/// backoff, so underestimating costs one early retry while the longer reset
+/// (often minutes for tokens) could stall a request that would already
+/// succeed.
+pub(crate) fn retry_after_from_headers(
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+) -> Option<Duration> {
     retry_after_header(headers).or_else(|| {
-        ["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"]
+        if status != 429 {
+            return None;
+        }
+        let header = |name: String| {
+            headers
+                .get(name.as_str())
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+        };
+        let limits: Vec<(Option<bool>, Duration)> = ["requests", "tokens"]
             .iter()
-            .filter_map(|name| headers.get(*name))
-            .filter_map(|value| value.to_str().ok())
-            .filter_map(parse_relative_duration)
+            .filter_map(|limit| {
+                let reset = parse_relative_duration(header(format!("x-ratelimit-reset-{limit}"))?)?;
+                let exhausted = header(format!("x-ratelimit-remaining-{limit}"))
+                    .and_then(|remaining| remaining.parse::<f64>().ok())
+                    .map(|remaining| remaining <= 0.0);
+                Some((exhausted, reset))
+            })
+            .collect();
+        limits
+            .iter()
+            .filter(|(exhausted, _)| *exhausted == Some(true))
+            .map(|(_, reset)| *reset)
             .max()
+            .or_else(|| limits.iter().map(|(_, reset)| *reset).min())
     })
 }
 
@@ -642,16 +678,43 @@ mod tests {
     }
 
     #[test]
-    fn rate_limit_reset_headers_are_used_without_retry_after() {
+    fn rate_limit_reset_headers_apply_only_to_an_exhausted_limit_on_a_429() {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("x-ratelimit-reset-requests", "1s".parse().unwrap());
         headers.insert("x-ratelimit-reset-tokens", "1m2.5s".parse().unwrap());
+        // Without remaining counts the limit that was hit is unknown.
         assert_eq!(
-            retry_after_from_headers(&headers),
+            retry_after_from_headers(429, &headers),
+            Some(Duration::from_secs(1))
+        );
+        // Reset headers accompany every response; they are no delay hint for
+        // other failures.
+        for status in [500, 503, 529, 400] {
+            assert_eq!(retry_after_from_headers(status, &headers), None, "{status}");
+        }
+        // Only the exhausted limit counts.
+        headers.insert("x-ratelimit-remaining-requests", "12".parse().unwrap());
+        headers.insert("x-ratelimit-remaining-tokens", "0".parse().unwrap());
+        assert_eq!(
+            retry_after_from_headers(429, &headers),
             Some(Duration::from_millis(62_500))
         );
+        headers.insert("x-ratelimit-remaining-requests", "0".parse().unwrap());
+        headers.insert("x-ratelimit-remaining-tokens", "5000".parse().unwrap());
+        assert_eq!(
+            retry_after_from_headers(429, &headers),
+            Some(Duration::from_secs(1))
+        );
+        // Both exhausted: both must recover.
+        headers.insert("x-ratelimit-remaining-tokens", "0".parse().unwrap());
+        assert_eq!(
+            retry_after_from_headers(429, &headers),
+            Some(Duration::from_millis(62_500))
+        );
+        // Retry-After wins on any status.
         headers.insert(reqwest::header::RETRY_AFTER, "3".parse().unwrap());
-        assert_eq!(retry_after_from_headers(&headers), Some(Duration::from_secs(3)));
+        assert_eq!(retry_after_from_headers(429, &headers), Some(Duration::from_secs(3)));
+        assert_eq!(retry_after_from_headers(503, &headers), Some(Duration::from_secs(3)));
     }
 
     #[test]
@@ -659,7 +722,7 @@ mod tests {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::RETRY_AFTER, "60".parse().unwrap());
         assert_eq!(
-            retry_after_from_headers(&headers),
+            retry_after_from_headers(429, &headers),
             Some(Duration::from_secs(60))
         );
         let deadline = std::time::SystemTime::now() + Duration::from_secs(60);
@@ -667,16 +730,16 @@ mod tests {
             reqwest::header::RETRY_AFTER,
             httpdate::fmt_http_date(deadline).parse().unwrap(),
         );
-        let delay = retry_after_from_headers(&headers).unwrap();
+        let delay = retry_after_from_headers(429, &headers).unwrap();
         assert!(delay >= Duration::from_secs(58) && delay <= Duration::from_secs(60));
         for value in ["-1", "NaN", "nonsense"] {
             headers.insert(reqwest::header::RETRY_AFTER, value.parse().unwrap());
-            assert_eq!(retry_after_from_headers(&headers), None);
+            assert_eq!(retry_after_from_headers(429, &headers), None);
         }
         headers.insert(
             reqwest::header::RETRY_AFTER,
             "Thu, 01 Jan 1970 00:00:00 GMT".parse().unwrap(),
         );
-        assert_eq!(retry_after_from_headers(&headers), Some(Duration::ZERO));
+        assert_eq!(retry_after_from_headers(429, &headers), Some(Duration::ZERO));
     }
 }

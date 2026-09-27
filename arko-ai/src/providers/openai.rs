@@ -138,7 +138,7 @@ pub fn is_token_expired(token: &str, margin: std::time::Duration) -> bool {
 }
 
 fn retry_after_from_headers(response: &reqwest::Response) -> Option<Duration> {
-    crate::error::retry_after_from_headers(response.headers())
+    crate::error::retry_after_from_headers(response.status().as_u16(), response.headers())
 }
 
 fn response_error(
