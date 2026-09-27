@@ -1264,13 +1264,17 @@ impl AnthropicClient {
     /// Anthropic's `input_tokens` counts only uncached input; arko's
     /// `UsageInfo::input_tokens` is the total, so cache reads and writes are
     /// added back. The 1-hour share of cache writes, fast mode (`speed`) and
-    /// `inference_geo` select price variants.
+    /// `inference_geo` select price variants. The counts come from the
+    /// provider, so the sum saturates rather than overflowing.
     /// https://platform.claude.com/docs/en/build-with-claude/prompt-caching#tracking-cache-performance
     fn calculate_usage(reported: &AnthropicUsage) -> UsageInfo {
         let cache_read = reported.cache_read_input_tokens;
         let cache_write = reported.cache_creation_input_tokens;
         let mut usage = UsageInfo::new(
-            reported.input_tokens + cache_read.unwrap_or(0) + cache_write.unwrap_or(0),
+            reported
+                .input_tokens
+                .saturating_add(cache_read.unwrap_or(0))
+                .saturating_add(cache_write.unwrap_or(0)),
             reported.output_tokens,
         );
         usage.cached_tokens = cache_read;
@@ -2097,6 +2101,18 @@ mod tests {
         let usage = &end(&events).usage;
         assert_eq!(usage.billing, BillingKind::Metered);
         assert!(usage.billed() > 0.0);
+    }
+
+    #[test]
+    fn reported_input_counts_that_would_overflow_saturate() {
+        let reported: super::AnthropicUsage = serde_json::from_value(json!({
+            "input_tokens": usize::MAX, "output_tokens": 5,
+            "cache_read_input_tokens": 7, "cache_creation_input_tokens": 9
+        }))
+        .unwrap();
+        let usage = AnthropicClient::calculate_usage(&reported);
+        assert_eq!(usage.input_tokens, usize::MAX);
+        assert_eq!(usage.cached_tokens, Some(7));
     }
 
     #[tokio::test]

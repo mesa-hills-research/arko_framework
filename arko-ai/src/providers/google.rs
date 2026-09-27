@@ -1077,19 +1077,23 @@ impl GoogleClient {
     /// `total_input_tokens` includes cached input. Output is visible output
     /// plus thought tokens, both billed as output. `total_tokens` is not used
     /// because it also counts other internal tokens such as tool-use prompts.
+    /// The counts come from the provider, so the sum and the conversions
+    /// saturate rather than overflowing or wrapping.
     /// https://ai.google.dev/api/interactions-api-v1
     fn calculate_usage(usage: &InteractionUsage) -> UsageInfo {
-        let input_tokens = usage.total_input_tokens as usize;
-        let output_tokens = (usage.total_output_tokens + usage.total_thought_tokens) as usize;
+        let count = |tokens: u64| usize::try_from(tokens).unwrap_or(usize::MAX);
+        let input_tokens = count(usage.total_input_tokens);
+        let output_tokens =
+            count(usage.total_output_tokens.saturating_add(usage.total_thought_tokens));
 
         let mut info = UsageInfo::new(input_tokens, output_tokens);
         info.reasoning_tokens =
-            (usage.total_thought_tokens > 0).then_some(usage.total_thought_tokens as usize);
+            (usage.total_thought_tokens > 0).then_some(count(usage.total_thought_tokens));
 
         if let Some(cached_tokens) = usage.total_cached_tokens
             && cached_tokens > 0
         {
-            info = info.with_cached_tokens(cached_tokens as usize);
+            info = info.with_cached_tokens(count(cached_tokens));
         }
 
         info
@@ -1420,6 +1424,18 @@ mod tests {
         assert_eq!(info.output_tokens, 500);
         assert_eq!(info.reasoning_tokens, Some(300));
         assert_eq!(info.cached_tokens, Some(400));
+    }
+
+    #[test]
+    fn reported_output_counts_that_would_overflow_saturate() {
+        let usage: InteractionUsage = serde_json::from_value(json!({
+            "total_input_tokens": 10, "total_output_tokens": u64::MAX,
+            "total_thought_tokens": 300
+        }))
+        .unwrap();
+        let info = GoogleClient::calculate_usage(&usage);
+        assert_eq!(info.output_tokens, usize::MAX);
+        assert_eq!(info.reasoning_tokens, Some(300));
     }
 
     #[tokio::test]
