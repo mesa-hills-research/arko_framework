@@ -1,13 +1,33 @@
+//! Command-line client for `arko_ai`: one-shot text generation and an
+//! interactive chat against any configured provider.
+//!
+//! Credentials come from the environment (and a `.env` file) through
+//! `LLMClient::from_env`: ChatGPT OAuth or `OPENAI_API_KEY`,
+//! `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` or `GEMINI_API_KEY`, and
+//! `OPENROUTER_API_KEY`.
+//!
+//! ```text
+//! cargo run -p arko-ai --example llm_client_cli -- models
+//! cargo run -p arko-ai --example llm_client_cli -- text -m gpt-5.5 -p "Hello"
+//! cargo run -p arko-ai --example llm_client_cli -- chat -m anthropic/claude-sonnet-5 --reasoning-level high
+//! ```
+//!
+//! A model is a registered id (see `models`), an alias of one, or an
+//! OpenRouter slug (anything with a `/`). The flags are parsed here; which
+//! efforts, levels, budgets and parameters a model accepts is checked by the
+//! library when the request is built.
+
 use arko_ai::{
-    model::ModelType, reasoning::{AnthropicReasoningFragment, OpenAIEffort},
-    AnthropicReasoningEffort, Content, Error, GenerationConfig, GeminiThinkingLevel, Image,
-    LLMClient, Model, OpenRouterReasoning, Provider, ReasoningArtifact, ReasoningEffort,
-    ReasoningConfig, StreamEvent, UsageInfo,
+    reasoning::{AnthropicReasoningFragment, OpenAIEffort},
+    AnthropicReasoningEffort, Content, Error, GeminiThinkingLevel, GenerationConfig,
+    GenerationResponse, Image, LLMClient, Model, OpenAIReasoningMode, OpenRouterReasoning,
+    Provider, ReasoningArtifact, ReasoningConfig, ReasoningEffort, StreamEvent, UsageInfo,
 };
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use dotenv::dotenv;
 use futures::StreamExt;
 use std::{
+    collections::HashMap,
     fs,
     io::{self, Write},
     path::PathBuf,
@@ -24,37 +44,12 @@ struct Cli {
 enum Commands {
     /// Generate text from a prompt (optionally streaming)
     Text {
-        /// The model to use
-        #[arg(short, long)]
-        model: String,
+        #[command(flatten)]
+        generation: GenerationArgs,
 
         /// The prompt to generate from
         #[arg(short, long)]
         prompt: String,
-
-        /// The system message
-        #[arg(short, long)]
-        system: Option<String>,
-
-        /// The temperature (0.0-2.0)
-        #[arg(short, long)]
-        temperature: Option<f64>,
-
-        /// The maximum number of tokens to generate
-        #[arg(short = 'n', long)]
-        max_tokens: Option<usize>,
-
-        /// Enable reasoning (for supported models)
-        #[arg(short, long)]
-        reasoning: bool,
-
-        /// The reasoning level (minimal/low/medium/high for OpenAI, integer for Anthropic/Google 2.x, high/low for Google 3.x, an effort or a token budget for OpenRouter)
-        #[arg(long)]
-        reasoning_level: Option<String>,
-
-        /// The reasoning effort for Claude Opus 4.5 (low/medium/high)
-        #[arg(long)]
-        reasoning_effort: Option<String>,
 
         /// Image input as file path
         #[arg(short, long)]
@@ -63,46 +58,64 @@ enum Commands {
         /// Stream the response
         #[arg(long)]
         stream: bool,
-
-        /// Enable 1M token context window (Claude Sonnet 4/4.5 only)
-        #[arg(long)]
-        long_context: bool,
     },
 
     /// Start an interactive, streaming conversation
     Chat {
-        /// The model to use
-        #[arg(short, long)]
-        model: String,
-
-        /// The system message
-        #[arg(short, long)]
-        system: Option<String>,
-
-        /// The temperature (0.0-2.0)
-        #[arg(short, long)]
-        temperature: Option<f64>,
-
-        /// The maximum number of tokens to generate
-        #[arg(short = 'n', long)]
-        max_tokens: Option<usize>,
-
-        /// Enable reasoning (for supported models)
-        #[arg(short, long)]
-        reasoning: bool,
-
-        /// The reasoning level (minimal/low/medium/high for OpenAI, integer for Anthropic/Google 2.x, high/low for Google 3.x, an effort or a token budget for OpenRouter)
-        #[arg(long)]
-        reasoning_level: Option<String>,
-
-        /// The reasoning effort for Claude Opus 4.5 (low/medium/high)
-        #[arg(long)]
-        reasoning_effort: Option<String>,
-
-        /// Enable 1M token context window (Claude Sonnet 4/4.5 only)
-        #[arg(long)]
-        long_context: bool,
+        #[command(flatten)]
+        generation: GenerationArgs,
     },
+
+    /// List the registered models and the aliases accepted for them
+    Models,
+}
+
+/// Model and generation settings shared by `text` and `chat`.
+#[derive(Args)]
+struct GenerationArgs {
+    /// A registered model id or alias (see `models`), or an OpenRouter slug
+    /// such as anthropic/claude-sonnet-5, openrouter/auto or @preset/name
+    #[arg(short, long)]
+    model: String,
+
+    /// The system message
+    #[arg(short, long)]
+    system: Option<String>,
+
+    /// The temperature (0.0-2.0), for models that accept one
+    #[arg(short, long)]
+    temperature: Option<f64>,
+
+    /// The maximum number of tokens to generate
+    #[arg(short = 'n', long)]
+    max_tokens: Option<usize>,
+
+    /// Enable reasoning with the model's defaults (implied by the other
+    /// reasoning options)
+    #[arg(short, long)]
+    reasoning: bool,
+
+    /// An effort (none, minimal, low, medium, high, xhigh, max) for OpenAI,
+    /// Claude adaptive thinking and OpenRouter; a thinking level (minimal,
+    /// low, medium, high) for Gemini; or a thinking token budget (Claude
+    /// manual thinking, Gemini, OpenRouter)
+    #[arg(long)]
+    reasoning_level: Option<String>,
+
+    /// Claude effort (low, medium, high, xhigh, max), with adaptive thinking
+    /// or together with a --reasoning-level token budget (Claude Opus 4.5);
+    /// for other providers the same as --reasoning-level
+    #[arg(long)]
+    reasoning_effort: Option<String>,
+
+    /// Reasoning mode (standard or pro) for GPT-5.6 and GPT-6, directly or
+    /// through OpenRouter; GPT-6 Pro is gpt-6-* with --reasoning-mode pro
+    #[arg(long)]
+    reasoning_mode: Option<String>,
+
+    /// Request the 1M-token context window (Claude 4.6 and later)
+    #[arg(long)]
+    long_context: bool,
 }
 
 #[tokio::main]
@@ -114,33 +127,20 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
     let client = create_client()?;
 
     match cli.command {
+        Commands::Models => print_models(),
+
         Commands::Text {
-            model,
+            generation,
             prompt,
-            system,
-            temperature,
-            max_tokens,
-            reasoning,
-            reasoning_level,
-            reasoning_effort,
             image,
             stream,
-            long_context,
         } => {
-            let model = get_model(&model)?;
-            let config = build_config(
-                model.clone(),
-                temperature,
-                max_tokens,
-                reasoning,
-                reasoning_level,
-                reasoning_effort,
-                long_context,
-            )?;
+            let model = get_model(&generation.model)?;
+            let config = build_config(&model, &generation)?;
 
             let mut conversation = client.new_conversation(model);
-            if let Some(system_msg) = system {
-                conversation = conversation.with_system_message(&system_msg);
+            if let Some(system_msg) = &generation.system {
+                conversation = conversation.with_system_message(system_msg);
             }
 
             if let Some(image_path) = image {
@@ -188,6 +188,7 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
                         Ok(StreamEvent::End(boxed_resp)) => {
                             let resp = *boxed_resp;
                             println!("\n");
+                            print_served_model(&resp);
                             print_usage_info(&resp.usage, None, 0.0, 0.0);
                             break;
                         }
@@ -203,34 +204,18 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
                 }
 
                 print_reasoning_artifact(response.message.reasoning_artifact.as_ref());
+                print_served_model(&response);
                 print_usage_info(&response.usage, None, 0.0, 0.0);
             }
         }
 
-        Commands::Chat {
-            model,
-            system,
-            temperature,
-            max_tokens,
-            reasoning,
-            reasoning_level,
-            reasoning_effort,
-            long_context,
-        } => {
-            let model = get_model(&model)?;
-            let config = build_config(
-                model.clone(),
-                temperature,
-                max_tokens,
-                reasoning,
-                reasoning_level,
-                reasoning_effort,
-                long_context,
-            )?;
+        Commands::Chat { generation } => {
+            let model = get_model(&generation.model)?;
+            let config = build_config(&model, &generation)?;
 
             let mut conversation = client.new_conversation(model);
-            if let Some(system_msg) = system {
-                conversation = conversation.with_system_message(&system_msg);
+            if let Some(system_msg) = &generation.system {
+                conversation = conversation.with_system_message(system_msg);
             }
 
             println!(
@@ -242,8 +227,9 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
             }
             println!("---");
 
-            // Billed amount (zero for subscription calls) and the estimate
-            // at API list prices, accumulated separately.
+            // Billed amount (zero for subscription calls; OpenRouter's
+            // reported charge) and the estimate at API list prices,
+            // accumulated separately.
             let mut total_billed: f64 = 0.0;
             let mut total_estimate: f64 = 0.0;
             let mut last_input_tokens: Option<usize> = None;
@@ -324,6 +310,7 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
                     }
                     total_billed += resp.usage.billed();
                     total_estimate += resp.usage.total_cost;
+                    print_served_model(&resp);
                     print_usage_info(&resp.usage, last_input_tokens, total_billed, total_estimate);
                     last_input_tokens = Some(resp.usage.input_tokens);
                 } else {
@@ -332,10 +319,11 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
                 }
                 println!("---");
             }
-            println!(
-                "Chat ended. Final accumulated billed cost: ${:.6} (estimate at list prices: ${:.6})",
-                total_billed, total_estimate
-            );
+            print!("Chat ended. Final accumulated billed cost: ${:.6}", total_billed);
+            if total_estimate > 0.0 {
+                print!(" (estimate at list prices: ${:.6})", total_estimate);
+            }
+            println!();
         }
     }
 
@@ -346,242 +334,257 @@ fn create_client() -> Result<LLMClient, Error> {
     Ok(LLMClient::from_env())
 }
 
-fn get_model(name: &str) -> Result<Model, Error> {
-    match name {
-        "gpt-5" => Ok(Model::openai_gpt_5()),
-        "gpt-5-mini" => Ok(Model::openai_gpt_5_mini()),
-        "gpt-5-nano" => Ok(Model::openai_gpt_5_nano()),
-        "o4-mini" => Ok(Model::openai_o4_mini()),
-        "o3" => Ok(Model::openai_o3()),
-        "o3-pro" => Ok(Model::openai_o3_pro()),
-        "gpt-4.1" => Ok(Model::openai_gpt_4_1()),
-        "gpt-4.1-mini" => Ok(Model::openai_gpt_4_1_mini()),
-        "gpt-4.1-nano" => Ok(Model::openai_gpt_4_1_nano()),
-        "claude-opus-4" => Ok(Model::anthropic_claude_opus_4()),
-        "claude-opus-4-5" | "claude-opus-4.5" => Ok(Model::anthropic_claude_opus_4_5()),
-        "claude-sonnet-4" => Ok(Model::anthropic_claude_sonnet_4()),
-        "claude-sonnet-4-5" | "claude-sonnet-4.5" => Ok(Model::anthropic_claude_sonnet_4_5()),
-        "claude-haiku-4-5" | "claude-haiku-4.5" => Ok(Model::anthropic_claude_haiku_4_5()),
-        "claude-3-7-sonnet" => Ok(Model::anthropic_claude_3_7_sonnet()),
-        "claude-3-5-sonnet-20241022" => Ok(Model::anthropic_claude_3_5_sonnet_20241022()),
-        "claude-3-5-sonnet" | "claude-3-5-sonnet-20240620" => {
-            Ok(Model::anthropic_claude_3_5_sonnet_20240620())
-        }
-        "gemini-3-pro" | "gemini-3.0-pro" => Ok(Model::google_gemini_3_0_pro()),
-        "gemini-2.5-pro" => Ok(Model::google_gemini_2_5_pro()),
-        "gemini-2.5-flash" => Ok(Model::google_gemini_2_5_flash()),
-        "gemini-2.5-flash-lite" => Ok(Model::google_gemini_2_5_flash_lite()),
-        "gemini-2.0-flash" => Ok(Model::google_gemini_2_0_flash()),
-        // OpenRouter slugs: author/model, ~author/alias-latest, @preset/name.
-        slug if slug.contains('/') => Ok(Model::openrouter(slug)),
-        _ => Model::find(name).ok_or_else(|| {
-            Error::ModelNotSupported(format!(
-                "Unknown model '{}'. Use a known alias or a registered model id.",
-                name
-            ))
-        }),
+/// The id without a trailing release date (`-2025-08-07`, `-20250514`) or
+/// `-preview`, the part the dated and preview registry ids add.
+fn undated(id: &str) -> &str {
+    let bytes = id.as_bytes();
+    let dated = |date_len: usize, pattern: &[usize]| {
+        id.len() > date_len + 1
+            && bytes[id.len() - date_len - 1] == b'-'
+            && bytes[id.len() - date_len..]
+                .iter()
+                .enumerate()
+                .all(|(i, b)| if pattern.contains(&i) { *b == b'-' } else { b.is_ascii_digit() })
+    };
+    if dated(10, &[4, 7]) {
+        &id[..id.len() - 11]
+    } else if dated(8, &[]) {
+        &id[..id.len() - 9]
+    } else {
+        id.strip_suffix("-preview").unwrap_or(id)
     }
 }
 
-fn build_config(
-    model: Model,
-    temperature: Option<f64>,
-    max_tokens: Option<usize>,
-    reasoning: bool,
-    reasoning_level: Option<String>,
-    reasoning_effort: Option<String>,
-    long_context: bool,
-) -> Result<GenerationConfig, Error> {
+/// Every alias that names exactly one registered model and isn't itself a
+/// registered id: the undated id and, for Claude, the version written with
+/// dots (`claude-opus-4.5`, `claude-3.7-sonnet`).
+fn aliases() -> HashMap<String, Vec<Model>> {
+    let models = Model::all();
+    let mut aliases: HashMap<String, Vec<Model>> = HashMap::new();
+    for model in &models {
+        let short = undated(&model.id);
+        let mut names = vec![short.to_string()];
+        if short.starts_with("claude-") {
+            // A '-' between two digits is a version separator.
+            let dotted: String = short
+                .char_indices()
+                .map(|(i, c)| {
+                    let digit_at = |j: usize| short.as_bytes().get(j).is_some_and(u8::is_ascii_digit);
+                    if c == '-' && i > 0 && digit_at(i - 1) && digit_at(i + 1) { '.' } else { c }
+                })
+                .collect();
+            names.push(dotted);
+        }
+        names.sort();
+        names.dedup();
+        for name in names {
+            if !models.iter().any(|registered| registered.id == name) {
+                aliases.entry(name).or_default().push(model.clone());
+            }
+        }
+    }
+    aliases
+}
+
+fn get_model(name: &str) -> Result<Model, Error> {
+    // OpenRouter slugs: author/model, ~author/alias-latest, @preset/name.
+    if name.contains('/') {
+        return Ok(Model::openrouter(name));
+    }
+    if let Some(model) = Model::find(name) {
+        return Ok(model);
+    }
+    match aliases().remove(name).as_deref() {
+        Some([model]) => Ok(model.clone()),
+        Some(models) => Err(Error::ModelNotSupported(format!(
+            "'{name}' names several models; use one of: {}",
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>().join(", ")
+        ))),
+        None => Err(Error::ModelNotSupported(format!(
+            "Unknown model '{name}'. Run the `models` command for registered ids and their aliases, or pass an OpenRouter slug (author/model)."
+        ))),
+    }
+}
+
+fn print_models() {
+    let mut unique: HashMap<String, Vec<String>> = HashMap::new();
+    for (alias, models) in aliases() {
+        if let [model] = models.as_slice() {
+            unique.entry(model.id.clone()).or_default().push(alias);
+        }
+    }
+    for model in Model::all() {
+        let mut names = unique.remove(&model.id).unwrap_or_default();
+        names.sort();
+        if names.is_empty() {
+            println!("{:<10} {}", format!("{:?}", model.provider), model.id);
+        } else {
+            println!(
+                "{:<10} {} (also: {})",
+                format!("{:?}", model.provider),
+                model.id,
+                names.join(", ")
+            );
+        }
+    }
+    println!("OpenRouter any author/model slug, ~author/alias-latest or @preset/name");
+}
+
+fn invalid(message: String) -> Error {
+    Error::InvalidRequest(message)
+}
+
+fn build_config(model: &Model, args: &GenerationArgs) -> Result<GenerationConfig, Error> {
     let mut config = GenerationConfig::default();
 
-    if let Some(temp) = temperature {
+    if let Some(temp) = args.temperature {
         config = config.with_temperature(temp);
     }
-    if let Some(tokens) = max_tokens {
+    if let Some(tokens) = args.max_tokens {
         config = config.with_max_tokens(tokens);
     }
-    if long_context {
+    if args.long_context {
         config = config.with_long_context(true);
     }
 
+    let mode = match args.reasoning_mode.as_deref() {
+        None => None,
+        Some("standard") => Some(OpenAIReasoningMode::Standard),
+        Some("pro") => Some(OpenAIReasoningMode::Pro),
+        Some(other) => {
+            return Err(invalid(format!("Reasoning mode must be 'standard' or 'pro', not '{other}'.")));
+        }
+    };
+    match (mode, &model.provider) {
+        (None, _) | (Some(_), Provider::OpenRouter) => {}
+        (Some(mode), Provider::OpenAI) => config = config.with_openai_reasoning_mode(mode),
+        (Some(_), _) => {
+            return Err(invalid(
+                "--reasoning-mode applies to OpenAI GPT-5.6 and GPT-6 models, directly or through OpenRouter.".into(),
+            ));
+        }
+    }
+
+    let reasoning = args.reasoning
+        || args.reasoning_level.is_some()
+        || args.reasoning_effort.is_some()
+        || (mode.is_some() && model.provider == Provider::OpenRouter);
     if reasoning {
-        let reasoning_config = match model.provider {
-            Provider::OpenAI => {
-                if model.model_type != ModelType::Reasoning {
-                    return Err(Error::InvalidRequest(format!(
-                        "Reasoning is only supported for OpenAI O-models (e.g., o4-mini, o3), not '{}'.",
-                        model.id
+        config = config.with_reasoning(reasoning_config(model, args, mode)?);
+    }
+    Ok(config)
+}
+
+/// The reasoning configuration the flags ask for. Unset options keep the
+/// model's defaults where the provider has them; OpenAI and OpenRouter
+/// default to a medium effort so reasoning summaries are requested.
+fn reasoning_config(
+    model: &Model,
+    args: &GenerationArgs,
+    mode: Option<OpenAIReasoningMode>,
+) -> Result<ReasoningConfig, Error> {
+    let level = args.reasoning_level.as_deref();
+    let effort = args.reasoning_effort.as_deref();
+    Ok(match model.provider {
+        Provider::OpenAI => {
+            let effort = match level.or(effort).unwrap_or("medium") {
+                "none" => OpenAIEffort::None,
+                "minimal" => OpenAIEffort::Minimal,
+                "low" => OpenAIEffort::Low,
+                "medium" => OpenAIEffort::Medium,
+                "high" => OpenAIEffort::High,
+                "xhigh" => OpenAIEffort::XHigh,
+                "max" => OpenAIEffort::Max,
+                other => {
+                    return Err(invalid(format!(
+                        "OpenAI reasoning effort must be none, minimal, low, medium, high, xhigh or max, not '{other}'."
                     )));
                 }
-                if config.temperature_specified {
-                    println!(
-                        "Warning: Temperature is ignored for OpenAI O-models when reasoning is enabled."
-                    );
+            };
+            ReasoningConfig::openai(effort, true)
+        }
+        Provider::Anthropic => {
+            let effort = effort.map(anthropic_effort).transpose()?;
+            // A number is a manual thinking budget; a name, an adaptive effort.
+            let budget = level.and_then(|level| level.parse::<usize>().ok());
+            match (level, budget, effort) {
+                (_, Some(budget), None) => ReasoningConfig::anthropic(budget),
+                (_, Some(budget), Some(effort)) => {
+                    ReasoningConfig::anthropic_with_effort(budget, effort)
                 }
-                let effort_str = reasoning_level.unwrap_or_else(|| "medium".to_string());
-
-                let effort = match effort_str.as_str() {
-                    "minimal" => {
-                        if !model.id.starts_with("gpt-5-") {
-                            return Err(Error::InvalidRequest(
-                                "Reasoning effort 'minimal' is only supported for GPT-5 models."
-                                    .to_string(),
-                            ));
-                        }
-                        OpenAIEffort::Minimal
-                    }
-                    "low" => OpenAIEffort::Low,
-                    "medium" => OpenAIEffort::Medium,
-                    "high" => OpenAIEffort::High,
-                    _ => {
-                        return Err(Error::InvalidRequest(
-                            "OpenAI reasoning effort must be 'minimal' (GPT-5 only), 'low', 'medium', or 'high'"
-                                .to_string(),
-                        ));
-                    }
-                };
-
-                ReasoningConfig::openai(effort, true)
-            }
-            Provider::Anthropic => {
-                if model.model_type != ModelType::Reasoning {
-                    return Err(Error::InvalidRequest(format!(
-                        "Reasoning is only supported for Anthropic reasoning models (e.g., claude-3-7-sonnet), not '{}'.",
-                        model.id
-                    )));
-                }
-
-                let max_budget = if model.is_opus_4_5() { 52000 } else { 102400 };
-
-                let budget = reasoning_level
-                    .map(|s| s.parse::<usize>())
-                    .transpose()
-                    .map_err(|_| {
-                        Error::InvalidRequest(
-                            "Invalid reasoning budget, must be an integer".to_string(),
-                        )
-                    })?
-                    .unwrap_or(1024);
-
-                if !(1024..=max_budget).contains(&budget) {
-                    return Err(Error::InvalidRequest(format!(
-                        "Anthropic reasoning budget must be between 1024 and {}",
-                        max_budget
-                    )));
-                }
-
-                if config.temperature_specified && config.temperature != 1.0 {
-                    return Err(Error::InvalidRequest(
-                        "Anthropic models with reasoning enabled require temperature=1.0. Omit --temperature or set it to 1.0."
-                            .to_string(),
+                (Some(_), None, Some(_)) => {
+                    return Err(invalid(
+                        "Give a Claude effort once: --reasoning-level <effort>, or --reasoning-effort with a token budget.".into(),
                     ));
-                } else if !config.temperature_specified {
-                    println!(
-                        "Info: Setting temperature to 1.0 as required by Anthropic reasoning."
-                    );
-                    config.temperature = 1.0;
-                    config.temperature_specified = true;
                 }
-
-                if model.is_opus_4_5() {
-                    if let Some(effort_str) = reasoning_effort {
-                        let effort = match effort_str.to_lowercase().as_str() {
-                            "low" => AnthropicReasoningEffort::Low,
-                            "medium" => AnthropicReasoningEffort::Medium,
-                            "high" => AnthropicReasoningEffort::High,
-                            _ => {
-                                return Err(Error::InvalidRequest(
-                                    "Anthropic reasoning effort must be 'low', 'medium', or 'high'"
-                                        .to_string(),
-                                ));
-                            }
-                        };
-                        ReasoningConfig::anthropic_with_effort(budget, effort)
-                    } else {
-                        ReasoningConfig::anthropic(budget)
-                    }
-                } else {
-                    if reasoning_effort.is_some() {
-                        return Err(Error::InvalidRequest(
-                            "Reasoning effort parameter is only supported for Claude Opus 4.5"
-                                .to_string(),
-                        ));
-                    }
-                    ReasoningConfig::anthropic(budget)
+                (Some(level), None, None) => {
+                    ReasoningConfig::anthropic_adaptive_with_effort(anthropic_effort(level)?)
                 }
+                (None, _, effort) if model.supports_anthropic_adaptive_thinking() => match effort {
+                    Some(effort) => ReasoningConfig::anthropic_adaptive_with_effort(effort),
+                    None => ReasoningConfig::anthropic_adaptive(),
+                },
+                (None, _, Some(effort)) => ReasoningConfig::anthropic_with_effort(1024, effort),
+                (None, _, None) => ReasoningConfig::anthropic(1024),
             }
-            Provider::OpenRouter => {
-                // An effort name, or a number as a reasoning token budget.
-                let level = reasoning_level.or(reasoning_effort).unwrap_or_else(|| "medium".into());
-                let reasoning = match level.as_str() {
-                    "none" => OpenRouterReasoning::effort(ReasoningEffort::None),
-                    "minimal" => OpenRouterReasoning::effort(ReasoningEffort::Minimal),
-                    "low" => OpenRouterReasoning::effort(ReasoningEffort::Low),
-                    "medium" => OpenRouterReasoning::effort(ReasoningEffort::Medium),
-                    "high" => OpenRouterReasoning::effort(ReasoningEffort::High),
-                    "xhigh" => OpenRouterReasoning::effort(ReasoningEffort::XHigh),
-                    "max" => OpenRouterReasoning::effort(ReasoningEffort::Max),
-                    budget => OpenRouterReasoning::max_tokens(budget.parse().map_err(|_| {
-                        Error::InvalidRequest(
-                            "OpenRouter reasoning takes an effort (none..max) or a token budget".to_string(),
-                        )
-                    })?),
-                };
-                ReasoningConfig::openrouter(reasoning)
-            }
-            Provider::Google => {
-                if model.model_type != ModelType::Reasoning {
-                    return Err(Error::InvalidRequest(format!(
-                        "Reasoning is only supported for Google reasoning models (e.g., gemini-2.5-pro), not '{}'.",
-                        model.id
-                    )));
-                }
-
-                if model.is_gemini_3_pro() {
-                    let level_str = reasoning_level.unwrap_or_else(|| "high".to_string());
-                    let level = match level_str.to_uppercase().as_str() {
-                        "HIGH" => GeminiThinkingLevel::High,
-                        "LOW" => GeminiThinkingLevel::Low,
-                        _ => {
-                            return Err(Error::InvalidRequest(
-                                "Gemini 3.0 Pro thinking level must be 'high' or 'low'".to_string(),
-                            ));
+        }
+        Provider::Google => match level.or(effort) {
+            // -1: the model's default level or dynamic budget.
+            None => ReasoningConfig::google(-1, true),
+            Some(level) => match level.parse::<isize>() {
+                Ok(budget) => ReasoningConfig::google(budget, true),
+                Err(_) => {
+                    let level = match level {
+                        "minimal" => GeminiThinkingLevel::Minimal,
+                        "low" => GeminiThinkingLevel::Low,
+                        "medium" => GeminiThinkingLevel::Medium,
+                        "high" => GeminiThinkingLevel::High,
+                        other => {
+                            return Err(invalid(format!(
+                                "Gemini thinking takes a level (minimal, low, medium, high) or a token budget, not '{other}'."
+                            )));
                         }
                     };
                     ReasoningConfig::gemini(level, true)
-                } else {
-                    let budget = reasoning_level
-                        .map(|s| s.parse::<isize>())
-                        .transpose()
-                        .map_err(|_| {
-                            Error::InvalidRequest(
-                                "Invalid reasoning budget, must be an integer".to_string(),
-                            )
-                        })?
-                        .unwrap_or(-1);
-
-                    let is_pro = model.id.contains("pro");
-                    if is_pro {
-                        if budget != -1 && !(1024..=32768).contains(&budget) {
-                            return Err(Error::InvalidRequest(
-                                "Gemini Pro reasoning budget must be between 1024 and 32768, or -1 for auto."
-                                    .to_string(),
-                            ));
-                        }
-                    } else if budget != 0 && budget != -1 && !(1024..=24576).contains(&budget) {
-                        return Err(Error::InvalidRequest(
-                            "Gemini Flash reasoning budget must be between 1024-24576, 0 to disable, or -1 for auto."
-                                .to_string(),
-                        ));
-                    }
-                    ReasoningConfig::google(budget, true)
                 }
+            },
+        },
+        Provider::OpenRouter => {
+            // An effort name, or a number as a reasoning token budget.
+            let mut reasoning = match level.or(effort) {
+                None if !args.reasoning => OpenRouterReasoning::default(),
+                None | Some("medium") => OpenRouterReasoning::effort(ReasoningEffort::Medium),
+                Some("none") => OpenRouterReasoning::effort(ReasoningEffort::None),
+                Some("minimal") => OpenRouterReasoning::effort(ReasoningEffort::Minimal),
+                Some("low") => OpenRouterReasoning::effort(ReasoningEffort::Low),
+                Some("high") => OpenRouterReasoning::effort(ReasoningEffort::High),
+                Some("xhigh") => OpenRouterReasoning::effort(ReasoningEffort::XHigh),
+                Some("max") => OpenRouterReasoning::effort(ReasoningEffort::Max),
+                Some(budget) => OpenRouterReasoning::max_tokens(budget.parse().map_err(|_| {
+                    invalid("OpenRouter reasoning takes an effort (none..max) or a token budget".into())
+                })?),
+            };
+            if let Some(mode) = mode {
+                reasoning = reasoning.with_mode(mode);
             }
-        };
-        config = config.with_reasoning(reasoning_config);
-    }
+            ReasoningConfig::openrouter(reasoning)
+        }
+    })
+}
 
-    Ok(config)
+fn anthropic_effort(name: &str) -> Result<AnthropicReasoningEffort, Error> {
+    Ok(match name {
+        "low" => AnthropicReasoningEffort::Low,
+        "medium" => AnthropicReasoningEffort::Medium,
+        "high" => AnthropicReasoningEffort::High,
+        "xhigh" => AnthropicReasoningEffort::XHigh,
+        "max" => AnthropicReasoningEffort::Max,
+        other => {
+            return Err(invalid(format!(
+                "Claude effort must be low, medium, high, xhigh or max, not '{other}'."
+            )));
+        }
+    })
 }
 
 fn load_image(path: &PathBuf) -> Result<Image, Box<Error>> {
@@ -679,6 +682,22 @@ fn print_reasoning_artifact(artifact: Option<&ReasoningArtifact>) {
         }
     }
 }
+/// Which model served the call when the provider routed it elsewhere (for
+/// example `openrouter/auto`, an OpenRouter fallback, or a ChatGPT backend
+/// reroute), and the upstream provider of a routed OpenRouter call.
+fn print_served_model(response: &GenerationResponse) {
+    let usage = &response.model_call_usage;
+    if response.rerouted() {
+        let served = usage.served_model.as_deref().unwrap_or(&usage.model);
+        match &usage.requested_model {
+            Some(requested) => println!("Served by {served} (requested {requested})"),
+            None => println!("Served by {served}"),
+        }
+    }
+    if let Some(provider) = &usage.upstream_provider {
+        println!("Upstream provider: {provider}");
+    }
+}
 
 fn print_usage_info(
     usage: &UsageInfo,
@@ -699,35 +718,44 @@ fn print_usage_info(
     }
 
     println!("  Output Tokens: {}", usage.output_tokens);
-    println!("  Input Cost:  ${:<10.6}", usage.input_cost);
-    println!("  Output Cost: ${:<10.6}", usage.output_cost);
-
-    if let Some(cached_tokens) = usage.cached_tokens {
-        if cached_tokens > 0 {
-            println!("  Cached Tokens Read: {}", cached_tokens);
-            if let Some(cache_read_cost) = usage.cache_read_cost {
-                println!("  Cache Read Cost: ${:<10.6}", cache_read_cost);
-            }
+    if let Some(reasoning_tokens) = usage.reasoning_tokens.filter(|tokens| *tokens > 0) {
+        println!("  Reasoning Tokens: {}", reasoning_tokens);
+    }
+    if let Some(cached_tokens) = usage.cached_tokens.filter(|tokens| *tokens > 0) {
+        println!("  Cached Tokens Read: {}", cached_tokens);
+        if let Some(cache_read_cost) = usage.cache_read_cost {
+            println!("  Cache Read Cost: ${:<10.6}", cache_read_cost);
         }
     }
-    if let Some(cache_write_tokens) = usage.cache_write_tokens {
-        if cache_write_tokens > 0 {
-            println!("  Cache Write Tokens: {}", cache_write_tokens);
-            if let Some(cache_write_cost) = usage.cache_write_cost {
-                println!("  Cache Write Cost: ${:<10.6}", cache_write_cost);
-            }
+    if let Some(cache_write_tokens) = usage.cache_write_tokens.filter(|tokens| *tokens > 0) {
+        println!("  Cache Write Tokens: {}", cache_write_tokens);
+        if let Some(cache_write_cost) = usage.cache_write_cost {
+            println!("  Cache Write Cost: ${:<10.6}", cache_write_cost);
         }
     }
 
     println!("-----------------------------");
-    println!("  Total Turn Cost (estimate): ${:<10.6}", usage.total_cost);
+    // A provider-reported charge (OpenRouter) comes without an estimate
+    // unless the model's prices are known.
+    let reported = usage.billing == arko_ai::BillingKind::ProviderReported;
+    if !reported || usage.total_cost > 0.0 {
+        println!("  Input Cost:  ${:<10.6}", usage.input_cost);
+        println!("  Output Cost: ${:<10.6}", usage.output_cost);
+        println!("  Total Turn Cost (estimate): ${:<10.6}", usage.total_cost);
+    }
+    if let Some(reported_cost) = usage.reported_cost {
+        println!("  Reported Cost: ${:<10.6}", reported_cost);
+    }
+    if let Some(upstream_cost) = usage.upstream_cost {
+        println!("  Upstream Cost (your provider key): ${:<10.6}", upstream_cost);
+    }
     if usage.billing != arko_ai::BillingKind::Metered {
         println!("  Billed ({:?}): ${:<10.6}", usage.billing, usage.billed());
     }
 
     if accumulated_billed > 0.0 || accumulated_estimate > 0.0 {
         println!("  Accumulated Billed: ${:<10.6}", accumulated_billed);
-        if accumulated_estimate != accumulated_billed {
+        if accumulated_estimate > 0.0 && accumulated_estimate != accumulated_billed {
             println!("  Accumulated Estimate: ${:<10.6}", accumulated_estimate);
         }
     }

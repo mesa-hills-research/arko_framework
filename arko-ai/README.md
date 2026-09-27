@@ -19,6 +19,7 @@ From the framework workspace:
 
 ```bash
 cargo run -p arko-ai --example llm_client_cli -- --help
+cargo run -p arko-ai --example llm_client_cli -- models   # registered ids and aliases
 cargo test -p arko-ai --lib
 ```
 
