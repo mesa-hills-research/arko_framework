@@ -330,8 +330,11 @@ stream chunk, as a 200 body with `error` instead of choices, or in `choices[0].e
 - 402 is retryable only for the in-flight spending budget
   (`limit_source: openrouter_in_flight_budget`) with a `Retry-After`; exhausted credits or
   key limits are permanent.
-- "No available model provider meets your routing requirements" (503, sometimes 404) is a
-  permanent configuration error (`code: no_eligible_provider`).
+- "No available model provider meets your routing requirements" and "No allowed
+  providers" (503, sometimes 404) are a permanent configuration error
+  (`code: no_eligible_provider`), unless a 503 carries a retry hint (`Retry-After` or a
+  delay in the body): OpenRouter sends `Retry-After` "when every attempted provider
+  returned a retry hint", so the error is then transient and keeps the delay.
 - Rate limits, `provider_overloaded` (capacity), `provider_unavailable`, `timeout` and
   `server` are retryable; `Retry-After` is kept.
 

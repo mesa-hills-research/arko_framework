@@ -225,8 +225,12 @@ impl OpenRouterClient {
 /// - A 402 is retryable only for the in-flight budget
 ///   (`limit_source: openrouter_in_flight_budget`) with a delay; exhausted
 ///   credits or key limits are permanent.
-/// - "No available model provider meets your routing requirements" (503 or
-///   404) is a permanent configuration error (code `no_eligible_provider`).
+/// - "No available model provider meets your routing requirements" or "No
+///   allowed providers" (503 or 404) is a permanent configuration error
+///   (code `no_eligible_provider`), unless it carries a retry hint
+///   (`Retry-After`, or a delay in the body) and a retryable status: OpenRouter
+///   adds `Retry-After` when every attempted provider returned a retry hint,
+///   so it is then transient and keeps the hint. A 404 stays permanent.
 /// - Otherwise [`Error::ProviderError`], classified by `error_type` first,
 ///   then by status (a numeric `error.code` stands in for the status on
 ///   errors that arrive after a 200).
@@ -281,31 +285,37 @@ pub(crate) fn openrouter_error(
 
     let mut converted =
         Error::provider_error("OpenRouter request failed", status, retry_after, body);
-    if let Error::ProviderError {
-        code, retry_after, ..
-    } = &mut converted
+    if effective_status == Some(402)
+        && let Error::ProviderError {
+            code, retry_after, ..
+        } = &mut converted
     {
-        if effective_status == Some(402) {
-            *code = Some("payment_required".into());
-            // Only the in-flight spending budget clears by itself.
-            if meta_str("limit_source") != Some("openrouter_in_flight_budget") {
-                *retry_after = None;
-            }
+        *code = Some("payment_required".into());
+        // Only the in-flight spending budget clears by itself.
+        if meta_str("limit_source") != Some("openrouter_in_flight_budget") {
+            *retry_after = None;
         }
-        let unroutable = message.is_some_and(|message| {
-            let message = message.to_ascii_lowercase();
-            message.contains("routing requirements")
-                || message.contains("no allowed providers")
-                || message.contains("no models match your request")
-        });
-        if unroutable
-            && !matches!(
-                error_type,
-                Some("provider_overloaded" | "provider_unavailable" | "rate_limit_exceeded")
-            )
-        {
-            *code = Some("no_eligible_provider".into());
-        }
+    }
+    let unroutable = message.is_some_and(|message| {
+        let message = message.to_ascii_lowercase();
+        message.contains("routing requirements")
+            || message.contains("no allowed providers")
+            || message.contains("no models match your request")
+    });
+    let outage = matches!(
+        error_type,
+        Some("provider_overloaded" | "provider_unavailable" | "rate_limit_exceeded")
+    );
+    // "When every attempted provider returned a retry hint, the error
+    // response also carries a `Retry-After`": the providers are only
+    // unavailable for now, and a retryable status keeps the hint.
+    let waiting = converted.retry_after().is_some() && converted.is_retryable();
+    if unroutable
+        && !outage
+        && !waiting
+        && let Error::ProviderError { code, .. } = &mut converted
+    {
+        *code = Some("no_eligible_provider".into());
     }
     converted
 }

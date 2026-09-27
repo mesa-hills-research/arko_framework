@@ -2170,11 +2170,8 @@ fn refusal_and_moderation_errors_become_refusals() {
 
 #[test]
 fn routing_requirement_failures_are_permanent_but_outages_are_not() {
-    let unroutable = or_error(
-        Some(503),
-        Some(1),
-        json!({"error": {"code": 503, "message": "No available model provider that meets your routing requirements"}}),
-    );
+    let unroutable_body = json!({"error": {"code": 503, "message": "No available model provider that meets your routing requirements"}});
+    let unroutable = or_error(Some(503), None, unroutable_body.clone());
     assert!(
         matches!(&unroutable, Error::ProviderError { code: Some(code), .. } if code == "no_eligible_provider")
     );
@@ -2185,6 +2182,37 @@ fn routing_requirement_failures_are_permanent_but_outages_are_not() {
         json!({"error": {"code": 404, "message": "No allowed providers are available for the selected model."}}),
     );
     assert_eq!(not_allowed.retry_class(), RetryClass::Permanent);
+
+    // "When every attempted provider returned a retry hint, the error
+    // response also carries a Retry-After": the providers are only
+    // temporarily unavailable, so the hint is honoured.
+    let waiting = or_error(Some(503), Some(7), unroutable_body);
+    assert_eq!(waiting.retry_class(), RetryClass::Transient, "{waiting}");
+    assert_eq!(
+        waiting.retry_after(),
+        Some(std::time::Duration::from_secs(7))
+    );
+    assert!(
+        !matches!(&waiting, Error::ProviderError { code: Some(code), .. } if code == "no_eligible_provider")
+    );
+    // A delay in the body counts too, also on an error reported after the 200.
+    let body_delay = json!({"error": {"code": 503, "message": "No allowed providers are available for the selected model.",
+        "metadata": {"retry_after_ms": 2000}}});
+    for status in [Some(503), None] {
+        let error = or_error(status, None, body_delay.clone());
+        assert_eq!(error.retry_class(), RetryClass::Transient, "{error}");
+        assert_eq!(error.retry_after(), Some(std::time::Duration::from_secs(2)));
+    }
+    // A 404 stays permanent: the status alone says the request can't succeed.
+    let not_allowed = or_error(
+        Some(404),
+        Some(7),
+        json!({"error": {"code": 404, "message": "No allowed providers are available for the selected model."}}),
+    );
+    assert_eq!(not_allowed.retry_class(), RetryClass::Permanent);
+    assert!(
+        matches!(&not_allowed, Error::ProviderError { code: Some(code), .. } if code == "no_eligible_provider")
+    );
     let overloaded = or_error(
         Some(503),
         Some(1),

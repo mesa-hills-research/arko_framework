@@ -279,7 +279,9 @@ async fn http_errors_keep_status_delays_and_classification() {
             (with_retry_after(reply(402, in_flight.to_string()), 60), RetryClass::Transient, Some(60)),
             (with_retry_after(reply(402, credits.to_string()), 60), RetryClass::Permanent, None),
             (with_retry_after(reply(429, limited.to_string()), 60), RetryClass::Transient, Some(60)),
-            (with_retry_after(reply(503, unroutable.to_string()), 60), RetryClass::Permanent, Some(60)),
+            // Unroutable is permanent unless every provider asked to wait.
+            (reply(503, unroutable.to_string()), RetryClass::Permanent, None),
+            (with_retry_after(reply(503, unroutable.to_string()), 60), RetryClass::Transient, Some(60)),
             (with_retry_after(reply(503, overloaded.to_string()), 30), RetryClass::Capacity, Some(30)),
             (reply(403, refusal.to_string()), RetryClass::Permanent, None),
         ];
