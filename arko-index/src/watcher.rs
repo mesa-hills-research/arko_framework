@@ -122,10 +122,10 @@ impl ArkoIndex {
                             let mut map=BTreeMap::new();let mut stmt=c.prepare("SELECT path,hash FROM files WHERE job=(SELECT active FROM indexes WHERE id=?1)")?;
                             for row in stmt.query_map([job_index],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?{let(p,h)=row?;map.insert(p,h);}Ok((pending,map))
                         }).await;
-                        let (pending,old)=match status {Ok(value)=>value,Err(error)=>{eprintln!("arko-index watcher status: {error}");continue;}};if pending>0{due=Some(tokio::time::Instant::now()+debounce);continue;}
+                        let (pending,old)=match status {Ok(value)=>value,Err(error)=>{log::warn!("index {index}: watcher could not read the index status: {error}");continue;}};if pending>0{due=Some(tokio::time::Instant::now()+debounce);continue;}
                         let scan_spec=spec.clone();let scan=tokio::task::spawn_blocking(move||source::scan(&scan_spec)).await;
-                        let manifest=match scan {Ok(Ok(value))=>value,Ok(Err(error))=>{eprintln!("arko-index watcher scan: {error}");continue;},Err(error)=>{eprintln!("arko-index watcher worker: {error}");continue;}};let new=manifest.files.into_iter().map(|s|(s.path,s.hash)).collect();
-                        if !coalesce(&old,&new).is_empty()&& let Err(error)=this.start_update(&index).await{eprintln!("arko-index watcher update: {error}");}
+                        let manifest=match scan {Ok(Ok(value))=>value,Ok(Err(error))=>{log::warn!("index {index}: watcher scan failed: {error}");continue;},Err(error)=>{log::warn!("index {index}: watcher scan worker failed: {error}");continue;}};let new=manifest.files.into_iter().map(|s|(s.path,s.hash)).collect();
+                        if !coalesce(&old,&new).is_empty()&& let Err(error)=this.start_update(&index).await{log::warn!("index {index}: watcher could not start an update: {error}");}
                     }
                 }
             }

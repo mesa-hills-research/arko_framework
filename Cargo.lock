@@ -188,6 +188,7 @@ dependencies = [
  "futures",
  "glob",
  "ignore",
+ "log",
  "notify",
  "proc-macro2",
  "pulldown-cmark",

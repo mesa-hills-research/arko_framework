@@ -176,7 +176,7 @@ impl ArkoIndex {
                     .phase(&job, phase, Some(error.to_string()))
                     .await
                 {
-                    eprintln!("arko-index: failed to persist job status: {e}");
+                    log::error!("failed to persist the status of job {job}: {e}");
                 }
             }
             this.inner.controls.lock().await.remove(&job);
