@@ -100,6 +100,19 @@ impl Task {
         self.failures.push(detail);
         self.rejected.extend(usage);
     }
+    /// The delivery for a queued request that is paused or cancelled, keeping
+    /// the usage of attempts rejected before the wait; `None` when its caller
+    /// has gone.
+    fn stopped(self) -> Option<(oneshot::Sender<Outcome>, Outcome)> {
+        if self.reply.is_closed() {
+            return None;
+        }
+        let error = match *self.control.borrow() {
+            1 => Error::Paused,
+            _ => Error::Cancelled,
+        };
+        Some(self.outcome(Err(error)))
+    }
     fn outcome(self, result: Result<Reply>) -> (oneshot::Sender<Outcome>, Outcome) {
         let outcome = Outcome {
             result,
@@ -139,18 +152,27 @@ impl Control {
 pub(crate) struct Scheduler {
     tx: mpsc::Sender<Task>,
     pub active: Arc<AtomicUsize>,
+    /// Scheduling-loop iterations, so tests can tell waiting from spinning.
+    #[cfg(test)]
+    iterations: Arc<AtomicUsize>,
 }
 impl Scheduler {
     pub fn new(backend: Arc<dyn Backend>, limit: usize, max_transient_attempts: usize) -> Self {
         let (tx, mut rx) = mpsc::channel::<Task>(64);
         let active = Arc::new(AtomicUsize::new(0));
         let count = active.clone();
+        #[cfg(test)]
+        let iterations = Arc::new(AtomicUsize::new(0));
+        #[cfg(test)]
+        let loops = iterations.clone();
         tokio::spawn(async move {
             let mut queue = VecDeque::<Task>::new();
             let mut running = JoinSet::new();
             let mut delivered = vec![];
             let mut open = true;
             loop {
+                #[cfg(test)]
+                loops.fetch_add(1, Ordering::SeqCst);
                 // Drain prepared requests before selecting priority and refilling.
                 while queue.len() < 128 {
                     match rx.try_recv() {
@@ -158,31 +180,29 @@ impl Scheduler {
                         Err(_) => break,
                     }
                 }
+                // Paused/cancelled and abandoned requests leave the queue even
+                // while every provider slot is busy: delivering them needs none.
+                let mut index = 0;
+                while index < queue.len() {
+                    if *queue[index].control.borrow() == 0 && !queue[index].reply.is_closed() {
+                        index += 1;
+                    } else if let Some(stopped) = queue.remove(index).and_then(Task::stopped) {
+                        delivered.push(stopped);
+                    }
+                }
                 while running.len() < limit {
                     let now = Instant::now();
                     let position = queue
                         .iter()
-                        .position(|t| t.initial && (t.ready <= now || *t.control.borrow() != 0))
-                        .or_else(|| {
-                            queue
-                                .iter()
-                                .position(|t| t.ready <= now || *t.control.borrow() != 0)
-                        });
+                        .position(|t| t.initial && t.ready <= now)
+                        .or_else(|| queue.iter().position(|t| t.ready <= now));
                     let Some(position) = position else {
                         break;
                     };
                     let task = queue.remove(position).unwrap();
-                    if task.reply.is_closed() {
-                        continue;
-                    }
-                    let state = *task.control.borrow();
-                    if state != 0 {
-                        // Keeps the usage of attempts rejected before the wait.
-                        delivered.push(task.outcome(Err(if state == 1 {
-                            Error::Paused
-                        } else {
-                            Error::Cancelled
-                        })));
+                    // A pause or cancel may have arrived since the queue was drained.
+                    if *task.control.borrow() != 0 || task.reply.is_closed() {
+                        delivered.extend(task.stopped());
                         continue;
                     }
                     task.event("started", serde_json::json!({}));
@@ -223,6 +243,10 @@ impl Scheduler {
                         None => std::future::pending().await,
                     }
                 };
+                // Wakes once per real control change of a queued request. Each
+                // clone marks the current value seen, so a change already
+                // handled doesn't wake the loop again; one made since the
+                // queue was drained wakes it at once.
                 let changes = async {
                     use futures::StreamExt;
                     let mut waits: futures::stream::FuturesUnordered<_> = queue
@@ -230,7 +254,9 @@ impl Scheduler {
                         .map(|t| {
                             let mut control = t.control.clone();
                             async move {
-                                let _ = control.changed().await;
+                                if *control.borrow_and_update() == 0 {
+                                    let _ = control.changed().await;
+                                }
                             }
                         })
                         .collect();
@@ -278,7 +304,12 @@ impl Scheduler {
                 }
             }
         });
-        Self { tx, active }
+        Self {
+            tx,
+            active,
+            #[cfg(test)]
+            iterations,
+        }
     }
     pub async fn call(&self, operation: Operation, initial: bool, control: &Control) -> Outcome {
         self.call_tracked(operation, initial, control, None).await
@@ -498,6 +529,33 @@ mod tests {
             Err(Error::Paused)
         ));
         assert_eq!(gate.tries.lock().unwrap()[0], 1);
+    }
+    #[tokio::test]
+    async fn a_queued_request_pauses_while_every_slot_is_busy_without_spinning() {
+        let (gate, s, mut started) = setup(2, 1, false);
+        let busy = enqueue(&s, 0, true, &Control::new());
+        assert_eq!(started.recv().await, Some(0));
+        let control = Control::new();
+        let queued = enqueue(&s, 1, true, &control);
+        // Let the scheduler take the request into its queue behind the busy slot.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        control.set(1);
+        // Delivering a pause needs no provider slot.
+        let paused = tokio::time::timeout(Duration::from_secs(5), queued)
+            .await
+            .expect("paused request waited for the busy slot")
+            .unwrap();
+        assert!(matches!(paused, Err(Error::Paused)));
+        // With the pause delivered, nothing wakes the scheduler until the busy
+        // call finishes.
+        let before = s.iterations.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let spun = s.iterations.load(Ordering::SeqCst) - before;
+        assert!(spun <= 2, "scheduler looped {spun} times while idle");
+        assert!(!busy.is_finished());
+        gate.gates[0].add_permits(1);
+        busy.await.unwrap().unwrap();
+        assert_eq!(gate.tries.lock().unwrap()[1], 0);
     }
     #[tokio::test]
     async fn cancellation_closes_active_request() {
