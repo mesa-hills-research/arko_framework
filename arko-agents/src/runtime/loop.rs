@@ -98,18 +98,10 @@ const HOST_STOPPED_CALL: &str =
 const TASK_FAILED_CALL: &str =
     "The task failed on an earlier tool error, so this call was not run.";
 
-/// Why a call of a turn was not run once the task stopped at an earlier
-/// call: failed on a tool error, cancelled (by the user or, through
-/// middleware, by a workflow), or otherwise ended.
-fn not_run_after_stop(state: &TaskState) -> String {
-    match state {
-        TaskState::Failed { .. } => TASK_FAILED_CALL.to_string(),
-        TaskState::Cancelled { reason } => {
-            format!("This call was not run: {}.", reason.trim_end_matches('.'))
-        }
-        _ => UNREACHED_CALL.to_string(),
-    }
-}
+/// Results of calls a `CancelTask` command stopped. The command carries no
+/// reason: it comes from the user or from a host such as a workflow
+/// stopping its agents.
+const TASK_CANCELLED_CALL: &str = "The task was cancelled, so this call was not run.";
 
 /// When `user_command_timeout_seconds` ran out during the wait.
 fn approval_timed_out_call(seconds: u64) -> String {
@@ -277,6 +269,10 @@ pub struct AgentLoop {
     stop_requested: bool,
     /// A batch of tool calls is running; see [`begin_tool_batch`](Self::begin_tool_batch).
     deferring_tool_errors: bool,
+    /// The task failed on a tool error under `ToolErrorPolicy::FailTask`
+    /// (not on a middleware's decision); see
+    /// [`not_run_after_stop`](Self::not_run_after_stop).
+    failed_on_tool_error: bool,
     #[cfg(test)]
     scripted_responses: std::sync::Mutex<VecDeque<ScriptedStreamResult>>,
     /// The model of every request made, in order.
@@ -351,6 +347,7 @@ impl AgentLoop {
             cache_pause_pending: None,
             stop_requested: false,
             deferring_tool_errors: false,
+            failed_on_tool_error: false,
             #[cfg(test)]
             scripted_responses: std::sync::Mutex::new(VecDeque::new()),
             #[cfg(test)]
@@ -1411,8 +1408,7 @@ impl AgentLoop {
                                         // on a tool error, or cancelled) still
                                         // answers the calls it didn't run.
                                         if self.task.current_state.is_terminal() {
-                                            let not_run =
-                                                not_run_after_stop(&self.task.current_state);
+                                            let not_run = self.not_run_after_stop();
                                             for pending_call_info in pending_calls {
                                                 if let Some(ai_call) = self
                                                     .task
@@ -1667,6 +1663,9 @@ impl AgentLoop {
                                             "Task {}: Error recovery rejected by user.",
                                             self.task.id
                                         );
+                                        // The failed task still records the
+                                        // results its last turn holds.
+                                        self.settle_interrupted_wait(UNREACHED_CALL).await?;
                                         self.task.set_state(TaskState::Failed {
                                             reason: format!(
                                                 "Error recovery rejected by user for error: {}",
@@ -1695,10 +1694,7 @@ impl AgentLoop {
                         if let UserCommand::CancelTask = cmd {
                             log::info!("Task {}: Cancelled by user command.", self.task.id);
                             // The calls it waited on are answered as not run.
-                            let not_run = not_run_after_stop(&TaskState::Cancelled {
-                                reason: CANCELLED_BY_USER.to_string(),
-                            });
-                            self.settle_interrupted_wait(&not_run).await?;
+                            self.settle_interrupted_wait(TASK_CANCELLED_CALL).await?;
                             self.task.set_state(TaskState::Cancelled {
                                 reason: CANCELLED_BY_USER.to_string(),
                             });
@@ -2285,7 +2281,7 @@ impl AgentLoop {
                 // a cancellation) still answers every call once: calls left
                 // awaiting an approval that won't be asked, and calls it
                 // didn't reach.
-                let not_run = not_run_after_stop(&self.task.current_state);
+                let not_run = self.not_run_after_stop();
                 if !matches!(self.task.current_state, TaskState::InProgress) {
                     for pending in calls_needing_approval.drain(..) {
                         if let Some(call) = self
@@ -2319,7 +2315,8 @@ impl AgentLoop {
                     .map(|(index, call)| (*index, call.clone()))
                     .collect();
                 native_stream_call_ids.retain(|index, _| *index >= tool_calls.len());
-                self.reject_announced_calls(&mut unreached, UNREACHED_CALL).await?;
+                self.reject_announced_calls(&mut unreached, &not_run)
+                    .await?;
                 self.reject_announced_calls(&mut native_stream_call_ids, UNDELIVERED_CALL).await?;
 
                 if !calls_needing_approval.is_empty()
@@ -2883,6 +2880,23 @@ impl AgentLoop {
         .await
     }
 
+    /// Why a call of the turn was not run once the task stopped at an
+    /// earlier call: it failed on a tool error, a middleware failed or
+    /// cancelled it (a workflow's cancellation gives "This call was not run:
+    /// Workflow cancelled."), or the turn otherwise ended.
+    fn not_run_after_stop(&self) -> String {
+        match &self.task.current_state {
+            TaskState::Failed { .. } if self.failed_on_tool_error => TASK_FAILED_CALL.to_string(),
+            TaskState::Cancelled { reason } if reason == CANCELLED_BY_USER => {
+                TASK_CANCELLED_CALL.to_string()
+            }
+            TaskState::Failed { reason } | TaskState::Cancelled { reason } => {
+                format!("This call was not run: {}.", reason.trim_end_matches('.'))
+            }
+            _ => UNREACHED_CALL.to_string(),
+        }
+    }
+
     /// Starts running a batch of tool calls (a turn's, or an approval's):
     /// under `ToolErrorPolicy::PauseAndAwaitApproval` a failed call no longer
     /// pauses the task at once, so the batch's other calls run first, and
@@ -2920,10 +2934,16 @@ impl AgentLoop {
             self.task.current_state.clone(),
         ))
         .await?;
+        // The message lists every failure; one call is named only when it
+        // is the only one.
+        let tool_call_id = match errors.as_slice() {
+            [error] => error.tool_call_id,
+            _ => None,
+        };
         self.emit_event(AgentEvent::ErrorEncountered {
             error_message,
             requires_approval_to_retry: true,
-            tool_call_id: errors[0].tool_call_id,
+            tool_call_id,
         })
         .await
     }
@@ -3998,12 +4018,14 @@ impl AgentLoop {
                 Ok(error_message_for_llm)
             }
             // The batch's other calls run first; `end_tool_batch` pauses.
+            // The call's own result reports the error in place (output-based
+            // mode; a native call's error result carries it already).
             ToolErrorPolicy::PauseAndAwaitApproval if self.deferring_tool_errors => {
                 self.task.deferred_tool_errors.push(DeferredToolError {
                     message: error_message_for_event,
                     tool_call_id,
                 });
-                Ok(String::new())
+                Ok(error_message_for_llm)
             }
             ToolErrorPolicy::PauseAndAwaitApproval => {
                 self.task
@@ -4020,9 +4042,10 @@ impl AgentLoop {
                     tool_call_id,
                 })
                 .await?;
-                Ok(String::new())
+                Ok(error_message_for_llm)
             }
             ToolErrorPolicy::FailTask => {
+                self.failed_on_tool_error = true;
                 self.task.set_state(TaskState::Failed {
                     reason: error_message_for_event.clone(),
                 });

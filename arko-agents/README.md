@@ -253,9 +253,12 @@ canonical paths.
 - `InformAgentAndContinue` (the default) reports the error as that call's result (a
   native error result, or a text result in output-based mode) and emits
   `ErrorEncountered`; the other calls of the response run as usual.
-- `PauseAndAwaitApproval` (opt-in) lets the other calls of the response run first,
-  including calls that wait for approval, and then pauses once, whatever number of calls
-  failed, for `ApproveErrorRecovery` or `RejectErrorRecovery`.
+- `PauseAndAwaitApproval` (opt-in) reports each error as its call's result too, lets the
+  other calls of the response run first, including calls that wait for approval, and
+  then pauses once, whatever number of calls failed, for `ApproveErrorRecovery` or
+  `RejectErrorRecovery`. The pause's `ErrorEncountered` lists every failure and names the
+  call when one failed. A rejected recovery fails the task with the turn's results
+  recorded.
 - `FailTask` (opt-in) fails the task at the first error. The calls of the response it
   did not run get a result saying so ("The task failed on an earlier tool error, so this
   call was not run."), so every call keeps its result.

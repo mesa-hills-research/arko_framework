@@ -1103,25 +1103,31 @@ async fn under_fail_task_a_native_batch_stops_and_answers_the_calls_it_did_not_r
     }
 }
 
-/// Cancels the task at a call to `b.txt`, as a workflow's cancellation does.
-struct CancelAtB;
+/// Stops the task at a call to `b.txt`, as a workflow's cancellation (or a
+/// middleware failing the task) does.
+struct StopAtB {
+    cancel: bool,
+}
 
 #[async_trait]
-impl ToolExecutionMiddleware for CancelAtB {
+impl ToolExecutionMiddleware for StopAtB {
     async fn before(
         &self,
         _: &ToolExecutionContext<'_>,
         call: &ToolCallContext<'_>,
     ) -> Result<ToolExecutionDecision, ToolError> {
-        Ok(
-            if call.parameters.get("path").and_then(Value::as_str) == Some("b.txt") {
-                ToolExecutionDecision::CancelTask {
-                    reason: "Workflow cancelled.".into(),
-                }
-            } else {
-                ToolExecutionDecision::Continue
-            },
-        )
+        if call.parameters.get("path").and_then(Value::as_str) != Some("b.txt") {
+            return Ok(ToolExecutionDecision::Continue);
+        }
+        Ok(if self.cancel {
+            ToolExecutionDecision::CancelTask {
+                reason: "Workflow cancelled.".into(),
+            }
+        } else {
+            ToolExecutionDecision::FailTask {
+                reason: "Budget exhausted.".into(),
+            }
+        })
     }
 
     async fn after(
@@ -1134,19 +1140,36 @@ impl ToolExecutionMiddleware for CancelAtB {
     }
 }
 
+/// A native turn whose calls the stream announces first, as providers
+/// stream them.
+fn announced_turn(calls: Vec<ai::ToolCall>) -> ScriptedStreamResult {
+    let starts: Vec<_> = calls
+        .iter()
+        .enumerate()
+        .map(|(index, call)| {
+            Ok(ai::StreamEvent::ToolCallStart {
+                index,
+                name: call.name.clone(),
+            })
+        })
+        .collect();
+    let Ok(end) = turn(calls) else { unreachable!() };
+    Ok(futures::stream::iter(starts).chain(end).boxed())
+}
+
 #[tokio::test]
-async fn a_cancelled_native_batch_answers_the_calls_it_did_not_run() {
-    for approvals in [false, true] {
+async fn a_native_batch_a_middleware_stops_answers_the_calls_it_did_not_run() {
+    for (cancel, approvals) in [(true, false), (true, true), (false, false), (false, true)] {
         let workspace = batch_workspace();
         let mut config = config(ToolCallingMode::Native, &["read_file"]);
         config.tool_config.default_auto_approve_tool_use = !approvals;
         let (mut agent, mut events, commands) = agent(config, ToolRegistry::new(), &workspace);
-        agent.execution_middleware = Some(Arc::new(CancelAtB));
+        agent.execution_middleware = Some(Arc::new(StopAtB { cancel }));
         agent
             .scripted_responses
             .get_mut()
             .unwrap()
-            .push_back(turn(vec![
+            .push_back(announced_turn(vec![
                 read_a(),
                 native_call("b", "read_file", serde_json::json!({"path": "b.txt"})),
                 native_call("c", "read_file", serde_json::json!({"path": "c.txt"})),
@@ -1183,31 +1206,43 @@ async fn a_cancelled_native_batch_answers_the_calls_it_did_not_run() {
             .unwrap()
             .unwrap();
         seen.extend(drain(&mut events));
-        assert_eq!(
-            task.current_state,
+        let reason = if cancel {
+            "Workflow cancelled."
+        } else {
+            "Budget exhausted."
+        };
+        let expected = if cancel {
             TaskState::Cancelled {
-                reason: "Workflow cancelled.".into()
+                reason: reason.into(),
             }
-        );
+        } else {
+            TaskState::Failed {
+                reason: reason.into(),
+            }
+        };
+        assert_eq!(task.current_state, expected);
         assert_calls_paired(&task.conversation);
         assert!(
             result_for(&task.conversation, "a")[0]
                 .output
                 .contains("A-CONTENTS")
         );
-        assert_eq!(
-            result_for(&task.conversation, "b")[0].output,
-            "Workflow cancelled."
-        );
-        let not_run = "This call was not run: Workflow cancelled.";
+        assert_eq!(result_for(&task.conversation, "b")[0].output, reason);
+        // The call the stop left gets the stop's reason, in its result and
+        // its `ToolRejected`.
+        let not_run = format!("This call was not run: {reason}");
         assert_eq!(result_for(&task.conversation, "c")[0].output, not_run);
-        assert_eq!(
-            seen.iter().any(|event| matches!(
-                event,
-                AgentEvent::ToolRejected { reason: Some(reason), .. } if reason == not_run
-            )),
-            approvals
-        );
+        let rejected: Vec<_> = seen
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolRejected {
+                    reason: Some(rejected),
+                    ..
+                } if rejected.starts_with("This call was not run") => Some(rejected.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rejected, [not_run.as_str()], "{cancel} {approvals}");
         std::fs::remove_dir_all(workspace).unwrap();
     }
 }
@@ -1246,11 +1281,11 @@ async fn cancelling_during_an_approval_wait_answers_the_waiting_calls() {
         }
     );
     assert_calls_paired(&task.conversation);
-    let not_run = "This call was not run: Task cancelled by user.";
+    // The command comes from the user or from a host such as a workflow.
     for id in ["a", "c"] {
         assert_eq!(
             result_for(&task.conversation, id)[0].output,
-            not_run,
+            TASK_CANCELLED_CALL,
             "{id}"
         );
     }
@@ -1259,12 +1294,104 @@ async fn cancelling_during_an_approval_wait_answers_the_waiting_calls() {
         .filter(|event| {
             matches!(
                 event,
-                AgentEvent::ToolRejected { reason: Some(reason), .. } if reason == not_run
+                AgentEvent::ToolRejected { reason: Some(reason), .. } if reason == TASK_CANCELLED_CALL
             )
         })
         .count();
     assert_eq!(rejected, 2);
     std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[tokio::test]
+async fn rejecting_recovery_records_the_turn_and_a_pause_names_every_failure() {
+    // One failed call, then two.
+    for failures in [1, 2] {
+        let workspace = batch_workspace();
+        let mut config = config(ToolCallingMode::Native, &["read_file"]);
+        config.error_recovery_config.on_tool_execution_error =
+            ToolErrorPolicy::PauseAndAwaitApproval;
+        let (mut agent, mut events, commands) = agent(config, ToolRegistry::new(), &workspace);
+        let first = if failures == 1 {
+            read_a()
+        } else {
+            native_call("a", "read_file", serde_json::json!({"path": "gone.txt"}))
+        };
+        agent
+            .scripted_responses
+            .get_mut()
+            .unwrap()
+            .push_back(failing_batch(first));
+        let run = tokio::spawn(agent.run());
+        let mut seen = Vec::new();
+        let (message, tool_call_id) = wait_for(&mut events, &mut seen, |event| match event {
+            AgentEvent::ErrorEncountered {
+                requires_approval_to_retry: true,
+                error_message,
+                tool_call_id,
+            } => Some((error_message.clone(), *tool_call_id)),
+            _ => None,
+        })
+        .await;
+        // The pause lists every failure and names a call only when one
+        // failed.
+        assert_eq!(message.lines().count(), failures);
+        assert_eq!(tool_call_id.is_some(), failures == 1);
+        commands
+            .send(UserCommand::RejectErrorRecovery { message: None })
+            .await
+            .unwrap();
+        let task = timeout(Duration::from_secs(10), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(task.current_state, TaskState::Failed { .. }));
+        // The failed task still records the turn's results.
+        assert!(task.pending_native_tool_results.is_empty());
+        assert_calls_paired(&task.conversation);
+        assert!(
+            result_for(&task.conversation, "c")[0]
+                .output
+                .contains("C-CONTENTS")
+        );
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn an_output_based_error_under_pause_keeps_its_result_when_the_wait_ends() {
+    // The missing file's read fails and pauses the task once the read
+    // outside the workspace is decided; the approval wait times out first.
+    let root = workspace();
+    let workspace = root.join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(root.join("outside.txt"), "OUTSIDE-CONTENTS").unwrap();
+    let mut config = config(ToolCallingMode::OutputBased, &["read_file"]);
+    config.tool_config.default_out_of_workspace_path_policy = PathSafetyPolicy::RequireApproval;
+    config.error_recovery_config.on_tool_execution_error = ToolErrorPolicy::PauseAndAwaitApproval;
+    config.user_command_timeout_seconds = Some(1);
+    let (mut agent, _events, _commands) = agent(config, ToolRegistry::new(), &workspace);
+    agent.scripted_responses.get_mut().unwrap().push_back(text_turn(
+        "<batched_tool_call>\n<read_file>\n<path>missing.txt</path>\n</read_file>\n<read_file>\n<path>../outside.txt</path>\n</read_file>\n</batched_tool_call>",
+    ));
+    let task = timeout(Duration::from_secs(10), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Interrupted { .. }));
+    assert!(task.deferred_tool_errors.is_empty());
+    let last = task
+        .conversation
+        .messages
+        .last()
+        .and_then(|message| message.content.first()?.as_text())
+        .unwrap();
+    assert!(last.contains("failed during execution"), "{last}");
+    assert!(
+        last.contains("Tool read_file: Human approval timed out after 1 seconds"),
+        "{last}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]
