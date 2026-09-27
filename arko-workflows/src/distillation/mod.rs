@@ -553,8 +553,8 @@ impl ToolResultInterceptor for DistillationInterceptor {
                     self.config.name
                 ))
             })?;
-        // A refused or cut-off summary is billed like a complete one, so the
-        // call is charged and recorded before its text is judged.
+        // A refused or cut-off summary is billed like a complete one, so
+        // every returned response is charged and recorded, used or not.
         let summary = complete_summary(&response);
         let cost = response.usage.billed();
         let cost_result = self.context.budget.add_manual_cost(
