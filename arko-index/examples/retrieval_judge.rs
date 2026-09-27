@@ -44,12 +44,13 @@ async fn grade_request(client: &LLMClient, request: ModelRequest) -> AnyResult<M
         if let StreamEvent::End(response) = event? {
             // Refusals, missing/extra calls and unparseable arguments fail here.
             let call = response.single_tool_call(&request.tool)?;
-            if !matches!(response.stop_reason, StopReason::EndTurn | StopReason::ToolUse) {
-                return Err(format!(
-                    "Luna Max response incomplete: {:?}",
-                    response.stop_reason
-                )
-                .into());
+            if !matches!(
+                response.stop_reason,
+                StopReason::EndTurn | StopReason::ToolUse
+            ) {
+                return Err(
+                    format!("Luna Max response incomplete: {:?}", response.stop_reason).into(),
+                );
             }
             return Ok(ModelReply {
                 value: call.arguments.clone(),

@@ -626,7 +626,10 @@ mod tests {
     #[test]
     fn retry_deadlines_saturate() {
         let now = Instant::now();
-        assert_eq!(deadline(now, Duration::from_secs(5)), now + Duration::from_secs(5));
+        assert_eq!(
+            deadline(now, Duration::from_secs(5)),
+            now + Duration::from_secs(5)
+        );
         assert!(deadline(now, Duration::MAX) >= now + arko_ai::retry::MAX_SERVER_DELAY_HINT);
         let delay = retry_delay(3, Some(Duration::MAX));
         assert!(delay <= arko_ai::retry::MAX_SERVER_DELAY_HINT + Duration::from_secs(60));

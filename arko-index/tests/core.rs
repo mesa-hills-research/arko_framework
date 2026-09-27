@@ -986,11 +986,18 @@ async fn repair_is_local_and_accepted_work_survives_pause_and_restart() {
         .filter(|e| e.kind == "request_finished" && !e.detail["usage"].is_null())
         .collect();
     assert_eq!(finished.len(), calls.len());
-    assert!(finished.iter().all(|e| e.detail["usage"]["input_tokens"] == 100));
+    assert!(
+        finished
+            .iter()
+            .all(|e| e.detail["usage"]["input_tokens"] == 100)
+    );
     let embedded = events.iter().filter(|e| e.kind == "embedded").count();
     assert!(embedded > 0);
     assert_eq!(usage.embedding_calls, embedded);
-    assert_eq!(usage.embedding.as_ref().unwrap().input_tokens, 1_000 * embedded);
+    assert_eq!(
+        usage.embedding.as_ref().unwrap().input_tokens,
+        1_000 * embedded
+    );
     assert_eq!(usage.unreported_calls, 0);
     assert!((usage.billed() - 0.00006 * embedded as f64).abs() < 1e-12);
 }
@@ -1034,7 +1041,10 @@ async fn usage_totals_load_from_databases_saved_before_usage_tracking() {
     assert_eq!(new.phase, "ready", "{:?}", new.problem);
     assert_eq!(new.usage.chunk_calls, 1);
     assert_eq!(new.usage.embedding_calls, 1);
-    assert_eq!(index.status(&job.job).await.unwrap().usage, JobUsage::default());
+    assert_eq!(
+        index.status(&job.job).await.unwrap().usage,
+        JobUsage::default()
+    );
 }
 #[tokio::test]
 async fn malformed_embeddings_do_not_replace_previous_generation() {

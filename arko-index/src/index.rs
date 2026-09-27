@@ -715,8 +715,14 @@ impl ArkoIndex {
                     let estimated: usize = bin.iter().map(|p| p.tokens).sum();
                     // The request was billed even when its vectors are unusable.
                     let (kind, detail) = match &vectors {
-                        Ok(_) => ("embedded", json!({"billed_tokens":result.billed_tokens,"reserved_tokens":estimated,"usage":result.usage_info})),
-                        Err(e) => ("embedding_rejected", json!({"error":e.to_string(),"billed_tokens":result.billed_tokens,"usage":result.usage_info})),
+                        Ok(_) => (
+                            "embedded",
+                            json!({"billed_tokens":result.billed_tokens,"reserved_tokens":estimated,"usage":result.usage_info}),
+                        ),
+                        Err(e) => (
+                            "embedding_rejected",
+                            json!({"error":e.to_string(),"billed_tokens":result.billed_tokens,"usage":result.usage_info}),
+                        ),
                     };
                     let (j, usage, detail) = (job.to_owned(), result.usage_info, encode(&detail)?);
                     let vectors = match vectors {

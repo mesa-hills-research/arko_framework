@@ -48,7 +48,10 @@ async fn grade_request(
         if let StreamEvent::End(response) = event? {
             // Refusals, missing/extra calls and unparseable arguments fail here.
             let call = response.single_tool_call(&request.tool)?;
-            if !matches!(response.stop_reason, StopReason::EndTurn | StopReason::ToolUse) {
+            if !matches!(
+                response.stop_reason,
+                StopReason::EndTurn | StopReason::ToolUse
+            ) {
                 return Err(format!("Luna response incomplete: {:?}", response.stop_reason).into());
             }
             return Ok(ModelReply {

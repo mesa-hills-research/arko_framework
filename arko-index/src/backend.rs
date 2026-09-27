@@ -242,7 +242,9 @@ impl Backend for ArkoBackend {
                 });
             }
         }
-        Err(invalid("chunk model stream ended without a completed response"))
+        Err(invalid(
+            "chunk model stream ended without a completed response",
+        ))
     }
     fn chunk_model_info(&self) -> Option<ChunkModelInfo> {
         Some(ChunkModelInfo::new(&self.chunk_model, &self.chunk_config))
@@ -384,20 +386,28 @@ mod tests {
         assert_eq!(openai["tool_choice"], json!({"Specific": "submit_cuts"}));
         assert_eq!(openai["parallel_tool_calls"], false);
         // Claude Opus 5.5 rejects a forced tool: the reply is still validated.
-        let opus = tools(&Model::anthropic_claude_opus_5_5(), &GenerationConfig::default());
+        let opus = tools(
+            &Model::anthropic_claude_opus_5_5(),
+            &GenerationConfig::default(),
+        );
         assert_eq!(opus["tool_choice"], "Auto");
         assert_eq!(opus["parallel_tool_calls"], false);
         // Gemini can't disable parallel calls; a second call is rejected instead.
-        let gemini = tools(&Model::google_gemini_3_5_flash(), &GenerationConfig::default());
+        let gemini = tools(
+            &Model::google_gemini_3_5_flash(),
+            &GenerationConfig::default(),
+        );
         assert_eq!(gemini["tool_choice"], json!({"Specific": "submit_cuts"}));
         assert!(gemini.get("parallel_tool_calls").is_none_or(Value::is_null));
         // Provenance of a configured model.
-        let adaptive = GenerationConfig::default().with_reasoning(ReasoningConfig::AnthropicAdaptive {
-            effort: None,
-        });
+        let adaptive = GenerationConfig::default()
+            .with_reasoning(ReasoningConfig::AnthropicAdaptive { effort: None });
         let info = ChunkModelInfo::new(&Model::anthropic_claude_opus_5_5(), &adaptive);
         assert_eq!(info.model, "claude-opus-5-5");
-        assert_eq!(info.reasoning, json!({"AnthropicAdaptive": {"effort": null}}));
+        assert_eq!(
+            info.reasoning,
+            json!({"AnthropicAdaptive": {"effort": null}})
+        );
         let plain = ChunkModelInfo::new(&Model::openai_gpt_5_5(), &GenerationConfig::default());
         assert_eq!(plain.reasoning, Value::Null);
     }

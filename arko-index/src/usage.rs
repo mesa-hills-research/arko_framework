@@ -89,14 +89,21 @@ mod tests {
         usage.record_chunk(Some(&subscription));
         usage.record_chunk(None);
         let chunking = usage.chunking.as_ref().unwrap();
-        assert_eq!((chunking.input_tokens, chunking.output_tokens), (2_000, 400));
+        assert_eq!(
+            (chunking.input_tokens, chunking.output_tokens),
+            (2_000, 400)
+        );
         assert_eq!(chunking.billing, BillingKind::Subscription);
         assert_eq!(chunking.total_cost, 1.0);
         assert_eq!(chunking.billed(), 0.0);
         let embedding = UsageInfo::for_embedding(1_000_000, 0.06);
         usage.record_embedding(Some(&embedding));
         assert_eq!(
-            (usage.chunk_calls, usage.embedding_calls, usage.unreported_calls),
+            (
+                usage.chunk_calls,
+                usage.embedding_calls,
+                usage.unreported_calls
+            ),
             (3, 1, 1)
         );
         assert!((usage.billed() - 0.06).abs() < 1e-12);
