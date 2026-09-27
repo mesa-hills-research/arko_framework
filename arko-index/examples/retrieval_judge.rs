@@ -1,7 +1,7 @@
 //! Grade a saved retrieval pool with mode/rank hidden; no index changes.
 use arko_ai::{
-    GenerationConfig, LLMClient, Model, OpenAIEffort, ReasoningConfig, StreamEvent, ToolChoice,
-    ToolConfig, ToolDefinition, Verbosity,
+    GenerationConfig, LLMClient, Model, OpenAIEffort, ReasoningConfig, StopReason, StreamEvent,
+    ToolChoice, ToolConfig, ToolDefinition, Verbosity,
 };
 use arko_index::backend::{ModelReply, ModelRequest};
 use futures::{StreamExt, stream};
@@ -42,20 +42,17 @@ async fn grade_request(client: &LLMClient, request: ModelRequest) -> AnyResult<M
     let mut stream = client.generate_stream(&conversation, config).await?;
     while let Some(event) = stream.next().await {
         if let StreamEvent::End(response) = event? {
-            if response.model_call_usage.stop_reason.as_deref() != Some("completed") {
+            // Refusals, missing/extra calls and unparseable arguments fail here.
+            let call = response.single_tool_call(&request.tool)?;
+            if !matches!(response.stop_reason, StopReason::EndTurn | StopReason::ToolUse) {
                 return Err(format!(
                     "Luna Max response incomplete: {:?}",
-                    response.model_call_usage.stop_reason
+                    response.stop_reason
                 )
                 .into());
             }
-            if response.message.tool_calls.len() != 1
-                || response.message.tool_calls[0].name != request.tool
-            {
-                return Err("Expected exactly one requested tool call".into());
-            }
             return Ok(ModelReply {
-                value: response.message.tool_calls[0].arguments.clone(),
+                value: call.arguments.clone(),
                 usage: serde_json::to_value(&response.model_call_usage)?,
             });
         }

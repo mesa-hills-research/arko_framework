@@ -2,8 +2,9 @@
 use crate::{EmbeddingProfile, Result, error::invalid};
 use arko_ai::{
     EmbeddingClient, EmbeddingConfig, EmbeddingModelDetails, EmbeddingProviderIdentifier,
-    GenerationConfig, LLMClient, Model, OpenAIEffort, ReasoningConfig, StreamEvent, TokenCounter,
-    ToolChoice, ToolConfig, ToolDefinition, Verbosity, VoyageInputType,
+    GenerationConfig, GenerationResponse, LLMClient, Model, OpenAIEffort, ReasoningConfig,
+    StopReason, StreamEvent, TokenCounter, ToolCall, ToolChoice, ToolConfig, ToolDefinition,
+    Verbosity, VoyageInputType,
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,26 @@ pub trait Backend: Send + Sync + 'static {
     fn limits(&self) -> Limits;
     fn profile(&self) -> &EmbeddingProfile;
     fn output_tokenizer(&self) -> String;
+}
+
+/// The one call to `tool` in a completed turn. Fails like
+/// [`GenerationResponse::single_tool_call`] (refusals, no call, several calls,
+/// another tool, unparseable arguments) and, even when the output holds a
+/// complete call, for a turn that ended any other way than
+/// [`StopReason::EndTurn`] or [`StopReason::ToolUse`].
+pub(crate) fn completed_tool_call<'a>(
+    response: &'a GenerationResponse,
+    tool: &str,
+) -> std::result::Result<&'a ToolCall, arko_ai::Error> {
+    let call = response.single_tool_call(tool)?;
+    match response.stop_reason {
+        StopReason::EndTurn | StopReason::ToolUse => Ok(call),
+        _ => Err(arko_ai::Error::UnexpectedToolCalls {
+            expected: tool.to_owned(),
+            stop_reason: response.stop_reason.clone(),
+            found: vec![call.name.clone()],
+        }),
+    }
 }
 
 pub struct ArkoBackend {
@@ -117,21 +138,12 @@ impl Backend for ArkoBackend {
         let mut stream = self.llm.generate_stream(&conversation, config).await?;
         while let Some(event) = stream.next().await {
             if let StreamEvent::End(response) = event? {
-                if response.model_call_usage.stop_reason.as_deref() != Some("completed") {
-                    return Err(invalid(format!(
-                        "Luna response incomplete/refused: {:?}",
-                        response.model_call_usage.stop_reason
-                    )));
-                }
-                if response.message.tool_calls.len() != 1
-                    || response.message.tool_calls[0].name != request.tool
-                {
-                    return Err(invalid(
-                        "Luna did not complete exactly one requested tool call",
-                    ));
-                }
+                // Refusals and token limits are permanent failures; a missing,
+                // extra or malformed call is resampled as a transient failure.
+                let call = completed_tool_call(&response, &request.tool)?;
                 return Ok(ModelReply {
-                    value: response.message.tool_calls[0].arguments.clone(),
+                    value: call.arguments.clone(),
+                    // Keeps the provider's raw stop reason with the call record.
                     usage: serde_json::to_value(&response.model_call_usage)?,
                 });
             }
@@ -170,5 +182,95 @@ impl Backend for ArkoBackend {
             "voyageai/{}@{}",
             self.profile.model, self.profile.tokenizer_revision
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arko_ai::{Message, ModelCallUsage, Refusal, RefusalSource, RetryClass, UsageInfo};
+    use serde_json::json;
+
+    fn response(calls: &[&str], stop_reason: StopReason) -> GenerationResponse {
+        let mut message = Message::new_assistant("");
+        for (n, name) in calls.iter().enumerate() {
+            message.tool_calls.push(ToolCall {
+                id: Some(format!("call_{n}")),
+                name: (*name).into(),
+                arguments: json!({"f0": {"cuts": []}}),
+                thought_signature: None,
+                provider_id: None,
+                invalid_arguments: None,
+            });
+        }
+        GenerationResponse {
+            message,
+            usage: UsageInfo::new(100, 20),
+            model_call_usage: ModelCallUsage::new(
+                "call".into(),
+                "openai".into(),
+                "test".into(),
+                100,
+                20,
+                1000,
+            )
+            .with_stop_metadata(Some("completed".into()), None),
+            stop_reason,
+            refusal: None,
+            openai_turn_state: None,
+        }
+    }
+    /// How the scheduler treats the rejection of `response`.
+    fn rejection(response: &GenerationResponse) -> RetryClass {
+        crate::Error::from(completed_tool_call(response, "submit").unwrap_err())
+            .retry_class()
+            .unwrap()
+    }
+
+    #[test]
+    fn chunk_replies_need_one_call_in_a_completed_turn() {
+        for stop in [StopReason::ToolUse, StopReason::EndTurn] {
+            let reply = response(&["submit"], stop);
+            let call = completed_tool_call(&reply, "submit").unwrap();
+            assert_eq!(call.arguments, json!({"f0": {"cuts": []}}));
+        }
+        // A token or context limit needs a configuration change, even when the
+        // output holds a complete call.
+        for stop in [StopReason::MaxTokens, StopReason::ContextWindowExceeded] {
+            assert_eq!(
+                rejection(&response(&["submit"], stop.clone())),
+                RetryClass::Permanent
+            );
+            assert_eq!(rejection(&response(&[], stop)), RetryClass::Permanent);
+        }
+        let mut refused = response(&["submit"], StopReason::Refusal);
+        refused.refusal = Some(Refusal::new(RefusalSource::Model));
+        assert!(matches!(
+            completed_tool_call(&refused, "submit"),
+            Err(arko_ai::Error::Refusal(_))
+        ));
+        assert_eq!(rejection(&refused), RetryClass::Permanent);
+        // A missing, extra, foreign or unparseable call, or a turn that ended
+        // some other way, is resampled.
+        for reply in [
+            response(&[], StopReason::EndTurn),
+            response(&["other"], StopReason::ToolUse),
+            response(&["submit", "submit"], StopReason::ToolUse),
+            response(&["submit"], StopReason::Other("incomplete".into())),
+        ] {
+            assert_eq!(
+                rejection(&reply),
+                RetryClass::Transient,
+                "{:?}",
+                reply.stop_reason
+            );
+        }
+        let mut malformed = response(&["submit"], StopReason::ToolUse);
+        malformed.message.tool_calls[0].invalid_arguments = Some("{\"f0\":".into());
+        assert_eq!(rejection(&malformed), RetryClass::Transient);
+        // The raw stop reason no longer matters; the normalized one does.
+        let mut raw = response(&["submit"], StopReason::ToolUse);
+        raw.model_call_usage.stop_reason = Some("requires_action".into());
+        assert!(completed_tool_call(&raw, "submit").is_ok());
     }
 }

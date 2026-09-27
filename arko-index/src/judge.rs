@@ -1,9 +1,12 @@
 //! Optional source-preserving selection after retrieval. Authentication belongs to
 //! the caller's model client and is never stored in index configuration or SQLite.
-use crate::{ArkoIndex, Error, Result, SearchHit, SearchOptions, SearchPage, error::invalid};
+use crate::{
+    ArkoIndex, Error, Result, SearchHit, SearchOptions, SearchPage, backend::completed_tool_call,
+    error::invalid,
+};
 use arko_ai::{
-    GenerationConfig, GenerationResponse, LLMClient, Model, StopReason, StreamEvent, ToolChoice,
-    ToolConfig, ToolDefinition,
+    GenerationConfig, GenerationResponse, LLMClient, Model, StreamEvent, ToolChoice, ToolConfig,
+    ToolDefinition,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -191,24 +194,11 @@ fn parse_selection(
     candidates: &[SearchHit],
 ) -> Result<JudgeSelection> {
     // Never accept an incomplete/refused generation, even if its partial output
-    // contains parseable tool arguments.
-    if response.refusal.is_some()
-        || !matches!(response.stop_reason, StopReason::EndTurn | StopReason::ToolUse)
-    {
-        return Err(invalid(format!(
-            "judge response incomplete/refused: {:?}",
-            response.stop_reason
-        )));
-    }
-    if response.message.tool_calls.len() != 1
-        || response.message.tool_calls[0].name != "select_results"
-    {
-        return Err(invalid(
-            "judge must complete exactly one select_results call",
-        ));
-    }
-    let selection: JudgeSelection =
-        serde_json::from_value(response.message.tool_calls[0].arguments.clone())?;
+    // contains parseable tool arguments. Like any invalid selection, the
+    // judge loop retries it.
+    let call = completed_tool_call(response, "select_results")
+        .map_err(|error| invalid(format!("judge response rejected: {error}")))?;
+    let selection: JudgeSelection = serde_json::from_value(call.arguments.clone())?;
     selection.validate(candidates)?;
     Ok(selection)
 }
@@ -304,7 +294,7 @@ impl ArkoIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arko_ai::{Message, ModelCallUsage, ToolCall, UsageInfo};
+    use arko_ai::{Message, ModelCallUsage, StopReason, ToolCall, UsageInfo};
 
     fn response() -> GenerationResponse {
         let mut message = Message::new_assistant("");
@@ -347,7 +337,8 @@ mod tests {
         ] {
             let mut reply = valid.clone();
             reply.stop_reason = reason;
-            assert!(parse_selection(&reply, &[]).is_err());
+            // Invalid selections, which search_with_judge retries.
+            assert!(matches!(parse_selection(&reply, &[]), Err(Error::Invalid(_))));
         }
         let mut reply = valid.clone();
         reply.refusal = Some(arko_ai::Refusal::new(arko_ai::RefusalSource::Model));
@@ -367,6 +358,12 @@ mod tests {
         let mut reply = valid.clone();
         reply.message.tool_calls[0].arguments["invented_text"] = json!("rewritten source");
         assert!(parse_selection(&reply, &[]).is_err());
+        let mut reply = valid.clone();
+        reply.message.tool_calls[0].invalid_arguments = Some("{\"ordered_ids\":[".into());
+        assert!(matches!(
+            parse_selection(&reply, &[]),
+            Err(Error::Invalid(_))
+        ));
         // Raw provider strings no longer matter; the normalized reason does.
         let mut reply = valid;
         reply.model_call_usage.stop_reason = Some("requires_action".into());
