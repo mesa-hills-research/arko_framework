@@ -40,6 +40,10 @@ const REDACTED_HEADERS: &[&str] = &[
 /// Response headers copied into the `calls.jsonl` summary when present.
 const SUMMARY_HEADERS: &[&str] = &[
     "x-request-id",
+    "x-oai-request-id",
+    "x-codex-plan-type",
+    "x-codex-primary-used-percent",
+    "x-codex-secondary-used-percent",
     "openai-model",
     "x-openai-model",
     "x-reasoning-included",
