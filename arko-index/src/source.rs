@@ -180,23 +180,18 @@ pub fn scan(spec: &BuildSpec) -> Result<Manifest> {
         .iter()
         .map(|s| glob::Pattern::new(s).map_err(|e| invalid(e.to_string())))
         .collect::<Result<_>>()?;
+    let skipped = spec.skip_directories.clone();
+    // Ignore files apply even outside a git repository, including those in
+    // the root's parent directories; hidden files are indexed.
     let walker = ignore::WalkBuilder::new(&root)
         .hidden(false)
         .follow_links(false)
         .require_git(false)
-        .filter_entry(|e| {
+        .filter_entry(move |e| {
             !e.file_type().is_some_and(|t| t.is_dir())
-                || !matches!(
-                    e.file_name().to_str().unwrap_or(""),
-                    ".git"
-                        | "target"
-                        | "node_modules"
-                        | ".runtime"
-                        | ".cache"
-                        | "__pycache__"
-                        | ".venv"
-                        | "dist"
-                )
+                || !skipped
+                    .iter()
+                    .any(|name| e.file_name().to_str() == Some(name.as_str()))
         })
         .build();
     let mut files = vec![];

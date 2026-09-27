@@ -61,6 +61,24 @@ impl Config {
         Ok(())
     }
 }
+/// Directory names a scan never enters by default, at any depth, whether or
+/// not an ignore file mentions them. See [`BuildSpec::skip_directories`].
+pub const DEFAULT_SKIPPED_DIRECTORIES: &[&str] = &[
+    ".git",
+    "target",
+    "node_modules",
+    ".runtime",
+    ".cache",
+    "__pycache__",
+    ".venv",
+    "dist",
+];
+fn default_skipped_directories() -> Vec<String> {
+    DEFAULT_SKIPPED_DIRECTORIES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect()
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BuildSpec {
     pub name: String,
@@ -69,6 +87,12 @@ pub struct BuildSpec {
     pub include: Vec<String>,
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// Directory names (exact, not patterns) never entered, at any depth.
+    /// Defaults to [`DEFAULT_SKIPPED_DIRECTORIES`], also for specs saved
+    /// before this field existed; an empty list skips none (keep `.git` in a
+    /// custom list). Ignore files and `exclude` patterns apply as well.
+    #[serde(default = "default_skipped_directories")]
+    pub skip_directories: Vec<String>,
 }
 impl BuildSpec {
     pub fn new(name: impl Into<String>, root: impl Into<PathBuf>) -> Self {
@@ -77,6 +101,15 @@ impl BuildSpec {
             root: root.into(),
             include: vec![],
             exclude: vec![],
+            skip_directories: default_skipped_directories(),
         }
+    }
+    /// Replaces [`BuildSpec::skip_directories`].
+    pub fn with_skip_directories(
+        mut self,
+        names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.skip_directories = names.into_iter().map(Into::into).collect();
+        self
     }
 }

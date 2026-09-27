@@ -54,6 +54,10 @@ let backend = backend.with_chunk_model(
 
 The backend owns the tool configuration: the boundary tool replaces any `tool_config` in the settings, is forced where the model allows it, and parallel calls are disabled where supported. Every reply must be exactly one call to that tool in a completed turn (`StopReason::EndTurn` or `ToolUse`): refusals and token limits fail the request, while a missing, extra or malformed call is retried as a transient failure. Each job's `snapshot` event records the chunk `model` and `reasoning`. Boundaries are validated against the source the same way for every model, so an update after changing the model still reuses the boundaries of unchanged files; build a new index to re-chunk everything with the new model.
 
+### Which files are indexed
+
+A scan walks `BuildSpec::root` without following symlinks (they are listed as excluded) and includes hidden files. Ignore rules apply as in git, even outside a repository: `.gitignore` and `.ignore` files (including those in the root's parent directories), `.git/info/exclude` and the global git excludes file. Independently of those rules, directories named in `BuildSpec::skip_directories` are never entered, at any depth; the default, `DEFAULT_SKIPPED_DIRECTORIES`, is `.git`, `target`, `node_modules`, `.runtime`, `.cache`, `__pycache__`, `.venv` and `dist`. Replace it with `with_skip_directories` (an empty list skips none; keep `.git` in a custom list) — for example to index authored docs under a `dist/` directory. Skipped directories are not listed in the job's excluded files. `include`/`exclude` glob patterns match root-relative paths with `/` separators; without `include` patterns only recognized source and documentation extensions and file names are indexed. Files that are not UTF-8 or contain NUL bytes are listed as excluded with the reason. The index saves its spec, so updates and the watcher scan with the same settings.
+
 ## Runnable example
 
 From the framework root:
