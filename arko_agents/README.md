@@ -426,9 +426,11 @@ and `Cancelled` are terminal.
 Besides answers to the waiting states, a running task accepts:
 
 - `InjectContext { content }`: queued and added at the next turn boundary as a user
-  message headed `# Workflow context update`; a stream in progress is not changed. A
-  `TurnContextSource` given to `AgentRuntime::with_turn_context` is also asked for context
-  at each such boundary, before each model request, and its answer joins that message.
+  message headed `# Workflow context update`; a stream in progress is not changed. Every
+  injection sent before the boundary (including while a tool call ran) joins that one
+  message, in the order sent. A `TurnContextSource` given to
+  `AgentRuntime::with_turn_context` is also asked for context at each such boundary,
+  before each model request, and its answer joins that message.
 - `CancelTask`: the task ends as `Cancelled { reason }` with `CANCELLED_BY_USER` ("Task
   cancelled by user."). Calls it waited on get a result saying they were not run. A task
   saved by an older version as `Failed { reason: "Task cancelled by user." }` loads as

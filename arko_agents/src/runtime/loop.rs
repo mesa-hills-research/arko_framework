@@ -1864,48 +1864,53 @@ impl AgentLoop {
                     }
                 }
             } else {
-                match self.command_receiver.try_recv() {
-                    Ok(UserCommand::CancelTask) => {
-                        self.task.set_state(TaskState::Cancelled {
-                            reason: CANCELLED_BY_USER.to_string(),
-                        });
-                        self.emit_event(AgentEvent::TaskStateChanged(
-                            self.task.current_state.clone(),
-                        ))
-                        .await?;
-                        break 'main_loop;
-                    }
-                    Ok(UserCommand::SuspendTask) => {
-                        break 'main_loop;
-                    }
-                    Ok(UserCommand::InjectContext { content }) => {
-                        self.queue_context_injection(content);
-                    }
-                    Err(mpsc::error::TryRecvError::Empty) => {}
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                        let reason = "Command channel disconnected.".to_string();
-                        log::error!("Task {}: {}", self.task.id, reason);
-                        self.task.set_state(TaskState::Interrupted {
-                            reason: reason.clone(),
-                        });
-                        self.emit_event(AgentEvent::TaskStateChanged(
-                            self.task.current_state.clone(),
-                        ))
-                        .await?;
-                        self.emit_event(AgentEvent::ErrorEncountered {
-                            error_message: reason,
-                            requires_approval_to_retry: false,
-                            tool_call_id: None,
-                        })
-                        .await?;
-                        break 'main_loop;
-                    }
-                    Ok(other_cmd) => {
-                        log::warn!(
-                            "Task {}: Unexpected command {:?} received outside of an approval state. Ignoring.",
-                            self.task.id,
-                            other_cmd
-                        );
+                // Every command queued by now, so all context sent before
+                // this boundary (for example while a tool call ran) reaches
+                // the next request together.
+                loop {
+                    match self.command_receiver.try_recv() {
+                        Ok(UserCommand::CancelTask) => {
+                            self.task.set_state(TaskState::Cancelled {
+                                reason: CANCELLED_BY_USER.to_string(),
+                            });
+                            self.emit_event(AgentEvent::TaskStateChanged(
+                                self.task.current_state.clone(),
+                            ))
+                            .await?;
+                            break 'main_loop;
+                        }
+                        Ok(UserCommand::SuspendTask) => {
+                            break 'main_loop;
+                        }
+                        Ok(UserCommand::InjectContext { content }) => {
+                            self.queue_context_injection(content);
+                        }
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            let reason = "Command channel disconnected.".to_string();
+                            log::error!("Task {}: {}", self.task.id, reason);
+                            self.task.set_state(TaskState::Interrupted {
+                                reason: reason.clone(),
+                            });
+                            self.emit_event(AgentEvent::TaskStateChanged(
+                                self.task.current_state.clone(),
+                            ))
+                            .await?;
+                            self.emit_event(AgentEvent::ErrorEncountered {
+                                error_message: reason,
+                                requires_approval_to_retry: false,
+                                tool_call_id: None,
+                            })
+                            .await?;
+                            break 'main_loop;
+                        }
+                        Ok(other_cmd) => {
+                            log::warn!(
+                                "Task {}: Unexpected command {:?} received outside of an approval state. Ignoring.",
+                                self.task.id,
+                                other_cmd
+                            );
+                        }
                     }
                 }
             }
@@ -4411,6 +4416,55 @@ mod tests {
             })
             .count();
         assert_eq!(updates, 1);
+    }
+
+    /// Every context injection queued before a turn boundary reaches the
+    /// next request, in one workflow context update, not one per request.
+    #[tokio::test]
+    async fn every_queued_injection_reaches_the_next_request() {
+        use futures::StreamExt;
+        let (mut agent, _events, commands) = super::retry_tests::harness();
+        let tool_config = &mut agent.task.agent_config.tool_config;
+        tool_config.tool_calling_mode = ToolCallingMode::Native;
+        tool_config.default_auto_approve_tool_use = true;
+        for content in ["First message.", "Second message."] {
+            commands
+                .try_send(UserCommand::InjectContext {
+                    content: content.into(),
+                })
+                .unwrap();
+        }
+        let turn = futures::stream::iter([Ok(super::retry_tests::complete_response())]);
+        agent
+            .scripted_responses
+            .get_mut()
+            .unwrap()
+            .push_back(Ok(turn.boxed()));
+        let task = timeout(Duration::from_secs(10), agent.run())
+            .await
+            .unwrap()
+            .unwrap();
+        let messages = &task.conversation.messages;
+        let update = messages
+            .iter()
+            .position(|message| {
+                message.role == ai::Role::User
+                    && message
+                        .content
+                        .iter()
+                        .filter_map(ai::Content::as_text)
+                        .any(|text| {
+                            text.starts_with(
+                                "# Workflow context update\n\nFirst message.\n\nSecond message.",
+                            )
+                        })
+            })
+            .expect("one update carries both injections");
+        let answer = messages
+            .iter()
+            .position(|message| message.role == ai::Role::Assistant)
+            .unwrap();
+        assert!(update < answer, "the update precedes the only request");
     }
 
     #[test]
