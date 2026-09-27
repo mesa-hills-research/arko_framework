@@ -7,7 +7,9 @@ use crate::{
     config::GenerationConfig,
     conversation::Conversation,
     error::Error,
-    message::Message,
+    message::{Content, Message},
+    stop::{Refusal, StopReason},
+    tool::ToolCall,
     usage::{ModelCallUsage, UsageInfo},
 };
 use futures::stream::BoxStream;
@@ -60,12 +62,78 @@ pub struct GenerationResponse {
     pub message: Message,
     pub usage: UsageInfo,
     pub model_call_usage: ModelCallUsage,
+    /// Why generation stopped, normalized across providers.
+    #[serde(default = "StopReason::unknown")]
+    pub stop_reason: StopReason,
+    /// Present when the model or a filter refused. For refusals whose
+    /// source doesn't keep the turn ([`RefusalSource::keeps_turn`]), `message`
+    /// is an empty assistant message with no tool calls or reasoning.
+    ///
+    /// [`RefusalSource::keeps_turn`]: crate::stop::RefusalSource::keeps_turn
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<Refusal>,
+}
+
+impl GenerationResponse {
+    /// The concatenated text content of the assistant message.
+    pub fn text(&self) -> String {
+        self.message
+            .content
+            .iter()
+            .filter_map(Content::as_text)
+            .collect()
+    }
+
+    /// The single call to `name` in a response that was forced to call it.
+    ///
+    /// Fails with [`Error::Refusal`] for refusals, with
+    /// [`Error::UnexpectedToolCalls`] when the response has no call, several
+    /// calls, or a different tool (its `stop_reason` shows whether a token
+    /// limit cut the call off), and with [`Error::InvalidToolArguments`] when
+    /// the call's arguments are not valid JSON.
+    pub fn single_tool_call(&self, name: &str) -> Result<&ToolCall, Error> {
+        if let Some(refusal) = &self.refusal {
+            return Err(Error::Refusal(Box::new(refusal.clone())));
+        }
+        match self.message.tool_calls.as_slice() {
+            [call] if call.name == name => match &call.invalid_arguments {
+                Some(raw) => Err(Error::InvalidToolArguments {
+                    name: call.name.clone(),
+                    raw: raw.clone(),
+                }),
+                None => Ok(call),
+            },
+            calls => Err(Error::UnexpectedToolCalls {
+                expected: name.to_string(),
+                stop_reason: self.stop_reason.clone(),
+                found: calls.iter().map(|call| call.name.clone()).collect(),
+            }),
+        }
+    }
+}
+
+/// Removes a refused turn's output from `message` so it can't be replayed,
+/// returning any text generated before the refusal.
+pub(crate) fn take_refused_output(message: &mut Message) -> Option<String> {
+    let text: String = message
+        .content
+        .iter()
+        .filter_map(Content::as_text)
+        .collect();
+    message.content = vec![Content::Text(String::new())];
+    message.tool_calls.clear();
+    message.reasoning_artifact = None;
+    (!text.is_empty()).then_some(text)
 }
 
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     ReasoningChunk(String),
     TextChunk(String),
+    /// Emitted once, just before [`End`](Self::End), when the response was
+    /// refused. Text already streamed for a refusal whose source doesn't
+    /// keep the turn should be discarded by the consumer.
+    Refusal(Refusal),
     ToolCallStart {
         index: usize,
         name: String,
@@ -107,6 +175,57 @@ pub trait EmbeddingProviderTrait {
         model_details: &crate::embedding_model::EmbeddingModelDetails,
     ) -> Result<EmbeddingResponse, Error>;
 }
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+    use crate::stop::RefusalSource;
+
+    fn response(calls: &[&str], stop_reason: StopReason, refusal: Option<Refusal>) -> GenerationResponse {
+        let mut message = Message::new_assistant("text");
+        for name in calls {
+            message.tool_calls.push(ToolCall::from_argument_text(None, name.to_string(), "{}"));
+        }
+        GenerationResponse {
+            message,
+            usage: UsageInfo::new(0, 0),
+            model_call_usage: ModelCallUsage::new("id".into(), "test".into(), "test".into(), 0, 0, 0),
+            stop_reason,
+            refusal,
+        }
+    }
+
+    #[test]
+    fn single_tool_call_distinguishes_refusals_limits_and_wrong_calls() {
+        assert!(response(&["pick"], StopReason::ToolUse, None).single_tool_call("pick").is_ok());
+        for (calls, stop) in [
+            (vec![], StopReason::EndTurn),
+            (vec!["other"], StopReason::ToolUse),
+            (vec!["pick", "pick"], StopReason::ToolUse),
+        ] {
+            let error = response(&calls, stop, None).single_tool_call("pick").unwrap_err();
+            assert!(matches!(error, Error::UnexpectedToolCalls { .. }));
+            assert!(error.is_retryable());
+        }
+        let error = response(&[], StopReason::MaxTokens, None).single_tool_call("pick").unwrap_err();
+        assert!(!error.is_retryable(), "a token limit needs a configuration change");
+        let refused = response(&["pick"], StopReason::Refusal, Some(Refusal::new(RefusalSource::Model)));
+        let error = refused.single_tool_call("pick").unwrap_err();
+        assert!(matches!(error, Error::Refusal(_)));
+        assert!(!error.is_retryable());
+        assert_eq!(refused.text(), "text");
+    }
+
+    #[test]
+    fn responses_saved_before_stop_reasons_still_load() {
+        let mut value = serde_json::to_value(response(&[], StopReason::EndTurn, None)).unwrap();
+        value.as_object_mut().unwrap().remove("stop_reason");
+        let loaded: GenerationResponse = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.stop_reason, StopReason::Other("unknown".into()));
+        assert!(loaded.refusal.is_none());
+    }
+}
+
 #[cfg(test)]
 mod transport_tests {
     use super::*;

@@ -201,12 +201,21 @@ pub struct GoogleReasoningFragment {
     pub signature: String,
 }
 
+/// One OpenAI Responses `reasoning` output item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAIReasoningItem {
+    pub encrypted_content: String,
+    pub summaries: Option<Vec<String>>,
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "ReasoningArtifactRepr")]
 pub enum ReasoningArtifact {
+    /// Every reasoning item of one OpenAI response, in output order. All of
+    /// them are replayed, ahead of the turn's function calls.
     OpenAIEncryptedReasoning {
-        encrypted_content: String,
-        summaries: Option<Vec<String>>,
-        id: Option<String>,
+        items: Vec<OpenAIReasoningItem>,
     },
     AnthropicReasoning {
         fragments: Vec<AnthropicReasoningFragment>,
@@ -216,12 +225,54 @@ pub enum ReasoningArtifact {
     },
 }
 
+// Conversations saved before multiple OpenAI reasoning items were kept hold
+// a single item's fields directly under `OpenAIEncryptedReasoning`.
+#[derive(Deserialize)]
+#[allow(clippy::enum_variant_names)] // Names must match the serialized tags.
+enum ReasoningArtifactRepr {
+    OpenAIEncryptedReasoning(OpenAIReasoningRepr),
+    AnthropicReasoning {
+        fragments: Vec<AnthropicReasoningFragment>,
+    },
+    GoogleReasoning {
+        fragments: Vec<GoogleReasoningFragment>,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OpenAIReasoningRepr {
+    Items { items: Vec<OpenAIReasoningItem> },
+    Single(OpenAIReasoningItem),
+}
+
+impl From<ReasoningArtifactRepr> for ReasoningArtifact {
+    fn from(repr: ReasoningArtifactRepr) -> Self {
+        match repr {
+            ReasoningArtifactRepr::OpenAIEncryptedReasoning(OpenAIReasoningRepr::Items {
+                items,
+            }) => Self::OpenAIEncryptedReasoning { items },
+            ReasoningArtifactRepr::OpenAIEncryptedReasoning(OpenAIReasoningRepr::Single(item)) => {
+                Self::OpenAIEncryptedReasoning { items: vec![item] }
+            }
+            ReasoningArtifactRepr::AnthropicReasoning { fragments } => {
+                Self::AnthropicReasoning { fragments }
+            }
+            ReasoningArtifactRepr::GoogleReasoning { fragments } => {
+                Self::GoogleReasoning { fragments }
+            }
+        }
+    }
+}
+
 impl ReasoningArtifact {
     pub fn new_openai_encrypted(encrypted_content: &str, summaries: Option<Vec<String>>) -> Self {
         ReasoningArtifact::OpenAIEncryptedReasoning {
-            encrypted_content: encrypted_content.to_string(),
-            summaries,
-            id: None,
+            items: vec![OpenAIReasoningItem {
+                encrypted_content: encrypted_content.to_string(),
+                summaries,
+                id: None,
+            }],
         }
     }
 
@@ -256,5 +307,36 @@ impl ReasoningArtifact {
             ReasoningArtifact::AnthropicReasoning { .. } => Provider::Anthropic,
             ReasoningArtifact::GoogleReasoning { .. } => Provider::Google,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openai_artifacts_saved_with_a_single_item_still_load() {
+        let saved = serde_json::json!({"OpenAIEncryptedReasoning": {
+            "encrypted_content": "enc", "summaries": ["s"], "id": "rs_1"
+        }});
+        let ReasoningArtifact::OpenAIEncryptedReasoning { items } =
+            serde_json::from_value(saved).unwrap()
+        else {
+            panic!("expected OpenAI reasoning");
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id.as_deref(), Some("rs_1"));
+
+        let artifact = ReasoningArtifact::OpenAIEncryptedReasoning {
+            items: vec![items[0].clone(), items[0].clone()],
+        };
+        let round_trip: ReasoningArtifact =
+            serde_json::from_value(serde_json::to_value(&artifact).unwrap()).unwrap();
+        assert!(matches!(round_trip, ReasoningArtifact::OpenAIEncryptedReasoning { items } if items.len() == 2));
+
+        let anthropic = ReasoningArtifact::new_anthropic_redacted("data");
+        let round_trip: ReasoningArtifact =
+            serde_json::from_value(serde_json::to_value(&anthropic).unwrap()).unwrap();
+        assert_eq!(round_trip.provider(), Provider::Anthropic);
     }
 }

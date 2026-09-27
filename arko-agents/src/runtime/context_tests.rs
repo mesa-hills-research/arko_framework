@@ -351,6 +351,8 @@ async fn text_model_boundary_includes_file_changes_and_observes_the_exact_result
                 0,
                 1000,
             ),
+            stop_reason: ai::StopReason::EndTurn,
+            refusal: None,
         }));
         agent
             .scripted_responses

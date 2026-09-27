@@ -45,16 +45,16 @@ impl ToolDefinition {
 pub struct ToolCall {
     pub id: Option<String>,
     pub name: String,
+    /// Parsed arguments. `Value::Null` when the provider returned text that
+    /// is not valid JSON; see [`invalid_arguments`](Self::invalid_arguments).
     pub arguments: serde_json::Value,
-    /// Opaque signature that the legacy Gemini generateContent API attached
-    /// to function-call parts to maintain reasoning context across
-    /// tool-call turns.
+    /// Opaque Gemini signature for this function call.
     ///
-    /// The Gemini Interactions API carries thought signatures on dedicated
-    /// `thought` steps (preserved via the message's reasoning artifact)
-    /// instead, so the Google provider no longer populates or sends this
-    /// field. It is retained for compatibility with previously serialized
-    /// conversations.
+    /// The Gemini Interactions API may attach a `signature` to
+    /// `function_call` steps (in addition to signatures on `thought` steps,
+    /// which are kept in the message's reasoning artifact). The Google
+    /// provider stores it here and sends it back with the call. Other
+    /// providers leave it `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
     /// Provider-specific item identifier that may differ from the
@@ -70,6 +70,46 @@ pub struct ToolCall {
     /// Other providers leave this as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
+    /// The raw argument text when it was not valid JSON. Such a call must
+    /// not be executed; report the problem to the model instead. The text is
+    /// replayed verbatim to providers that accept argument strings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid_arguments: Option<String>,
+}
+
+impl ToolCall {
+    /// Builds a call from provider argument text. Empty text means no
+    /// arguments; text that isn't valid JSON is kept in `invalid_arguments`.
+    pub(crate) fn from_argument_text(id: Option<String>, name: String, text: &str) -> Self {
+        let (arguments, invalid_arguments) = if text.trim().is_empty() {
+            (serde_json::Value::Object(Default::default()), None)
+        } else {
+            match serde_json::from_str(text) {
+                Ok(arguments) => (arguments, None),
+                Err(_) => (serde_json::Value::Null, Some(text.to_string())),
+            }
+        };
+        Self {
+            id,
+            name,
+            arguments,
+            thought_signature: None,
+            provider_id: None,
+            invalid_arguments,
+        }
+    }
+
+    /// Arguments for providers that require a JSON object when the call is
+    /// sent back as history (Anthropic `tool_use.input`, Gemini
+    /// `function_call.arguments`). Invalid arguments become `{}`; the
+    /// accompanying tool result tells the model what went wrong.
+    pub(crate) fn replay_arguments(&self) -> serde_json::Value {
+        if self.invalid_arguments.is_some() {
+            serde_json::Value::Object(Default::default())
+        } else {
+            self.arguments.clone()
+        }
+    }
 }
 
 /// The result of executing a tool locally in response to a `ToolCall`.

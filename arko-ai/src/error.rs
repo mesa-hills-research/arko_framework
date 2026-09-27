@@ -1,3 +1,4 @@
+use crate::stop::{Refusal, StopReason};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -59,6 +60,26 @@ pub enum Error {
 
     #[error("Invalid embedding dimension: {0}")]
     InvalidDimension(String),
+
+    /// The model or a filter around it declined the request.
+    #[error("Model refused the request: {0}")]
+    Refusal(Box<Refusal>),
+
+    /// The response stream ended before the provider reported completion.
+    #[error("Response stream ended before completion: {0}")]
+    StreamTruncated(String),
+
+    /// A response expected to contain exactly one call to `expected` did not.
+    #[error("Expected one call to `{expected}`; the response stopped with {stop_reason:?} and called {found:?}")]
+    UnexpectedToolCalls {
+        expected: String,
+        stop_reason: StopReason,
+        found: Vec<String>,
+    },
+
+    /// The model produced tool arguments that are not valid JSON.
+    #[error("Tool `{name}` received arguments that are not valid JSON: {raw}")]
+    InvalidToolArguments { name: String, raw: String },
 }
 
 impl Error {
@@ -125,6 +146,10 @@ impl Error {
                 |status| matches!(status.as_u16(), 408 | 409 | 429 | 500..=599),
             ),
             Self::ApiError(_) => true,
+            Self::StreamTruncated(_) | Self::InvalidToolArguments { .. } => true,
+            // A missing or wrong call may be resampled; a token or context
+            // limit needs a configuration change.
+            Self::UnexpectedToolCalls { stop_reason, .. } => !stop_reason.is_truncated(),
             _ => false,
         }
     }

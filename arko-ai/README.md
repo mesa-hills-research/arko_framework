@@ -62,19 +62,23 @@ Model metadata checked 2026-09-13 against Voyage's [model guide](https://docs.vo
 [pricing](https://docs.voyageai.com/docs/pricing), and
 [tokenizer documentation](https://docs.voyageai.com/docs/tokenization).
 
-## Provider stop metadata
+## Stop reasons and refusals
 
-Anthropic responses now retain `stop_reason` and, when supplied, `stop_details` on `GenerationResponse.model_call_usage`. Both streaming `message_delta.delta` and non-streaming responses are covered.
+Every `GenerationResponse` carries a normalized `stop_reason` (`EndTurn`, `ToolUse`, `MaxTokens`, `StopSequence`, `Refusal`, `PauseTurn`, `ContextWindowExceeded`, or `Other` with the provider's value) and, when the model or a filter declined, a `refusal`. Streams emit `StreamEvent::Refusal` once, just before `End`, which carries the same data. `GenerationResponse::single_tool_call(name)` returns the one expected tool call or an error that says whether the response was refused, cut off by a limit, or called something else.
 
-The agent runtime already persists this object in `ModelCallUsageReported` events and task usage history. Consumers can distinguish `refusal`, `max_tokens`, `tool_use`, `end_turn`, and future provider values without inspecting response text. Refusal details remain provider-supplied JSON; category and explanation can be null. Missing fields in older saved records deserialize as `None`, and absent or null details are omitted when serialized.
+The provider's raw `stop_reason` and `stop_details` remain on `GenerationResponse.model_call_usage` (and in the agent runtime's `ModelCallUsageReported` events and task usage history). Missing fields in older saved records deserialize as `None`.
 
-OpenAI's Responses API exposes typed `refusal` content and `response.refusal.delta` / `response.refusal.done` events rather than Anthropic's literal `stop_reason` field. Arko normalizes those signals to `stop_reason: "refusal"`; `stop_details` records the response status, item identifiers, content indices, and supplied refusal explanations. Ordinary text mentioning refusal is not classified as a refusal. A finalized refusal event replaces accumulated deltas rather than duplicating their text.
+`Refusal.source` says how to treat the turn:
 
-OpenAI `response.incomplete` terminal events now preserve usage and the reason in `incomplete_details`, including `content_filter` and token limits. Otherwise the response status is used as the normalized reason. This does not identify which internal classifier produced a refusal. Refusal content without an ordinary `text` field is parsed correctly and its explanation is retained in the assistant message. Partial streamed tool calls are not reconstructed after refusal or incomplete termination.
+- `SafetyClassifier`: Anthropic's `stop_reason: "refusal"`, with `stop_details.category` and `explanation` when supplied (both can be null). Anthropic requires the refused turn to be removed before continuing, so the message is left empty and text generated before the refusal moves to `partial_output`. `Conversation::add_assistant_message_from_response` doesn't append such a turn.
+- `Model`: OpenAI's structured `refusal` content. The refusal text is in `explanation`, never in the message text or streamed as `TextChunk`. Ordinary text mentioning refusal is not classified as a refusal.
+- `ContentFilter`: OpenAI `incomplete_details.reason: "content_filter"`. Partial output moves to `partial_output`, as for classifier refusals.
 
-Retry policies, conversation resets, and model fallbacks are unchanged. These diagnostics cannot reconstruct fields discarded by earlier versions or explain a process signal when no terminal API response was recorded.
+A stream that ends before the provider reports completion yields `Error::StreamTruncated` (retryable) instead of an `End`. When a token limit cuts a response short, tool calls whose arguments finished are kept and a call that was still being written is dropped. Tool-call arguments that aren't valid JSON are kept in `ToolCall::invalid_arguments` (with `arguments` set to `null`) instead of being replaced by `{}`.
 
-References: [Anthropic streaming refusals](https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/handle-streaming-refusals), [official Anthropic streaming event schema](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/types/raw_message_delta_event.py), [OpenAI refusal and content-filter handling](https://developers.openai.com/api/docs/guides/structured-outputs), [OpenAI streaming refusal events](https://platform.openai.com/docs/api-reference/responses-streaming/response/refusal).
+Google's Interactions API reports only an interaction `status`: `completed` maps to `EndTurn` (or `ToolUse` with function calls), `requires_action` to `ToolUse`, and `incomplete` to `MaxTokens`. It has no refusal or safety reason to report.
+
+References: [Anthropic streaming refusals](https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/handle-streaming-refusals), [official Anthropic streaming event schema](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/types/raw_message_delta_event.py), [OpenAI refusal and content-filter handling](https://developers.openai.com/api/docs/guides/structured-outputs), [OpenAI streaming refusal events](https://platform.openai.com/docs/api-reference/responses-streaming/response/refusal), [Gemini Interactions API](https://ai.google.dev/api/interactions-api-v1).
 
 ### Long requests and embedding tokenizers
 

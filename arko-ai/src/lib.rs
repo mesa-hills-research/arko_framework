@@ -6,6 +6,7 @@ pub mod message;
 pub mod model;
 pub mod providers;
 pub mod reasoning;
+pub mod stop;
 pub mod tool;
 pub mod usage;
 
@@ -24,8 +25,9 @@ pub use model::{Model, Provider};
 pub use providers::{GenerationResponse, StreamEvent};
 pub use reasoning::{
     AnthropicReasoningEffort, GeminiThinkingLevel, OpenAIEffort,
-    OpenAIReasoningMode, ReasoningArtifact, ReasoningConfig,
+    OpenAIReasoningItem, OpenAIReasoningMode, ReasoningArtifact, ReasoningConfig,
 };
+pub use stop::{Refusal, RefusalSource, StopReason};
 pub use tool::{ToolCall, ToolChoice, ToolConfig, ToolDefinition, ToolResult};
 pub use usage::{ContextEvent, ContextEventType, ModelCallUsage, UsageInfo};
 

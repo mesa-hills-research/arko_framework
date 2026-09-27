@@ -1,4 +1,4 @@
-use super::{GenerationResponse, Provider, StreamEvent};
+use super::{GenerationResponse, Provider, StreamEvent, take_refused_output};
 use crate::{
     config::GenerationConfig,
     conversation::Conversation,
@@ -8,6 +8,7 @@ use crate::{
     reasoning::{
         AnthropicReasoningEffort, AnthropicReasoningFragment, ReasoningArtifact, ReasoningConfig,
     },
+    stop::{Refusal, RefusalSource, StopReason},
     tool::{ToolCall, ToolChoice},
     usage::{ModelCallUsage, UsageInfo},
 };
@@ -334,6 +335,96 @@ impl AnthropicClient {
             delta.get("stop_details").cloned(),
         )
     }
+
+    fn generation_response(
+        response_data: AnthropicResponse,
+        conversation: &Conversation,
+        config: &GenerationConfig,
+    ) -> GenerationResponse {
+        let (mut message, _) = Self::parse_response(&response_data);
+        let mut usage = Self::calculate_usage(&response_data);
+        usage.calculate_cost(&conversation.model, Some(config));
+
+        let model_call_usage = ModelCallUsage::new(
+            response_data.id.clone(),
+            conversation.model.provider.as_telemetry_str().to_string(),
+            response_data.model.clone(),
+            Self::unified_input_tokens(&response_data.usage),
+            response_data.usage.output_tokens,
+            conversation.model.max_input_tokens,
+        ).with_stop_metadata(
+            response_data.stop_reason.clone(),
+            response_data.stop_details.clone(),
+        );
+
+        let trailing_tool_call = matches!(
+            response_data.content.last(),
+            Some(AnthropicResponseContent::ToolUse { .. })
+        );
+        let (stop_reason, refusal) = Self::finish_turn(
+            &mut message,
+            response_data.stop_reason.as_deref(),
+            response_data.stop_details.as_ref(),
+            trailing_tool_call,
+        );
+
+        GenerationResponse {
+            message,
+            usage,
+            model_call_usage,
+            stop_reason,
+            refusal,
+        }
+    }
+
+    /// Normalizes a finished turn. `trailing_tool_call` says the last content
+    /// block was a completed `tool_use` block, which a token limit may have
+    /// cut short. Stop reasons:
+    /// https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons
+    fn finish_turn(
+        message: &mut Message,
+        stop: Option<&str>,
+        stop_details: Option<&Value>,
+        trailing_tool_call: bool,
+    ) -> (StopReason, Option<Refusal>) {
+        let stop_reason = match stop {
+            Some("end_turn") => StopReason::EndTurn,
+            Some("tool_use") => StopReason::ToolUse,
+            Some("max_tokens") => StopReason::MaxTokens,
+            Some("stop_sequence") => StopReason::StopSequence,
+            Some("pause_turn") => StopReason::PauseTurn,
+            Some("refusal") => StopReason::Refusal,
+            Some("model_context_window_exceeded") => StopReason::ContextWindowExceeded,
+            Some(other) => StopReason::Other(other.to_string()),
+            None => StopReason::unknown(),
+        };
+
+        if stop_reason.is_truncated() && trailing_tool_call {
+            message.tool_calls.pop();
+        }
+
+        // Streaming classifier refusals: partial output must be discarded and
+        // the turn removed before continuing.
+        // https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/handle-streaming-refusals
+        let refusal = (stop_reason == StopReason::Refusal).then(|| {
+            let details = stop_details.filter(|details| !details.is_null());
+            let field = |name: &str| {
+                details
+                    .and_then(|details| details.get(name))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            };
+            Refusal {
+                source: RefusalSource::SafetyClassifier,
+                category: field("category"),
+                explanation: field("explanation"),
+                partial_output: take_refused_output(message),
+                provider_details: details.cloned().unwrap_or(Value::Null),
+            }
+        });
+
+        (stop_reason, refusal)
+    }
 }
 
 #[async_trait::async_trait]
@@ -378,27 +469,7 @@ impl Provider for AnthropicClient {
         }
 
         let response_data: AnthropicResponse = response.json().await?;
-        let (message, _) = Self::parse_response(&response_data)?;
-        let mut usage = Self::calculate_usage(&response_data);
-        usage.calculate_cost(&conversation.model, Some(config));
-
-        let model_call_usage = ModelCallUsage::new(
-            response_data.id.clone(),
-            conversation.model.provider.as_telemetry_str().to_string(),
-            response_data.model.clone(),
-            Self::unified_input_tokens(&response_data.usage),
-            response_data.usage.output_tokens,
-            conversation.model.max_input_tokens,
-        ).with_stop_metadata(
-            Some(response_data.stop_reason.clone()),
-            response_data.stop_details.clone(),
-        );
-
-        Ok(GenerationResponse {
-            message,
-            usage,
-            model_call_usage,
-        })
+        Ok(Self::generation_response(response_data, conversation, config))
     }
 
     async fn generate_stream(
@@ -442,12 +513,30 @@ impl Provider for AnthropicClient {
             return Err(Error::from_response("anthropic API error", response).await);
         }
 
-        let byte_stream = response.bytes_stream().eventsource();
-        let model = conversation.model.clone();
-        let cost_config = (*config).clone();
+        Ok(Self::stream_events(
+            response.bytes_stream(),
+            conversation.model.clone(),
+            config.clone(),
+        ))
+    }
+}
 
+impl AnthropicClient {
+    /// Parses an Anthropic Messages SSE byte stream. `End` is emitted only for
+    /// the `message_delta` event that carries the stop reason; a stream that
+    /// ends earlier yields [`Error::StreamTruncated`].
+    fn stream_events<S, B, E>(
+        bytes: S,
+        model: crate::model::Model,
+        cost_config: GenerationConfig,
+    ) -> BoxStream<'static, Result<StreamEvent, Error>>
+    where
+        S: futures::Stream<Item = Result<B, E>> + Send + 'static,
+        B: AsRef<[u8]> + Send + 'static,
+        E: std::fmt::Display + Send + 'static,
+    {
         let stream = try_stream! {
-            let mut event_stream = byte_stream;
+            let mut event_stream = Box::pin(bytes.eventsource());
             let mut fragments = Vec::new();
             let mut current_thinking: Option<(String, Option<String>)> = None;
             let mut full_text = String::new();
@@ -455,8 +544,10 @@ impl Provider for AnthropicClient {
             let mut tool_calls = Vec::new();
             let mut current_tool: Option<(String, String, String)> = None;
             let mut tool_call_index = 0usize;
+            let mut last_block_type = String::new();
             let mut response_id = String::new();
             let mut response_model = String::new();
+            let mut finished = false;
 
             while let Some(event) = event_stream.next().await {
                 let event =
@@ -508,24 +599,19 @@ impl Provider for AnthropicClient {
                     }
                     Some("content_block_start") => {
                         let block = &value["content_block"];
+                        last_block_type = block["type"].as_str().unwrap_or("").to_string();
 
-                        match block["type"].as_str().unwrap_or("") {
+                        match last_block_type.as_str() {
                             "thinking" => {
                                 current_thinking = Some((String::new(), None));
                             }
+                            // Encrypted; kept for replay but never shown as reasoning text.
                             "redacted_thinking" => {
-                                let data = block["data"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_string();
-
                                 fragments.push(
                                     AnthropicReasoningFragment::RedactedThinking {
-                                        data: data.clone(),
+                                        data: block["data"].as_str().unwrap_or("").to_string(),
                                     },
                                 );
-
-                                yield StreamEvent::ReasoningChunk(data);
                             }
                             "tool_use" => {
                                 let id = block["id"]
@@ -608,18 +694,11 @@ impl Provider for AnthropicClient {
                         }
 
                         if let Some((id, name, arguments)) = current_tool.take() {
-                            let arguments =
-                                serde_json::from_str(&arguments).unwrap_or(
-                                    Value::Object(Default::default()),
-                                );
-
-                            tool_calls.push(ToolCall {
-                                id: Some(id),
+                            tool_calls.push(ToolCall::from_argument_text(
+                                Some(id),
                                 name,
-                                arguments,
-                                thought_signature: None,
-                                provider_id: None,
-                            });
+                                &arguments,
+                            ));
 
                             tool_call_index += 1;
                         }
@@ -660,26 +739,44 @@ impl Provider for AnthropicClient {
                                 model_call_usage, &value["delta"],
                             );
 
-                            let message = Message {
+                            let mut message = Message {
                                 role: Role::Assistant,
-                                content: vec![Content::Text(full_text.clone())],
+                                content: vec![Content::Text(std::mem::take(&mut full_text))],
                                 reasoning_artifact: if fragments.is_empty() {
                                     None
                                 } else {
                                     Some(ReasoningArtifact::AnthropicReasoning {
-                                        fragments: fragments.clone(),
+                                        fragments: std::mem::take(&mut fragments),
                                     })
                                 },
-                                tool_calls: tool_calls.clone(),
+                                tool_calls: std::mem::take(&mut tool_calls),
                                 id: None,
                             };
+
+                            // A tool block still open here never finished, so it
+                            // was never added; only a closed trailing one may be cut.
+                            let trailing_tool_call =
+                                last_block_type == "tool_use" && current_tool.is_none();
+                            let (stop_reason, refusal) = Self::finish_turn(
+                                &mut message,
+                                value["delta"]["stop_reason"].as_str(),
+                                value["delta"].get("stop_details"),
+                                trailing_tool_call,
+                            );
+
+                            if let Some(refusal) = &refusal {
+                                yield StreamEvent::Refusal(refusal.clone());
+                            }
 
                             yield StreamEvent::End(Box::new(GenerationResponse {
                                 message,
                                 usage,
                                 model_call_usage,
+                                stop_reason,
+                                refusal,
                             }));
 
+                            finished = true;
                             break;
                         }
                     }
@@ -695,27 +792,27 @@ impl Provider for AnthropicClient {
                     _ => {}
                 }
             }
+
+            if !finished {
+                Err(Error::StreamTruncated(
+                    "Anthropic stream ended before a stop reason was reported".to_string(),
+                ))?;
+            }
         };
 
-        Ok(stream.boxed())
+        stream.boxed()
     }
-}
 
-impl AnthropicClient {
     fn build_request(
         &self,
         conversation: &Conversation,
         config: &GenerationConfig,
     ) -> Result<AnthropicRequest, Error> {
-        let has_reasoning = Self::has_anthropic_reasoning(conversation, config);
-
-        let temperature = if conversation.model.omits_anthropic_sampling_parameters() {
-            None
-        } else if has_reasoning {
-            Some(1.0)
-        } else {
-            Some(config.temperature)
-        };
+        // Omitted unless set, so the provider default applies (1.0, which is
+        // also what thinking requires; validate_config rejects anything else).
+        let temperature = (config.temperature_specified
+            && !conversation.model.omits_anthropic_sampling_parameters())
+        .then_some(config.temperature);
 
         let mut request = AnthropicRequest {
             model: conversation.model.id.clone(),
@@ -976,7 +1073,7 @@ impl AnthropicClient {
                         type_: "tool_use".to_string(),
                         id: tool_call.id.clone().unwrap_or_default(),
                         name: tool_call.name.clone(),
-                        input: tool_call.arguments.clone(),
+                        input: tool_call.replay_arguments(),
                     }));
             }
         }
@@ -1013,9 +1110,7 @@ impl AnthropicClient {
         }
     }
 
-    fn parse_response(
-        response: &AnthropicResponse,
-    ) -> Result<(Message, Option<ReasoningArtifact>), Error> {
+    fn parse_response(response: &AnthropicResponse) -> (Message, Option<ReasoningArtifact>) {
         let mut text = String::new();
         let mut fragments = Vec::new();
         let mut tool_calls = Vec::new();
@@ -1045,7 +1140,11 @@ impl AnthropicClient {
                         arguments: input.clone(),
                         thought_signature: None,
                         provider_id: None,
+                        invalid_arguments: None,
                     });
+                }
+                AnthropicResponseContent::Unknown => {
+                    log::debug!("Skipping an Anthropic content block of an unsupported type.");
                 }
             }
         }
@@ -1064,7 +1163,7 @@ impl AnthropicClient {
             id: None,
         };
 
-        Ok((message, reasoning_artifact))
+        (message, reasoning_artifact)
     }
 
     fn calculate_usage(response: &AnthropicResponse) -> UsageInfo {
@@ -1231,14 +1330,17 @@ struct AnthropicToolResultContent {
 #[allow(dead_code)]
 struct AnthropicResponse {
     id: String,
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
     type_: String,
+    #[serde(default)]
     role: String,
     model: String,
     content: Vec<AnthropicResponseContent>,
-    stop_reason: String,
+    #[serde(default)]
+    stop_reason: Option<String>,
     #[serde(default)]
     stop_details: Option<Value>,
+    #[serde(default)]
     stop_sequence: Option<String>,
     usage: AnthropicUsage,
 }
@@ -1258,6 +1360,10 @@ enum AnthropicResponseContent {
         name: String,
         input: serde_json::Value,
     },
+    /// Block types this client doesn't handle (for example server tool
+    /// blocks or server-side fallback markers) are skipped.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1289,7 +1395,7 @@ mod tests {
         use crate::{Content, Image, Message, ToolCall, ToolResult};
         let client = AnthropicClient::new("test");
         let mut conversation = Conversation::new(Model::get(Provider::Anthropic, "claude-fable-5-1").unwrap());
-        let calls = ["first", "second"].map(|id| ToolCall { id: Some(id.into()), name: "view_image".into(), arguments: serde_json::json!({"path":"fixture.png"}), thought_signature: None, provider_id: None });
+        let calls = ["first", "second"].map(|id| ToolCall { id: Some(id.into()), name: "view_image".into(), arguments: serde_json::json!({"path":"fixture.png"}), thought_signature: None, provider_id: None, invalid_arguments: None });
         let mut assistant = Message::new_assistant("Inspecting images."); assistant.tool_calls = calls.to_vec(); conversation.messages.push(assistant);
         let mut content: Vec<_> = calls.iter().map(|call| Content::ToolResult(ToolResult::from_tool_call(call, "fixture.png, 12 × 8"))).collect();
         content.extend([Content::Text("Image from first call: fixture.png".into()), Content::Image(Image::new_base64("cGl4ZWxz", "image/png"))]);
@@ -1340,7 +1446,7 @@ mod tests {
             })).unwrap();
             let usage = crate::usage::ModelCallUsage::new(
                 response.id, "anthropic".into(), response.model, 42, 17, 200000,
-            ).with_stop_metadata(Some(response.stop_reason), response.stop_details);
+            ).with_stop_metadata(response.stop_reason, response.stop_details);
             assert_eq!(usage.stop_reason.as_deref(), Some(reason));
             assert_eq!(usage.stop_details.unwrap()["explanation"], "Fixture explanation");
         }
@@ -1443,5 +1549,227 @@ mod tests {
             serde_json::to_value(request).unwrap()["thinking"]["type"],
             "disabled"
         );
+    }
+
+    use crate::{
+        providers::{GenerationResponse, StreamEvent},
+        stop::{RefusalSource, StopReason},
+    };
+    use futures::StreamExt;
+    use serde_json::{Value, json};
+
+    fn sse(events: &[Value]) -> String {
+        events.iter().map(|event| format!("data: {event}\n\n")).collect()
+    }
+
+    async fn stream_events(events: &[Value]) -> (Vec<StreamEvent>, Option<Error>) {
+        let bytes = futures::stream::iter([Ok::<_, std::io::Error>(sse(events))]);
+        let mut stream = AnthropicClient::stream_events(
+            bytes,
+            Model::anthropic_claude_sonnet_4_5(),
+            GenerationConfig::default(),
+        );
+        let mut collected = Vec::new();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(event) => collected.push(event),
+                Err(error) => return (collected, Some(error)),
+            }
+        }
+        (collected, None)
+    }
+
+    fn end(events: &[StreamEvent]) -> &GenerationResponse {
+        match events.last() {
+            Some(StreamEvent::End(response)) => response,
+            other => panic!("expected End last, got {other:?}"),
+        }
+    }
+
+    fn message_start() -> Value {
+        json!({"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-5",
+            "usage":{"input_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}})
+    }
+
+    fn text_block(index: u64, text: &str) -> [Value; 3] {
+        [
+            json!({"type":"content_block_start","index":index,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":index,"delta":{"type":"text_delta","text":text}}),
+            json!({"type":"content_block_stop","index":index}),
+        ]
+    }
+
+    fn tool_block(index: u64, id: &str, json_text: &str, close: bool) -> Vec<Value> {
+        let mut events = vec![
+            json!({"type":"content_block_start","index":index,"content_block":{"type":"tool_use","id":id,"name":"fixture_tool","input":{}}}),
+            json!({"type":"content_block_delta","index":index,"delta":{"type":"input_json_delta","partial_json":json_text}}),
+        ];
+        if close {
+            events.push(json!({"type":"content_block_stop","index":index}));
+        }
+        events
+    }
+
+    fn message_delta(stop_reason: &str, stop_details: Value) -> Value {
+        json!({"type":"message_delta","delta":{"stop_reason":stop_reason,"stop_details":stop_details},
+            "usage":{"output_tokens":5}})
+    }
+
+    #[tokio::test]
+    async fn streamed_classifier_refusal_discards_partial_output_from_the_message() {
+        let mut events = vec![message_start()];
+        events.extend(text_block(0, "Hello.."));
+        events.push(message_delta(
+            "refusal",
+            json!({"type":"refusal","category":"cyber","explanation":"Declined."}),
+        ));
+        let (events, error) = stream_events(&events).await;
+        assert!(error.is_none());
+        assert!(matches!(events[events.len() - 2], StreamEvent::Refusal(_)));
+        let response = end(&events);
+        assert_eq!(response.stop_reason, StopReason::Refusal);
+        let refusal = response.refusal.as_ref().unwrap();
+        assert_eq!(refusal.source, RefusalSource::SafetyClassifier);
+        assert_eq!(refusal.category.as_deref(), Some("cyber"));
+        assert_eq!(refusal.explanation.as_deref(), Some("Declined."));
+        assert_eq!(refusal.partial_output.as_deref(), Some("Hello.."));
+        assert_eq!(response.text(), "");
+        assert!(response.message.tool_calls.is_empty());
+        assert_eq!(response.model_call_usage.stop_reason.as_deref(), Some("refusal"));
+
+        // Such a turn is not added to the conversation.
+        let mut conversation = Conversation::new(Model::anthropic_claude_sonnet_4_5());
+        conversation.add_user_message("hi");
+        conversation.add_assistant_message_from_response(response.clone());
+        assert_eq!(conversation.messages.len(), 1);
+    }
+
+    #[test]
+    fn non_streaming_refusal_with_null_details_is_still_a_refusal() {
+        let response: super::AnthropicResponse = serde_json::from_value(json!({
+            "id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-5",
+            "content":[{"type":"text","text":"partial"}],"stop_reason":"refusal",
+            "stop_details":{"type":"refusal","category":null,"explanation":null},
+            "usage":{"input_tokens":1,"output_tokens":1}
+        })).unwrap();
+        let response = AnthropicClient::generation_response(
+            response,
+            &Conversation::new(Model::anthropic_claude_sonnet_4_5()),
+            &GenerationConfig::default(),
+        );
+        let refusal = response.refusal.unwrap();
+        assert_eq!(refusal.category, None);
+        assert_eq!(refusal.explanation, None);
+        assert_eq!(refusal.partial_output.as_deref(), Some("partial"));
+        assert!(matches!(
+            response.message.content.as_slice(),
+            [crate::Content::Text(text)] if text.is_empty()
+        ));
+    }
+
+    #[tokio::test]
+    async fn max_tokens_drops_a_trailing_or_unfinished_tool_call() {
+        // A closed trailing tool block may have been cut by the limit.
+        let mut events = vec![message_start()];
+        events.extend(tool_block(0, "toolu_a", "{\"n\":1}", true));
+        events.extend(tool_block(1, "toolu_b", "{\"n\":2}", true));
+        events.push(message_delta("max_tokens", Value::Null));
+        let (events, _) = stream_events(&events).await;
+        let response = end(&events);
+        assert_eq!(response.stop_reason, StopReason::MaxTokens);
+        let ids: Vec<_> = response.message.tool_calls.iter().map(|call| call.id.as_deref().unwrap()).collect();
+        assert_eq!(ids, ["toolu_a"]);
+
+        // An unfinished block was never added; earlier calls stay.
+        let mut events = vec![message_start()];
+        events.extend(tool_block(0, "toolu_a", "{\"n\":1}", true));
+        events.extend(tool_block(1, "toolu_b", "{\"n\":", false));
+        events.push(message_delta("max_tokens", Value::Null));
+        let (events, _) = stream_events(&events).await;
+        let ids: Vec<_> = end(&events).message.tool_calls.iter().map(|call| call.id.as_deref().unwrap()).collect();
+        assert_eq!(ids, ["toolu_a"]);
+
+        // Normal tool use keeps every call.
+        let mut events = vec![message_start()];
+        events.extend(tool_block(0, "toolu_a", "{\"n\":1}", true));
+        events.push(message_delta("tool_use", Value::Null));
+        let (events, _) = stream_events(&events).await;
+        assert_eq!(end(&events).stop_reason, StopReason::ToolUse);
+        assert_eq!(end(&events).message.tool_calls.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_tool_json_is_marked_not_replaced() {
+        let mut events = vec![message_start()];
+        events.extend(tool_block(0, "toolu_a", "{broken", true));
+        events.push(message_delta("tool_use", Value::Null));
+        let (events, _) = stream_events(&events).await;
+        let call = &end(&events).message.tool_calls[0];
+        assert_eq!(call.invalid_arguments.as_deref(), Some("{broken"));
+        assert!(call.arguments.is_null());
+        assert_eq!(call.replay_arguments(), json!({}));
+    }
+
+    #[tokio::test]
+    async fn redacted_thinking_is_kept_but_never_streamed_as_reasoning() {
+        let events = vec![
+            message_start(),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"ENCRYPTED"}}),
+            json!({"type":"content_block_stop","index":0}),
+            message_delta("end_turn", Value::Null),
+        ];
+        let (events, _) = stream_events(&events).await;
+        assert!(!events.iter().any(|event| matches!(event, StreamEvent::ReasoningChunk(_))));
+        let response = end(&events);
+        assert_eq!(response.stop_reason, StopReason::EndTurn);
+        assert!(matches!(
+            &response.message.reasoning_artifact,
+            Some(crate::ReasoningArtifact::AnthropicReasoning { fragments }) if fragments.len() == 1
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_stream_without_a_stop_reason_is_truncated() {
+        let mut events = vec![message_start()];
+        events.extend(text_block(0, "partial"));
+        let (events, error) = stream_events(&events).await;
+        assert!(matches!(events.last(), Some(StreamEvent::TextChunk(_))));
+        assert!(matches!(error, Some(Error::StreamTruncated(_))));
+    }
+
+    #[test]
+    fn unknown_content_blocks_and_stop_reasons_are_tolerated() {
+        let response: super::AnthropicResponse = serde_json::from_value(json!({
+            "id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-5",
+            "content":[
+                {"type":"fallback","from":{"model":"a"},"to":{"model":"b"}},
+                {"type":"text","text":"ok"}
+            ],
+            "stop_reason":"compaction","usage":{"input_tokens":1,"output_tokens":1}
+        })).unwrap();
+        let response = AnthropicClient::generation_response(
+            response,
+            &Conversation::new(Model::anthropic_claude_sonnet_4_5()),
+            &GenerationConfig::default(),
+        );
+        assert_eq!(response.text(), "ok");
+        assert_eq!(response.stop_reason, StopReason::Other("compaction".into()));
+    }
+
+    #[test]
+    fn temperature_is_sent_only_when_specified() {
+        let client = AnthropicClient::new("test");
+        let conversation = Conversation::new(Model::anthropic_claude_sonnet_4_5());
+
+        let request = client.build_request(&conversation, &GenerationConfig::default()).unwrap();
+        assert!(serde_json::to_value(request).unwrap().get("temperature").is_none());
+
+        let request = client.build_request(&conversation, &GenerationConfig::new(0.2)).unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap()["temperature"], 0.2);
+
+        // Thinking no longer forces an explicit temperature.
+        let config = GenerationConfig::default().with_reasoning(ReasoningConfig::anthropic(2048));
+        let request = client.build_request(&conversation, &config).unwrap();
+        assert!(serde_json::to_value(request).unwrap().get("temperature").is_none());
     }
 }

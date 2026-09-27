@@ -1603,6 +1603,18 @@ impl Model {
         self.id == "gemini-3.5-flash"
     }
 
+    pub fn is_gemini_2_5_pro(&self) -> bool {
+        self.id == "gemini-2.5-pro"
+    }
+
+    pub fn is_gemini_2_5_flash(&self) -> bool {
+        self.id == "gemini-2.5-flash"
+    }
+
+    pub fn is_gemini_2_5_flash_lite(&self) -> bool {
+        self.id == "gemini-2.5-flash-lite"
+    }
+
     pub fn uses_gemini_thinking_levels(&self) -> bool {
         self.is_gemini_3_pro()
             || self.is_gemini_3_flash()

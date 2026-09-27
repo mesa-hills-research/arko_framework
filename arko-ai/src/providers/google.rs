@@ -6,6 +6,7 @@ use crate::{
     message::{Content, Image, Message, Role},
     model::Provider as ProviderType,
     reasoning::{GeminiThinkingLevel, GoogleReasoningFragment, ReasoningArtifact, ReasoningConfig},
+    stop::StopReason,
     tool::{ToolCall, ToolChoice},
     usage::{ModelCallUsage, UsageInfo},
 };
@@ -74,25 +75,24 @@ impl Provider for GoogleClient {
         }
 
         let message = Self::parse_steps(&interaction.steps);
+        let status = interaction.status.as_deref().unwrap_or("completed");
+        let trailing_tool_call = interaction
+            .steps
+            .last()
+            .and_then(|step| step.get("type"))
+            .and_then(Value::as_str)
+            == Some("function_call");
 
         let usage_data = interaction.usage.clone().unwrap_or_default();
-        let mut usage = Self::calculate_usage(&usage_data);
-        usage.calculate_cost(&conversation.model, Some(config));
-
-        let model_call_usage = ModelCallUsage::new(
-            interaction.id.clone(),
-            conversation.model.provider.as_telemetry_str().to_string(),
-            conversation.model.id.clone(),
-            usage.input_tokens,
-            usage.output_tokens,
-            conversation.model.max_input_tokens,
-        );
-
-        Ok(GenerationResponse {
+        Ok(Self::generation_response(
             message,
-            usage,
-            model_call_usage,
-        })
+            status,
+            trailing_tool_call,
+            &usage_data,
+            interaction.id.clone(),
+            &conversation.model,
+            config,
+        ))
     }
 
     async fn generate_stream(
@@ -122,21 +122,42 @@ impl Provider for GoogleClient {
             return Err(Error::from_response("google API error", response).await);
         }
 
-        let byte_stream = response.bytes_stream().eventsource();
-        let model = conversation.model.clone();
-        let config = config.clone();
+        Ok(Self::stream_events(
+            response.bytes_stream(),
+            conversation.model.clone(),
+            config.clone(),
+        ))
+    }
+}
+
+impl GoogleClient {
+    /// Parses an Interactions API SSE byte stream. `End` is emitted only after
+    /// the interaction reports a terminal status; a stream that ends earlier
+    /// yields [`Error::StreamTruncated`].
+    fn stream_events<S, B, E>(
+        bytes: S,
+        model: crate::model::Model,
+        config: GenerationConfig,
+    ) -> BoxStream<'static, Result<StreamEvent, Error>>
+    where
+        S: futures::Stream<Item = Result<B, E>> + Send + 'static,
+        B: AsRef<[u8]> + Send + 'static,
+        E: std::fmt::Display + Send + 'static,
+    {
         let emit_reasoning = Self::requests_thinking_summaries(&config);
 
         let stream = try_stream! {
-            let mut event_stream = byte_stream;
+            let mut event_stream = Box::pin(bytes.eventsource());
             let mut full_text = String::new();
             let mut reasoning_fragments: Vec<GoogleReasoningFragment> = Vec::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut tool_call_index = 0usize;
             let mut current_thought: Option<PendingThought> = None;
             let mut pending_tool: Option<PendingFunctionCall> = None;
+            let mut last_step_type = String::new();
             let mut interaction_id = String::new();
             let mut final_usage: Option<InteractionUsage> = None;
+            let mut terminal_status: Option<String> = None;
 
             while let Some(event) = event_stream.next().await {
                 let event =
@@ -173,19 +194,23 @@ impl Provider for GoogleClient {
                     }
                     Some("step.start") => {
                         let step = &value["step"];
+                        last_step_type = step
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
 
-                        match step.get("type").and_then(Value::as_str) {
-                            Some("thought") => {
+                        match last_step_type.as_str() {
+                            "thought" => {
                                 current_thought = Some(PendingThought {
                                     summary: String::new(),
                                     signature: step
                                         .get("signature")
                                         .and_then(Value::as_str)
                                         .map(String::from),
-                                    signature_received: step.get("signature").is_some(),
                                 });
                             }
-                            Some("function_call") => {
+                            "function_call" => {
                                 let name = step
                                     .get("name")
                                     .and_then(Value::as_str)
@@ -250,7 +275,6 @@ impl Provider for GoogleClient {
                                     current_thought = Some(PendingThought {
                                         summary: text.clone(),
                                         signature: None,
-                                        signature_received: false,
                                     });
                                 }
 
@@ -262,29 +286,23 @@ impl Provider for GoogleClient {
                                 let signature = delta
                                     .get("signature")
                                     .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .to_string();
+                                    .map(String::from);
 
                                 if let Some(thought) = &mut current_thought {
-                                    thought.signature = Some(signature);
-                                    thought.signature_received = true;
+                                    thought.signature = signature;
                                 } else {
                                     current_thought = Some(PendingThought {
                                         summary: String::new(),
-                                        signature: Some(signature),
-                                        signature_received: true,
+                                        signature,
                                     });
                                 }
                             }
                             Some("function_call_signature") => {
-                                let signature = delta
-                                    .get("signature")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .to_string();
-
                                 if let Some(pending) = &mut pending_tool {
-                                    pending.signature = Some(signature);
+                                    pending.signature = delta
+                                        .get("signature")
+                                        .and_then(Value::as_str)
+                                        .map(String::from);
                                 }
                             }
                             Some("arguments_delta")
@@ -324,35 +342,15 @@ impl Provider for GoogleClient {
                         }
 
                         if let Some(thought) = current_thought.take() {
-                            reasoning_fragments.push(GoogleReasoningFragment {
-                                summary: thought.summary,
-                                signature: thought.signature.unwrap_or_default(),
-                            });
+                            reasoning_fragments.push(thought.into_fragment());
                         }
 
                         if let Some(pending) = pending_tool.take() {
-                            let arguments = if !pending.partial_arguments.is_empty() {
-                                serde_json::from_str(&pending.partial_arguments)
-                                    .unwrap_or(Value::Object(Default::default()))
-                            } else {
-                                pending
-                                    .initial_arguments
-                                    .unwrap_or(Value::Object(Default::default()))
-                            };
-
-                            tool_calls.push(ToolCall {
-                                id: pending.id,
-                                name: pending.name,
-                                arguments,
-                                thought_signature: pending.signature,
-                                provider_id: None,
-                            });
-
+                            tool_calls.push(pending.into_tool_call());
                             tool_call_index += 1;
                         }
                     }
-                    Some("interaction.completed")
-                    | Some("interaction.requires_action") => {
+                    Some(event_type @ ("interaction.completed" | "interaction.requires_action")) => {
                         let interaction = &value["interaction"];
 
                         if let Some(id) = interaction
@@ -371,6 +369,19 @@ impl Provider for GoogleClient {
                         {
                             final_usage = Some(parsed);
                         }
+
+                        let default_status = if event_type == "interaction.requires_action" {
+                            "requires_action"
+                        } else {
+                            "completed"
+                        };
+                        terminal_status = Some(
+                            interaction
+                                .get("status")
+                                .and_then(Value::as_str)
+                                .unwrap_or(default_status)
+                                .to_string(),
+                        );
 
                         break;
                     }
@@ -394,10 +405,11 @@ impl Provider for GoogleClient {
 
                                 break;
                             }
-                            Some("completed")
-                            | Some("requires_action")
-                            | Some("incomplete")
-                            | Some("cancelled") => {
+                            Some(status @ ("completed"
+                            | "requires_action"
+                            | "incomplete"
+                            | "cancelled")) => {
+                                terminal_status = Some(status.to_string());
                                 break;
                             }
                             _ => {}
@@ -432,73 +444,102 @@ impl Provider for GoogleClient {
                 }
             }
 
+            let status = terminal_status.ok_or_else(|| {
+                Error::StreamTruncated(
+                    "Google Interactions stream ended before the interaction finished".to_string(),
+                )
+            })?;
+
             if let Some(thought) = current_thought.take() {
-                reasoning_fragments.push(GoogleReasoningFragment {
-                    summary: thought.summary,
-                    signature: thought.signature.unwrap_or_default(),
-                });
+                reasoning_fragments.push(thought.into_fragment());
             }
 
-            if let Some(pending) = pending_tool.take() {
-                let arguments = if !pending.partial_arguments.is_empty() {
-                    serde_json::from_str(&pending.partial_arguments)
-                        .unwrap_or(Value::Object(Default::default()))
-                } else {
-                    pending
-                        .initial_arguments
-                        .unwrap_or(Value::Object(Default::default()))
-                };
+            let trailing_tool_call = last_step_type == "function_call" && pending_tool.is_none();
 
-                tool_calls.push(ToolCall {
-                    id: pending.id,
-                    name: pending.name,
-                    arguments,
-                    thought_signature: pending.signature,
-                    provider_id: None,
-                });
+            // A call still being written when the interaction ended incomplete was cut off.
+            if let Some(pending) = pending_tool.take()
+                && status != "incomplete"
+            {
+                tool_calls.push(pending.into_tool_call());
             }
-
-            let reasoning_artifact = if reasoning_fragments.is_empty() {
-                None
-            } else {
-                Some(ReasoningArtifact::new_google_reasoning(
-                    reasoning_fragments,
-                ))
-            };
 
             let message = Message {
                 role: Role::Assistant,
                 content: vec![Content::Text(full_text)],
-                reasoning_artifact,
+                reasoning_artifact: (!reasoning_fragments.is_empty())
+                    .then(|| ReasoningArtifact::new_google_reasoning(reasoning_fragments)),
                 tool_calls,
                 id: None,
             };
 
-            let usage_data = final_usage.unwrap_or_default();
-            let mut usage = GoogleClient::calculate_usage(&usage_data);
-            usage.calculate_cost(&model, Some(&config));
-
-            let model_call_usage = ModelCallUsage::new(
-                interaction_id,
-                model.provider.as_telemetry_str().to_string(),
-                model.id.clone(),
-                usage.input_tokens,
-                usage.output_tokens,
-                model.max_input_tokens,
-            );
-
-            yield StreamEvent::End(Box::new(GenerationResponse {
+            yield StreamEvent::End(Box::new(GoogleClient::generation_response(
                 message,
-                usage,
-                model_call_usage,
-            }));
+                &status,
+                trailing_tool_call,
+                &final_usage.unwrap_or_default(),
+                interaction_id,
+                &model,
+                &config,
+            )));
         };
 
-        Ok(stream.boxed())
+        stream.boxed()
     }
-}
 
-impl GoogleClient {
+    fn generation_response(
+        mut message: Message,
+        status: &str,
+        trailing_tool_call: bool,
+        usage_data: &InteractionUsage,
+        interaction_id: String,
+        model: &crate::model::Model,
+        config: &GenerationConfig,
+    ) -> GenerationResponse {
+        let mut usage = Self::calculate_usage(usage_data);
+        usage.calculate_cost(model, Some(config));
+
+        let model_call_usage = ModelCallUsage::new(
+            interaction_id,
+            model.provider.as_telemetry_str().to_string(),
+            model.id.clone(),
+            usage.input_tokens,
+            usage.output_tokens,
+            model.max_input_tokens,
+        )
+        .with_stop_metadata(Some(status.to_string()), None);
+
+        let stop_reason = Self::finish_turn(&mut message, status, trailing_tool_call);
+
+        GenerationResponse {
+            message,
+            usage,
+            model_call_usage,
+            stop_reason,
+            refusal: None,
+        }
+    }
+
+    /// Maps an interaction status. The Interactions API reports only
+    /// `status` (in_progress, requires_action, completed, failed, cancelled,
+    /// incomplete) with no finish or safety reason; `incomplete` is
+    /// documented as "e.g. hitting max_tokens", so it maps to `MaxTokens`.
+    /// https://ai.google.dev/api/interactions-api-v1
+    fn finish_turn(message: &mut Message, status: &str, trailing_tool_call: bool) -> StopReason {
+        match status {
+            "completed" | "requires_action" if !message.tool_calls.is_empty() => {
+                StopReason::ToolUse
+            }
+            "completed" => StopReason::EndTurn,
+            "incomplete" => {
+                if trailing_tool_call {
+                    message.tool_calls.pop();
+                }
+                StopReason::MaxTokens
+            }
+            other => StopReason::Other(other.to_string()),
+        }
+    }
+
     fn default_thinking_level(model: &crate::model::Model) -> GeminiThinkingLevel {
         if model.is_gemini_3_5_flash() {
             GeminiThinkingLevel::Medium
@@ -518,17 +559,17 @@ impl GoogleClient {
         }
     }
 
-    fn thinking_level_for_budget(budget: isize) -> Option<&'static str> {
+    fn thinking_level_for_budget(budget: isize) -> Option<GeminiThinkingLevel> {
         if budget < 0 {
             None
         } else if budget == 0 {
-            Some("minimal")
+            Some(GeminiThinkingLevel::Minimal)
         } else if budget <= 4_096 {
-            Some("low")
+            Some(GeminiThinkingLevel::Low)
         } else if budget <= 16_384 {
-            Some("medium")
+            Some(GeminiThinkingLevel::Medium)
         } else {
-            Some("high")
+            Some(GeminiThinkingLevel::High)
         }
     }
 
@@ -558,6 +599,17 @@ impl GoogleClient {
             ));
         }
 
+        // temperature, top_p and top_k are no longer part of the Interactions
+        // API generation_config (deprecated 2026-07-21, absent from the v1
+        // spec). Reject rather than silently ignore an explicit value.
+        // https://ai.google.dev/gemini-api/docs/changelog
+        // https://ai.google.dev/static/api/interactions-v1.openapi.json
+        if config.temperature_specified {
+            return Err(Error::UnsupportedFeature(
+                "The Gemini Interactions API does not accept a temperature.".to_string(),
+            ));
+        }
+
         let (thinking_level, thinking_summaries) = self.resolve_thinking(conversation, config)?;
 
         let tool_choice = config
@@ -581,7 +633,6 @@ impl GoogleClient {
             });
 
         let generation_config = InteractionsGenerationConfig {
-            temperature: config.temperature_specified.then_some(config.temperature),
             max_output_tokens: Some(
                 config
                     .max_tokens
@@ -640,10 +691,17 @@ impl GoogleClient {
                 Some(ReasoningConfig::Google {
                     thinking_budget,
                     include_summaries,
-                }) => Ok((
-                    Self::thinking_level_for_budget(*thinking_budget).map(String::from),
-                    summaries_value(*include_summaries),
-                )),
+                }) => {
+                    let level = Self::thinking_level_for_budget(*thinking_budget);
+                    if let Some(level) = level {
+                        self.validate_gemini_thinking_level(&conversation.model, level)?;
+                    }
+
+                    Ok((
+                        level.map(|level| Self::thinking_level_request_value(level).to_string()),
+                        summaries_value(*include_summaries),
+                    ))
+                }
                 _ => Ok((
                     Some(
                         Self::thinking_level_request_value(Self::default_thinking_level(
@@ -660,11 +718,35 @@ impl GoogleClient {
         }) = &config.reasoning
         {
             Ok((
-                Self::thinking_level_for_budget(*thinking_budget).map(String::from),
+                Self::budget_level_without_thinking_levels(&conversation.model, *thinking_budget)?
+                    .map(|level| Self::thinking_level_request_value(level).to_string()),
                 summaries_value(*include_summaries),
             ))
         } else {
             Ok((None, None))
+        }
+    }
+
+    /// Gemini 2.5 models on the Interactions API accept only LOW, MEDIUM and
+    /// HIGH, so a zero budget (thinking off) has no level. 2.5 Pro can't turn
+    /// thinking off and 2.5 Flash has no documented off switch there, so they
+    /// are rejected; 2.5 Flash-Lite thinks only when asked, so the level is
+    /// omitted. https://ai.google.dev/gemini-api/docs/thinking
+    fn budget_level_without_thinking_levels(
+        model: &crate::model::Model,
+        budget: isize,
+    ) -> Result<Option<GeminiThinkingLevel>, Error> {
+        match Self::thinking_level_for_budget(budget) {
+            Some(GeminiThinkingLevel::Minimal) if model.is_gemini_2_5_flash_lite() => Ok(None),
+            Some(GeminiThinkingLevel::Minimal)
+                if model.is_gemini_2_5_pro() || model.is_gemini_2_5_flash() =>
+            {
+                Err(Error::InvalidRequest(format!(
+                    "Thinking can't be disabled for '{}' on the Interactions API; use a positive budget, or -1 for the model default.",
+                    model.id
+                )))
+            }
+            level => Ok(level),
         }
     }
 
@@ -752,7 +834,8 @@ impl GoogleClient {
 
                                     steps.push(InteractionInputStep::Thought {
                                         summary,
-                                        signature: Some(fragment.signature.clone()),
+                                        signature: (!fragment.signature.is_empty())
+                                            .then(|| fragment.signature.clone()),
                                     });
                                 }
                             }
@@ -797,9 +880,12 @@ impl GoogleClient {
                     for tool_call in &message.tool_calls {
                         steps.push(InteractionInputStep::FunctionCall {
                             id: tool_call.id.clone().unwrap_or_default(),
-                            signature: tool_call.thought_signature.clone(),
+                            signature: tool_call
+                                .thought_signature
+                                .clone()
+                                .filter(|signature| !signature.is_empty()),
                             name: tool_call.name.clone(),
-                            arguments: tool_call.arguments.clone(),
+                            arguments: tool_call.replay_arguments(),
                         });
                     }
                 }
@@ -849,23 +935,27 @@ impl GoogleClient {
                     });
                 }
                 Some("function_call") => {
-                    tool_calls.push(ToolCall {
-                        id: step.get("id").and_then(Value::as_str).map(String::from),
-                        name: step
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string(),
-                        arguments: step
-                            .get("arguments")
-                            .cloned()
-                            .unwrap_or(Value::Object(Default::default())),
-                        thought_signature: step
-                            .get("signature")
-                            .and_then(Value::as_str)
-                            .map(String::from),
-                        provider_id: None,
-                    });
+                    let id = step.get("id").and_then(Value::as_str).map(String::from);
+                    let name = step
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let mut call = match step.get("arguments") {
+                        Some(Value::String(text)) => ToolCall::from_argument_text(id, name, text),
+                        Some(arguments) if !arguments.is_null() => {
+                            let mut call = ToolCall::from_argument_text(id, name, "");
+                            call.arguments = arguments.clone();
+                            call
+                        }
+                        _ => ToolCall::from_argument_text(id, name, ""),
+                    };
+                    call.thought_signature = step
+                        .get("signature")
+                        .and_then(Value::as_str)
+                        .filter(|signature| !signature.is_empty())
+                        .map(String::from);
+                    tool_calls.push(call);
                 }
                 _ => {}
             }
@@ -930,7 +1020,15 @@ impl GoogleClient {
 struct PendingThought {
     summary: String,
     signature: Option<String>,
-    signature_received: bool,
+}
+
+impl PendingThought {
+    fn into_fragment(self) -> GoogleReasoningFragment {
+        GoogleReasoningFragment {
+            summary: self.summary,
+            signature: self.signature.unwrap_or_default(),
+        }
+    }
 }
 
 struct PendingFunctionCall {
@@ -939,6 +1037,22 @@ struct PendingFunctionCall {
     signature: Option<String>,
     partial_arguments: String,
     initial_arguments: Option<Value>,
+}
+
+impl PendingFunctionCall {
+    fn into_tool_call(self) -> ToolCall {
+        let mut call = if self.partial_arguments.is_empty() {
+            let mut call = ToolCall::from_argument_text(self.id, self.name, "");
+            if let Some(arguments) = self.initial_arguments {
+                call.arguments = arguments;
+            }
+            call
+        } else {
+            ToolCall::from_argument_text(self.id, self.name, &self.partial_arguments)
+        };
+        call.thought_signature = self.signature.filter(|signature| !signature.is_empty());
+        call
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -958,8 +1072,6 @@ struct InteractionsRequest {
 
 #[derive(Debug, Serialize)]
 struct InteractionsGenerationConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1059,4 +1171,231 @@ struct InteractionUsage {
 
 pub fn list_models() -> Vec<crate::model::Model> {
     crate::model::Model::list_google_models()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Model;
+    use serde_json::json;
+
+    async fn stream_events(events: &[Value]) -> (Vec<StreamEvent>, Option<Error>) {
+        let body: String = events.iter().map(|event| format!("data: {event}\n\n")).collect();
+        stream_body(body).await
+    }
+
+    async fn stream_body(body: String) -> (Vec<StreamEvent>, Option<Error>) {
+        let bytes = futures::stream::iter([Ok::<_, std::io::Error>(body)]);
+        let mut stream = GoogleClient::stream_events(
+            bytes,
+            Model::google_gemini_3_5_flash(),
+            GenerationConfig::default(),
+        );
+        let mut collected = Vec::new();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(event) => collected.push(event),
+                Err(error) => return (collected, Some(error)),
+            }
+        }
+        (collected, None)
+    }
+
+    fn end(events: &[StreamEvent]) -> &GenerationResponse {
+        match events.last() {
+            Some(StreamEvent::End(response)) => response,
+            other => panic!("expected End last, got {other:?}"),
+        }
+    }
+
+    fn text_step() -> [Value; 3] {
+        [
+            json!({"event_type":"step.start","index":0,"step":{"type":"model_output"}}),
+            json!({"event_type":"step.delta","index":0,"delta":{"type":"text","text":"hi"}}),
+            json!({"event_type":"step.stop","index":0}),
+        ]
+    }
+
+    fn call_step(index: u64, id: &str, arguments: &str, stop: bool) -> Vec<Value> {
+        let mut events = vec![
+            json!({"event_type":"step.start","index":index,"step":{"type":"function_call","id":id,"name":"fixture_tool"}}),
+            json!({"event_type":"step.delta","index":index,"delta":{"type":"arguments_delta","arguments":arguments}}),
+        ];
+        if stop {
+            events.push(json!({"event_type":"step.stop","index":index}));
+        }
+        events
+    }
+
+    fn completed(status: &str) -> Value {
+        json!({"event_type":"interaction.completed","interaction":{"id":"int_1","status":status,
+            "usage":{"total_input_tokens":3,"total_output_tokens":2}}})
+    }
+
+    #[tokio::test]
+    async fn completed_interactions_end_the_turn_and_record_their_status() {
+        let mut events = text_step().to_vec();
+        events.push(completed("completed"));
+        let (events, error) = stream_events(&events).await;
+        assert!(error.is_none());
+        let response = end(&events);
+        assert_eq!(response.text(), "hi");
+        assert_eq!(response.stop_reason, StopReason::EndTurn);
+        assert_eq!(response.model_call_usage.stop_reason.as_deref(), Some("completed"));
+    }
+
+    #[tokio::test]
+    async fn function_calls_awaiting_results_are_tool_use() {
+        let mut events = call_step(0, "call_a", "{\"n\":1}", true);
+        events.push(json!({"event_type":"interaction.status_update","interaction_id":"int_1","status":"requires_action"}));
+        let (events, _) = stream_events(&events).await;
+        let response = end(&events);
+        assert_eq!(response.stop_reason, StopReason::ToolUse);
+        assert_eq!(response.message.tool_calls[0].arguments, json!({"n":1}));
+        assert_eq!(response.model_call_usage.stop_reason.as_deref(), Some("requires_action"));
+    }
+
+    #[tokio::test]
+    async fn incomplete_interactions_drop_cut_off_calls() {
+        let mut events = call_step(0, "call_a", "{\"n\":1}", true);
+        events.extend(call_step(1, "call_b", "{\"n\":2}", true));
+        events.push(completed("incomplete"));
+        let (events, _) = stream_events(&events).await;
+        let response = end(&events);
+        assert_eq!(response.stop_reason, StopReason::MaxTokens);
+        let ids: Vec<_> = response.message.tool_calls.iter().map(|call| call.id.as_deref().unwrap()).collect();
+        assert_eq!(ids, ["call_a"]);
+
+        let mut events = call_step(0, "call_a", "{\"n\":1}", true);
+        events.extend(call_step(1, "call_b", "{\"n\":", false));
+        events.push(completed("incomplete"));
+        let (events, _) = stream_events(&events).await;
+        let ids: Vec<_> = end(&events).message.tool_calls.iter().map(|call| call.id.as_deref().unwrap()).collect();
+        assert_eq!(ids, ["call_a"]);
+    }
+
+    #[tokio::test]
+    async fn streams_without_a_terminal_status_are_truncated() {
+        let (events, error) = stream_events(&text_step()).await;
+        assert!(!events.iter().any(|event| matches!(event, StreamEvent::End(_))));
+        assert!(matches!(error, Some(Error::StreamTruncated(_))));
+
+        let body: String = text_step().iter().map(|event| format!("data: {event}\n\n")).collect();
+        let (_, error) = stream_body(body + "data: [DONE]\n\n").await;
+        assert!(matches!(error, Some(Error::StreamTruncated(_))));
+    }
+
+    #[tokio::test]
+    async fn invalid_call_arguments_are_marked() {
+        let mut events = call_step(0, "call_a", "{oops", true);
+        events.push(completed("requires_action"));
+        let (events, _) = stream_events(&events).await;
+        let call = &end(&events).message.tool_calls[0];
+        assert_eq!(call.invalid_arguments.as_deref(), Some("{oops"));
+    }
+
+    #[test]
+    fn non_streaming_statuses_map_to_stop_reasons() {
+        for (status, expected) in [
+            ("completed", StopReason::EndTurn),
+            ("incomplete", StopReason::MaxTokens),
+            ("cancelled", StopReason::Other("cancelled".into())),
+        ] {
+            let response = GoogleClient::generation_response(
+                GoogleClient::parse_steps(&[json!({"type":"model_output","content":[{"type":"text","text":"x"}]})]),
+                status,
+                false,
+                &InteractionUsage::default(),
+                "int_1".into(),
+                &Model::google_gemini_3_5_flash(),
+                &GenerationConfig::default(),
+            );
+            assert_eq!(response.stop_reason, expected);
+            assert_eq!(response.model_call_usage.stop_reason.as_deref(), Some(status));
+        }
+    }
+
+    #[test]
+    fn empty_signatures_are_not_sent() {
+        let mut conversation = Conversation::new(Model::google_gemini_3_5_flash());
+        conversation.add_user_message("go");
+        let mut message = Message::new_assistant("");
+        message.reasoning_artifact = Some(ReasoningArtifact::new_google_reasoning(vec![
+            GoogleReasoningFragment { summary: "thought".into(), signature: String::new() },
+        ]));
+        let mut call = ToolCall::from_argument_text(Some("call_a".into()), "fixture_tool".into(), "{}");
+        call.thought_signature = Some(String::new());
+        message.tool_calls.push(call);
+        conversation.messages.push(message);
+        let steps = serde_json::to_value(
+            GoogleClient::new("test").convert_messages(&conversation).unwrap(),
+        )
+        .unwrap();
+        for step in steps.as_array().unwrap() {
+            assert!(step.get("signature").is_none(), "{step}");
+        }
+    }
+
+    #[test]
+    fn budget_mapped_levels_are_validated_for_the_model() {
+        let conversation = Conversation::new(Model::google_gemini_3_0_pro());
+        let config = GenerationConfig::default().with_reasoning(ReasoningConfig::google(10_000, false));
+        assert!(matches!(
+            GoogleClient::new("test").build_request(&conversation, &config, false),
+            Err(Error::InvalidRequest(_))
+        ));
+        let config = GenerationConfig::default().with_reasoning(ReasoningConfig::google(20_000, false));
+        let request = GoogleClient::new("test").build_request(&conversation, &config, false).unwrap();
+        assert_eq!(
+            serde_json::to_value(request).unwrap()["generation_config"]["thinking_level"],
+            "high"
+        );
+
+        // Gemini 3.1 Pro rejects MINIMAL, which a zero budget maps to.
+        let conversation = Conversation::new(Model::google_gemini_3_1_pro());
+        let config = GenerationConfig::default().with_reasoning(ReasoningConfig::google(0, false));
+        assert!(matches!(
+            GoogleClient::new("test").build_request(&conversation, &config, false),
+            Err(Error::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn gemini_2_5_budgets_never_map_to_minimal() {
+        let client = GoogleClient::new("test");
+        let zero = GenerationConfig::default().with_reasoning(ReasoningConfig::google(0, false));
+        for model in [Model::google_gemini_2_5_pro(), Model::google_gemini_2_5_flash()] {
+            let conversation = Conversation::new(model);
+            assert!(matches!(
+                client.build_request(&conversation, &zero, false),
+                Err(Error::InvalidRequest(_))
+            ));
+        }
+
+        let conversation = Conversation::new(Model::google_gemini_2_5_flash_lite());
+        let request = client.build_request(&conversation, &zero, false).unwrap();
+        assert!(serde_json::to_value(request).unwrap()["generation_config"].get("thinking_level").is_none());
+
+        let conversation = Conversation::new(Model::google_gemini_2_5_pro());
+        let config = GenerationConfig::default().with_reasoning(ReasoningConfig::google(2_000, false));
+        let request = client.build_request(&conversation, &config, false).unwrap();
+        assert_eq!(
+            serde_json::to_value(request).unwrap()["generation_config"]["thinking_level"],
+            "low"
+        );
+    }
+
+    #[test]
+    fn temperature_is_rejected_because_the_api_no_longer_accepts_it() {
+        let client = GoogleClient::new("test");
+        let conversation = Conversation::new(Model::google_gemini_3_5_flash());
+        assert!(matches!(
+            client.build_request(&conversation, &GenerationConfig::new(0.5), false),
+            Err(Error::UnsupportedFeature(_))
+        ));
+        let request = client
+            .build_request(&conversation, &GenerationConfig::default(), false)
+            .unwrap();
+        assert!(serde_json::to_value(request).unwrap()["generation_config"].get("temperature").is_none());
+    }
 }

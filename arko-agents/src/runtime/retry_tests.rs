@@ -600,6 +600,7 @@ fn complete_response() -> ai::StreamEvent {
         arguments: serde_json::json!({"summary":"done"}),
         thought_signature: None,
         provider_id: None,
+        invalid_arguments: None,
     });
     ai::StreamEvent::End(Box::new(ai::GenerationResponse {
         message,
@@ -612,6 +613,8 @@ fn complete_response() -> ai::StreamEvent {
             0,
             1000,
         ),
+        stop_reason: ai::StopReason::ToolUse,
+        refusal: None,
     }))
 }
 

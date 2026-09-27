@@ -115,6 +115,7 @@ pub(super) fn call(id: &str, name: &str) -> ai::ToolCall {
         arguments: serde_json::json!({}),
         thought_signature: None,
         provider_id: None,
+        invalid_arguments: None,
     }
 }
 
@@ -288,6 +289,11 @@ async fn interception_changes_text_without_dropping_images_and_old_tasks_still_l
 }
 
 pub(super) fn response(message: ai::Message) -> ScriptedStreamResult {
+    let stop_reason = if message.has_tool_calls() {
+        ai::StopReason::ToolUse
+    } else {
+        ai::StopReason::EndTurn
+    };
     Ok(
         futures::stream::iter([Ok(ai::StreamEvent::End(Box::new(ai::GenerationResponse {
             message,
@@ -300,6 +306,8 @@ pub(super) fn response(message: ai::Message) -> ScriptedStreamResult {
                 0,
                 1000,
             ),
+            stop_reason,
+            refusal: None,
         })))])
         .boxed(),
     )

@@ -313,6 +313,7 @@ mod tests {
             arguments: json!({"ordered_ids":[],"excluded":[]}),
             thought_signature: None,
             provider_id: None,
+            invalid_arguments: None,
         });
         GenerationResponse {
             message,
@@ -326,6 +327,8 @@ mod tests {
                 1000,
             )
             .with_stop_metadata(Some("completed".into()), None),
+            stop_reason: arko_ai::StopReason::ToolUse,
+            refusal: None,
         }
     }
 

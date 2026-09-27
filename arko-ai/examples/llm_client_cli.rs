@@ -182,6 +182,9 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
                             io::stdout().flush().map_err(Error::IoError)?;
                         }
                         Ok(StreamEvent::ToolCallStart { .. } | StreamEvent::ToolCallArgumentsDelta { .. }) => {}
+                        Ok(StreamEvent::Refusal(refusal)) => {
+                            println!("\n\nThe response was {refusal}");
+                        }
                         Ok(StreamEvent::End(boxed_resp)) => {
                             let resp = *boxed_resp;
                             println!("\n");
@@ -194,10 +197,10 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
             } else {
                 let response = client.generate_text(&conversation, config).await?;
 
-                println!(
-                    "Response: {}",
-                    response.message.content[0].as_text().unwrap_or("")
-                );
+                println!("Response: {}", response.text());
+                if let Some(refusal) = &response.refusal {
+                    println!("The response was {refusal}");
+                }
 
                 print_reasoning_artifact(response.message.reasoning_artifact.as_ref());
                 print_usage_info(&response.usage, None, 0.0);
@@ -291,6 +294,9 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
                             io::stdout().flush().map_err(Error::IoError)?;
                         }
                         Ok(StreamEvent::ToolCallStart { .. } | StreamEvent::ToolCallArgumentsDelta { .. }) => {}
+                        Ok(StreamEvent::Refusal(refusal)) => {
+                            println!("\n  (The response was {refusal})");
+                        }
                         Ok(StreamEvent::End(boxed_resp)) => {
                             let resp = *boxed_resp;
                             final_response_for_turn = Some(resp);
@@ -306,7 +312,13 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
                 println!();
 
                 if let Some(resp) = final_response_for_turn {
-                    conversation.add_assistant_message_from_response(resp.clone());
+                    // A refused turn that can't stay in history is removed
+                    // together with the prompt that triggered it.
+                    if resp.refusal.as_ref().is_some_and(|refusal| !refusal.source.keeps_turn()) {
+                        conversation.messages.pop();
+                    } else {
+                        conversation.add_assistant_message_from_response(resp.clone());
+                    }
                     total_cost += resp.usage.total_cost;
                     print_usage_info(&resp.usage, last_input_tokens, total_cost);
                     last_input_tokens = Some(resp.usage.input_tokens);
@@ -585,14 +597,19 @@ fn load_image(path: &PathBuf) -> Result<Image, Box<Error>> {
 fn print_reasoning_artifact(artifact: Option<&ReasoningArtifact>) {
     if let Some(artifact) = artifact {
         match artifact {
-            ReasoningArtifact::OpenAIEncryptedReasoning { summaries, .. } => {
-                if let Some(summaries) = summaries {
+            ReasoningArtifact::OpenAIEncryptedReasoning { items } => {
+                let summaries: Vec<&String> = items
+                    .iter()
+                    .filter_map(|item| item.summaries.as_ref())
+                    .flatten()
+                    .collect();
+                if summaries.is_empty() {
+                    println!("\nReasoning Artifact Present (Encrypted, No Summaries)");
+                } else {
                     println!("\nReasoning Summaries:");
                     for summary in summaries {
                         println!("- {}", summary);
                     }
-                } else {
-                    println!("\nReasoning Artifact Present (Encrypted, No Summaries)");
                 }
             }
             ReasoningArtifact::AnthropicReasoning { fragments } => {

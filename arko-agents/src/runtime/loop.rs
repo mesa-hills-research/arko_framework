@@ -1462,6 +1462,8 @@ impl AgentLoop {
                                 }
                             }
                             Ok(Some(ai::StreamEvent::ToolCallArgumentsDelta { .. })) => {}
+                            // The same refusal arrives with `End`.
+                            Ok(Some(ai::StreamEvent::Refusal(_))) => {}
                             Ok(Some(ai::StreamEvent::End(boxed_generation_response))) => {
                                 let generation_response = *boxed_generation_response;
                                 self.task.usage_history.push(generation_response.usage.clone());
@@ -2986,6 +2988,7 @@ mod tests {
             arguments: serde_json::json!({}),
             thought_signature: None,
             provider_id: None,
+            invalid_arguments: None,
         }
     }
 

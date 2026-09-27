@@ -91,10 +91,22 @@ impl Conversation {
         self
     }
 
+    /// Appends the response's assistant message. A refused turn that must not
+    /// remain in history (see [`RefusalSource::keeps_turn`]) is not appended;
+    /// the caller decides what to do with the input that triggered it.
+    ///
+    /// [`RefusalSource::keeps_turn`]: crate::stop::RefusalSource::keeps_turn
     pub fn add_assistant_message_from_response(
         &mut self,
         response: GenerationResponse,
     ) -> &mut Self {
+        if response
+            .refusal
+            .as_ref()
+            .is_some_and(|refusal| !refusal.source.keeps_turn())
+        {
+            return self;
+        }
         self.messages.push(response.message);
         self
     }

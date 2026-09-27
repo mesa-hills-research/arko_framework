@@ -1,4 +1,4 @@
-use super::{GenerationResponse, Provider, StreamEvent};
+use super::{GenerationResponse, Provider, StreamEvent, take_refused_output};
 use crate::{
     config::GenerationConfig,
     conversation::Conversation,
@@ -6,8 +6,9 @@ use crate::{
     message::{Content, Image, Message, Role},
     model::{ModelType, Provider as ProviderType},
     reasoning::{
-        OpenAIEffort, OpenAIReasoningMode, ReasoningArtifact,
+        OpenAIEffort, OpenAIReasoningItem, OpenAIReasoningMode, ReasoningArtifact,
     },
+    stop::{Refusal, RefusalSource, StopReason},
     tool::{ToolCall, ToolChoice},
     usage::{ModelCallUsage, UsageInfo},
 };
@@ -64,10 +65,45 @@ pub struct OAuthRefreshResult {
 }
 
 struct StreamingToolCall {
+    /// Position in `ToolCallStart`/`ToolCallArgumentsDelta` events.
+    index: usize,
     name: String,
     arguments: String,
     item_id: Option<String>,
     call_id: Option<String>,
+    output_index: Option<u64>,
+    /// Set once the provider reports the arguments as finished.
+    completed: bool,
+}
+
+impl StreamingToolCall {
+    /// The call an argument event belongs to, matched by `item_id` and then
+    /// `output_index`, so interleaved parallel calls stay separate.
+    fn find<'a>(calls: &'a mut [Self], event: &Value) -> Option<&'a mut Self> {
+        let item_id = event.get("item_id").and_then(Value::as_str);
+        let output_index = event.get("output_index").and_then(Value::as_u64);
+        let position = calls
+            .iter()
+            .position(|call| item_id.is_some() && call.item_id.as_deref() == item_id)
+            .or_else(|| {
+                calls
+                    .iter()
+                    .position(|call| output_index.is_some() && call.output_index == output_index)
+            })
+            // Events without either identifier can only mean the latest call.
+            .or_else(|| {
+                (item_id.is_none() && output_index.is_none())
+                    .then(|| calls.len().checked_sub(1))
+                    .flatten()
+            })?;
+        calls.get_mut(position)
+    }
+
+    fn into_tool_call(self) -> ToolCall {
+        let mut call = ToolCall::from_argument_text(self.call_id, self.name, &self.arguments);
+        call.provider_id = self.item_id;
+        call
+    }
 }
 
 fn base64_url_decode(input: &str) -> Option<Vec<u8>> {
@@ -645,35 +681,14 @@ impl Provider for OpenAIClient {
         let (response, auth) = self.send_response_request(&request, auth).await?;
 
         let response_data: OpenAIResponse = response.json().await?;
-        let (message, _) = Self::parse_response(&response_data)?;
-        let mut usage = Self::calculate_usage(&response_data);
-        usage.calculate_cost(&conversation.model, Some(config));
-
-        if auth.is_chatgpt_oauth() {
-            Self::zero_usage_costs(&mut usage);
-        }
-
-        let model_call_usage = ModelCallUsage::new(
-            response_data.id.clone(),
-            conversation
-                .model
-                .provider
-                .as_telemetry_str()
-                .to_string(),
-            response_data.model.clone(),
-            response_data.usage.input_tokens,
-            response_data.usage.output_tokens,
-            conversation.model.max_input_tokens,
-        );
-        let model_call_usage = Self::with_response_stop_metadata(
-            model_call_usage, &response_data, &StreamingRefusals::new(),
-        );
-
-        Ok(GenerationResponse {
-            message,
-            usage,
-            model_call_usage,
-        })
+        Ok(Self::generation_response(
+            &response_data,
+            &conversation.model,
+            config,
+            auth.is_chatgpt_oauth(),
+            &StreamingRefusals::new(),
+            Vec::new(),
+        ))
     }
 
     async fn generate_stream(
@@ -703,16 +718,35 @@ impl Provider for OpenAIClient {
 
         let (response, auth) = self.send_response_request(&request, auth).await?;
 
-        let byte_stream = response.bytes_stream().eventsource();
-        let model = conversation.model.clone();
-        let config = config.clone();
-        let is_chatgpt_oauth = auth.is_chatgpt_oauth();
+        Ok(Self::stream_events(
+            response.bytes_stream(),
+            conversation.model.clone(),
+            config.clone(),
+            auth.is_chatgpt_oauth(),
+        ))
+    }
+}
 
+impl OpenAIClient {
+    /// Parses a Responses API SSE byte stream. `End` is emitted only for a
+    /// `response.completed` or `response.incomplete` event; a stream that
+    /// ends earlier yields [`Error::StreamTruncated`].
+    fn stream_events<S, B, E>(
+        bytes: S,
+        model: crate::model::Model,
+        config: GenerationConfig,
+        is_chatgpt_oauth: bool,
+    ) -> BoxStream<'static, Result<StreamEvent, Error>>
+    where
+        S: futures::Stream<Item = Result<B, E>> + Send + 'static,
+        B: AsRef<[u8]> + Send + 'static,
+        E: std::fmt::Display + Send + 'static,
+    {
         let stream = try_stream! {
-            let mut event_stream = byte_stream;
-            let mut tool_call_index = 0usize;
-            let mut streaming_tool_calls = Vec::new();
+            let mut event_stream = Box::pin(bytes.eventsource());
+            let mut streaming_tool_calls: Vec<StreamingToolCall> = Vec::new();
             let mut streaming_refusals = StreamingRefusals::new();
+            let mut finished = false;
 
             while let Some(event) = event_stream.next().await {
                 let event =
@@ -730,11 +764,9 @@ impl Provider for OpenAIClient {
 
                         yield StreamEvent::TextChunk(delta);
                     }
-                    Some("response.refusal.delta") => {
-                        Self::record_stream_refusal(&mut streaming_refusals, &value);
-                        yield StreamEvent::TextChunk(value["delta"].as_str().unwrap_or("").to_string());
-                    }
-                    Some("response.refusal.done") => {
+                    // Refusal text is reported through `StreamEvent::Refusal`,
+                    // never as ordinary text.
+                    Some("response.refusal.delta" | "response.refusal.done") => {
                         Self::record_stream_refusal(&mut streaming_refusals, &value);
                     }
                     Some("response.reasoning_summary_text.delta") => {
@@ -755,28 +787,25 @@ impl Provider for OpenAIClient {
                                 .and_then(Value::as_str)
                                 .unwrap_or("")
                                 .to_string();
-
-                            let item_id = item
-                                .get("id")
-                                .and_then(Value::as_str)
-                                .map(String::from);
-
-                            let call_id = item
-                                .get("call_id")
-                                .and_then(Value::as_str)
-                                .map(String::from);
+                            let index = streaming_tool_calls.len();
 
                             streaming_tool_calls.push(StreamingToolCall {
+                                index,
                                 name: name.clone(),
                                 arguments: String::new(),
-                                item_id,
-                                call_id,
+                                item_id: item
+                                    .get("id")
+                                    .and_then(Value::as_str)
+                                    .map(String::from),
+                                call_id: item
+                                    .get("call_id")
+                                    .and_then(Value::as_str)
+                                    .map(String::from),
+                                output_index: value.get("output_index").and_then(Value::as_u64),
+                                completed: false,
                             });
 
-                            yield StreamEvent::ToolCallStart {
-                                index: tool_call_index,
-                                name,
-                            };
+                            yield StreamEvent::ToolCallStart { index, name };
                         }
                     }
                     Some("response.function_call_arguments.delta") => {
@@ -786,24 +815,45 @@ impl Provider for OpenAIClient {
                             .unwrap_or("")
                             .to_string();
 
-                        if let Some(tool_call) = streaming_tool_calls.last_mut() {
+                        if let Some(tool_call) =
+                            StreamingToolCall::find(&mut streaming_tool_calls, &value)
+                        {
                             tool_call.arguments.push_str(&delta);
-                        }
+                            let index = tool_call.index;
 
-                        yield StreamEvent::ToolCallArgumentsDelta {
-                            index: tool_call_index,
-                            delta,
-                        };
+                            yield StreamEvent::ToolCallArgumentsDelta { index, delta };
+                        }
                     }
                     Some("response.function_call_arguments.done") => {
-                        if let Some(arguments) =
-                            value.get("arguments").and_then(Value::as_str)
-                            && let Some(tool_call) = streaming_tool_calls.last_mut()
+                        if let Some(tool_call) =
+                            StreamingToolCall::find(&mut streaming_tool_calls, &value)
                         {
-                            tool_call.arguments = arguments.to_string();
+                            if let Some(arguments) =
+                                value.get("arguments").and_then(Value::as_str)
+                            {
+                                tool_call.arguments = arguments.to_string();
+                            }
+                            tool_call.completed = true;
                         }
-
-                        tool_call_index += 1;
+                    }
+                    Some("response.output_item.done") => {
+                        let item = &value["item"];
+                        if item.get("type").and_then(Value::as_str) == Some("function_call")
+                            && let Some(tool_call) = streaming_tool_calls.iter_mut().find(|call| {
+                                call.item_id.is_some()
+                                    && call.item_id.as_deref() == item.get("id").and_then(Value::as_str)
+                            })
+                        {
+                            if let Some(arguments) =
+                                item.get("arguments").and_then(Value::as_str)
+                            {
+                                tool_call.arguments = arguments.to_string();
+                            }
+                            tool_call.completed = matches!(
+                                item.get("status").and_then(Value::as_str),
+                                None | Some("completed")
+                            );
+                        }
                     }
                     Some("response.completed" | "response.incomplete") => {
                         #[derive(Deserialize)]
@@ -814,67 +864,28 @@ impl Provider for OpenAIClient {
                         let completed: Completed =
                             serde_json::from_value(value).map_err(Error::JsonError)?;
 
-                        let (mut message, _) =
-                            OpenAIClient::parse_response(&completed.response)?;
+                        let streamed_calls = streaming_tool_calls
+                            .drain(..)
+                            .filter(|tool_call| tool_call.completed)
+                            .map(StreamingToolCall::into_tool_call)
+                            .collect();
 
-                        let mut usage =
-                            OpenAIClient::calculate_usage(&completed.response);
-                        usage.calculate_cost(&model, Some(&config));
-
-                        if is_chatgpt_oauth {
-                            OpenAIClient::zero_usage_costs(&mut usage);
-                        }
-
-                        if message.tool_calls.is_empty()
-                            && !streaming_tool_calls.is_empty()
-                            && completed.response.status == "completed"
-                            && streaming_refusals.is_empty()
-                            && !Self::has_refusal(&completed.response)
-                        {
-                            message.tool_calls = streaming_tool_calls
-                                .drain(..)
-                                .map(|tool_call| {
-                                    let arguments =
-                                        serde_json::from_str(&tool_call.arguments).unwrap_or(
-                                            Value::Object(Default::default()),
-                                        );
-
-                                    ToolCall {
-                                        id: tool_call.call_id,
-                                        name: tool_call.name,
-                                        arguments,
-                                        thought_signature: None,
-                                        provider_id: tool_call.item_id,
-                                    }
-                                })
-                                .collect();
-                        }
-
-                        let model_call_usage = ModelCallUsage::new(
-                            completed.response.id.clone(),
-                            model.provider.as_telemetry_str().to_string(),
-                            completed.response.model.clone(),
-                            completed.response.usage.input_tokens,
-                            completed.response.usage.output_tokens,
-                            model.max_input_tokens,
+                        let response = Self::generation_response(
+                            &completed.response,
+                            &model,
+                            &config,
+                            is_chatgpt_oauth,
+                            &streaming_refusals,
+                            streamed_calls,
                         );
-                        let model_call_usage = Self::with_response_stop_metadata(
-                            model_call_usage, &completed.response, &streaming_refusals,
-                        );
-                        if !streaming_refusals.is_empty()
-                            && message.content.iter().all(|item| matches!(item, Content::Text(text) if text.is_empty()))
-                        {
-                            message.content = vec![Content::Text(
-                                streaming_refusals.values().cloned().collect::<Vec<_>>().join("\n"),
-                            )];
+
+                        if let Some(refusal) = &response.refusal {
+                            yield StreamEvent::Refusal(refusal.clone());
                         }
 
-                        yield StreamEvent::End(Box::new(GenerationResponse {
-                            message,
-                            usage,
-                            model_call_usage,
-                        }));
+                        yield StreamEvent::End(Box::new(response));
 
+                        finished = true;
                         break;
                     }
                     Some("error" | "response.failed") => {
@@ -895,13 +906,112 @@ impl Provider for OpenAIClient {
                     _ => {}
                 }
             }
+
+            if !finished {
+                Err(Error::StreamTruncated(
+                    "OpenAI stream ended before the response completed".to_string(),
+                ))?;
+            }
         };
 
-        Ok(stream.boxed())
+        stream.boxed()
     }
-}
 
-impl OpenAIClient {
+    fn generation_response(
+        response: &OpenAIResponse,
+        model: &crate::model::Model,
+        config: &GenerationConfig,
+        is_chatgpt_oauth: bool,
+        streamed_refusals: &StreamingRefusals,
+        streamed_calls: Vec<ToolCall>,
+    ) -> GenerationResponse {
+        let (mut message, mut refusal_texts) = Self::parse_response(response);
+        let mut usage = Self::calculate_usage(response);
+        usage.calculate_cost(model, Some(config));
+
+        if is_chatgpt_oauth {
+            Self::zero_usage_costs(&mut usage);
+        }
+
+        let model_call_usage = ModelCallUsage::new(
+            response.id.clone(),
+            model.provider.as_telemetry_str().to_string(),
+            response.model.clone(),
+            response.usage.input_tokens,
+            response.usage.output_tokens,
+            model.max_input_tokens,
+        );
+        let model_call_usage =
+            Self::with_response_stop_metadata(model_call_usage, response, streamed_refusals);
+
+        if refusal_texts.is_empty() {
+            refusal_texts = streamed_refusals.values().cloned().collect();
+        }
+
+        // The ChatGPT Codex backend can finish a stream without repeating its
+        // output items, so use the calls whose arguments finished streaming.
+        if message.tool_calls.is_empty() && refusal_texts.is_empty() {
+            message.tool_calls = streamed_calls;
+        }
+
+        let (stop_reason, refusal) = Self::finish_turn(
+            &mut message,
+            response,
+            refusal_texts,
+            model_call_usage.stop_details.clone(),
+        );
+
+        GenerationResponse {
+            message,
+            usage,
+            model_call_usage,
+            stop_reason,
+            refusal,
+        }
+    }
+
+    /// Normalizes a finished response. Refusal parts are the model declining
+    /// in its own words; `incomplete` responses carry their reason in
+    /// `incomplete_details`.
+    /// https://developers.openai.com/api/docs/guides/structured-outputs#refusals
+    /// https://platform.openai.com/docs/api-reference/responses/object
+    fn finish_turn(
+        message: &mut Message,
+        response: &OpenAIResponse,
+        refusal_texts: Vec<String>,
+        stop_details: Option<Value>,
+    ) -> (StopReason, Option<Refusal>) {
+        if !refusal_texts.is_empty() {
+            let mut refusal = Refusal::new(RefusalSource::Model);
+            refusal.explanation = Some(refusal_texts.join("\n"));
+            refusal.provider_details = stop_details.unwrap_or(Value::Null);
+            return (StopReason::Refusal, Some(refusal));
+        }
+
+        let incomplete_reason = response
+            .incomplete_details
+            .as_ref()
+            .and_then(|details| details.get("reason"))
+            .and_then(Value::as_str);
+
+        match (response.status.as_str(), incomplete_reason) {
+            ("incomplete", Some("content_filter")) => {
+                let mut refusal = Refusal::new(RefusalSource::ContentFilter);
+                refusal.partial_output = take_refused_output(message);
+                refusal.provider_details =
+                    response.incomplete_details.clone().unwrap_or(Value::Null);
+                (StopReason::Refusal, Some(refusal))
+            }
+            ("incomplete", Some("max_output_tokens")) => (StopReason::MaxTokens, None),
+            ("incomplete", reason) => {
+                (StopReason::Other(reason.unwrap_or("incomplete").to_string()), None)
+            }
+            ("completed", _) if !message.tool_calls.is_empty() => (StopReason::ToolUse, None),
+            ("completed", _) => (StopReason::EndTurn, None),
+            (status, _) => (StopReason::Other(status.to_string()), None),
+        }
+    }
+
     fn record_stream_refusal(refusals: &mut StreamingRefusals, event: &Value) {
         let key = (
             event["item_id"].as_str().unwrap_or("").to_string(),
@@ -916,12 +1026,6 @@ impl OpenAIClient {
             }
             _ => {}
         }
-    }
-
-    fn has_refusal(response: &OpenAIResponse) -> bool {
-        response.output.iter().any(|output| matches!(output,
-            OpenAIOutput::Message { content, .. } if content.iter().any(|part| part.type_ == "refusal")
-        ))
     }
 
     fn with_response_stop_metadata(
@@ -1026,11 +1130,11 @@ impl OpenAIClient {
             include: None,
             input: Vec::new(),
             max_output_tokens: resolved_max_tokens,
-            temperature: if conversation.model.model_type != ModelType::Reasoning {
-                Some(config.temperature)
-            } else {
-                None
-            },
+            // Omitted unless set, so the model default applies. Reasoning
+            // models reject it (checked before building).
+            temperature: (conversation.model.model_type != ModelType::Reasoning
+                && config.temperature_specified)
+                .then_some(config.temperature),
             stream: Some(false),
             tools: None,
             tool_choice: None,
@@ -1272,34 +1376,36 @@ impl OpenAIClient {
 
         for message in &conversation.messages {
             if let Role::Assistant = message.role {
-                if let Some(ReasoningArtifact::OpenAIEncryptedReasoning {
-                    encrypted_content,
-                    summaries,
-                    id,
-                }) = &message.reasoning_artifact
+                if let Some(ReasoningArtifact::OpenAIEncryptedReasoning { items }) =
+                    &message.reasoning_artifact
                 {
-                    request.input.push(OpenAIInputEntry::Reasoning(
-                        OpenAIInputReasoning {
-                            type_: "reasoning".to_string(),
-                            encrypted_content: encrypted_content.clone(),
-                            summary: summaries.as_ref().map(|summaries| {
-                                summaries
-                                    .iter()
-                                    .map(|summary| OpenAIReasoningSummary {
-                                        type_: "summary_text".to_string(),
-                                        text: summary.clone(),
-                                    })
-                                    .collect()
-                            }),
-                            id: id.clone(),
-                        },
-                    ));
+                    for item in items {
+                        request.input.push(OpenAIInputEntry::Reasoning(
+                            OpenAIInputReasoning {
+                                type_: "reasoning".to_string(),
+                                encrypted_content: item.encrypted_content.clone(),
+                                summary: item.summaries.as_ref().map(|summaries| {
+                                    summaries
+                                        .iter()
+                                        .map(|summary| OpenAIReasoningSummary {
+                                            type_: "summary_text".to_string(),
+                                            text: summary.clone(),
+                                        })
+                                        .collect()
+                                }),
+                                id: item.id.clone(),
+                            },
+                        ));
+                    }
                 }
 
                 for tool_call in &message.tool_calls {
-                    let arguments =
-                        serde_json::to_string(&tool_call.arguments)
-                            .unwrap_or_else(|_| "{}".to_string());
+                    // Invalid arguments are replayed exactly as the model wrote them.
+                    let arguments = match &tool_call.invalid_arguments {
+                        Some(raw) => raw.clone(),
+                        None => serde_json::to_string(&tool_call.arguments)
+                            .unwrap_or_else(|_| "{}".to_string()),
+                    };
 
                     request.input.push(OpenAIInputEntry::FunctionCall(
                         OpenAIInputFunctionCall {
@@ -1391,9 +1497,8 @@ impl OpenAIClient {
                         Some(OpenAIContent::Text(text.clone()));
                 }
                 Content::Image(image) => {
-                    input_message.content = Some(OpenAIContent::Image(
-                        self.convert_image_to_openai(image)?,
-                    ));
+                    input_message.content =
+                        Some(OpenAIContent::Array(vec![self.image_item(image)?]));
                 }
                 Content::ToolResult(_) => {}
             }
@@ -1475,9 +1580,8 @@ impl OpenAIClient {
                         Some(OpenAIContent::Text(text.to_string()));
                 }
             } else if let Some(image) = content[0].as_image() {
-                input_message.content = Some(OpenAIContent::Image(
-                    self.convert_image_to_openai(image)?,
-                ));
+                input_message.content =
+                    Some(OpenAIContent::Array(vec![self.image_item(image)?]));
             }
         } else {
             let mut items = Vec::new();
@@ -1514,6 +1618,14 @@ impl OpenAIClient {
         Ok(input_message)
     }
 
+    fn image_item(&self, image: &Image) -> Result<OpenAIContentItem, Error> {
+        Ok(OpenAIContentItem {
+            type_: "input_image".to_string(),
+            text: None,
+            image_url: Some(self.convert_image_to_openai(image)?),
+        })
+    }
+
     fn convert_image_to_openai(
         &self,
         image: &Image,
@@ -1526,11 +1638,13 @@ impl OpenAIClient {
         }
     }
 
-    fn parse_response(
-        response: &OpenAIResponse,
-    ) -> Result<(Message, Option<ReasoningArtifact>), Error> {
+    /// Returns the assistant message and any refusal texts. Refusal text is
+    /// never part of the message text. Function calls that didn't finish
+    /// (an `incomplete` response cut them off) are dropped.
+    fn parse_response(response: &OpenAIResponse) -> (Message, Vec<String>) {
         let mut text = String::new();
-        let mut reasoning_artifact = None;
+        let mut refusals = Vec::new();
+        let mut reasoning_items = Vec::new();
         let mut message_id = None;
         let mut tool_calls = Vec::new();
 
@@ -1542,45 +1656,46 @@ impl OpenAIClient {
                     for item in content {
                         match item.type_.as_str() {
                             "output_text" => text.push_str(&item.text),
-                            "refusal" => text.push_str(item.refusal.as_deref().unwrap_or("")),
+                            "refusal" => refusals.push(item.refusal.clone().unwrap_or_default()),
                             _ => {}
                         }
                     }
                 }
                 OpenAIOutput::Reasoning {
-                    encrypted_content,
+                    encrypted_content: Some(encrypted_content),
                     summary,
                     id,
-                } => {
-                    reasoning_artifact =
-                        Some(ReasoningArtifact::OpenAIEncryptedReasoning {
-                            encrypted_content: encrypted_content.clone(),
-                            summaries: summary.as_ref().map(|summaries| {
-                                summaries
-                                    .iter()
-                                    .map(|summary| summary.text.clone())
-                                    .collect()
-                            }),
-                            id: Some(id.clone()),
-                        });
-                }
+                } => reasoning_items.push(OpenAIReasoningItem {
+                    encrypted_content: encrypted_content.clone(),
+                    summaries: summary.as_ref().map(|summaries| {
+                        summaries
+                            .iter()
+                            .map(|summary| summary.text.clone())
+                            .collect()
+                    }),
+                    id: Some(id.clone()),
+                }),
+                // Without encrypted content a reasoning item can't be replayed
+                // statelessly (store=false).
+                OpenAIOutput::Reasoning { .. } => {}
                 OpenAIOutput::FunctionCall {
                     id,
                     call_id,
                     name,
                     arguments,
-                    ..
+                    status,
                 } => {
-                    let arguments = serde_json::from_str(arguments)
-                        .unwrap_or(Value::Object(Default::default()));
+                    if !matches!(status.as_deref(), None | Some("completed")) {
+                        continue;
+                    }
 
-                    tool_calls.push(ToolCall {
-                        id: Some(call_id.clone()),
-                        name: name.clone(),
-                        arguments,
-                        thought_signature: None,
-                        provider_id: Some(id.clone()),
-                    });
+                    let mut call =
+                        ToolCall::from_argument_text(Some(call_id.clone()), name.clone(), arguments);
+                    call.provider_id = Some(id.clone());
+                    tool_calls.push(call);
+                }
+                OpenAIOutput::Unknown => {
+                    log::debug!("Skipping an OpenAI output item of an unsupported type.");
                 }
             }
         }
@@ -1588,12 +1703,16 @@ impl OpenAIClient {
         let message = Message {
             role: Role::Assistant,
             content: vec![Content::Text(text)],
-            reasoning_artifact: reasoning_artifact.clone(),
+            reasoning_artifact: (!reasoning_items.is_empty()).then_some(
+                ReasoningArtifact::OpenAIEncryptedReasoning {
+                    items: reasoning_items,
+                },
+            ),
             tool_calls,
             id: message_id,
         };
 
-        Ok((message, reasoning_artifact))
+        (message, refusals)
     }
 
     fn calculate_usage(response: &OpenAIResponse) -> UsageInfo {
@@ -1761,7 +1880,6 @@ struct OpenAIReasoningSummary {
 #[serde(untagged)]
 enum OpenAIContent {
     Text(String),
-    Image(String),
     Array(Vec<OpenAIContentItem>),
 }
 
@@ -1779,15 +1897,21 @@ struct OpenAIContentItem {
 #[allow(dead_code)]
 struct OpenAIResponse {
     id: String,
+    #[serde(default)]
     object: String,
+    #[serde(default)]
     created_at: u64,
     status: String,
+    #[serde(default)]
     error: Option<Value>,
+    #[serde(default)]
     incomplete_details: Option<Value>,
     model: String,
     output: Vec<OpenAIOutput>,
     usage: OpenAIUsage,
+    #[serde(default)]
     user: Option<String>,
+    #[serde(default)]
     metadata: serde_json::Value,
 }
 
@@ -1798,14 +1922,18 @@ enum OpenAIOutput {
     #[serde(rename = "message")]
     Message {
         id: String,
-        status: String,
+        #[serde(default)]
+        status: Option<String>,
         content: Vec<OpenAIOutputContent>,
-        role: String,
+        #[serde(default)]
+        role: Option<String>,
     },
     #[serde(rename = "reasoning")]
     Reasoning {
         id: String,
-        encrypted_content: String,
+        #[serde(default)]
+        encrypted_content: Option<String>,
+        #[serde(default)]
         summary: Option<Vec<OpenAISummary>>,
     },
     #[serde(rename = "function_call")]
@@ -1814,8 +1942,13 @@ enum OpenAIOutput {
         call_id: String,
         name: String,
         arguments: String,
-        status: String,
+        #[serde(default)]
+        status: Option<String>,
     },
+    /// Output items this client doesn't handle (for example built-in tool
+    /// calls) are skipped.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1878,7 +2011,7 @@ mod tests {
         use crate::{Content, Image, Message, ToolCall, ToolResult};
         let client = OpenAIClient::new("test");
         let mut conversation = Conversation::new(Model::get(Provider::OpenAI, "gpt-6-astra").unwrap());
-        let calls = ["first", "second"].map(|id| ToolCall { id: Some(id.into()), name: "view_image".into(), arguments: serde_json::json!({"path":"fixture.png"}), thought_signature: None, provider_id: None });
+        let calls = ["first", "second"].map(|id| ToolCall { id: Some(id.into()), name: "view_image".into(), arguments: serde_json::json!({"path":"fixture.png"}), thought_signature: None, provider_id: None, invalid_arguments: None });
         let mut assistant = Message::new_assistant("Inspecting images."); assistant.tool_calls = calls.to_vec(); conversation.messages.push(assistant);
         let mut content: Vec<_> = calls.iter().map(|call| Content::ToolResult(ToolResult::from_tool_call(call, "fixture.png, 12 × 8"))).collect();
         content.extend([Content::Text("Image from first call: fixture.png".into()), Content::Image(Image::new_base64("cGl4ZWxz", "image/png"))]);
@@ -2432,5 +2565,21 @@ mod tests {
             }
             other => panic!("Unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn temperature_is_sent_only_when_specified() {
+        let client = OpenAIClient::new("test");
+        let conversation = Conversation::new(Model::openai_gpt_4_1());
+
+        let request = client
+            .build_request(&conversation, &GenerationConfig::default(), false)
+            .unwrap();
+        assert!(serde_json::to_value(request).unwrap().get("temperature").is_none());
+
+        let request = client
+            .build_request(&conversation, &GenerationConfig::new(0.3), false)
+            .unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap()["temperature"], 0.3);
     }
 }
