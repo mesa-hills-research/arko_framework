@@ -41,13 +41,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &context,
         &command,
         StartOptions {
-            timeout: Some(Duration::from_secs(5)),
+            // Generous: this runs as a CI smoke test, and loaded Windows runners
+            // can take several seconds just to start Python under ConPTY.
+            timeout: Some(Duration::from_secs(60)),
             ..Default::default()
         },
     )?;
     println!("Started {}", job.job_id);
     loop {
-        let notice = tokio::time::timeout(Duration::from_secs(6), notices.recv())
+        let notice = tokio::time::timeout(Duration::from_secs(65), notices.recv())
             .await?
             .ok_or("context channel closed")?;
         if let UserCommand::InjectContext { content } = notice {
