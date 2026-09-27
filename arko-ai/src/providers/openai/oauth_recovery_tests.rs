@@ -1121,3 +1121,67 @@ async fn an_expiry_check_adopts_stored_tokens_and_refreshes_them_only_if_they_ex
     .await
     .unwrap();
 }
+
+/// After a rotation that couldn't be saved, the user signs in again (as the
+/// recovery message suggests): every client takes the new credentials, the
+/// one holding the forgotten rotation too, and none refreshes with the
+/// rotated or the spent token.
+#[tokio::test]
+async fn clients_take_the_credentials_of_a_new_sign_in_after_an_unsaved_rotation() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        // Any further refresh request would be answered too.
+        let server = TestServer::start(vec![refreshed(), second_refresh()], false).await;
+        let (dir, path) = auth_file(&fresh_jwt());
+        let file = crate::codex_auth::CodexAuthFile::load(&path).unwrap();
+        let first = served_by(file.openai_client().unwrap(), &server.url);
+        let second = served_by(file.openai_client().unwrap(), &server.url);
+        let backup = dir.path().join("auth.json.bak");
+        std::fs::create_dir(&backup).unwrap();
+        assert!(first.refresh_oauth_token_once().await.is_err());
+        std::fs::remove_dir(&backup).unwrap();
+
+        let signed_in = serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": fresh_jwt(),
+                "refresh_token": "signed-in-refresh",
+                "account_id": "synthetic-account",
+                "id_token": "signed-in-id",
+            },
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&signed_in).unwrap()).unwrap();
+        for client in [&first, &second] {
+            client.refresh_oauth_token_once().await.unwrap();
+            let credentials = client.chatgpt_oauth_credentials().await.unwrap();
+            assert_eq!(credentials.refresh_token.as_deref(), Some("signed-in-refresh"));
+        }
+        assert_eq!(server.request_count(), 1, "only the first, failed-to-save refresh");
+    })
+    .await
+    .unwrap();
+}
+
+/// A host that builds a client per run and drops it: the unsaved rotation
+/// outlives the clients, so the next client made from the file is handed it
+/// instead of refreshing with the spent token.
+#[tokio::test]
+async fn an_unsaved_rotation_outlives_the_clients_of_the_file() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let server = TestServer::start(vec![refreshed(), second_refresh()], false).await;
+        let (dir, path) = auth_file(&fresh_jwt());
+        let backup = dir.path().join("auth.json.bak");
+        std::fs::create_dir(&backup).unwrap();
+        {
+            let file = crate::codex_auth::CodexAuthFile::load(&path).unwrap();
+            let run = served_by(file.openai_client().unwrap(), &server.url);
+            assert!(run.refresh_oauth_token_once().await.is_err());
+        }
+        let file = crate::codex_auth::CodexAuthFile::load(&path).unwrap();
+        let next_run = served_by(file.openai_client().unwrap(), &server.url);
+        let result = next_run.refresh_oauth_token_once().await.unwrap();
+        assert_eq!(result.access_token, "synthetic-new-access");
+        assert_eq!(server.request_count(), 1);
+    })
+    .await
+    .unwrap();
+}

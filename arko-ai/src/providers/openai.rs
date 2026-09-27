@@ -302,9 +302,14 @@ fn is_rate_limited_refresh(error: &Error) -> bool {
 /// of the response body. The shared HTTP client has no total deadline (a
 /// generation can stream for a long time), but a refresh holds the
 /// credentials while it runs, so a stalled token endpoint must not hold them
-/// for long. A timeout is a transient [`Error::HttpError`]. (Should the
-/// server still rotate the token after that, its answer is lost and the next
-/// refresh is refused, as for any refresh whose answer never arrives.)
+/// for long. A timeout is a transient [`Error::HttpError`].
+///
+/// The trade-off: Codex sets no timeout here. A server that rotates the
+/// token but answers after 60 s has its answer dropped, so that rotation is
+/// lost and the next refresh with the old token is refused, just as when the
+/// connection drops mid-answer. The timeout exists so a stalled endpoint
+/// can't hold the credential locks (and every request waiting on them)
+/// indefinitely.
 const OAUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Exchanges a ChatGPT OAuth refresh token for new tokens, once; an HTTP
