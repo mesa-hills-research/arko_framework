@@ -545,23 +545,32 @@ fn add_options<T: std::ops::Add<Output = T>>(a: Option<T>, b: Option<T>) -> Opti
     }
 }
 
+/// Token counts add saturating: absurd provider figures must not panic
+/// (debug builds check overflow), for example inside a caller's lock.
+fn add_counts(a: Option<usize>, b: Option<usize>) -> Option<usize> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.saturating_add(b)),
+        (a, b) => a.or(b),
+    }
+}
+
 impl std::ops::AddAssign<&UsageInfo> for UsageInfo {
     /// Adds another call's usage. Tier, region and billing kind are kept when
     /// both sides agree; otherwise the tier and region become unknown and the
     /// billing kind becomes [`BillingKind::Mixed`].
     fn add_assign(&mut self, other: &UsageInfo) {
         let billed = self.billed() + other.billed();
-        self.input_tokens += other.input_tokens;
-        self.output_tokens += other.output_tokens;
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
         self.input_cost += other.input_cost;
         self.output_cost += other.output_cost;
-        self.cached_tokens = add_options(self.cached_tokens, other.cached_tokens);
+        self.cached_tokens = add_counts(self.cached_tokens, other.cached_tokens);
         self.cache_read_cost = add_options(self.cache_read_cost, other.cache_read_cost);
-        self.cache_write_tokens = add_options(self.cache_write_tokens, other.cache_write_tokens);
+        self.cache_write_tokens = add_counts(self.cache_write_tokens, other.cache_write_tokens);
         self.cache_write_1h_tokens =
-            add_options(self.cache_write_1h_tokens, other.cache_write_1h_tokens);
+            add_counts(self.cache_write_1h_tokens, other.cache_write_1h_tokens);
         self.cache_write_cost = add_options(self.cache_write_cost, other.cache_write_cost);
-        self.reasoning_tokens = add_options(self.reasoning_tokens, other.reasoning_tokens);
+        self.reasoning_tokens = add_counts(self.reasoning_tokens, other.reasoning_tokens);
         if self.service_tier != other.service_tier {
             self.service_tier = None;
         }
@@ -617,6 +626,26 @@ mod tests {
 
     fn close(actual: f64, expected: f64) -> bool {
         (actual - expected).abs() < 1e-9
+    }
+
+    #[test]
+    fn adding_absurd_token_counts_saturates() {
+        let huge = UsageInfo {
+            cached_tokens: Some(usize::MAX),
+            cache_write_tokens: Some(usize::MAX),
+            cache_write_1h_tokens: Some(usize::MAX),
+            reasoning_tokens: Some(usize::MAX),
+            ..UsageInfo::new(usize::MAX, usize::MAX)
+        };
+        let mut total = huge.clone();
+        total += &huge;
+        assert_eq!((total.input_tokens, total.output_tokens), (usize::MAX, usize::MAX));
+        assert_eq!(total.cached_tokens, Some(usize::MAX));
+        assert_eq!(total.cache_write_tokens, Some(usize::MAX));
+        assert_eq!(total.cache_write_1h_tokens, Some(usize::MAX));
+        assert_eq!(total.reasoning_tokens, Some(usize::MAX));
+        let summed: UsageInfo = [huge.clone(), huge].iter().sum();
+        assert_eq!(summed.input_tokens, usize::MAX);
     }
 
     #[test]
