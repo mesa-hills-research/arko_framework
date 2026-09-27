@@ -82,8 +82,15 @@ const PERMANENT_CODES: &[&str] = &[
     // quota/spend walls, a plan without API usage, and a policy block.
     "credit_balance_exhausted",
     "organization_spend_limit_exceeded",
+    // A quota wall Codex reports like the ones above when it arrives with an
+    // HTTP 429 (codex-rs/codex-api/src/api_bridge.rs).
+    "organization_usage_limit_exceeded",
     "project_spend_limit_exceeded",
     "usage_not_included",
+    // Flex processing has no capacity: Codex does not retry it (its
+    // `ApiError::FlexUnavailable`, also sent with a 429); a request can use
+    // another service tier instead.
+    "flex_unavailable",
     "cyber_policy",
     "misalignment_policy_violation",
     "invalid_image",
@@ -447,7 +454,9 @@ impl Error {
     /// `error.metadata.error_type`, and numeric HTTP-style codes
     /// (`error.code: 429`, used by OpenRouter and Google), which stand in for
     /// the status when the HTTP status is absent or 2xx, as on stream errors.
-    /// A delay hint in the body is used when no header delay is supplied.
+    /// A delay hint in the body is used when no header delay is supplied, and
+    /// a rate limit without either takes the wait its message names ("Please
+    /// try again in 2.5s"), as Codex does.
     pub(crate) fn provider_error(
         label: &str,
         status: Option<u16>,
@@ -479,12 +488,26 @@ impl Error {
         let status = status
             .filter(|status| !(200..300).contains(status))
             .or(numeric_code);
-        Self::ProviderError {
+        let mut provider_error = Self::ProviderError {
             message: format!("{label}: {body}"),
             status,
             code,
             retry_after: retry_after.or_else(|| retry_after_from_value(&value)),
+        };
+        // OpenAI names the wait only in a rate limit's message; Codex reads it
+        // from there (codex-rs/codex-api/src/sse/responses_error.rs).
+        if provider_error.retry_after().is_none()
+            && provider_error.is_rate_limit()
+            && let Some(delay) = error
+                .get("message")
+                .and_then(Value::as_str)
+                .or_else(|| error.as_str())
+                .and_then(retry_delay_from_message)
+            && let Self::ProviderError { retry_after, .. } = &mut provider_error
+        {
+            *retry_after = Some(delay);
         }
+        provider_error
     }
 
     pub(crate) async fn from_response(label: &str, response: reqwest::Response) -> Self {
@@ -644,8 +667,10 @@ fn find_numeric_field(value: &Value, names: &[&str]) -> Option<f64> {
 
 /// Delay hints anywhere in an error body: `retry_after_ms`/`retryAfterMs`,
 /// `retry_after`/`retryAfter` (seconds), or a reset time
-/// `resets_at`/`reset_at`/`resetsAt`/`resetAt` (epoch seconds or milliseconds).
-/// Capped at [`MAX_SERVER_DELAY_HINT`](crate::retry::MAX_SERVER_DELAY_HINT).
+/// `resets_at`/`reset_at`/`resetsAt`/`resetAt` (epoch seconds or milliseconds)
+/// or OpenRouter's `error.metadata.headers.X-RateLimit-Reset` (epoch
+/// milliseconds). Capped at
+/// [`MAX_SERVER_DELAY_HINT`](crate::retry::MAX_SERVER_DELAY_HINT).
 pub(crate) fn retry_after_from_value(value: &Value) -> Option<Duration> {
     body_delay(value).map(cap_server_hint)
 }
@@ -663,7 +688,8 @@ fn body_delay(value: &Value) -> Option<Duration> {
     let reset_at = find_numeric_field(
         value,
         &["resets_at", "reset_at", "resetsAt", "resetAt"],
-    )?;
+    )
+    .or_else(|| openrouter_rate_limit_reset(value))?;
     let reset_millis = if reset_at >= 10_000_000_000_f64 {
         reset_at
     } else {
@@ -676,6 +702,60 @@ fn body_delay(value: &Value) -> Option<Duration> {
     Some(Duration::from_millis(
         (reset_millis - now_millis).max(1_000_f64).ceil() as u64,
     ))
+}
+
+/// OpenRouter passes a rate limit's headers along in its error body:
+/// `error.metadata.headers."X-RateLimit-Reset"`, in epoch milliseconds
+/// (usually a string).
+fn openrouter_rate_limit_reset(value: &Value) -> Option<f64> {
+    value
+        .pointer("/error/metadata/headers")?
+        .as_object()?
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("x-ratelimit-reset"))
+        .and_then(|(_, reset)| value_as_f64(reset))
+        .filter(|reset| reset.is_finite() && *reset >= 0.0)
+}
+
+/// The wait a rate-limit message names, read as the Codex CLI reads it
+/// (`(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)`): "Please try
+/// again in 2.5s", "try again in 350ms", "Try again in 11 seconds". Capped at
+/// [`MAX_SERVER_DELAY_HINT`](crate::retry::MAX_SERVER_DELAY_HINT).
+fn retry_delay_from_message(message: &str) -> Option<Duration> {
+    const PHRASE: &str = "try again in";
+    let digits = |text: &str| text.len() - text.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    // ASCII lowercasing keeps byte offsets.
+    let lowercase = message.to_ascii_lowercase();
+    let mut rest = lowercase.as_str();
+    while let Some(start) = rest.find(PHRASE) {
+        rest = &rest[start + PHRASE.len()..];
+        let text = rest.trim_start_matches(|c: char| c.is_ascii_whitespace());
+        let mut end = digits(text);
+        if end == 0 {
+            continue;
+        }
+        if let Some(fraction) = text[end..].strip_prefix('.')
+            && digits(fraction) > 0
+        {
+            end += 1 + digits(fraction);
+        }
+        let Ok(amount) = text[..end].parse::<f64>() else {
+            continue;
+        };
+        let unit = text[end..].trim_start_matches(|c: char| c.is_ascii_whitespace());
+        let seconds = if unit.starts_with("ms") {
+            amount / 1_000_f64
+        } else if unit.starts_with('s') {
+            amount
+        } else {
+            continue;
+        };
+        return Some(
+            Duration::try_from_secs_f64(seconds)
+                .map_or(crate::retry::MAX_SERVER_DELAY_HINT, cap_server_hint),
+        );
+    }
+    None
 }
 
 /// [`retry_after_from_value`] for an unparsed body. Error bodies reach it
@@ -1153,12 +1233,125 @@ mod tests {
     }
 
     #[test]
+    fn codex_quota_walls_and_flex_unavailability_are_permanent_even_on_a_429() {
+        for body in [
+            r#"{"error":{"code":"organization_usage_limit_exceeded","message":"m"}}"#,
+            r#"{"error":{"code":"flex_unavailable","message":"Flex capacity unavailable."}}"#,
+        ] {
+            for status in [Some(429), None] {
+                let error = Error::provider_error("OpenAI request failed", status, None, body);
+                assert_eq!(error.retry_class(), RetryClass::Permanent, "{body} {status:?}");
+                assert!(!error.is_rate_limit(), "{body}");
+            }
+        }
+    }
+
+    fn now_millis() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    #[test]
+    fn openrouter_rate_limit_reset_metadata_is_a_delay_hint() {
+        let reset = now_millis() + 90_000;
+        // OpenRouter's 429 body passes the limit's headers along (the reset in
+        // epoch milliseconds, as a string).
+        for reset in [format!(r#""{reset}""#), reset.to_string()] {
+            let body = format!(
+                r#"{{"error":{{"code":429,"message":"Rate limit exceeded: free-models-per-min. ","metadata":{{"headers":{{"X-RateLimit-Limit":"20","X-RateLimit-Remaining":"0","X-RateLimit-Reset":{reset}}},"provider_name":null}}}},"user_id":"user_1"}}"#
+            );
+            for status in [Some(429), None] {
+                let error = Error::provider_error("OpenRouter request failed", status, None, &body);
+                assert!(error.is_rate_limit(), "{body}");
+                let wait = error.retry_after().unwrap();
+                assert!(
+                    wait > Duration::from_secs(80) && wait <= Duration::from_secs(90),
+                    "{wait:?}"
+                );
+            }
+        }
+        // A header delay still wins.
+        let body = format!(
+            r#"{{"error":{{"code":429,"metadata":{{"headers":{{"x-ratelimit-reset":"{}"}}}}}}}}"#,
+            now_millis() + 90_000
+        );
+        let error = Error::provider_error("or", Some(429), Some(Duration::from_secs(4)), &body);
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(4)));
+        let error = Error::provider_error("or", Some(429), None, &body);
+        assert!(error.retry_after().unwrap() > Duration::from_secs(80));
+    }
+
+    #[test]
+    fn try_again_in_messages_are_delay_hints_for_rate_limits_only() {
+        for (message, expected) in [
+            (
+                "Rate limit reached for gpt-5 in organization org-x on tokens per min (TPM): Limit 30000, Used 29000, Requested 2000. Please try again in 2.5s. Visit https://platform.openai.com/account/rate-limits to learn more.",
+                Duration::from_millis(2_500),
+            ),
+            ("Please try again in 350ms.", Duration::from_millis(350)),
+            ("Try again in 11 seconds", Duration::from_secs(11)),
+            ("TRY AGAIN IN 1 second.", Duration::from_secs(1)),
+            ("try again in7s", Duration::from_secs(7)),
+            // The first phrase without a number does not stop the search.
+            ("You can try again in a moment; try again in 3s", Duration::from_secs(3)),
+        ] {
+            let message = serde_json::to_string(message).unwrap();
+            // An OpenAI stream error event, a `response.failed` error and a 429.
+            for (status, body) in [
+                (None, format!(r#"{{"type":"error","code":"rate_limit_exceeded","message":{message},"param":null,"sequence_number":3}}"#)),
+                (None, format!(r#"{{"error":{{"code":"slow_down","message":{message}}}}}"#)),
+                (Some(429), format!(r#"{{"error":{{"message":{message}}}}}"#)),
+            ] {
+                let error = Error::provider_error("test", status, None, &body);
+                assert!(error.is_rate_limit(), "{body}");
+                assert_eq!(error.retry_after(), Some(expected), "{body}");
+            }
+        }
+        // Other hints win over the message.
+        let body = r#"{"error":{"code":"rate_limit_exceeded","message":"try again in 5s","retry_after_ms":800}}"#;
+        assert_eq!(
+            Error::provider_error("test", None, None, body).retry_after(),
+            Some(Duration::from_millis(800))
+        );
+        assert_eq!(
+            Error::provider_error("test", Some(429), Some(Duration::from_secs(9)), body).retry_after(),
+            Some(Duration::from_secs(9))
+        );
+        // Only rate limits read their message.
+        for (status, body) in [
+            (Some(503), r#"{"error":{"message":"Please try again in 5s"}}"#),
+            (None, r#"{"error":{"code":"server_error","message":"Please try again in 5s"}}"#),
+            (Some(429), r#"{"error":{"code":"insufficient_quota","message":"try again in 5s"}}"#),
+            (Some(400), r#"{"error":{"code":"rate_limit_exceeded","message":"try again in 5s"}}"#),
+        ] {
+            assert_eq!(Error::provider_error("test", status, None, body).retry_after(), None, "{body}");
+        }
+        // No number or unit: no hint. A huge one is capped.
+        for message in ["try again in a moment", "try again in 5 minutes", "try again in .5s", "try again in 5"] {
+            let body = format!(r#"{{"error":{{"code":"rate_limit_exceeded","message":"{message}"}}}}"#);
+            assert_eq!(Error::provider_error("test", None, None, &body).retry_after(), None, "{message}");
+        }
+        let body = format!(
+            r#"{{"error":{{"code":"rate_limit_exceeded","message":"try again in 1{}s"}}}}"#,
+            "0".repeat(400)
+        );
+        assert_eq!(
+            Error::provider_error("test", None, None, &body).retry_after(),
+            Some(crate::retry::MAX_SERVER_DELAY_HINT)
+        );
+    }
+
+    #[test]
     fn codex_backend_fatal_stream_codes_and_status_names_are_permanent() {
         for code in [
             "credit_balance_exhausted",
             "organization_spend_limit_exceeded",
+            "organization_usage_limit_exceeded",
             "project_spend_limit_exceeded",
             "usage_not_included",
+            "flex_unavailable",
             "cyber_policy",
             "unsupported_media_type",
             "uri_too_long",
