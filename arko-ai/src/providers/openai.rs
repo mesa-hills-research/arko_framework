@@ -826,10 +826,26 @@ impl ProviderClient for OpenAIClient {
 
         let response_data: OpenAIResponse = match trace.take() {
             None => response.json().await?,
+            // A body that doesn't parse fails the call, so it is traced as
+            // a failure.
             Some(trace) => {
-                let value: Value = response.json().await?;
-                trace.finish(&value);
-                serde_json::from_value(value).map_err(Error::JsonError)?
+                let value: Value = match response.json().await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        trace.fail(&format!("failed to read or parse the response: {error}"), None);
+                        return Err(error.into());
+                    }
+                };
+                match OpenAIResponse::deserialize(&value) {
+                    Ok(response_data) => {
+                        trace.finish(&value);
+                        response_data
+                    }
+                    Err(error) => {
+                        trace.fail(&format!("failed to parse the response: {error}"), Some(&value));
+                        return Err(Error::JsonError(error));
+                    }
+                }
             }
         };
         Ok(Self::generation_response(
@@ -1073,12 +1089,18 @@ impl OpenAIClient {
                             response: OpenAIResponse,
                         }
 
+                        let completed = Completed::deserialize(&value);
                         if let Some(trace) = trace.take() {
-                            trace.finish(value.get("response").unwrap_or(&Value::Null));
+                            let response = value.get("response");
+                            match &completed {
+                                Ok(_) => trace.finish(response.unwrap_or(&Value::Null)),
+                                Err(error) => trace.fail(
+                                    &format!("failed to parse the response: {error}"),
+                                    response,
+                                ),
+                            }
                         }
-
-                        let completed: Completed =
-                            serde_json::from_value(value).map_err(Error::JsonError)?;
+                        let completed = completed.map_err(Error::JsonError)?;
 
                         streamed.calls = streaming_tool_calls
                             .drain(..)

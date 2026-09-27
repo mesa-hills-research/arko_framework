@@ -119,3 +119,86 @@ async fn llm_client_settings_apply_to_an_installed_openai_client() {
     std::fs::remove_dir_all(&dir).ok();
     std::fs::remove_dir_all(&own).ok();
 }
+
+fn read_files(dir: &std::path::Path) -> Vec<String> {
+    let mut texts = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            texts.extend(read_files(&path));
+        } else {
+            texts.push(std::fs::read_to_string(&path).unwrap());
+        }
+    }
+    texts
+}
+
+fn summary(dir: &std::path::Path) -> Value {
+    serde_json::from_str(std::fs::read_to_string(dir.join("calls.jsonl")).unwrap().trim()).unwrap()
+}
+
+fn sha256(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[tokio::test]
+async fn turn_state_tokens_are_never_written_in_the_clear() {
+    let body = format!(
+        "data: {}\n\n",
+        serde_json::json!({"type": "response.completed", "response": completed_response()})
+    );
+    let (url, server) = server(vec![
+        reply("/responses", 200, &body).with_header("x-codex-turn-state", "received-turn-token"),
+    ])
+    .await;
+    let dir = std::env::temp_dir().join(format!("arko-trace-turn-state-{}", uuid::Uuid::new_v4()));
+    let client = client(&url).with_request_trace(Some(RequestTrace::new(&dir)));
+    let mut conversation = Conversation::new(Model::get(ProviderType::OpenAI, "gpt-6-astra").unwrap());
+    conversation.add_user_message("hi");
+    conversation.record_openai_turn_state("sent-turn-token");
+
+    let response = client.generate_text(&conversation, &GenerationConfig::default()).await.unwrap();
+    assert_eq!(response.openai_turn_state.as_deref(), Some("received-turn-token"));
+    let requests = server.await.unwrap();
+    assert!(requests[0].0.contains("sent-turn-token"));
+
+    // The summary line and the per-call files hash both tokens the same way.
+    let line = summary(&dir);
+    assert_eq!(line["turn_state_sha256"], sha256("received-turn-token"));
+    assert_eq!(line["turn_state_sent_sha256"], sha256("sent-turn-token"));
+    let texts = read_files(&dir).concat();
+    assert!(!texts.contains("received-turn-token") && !texts.contains("sent-turn-token"));
+    assert!(texts.contains(&format!("sha256:{}", sha256("received-turn-token"))));
+    assert!(texts.contains(&format!("sha256:{}", sha256("sent-turn-token"))));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn a_final_response_that_does_not_parse_is_traced_as_an_error() {
+    // Well-formed JSON that isn't a Responses object: `output` must be a list.
+    let mut malformed = completed_response();
+    malformed["output"] = serde_json::json!("not a list");
+    let streamed = format!(
+        "data: {}\n\n",
+        serde_json::json!({"type": "response.completed", "response": malformed})
+    );
+    for (oauth, body) in [(true, streamed), (false, malformed.to_string())] {
+        let (url, server) = server(vec![reply("/responses", 200, &body)]).await;
+        let dir = std::env::temp_dir().join(format!("arko-trace-malformed-{}", uuid::Uuid::new_v4()));
+        let client = if oauth { client(&url) } else { super::oauth_recovery_tests::api_key_client(&url) }
+            .with_request_trace(Some(RequestTrace::new(&dir)));
+        let mut conversation = Conversation::new(Model::get(ProviderType::OpenAI, "gpt-6-astra").unwrap());
+        conversation.add_user_message("hi");
+
+        let error = client.generate_text(&conversation, &GenerationConfig::default()).await.unwrap_err();
+        assert!(matches!(error, Error::JsonError(_)), "{error}");
+        server.await.unwrap();
+
+        let line = summary(&dir);
+        assert_eq!(line["status"], "error", "oauth: {oauth}");
+        assert!(line["error"].as_str().unwrap().contains("parse"), "{}", line["error"]);
+        assert_eq!(line["http_status"], 200);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

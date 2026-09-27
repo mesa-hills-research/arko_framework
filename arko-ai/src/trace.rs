@@ -13,16 +13,25 @@
 //!
 //! The previous request is the last one that didn't fail: a failed or
 //! abandoned call is traced, but the call after it (typically its retry) is
-//! compared with the call before it.
+//! compared with the call before it. A response that doesn't parse counts as
+//! a failed call.
 //!
-//! Credentials are redacted. Traces still contain prompt and response
-//! content, so keep them local. Tracing never fails a model call: I/O
-//! errors are logged and ignored.
+//! Per conversation the trace keeps a hash of each `input` item of the
+//! previous request, and the serialized `input` itself only for the 32 most
+//! recently traced conversations, so memory stays bounded in long-running
+//! processes. For an older conversation's next
+//! request, `common_input_bytes` is `null`; the other metrics stay exact.
+//!
+//! Credentials are redacted, and `x-codex-turn-state` routing tokens are
+//! written as their SHA-256 (`sha256:<hex>`, the hash the summary line
+//! reports). Conversation directory names never leave `<dir>`. Traces still
+//! contain prompt and response content, so keep them local. Tracing never
+//! fails a model call: I/O errors are logged and ignored.
 
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -30,16 +39,22 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-/// Request headers whose values are never written to a trace.
+/// Request and response headers whose values are never written to a trace.
 const REDACTED_HEADERS: &[&str] = &[
     "authorization",
+    "proxy-authorization",
     "chatgpt-account-id",
+    "api-key",
     "x-api-key",
     "x-goog-api-key",
+    "x-auth-token",
     "cookie",
     "set-cookie",
-    "proxy-authorization",
 ];
+
+/// Headers written as `sha256:<hex>` of their value: routing tokens that
+/// shouldn't be stored, but whose changes the trace should show.
+const HASHED_HEADERS: &[&str] = &["x-codex-turn-state"];
 
 /// Response headers copied into the `calls.jsonl` summary when present.
 const SUMMARY_HEADERS: &[&str] = &[
@@ -56,6 +71,10 @@ const SUMMARY_HEADERS: &[&str] = &[
     "openai-processing-ms",
 ];
 
+/// How many conversations, most recently traced first, keep their previous
+/// request's serialized `input` for the byte-level prefix comparison.
+const RETAINED_INPUTS: usize = 32;
+
 /// Writes each model call's request and response to a directory.
 #[derive(Clone, Debug)]
 pub struct RequestTrace {
@@ -65,8 +84,33 @@ pub struct RequestTrace {
 #[derive(Debug)]
 struct Inner {
     dir: PathBuf,
-    conversations: Mutex<HashMap<String, ConversationState>>,
+    conversations: Mutex<Conversations>,
     calls: Mutex<()>,
+}
+
+#[derive(Debug, Default)]
+struct Conversations {
+    states: HashMap<String, ConversationState>,
+    /// Conversations whose previous request keeps its serialized `input`,
+    /// least recently traced first; at most [`RETAINED_INPUTS`].
+    retained: VecDeque<String>,
+}
+
+impl Conversations {
+    /// Marks `key` as the most recently traced conversation and drops the
+    /// serialized input of the least recent ones beyond the limit.
+    fn retain_input(&mut self, key: &str) {
+        if let Some(position) = self.retained.iter().position(|retained| retained == key) {
+            self.retained.remove(position);
+        }
+        self.retained.push_back(key.to_string());
+        while self.retained.len() > RETAINED_INPUTS {
+            let Some(evicted) = self.retained.pop_front() else { break };
+            if let Some(previous) = self.states.get_mut(&evicted).and_then(|state| state.previous.as_mut()) {
+                previous.input_json = None;
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -78,8 +122,12 @@ struct ConversationState {
 #[derive(Debug, Clone)]
 struct PreviousRequest {
     seq: u64,
-    items: Vec<String>,
-    input_json: String,
+    /// Hash of each serialized `input` item, for `common_items`.
+    item_hashes: Vec<u128>,
+    input_bytes: usize,
+    /// The serialized `input`, for `common_input_bytes`; dropped once the
+    /// conversation is not among the [`RETAINED_INPUTS`] most recent.
+    input_json: Option<Arc<str>>,
     instructions_hash: Option<String>,
     tools_hash: Option<String>,
     input_tokens: Option<u64>,
@@ -91,7 +139,7 @@ impl RequestTrace {
         Self {
             inner: Arc::new(Inner {
                 dir: dir.into(),
-                conversations: Mutex::new(HashMap::new()),
+                conversations: Mutex::new(Conversations::default()),
                 calls: Mutex::new(()),
             }),
         }
@@ -111,33 +159,36 @@ impl RequestTrace {
         body: &Value,
         stream: bool,
     ) -> TraceCall {
-        let items: Vec<String> = body
+        let item_hashes: Vec<u128> = body
             .get("input")
             .and_then(Value::as_array)
-            .map(|items| items.iter().map(Value::to_string).collect())
+            .map(|items| items.iter().map(|item| hash128(item.to_string().as_bytes())).collect())
             .unwrap_or_default();
-        let input_json = body.get("input").map(Value::to_string).unwrap_or_default();
+        let input_json: Arc<str> = body.get("input").map(Value::to_string).unwrap_or_default().into();
         let instructions_hash = body.get("instructions").map(hash_value);
         let tools_hash = body.get("tools").map(hash_value);
 
         let (seq, previous) = {
             let mut conversations = lock(&self.inner.conversations);
-            let state = conversations.entry(conversation_key.to_string()).or_default();
+            let state = conversations.states.entry(conversation_key.to_string()).or_default();
             state.next_seq += 1;
+            let seq = state.next_seq;
             let previous = state.previous.replace(PreviousRequest {
-                seq: state.next_seq,
-                items: items.clone(),
-                input_json: input_json.clone(),
+                seq,
+                item_hashes: item_hashes.clone(),
+                input_bytes: input_json.len(),
+                input_json: Some(input_json.clone()),
                 instructions_hash: instructions_hash.clone(),
                 tools_hash: tools_hash.clone(),
                 input_tokens: None,
             });
-            (state.next_seq, previous)
+            conversations.retain_input(conversation_key);
+            (seq, previous)
         };
 
         let prefix = prefix_metrics(
             previous.as_ref(),
-            &items,
+            &item_hashes,
             &input_json,
             instructions_hash.as_deref(),
             tools_hash.as_deref(),
@@ -157,7 +208,7 @@ impl RequestTrace {
             url: None,
             http_status: None,
             response_headers: Map::new(),
-            sent_turn_state: None,
+            sent_turn_state_sha256: None,
             prefix,
             previous_input_tokens: previous.as_ref().and_then(|previous| previous.input_tokens),
             previous,
@@ -172,10 +223,17 @@ impl RequestTrace {
     /// `seq` (which failed) is still the latest.
     fn restore_previous(&self, conversation_key: &str, seq: u64, previous: Option<PreviousRequest>) {
         let mut conversations = lock(&self.inner.conversations);
-        if let Some(state) = conversations.get_mut(conversation_key)
+        let retained = conversations.retained.iter().any(|key| key == conversation_key);
+        if let Some(state) = conversations.states.get_mut(conversation_key)
             && state.previous.as_ref().is_some_and(|latest| latest.seq == seq)
         {
-            state.previous = previous;
+            state.previous = previous.map(|mut previous| {
+                // Evicted while the call ran: keep the bound.
+                if !retained {
+                    previous.input_json = None;
+                }
+                previous
+            });
         }
     }
 
@@ -186,12 +244,23 @@ impl RequestTrace {
     fn remember_input_tokens(&self, conversation_key: &str, seq: u64, input_tokens: Option<u64>) {
         let mut conversations = lock(&self.inner.conversations);
         if let Some(previous) = conversations
+            .states
             .get_mut(conversation_key)
             .and_then(|state| state.previous.as_mut())
             .filter(|previous| previous.seq == seq)
         {
             previous.input_tokens = input_tokens;
         }
+    }
+
+    #[cfg(test)]
+    fn retained_input_bytes(&self) -> usize {
+        lock(&self.inner.conversations)
+            .states
+            .values()
+            .filter_map(|state| state.previous.as_ref()?.input_json.as_ref())
+            .map(|input| input.len())
+            .sum()
     }
 
     fn append_summary(&self, line: &Value) {
@@ -228,8 +297,8 @@ pub(crate) struct TraceCall {
     url: Option<String>,
     http_status: Option<u16>,
     response_headers: Map<String, Value>,
-    /// The `x-codex-turn-state` request header of the last attempt.
-    sent_turn_state: Option<String>,
+    /// SHA-256 of the `x-codex-turn-state` request header of the last attempt.
+    sent_turn_state_sha256: Option<String>,
     prefix: Value,
     previous_input_tokens: Option<u64>,
     /// The request this call is compared with, restored if the call fails.
@@ -246,10 +315,10 @@ impl TraceCall {
     pub(crate) fn record_request(&mut self, request: &reqwest::Request) {
         self.attempts += 1;
         self.url = Some(request.url().to_string());
-        self.sent_turn_state = request
+        self.sent_turn_state_sha256 = request
             .headers()
             .get("x-codex-turn-state")
-            .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned());
+            .map(|value| hex_sha256(value.as_bytes()));
         let bytes = request.body().and_then(reqwest::Body::as_bytes).unwrap_or_default();
         let body: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
         let document = json!({
@@ -371,7 +440,12 @@ impl TraceCall {
                 summary_headers.insert((*name).to_string(), value.clone());
             }
         }
-        let turn_state = self.response_headers.get("x-codex-turn-state").and_then(Value::as_str);
+        // Hashed by `redacted_headers`.
+        let turn_state_sha256 = self
+            .response_headers
+            .get("x-codex-turn-state")
+            .and_then(Value::as_str)
+            .and_then(|value| value.strip_prefix("sha256:"));
 
         let line = json!({
             "completed_unix_ms": unix_ms(SystemTime::now()),
@@ -409,10 +483,10 @@ impl TraceCall {
             }).count(),
             "response_reasoning": response.and_then(|response| response.get("reasoning")),
             "response_service_tier": response.and_then(|response| response.get("service_tier")),
-            "turn_state_present": turn_state.is_some(),
-            "turn_state_sha256": turn_state.map(|value| hex_sha256(value.as_bytes())),
-            "turn_state_sent": self.sent_turn_state.is_some(),
-            "turn_state_sent_sha256": self.sent_turn_state.as_ref().map(|value| hex_sha256(value.as_bytes())),
+            "turn_state_present": turn_state_sha256.is_some(),
+            "turn_state_sha256": turn_state_sha256,
+            "turn_state_sent": self.sent_turn_state_sha256.is_some(),
+            "turn_state_sent_sha256": self.sent_turn_state_sha256,
             "headers": summary_headers,
             "timings_ms": {
                 "headers": self.headers_ms,
@@ -448,9 +522,11 @@ impl Drop for TraceCall {
 /// Compares the current request with the previous one of the same
 /// conversation. `previous_is_prefix` is true when every previous `input`
 /// item appears unchanged, in order, at the start of the current `input`.
+/// Items are compared by hash; `common_input_bytes` is `null` when the
+/// previous request's serialized input is no longer retained.
 fn prefix_metrics(
     previous: Option<&PreviousRequest>,
-    items: &[String],
+    items: &[u128],
     input_json: &str,
     instructions_hash: Option<&str>,
     tools_hash: Option<&str>,
@@ -465,25 +541,27 @@ fn prefix_metrics(
         });
     };
     let common_items = previous
-        .items
+        .item_hashes
         .iter()
         .zip(items)
         .take_while(|(previous, current)| previous == current)
         .count();
-    let common_bytes = previous
-        .input_json
-        .bytes()
-        .zip(input_json.bytes())
-        .take_while(|(previous, current)| previous == current)
-        .count();
+    let common_bytes = previous.input_json.as_ref().map(|previous| {
+        previous
+            .bytes()
+            .zip(input_json.bytes())
+            .take_while(|(previous, current)| previous == current)
+            .count()
+    });
+    let previous_items = previous.item_hashes.len();
     json!({
         "first_request": false,
-        "previous_is_prefix": common_items == previous.items.len() && items.len() >= previous.items.len(),
+        "previous_is_prefix": common_items == previous_items && items.len() >= previous_items,
         "common_items": common_items,
-        "previous_items": previous.items.len(),
+        "previous_items": previous_items,
         "items": items.len(),
         "common_input_bytes": common_bytes,
-        "previous_input_bytes": previous.input_json.len(),
+        "previous_input_bytes": previous.input_bytes,
         "input_bytes": input_json.len(),
         "instructions_sha256": instructions_hash,
         "tools_sha256": tools_hash,
@@ -492,6 +570,8 @@ fn prefix_metrics(
     })
 }
 
+/// Headers as written to a trace: credentials redacted, routing tokens
+/// hashed, repeated headers joined with `, `.
 fn redacted_headers(headers: &reqwest::header::HeaderMap) -> Map<String, Value> {
     let mut map = Map::new();
     for (name, value) in headers {
@@ -511,6 +591,11 @@ fn redacted_headers(headers: &reqwest::header::HeaderMap) -> Map<String, Value> 
             }
         }
     }
+    for name in HASHED_HEADERS {
+        if let Some(Value::String(value)) = map.get_mut(*name) {
+            *value = format!("sha256:{}", hex_sha256(value.as_bytes()));
+        }
+    }
     map
 }
 
@@ -528,16 +613,52 @@ fn response_id_prefix(id: &str) -> Option<String> {
         .map(|rest| rest.chars().take(16).collect())
 }
 
+/// A directory name for a conversation key that stays inside the trace
+/// directory on every platform. Characters other than ASCII letters, digits,
+/// `.`, `-` and `_` become `_`, so the name holds no path separators or
+/// drive prefixes. A name that would still be unsafe (empty, `.`/`..` or
+/// any other leading or trailing dot, a Windows device name such as `CON`,
+/// or too long) becomes `_<readable part>-<hash of the key>` instead, which
+/// also keeps such keys apart.
 fn sanitize(key: &str) -> String {
-    let sanitized: String = key
+    const MAX_LEN: usize = 100;
+    let mapped: String = key
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' })
         .collect();
-    if sanitized.is_empty() { "_".to_string() } else { sanitized }
+    let stem = mapped.split('.').next().unwrap_or_default();
+    let safe = !mapped.is_empty()
+        && !mapped.starts_with('.')
+        && !mapped.ends_with('.')
+        && mapped.len() <= MAX_LEN
+        && !is_windows_device_name(stem);
+    if safe {
+        return mapped;
+    }
+    let readable: String = mapped.trim_matches('.').chars().take(64).collect();
+    format!("_{readable}-{}", &hex_sha256(key.as_bytes())[..16])
+}
+
+/// Names Windows reserves for devices in every directory, with or without
+/// an extension.
+fn is_windows_device_name(stem: &str) -> bool {
+    let stem = stem.to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit())
 }
 
 fn hash_value(value: &Value) -> String {
     hex_sha256(value.to_string().as_bytes())
+}
+
+/// The first 128 bits of the SHA-256 of `bytes`.
+fn hash128(bytes: &[u8]) -> u128 {
+    let digest = Sha256::digest(bytes);
+    let mut first = [0; 16];
+    first.copy_from_slice(&digest[..16]);
+    u128::from_be_bytes(first)
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
@@ -571,6 +692,69 @@ mod tests {
         assert_eq!(map["openai-beta"], "responses=experimental");
         let text = Value::Object(map).to_string();
         assert!(!text.contains("secret") && !text.contains("acct-123"));
+    }
+
+    #[test]
+    fn every_credential_header_is_redacted() {
+        let mut headers = HeaderMap::new();
+        for name in [
+            "authorization",
+            "proxy-authorization",
+            "api-key",
+            "x-api-key",
+            "x-goog-api-key",
+            "x-auth-token",
+            "cookie",
+            "set-cookie",
+            "chatgpt-account-id",
+        ] {
+            headers.insert(name, HeaderValue::from_static("credential-value"));
+        }
+        let map = redacted_headers(&headers);
+        assert_eq!(map.len(), 9);
+        assert!(map.values().all(|value| value == "[REDACTED]"), "{map:?}");
+    }
+
+    #[test]
+    fn turn_state_tokens_are_hashed_in_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-codex-turn-state", HeaderValue::from_static("turn-token"));
+        let map = redacted_headers(&headers);
+        assert_eq!(map["x-codex-turn-state"], format!("sha256:{}", hex_sha256(b"turn-token")));
+    }
+
+    #[test]
+    fn sanitized_names_stay_inside_the_trace_dir() {
+        let dir = Path::new("traces");
+        for key in ["", ".", "..", "...", "../..", "../../etc", "a/../..", "..\\..", "C:\\x", "/abs", ".hidden", "trailing.", "CON", "nul.txt", "Lpt1"] {
+            let name = sanitize(key);
+            assert!(!name.is_empty() && name != "." && name != "..", "{key:?} -> {name:?}");
+            assert!(!name.starts_with('.') && !name.ends_with('.'), "{key:?} -> {name:?}");
+            assert!(!name.contains(['/', '\\', ':']), "{key:?} -> {name:?}");
+            let joined = dir.join(&name);
+            assert_eq!(joined.parent(), Some(dir), "{key:?} -> {name:?}");
+            assert_eq!(joined.components().count(), 2, "{key:?} -> {name:?}");
+        }
+        // Ordinary keys keep their readable names; unusable ones stay distinct.
+        assert_eq!(sanitize("arko:conversation:x"), "arko_conversation_x");
+        assert_ne!(sanitize("."), sanitize(".."));
+        assert_ne!(sanitize(""), sanitize("."));
+        assert!(sanitize(&"k".repeat(1000)).len() < 128);
+        assert_ne!(sanitize(&"k".repeat(1000)), sanitize(&"k".repeat(1001)));
+    }
+
+    #[test]
+    fn a_dot_dot_key_writes_inside_the_trace_dir() {
+        let root = std::env::temp_dir().join(format!("arko-trace-unit-{}", uuid::Uuid::new_v4()));
+        let dir = root.join("trace");
+        let trace = RequestTrace::new(&dir);
+        trace.begin("..", "m", &body(&[json!({"role": "user", "content": "a"})], "s"), false)
+            .finish(&json!({"status": "completed"}));
+        let outside: Vec<_> = fs::read_dir(&root).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        assert_eq!(outside, ["trace"], "nothing is written next to the trace dir");
+        let conversation_dir = dir.join(sanitize(".."));
+        assert!(conversation_dir.join("0001-response.json").exists());
+        fs::remove_dir_all(&root).ok();
     }
 
     fn body(items: &[Value], instructions: &str) -> Value {
@@ -608,6 +792,93 @@ mod tests {
         let other = trace.begin("other", "m", &body(&[a], "sys"), false);
         assert_eq!(other.prefix["first_request"], true);
         std::mem::forget(other);
+    }
+
+    #[test]
+    fn prefix_metrics_are_exact() {
+        let trace = RequestTrace::new(std::env::temp_dir().join("arko-trace-unit-unused"));
+        let a = json!({"role": "user", "content": "a"});
+        let b = json!({"role": "assistant", "content": "b"});
+        let c = json!({"role": "user", "content": "c"});
+        let prefix = |items: &[Value], instructions: &str| {
+            let call = trace.begin("k", "m", &body(items, instructions), false);
+            let prefix = call.prefix.clone();
+            trace.remember_input_tokens("k", call.seq, Some(100));
+            std::mem::forget(call);
+            prefix
+        };
+        let (sys, sys2) = (hash_value(&json!("sys")), hash_value(&json!("sys2")));
+        let tools = hash_value(&json!([{"name": "t"}]));
+
+        assert_eq!(prefix(std::slice::from_ref(&a), "sys"), json!({
+            "first_request": true, "items": 1, "input_bytes": 31,
+            "instructions_sha256": sys, "tools_sha256": tools,
+        }));
+        assert_eq!(prefix(&[a.clone(), b.clone(), c.clone()], "sys"), json!({
+            "first_request": false, "previous_is_prefix": true,
+            "common_items": 1, "previous_items": 1, "items": 3,
+            "common_input_bytes": 30, "previous_input_bytes": 31, "input_bytes": 96,
+            "instructions_sha256": sys, "tools_sha256": tools,
+            "instructions_changed": false, "tools_changed": false,
+        }));
+        let rewritten = json!({"role": "assistant", "content": "B"});
+        assert_eq!(prefix(&[a.clone(), rewritten, c.clone()], "sys2"), json!({
+            "first_request": false, "previous_is_prefix": false,
+            "common_items": 1, "previous_items": 3, "items": 3,
+            "common_input_bytes": 43, "previous_input_bytes": 96, "input_bytes": 96,
+            "instructions_sha256": sys2, "tools_sha256": tools,
+            "instructions_changed": true, "tools_changed": false,
+        }));
+        assert_eq!(prefix(std::slice::from_ref(&a), "sys2"), json!({
+            "first_request": false, "previous_is_prefix": false,
+            "common_items": 1, "previous_items": 3, "items": 1,
+            "common_input_bytes": 30, "previous_input_bytes": 96, "input_bytes": 31,
+            "instructions_sha256": sys2, "tools_sha256": tools,
+            "instructions_changed": false, "tools_changed": false,
+        }));
+    }
+
+    /// Only the most recently used conversations keep their serialized
+    /// input; the others keep item hashes, so every metric but
+    /// `common_input_bytes` stays exact for them.
+    #[test]
+    fn retained_input_is_bounded() {
+        let dir = std::env::temp_dir().join(format!("arko-trace-unit-{}", uuid::Uuid::new_v4()));
+        let trace = RequestTrace::new(&dir);
+        let item = |n: usize| json!({"role": "user", "content": format!("{n}:{}", "x".repeat(1000))});
+        let first = |key: &str| {
+            let call = trace.begin(key, "m", &body(&[item(0)], "s"), false);
+            std::mem::forget(call);
+        };
+        for n in 0..10 * RETAINED_INPUTS {
+            first(&format!("conversation-{n}"));
+        }
+        let one_input = json!([item(0)]).to_string().len();
+        assert!(trace.retained_input_bytes() <= RETAINED_INPUTS * one_input, "{}", trace.retained_input_bytes());
+
+        // The oldest conversation lost its bytes but not its item hashes.
+        let next = trace.begin("conversation-0", "m", &body(&[item(0), item(1)], "s"), false);
+        assert_eq!(next.prefix["previous_is_prefix"], true);
+        assert_eq!(next.prefix["common_items"], 1);
+        assert_eq!(next.prefix["previous_input_bytes"], one_input);
+        assert!(next.prefix["common_input_bytes"].is_null());
+        std::mem::forget(next);
+        // A recent one compares bytes as before.
+        let recent = format!("conversation-{}", 10 * RETAINED_INPUTS - 1);
+        let next = trace.begin(&recent, "m", &body(&[item(0), item(1)], "s"), false);
+        assert_eq!(next.prefix["common_input_bytes"], one_input - 1);
+        std::mem::forget(next);
+
+        // A call that fails after its conversation was evicted restores the
+        // previous request without its bytes.
+        first("restored");
+        let failing = trace.begin("restored", "m", &body(&[item(0), item(1)], "s"), false);
+        for n in 0..RETAINED_INPUTS {
+            first(&format!("other-{n}"));
+        }
+        failing.fail("rate limited", None);
+        assert!(trace.retained_input_bytes() <= RETAINED_INPUTS * one_input, "{}", trace.retained_input_bytes());
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
