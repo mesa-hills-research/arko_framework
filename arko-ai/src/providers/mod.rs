@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod google;
 pub mod openai;
+pub mod openrouter;
 pub mod voyage;
 
 use crate::{
@@ -135,9 +136,11 @@ impl GenerationResponse {
 /// models without image input, and mid-conversation configuration updates for
 /// providers that can't send them.
 pub(crate) fn ensure_supported_inputs(conversation: &Conversation) -> Result<(), Error> {
-    if conversation.messages.iter().any(Message::is_configuration_update) {
+    if conversation.model.provider != crate::model::Provider::OpenRouter
+        && conversation.messages.iter().any(Message::is_configuration_update)
+    {
         return Err(Error::UnsupportedFeature(format!(
-            "Mid-conversation reasoning-effort updates are not supported for {:?} model '{}'. Remove the update or change the request-level reasoning configuration.",
+            "Mid-conversation reasoning-effort updates are supported only for OpenRouter models, not {:?} model '{}'. Remove the update or change the request-level reasoning configuration.",
             conversation.model.provider, conversation.model.id
         )));
     }

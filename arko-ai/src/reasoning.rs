@@ -76,8 +76,11 @@ impl GeminiThinkingLevel {
 
 /// Provider-agnostic reasoning effort, from no reasoning to the most.
 ///
-/// Used by mid-conversation effort updates
-/// ([`Conversation::add_reasoning_effort_update`]).
+/// Used by [`OpenRouterReasoning`] and by mid-conversation effort updates
+/// ([`Conversation::add_reasoning_effort_update`]). OpenRouter translates
+/// each level to the served model's vocabulary and clamps unsupported levels
+/// to the nearest supported one, except `None`, which models with mandatory
+/// reasoning reject.
 ///
 /// [`Conversation::add_reasoning_effort_update`]: crate::conversation::Conversation::add_reasoning_effort_update
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -144,6 +147,111 @@ impl From<GeminiThinkingLevel> for ReasoningEffort {
     }
 }
 
+/// OpenRouter `reasoning.summary` verbosity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningSummary {
+    Auto,
+    Concise,
+    Detailed,
+}
+
+/// OpenRouter `reasoning.context`: which replayed reasoning the model may use
+/// (OpenAI GPT-5.6 and newer only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningContext {
+    Auto,
+    AllTurns,
+    CurrentTurn,
+}
+
+/// The OpenRouter Chat Completions `reasoning` object. Serializes to the wire
+/// form with unset fields omitted, so the model's defaults apply (catalog
+/// `reasoning.default_enabled` / `default_effort`).
+/// https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+///
+/// `effort` and `max_tokens` are mutually exclusive; requests setting both
+/// are rejected before sending. `exclude: true` hides reasoning from the
+/// response (it is still generated and billed); whether it also withholds the
+/// `reasoning_details` needed to continue tool calls is undocumented, so avoid
+/// it in tool loops.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenRouterReasoning {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
+    /// Reasoning token budget (Anthropic-style); at least 1024 on Claude.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<ReasoningSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<ReasoningContext>,
+    /// `pro` routes to the model's pro variant (OpenAI GPT-5.6 and newer).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<OpenAIReasoningMode>,
+}
+
+impl OpenRouterReasoning {
+    /// Reasoning at a given effort.
+    pub fn effort(effort: ReasoningEffort) -> Self {
+        Self {
+            effort: Some(effort),
+            ..Self::default()
+        }
+    }
+
+    /// Reasoning with a token budget.
+    pub fn max_tokens(max_tokens: usize) -> Self {
+        Self {
+            max_tokens: Some(max_tokens),
+            ..Self::default()
+        }
+    }
+
+    /// Reasoning on, with the model's default effort (`enabled: true`).
+    pub fn enabled() -> Self {
+        Self {
+            enabled: Some(true),
+            ..Self::default()
+        }
+    }
+
+    /// Reasoning off (`enabled: false`); rejected by models whose reasoning is
+    /// mandatory.
+    pub fn disabled() -> Self {
+        Self {
+            enabled: Some(false),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_exclude(mut self, exclude: bool) -> Self {
+        self.exclude = Some(exclude);
+        self
+    }
+
+    pub fn with_summary(mut self, summary: ReasoningSummary) -> Self {
+        self.summary = Some(summary);
+        self
+    }
+
+    pub fn with_context(mut self, context: ReasoningContext) -> Self {
+        self.context = Some(context);
+        self
+    }
+
+    pub fn with_mode(mut self, mode: OpenAIReasoningMode) -> Self {
+        self.mode = Some(mode);
+        self
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ReasoningConfig {
     OpenAI {
@@ -177,9 +285,89 @@ pub enum ReasoningConfig {
         thinking_level: GeminiThinkingLevel,
         include_summaries: bool,
     },
+    /// OpenRouter's unified `reasoning` object. The only reasoning
+    /// configuration OpenRouter models accept; convert another provider's
+    /// configuration explicitly with [`ReasoningConfig::to_openrouter`].
+    OpenRouter(OpenRouterReasoning),
 }
 
 impl ReasoningConfig {
+    /// An OpenRouter reasoning configuration.
+    pub fn openrouter(reasoning: OpenRouterReasoning) -> Self {
+        ReasoningConfig::OpenRouter(reasoning)
+    }
+
+    /// OpenRouter reasoning at a given effort.
+    pub fn openrouter_effort(effort: ReasoningEffort) -> Self {
+        ReasoningConfig::OpenRouter(OpenRouterReasoning::effort(effort))
+    }
+
+    /// The closest OpenRouter equivalent of this configuration. Nothing is
+    /// translated implicitly: OpenRouter models reject other variants, and
+    /// this conversion fails where no equivalent exists.
+    ///
+    /// - `OpenAI`: the effort, plus `summary: "auto"` when summaries were requested.
+    /// - `Anthropic`: the budget as `max_tokens`, or `enabled: false` for a zero
+    ///   budget. A budget combined with an effort fails: OpenRouter accepts
+    ///   one or the other.
+    /// - `AnthropicAdaptive`: the effort, or `enabled: true` without one.
+    /// - `Google`: `-1` (dynamic) becomes `enabled: true`, `0` `enabled: false`
+    ///   and a positive budget `max_tokens`.
+    /// - `Gemini`: the thinking level as an effort.
+    ///
+    /// `include_summaries: false` on the Google variants is not carried over:
+    /// OpenRouter returns reasoning whenever the model produces it, and its
+    /// only switch (`exclude`) may also withhold the signatures needed to
+    /// continue tool calls.
+    pub fn to_openrouter(&self) -> Result<OpenRouterReasoning, crate::error::Error> {
+        let invalid = |message: &str| Err(crate::error::Error::InvalidRequest(message.to_string()));
+        Ok(match self {
+            ReasoningConfig::OpenAI {
+                effort,
+                include_summaries,
+            } => OpenRouterReasoning {
+                effort: Some((*effort).into()),
+                summary: include_summaries.then_some(ReasoningSummary::Auto),
+                ..OpenRouterReasoning::default()
+            },
+            ReasoningConfig::Anthropic {
+                budget_tokens,
+                effort: None,
+            } => {
+                if *budget_tokens > 0 {
+                    OpenRouterReasoning::max_tokens(*budget_tokens)
+                } else {
+                    OpenRouterReasoning::disabled()
+                }
+            }
+            ReasoningConfig::Anthropic { effort: Some(_), .. } => {
+                return invalid(
+                    "OpenRouter reasoning takes either an effort or a token budget, not both; use OpenRouterReasoning::effort or ::max_tokens.",
+                );
+            }
+            ReasoningConfig::AnthropicAdaptive { effort } => match effort {
+                Some(effort) => OpenRouterReasoning::effort((*effort).into()),
+                None => OpenRouterReasoning::enabled(),
+            },
+            ReasoningConfig::Google {
+                thinking_budget, ..
+            } => match *thinking_budget {
+                -1 => OpenRouterReasoning::enabled(),
+                0 => OpenRouterReasoning::disabled(),
+                budget if budget > 0 => OpenRouterReasoning::max_tokens(budget as usize),
+                _ => {
+                    return invalid(
+                        "A negative thinking budget other than -1 (dynamic) has no OpenRouter equivalent.",
+                    );
+                }
+            },
+            ReasoningConfig::Gemini { thinking_level, .. } => {
+                OpenRouterReasoning::effort((*thinking_level).into())
+            }
+            ReasoningConfig::OpenRouter(reasoning) => reasoning.clone(),
+        })
+    }
+
     pub fn openai(effort: OpenAIEffort, include_summaries: bool) -> Self {
         ReasoningConfig::OpenAI {
             effort,
@@ -240,6 +428,10 @@ impl ReasoningConfig {
                 thinking_budget, ..
             } => *thinking_budget != 0,
             ReasoningConfig::Gemini { .. } => true,
+            ReasoningConfig::OpenRouter(reasoning) => {
+                reasoning.enabled != Some(false)
+                    && reasoning.effort != Some(ReasoningEffort::None)
+            }
         }
     }
 
@@ -250,6 +442,7 @@ impl ReasoningConfig {
             ReasoningConfig::AnthropicAdaptive { .. } => Provider::Anthropic,
             ReasoningConfig::Google { .. } => Provider::Google,
             ReasoningConfig::Gemini { .. } => Provider::Google,
+            ReasoningConfig::OpenRouter(_) => Provider::OpenRouter,
         }
     }
 }
@@ -293,6 +486,14 @@ pub enum ReasoningArtifact {
     GoogleReasoning {
         fragments: Vec<GoogleReasoningFragment>,
     },
+    /// OpenRouter `reasoning_details` items, kept verbatim and in order. They
+    /// are sent back unmodified on the assistant turn: they carry the
+    /// signatures and encrypted reasoning that Claude, Gemini and OpenAI models
+    /// need to continue after tool calls. Items are opaque JSON; encrypted
+    /// items (`reasoning.encrypted`) hold no readable text.
+    OpenRouter {
+        details: Vec<serde_json::Value>,
+    },
 }
 
 // Conversations saved before multiple OpenAI reasoning items were kept hold
@@ -306,6 +507,9 @@ enum ReasoningArtifactRepr {
     },
     GoogleReasoning {
         fragments: Vec<GoogleReasoningFragment>,
+    },
+    OpenRouter {
+        details: Vec<serde_json::Value>,
     },
 }
 
@@ -331,6 +535,7 @@ impl From<ReasoningArtifactRepr> for ReasoningArtifact {
             ReasoningArtifactRepr::GoogleReasoning { fragments } => {
                 Self::GoogleReasoning { fragments }
             }
+            ReasoningArtifactRepr::OpenRouter { details } => Self::OpenRouter { details },
         }
     }
 }
@@ -371,11 +576,17 @@ impl ReasoningArtifact {
         ReasoningArtifact::GoogleReasoning { fragments }
     }
 
+    /// OpenRouter `reasoning_details`, kept verbatim.
+    pub fn new_openrouter(details: Vec<serde_json::Value>) -> Self {
+        ReasoningArtifact::OpenRouter { details }
+    }
+
     pub fn provider(&self) -> Provider {
         match self {
             ReasoningArtifact::OpenAIEncryptedReasoning { .. } => Provider::OpenAI,
             ReasoningArtifact::AnthropicReasoning { .. } => Provider::Anthropic,
             ReasoningArtifact::GoogleReasoning { .. } => Provider::Google,
+            ReasoningArtifact::OpenRouter { .. } => Provider::OpenRouter,
         }
     }
 }

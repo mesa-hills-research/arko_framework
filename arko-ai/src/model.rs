@@ -6,6 +6,9 @@ pub enum Provider {
     OpenAI,
     Anthropic,
     Google,
+    /// OpenRouter's Chat Completions API. Models are dynamic slugs such as
+    /// `anthropic/claude-sonnet-5` ([`Model::openrouter`]).
+    OpenRouter,
 }
 
 impl Provider {
@@ -14,6 +17,7 @@ impl Provider {
             Provider::OpenAI => "openai",
             Provider::Anthropic => "anthropic",
             Provider::Google => "gemini",
+            Provider::OpenRouter => "openrouter",
         }
     }
 }
@@ -75,6 +79,11 @@ pub struct Model {
     pub supports_image_input: bool,
     pub supports_cache: bool,
     pub pricing: ModelPricing,
+    /// OpenRouter catalog metadata, for models built from the OpenRouter
+    /// catalog. `None` for registry models and for [`Model::openrouter`]
+    /// models created without a catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openrouter: Option<crate::providers::openrouter::OpenRouterModelInfo>,
 }
 
 /// Model data audited 2026-09-27 against vendor docs:
@@ -111,6 +120,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 10.00,
                 output_cost_per_million: 50.00,
@@ -139,6 +149,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 2.00,
                 output_cost_per_million: 10.00,
@@ -167,6 +178,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 0.10,
                 output_cost_per_million: 0.50,
@@ -196,6 +208,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 4.00,
                 output_cost_per_million: 20.00,
@@ -224,6 +237,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 2.00,
                 output_cost_per_million: 12.00,
@@ -252,6 +266,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 0.20,
                 output_cost_per_million: 1.20,
@@ -290,6 +305,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 1.25,
                 output_cost_per_million: 10.00,
@@ -321,6 +337,7 @@ impl Model {
             max_output_tokens: 272_000,
             supports_image_input: true,
             supports_cache: false,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 15.00,
                 output_cost_per_million: 120.00,
@@ -338,6 +355,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 1.25,
                 output_cost_per_million: 10.00,
@@ -364,6 +382,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 1.75,
                 output_cost_per_million: 14.00,
@@ -394,6 +413,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: false,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 21.00,
                 output_cost_per_million: 168.00,
@@ -411,6 +431,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 1.75,
                 output_cost_per_million: 14.00,
@@ -437,6 +458,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 2.50,
                 output_cost_per_million: 15.00,
@@ -463,6 +485,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: false,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 30.00,
                 output_cost_per_million: 180.00,
@@ -489,6 +512,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 5.00,
                 output_cost_per_million: 30.00,
@@ -520,6 +544,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: false,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 30.00,
                 output_cost_per_million: 180.00,
@@ -541,6 +566,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 0.75,
                 output_cost_per_million: 4.50,
@@ -567,6 +593,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 0.20,
                 output_cost_per_million: 1.25,
@@ -595,6 +622,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 0.25,
                 output_cost_per_million: 2.00,
@@ -623,6 +651,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 0.05,
                 output_cost_per_million: 0.40,
@@ -651,6 +680,7 @@ impl Model {
             max_output_tokens: 100_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 1.10,
                 output_cost_per_million: 4.40,
@@ -679,6 +709,7 @@ impl Model {
             max_output_tokens: 100_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 2.00,
                 output_cost_per_million: 8.00,
@@ -708,6 +739,7 @@ impl Model {
             max_output_tokens: 100_000,
             supports_image_input: true,
             supports_cache: false,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 20.00,
                 output_cost_per_million: 80.00,
@@ -733,6 +765,7 @@ impl Model {
             max_output_tokens: 32_768,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 2.00,
                 output_cost_per_million: 8.00,
@@ -759,6 +792,7 @@ impl Model {
             max_output_tokens: 32_768,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 0.40,
                 output_cost_per_million: 1.60,
@@ -787,6 +821,7 @@ impl Model {
             max_output_tokens: 32_768,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 0.10,
                 output_cost_per_million: 0.40,
@@ -814,6 +849,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 10.00,
                 output_cost_per_million: 50.00,
@@ -841,6 +877,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 10.00,
                 output_cost_per_million: 50.00,
@@ -875,6 +912,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 4.00,
                 output_cost_per_million: 20.00,
@@ -898,6 +936,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 5.00,
                 output_cost_per_million: 25.00,
@@ -926,6 +965,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 5.00,
                 output_cost_per_million: 25.00,
@@ -957,6 +997,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 2.00,
                 output_cost_per_million: 10.00,
@@ -989,6 +1030,7 @@ impl Model {
             max_output_tokens: 64_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 3.00,
                 output_cost_per_million: 15.00,
@@ -1017,6 +1059,7 @@ impl Model {
             max_output_tokens: 8192,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 3.00,
                 output_cost_per_million: 15.00,
@@ -1045,6 +1088,7 @@ impl Model {
             max_output_tokens: 8192,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 3.00,
                 output_cost_per_million: 15.00,
@@ -1073,6 +1117,7 @@ impl Model {
             max_output_tokens: 32_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 15.00,
                 output_cost_per_million: 75.00,
@@ -1101,6 +1146,7 @@ impl Model {
             max_output_tokens: 32_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 15.00,
                 output_cost_per_million: 75.00,
@@ -1129,6 +1175,7 @@ impl Model {
             max_output_tokens: 64_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 5.00,
                 output_cost_per_million: 25.00,
@@ -1155,6 +1202,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 5.00,
                 output_cost_per_million: 25.00,
@@ -1182,6 +1230,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 5.00,
                 output_cost_per_million: 25.00,
@@ -1217,6 +1266,7 @@ impl Model {
             max_output_tokens: 64_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 3.00,
                 output_cost_per_million: 15.00,
@@ -1239,6 +1289,7 @@ impl Model {
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 3.00,
                 output_cost_per_million: 15.00,
@@ -1276,6 +1327,7 @@ impl Model {
             max_output_tokens: 64_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 3.00,
                 output_cost_per_million: 15.00,
@@ -1298,6 +1350,7 @@ impl Model {
             max_output_tokens: 64_000,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 1.00,
                 output_cost_per_million: 5.00,
@@ -1324,6 +1377,7 @@ impl Model {
             max_output_tokens: 65_536,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 1.50,
                 output_cost_per_million: 9.00,
@@ -1353,6 +1407,7 @@ impl Model {
             max_output_tokens: 65_536,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 1.25,
                 output_cost_per_million: 10.00,
@@ -1382,6 +1437,7 @@ impl Model {
             max_output_tokens: 65_536,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 0.30,
                 output_cost_per_million: 2.50,
@@ -1411,6 +1467,7 @@ impl Model {
             max_output_tokens: 65_536,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 0.10,
                 output_cost_per_million: 0.40,
@@ -1441,6 +1498,7 @@ impl Model {
             max_output_tokens: 8_192,
             supports_image_input: true,
             supports_cache: false,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 0.10,
                 output_cost_per_million: 0.40,
@@ -1474,6 +1532,7 @@ impl Model {
             max_output_tokens: 65_536,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 2.00,
                 output_cost_per_million: 12.00,
@@ -1503,6 +1562,7 @@ impl Model {
             max_output_tokens: 65_536,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 0.50,
                 output_cost_per_million: 3.00,
@@ -1528,6 +1588,7 @@ impl Model {
             max_output_tokens: 65_536,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 2.00,
                 output_cost_per_million: 12.00,
@@ -1553,6 +1614,7 @@ impl Model {
             max_output_tokens: 65_536,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 2.00,
                 output_cost_per_million: 12.00,
@@ -1581,6 +1643,7 @@ impl Model {
             max_output_tokens: 65_536,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing: ModelPricing {
                 input_cost_per_million: 0.25,
                 output_cost_per_million: 1.50,
@@ -1608,6 +1671,7 @@ impl Model {
             max_output_tokens: 65_536,
             supports_image_input: true,
             supports_cache: true,
+            openrouter: None,
             pricing,
         }
     }
@@ -1764,12 +1828,41 @@ impl Model {
         ]
     }
 
-    /// Every registered model for `provider`.
+    /// An OpenRouter model by slug, for example `anthropic/claude-sonnet-5`,
+    /// `openrouter/auto`, `~anthropic/claude-sonnet-latest`,
+    /// `openai/gpt-6-luna:floor` or `@preset/name`.
+    ///
+    /// No network call is made and nothing is known about the model: limits
+    /// are 0 (unknown), prices are 0 (costs come from OpenRouter's reported
+    /// `usage.cost`), and image input and caching are assumed so requests pass
+    /// through unchanged. For limits, prices and request validation, load the
+    /// catalog with [`OpenRouterClient::fetch_models`] and use
+    /// [`OpenRouterClient::model`].
+    ///
+    /// [`OpenRouterClient::fetch_models`]: crate::providers::openrouter::OpenRouterClient::fetch_models
+    /// [`OpenRouterClient::model`]: crate::providers::openrouter::OpenRouterClient::model
+    pub fn openrouter(slug: impl Into<String>) -> Self {
+        Self {
+            provider: Provider::OpenRouter,
+            id: slug.into(),
+            model_type: ModelType::Standard,
+            max_input_tokens: 0,
+            max_output_tokens: 0,
+            supports_image_input: true,
+            supports_cache: true,
+            pricing: ModelPricing::default(),
+            openrouter: None,
+        }
+    }
+
+    /// Every registered model for `provider`. OpenRouter models are dynamic
+    /// and not registered (see [`Model::openrouter`]), so its list is empty.
     pub fn list(provider: Provider) -> Vec<Self> {
         match provider {
             Provider::OpenAI => Self::list_openai_models(),
             Provider::Anthropic => Self::list_anthropic_models(),
             Provider::Google => Self::list_google_models(),
+            Provider::OpenRouter => Vec::new(),
         }
     }
 
@@ -1787,7 +1880,15 @@ impl Model {
         Self::all().into_iter().find(|model| model.id == model_id)
     }
 
+    /// The registered model with this id. OpenRouter models are not
+    /// registered, so this fails for [`Provider::OpenRouter`]; use
+    /// [`Model::openrouter`] or the client's catalog instead.
     pub fn get(provider: Provider, model_id: &str) -> Result<Self, crate::error::Error> {
+        if provider == Provider::OpenRouter {
+            return Err(crate::error::Error::ModelNotSupported(format!(
+                "OpenRouter model '{model_id}' is not in the static registry; OpenRouter models are dynamic (use Model::openrouter or OpenRouterClient::model)."
+            )));
+        }
         Self::list(provider.clone())
             .into_iter()
             .find(|model| model.id == model_id)
@@ -1802,7 +1903,11 @@ impl Model {
     /// Whether a forced tool choice ([`ToolChoice::Required`] or
     /// [`ToolChoice::Specific`]) is accepted for a request with `config`.
     /// Anthropic rejects it on some models and, on every model, while manual
-    /// extended thinking (`budget_tokens`) is enabled.
+    /// extended thinking (`budget_tokens`) is enabled. The same rules apply to
+    /// Claude models on OpenRouter, where OpenRouter reasoning on a Claude
+    /// model without adaptive thinking, or a reasoning `max_tokens` budget,
+    /// means manual thinking; other OpenRouter models need `tool_choice` in
+    /// their catalog parameters when catalog metadata is present.
     ///
     /// [`ToolChoice::Required`]: crate::tool::ToolChoice::Required
     /// [`ToolChoice::Specific`]: crate::tool::ToolChoice::Specific
@@ -1818,14 +1923,62 @@ impl Model {
                 !self.rejects_anthropic_forced_tool_choice() && !manual_thinking
             }
             Provider::OpenAI | Provider::Google => true,
+            Provider::OpenRouter => {
+                let listed = self
+                    .openrouter
+                    .as_ref()
+                    .is_none_or(|info| info.supports_parameter("tool_choice"));
+                let claude_allows = self.openrouter_claude_equivalent().is_none_or(|claude| {
+                    !claude.rejects_anthropic_forced_tool_choice()
+                        && !Self::openrouter_claude_manual_thinking(&claude, config)
+                });
+                listed && claude_allows
+            }
         }
+    }
+
+    /// The registered Claude model an OpenRouter `anthropic/` slug (or a
+    /// catalog alias's target) names, for Anthropic's model rules:
+    /// `anthropic/claude-sonnet-4.5` is `claude-sonnet-4-5-20250929`.
+    fn openrouter_claude_equivalent(&self) -> Option<Model> {
+        let slug = self
+            .openrouter
+            .as_ref()
+            .and_then(|info| info.alias_target.as_deref())
+            .unwrap_or(&self.id);
+        let name = slug.trim_start_matches('~').strip_prefix("anthropic/")?;
+        let name = name.split(':').next()?.replace('.', "-");
+        let dated = format!("{name}-2");
+        Self::list_anthropic_models()
+            .into_iter()
+            .find(|model| model.id == name || model.id.starts_with(&dated))
+    }
+
+    /// Whether OpenRouter reasoning in `config` runs Claude with a manual
+    /// thinking budget.
+    fn openrouter_claude_manual_thinking(
+        claude: &Model,
+        config: &crate::config::GenerationConfig,
+    ) -> bool {
+        let Some(crate::reasoning::ReasoningConfig::OpenRouter(reasoning)) = &config.reasoning
+        else {
+            return false;
+        };
+        if reasoning.enabled == Some(false)
+            || reasoning.effort == Some(crate::reasoning::ReasoningEffort::None)
+        {
+            return false;
+        }
+        !claude.supports_anthropic_adaptive_thinking()
+            || (reasoning.max_tokens.is_some() && !claude.rejects_anthropic_manual_thinking())
     }
 
     /// Whether `ToolConfig::with_parallel_tool_calls(false)` is accepted. The
     /// Gemini Interactions API has no switch to disable parallel calls.
+    /// OpenRouter forwards `parallel_tool_calls` to the serving provider.
     pub fn supports_disabling_parallel_tool_calls(&self) -> bool {
         match self.provider {
-            Provider::OpenAI | Provider::Anthropic => true,
+            Provider::OpenAI | Provider::Anthropic | Provider::OpenRouter => true,
             Provider::Google => false,
         }
     }
@@ -1836,8 +1989,15 @@ impl Model {
     /// ones.
     pub fn reports_stop_reason(&self) -> bool {
         match self.provider {
-            Provider::OpenAI | Provider::Anthropic | Provider::Google => true,
+            Provider::OpenAI | Provider::Anthropic | Provider::Google | Provider::OpenRouter => {
+                true
+            }
         }
+    }
+
+    /// OpenRouter catalog metadata, when this model came from the catalog.
+    pub fn openrouter_info(&self) -> Option<&crate::providers::openrouter::OpenRouterModelInfo> {
+        self.openrouter.as_ref()
     }
 
     pub fn is_openai_gpt_6_astra(&self) -> bool {

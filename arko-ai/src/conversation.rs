@@ -20,7 +20,9 @@ pub struct Conversation {
     /// Stable request-routing key for providers with prefix prompt caches.
     ///
     /// The key is generated once per conversation and serialized so restored
-    /// conversations continue to reach the same cache lineage.
+    /// conversations continue to reach the same cache lineage. OpenRouter
+    /// always receives it as `session_id` (its sticky-routing key, at most 256
+    /// characters) and, with caching enabled, as `prompt_cache_key`.
     #[serde(default = "new_prompt_cache_key")]
     pub prompt_cache_key: String,
     pub messages: Vec<Message>,
@@ -99,9 +101,12 @@ impl Conversation {
     /// (and the provider's prompt cache for it) is unchanged. Unlike editing
     /// the request-level effort, earlier turns keep their cache.
     ///
-    /// Providers that can't send updates reject conversations containing one
-    /// with [`Error::UnsupportedFeature`](crate::error::Error::UnsupportedFeature)
-    /// rather than dropping it; none of the current providers can yet.
+    /// Supported for OpenRouter models that accept mid-conversation effort
+    /// changes (for example GPT-6 Astra, Sol and Luna, Claude Fable 5.1 and
+    /// Claude Opus 5; OpenRouter rejects other models with a 400). Other
+    /// providers reject conversations containing an update with
+    /// [`Error::UnsupportedFeature`](crate::error::Error::UnsupportedFeature).
+    /// Updates can't be combined with pro reasoning mode or `-pro` models.
     ///
     /// Providers reject two updates in a row, so calling this again before any
     /// other message replaces the pending update.

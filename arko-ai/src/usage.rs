@@ -19,6 +19,15 @@ pub struct ModelCallUsage {
     /// Provider-supplied termination details, when available. No response text is added.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_details: Option<serde_json::Value>,
+    /// The model that was requested, when the provider served a different one
+    /// (OpenRouter model fallbacks, routers such as `openrouter/auto`, and
+    /// `~…-latest` aliases). `model` is the one that served the call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    /// The upstream provider that served a routed call, when reported (for
+    /// example OpenRouter's `provider`, such as `Anthropic` or `Google Vertex`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_provider: Option<String>,
 }
 
 impl ModelCallUsage {
@@ -47,7 +56,14 @@ impl ModelCallUsage {
             input_delta_from_previous_call: None,
             stop_reason: None,
             stop_details: None,
+            requested_model: None,
+            upstream_provider: None,
         }
+    }
+
+    /// Whether the provider served a different model than the one requested.
+    pub fn served_model_changed(&self) -> bool {
+        self.requested_model.is_some()
     }
 
     pub fn with_input_delta(mut self, delta: isize) -> Self {
@@ -207,6 +223,12 @@ pub struct UsageInfo {
     /// Actual charge reported by the provider (OpenRouter `usage.cost`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reported_cost: Option<f64>,
+    /// With bring-your-own-key routing, what the upstream provider charged
+    /// your own provider account (OpenRouter
+    /// `usage.cost_details.upstream_inference_cost`); `reported_cost` is then
+    /// only OpenRouter's fee. Included in `billed_cost`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_cost: Option<f64>,
     #[serde(default)]
     pub billing: BillingKind,
     /// What the account was charged. Records saved before billing kinds
@@ -361,9 +383,9 @@ impl UsageInfo {
         self.billed_cost = match self.billing {
             BillingKind::Metered => Some(self.total_cost),
             BillingKind::Subscription | BillingKind::NotCharged => Some(0.0),
-            BillingKind::ProviderReported => {
-                Some(self.reported_cost.unwrap_or(self.total_cost))
-            }
+            BillingKind::ProviderReported => Some(
+                self.reported_cost.unwrap_or(self.total_cost) + self.upstream_cost.unwrap_or(0.0),
+            ),
             BillingKind::Mixed => self.billed_cost,
         };
     }
@@ -414,6 +436,7 @@ impl std::ops::AddAssign<&UsageInfo> for UsageInfo {
         }
         self.total_cost += other.total_cost;
         self.reported_cost = add_options(self.reported_cost, other.reported_cost);
+        self.upstream_cost = add_options(self.upstream_cost, other.upstream_cost);
         if self.billing != other.billing {
             self.billing = BillingKind::Mixed;
         }

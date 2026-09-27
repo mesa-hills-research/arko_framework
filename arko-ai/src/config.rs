@@ -52,6 +52,11 @@ pub struct GenerationConfig {
     /// Gemini implicit caching remains provider-managed and cannot be disabled
     /// through this setting.
     ///
+    /// For OpenRouter, enabled sends `prompt_cache_key` and, on Claude models,
+    /// a top-level `cache_control`; disabled sends neither, and on OpenAI
+    /// models the catalog shows billing cache writes it also sends
+    /// `prompt_cache_options.mode: "explicit"`.
+    ///
     /// [`Conversation::enable_cache`]: crate::conversation::Conversation::enable_cache
     pub prompt_caching: Option<bool>,
     /// Requests summarized Anthropic thinking text while thinking is enabled
@@ -103,6 +108,7 @@ pub struct GenerationConfig {
     /// client sends when caching is enabled. `None` sends no `ttl`, which is the
     /// provider's 5-minute default. 1-hour writes cost 2x base input (5-minute
     /// writes 1.25x). https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+    /// Also the `ttl` of the `cache_control` sent for Claude models on OpenRouter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anthropic_cache_ttl: Option<AnthropicCacheTtl>,
     /// Anthropic fast mode (`speed: "fast"` with the `fast-mode-2026-02-01` beta
@@ -119,6 +125,15 @@ pub struct GenerationConfig {
     /// decides the price. https://platform.claude.com/docs/en/manage-claude/data-residency
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anthropic_inference_geo: Option<AnthropicInferenceGeo>,
+    /// OpenRouter routing and request options for this request. Fields set
+    /// here override the client's defaults
+    /// ([`OpenRouterClient::with_default_options`]) field by field; see
+    /// [`OpenRouterOptions`]. Ignored by other providers.
+    ///
+    /// [`OpenRouterClient::with_default_options`]: crate::providers::openrouter::OpenRouterClient::with_default_options
+    /// [`OpenRouterOptions`]: crate::providers::openrouter::OpenRouterOptions
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openrouter: Option<crate::providers::openrouter::OpenRouterOptions>,
 }
 
 /// Anthropic prompt-cache lifetimes (`cache_control.ttl`).
@@ -188,7 +203,17 @@ impl GenerationConfig {
             anthropic_cache_ttl: None,
             anthropic_fast_mode: None,
             anthropic_inference_geo: None,
+            openrouter: None,
         }
+    }
+
+    /// Sets per-request OpenRouter options (merged over the client defaults).
+    pub fn with_openrouter_options(
+        mut self,
+        options: crate::providers::openrouter::OpenRouterOptions,
+    ) -> Self {
+        self.openrouter = Some(options);
+        self
     }
 
     /// Requests an OpenAI processing tier.

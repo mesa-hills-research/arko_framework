@@ -32,8 +32,8 @@ pub use pricing::{ResidencyPricing, ScheduledPricing, ServiceTier, TierPricing};
 pub use providers::{GenerationResponse, StreamEvent, http_client, http_client_builder};
 pub use reasoning::{
     AnthropicReasoningEffort, GeminiThinkingLevel, OpenAIEffort,
-    OpenAIReasoningItem, OpenAIReasoningMode, ReasoningArtifact, ReasoningConfig,
-    ReasoningEffort,
+    OpenAIReasoningItem, OpenAIReasoningMode, OpenRouterReasoning, ReasoningArtifact,
+    ReasoningConfig, ReasoningContext, ReasoningEffort, ReasoningSummary,
 };
 pub use stop::{Refusal, RefusalSource, StopReason};
 pub use tool::{ToolCall, ToolChoice, ToolConfig, ToolDefinition, ToolResult};
@@ -46,6 +46,12 @@ pub use embedding_model::EmbeddingModelDetails;
 pub use embedding_provider_identifier::EmbeddingProviderIdentifier;
 pub use providers::EmbeddingResponse;
 pub use token_utils::{TokenCounter, count_tokens};
+
+pub use providers::openrouter::{
+    AppAttribution, AutoExactoPolicy, AutoRouterCostTier, AutoRouterOptions, DataCollection,
+    OpenRouterCatalog, OpenRouterClient, OpenRouterModelInfo, OpenRouterOptions,
+    ProviderPreferences, SortBy,
+};
 
 pub use providers::openai::{
     ChatGptOAuthCredentials, OAuthRefreshResult, OpenAIAuth,

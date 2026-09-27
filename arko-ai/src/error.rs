@@ -97,6 +97,9 @@ const PERMANENT_CODES: &[&str] = &[
     "failed_to_download_image",
     // Gemini: the replayed history lacks a required thought signature.
     "missing_thought_signature",
+    // arko's code for OpenRouter's "no available model provider meets your
+    // routing requirements": provider preferences exclude every endpoint.
+    "no_eligible_provider",
     "INVALID_ARGUMENT",
     "FAILED_PRECONDITION",
     "PERMISSION_DENIED",

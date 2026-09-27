@@ -12,6 +12,7 @@ pub struct LLMClient {
     openai_client: Option<providers::openai::OpenAIClient>,
     anthropic_client: Option<providers::anthropic::AnthropicClient>,
     google_client: Option<providers::google::GoogleClient>,
+    openrouter_client: Option<providers::openrouter::OpenRouterClient>,
 }
 
 impl LLMClient {
@@ -20,6 +21,7 @@ impl LLMClient {
             openai_client: None,
             anthropic_client: None,
             google_client: None,
+            openrouter_client: None,
         }
     }
 
@@ -32,6 +34,7 @@ impl LLMClient {
     ///   Codex `auth.json`, use [`CodexAuthFile`](crate::codex_auth::CodexAuthFile).
     /// - Anthropic: `ANTHROPIC_API_KEY`.
     /// - Google: `GOOGLE_API_KEY`, else `GEMINI_API_KEY`.
+    /// - OpenRouter: `OPENROUTER_API_KEY`.
     ///
     /// The library reads no environment variables unless this is called.
     pub fn from_env() -> Self {
@@ -58,6 +61,9 @@ impl LLMClient {
         }
         if let Some(key) = var("GOOGLE_API_KEY").or_else(|| var("GEMINI_API_KEY")) {
             client = client.with_google_api_key(&key);
+        }
+        if let Some(key) = var("OPENROUTER_API_KEY") {
+            client = client.with_openrouter_api_key(&key);
         }
         client
     }
@@ -246,6 +252,30 @@ impl LLMClient {
         self
     }
 
+    /// Configures OpenRouter with an API key and default options. See
+    /// [`with_openrouter_client`](Self::with_openrouter_client) for a client
+    /// with default options, attribution or a different base URL.
+    pub fn with_openrouter_api_key(mut self, key: &str) -> Self {
+        self.openrouter_client = Some(providers::openrouter::OpenRouterClient::new(key));
+        self
+    }
+
+    /// Installs a preconfigured OpenRouter client.
+    pub fn with_openrouter_client(
+        mut self,
+        client: providers::openrouter::OpenRouterClient,
+    ) -> Self {
+        self.openrouter_client = Some(client);
+        self
+    }
+
+    /// The configured OpenRouter client, for catalog access
+    /// ([`fetch_models`](providers::openrouter::OpenRouterClient::fetch_models),
+    /// [`model`](providers::openrouter::OpenRouterClient::model)).
+    pub fn openrouter(&self) -> Option<&providers::openrouter::OpenRouterClient> {
+        self.openrouter_client.as_ref()
+    }
+
     pub fn new_conversation(&self, model: Model) -> Conversation {
         Conversation::new(model)
     }
@@ -289,6 +319,11 @@ impl LLMClient {
                 .as_ref()
                 .map(|c| c as &dyn ProviderClient)
                 .ok_or_else(|| Error::MissingApiKey("Google".to_string())),
+            Provider::OpenRouter => self
+                .openrouter_client
+                .as_ref()
+                .map(|c| c as &dyn ProviderClient)
+                .ok_or_else(|| Error::MissingApiKey("OpenRouter".to_string())),
         }
     }
 
@@ -335,7 +370,7 @@ mod tests {
     #[tokio::test]
     async fn from_env_configures_the_providers_it_finds() {
         let empty = client(&[]);
-        for provider in [Provider::OpenAI, Provider::Anthropic, Provider::Google] {
+        for provider in [Provider::OpenAI, Provider::Anthropic, Provider::Google, Provider::OpenRouter] {
             assert!(!empty.has_provider(&provider));
         }
 
@@ -343,11 +378,14 @@ mod tests {
             ("OPENAI_API_KEY", "sk-test"),
             ("ANTHROPIC_API_KEY", "ak-test"),
             ("GEMINI_API_KEY", "g-test"),
+            ("OPENROUTER_API_KEY", "or-test"),
         ]);
         assert!(keys.has_provider(&Provider::OpenAI));
         assert!(!keys.is_openai_chatgpt_oauth().await);
         assert!(keys.has_provider(&Provider::Anthropic));
         assert!(keys.has_provider(&Provider::Google));
+        assert!(keys.has_provider(&Provider::OpenRouter));
+        assert!(keys.openrouter().is_some());
 
         let oauth = client(&[
             ("OPENAI_OAUTH_ACCESS_TOKEN", "access"),

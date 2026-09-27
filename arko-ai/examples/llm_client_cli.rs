@@ -1,7 +1,7 @@
 use arko_ai::{
     model::ModelType, reasoning::{AnthropicReasoningFragment, OpenAIEffort},
     AnthropicReasoningEffort, Content, Error, GenerationConfig, GeminiThinkingLevel, Image,
-    LLMClient, Model, Provider, ReasoningArtifact,
+    LLMClient, Model, OpenRouterReasoning, Provider, ReasoningArtifact, ReasoningEffort,
     ReasoningConfig, StreamEvent, UsageInfo,
 };
 use clap::{Parser, Subcommand};
@@ -48,7 +48,7 @@ enum Commands {
         #[arg(short, long)]
         reasoning: bool,
 
-        /// The reasoning level (minimal/low/medium/high for OpenAI, integer for Anthropic/Google 2.x, high/low for Google 3.x)
+        /// The reasoning level (minimal/low/medium/high for OpenAI, integer for Anthropic/Google 2.x, high/low for Google 3.x, an effort or a token budget for OpenRouter)
         #[arg(long)]
         reasoning_level: Option<String>,
 
@@ -91,7 +91,7 @@ enum Commands {
         #[arg(short, long)]
         reasoning: bool,
 
-        /// The reasoning level (minimal/low/medium/high for OpenAI, integer for Anthropic/Google 2.x, high/low for Google 3.x)
+        /// The reasoning level (minimal/low/medium/high for OpenAI, integer for Anthropic/Google 2.x, high/low for Google 3.x, an effort or a token budget for OpenRouter)
         #[arg(long)]
         reasoning_level: Option<String>,
 
@@ -372,6 +372,8 @@ fn get_model(name: &str) -> Result<Model, Error> {
         "gemini-2.5-flash" => Ok(Model::google_gemini_2_5_flash()),
         "gemini-2.5-flash-lite" => Ok(Model::google_gemini_2_5_flash_lite()),
         "gemini-2.0-flash" => Ok(Model::google_gemini_2_0_flash()),
+        // OpenRouter slugs: author/model, ~author/alias-latest, @preset/name.
+        slug if slug.contains('/') => Ok(Model::openrouter(slug)),
         _ => Model::find(name).ok_or_else(|| {
             Error::ModelNotSupported(format!(
                 "Unknown model '{}'. Use a known alias or a registered model id.",
@@ -508,6 +510,25 @@ fn build_config(
                     ReasoningConfig::anthropic(budget)
                 }
             }
+            Provider::OpenRouter => {
+                // An effort name, or a number as a reasoning token budget.
+                let level = reasoning_level.or(reasoning_effort).unwrap_or_else(|| "medium".into());
+                let reasoning = match level.as_str() {
+                    "none" => OpenRouterReasoning::effort(ReasoningEffort::None),
+                    "minimal" => OpenRouterReasoning::effort(ReasoningEffort::Minimal),
+                    "low" => OpenRouterReasoning::effort(ReasoningEffort::Low),
+                    "medium" => OpenRouterReasoning::effort(ReasoningEffort::Medium),
+                    "high" => OpenRouterReasoning::effort(ReasoningEffort::High),
+                    "xhigh" => OpenRouterReasoning::effort(ReasoningEffort::XHigh),
+                    "max" => OpenRouterReasoning::effort(ReasoningEffort::Max),
+                    budget => OpenRouterReasoning::max_tokens(budget.parse().map_err(|_| {
+                        Error::InvalidRequest(
+                            "OpenRouter reasoning takes an effort (none..max) or a token budget".to_string(),
+                        )
+                    })?),
+                };
+                ReasoningConfig::openrouter(reasoning)
+            }
             Provider::Google => {
                 if model.model_type != ModelType::Reasoning {
                     return Err(Error::InvalidRequest(format!(
@@ -628,6 +649,14 @@ fn print_reasoning_artifact(artifact: Option<&ReasoningArtifact>) {
                 println!("\nGoogle Reasoning Summaries:");
                 for fragment in fragments {
                     println!("- {}", fragment.summary);
+                }
+            }
+            ReasoningArtifact::OpenRouter { details } => {
+                println!("\nOpenRouter Reasoning Details:");
+                for detail in details {
+                    let kind = detail.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    let format = detail.get("format").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    println!("- {kind} ({format})");
                 }
             }
         }

@@ -254,6 +254,11 @@ impl<'de> Deserialize<'de> for AgentLLMConfig {
         let model = match (LLMModel::get(helper.provider.clone(), &helper.model_id), snapshot) {
             (Ok(model), _) => model,
             (Err(_), Some(snapshot)) => snapshot,
+            // OpenRouter slugs are dynamic: a hand-written config without a
+            // snapshot gets a model without catalog metadata.
+            (Err(_), None) if helper.provider == LLMProvider::OpenRouter => {
+                LLMModel::openrouter(helper.model_id.clone())
+            }
             (Err(e), None) => {
                 return Err(serde::de::Error::custom(format!(
                     "Failed to get model '{}' for provider '{:?}': {}",
@@ -747,5 +752,31 @@ mod llm_config_serde_tests {
         let partial = "provider: OpenAI\nmodel_id: gpt-6-sol\ngeneration_config:\n  max_tokens: 900\n";
         let loaded: AgentLLMConfig = serde_yaml::from_str(partial).unwrap();
         assert_eq!(loaded.generation_config.max_tokens, Some(900));
+    }
+
+    #[test]
+    fn openrouter_configs_load_with_or_without_a_catalog_snapshot() {
+        let yaml = "provider: OpenRouter\nmodel_id: anthropic/claude-sonnet-5\ngeneration_config:\n  reasoning: !OpenRouter\n    effort: high\n  openrouter:\n    provider:\n      zdr: true\n";
+        let loaded: AgentLLMConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(loaded.model.provider, LLMProvider::OpenRouter);
+        assert_eq!(loaded.model.id, "anthropic/claude-sonnet-5");
+        assert!(loaded.model.openrouter.is_none());
+        assert!(matches!(
+            loaded.generation_config.reasoning,
+            Some(arko_ai::ReasoningConfig::OpenRouter(ref reasoning))
+                if reasoning.effort == Some(arko_ai::ReasoningEffort::High)
+        ));
+        let zdr = loaded.generation_config.openrouter.as_ref().and_then(|o| o.provider.as_ref()).and_then(|p| p.zdr);
+        assert_eq!(zdr, Some(true));
+
+        // A saved snapshot keeps catalog metadata.
+        let mut model = LLMModel::openrouter("openai/gpt-6-sol");
+        model.max_input_tokens = 1_050_000;
+        let config = AgentLLMConfig {
+            model: model.clone(),
+            generation_config: LLMGenerationConfig::default(),
+        };
+        let loaded: AgentLLMConfig = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(loaded.model.max_input_tokens, 1_050_000);
     }
 }
