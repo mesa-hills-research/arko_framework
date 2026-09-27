@@ -57,15 +57,19 @@ pub(crate) async fn execute_command_from_template(
                     continue;
                 }
                 // A path parameter passes the path the workspace check
-                // judged: absolute, so the program can't read it as an
-                // option, and with `..` already resolved, so a symbolic link
-                // on the way can't take it elsewhere.
+                // judged, with `..` already resolved, so a symbolic link on
+                // the way can't take it elsewhere: `./`-relative inside the
+                // working directory, where the command runs, and absolute
+                // outside it, so the program can't read it as an option.
                 let argument = if def.is_path && !str_val.is_empty() {
-                    crate::utils::resolve_path(str_val, task_cwd)
-                        .map_err(|error| ToolError::ParameterValidation {
-                            param_name: def.name.clone(),
-                            message: format!("Invalid path '{str_val}': {error}"),
-                        })?
+                    let resolved =
+                        crate::utils::resolve_path(str_val, task_cwd).map_err(|error| {
+                            ToolError::ParameterValidation {
+                                param_name: def.name.clone(),
+                                message: format!("Invalid path '{str_val}': {error}"),
+                            }
+                        })?;
+                    crate::utils::relative_to_working_directory(&resolved, task_cwd)
                         .into_os_string()
                 } else {
                     OsString::from(str_val)
@@ -260,11 +264,23 @@ mod tests {
         std::os::unix::fs::symlink(root.join("outside/deep"), workspace.join("link")).unwrap();
 
         // An option-like value is inside the workspace as a path, and the
-        // program gets it as one: absolute, never an option.
-        assert!(crate::utils::is_path_in_workspace("-n", &workspace).unwrap());
+        // program gets it as one: `./`-relative, never an option.
+        for option in ["-n", "--output=/etc/x"] {
+            assert!(crate::utils::is_path_in_workspace(option, &workspace).unwrap());
+        }
         assert_eq!(
             run_with_path("echo", "-n", &workspace).await.unwrap(),
-            format!("{}\n", workspace.join("-n").display())
+            "./-n\n"
+        );
+        assert_eq!(
+            run_with_path("echo", "--output=/etc/x", &workspace)
+                .await
+                .unwrap(),
+            "./--output=/etc/x\n"
+        );
+        assert_eq!(
+            run_with_path("echo", " . ", &workspace).await.unwrap(),
+            ".\n"
         );
         // `link/..` is the workspace lexically, which the check judged; the
         // kernel would follow the link to `outside` first.
@@ -272,6 +288,19 @@ mod tests {
         assert_eq!(
             run_with_path("cat", "link/../x", &workspace).await.unwrap(),
             "INSIDE"
+        );
+        // A path outside (after approval) is passed absolute.
+        assert_eq!(
+            run_with_path("cat", "../outside/x", &workspace)
+                .await
+                .unwrap(),
+            "OUTSIDE"
+        );
+        assert_eq!(
+            run_with_path("echo", "../outside/x", &workspace)
+                .await
+                .unwrap(),
+            format!("{}\n", root.join("outside/x").display())
         );
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -326,13 +326,14 @@ End-user tools wrap a command without Rust code: a `ToolDefinition` whose
 expanded and it is split on whitespace, without interpreting quotes. String parameters
 without a `flag` follow as positional arguments, in order, and then flagged string
 parameters as `flag value` and each true boolean parameter as its flag. An `is_path`
-parameter passes the path the workspace check judged: absolute and resolved, so the
-program cannot read it as an option and a symbolic link cannot redirect its `..`. The
-command runs in the task's working directory without a shell, and its standard output is
-the result; a nonzero exit status is a tool error. The process is killed when its call is
-dropped, for example when the task's runtime is aborted mid-call. A boolean parameter
-takes a JSON boolean or the text `true` or `false`, so it works in both tool calling
-modes.
+parameter passes the path the workspace check judged, with `..` resolved so a symbolic
+link cannot redirect it: relative to the working directory inside it (`./src/main.rs`,
+never a verbatim `\\?\` path on Windows) and absolute outside it, so the program cannot
+read it as an option. The command runs in the task's working directory without a shell,
+and its standard output is the result; a nonzero exit status is a tool error. The process
+is killed when its call is dropped, for example when the task's runtime is aborted
+mid-call. A boolean parameter takes a JSON boolean or the text `true` or `false`, so it
+works in both tool calling modes.
 
 ### Result interception and execution middleware
 

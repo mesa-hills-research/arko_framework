@@ -87,6 +87,23 @@ pub fn resolve_path(path: &str, working_directory: &Path) -> std::io::Result<Pat
     )?))
 }
 
+/// A path [`resolve_path`] returned, relative to `working_directory` when it
+/// is inside it (`./sub/file`, or `.` for the directory itself), else as it
+/// is. The relative form holds no `..` and starts with `.`, so a program run
+/// in the working directory opens the same file and can't read the path as
+/// an option; on Windows it also avoids handing programs a verbatim `\\?\`
+/// path, which many of them mishandle.
+pub(crate) fn relative_to_working_directory(resolved: &Path, working_directory: &Path) -> PathBuf {
+    let Ok(root) = absolute(working_directory).map(|root| normalize_path(&root)) else {
+        return resolved.to_path_buf();
+    };
+    match resolved.strip_prefix(&root) {
+        Ok(rest) if rest.as_os_str().is_empty() => PathBuf::from("."),
+        Ok(rest) => Path::new(".").join(rest),
+        Err(_) => resolved.to_path_buf(),
+    }
+}
+
 /// [`std::path::absolute`], with an empty path meaning the current
 /// directory.
 fn absolute(path: &Path) -> std::io::Result<PathBuf> {
@@ -180,6 +197,13 @@ mod tests {
         assert_eq!(resolve("$HOME/notes"), workspace.join("$HOME/notes"));
         assert_eq!(resolve(r"a\..\..\x"), workspace.join(r"a\..\..\x"));
         assert!(resolve_path("a\0b", workspace).is_err());
+        // Programs run in the working directory get paths inside it
+        // relative to it.
+        let relative = |path: &str| relative_to_working_directory(&resolve(path), workspace);
+        assert_eq!(relative("src/../lib.rs"), PathBuf::from("./lib.rs"));
+        assert_eq!(relative("-n"), PathBuf::from("./-n"));
+        assert_eq!(relative("."), PathBuf::from("."));
+        assert_eq!(relative("../other"), PathBuf::from("/workspace/other"));
     }
 
     #[cfg(unix)]
@@ -232,6 +256,16 @@ mod tests {
         assert_eq!(resolve(r"\x"), PathBuf::from(r"C:\x"));
         // Win32 drops a trailing dot, as when the file is opened.
         assert_eq!(resolve(r"src\lib.rs."), file);
+        // Programs run in the working directory get paths inside it
+        // relative to it, never in verbatim form.
+        let relative = |path: &str| relative_to_working_directory(&resolve(path), workspace);
+        assert_eq!(relative("src/lib.rs"), PathBuf::from(r".\src\lib.rs"));
+        assert_eq!(relative(r"..\x"), PathBuf::from(r"C:\Work\x"));
+        let verbatim = Path::new(r"\\?\C:\Work\Project");
+        assert_eq!(
+            relative_to_working_directory(&resolve_path("src/lib.rs", verbatim).unwrap(), verbatim),
+            PathBuf::from(r".\src\lib.rs")
+        );
         for (path, expected) in [
             (r"src\lib.rs", true),
             // Drive letters and names compare without regard to case.
