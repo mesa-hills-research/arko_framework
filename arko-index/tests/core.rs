@@ -1272,6 +1272,24 @@ async fn a_job_seen_paused_can_be_resumed_at_once() {
     index.cancel(&job.job).await.unwrap();
     assert_eq!(settle(&index, &job.job).await.phase, "cancelled");
 }
+#[tokio::test]
+async fn a_pause_after_a_cancel_does_not_undo_it() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    // The chunk request waits an hour to retry, so the job runs until stopped.
+    let mut fake = Fake::new();
+    fake.rejection = Rejection::WrongCallRetryLater;
+    let fake = Arc::new(fake);
+    fake.rejected_chunks.store(usize::MAX, Ordering::SeqCst);
+    let (index, job) = start_one_file(&fake, &db.path().join("i.db"), root.path()).await;
+    wait_for_retry(&index, &job.job).await;
+    index.cancel(&job.job).await.unwrap();
+    // Refused while the job drains, or because it has already stopped.
+    assert!(index.pause(&job.job).await.is_err());
+    assert_eq!(settle(&index, &job.job).await.phase, "cancelled");
+    let events = index.events(&job.job, 0, 1000).await.unwrap();
+    assert!(events.iter().all(|e| e.kind != "pause_requested"));
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_job_seen_ready_is_no_longer_running() {
     let root = tempfile::tempdir().unwrap();

@@ -194,9 +194,13 @@ impl ArkoIndex {
         });
         Ok(())
     }
+    /// Drains a running job to a checkpoint. A job being cancelled stays
+    /// cancelled: pausing it is an error.
     pub async fn pause(&self, job: &str) -> Result<()> {
         let controls = self.inner.controls.lock().await;
-        required(controls.get(job), "running job")?.set(1);
+        if required(controls.get(job), "running job")?.pause() == 2 {
+            return Err(error::invalid("job is being cancelled"));
+        }
         drop(controls);
         self.inner
             .db

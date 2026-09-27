@@ -6,12 +6,23 @@ use serde::{Deserialize, Serialize};
 /// (initial requests and repairs) and embedding requests, summed across
 /// retries, pauses, resumes and restarts.
 /// [`JobStatus::usage`](crate::JobStatus::usage) reports it. Each usage is
-/// saved in the same transaction as the one event that carries it, so the
-/// events add up to these totals: `usage` of `request_finished` (accepted
-/// chunk replies), `event.detail.usage` of failed `request_attempt` events
-/// (rejected chunk responses, saved before any retry wait), and `usage` and
-/// `rejected_usage` of `embedded`, `embedding_rejected` and
-/// `embedding_failed` events.
+/// saved in the same transaction as the one event that carries it, so a
+/// job's events add up to these totals:
+/// - `usage` of `request_finished` events: accepted chunk replies;
+/// - `event.detail.usage` of failed `request_attempt` events: rejected chunk
+///   responses, saved as the attempt is recorded, while any retry wait runs.
+///   A crash before that save loses the event and its usage together;
+/// - `usage` and `rejected_usage` of `embedded` and `embedding_rejected`
+///   events, and `rejected_usage` of `embedding_failed` events: embedding
+///   responses. Embedding requests have no attempt events, so the usage of
+///   their rejected responses (only custom backends attach usage to
+///   embedding errors) is held in memory until the request finishes.
+///
+/// Sum events, not request artifacts: [`ArkoIndex::request_artifact`]
+/// shows a rejected chunk response's usage both in `attempts[].detail.usage`
+/// and, once a retry is accepted, in `response.usage.retry_failures[].usage`.
+///
+/// [`ArkoIndex::request_artifact`]: crate::ArkoIndex::request_artifact
 ///
 /// A call counts when the provider returned a response: accepted replies,
 /// embedding replies whose vectors the index then rejects, and responses the

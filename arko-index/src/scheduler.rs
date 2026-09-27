@@ -147,6 +147,34 @@ impl Control {
     pub fn set(&self, state: u8) {
         self.0.send_replace(state);
     }
+    /// Requests a pause unless a cancel was already requested, which a pause
+    /// never undoes. Returns the resulting state.
+    pub fn pause(&self) -> u8 {
+        self.0.send_if_modified(|state| {
+            let running = *state == 0;
+            if running {
+                *state = 1;
+            }
+            running
+        });
+        *self.0.borrow()
+    }
+}
+/// When the scheduler must next wake for a queued retry. A deadline that
+/// passed since the slots were refilled still counts: `sleep_until` returns
+/// at once for it, and the wait is off while every slot is busy.
+fn next_due(queue: &VecDeque<Task>) -> Option<Instant> {
+    queue.iter().map(|t| t.ready).min()
+}
+/// Resolves when a queued request's control leaves the running state, or at
+/// once if it already has. Marking the current value seen means a change
+/// wakes the scheduler once. A closed sender can't change it any more, so
+/// that never resolves rather than resolving on every poll.
+async fn stopped(mut control: watch::Receiver<u8>) {
+    let running = *control.borrow_and_update() == 0;
+    if running && control.changed().await.is_err() {
+        std::future::pending::<()>().await;
+    }
 }
 #[derive(Clone)]
 pub(crate) struct Scheduler {
@@ -232,11 +260,7 @@ impl Scheduler {
                 if !open && queue.is_empty() && running.is_empty() {
                     break;
                 }
-                let due = queue
-                    .iter()
-                    .map(|t| t.ready)
-                    .filter(|&t| t > Instant::now())
-                    .min();
+                let due = next_due(&queue);
                 let delay = async {
                     match due {
                         Some(t) => tokio::time::sleep_until(t).await,
@@ -249,17 +273,8 @@ impl Scheduler {
                 // queue was drained wakes it at once.
                 let changes = async {
                     use futures::StreamExt;
-                    let mut waits: futures::stream::FuturesUnordered<_> = queue
-                        .iter()
-                        .map(|t| {
-                            let mut control = t.control.clone();
-                            async move {
-                                if *control.borrow_and_update() == 0 {
-                                    let _ = control.changed().await;
-                                }
-                            }
-                        })
-                        .collect();
+                    let mut waits: futures::stream::FuturesUnordered<_> =
+                        queue.iter().map(|t| stopped(t.control.clone())).collect();
                     if waits.is_empty() {
                         std::future::pending::<()>().await;
                     } else {
@@ -741,6 +756,69 @@ mod tests {
         let cap = arko_ai::retry::MAX_SERVER_DELAY_HINT.as_millis() as u64;
         assert_eq!(waits.len(), 1);
         assert!(waits[0] >= cap && waits[0] <= cap + 1_000, "{waits:?}");
+    }
+    /// A queued chunk request that becomes ready at `ready`.
+    fn queued(ready: Instant, control: &Control) -> (Task, oneshot::Receiver<Outcome>) {
+        let (reply, outcome) = oneshot::channel();
+        let task = Task {
+            operation: chunk_request(),
+            initial: true,
+            attempts: 1,
+            transient_failures: 0,
+            failures: vec![],
+            rejected: vec![],
+            ready,
+            control: control.0.subscribe(),
+            reply,
+            progress: None,
+        };
+        (task, outcome)
+    }
+    #[test]
+    fn a_retry_that_became_due_after_the_refill_is_still_waited_for() {
+        // The refill read the clock before this retry's deadline; the wait
+        // read it after. The retry must still wake the scheduler (at once).
+        let now = Instant::now();
+        let control = Control::new();
+        let (past, _a) = queued(now - Duration::from_millis(1), &control);
+        let (later, _b) = queued(now + Duration::from_secs(5), &control);
+        let queue = VecDeque::from([later, past]);
+        assert_eq!(next_due(&queue), Some(now - Duration::from_millis(1)));
+        assert_eq!(next_due(&VecDeque::new()), None);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_queued_request_wakes_the_scheduler_once_per_control_change() {
+        let wait = |control: &Control| tokio::spawn(stopped(control.0.subscribe()));
+        let settled = |task: tokio::task::JoinHandle<()>| async move {
+            tokio::time::timeout(Duration::from_secs(60), task)
+                .await
+                .is_ok()
+        };
+        // Running: waits for the change.
+        let control = Control::new();
+        let task = wait(&control);
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        control.set(1);
+        assert!(settled(task).await);
+        // Already stopped: resolves at once.
+        assert!(settled(wait(&control)).await);
+        // A closed sender can never change it: never resolves (it resolved on
+        // every poll before, spinning the scheduler).
+        let control = Control::new();
+        let task = wait(&control);
+        drop(control);
+        assert!(!settled(task).await);
+    }
+    #[test]
+    fn a_pause_never_undoes_a_cancel() {
+        let control = Control::new();
+        assert_eq!(control.pause(), 1);
+        assert_eq!(control.pause(), 1);
+        assert!(matches!(control.check(), Err(Error::Paused)));
+        control.set(2);
+        assert_eq!(control.pause(), 2);
+        assert!(matches!(control.check(), Err(Error::Cancelled)));
     }
     #[test]
     fn retry_deadlines_saturate() {
