@@ -1,4 +1,5 @@
 pub mod client;
+pub mod codex_auth;
 pub mod config;
 pub mod conversation;
 pub mod error;
@@ -19,6 +20,7 @@ pub mod embedding_provider_identifier;
 pub mod token_utils;
 
 pub use client::LLMClient;
+pub use codex_auth::{CodexAuthFile, CodexAuthSync};
 pub use config::{
     AnthropicCacheTtl, AnthropicInferenceGeo, GenerationConfig, OpenAIServiceTier, Verbosity,
 };

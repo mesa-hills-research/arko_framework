@@ -6,7 +6,8 @@
 //!     --architect configs/architect.json \
 //!     --coder configs/coder.json
 //!
-//! Requires ANTHROPIC_API_KEY (or OPENAI_API_KEY / GOOGLE_API_KEY) in env.
+//! Requires ANTHROPIC_API_KEY (or another provider's credentials; see
+//! `LLMClient::from_env`) in env.
 
 use std::sync::Arc;
 
@@ -18,17 +19,7 @@ use arko_workflows::prelude::*;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
-    let mut client = LLMClient::new();
-    if let Ok(k) = std::env::var("ANTHROPIC_API_KEY") {
-        client = client.with_anthropic_api_key(&k);
-    }
-    if let Ok(k) = std::env::var("OPENAI_API_KEY") {
-        client = client.with_openai_api_key(&k);
-    }
-    if let Ok(k) = std::env::var("GOOGLE_API_KEY") {
-        client = client.with_google_api_key(&k);
-    }
-    let llm_client = Arc::new(client);
+    let llm_client = Arc::new(LLMClient::from_env());
 
     let architect_config = AgentConfig::load_from_path("configs/architect.json".as_ref())
         .expect("Failed to load architect config");

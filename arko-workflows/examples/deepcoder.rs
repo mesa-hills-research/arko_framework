@@ -19,8 +19,7 @@ use arko_agents::{
     ToolTypeDetails,
 };
 use arko_ai::{
-    ChatGptOAuthCredentials, GenerationConfig, LLMClient, Model, OpenAIEffort, ReasoningConfig,
-    Verbosity,
+    CodexAuthFile, GenerationConfig, LLMClient, Model, OpenAIEffort, ReasoningConfig, Verbosity,
 };
 use arko_workflows::prelude::*;
 use async_trait::async_trait;
@@ -323,33 +322,41 @@ fn agent_config(
         .build()?)
 }
 
-fn build_client() -> ExampleResult<LLMClient> {
+/// OAuth environment variables, then the Codex `auth.json` (returned so that
+/// rotated tokens can be saved back), then `OPENAI_API_KEY`.
+fn build_client() -> ExampleResult<(LLMClient, Option<CodexAuthFile>)> {
     if let (Ok(access_token), Ok(account_id)) = (
         std::env::var("OPENAI_OAUTH_ACCESS_TOKEN"),
         std::env::var("OPENAI_OAUTH_ACCOUNT_ID"),
     ) {
         let refresh_token = std::env::var("OPENAI_OAUTH_REFRESH_TOKEN").ok();
-        return Ok(
+        return Ok((
             LLMClient::new().with_openai_chatgpt_oauth_rate_limit_retries(
                 &access_token,
                 refresh_token.as_deref(),
                 &account_id,
                 true,
             ),
-        );
+            None,
+        ));
     }
-    if let Some(credentials) = discover_codex_oauth()? {
-        return Ok(
-            LLMClient::new().with_openai_chatgpt_oauth_rate_limit_retries(
-                &credentials.access_token,
-                credentials.refresh_token.as_deref(),
-                &credentials.account_id,
-                true,
-            ),
-        );
+    if let Some(path) = CodexAuthFile::default_path().filter(|path| path.is_file()) {
+        match CodexAuthFile::load(&path) {
+            Ok(auth) => {
+                let credentials = auth.credentials()?;
+                let client = LLMClient::new().with_openai_chatgpt_oauth_rate_limit_retries(
+                    &credentials.access_token,
+                    credentials.refresh_token.as_deref(),
+                    &credentials.account_id,
+                    true,
+                );
+                return Ok((client, Some(auth)));
+            }
+            Err(error) => eprintln!("ignoring {}: {error}", path.display()),
+        }
     }
     if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
-        return Ok(LLMClient::new().with_openai_api_key(&api_key));
+        return Ok((LLMClient::new().with_openai_api_key(&api_key), None));
     }
     Err(
         io::Error::other("configure Codex OAuth, OAuth environment variables, or OPENAI_API_KEY")
@@ -357,39 +364,32 @@ fn build_client() -> ExampleResult<LLMClient> {
     )
 }
 
-fn discover_codex_oauth() -> ExampleResult<Option<ChatGptOAuthCredentials>> {
-    let mut candidates = Vec::new();
-    if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
-        candidates.push(PathBuf::from(codex_home).join("auth.json"));
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        let default = PathBuf::from(home).join(".codex").join("auth.json");
-        if !candidates.contains(&default) {
-            candidates.push(default);
+/// Saves tokens the client rotated to the Codex `auth.json` every 30 seconds
+/// and once more when `stop` resolves, so an interrupted run does not leave
+/// the Codex login holding a spent refresh token.
+fn spawn_codex_auth_sync(
+    mut auth: CodexAuthFile,
+    client: Arc<LLMClient>,
+    mut stop: tokio::sync::oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            let stopping = tokio::select! {
+                _ = interval.tick() => false,
+                _ = &mut stop => true,
+            };
+            if let Err(error) = auth.sync(&client).await {
+                eprintln!(
+                    "could not save rotated OAuth tokens to {}: {error}",
+                    auth.path().display()
+                );
+            }
+            if stopping {
+                return;
+            }
         }
-    }
-    for path in candidates {
-        if !path.is_file() {
-            continue;
-        }
-        let value: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
-        let tokens = value.get("tokens").unwrap_or(&value);
-        let Some(access_token) = tokens.get("access_token").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(account_id) = tokens.get("account_id").and_then(Value::as_str) else {
-            continue;
-        };
-        return Ok(Some(ChatGptOAuthCredentials {
-            access_token: access_token.to_string(),
-            refresh_token: tokens
-                .get("refresh_token")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            account_id: account_id.to_string(),
-        }));
-    }
-    Ok(None)
+    })
 }
 
 fn resolve_checkpoint(path: &Path) -> ExampleResult<PathBuf> {
@@ -651,6 +651,10 @@ async fn main() -> ExampleResult<()> {
         args.shell_timeout_seconds,
         args.shell_output_bytes,
     ));
+    let (client, codex_auth) = build_client()?;
+    let client = Arc::new(client);
+    let (stop_auth_sync, stop) = tokio::sync::oneshot::channel();
+    let auth_sync = codex_auth.map(|auth| spawn_codex_auth_sync(auth, client.clone(), stop));
     let mut builder = Workflow::builder()
         .name("deepcoder-example")
         .metadata(WorkflowMetadata {
@@ -677,7 +681,7 @@ async fn main() -> ExampleResult<()> {
             ],
         })
         .workspace(workspace.clone())
-        .llm_client(Arc::new(build_client()?))
+        .llm_client(client)
         .agent("orchestrator", orchestrator)
         .agent("coder", coder)
         .agent("correctness_verifier", correctness)
@@ -764,8 +768,16 @@ async fn main() -> ExampleResult<()> {
         "Implement the specification stored in the read-only `requirements` memory tier in workspace `{}`. Lead the work through small dependency-aware coder subtasks. Use the researcher only for bounded repository questions. Record durable decisions and require deterministic evidence. Do not implement code yourself. Complete only when every requirement is covered and the final verifier accepts the current workspace.",
         workspace.display()
     );
-    let orchestrator_result = workflow.run_agent("orchestrator", &prompt).await?;
-    let result = workflow.finish().await?;
+    let run = async {
+        let orchestrator_result = workflow.run_agent("orchestrator", &prompt).await?;
+        ExampleResult::Ok((orchestrator_result, workflow.finish().await?))
+    }
+    .await;
+    let _ = stop_auth_sync.send(());
+    if let Some(auth_sync) = auth_sync {
+        auth_sync.await?;
+    }
+    let (orchestrator_result, result) = run?;
 
     println!("{}", orchestrator_result.summary);
     println!("workflow_run_id: {}", result.workflow_run_id);

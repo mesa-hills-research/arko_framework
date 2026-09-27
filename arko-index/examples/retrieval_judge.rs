@@ -8,88 +8,15 @@ use futures::{StreamExt, stream};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 type AnyResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-struct OAuthFile {
-    path: PathBuf,
-    original: Vec<u8>,
-}
+/// A Codex `auth.json`; rotated tokens are written back with `sync`.
+type OAuthFile = arko_ai::CodexAuthFile;
+/// Credentials from an OAuth file when given, else from the environment.
 fn clients(path: Option<PathBuf>) -> AnyResult<(LLMClient, Option<OAuthFile>)> {
     if let Some(path) = path {
-        let original = std::fs::read(&path)?;
-        let value: Value = serde_json::from_slice(&original)?;
-        let tokens = value.get("tokens").unwrap_or(&value);
-        let access = tokens["access_token"]
-            .as_str()
-            .ok_or("OAuth file needs access_token")?;
-        let account = tokens["account_id"]
-            .as_str()
-            .ok_or("OAuth file needs account_id")?;
-        let client = LLMClient::new().with_openai_chatgpt_oauth_rate_limit_retries(
-            access,
-            tokens["refresh_token"].as_str(),
-            account,
-            false,
-        );
-        return Ok((client, Some(OAuthFile { path, original })));
+        let file = OAuthFile::load(path)?;
+        return Ok((file.client()?, Some(file)));
     }
-    if let Ok(access) = std::env::var("OPENAI_OAUTH_ACCESS_TOKEN") {
-        let account = std::env::var("OPENAI_OAUTH_ACCOUNT_ID")?;
-        let refresh = std::env::var("OPENAI_OAUTH_REFRESH_TOKEN").ok();
-        return Ok((
-            LLMClient::new().with_openai_chatgpt_oauth_rate_limit_retries(
-                &access,
-                refresh.as_deref(),
-                &account,
-                false,
-            ),
-            None,
-        ));
-    }
-    Ok((
-        match std::env::var("OPENAI_API_KEY") {
-            Ok(key) => LLMClient::new().with_openai_api_key(&key),
-            Err(_) => LLMClient::new(),
-        },
-        None,
-    ))
-}
-impl OAuthFile {
-    async fn persist(&mut self, client: &LLMClient) -> AnyResult<()> {
-        let Some(tokens) = client.openai_chatgpt_oauth_credentials().await else {
-            return Ok(());
-        };
-        let mut value: Value = serde_json::from_slice(&self.original)?;
-        let object = if value.get("tokens").is_some() {
-            value.get_mut("tokens").unwrap()
-        } else {
-            &mut value
-        };
-        if object["access_token"].as_str() == Some(&tokens.access_token)
-            && object["refresh_token"].as_str() == tokens.refresh_token.as_deref()
-        {
-            return Ok(());
-        }
-        object["access_token"] = json!(tokens.access_token);
-        object["refresh_token"] = json!(tokens.refresh_token);
-        object["account_id"] = json!(tokens.account_id);
-        if std::fs::read(&self.path)? != self.original {
-            return Err(
-                "OAuth file changed externally; refusing to overwrite newer credentials".into(),
-            );
-        }
-        let bytes = serde_json::to_vec_pretty(&value)?;
-        let parent = self
-            .path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(std::path::Path::new("."));
-        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-        use std::io::Write;
-        temporary.write_all(&bytes)?;
-        temporary.as_file().sync_all()?;
-        temporary.persist(&self.path)?;
-        self.original = bytes;
-        Ok(())
-    }
+    Ok((LLMClient::from_env(), None))
 }
 
 async fn grade_request(client: &LLMClient, request: ModelRequest) -> AnyResult<ModelReply> {
@@ -191,7 +118,7 @@ async fn main() -> AnyResult<()> {
             }
         }
         if let Some(oauth) = &mut oauth {
-            oauth.persist(&client).await?;
+            oauth.sync(&client).await?;
         }
     }
     if failures > 0 {

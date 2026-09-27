@@ -113,7 +113,7 @@ impl PyWorkflowBuilder {
             builder = builder.memory(memory);
         }
 
-        let llm_client = std::sync::Arc::new(build_llm_client_from_env());
+        let llm_client = std::sync::Arc::new(arko_ai::LLMClient::from_env());
         builder = builder.llm_client(llm_client);
 
         for (name, config_path) in &self.agents {
@@ -268,19 +268,4 @@ impl From<crate::AgentResult> for PyAgentResult {
             agent_run_id: result.agent_run_id.to_string(),
         }
     }
-}
-
-#[cfg(feature = "python")]
-fn build_llm_client_from_env() -> arko_ai::LLMClient {
-    let mut client = arko_ai::LLMClient::new();
-    if let Ok(k) = std::env::var("OPENAI_API_KEY") {
-        client = client.with_openai_api_key(&k);
-    }
-    if let Ok(k) = std::env::var("ANTHROPIC_API_KEY") {
-        client = client.with_anthropic_api_key(&k);
-    }
-    if let Ok(k) = std::env::var("GOOGLE_API_KEY") {
-        client = client.with_google_api_key(&k);
-    }
-    client
 }

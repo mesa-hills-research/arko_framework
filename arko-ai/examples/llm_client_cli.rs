@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use dotenv::dotenv;
 use futures::StreamExt;
 use std::{
-    env, fs,
+    fs,
     io::{self, Write},
     path::PathBuf,
 };
@@ -336,17 +336,7 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
 }
 
 fn create_client() -> Result<LLMClient, Error> {
-    let mut client = LLMClient::new();
-    if let Ok(key) = env::var("OPENAI_API_KEY") {
-        client = client.with_openai_api_key(&key);
-    }
-    if let Ok(key) = env::var("ANTHROPIC_API_KEY") {
-        client = client.with_anthropic_api_key(&key);
-    }
-    if let Ok(key) = env::var("GOOGLE_API_KEY") {
-        client = client.with_google_api_key(&key);
-    }
-    Ok(client)
+    Ok(LLMClient::from_env())
 }
 
 fn get_model(name: &str) -> Result<Model, Error> {
@@ -375,10 +365,12 @@ fn get_model(name: &str) -> Result<Model, Error> {
         "gemini-2.5-flash" => Ok(Model::google_gemini_2_5_flash()),
         "gemini-2.5-flash-lite" => Ok(Model::google_gemini_2_5_flash_lite()),
         "gemini-2.0-flash" => Ok(Model::google_gemini_2_0_flash()),
-        _ => Err(Error::ModelNotSupported(format!(
-            "Unknown model alias '{}'. Please use a known alias.",
-            name
-        ))),
+        _ => Model::find(name).ok_or_else(|| {
+            Error::ModelNotSupported(format!(
+                "Unknown model '{}'. Use a known alias or a registered model id.",
+                name
+            ))
+        }),
     }
 }
 

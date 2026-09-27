@@ -23,6 +23,50 @@ impl LLMClient {
         }
     }
 
+    /// Configures every provider whose credentials are in the environment.
+    /// Empty values are ignored.
+    ///
+    /// - OpenAI: ChatGPT OAuth from `OPENAI_OAUTH_ACCESS_TOKEN` and
+    ///   `OPENAI_OAUTH_ACCOUNT_ID` (plus optional `OPENAI_OAUTH_REFRESH_TOKEN`)
+    ///   when both are set; otherwise `OPENAI_API_KEY`. For credentials in a
+    ///   Codex `auth.json`, use [`CodexAuthFile`](crate::codex_auth::CodexAuthFile).
+    /// - Anthropic: `ANTHROPIC_API_KEY`.
+    /// - Google: `GOOGLE_API_KEY`, else `GEMINI_API_KEY`.
+    ///
+    /// The library reads no environment variables unless this is called.
+    pub fn from_env() -> Self {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let var = |name: &str| lookup(name).filter(|value| !value.trim().is_empty());
+        let mut client = Self::new();
+        if let (Some(access_token), Some(account_id)) =
+            (var("OPENAI_OAUTH_ACCESS_TOKEN"), var("OPENAI_OAUTH_ACCOUNT_ID"))
+        {
+            let refresh_token = var("OPENAI_OAUTH_REFRESH_TOKEN");
+            client = client.with_openai_chatgpt_oauth(
+                &access_token,
+                refresh_token.as_deref(),
+                &account_id,
+            );
+        } else if let Some(key) = var("OPENAI_API_KEY") {
+            client = client.with_openai_api_key(&key);
+        }
+        if let Some(key) = var("ANTHROPIC_API_KEY") {
+            client = client.with_anthropic_api_key(&key);
+        }
+        if let Some(key) = var("GOOGLE_API_KEY").or_else(|| var("GEMINI_API_KEY")) {
+            client = client.with_google_api_key(&key);
+        }
+        client
+    }
+
+    /// Whether a provider client is configured for `provider`.
+    pub fn has_provider(&self, provider: &Provider) -> bool {
+        self.get_provider(provider).is_ok()
+    }
+
     pub fn with_openai_api_key(mut self, key: &str) -> Self {
         self.openai_client = Some(providers::openai::OpenAIClient::new(key));
         self
@@ -275,5 +319,51 @@ impl LLMClient {
 impl Default for LLMClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn client(vars: &[(&str, &str)]) -> LLMClient {
+        let vars: HashMap<String, String> =
+            vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        LLMClient::from_lookup(|name| vars.get(name).cloned())
+    }
+
+    #[tokio::test]
+    async fn from_env_configures_the_providers_it_finds() {
+        let empty = client(&[]);
+        for provider in [Provider::OpenAI, Provider::Anthropic, Provider::Google] {
+            assert!(!empty.has_provider(&provider));
+        }
+
+        let keys = client(&[
+            ("OPENAI_API_KEY", "sk-test"),
+            ("ANTHROPIC_API_KEY", "ak-test"),
+            ("GEMINI_API_KEY", "g-test"),
+        ]);
+        assert!(keys.has_provider(&Provider::OpenAI));
+        assert!(!keys.is_openai_chatgpt_oauth().await);
+        assert!(keys.has_provider(&Provider::Anthropic));
+        assert!(keys.has_provider(&Provider::Google));
+
+        let oauth = client(&[
+            ("OPENAI_OAUTH_ACCESS_TOKEN", "access"),
+            ("OPENAI_OAUTH_ACCOUNT_ID", "account"),
+            ("OPENAI_API_KEY", "sk-test"),
+            ("ANTHROPIC_API_KEY", "  "),
+        ]);
+        assert!(oauth.is_openai_chatgpt_oauth().await);
+        let credentials = oauth.openai_chatgpt_oauth_credentials().await.unwrap();
+        assert_eq!(credentials.account_id, "account");
+        assert!(credentials.refresh_token.is_none());
+        assert!(!oauth.has_provider(&Provider::Anthropic), "blank values are ignored");
+
+        // An incomplete OAuth pair falls back to the API key.
+        let partial = client(&[("OPENAI_OAUTH_ACCESS_TOKEN", "access"), ("OPENAI_API_KEY", "sk")]);
+        assert!(!partial.is_openai_chatgpt_oauth().await);
+        assert!(partial.has_provider(&Provider::OpenAI));
     }
 }

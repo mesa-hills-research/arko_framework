@@ -168,6 +168,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokenizers",
  "tokio",

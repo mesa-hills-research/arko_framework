@@ -26,6 +26,15 @@ impl EmbeddingClient {
         self
     }
 
+    /// Configures Voyage from `VOYAGE_API_KEY` when it is set and non-empty.
+    /// The library reads no environment variables unless this is called.
+    pub fn from_env() -> Self {
+        match std::env::var("VOYAGE_API_KEY") {
+            Ok(key) if !key.trim().is_empty() => Self::new().with_voyage_api_key(&key),
+            _ => Self::new(),
+        }
+    }
+
     /// Installs a preconfigured Voyage client (for example one with
     /// [`VoyageClient::with_base_url`]).
     pub fn with_voyage_client(mut self, client: VoyageClient) -> Self {

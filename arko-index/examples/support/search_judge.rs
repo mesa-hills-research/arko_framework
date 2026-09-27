@@ -63,7 +63,7 @@ pub struct JudgeSession {
 impl JudgeSession {
     pub async fn persist(&mut self) -> AnyResult<()> {
         if let Some(oauth) = &mut self.oauth {
-            oauth.persist(&self.client).await?;
+            oauth.sync(&self.client).await?;
         }
         Ok(())
     }

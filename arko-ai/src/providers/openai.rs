@@ -37,7 +37,7 @@ const CHATGPT_OAUTH_DEFAULT_TOKEN_URL: &str = "https://auth.openai.com/oauth/tok
 const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatGptOAuthCredentials {
     pub access_token: String,
     pub refresh_token: Option<String>,

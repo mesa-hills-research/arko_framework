@@ -3,13 +3,12 @@ use arko_agents::{
     ToolRegistry,
     runtime::{command::ToolApprovalDecision, command::UserCommand, event::AgentEvent},
 };
-use arko_ai::{LLMClient, UsageInfo};
+use arko_ai::{CodexAuthFile, CodexAuthSync, LLMClient, UsageInfo};
 use clap::Parser;
 use dotenv::dotenv;
-use serde::Deserialize;
 use std::{
     collections::HashMap,
-    env, fs,
+    fs,
     io::{self, Write},
     path::PathBuf,
     sync::Arc,
@@ -53,7 +52,7 @@ struct Cli {
     /// running `npx @openai/codex login` (typically at ~/.codex/auth.json).
     ///
     /// Token refresh is handled automatically by the agent runtime when the
-    /// access token expires.
+    /// access token expires; rotated tokens are saved back to this file.
     #[arg(long)]
     openai_auth_json: Option<PathBuf>,
 }
@@ -69,22 +68,21 @@ fn parse_tool_calling_mode(s: &str) -> Result<ToolCallingMode, String> {
     }
 }
 
-#[derive(Deserialize)]
-struct AuthJsonTokens {
-    access_token: String,
-    refresh_token: Option<String>,
-    account_id: String,
-}
-
-#[derive(Deserialize)]
-struct AuthJson {
-    tokens: AuthJsonTokens,
-}
-
-fn load_openai_auth_json(path: &PathBuf) -> Result<AuthJson, Box<dyn std::error::Error>> {
-    let content = fs::read_to_string(path)?;
-    let auth: AuthJson = serde_json::from_str(&content)?;
-    Ok(auth)
+/// Writes tokens the client rotated back to the auth file.
+async fn sync_openai_auth(auth: &mut Option<CodexAuthFile>, client: &LLMClient) {
+    let Some(auth) = auth else {
+        return;
+    };
+    match auth.sync(client).await {
+        Ok(CodexAuthSync::Saved) => {
+            println!("[SYSTEM] Saved rotated OpenAI OAuth tokens to {:?}", auth.path())
+        }
+        Ok(CodexAuthSync::Reloaded) => {
+            println!("[SYSTEM] Reloaded OpenAI OAuth tokens from {:?}", auth.path())
+        }
+        Ok(CodexAuthSync::Unchanged) => {}
+        Err(e) => eprintln!("[ERROR] Failed to save OpenAI OAuth tokens: {}", e),
+    }
 }
 
 #[tokio::main]
@@ -94,33 +92,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
 
-    let mut llm_client_builder = LLMClient::new();
+    let mut llm_client_builder = LLMClient::from_env();
 
+    let mut openai_auth = None;
     if let Some(ref auth_json_path) = cli.openai_auth_json {
         println!("[SYSTEM] Loading OpenAI OAuth from {:?}", auth_json_path);
-        let auth = load_openai_auth_json(auth_json_path)?;
+        let auth = CodexAuthFile::load(auth_json_path)?;
+        let credentials = auth.credentials()?;
         llm_client_builder = llm_client_builder.with_openai_chatgpt_oauth(
-            &auth.tokens.access_token,
-            auth.tokens.refresh_token.as_deref(),
-            &auth.tokens.account_id,
+            &credentials.access_token,
+            credentials.refresh_token.as_deref(),
+            &credentials.account_id,
         );
         println!(
             "[SYSTEM] OpenAI ChatGPT OAuth configured (token refresh {})",
-            if auth.tokens.refresh_token.is_some() {
+            if credentials.refresh_token.is_some() {
                 "enabled"
             } else {
                 "disabled — no refresh_token"
             }
         );
-    } else if let Ok(key) = env::var("OPENAI_API_KEY") {
-        llm_client_builder = llm_client_builder.with_openai_api_key(&key);
-    }
-
-    if let Ok(key) = env::var("ANTHROPIC_API_KEY") {
-        llm_client_builder = llm_client_builder.with_anthropic_api_key(&key);
-    }
-    if let Ok(key) = env::var("GOOGLE_API_KEY") {
-        llm_client_builder = llm_client_builder.with_google_api_key(&key);
+        openai_auth = Some(auth);
     }
     let llm_client = Arc::new(llm_client_builder);
 
@@ -235,7 +227,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         absolute_workspace_dir,
         None,
     );
-    let agent_runtime = AgentRuntime::new(llm_client);
+    let agent_runtime = AgentRuntime::new(llm_client.clone());
 
     let (mut event_receiver, command_sender, task_join_handle) = agent_runtime.run_task(
         task,
@@ -260,6 +252,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             AgentEvent::TaskStateChanged(new_state) => {
                 close_active_blocks(&mut in_reasoning_block, &mut in_assistant_response_block)?;
                 println!("\n[STATE] {:?}", new_state);
+                sync_openai_auth(&mut openai_auth, &llm_client).await;
                 if new_state.is_terminal() {
                     println!("[SYSTEM] Task reached terminal state.");
                 }
@@ -461,6 +454,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let final_task_result = task_join_handle.await;
+    sync_openai_auth(&mut openai_auth, &llm_client).await;
 
     match final_task_result {
         Ok(Ok(final_task)) => {
