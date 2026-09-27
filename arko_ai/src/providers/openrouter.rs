@@ -29,6 +29,7 @@ pub use options::{
     MaxPrice, OpenRouterOptions, OpenRouterServiceTier, PerformanceThreshold, ProviderPreferences,
     ProviderSort, Quantization, SortBy, SortPartition,
 };
+pub(crate) use request::is_claude_family;
 
 use super::{GenerationResponse, ProviderClient, StreamEvent};
 use crate::{

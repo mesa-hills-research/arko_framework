@@ -120,6 +120,20 @@ and `with_tool_config`. Each provider takes its own `ReasoningConfig` variant:
 (`Conversation::enable_cache`); a conversation's `prompt_cache_key` is a new random key,
 so give each independent agent or task its own conversation.
 
+`LLMClient::prompt_cache_lifetime(&model, &config)` reports how long the provider keeps a
+request's prompt cache after its last use: `PromptCacheLifetime::Known(duration)`,
+`Unknown` or `Disabled`. Every cache hit starts the lifetime again, so a conversation that
+makes a request within it stays cached however long it waits in between. Anthropic, and
+Claude on OpenRouter: 5 minutes, or 1 hour with `anthropic_cache_ttl` set to `OneHour`.
+OpenAI GPT-5.6 and later: 30 minutes, the only `prompt_cache_options.ttl` the API accepts
+and its default (over ChatGPT OAuth this is assumed, pending a measurement). Earlier
+OpenAI models: 5 minutes, the least any organization gets (Zero Data Retention
+organizations keep entries in memory for 5 to 10 minutes of inactivity, others around 30
+minutes). Gemini and other OpenRouter models: `Unknown`. Models without caching, and
+caching turned off where the request can turn it off (Anthropic, Claude on OpenRouter,
+GPT-5.6 and later with an API key): `Disabled`. The `prompt_cache` module has the
+constants and the providers' documentation links.
+
 Native tool calls use JSON Schema definitions (built here with `serde_json`), continuing
 the quick start's conversation:
 
@@ -815,7 +829,8 @@ cargo run -p arko_ai --example llm_client_cli -- chat -m anthropic/claude-sonnet
 
 `embeddings_demo` requests Voyage embeddings with `VOYAGE_API_KEY`, and
 `oauth_cache_probe` measures prompt-cache hits on the ChatGPT OAuth path with the
-credentials in a Codex `auth.json`.
+credentials in a Codex `auth.json`; with `--idle-gap` it measures how long an idle
+conversation's cache lasts.
 
 The unit tests use local fixtures and make no provider calls:
 

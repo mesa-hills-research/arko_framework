@@ -307,6 +307,22 @@ impl LLMClient {
         }
     }
 
+    /// How long the provider keeps the prompt cache of this client's requests
+    /// for `model` with `config` after their last use, for a conversation
+    /// with caching enabled (the default); see
+    /// [`prompt_cache_lifetime`](crate::prompt_cache::prompt_cache_lifetime).
+    /// For OpenAI models it depends on the client's OpenAI auth: API key or
+    /// ChatGPT OAuth.
+    pub async fn prompt_cache_lifetime(
+        &self,
+        model: &Model,
+        config: &GenerationConfig,
+    ) -> crate::prompt_cache::PromptCacheLifetime {
+        let chatgpt_oauth =
+            model.provider == Provider::OpenAI && self.is_openai_chatgpt_oauth().await;
+        crate::prompt_cache::prompt_cache_lifetime(model, config, chatgpt_oauth)
+    }
+
     /// Replaces the ChatGPT OAuth credentials only if the client still holds
     /// `expected`; returns whether it did.
     pub(crate) async fn replace_openai_chatgpt_credentials(
@@ -574,5 +590,40 @@ mod tests {
         ]);
         assert!(!partial.is_openai_chatgpt_oauth().await);
         assert!(partial.has_provider(&Provider::OpenAI));
+    }
+
+    /// The client's OpenAI auth decides OpenAI models' cache lifetime.
+    #[tokio::test]
+    async fn prompt_cache_lifetime_reads_the_openai_auth() {
+        use crate::prompt_cache::{
+            CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME, OPENAI_PROMPT_CACHE_LIFETIME, PromptCacheLifetime,
+        };
+        let off = GenerationConfig::default().with_prompt_caching(false);
+        let model = Model::openai_gpt_6_astra();
+        let key = client(&[("OPENAI_API_KEY", "sk-test")]);
+        assert_eq!(
+            key.prompt_cache_lifetime(&model, &GenerationConfig::default())
+                .await,
+            PromptCacheLifetime::Known(OPENAI_PROMPT_CACHE_LIFETIME)
+        );
+        assert_eq!(
+            key.prompt_cache_lifetime(&model, &off).await,
+            PromptCacheLifetime::Disabled
+        );
+        let oauth = client(&[
+            ("OPENAI_OAUTH_ACCESS_TOKEN", "access"),
+            ("OPENAI_OAUTH_ACCOUNT_ID", "account"),
+        ]);
+        assert_eq!(
+            oauth.prompt_cache_lifetime(&model, &off).await,
+            PromptCacheLifetime::Known(CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME)
+        );
+        // Other providers don't depend on it, nor on being configured.
+        assert_eq!(
+            oauth
+                .prompt_cache_lifetime(&Model::google_gemini_2_5_pro(), &off)
+                .await,
+            PromptCacheLifetime::Unknown
+        );
     }
 }
