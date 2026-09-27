@@ -295,7 +295,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             AgentEvent::UsageReported(usage) => {
                 close_active_blocks(&mut in_reasoning_block, &mut in_assistant_response_block)?;
                 print_usage_info(&usage, last_turn_input_tokens, accumulated_cost);
-                accumulated_cost += usage.total_cost;
+                accumulated_cost += usage.billed();
                 last_turn_input_tokens = Some(usage.input_tokens);
             }
             AgentEvent::ToolCallInitiated {
@@ -564,9 +564,10 @@ fn print_usage_info(usage: &UsageInfo, last_input_tokens: Option<usize>, accumul
     }
     println!("  Output: {}", usage.output_tokens);
     println!(
-        "  Cost:   ${:.6} (accumulated: ${:.6})",
+        "  Cost:   ${:.6} billed, ${:.6} at list prices (accumulated billed: ${:.6})",
+        usage.billed(),
         usage.total_cost,
-        accumulated_cost + usage.total_cost
+        accumulated_cost + usage.billed()
     );
     if let Some(cached) = usage.cached_tokens
         && cached > 0

@@ -137,21 +137,78 @@ impl ContextEvent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// How a call is paid for, which decides [`UsageInfo::billed_cost`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingKind {
+    /// Charged per token at list prices: the billed cost is the estimate.
+    #[default]
+    Metered,
+    /// Covered by a subscription (ChatGPT OAuth): nothing is billed per call;
+    /// the estimate shows what the call would cost at API list prices.
+    Subscription,
+    /// The provider reported the actual charge in [`UsageInfo::reported_cost`].
+    ProviderReported,
+    /// An aggregate of calls billed in different ways.
+    Mixed,
+}
+
+/// Token usage and cost of one model call, or a sum of calls.
+///
+/// Token counts mean the same thing for every provider:
+/// - `input_tokens` is the TOTAL input, including cache reads
+///   (`cached_tokens`) and cache writes (`cache_write_tokens`). Usage records
+///   saved before this definition stored only uncached input for Anthropic.
+/// - `output_tokens` includes reasoning/thinking tokens (`reasoning_tokens`).
+///
+/// Costs are USD estimates at list prices, for the tier, residency and date
+/// that applied. `total_cost` is their sum; `billed_cost` is what the account
+/// is actually charged (see [`BillingKind`]).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct UsageInfo {
+    /// Total input tokens, including cache reads and writes.
     pub input_tokens: usize,
+    /// Output tokens, including reasoning tokens.
     pub output_tokens: usize,
+    /// Estimated cost of uncached, unwritten input.
     pub input_cost: f64,
+    /// Estimated cost of output tokens.
     pub output_cost: f64,
+    /// Input tokens read from the prompt cache (part of `input_tokens`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_read_cost: Option<f64>,
+    /// Input tokens written to the prompt cache (part of `input_tokens`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_write_tokens: Option<usize>,
+    /// The part of `cache_write_tokens` written with a 1-hour TTL (Anthropic).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_write_cost: Option<f64>,
+    /// Reasoning/thinking tokens, when the provider reports them (part of
+    /// `output_tokens`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<usize>,
+    /// Processing tier used for pricing: the provider-reported tier when the
+    /// response includes one, else the requested tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<crate::pricing::ServiceTier>,
+    /// Data-residency region the provider reported (Anthropic `inference_geo`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_geo: Option<String>,
+    /// Sum of the estimated costs above.
     pub total_cost: f64,
+    /// Actual charge reported by the provider (OpenRouter `usage.cost`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_cost: Option<f64>,
+    #[serde(default)]
+    pub billing: BillingKind,
+    /// What the account was charged. Records saved before billing kinds
+    /// existed have none; see [`UsageInfo::billed`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billed_cost: Option<f64>,
 }
 
 impl UsageInfo {
@@ -159,13 +216,7 @@ impl UsageInfo {
         Self {
             input_tokens,
             output_tokens,
-            input_cost: 0.0,
-            output_cost: 0.0,
-            cached_tokens: None,
-            cache_read_cost: None,
-            cache_write_tokens: None,
-            cache_write_cost: None,
-            total_cost: 0.0,
+            ..Self::default()
         }
     }
 
@@ -179,96 +230,138 @@ impl UsageInfo {
         self
     }
 
+    /// What the account was charged: the billed cost, or for records saved
+    /// before billing kinds existed, `total_cost` (which was already zero for
+    /// subscription calls then).
+    pub fn billed(&self) -> f64 {
+        self.billed_cost.unwrap_or(self.total_cost)
+    }
+
+    /// Estimates cost at list prices in effect now. See
+    /// [`UsageInfo::calculate_cost_at`].
     pub fn calculate_cost(
         &mut self,
         model: &crate::model::Model,
         config: Option<&crate::config::GenerationConfig>,
     ) {
-        self.cache_read_cost = None;
-        self.cache_write_cost = None;
+        self.calculate_cost_at(model, config, std::time::SystemTime::now());
+    }
 
-        let use_large_context_pricing = if model.provider == crate::model::Provider::Anthropic {
-            let total_input = self.input_tokens
-                + self.cached_tokens.unwrap_or(0)
-                + self.cache_write_tokens.unwrap_or(0);
+    /// Estimates cost at the list prices in effect at `at`, for the tier and
+    /// residency that applied, and sets `billed_cost` from the billing kind.
+    ///
+    /// Rules:
+    /// - Long-context rates apply when total input exceeds the model's
+    ///   threshold (for Anthropic, only when `long_context` was requested).
+    /// - The tier is the reported `service_tier`, else the requested OpenAI
+    ///   tier, else standard; unpriced tiers use standard rates.
+    /// - Tier and residency multipliers stack and apply to every token class.
+    /// - Token classes without their own price are billed at the input rate.
+    pub fn calculate_cost_at(
+        &mut self,
+        model: &crate::model::Model,
+        config: Option<&crate::config::GenerationConfig>,
+        at: std::time::SystemTime,
+    ) {
+        let pricing = model.pricing.at(at);
+        let base = &model.pricing;
 
-            config.and_then(|c| c.long_context).unwrap_or(false)
-                && model.pricing.large_input_threshold.is_some()
-                && total_input > model.pricing.large_input_threshold.unwrap()
-        } else {
-            model.pricing.large_input_threshold.is_some()
-                && self.input_tokens > model.pricing.large_input_threshold.unwrap()
+        let long_context = pricing.large_input_threshold.is_some_and(|threshold| {
+            self.input_tokens > threshold
+                && (model.provider != crate::model::Provider::Anthropic
+                    || config.and_then(|c| c.long_context).unwrap_or(false))
+        });
+        let pick = |large: Option<f64>, standard: Option<f64>| {
+            if long_context { large.or(standard) } else { standard }
         };
 
-        let non_cached_input_tokens = match model.provider {
-            crate::model::Provider::Anthropic => self.input_tokens,
-            crate::model::Provider::OpenAI => self
-                .input_tokens
-                .saturating_sub(self.cached_tokens.unwrap_or(0))
-                .saturating_sub(self.cache_write_tokens.unwrap_or(0)),
-            crate::model::Provider::Google => self
-                .input_tokens
-                .saturating_sub(self.cached_tokens.unwrap_or(0)),
-        };
-
-        let input_rate = if use_large_context_pricing {
-            model
-                .pricing
-                .large_input_cost_per_million
-                .unwrap_or(model.pricing.input_cost_per_million)
-        } else {
-            model.pricing.input_cost_per_million
-        };
-
-        self.input_cost = (non_cached_input_tokens as f64 / 1_000_000.0) * input_rate;
-
-        if let Some(cached_tokens) = self.cached_tokens
-            && let Some(default_rate) = model.pricing.cached_input_cost_per_million
-        {
-            let rate = if use_large_context_pricing {
-                model
-                    .pricing
-                    .large_cached_input_cost_per_million
-                    .unwrap_or(default_rate)
-            } else {
-                default_rate
-            };
-
-            self.cache_read_cost =
-                Some((cached_tokens as f64 / 1_000_000.0) * rate);
+        if self.service_tier.is_none() && model.provider == crate::model::Provider::OpenAI {
+            self.service_tier = config
+                .and_then(|c| c.openai_service_tier)
+                .map(|tier| tier.pricing_tier());
         }
+        let tiers = if pricing.service_tiers.is_empty() { base } else { pricing };
+        let residency = if pricing.residency.is_empty() { base } else { pricing };
+        let multiplier = tiers.tier_multiplier(self.service_tier.as_ref(), long_context)
+            * residency.residency_multiplier(self.inference_geo.as_deref());
 
-        if let Some(cache_write_tokens) = self.cache_write_tokens
-            && let Some(default_rate) = model.pricing.cache_write_cost_per_million
-        {
-            let rate = if use_large_context_pricing {
-                model
-                    .pricing
-                    .large_cache_write_cost_per_million
-                    .unwrap_or(default_rate)
-            } else {
-                default_rate
-            };
+        let input_rate = pick(
+            pricing.large_input_cost_per_million,
+            Some(pricing.input_cost_per_million),
+        )
+        .unwrap_or(pricing.input_cost_per_million);
+        let rate = |price: Option<f64>| price.unwrap_or(input_rate) * multiplier;
+        let cost = |tokens: usize, rate: f64| tokens as f64 / 1_000_000.0 * rate;
 
-            self.cache_write_cost =
-                Some((cache_write_tokens as f64 / 1_000_000.0) * rate);
-        }
+        let cached = self.cached_tokens.unwrap_or(0);
+        let written = self.cache_write_tokens.unwrap_or(0);
+        let written_1h = self.cache_write_1h_tokens.unwrap_or(0).min(written);
+        let uncached = self.input_tokens.saturating_sub(cached).saturating_sub(written);
 
-        let output_rate = if use_large_context_pricing {
-            model
-                .pricing
-                .large_output_cost_per_million
-                .unwrap_or(model.pricing.output_cost_per_million)
-        } else {
-            model.pricing.output_cost_per_million
-        };
-
-        self.output_cost = (self.output_tokens as f64 / 1_000_000.0) * output_rate;
+        self.input_cost = cost(uncached, input_rate * multiplier);
+        self.cache_read_cost = self.cached_tokens.map(|tokens| {
+            cost(
+                tokens,
+                rate(pick(
+                    pricing.large_cached_input_cost_per_million,
+                    pricing.cached_input_cost_per_million,
+                )),
+            )
+        });
+        self.cache_write_cost = self.cache_write_tokens.map(|_| {
+            cost(
+                written - written_1h,
+                rate(pick(
+                    pricing.large_cache_write_cost_per_million,
+                    pricing.cache_write_cost_per_million,
+                )),
+            ) + cost(
+                written_1h,
+                rate(pick(
+                    pricing.large_cache_write_1h_cost_per_million,
+                    pricing.cache_write_1h_cost_per_million,
+                )),
+            )
+        });
+        let output_rate = pick(
+            pricing.large_output_cost_per_million,
+            Some(pricing.output_cost_per_million),
+        )
+        .unwrap_or(pricing.output_cost_per_million);
+        self.output_cost = cost(self.output_tokens, output_rate * multiplier);
 
         self.total_cost = self.input_cost
             + self.output_cost
             + self.cache_read_cost.unwrap_or(0.0)
             + self.cache_write_cost.unwrap_or(0.0);
+        self.update_billed_cost();
+    }
+
+    /// Records a provider-reported charge; it takes precedence over the
+    /// estimate for billing.
+    pub fn with_reported_cost(mut self, cost: f64) -> Self {
+        self.reported_cost = Some(cost);
+        self.billing = BillingKind::ProviderReported;
+        self.update_billed_cost();
+        self
+    }
+
+    /// Marks the call as covered by a subscription (nothing billed per call).
+    pub fn with_billing(mut self, billing: BillingKind) -> Self {
+        self.billing = billing;
+        self.update_billed_cost();
+        self
+    }
+
+    fn update_billed_cost(&mut self) {
+        self.billed_cost = match self.billing {
+            BillingKind::Metered => Some(self.total_cost),
+            BillingKind::Subscription => Some(0.0),
+            BillingKind::ProviderReported => {
+                Some(self.reported_cost.unwrap_or(self.total_cost))
+            }
+            BillingKind::Mixed => self.billed_cost,
+        };
     }
 
     pub fn for_embedding(input_tokens: usize, model_cost_per_million_input_tokens: f64) -> Self {
@@ -277,14 +370,237 @@ impl UsageInfo {
 
         Self {
             input_tokens,
-            output_tokens: 0,
             input_cost,
-            output_cost: 0.0,
-            cached_tokens: None,
-            cache_read_cost: None,
-            cache_write_tokens: None,
-            cache_write_cost: None,
             total_cost: input_cost,
+            billed_cost: Some(input_cost),
+            ..Self::default()
         }
+    }
+}
+
+fn add_options<T: std::ops::Add<Output = T>>(a: Option<T>, b: Option<T>) -> Option<T> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a + b),
+        (a, b) => a.or(b),
+    }
+}
+
+impl std::ops::AddAssign<&UsageInfo> for UsageInfo {
+    /// Adds another call's usage. Tier, region and billing kind are kept when
+    /// both sides agree; otherwise the tier and region become unknown and the
+    /// billing kind becomes [`BillingKind::Mixed`].
+    fn add_assign(&mut self, other: &UsageInfo) {
+        let billed = self.billed() + other.billed();
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.input_cost += other.input_cost;
+        self.output_cost += other.output_cost;
+        self.cached_tokens = add_options(self.cached_tokens, other.cached_tokens);
+        self.cache_read_cost = add_options(self.cache_read_cost, other.cache_read_cost);
+        self.cache_write_tokens = add_options(self.cache_write_tokens, other.cache_write_tokens);
+        self.cache_write_1h_tokens =
+            add_options(self.cache_write_1h_tokens, other.cache_write_1h_tokens);
+        self.cache_write_cost = add_options(self.cache_write_cost, other.cache_write_cost);
+        self.reasoning_tokens = add_options(self.reasoning_tokens, other.reasoning_tokens);
+        if self.service_tier != other.service_tier {
+            self.service_tier = None;
+        }
+        if self.inference_geo != other.inference_geo {
+            self.inference_geo = None;
+        }
+        self.total_cost += other.total_cost;
+        self.reported_cost = add_options(self.reported_cost, other.reported_cost);
+        if self.billing != other.billing {
+            self.billing = BillingKind::Mixed;
+        }
+        self.billed_cost = Some(billed);
+    }
+}
+
+impl std::ops::AddAssign for UsageInfo {
+    fn add_assign(&mut self, other: UsageInfo) {
+        *self += &other;
+    }
+}
+
+impl<'a> std::iter::Sum<&'a UsageInfo> for UsageInfo {
+    fn sum<I: Iterator<Item = &'a UsageInfo>>(mut iter: I) -> Self {
+        let Some(first) = iter.next() else {
+            return Self::default();
+        };
+        let mut total = first.clone();
+        total.billed_cost = Some(first.billed());
+        for usage in iter {
+            total += usage;
+        }
+        total
+    }
+}
+
+impl std::iter::Sum for UsageInfo {
+    fn sum<I: Iterator<Item = UsageInfo>>(iter: I) -> Self {
+        let usages: Vec<_> = iter.collect();
+        usages.iter().sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::{GenerationConfig, OpenAIServiceTier},
+        model::{Model, ModelPricing},
+        pricing::{ScheduledPricing, ServiceTier},
+    };
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn close(actual: f64, expected: f64) -> bool {
+        (actual - expected).abs() < 1e-9
+    }
+
+    fn priced(model: &Model, usage: UsageInfo, config: Option<&GenerationConfig>) -> UsageInfo {
+        let mut usage = usage;
+        usage.calculate_cost(model, config);
+        usage
+    }
+
+    #[test]
+    fn short_context_only_tiers_fall_back_to_standard_long_context_rates() {
+        let fast = GenerationConfig::default().with_openai_service_tier(OpenAIServiceTier::Fast);
+        let model = Model::openai_gpt_5_5();
+        // Short context: Fast is 2.5x ($5 -> $12.50 input, $30 -> $75 output).
+        let short = priced(&model, UsageInfo::new(100_000, 1_000_000), Some(&fast));
+        assert!(close(short.total_cost, 0.1 * 12.5 + 75.0));
+        // Above 272K, GPT-5.5 Fast mode is not offered: standard long-context rates.
+        let long = priced(&model, UsageInfo::new(300_000, 1_000_000), Some(&fast));
+        assert!(close(long.total_cost, 0.3 * 10.0 + 45.0));
+        // GPT-6 Fast applies to long context too.
+        let astra = priced(
+            &Model::openai_gpt_6_astra(),
+            UsageInfo::new(300_000, 0),
+            Some(&fast),
+        );
+        assert!(close(astra.total_cost, 0.3 * 40.0));
+    }
+
+    #[test]
+    fn token_classes_without_a_price_are_billed_at_the_input_rate() {
+        // gpt-5.4-pro has no cached-input discount; above 272K input costs $60.
+        let pro = priced(
+            &Model::openai_gpt_5_4_pro(),
+            UsageInfo::new(1_000_000, 0).with_cached_tokens(400_000),
+            None,
+        );
+        assert!(close(pro.input_cost, 0.6 * 60.0));
+        assert!(close(pro.cache_read_cost.unwrap(), 0.4 * 60.0));
+        assert!(close(pro.total_cost, 60.0));
+        let short_pro = priced(
+            &Model::openai_gpt_5_4_pro(),
+            UsageInfo::new(200_000, 0).with_cached_tokens(100_000),
+            None,
+        );
+        assert!(close(short_pro.total_cost, 0.2 * 30.0));
+        // Models before GPT-5.6 charge no cache-write premium: writes cost input.
+        let writes = priced(
+            &Model::openai_gpt_5_5(),
+            UsageInfo::new(100_000, 0).with_cache_write_tokens(40_000),
+            None,
+        );
+        assert!(close(writes.cache_write_cost.unwrap(), 0.04 * 5.0));
+        assert!(close(writes.total_cost, 0.1 * 5.0));
+    }
+
+    #[test]
+    fn anthropic_long_context_rates_need_the_long_context_request() {
+        let model = Model::anthropic_claude_sonnet_4_5();
+        let usage = || UsageInfo::new(250_000, 0);
+        assert!(close(priced(&model, usage(), None).total_cost, 0.25 * 3.0));
+        let long = GenerationConfig {
+            long_context: Some(true),
+            ..GenerationConfig::default()
+        };
+        assert!(close(priced(&model, usage(), Some(&long)).total_cost, 0.25 * 6.0));
+    }
+
+    #[test]
+    fn scheduled_prices_follow_the_request_time() {
+        let mut model = Model::openai_gpt_6_luna();
+        model.pricing = ModelPricing {
+            input_cost_per_million: 0.75,
+            output_cost_per_million: 3.75,
+            schedule: vec![ScheduledPricing::new(
+                "2027-01-01",
+                ModelPricing {
+                    input_cost_per_million: 1.50,
+                    output_cost_per_million: 7.50,
+                    ..ModelPricing::default()
+                },
+            )],
+            ..ModelPricing::default()
+        };
+        let boundary = UNIX_EPOCH + Duration::from_secs(1_798_761_600);
+        let cost_at = |at: SystemTime| {
+            let mut usage = UsageInfo::new(1_000_000, 1_000_000);
+            usage.calculate_cost_at(&model, None, at);
+            usage.total_cost
+        };
+        assert!(close(cost_at(boundary - Duration::from_secs(1)), 4.5));
+        assert!(close(cost_at(boundary), 9.0));
+    }
+
+    #[test]
+    fn billing_kinds_decide_the_billed_amount() {
+        let model = Model::openai_gpt_6_luna();
+        let metered = priced(&model, UsageInfo::new(1_000_000, 0), None);
+        assert!(close(metered.billed(), metered.total_cost));
+        let subscription = priced(
+            &model,
+            UsageInfo::new(1_000_000, 0).with_billing(BillingKind::Subscription),
+            None,
+        );
+        assert!(subscription.total_cost > 0.0);
+        assert_eq!(subscription.billed(), 0.0);
+        let reported = priced(&model, UsageInfo::new(1_000_000, 0), None).with_reported_cost(0.42);
+        assert_eq!(reported.billing, BillingKind::ProviderReported);
+        assert!(close(reported.billed(), 0.42));
+        // Records saved before billing kinds: billed = total_cost.
+        let legacy: UsageInfo = serde_json::from_value(serde_json::json!({
+            "input_tokens": 10, "output_tokens": 5, "input_cost": 0.5,
+            "output_cost": 0.25, "total_cost": 0.75
+        }))
+        .unwrap();
+        assert_eq!(legacy.billing, BillingKind::Metered);
+        assert!(close(legacy.billed(), 0.75));
+    }
+
+    #[test]
+    fn sums_keep_billed_amounts_and_mark_mixed_billing() {
+        let model = Model::openai_gpt_6_luna();
+        let mut metered =
+            priced(&model, UsageInfo::new(1_000_000, 0).with_cached_tokens(10), None);
+        metered.reasoning_tokens = Some(7);
+        metered.service_tier = Some(ServiceTier::Standard);
+        let subscription = priced(
+            &model,
+            UsageInfo::new(2_000_000, 0).with_billing(BillingKind::Subscription),
+            None,
+        );
+        let total: UsageInfo = [metered.clone(), subscription.clone()].iter().sum();
+        assert_eq!(total.input_tokens, 3_000_000);
+        assert_eq!(total.cached_tokens, Some(10));
+        assert_eq!(total.reasoning_tokens, Some(7));
+        assert_eq!(total.service_tier, None);
+        assert_eq!(total.billing, BillingKind::Mixed);
+        assert!(close(total.total_cost, metered.total_cost + subscription.total_cost));
+        assert!(close(total.billed(), metered.total_cost));
+        let mut added = metered.clone();
+        added += &metered;
+        assert_eq!(added.billing, BillingKind::Metered);
+        assert_eq!(added.service_tier, Some(ServiceTier::Standard));
+        assert!(close(added.billed(), 2.0 * metered.total_cost));
+        assert_eq!(
+            std::iter::empty::<UsageInfo>().sum::<UsageInfo>(),
+            UsageInfo::default()
+        );
     }
 }

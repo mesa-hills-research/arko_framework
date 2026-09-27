@@ -84,6 +84,42 @@ pub struct GenerationConfig {
     /// the selected model automatically requires interleaved thinking with its
     /// active adaptive-thinking mode.
     pub interleaved_thinking: Option<bool>,
+    /// OpenAI processing tier (`service_tier`). Flex and Fast must be offered
+    /// by the model (see [`ModelPricing::service_tiers`]); API-key auth only.
+    /// `None` sends nothing, so the project default applies.
+    ///
+    /// [`ModelPricing::service_tiers`]: crate::model::ModelPricing::service_tiers
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_service_tier: Option<OpenAIServiceTier>,
+}
+
+/// OpenAI `service_tier` request values.
+/// https://developers.openai.com/api/docs/guides/flex-processing
+/// https://developers.openai.com/api/docs/guides/fast-mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OpenAIServiceTier {
+    /// The project's default tier.
+    Auto,
+    /// Standard processing.
+    Default,
+    /// Discounted, lower-priority processing.
+    Flex,
+    /// Fast mode (formerly Priority processing); sent as `priority`.
+    #[serde(rename = "priority")]
+    Fast,
+}
+
+impl OpenAIServiceTier {
+    /// The tier used for pricing when the response does not report one.
+    /// `Auto` prices at standard rates.
+    pub fn pricing_tier(self) -> crate::pricing::ServiceTier {
+        match self {
+            Self::Auto | Self::Default => crate::pricing::ServiceTier::Standard,
+            Self::Flex => crate::pricing::ServiceTier::Flex,
+            Self::Fast => crate::pricing::ServiceTier::Fast,
+        }
+    }
 }
 
 impl GenerationConfig {
@@ -101,7 +137,14 @@ impl GenerationConfig {
             long_context: None,
             tool_config: None,
             interleaved_thinking: None,
+            openai_service_tier: None,
         }
+    }
+
+    /// Requests an OpenAI processing tier.
+    pub fn with_openai_service_tier(mut self, tier: OpenAIServiceTier) -> Self {
+        self.openai_service_tier = Some(tier);
+        self
     }
 
     pub fn with_temperature(mut self, temperature: f64) -> Self {

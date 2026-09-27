@@ -5,6 +5,7 @@ pub mod error;
 pub mod message;
 pub mod model;
 pub mod providers;
+pub mod pricing;
 pub mod reasoning;
 pub mod retry;
 pub mod stop;
@@ -18,11 +19,12 @@ pub mod embedding_provider_identifier;
 pub mod token_utils;
 
 pub use client::LLMClient;
-pub use config::{GenerationConfig, Verbosity};
+pub use config::{GenerationConfig, OpenAIServiceTier, Verbosity};
 pub use conversation::Conversation;
 pub use error::{Error, RetryClass};
 pub use message::{Content, Image, Message, Role};
-pub use model::{Model, Provider};
+pub use model::{Model, ModelPricing, Provider};
+pub use pricing::{ResidencyPricing, ScheduledPricing, ServiceTier, TierPricing};
 pub use providers::{GenerationResponse, StreamEvent};
 pub use reasoning::{
     AnthropicReasoningEffort, GeminiThinkingLevel, OpenAIEffort,
@@ -31,7 +33,7 @@ pub use reasoning::{
 pub use stop::{Refusal, RefusalSource, StopReason};
 pub use tool::{ToolCall, ToolChoice, ToolConfig, ToolDefinition, ToolResult};
 pub use retry::BackoffPolicy;
-pub use usage::{ContextEvent, ContextEventType, ModelCallUsage, UsageInfo};
+pub use usage::{BillingKind, ContextEvent, ContextEventType, ModelCallUsage, UsageInfo};
 
 pub use embedding_client::EmbeddingClient;
 pub use embedding_config::{EmbeddingConfig, VoyageInputType};

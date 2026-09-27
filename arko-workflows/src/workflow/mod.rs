@@ -969,7 +969,6 @@ impl WorkflowBuilder {
                 self.budget_limit,
                 self.budget_warning,
                 state.cost_ledger.clone(),
-                state.oauth_exempt_agents.clone(),
             )
         } else {
             BudgetManager::new(self.budget_limit, self.budget_warning)

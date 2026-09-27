@@ -671,6 +671,9 @@ fn print_usage_info(usage: &UsageInfo, last_input_tokens: Option<usize>, accumul
 
     println!("-----------------------------");
     println!("  Total Turn Cost: ${:<10.6}", usage.total_cost);
+    if usage.billing != arko_ai::BillingKind::Metered {
+        println!("  Billed ({:?}): ${:<10.6}", usage.billing, usage.billed());
+    }
 
     if accumulated_cost > 0.0 {
         println!("  Accumulated Cost: ${:<10.6}", accumulated_cost);

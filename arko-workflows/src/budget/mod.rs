@@ -3,7 +3,7 @@
 /// Tracks accumulated cost across all agents and manual additions,
 /// maintaining both a lock-free running total (for fast threshold checks)
 /// and a detailed serializable ledger (for persistence and analysis).
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
@@ -19,7 +19,7 @@ pub enum CostSource {
     /// Cost incurred by an agent's LLM call.
     Agent {
         agent_name: String,
-        usage: arko_ai::UsageInfo,
+        usage: Box<arko_ai::UsageInfo>,
     },
     /// Cost added manually by the workflow operator.
     Manual { description: String },
@@ -81,7 +81,6 @@ pub struct BudgetManager {
     limit: Option<u64>,
     warning: Option<u64>,
     warned: AtomicBool,
-    oauth_exempt: RwLock<HashSet<String>>,
     ledger: Mutex<CostLedger>,
     agent_limits: RwLock<HashMap<String, u64>>,
     agent_spent: Mutex<HashMap<String, u64>>,
@@ -95,7 +94,6 @@ impl BudgetManager {
             limit: limit.map(|l| (l * COST_SCALE) as u64),
             warning: warning.map(|w| (w * COST_SCALE) as u64),
             warned: AtomicBool::new(false),
-            oauth_exempt: RwLock::new(HashSet::new()),
             ledger: Mutex::new(CostLedger::default()),
             agent_limits: RwLock::new(HashMap::new()),
             agent_spent: Mutex::new(HashMap::new()),
@@ -106,7 +104,6 @@ impl BudgetManager {
         limit: Option<f64>,
         warning: Option<f64>,
         ledger: CostLedger,
-        oauth_exempt: HashSet<String>,
     ) -> Self {
         let total = ledger.total().max(0.0);
         let warning_scaled = warning.map(|value| (value * COST_SCALE) as u64);
@@ -123,43 +120,34 @@ impl BudgetManager {
             limit: limit.map(|value| (value * COST_SCALE) as u64),
             warning: warning_scaled,
             warned: AtomicBool::new(warning_scaled.is_some_and(|value| spent >= value)),
-            oauth_exempt: RwLock::new(oauth_exempt),
             ledger: Mutex::new(ledger),
             agent_limits: RwLock::new(HashMap::new()),
             agent_spent: Mutex::new(agent_spent),
         }
     }
 
-    pub fn oauth_exempt_snapshot(&self) -> HashSet<String> {
-        self.oauth_exempt.read().clone()
-    }
-
-    /// Mark an agent as OAuth-exempt (not billed per token).
-    pub fn mark_oauth_exempt(&self, agent_name: &str) {
-        self.oauth_exempt.write().insert(agent_name.to_string());
-    }
-
-    /// Returns true if the agent is OAuth-exempt.
-    pub fn is_oauth_exempt(&self, agent_name: &str) -> bool {
-        self.oauth_exempt.read().contains(agent_name)
-    }
-
     /// Record an agent's LLM usage cost in the ledger and update the running total.
     ///
-    /// The full [`UsageInfo`](arko_ai::UsageInfo) is stored in the ledger entry
-    /// for detailed cost breakdown analysis (input/output tokens, cache costs, etc.).
+    /// The amount is what the account is billed ([`UsageInfo::billed`]), so
+    /// subscription calls (ChatGPT OAuth) count as zero while their estimate
+    /// stays in the stored [`UsageInfo`] for cost breakdown analysis
+    /// (input/output tokens, cache costs, etc.).
+    ///
+    /// [`UsageInfo::billed`]: arko_ai::UsageInfo::billed
+    /// [`UsageInfo`]: arko_ai::UsageInfo
     pub fn add_agent_cost(&self, agent_name: &str, usage: &arko_ai::UsageInfo) -> AddCostResult {
+        let amount = usage.billed();
         let entry = CostEntry {
-            amount: usage.total_cost,
+            amount,
             source: CostSource::Agent {
                 agent_name: agent_name.to_string(),
-                usage: usage.clone(),
+                usage: Box::new(usage.clone()),
             },
             timestamp: Utc::now(),
             metadata: None,
         };
         let result = self.record_entry(entry);
-        let scaled = (usage.total_cost * COST_SCALE) as u64;
+        let scaled = (amount * COST_SCALE) as u64;
         let mut spent = self.agent_spent.lock();
         let current = spent.entry(agent_name.to_string()).or_default();
         *current = current.saturating_add(scaled);
@@ -278,5 +266,34 @@ impl BudgetManager {
     /// Returns a snapshot of the cost ledger for persistence or analysis.
     pub fn snapshot_ledger(&self) -> CostLedger {
         self.ledger.lock().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arko_ai::{BillingKind, Model, UsageInfo};
+
+    #[test]
+    fn agent_costs_count_the_billed_amount_and_keep_the_estimate() {
+        let budget = BudgetManager::new(Some(1.0), None);
+        let model = Model::openai_gpt_6_luna();
+        let mut subscription =
+            UsageInfo::new(1_000_000, 1_000_000).with_billing(BillingKind::Subscription);
+        subscription.calculate_cost(&model, None);
+        let mut metered = UsageInfo::new(1_000_000, 0);
+        metered.calculate_cost(&model, None);
+
+        assert_eq!(budget.add_agent_cost("oauth", &subscription).new_total, 0.0);
+        assert_eq!(budget.agent_spent("oauth"), 0.0);
+        let result = budget.add_agent_cost("api", &metered);
+        assert!((result.new_total - metered.total_cost).abs() < 1e-6);
+
+        let ledger = budget.snapshot_ledger();
+        let CostSource::Agent { usage, .. } = &ledger.entries[0].source else {
+            panic!("expected an agent entry");
+        };
+        assert!(usage.total_cost > 0.0, "the subscription estimate is kept");
+        assert_eq!(ledger.entries[0].amount, 0.0);
     }
 }

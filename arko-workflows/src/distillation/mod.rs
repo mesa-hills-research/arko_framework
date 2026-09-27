@@ -235,7 +235,7 @@ impl ToolResultInterceptor for DistillationInterceptor {
         }
 
         let cost_result = self.context.budget.add_manual_cost(
-            response.usage.total_cost,
+            response.usage.billed(),
             &format!("distillation: {}", self.config.name),
             Some(format!(
                 "agent={}, task={}, tool={}",
@@ -269,7 +269,7 @@ impl ToolResultInterceptor for DistillationInterceptor {
                 config_name: self.config.name.clone(),
                 input_chars: raw_result.chars().count(),
                 output_chars: distilled.chars().count(),
-                cost: response.usage.total_cost,
+                cost: response.usage.billed(),
             });
         Ok(InterceptedResult::Replaced(distilled))
     }

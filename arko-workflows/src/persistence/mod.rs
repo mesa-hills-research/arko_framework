@@ -112,7 +112,6 @@ impl PersistenceManager {
             message_queues: ctx.messages.snapshot(),
             budget_spent: ctx.budget.total_spent(),
             cost_ledger: ctx.budget.snapshot_ledger(),
-            oauth_exempt_agents: ctx.budget.oauth_exempt_snapshot(),
             freshness_snapshot: ctx
                 .resource_tracker
                 .as_ref()

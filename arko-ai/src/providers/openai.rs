@@ -1,6 +1,7 @@
 use super::{GenerationResponse, Provider, StreamEvent, take_refused_output};
 use crate::{
-    config::GenerationConfig,
+    config::{GenerationConfig, OpenAIServiceTier},
+    pricing::ServiceTier,
     conversation::Conversation,
     error::Error,
     message::{Content, Image, Message, Role},
@@ -11,7 +12,7 @@ use crate::{
     retry::BackoffPolicy,
     stop::{Refusal, RefusalSource, StopReason},
     tool::{ToolCall, ToolChoice},
-    usage::{ModelCallUsage, UsageInfo},
+    usage::{BillingKind, ModelCallUsage, UsageInfo},
 };
 use async_stream::try_stream;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -512,20 +513,6 @@ impl OpenAIClient {
         }
     }
 
-    fn zero_usage_costs(usage: &mut UsageInfo) {
-        usage.input_cost = 0.0;
-        usage.output_cost = 0.0;
-
-        if usage.cache_read_cost.is_some() {
-            usage.cache_read_cost = Some(0.0);
-        }
-
-        if usage.cache_write_cost.is_some() {
-            usage.cache_write_cost = Some(0.0);
-        }
-
-        usage.total_cost = 0.0;
-    }
 }
 
 #[async_trait::async_trait]
@@ -803,11 +790,12 @@ impl OpenAIClient {
     ) -> GenerationResponse {
         let (mut message, mut refusal_texts) = Self::parse_response(response);
         let mut usage = Self::calculate_usage(response);
-        usage.calculate_cost(model, Some(config));
-
+        // ChatGPT OAuth calls are covered by the subscription: the estimate
+        // stays visible while nothing is billed per call.
         if is_chatgpt_oauth {
-            Self::zero_usage_costs(&mut usage);
+            usage.billing = BillingKind::Subscription;
         }
+        usage.calculate_cost(model, Some(config));
 
         let model_call_usage = ModelCallUsage::new(
             response.id.clone(),
@@ -994,6 +982,24 @@ impl OpenAIClient {
                 .or(Some(conversation.model.max_output_tokens))
         };
 
+        if let Some(tier) = config.openai_service_tier {
+            if is_chatgpt_oauth {
+                return Err(Error::UnsupportedFeature(
+                    "OpenAI service tiers require API-key authentication; ChatGPT OAuth requests use the subscription's processing."
+                        .to_string(),
+                ));
+            }
+            let priced = tier.pricing_tier();
+            if priced != ServiceTier::Standard
+                && !conversation.model.pricing.offers_tier(&priced)
+            {
+                return Err(Error::InvalidRequest(format!(
+                    "{} does not offer the {:?} service tier.",
+                    conversation.model.id, tier
+                )));
+            }
+        }
+
         let mut request = OpenAIRequest {
             model: Self::request_model_id(
                 &conversation.model.id,
@@ -1017,6 +1023,7 @@ impl OpenAIClient {
             parallel_tool_calls: None,
             prompt_cache_key: None,
             prompt_cache_options: None,
+            service_tier: config.openai_service_tier,
         };
 
         if conversation.model.supports_openai_prompt_cache_options() {
@@ -1591,6 +1598,11 @@ impl OpenAIClient {
         (message, refusals)
     }
 
+    /// `input_tokens` already includes cached and written tokens and
+    /// `output_tokens` includes reasoning tokens. The response's
+    /// `service_tier` is the tier actually used (for example `default` when a
+    /// Fast request was downgraded).
+    /// https://developers.openai.com/api/docs/guides/prompt-caching
     fn calculate_usage(response: &OpenAIResponse) -> UsageInfo {
         let mut usage = UsageInfo::new(
             response.usage.input_tokens,
@@ -1608,6 +1620,16 @@ impl OpenAIClient {
                     .with_cache_write_tokens(details.cache_write_tokens);
             }
         }
+
+        usage.reasoning_tokens = response
+            .usage
+            .output_tokens_details
+            .as_ref()
+            .and_then(|details| details.reasoning_tokens);
+        usage.service_tier = response
+            .service_tier
+            .as_deref()
+            .map(ServiceTier::from_openai);
 
         usage
     }
@@ -1695,6 +1717,8 @@ struct OpenAIRequest {
     prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_options: Option<OpenAIPromptCacheOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<OpenAIServiceTier>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1789,6 +1813,9 @@ struct OpenAIResponse {
     user: Option<String>,
     #[serde(default)]
     metadata: serde_json::Value,
+    /// Processing tier actually used.
+    #[serde(default)]
+    service_tier: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1854,6 +1881,14 @@ struct OpenAIUsage {
     #[serde(default)]
     input_tokens_details: Option<OpenAIInputTokensDetails>,
     output_tokens: usize,
+    #[serde(default)]
+    output_tokens_details: Option<OpenAIOutputTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIOutputTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2460,6 +2495,93 @@ mod tests {
         assert_eq!(serde_json::to_value(request).unwrap()["temperature"], 0.3);
     }
 
+    fn close(actual: f64, expected: f64) -> bool {
+        (actual - expected).abs() < 1e-9
+    }
+
+    #[test]
+    fn service_tier_requests_are_validated_per_model_and_auth() {
+        use crate::config::OpenAIServiceTier;
+        let client = OpenAIClient::new("test");
+        let astra = Conversation::new(Model::openai_gpt_6_astra());
+        for (tier, wire) in [
+            (OpenAIServiceTier::Flex, "flex"),
+            (OpenAIServiceTier::Fast, "priority"),
+            (OpenAIServiceTier::Auto, "auto"),
+            (OpenAIServiceTier::Default, "default"),
+        ] {
+            let config = GenerationConfig::default().with_openai_service_tier(tier);
+            let request = client.build_request(&astra, &config, false).unwrap();
+            assert_eq!(serde_json::to_value(request).unwrap()["service_tier"], wire);
+            assert!(matches!(
+                client.build_request(&astra, &config, true),
+                Err(Error::UnsupportedFeature(_))
+            ));
+        }
+        let unset = client
+            .build_request(&astra, &GenerationConfig::default(), false)
+            .unwrap();
+        assert!(serde_json::to_value(unset).unwrap().get("service_tier").is_none());
+        // gpt-4.1 has no Flex; gpt-5.4-nano has no Fast mode.
+        for (model, tier) in [
+            (Model::openai_gpt_4_1(), OpenAIServiceTier::Flex),
+            (Model::openai_gpt_5_4_nano(), OpenAIServiceTier::Fast),
+        ] {
+            let config = GenerationConfig::default().with_openai_service_tier(tier);
+            assert!(matches!(
+                client.build_request(&Conversation::new(model), &config, false),
+                Err(Error::InvalidRequest(_))
+            ));
+        }
+    }
+
+    fn response(service_tier: Option<&str>) -> super::OpenAIResponse {
+        serde_json::from_value(serde_json::json!({
+            "id": "resp_1", "status": "completed", "model": "gpt-6-astra",
+            "output": [{"type": "message", "id": "msg_1", "status": "completed", "role": "assistant",
+                "content": [{"type": "output_text", "text": "ok", "annotations": []}]}],
+            "usage": {"input_tokens": 100_000, "output_tokens": 1_000_000,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 400_000}},
+            "service_tier": service_tier,
+        }))
+        .unwrap()
+    }
+
+    fn priced(
+        service_tier: Option<&str>,
+        config: &GenerationConfig,
+        oauth: bool,
+    ) -> crate::usage::UsageInfo {
+        OpenAIClient::generation_response(
+            &response(service_tier),
+            &Model::openai_gpt_6_astra(),
+            config,
+            oauth,
+            &super::StreamingRefusals::new(),
+            Vec::new(),
+        )
+        .usage
+    }
+
+    #[test]
+    fn reported_service_tier_and_reasoning_tokens_price_the_call() {
+        use crate::config::OpenAIServiceTier;
+        let standard = GenerationConfig::default();
+        let flex = GenerationConfig::default().with_openai_service_tier(OpenAIServiceTier::Flex);
+        // GPT-6 Astra short context: 0.1M input at $10 + 1M output at $50.
+        let usage = priced(None, &standard, false);
+        assert_eq!(usage.reasoning_tokens, Some(400_000));
+        assert!(close(usage.total_cost, 51.0));
+        assert!(close(priced(Some("priority"), &standard, false).total_cost, 102.0));
+        // The requested tier applies only when the response doesn't report one;
+        // a Flex request served at the default tier is priced as standard.
+        assert!(close(priced(None, &flex, false).total_cost, 25.5));
+        let downgraded = priced(Some("default"), &flex, false);
+        assert_eq!(downgraded.service_tier, Some(crate::pricing::ServiceTier::Standard));
+        assert!(close(downgraded.total_cost, 51.0));
+    }
+
     #[test]
     fn oauth_refresh_backoff_doubles_to_a_cap_and_honors_server_hints() {
         for _ in 0..50 {
@@ -2470,5 +2592,14 @@ mod tests {
             let hinted = super::oauth_retry_delay(None, r#"{"retry_after":1200}"#, 0);
             assert!(hinted >= Duration::from_secs(1200));
         }
+    }
+
+    #[test]
+    fn chatgpt_oauth_calls_keep_estimates_but_bill_nothing() {
+        let usage = priced(None, &GenerationConfig::default(), true);
+        assert_eq!(usage.billing, crate::usage::BillingKind::Subscription);
+        assert!(close(usage.total_cost, 51.0));
+        assert!(close(usage.input_cost, 1.0));
+        assert_eq!(usage.billed(), 0.0);
     }
 }

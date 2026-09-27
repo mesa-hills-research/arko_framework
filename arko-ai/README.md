@@ -80,6 +80,22 @@ Google's Interactions API reports only an interaction `status`: `completed` maps
 
 References: [Anthropic streaming refusals](https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/handle-streaming-refusals), [official Anthropic streaming event schema](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/types/raw_message_delta_event.py), [OpenAI refusal and content-filter handling](https://developers.openai.com/api/docs/guides/structured-outputs), [OpenAI streaming refusal events](https://platform.openai.com/docs/api-reference/responses-streaming/response/refusal), [Gemini Interactions API](https://ai.google.dev/api/interactions-api-v1).
 
+## Usage and cost
+
+`UsageInfo` token counts mean the same thing for every provider:
+
+- `input_tokens` is the total input, including cache reads (`cached_tokens`) and cache writes (`cache_write_tokens`). Anthropic reports uncached input separately, so arko adds the cache counts back; for streams it uses the cumulative counts in the final `message_delta`. **Usage records saved before this change stored only uncached input for Anthropic.**
+- `output_tokens` includes reasoning tokens; `reasoning_tokens` reports them separately when the provider does (OpenAI `output_tokens_details.reasoning_tokens`, Gemini thought tokens).
+- `cache_write_1h_tokens` is the part of Anthropic cache writes made with a 1-hour TTL.
+
+Costs are estimates at list prices from `model.rs`, computed for what the call actually used:
+
+- **Service tier.** The tier the response reports wins over the one requested (OpenAI echoes `service_tier`, for example `default` when a Fast request was downgraded; Anthropic reports `speed: "fast"` and `service_tier`). `GenerationConfig::with_openai_service_tier` requests OpenAI Flex or Fast (sent as `priority`) on models that offer it, with API-key auth only. Tier prices are per model (`ModelPricing::service_tiers`); tiers without a published price (Anthropic priority, OpenAI scale) are estimated at standard rates.
+- **Cache TTL, residency and dates.** Anthropic 1-hour cache writes use their own rate; `inference_geo: "us"` applies the 1.1x multiplier on Claude 4.6 and later; `ModelPricing::schedule` switches prices on a date (for example the end of promotional pricing). Tier and residency multipliers stack.
+- **Missing prices.** A token class without its own price (cached input on Pro models, cache writes on models that don't charge extra for them) is billed at the input rate, including long-context rates.
+
+`total_cost` is the estimate; `billed()` is what the account is charged, decided by `billing`: `Metered` (the estimate), `Subscription` (ChatGPT OAuth: zero, while the estimate stays visible) or `ProviderReported` (`reported_cost`, used by providers that report their actual charge). `UsageInfo` implements `AddAssign` and `Sum`; summing calls billed differently yields `BillingKind::Mixed` with the billed amounts added. Workflow budgets count `billed()`.
+
 ## Errors and retries
 
 `Error::retry_class()` returns `Permanent`, `Transient` or `Capacity`; `is_retryable()` and `is_capacity_error()` are views of it. Provider error bodies are read generically: string codes (`error.code`, `error.type`, `error.status`), OpenRouter's `error.metadata.error_type`, and numeric HTTP-style codes, which stand in for the status on stream errors that arrive after a 200. Delay hints come from `Retry-After`, OpenAI's `x-ratelimit-reset-*` headers, or body fields (`retry_after_ms`, `retry_after`, `resets_at`) for every provider.

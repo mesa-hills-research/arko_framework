@@ -247,22 +247,31 @@ impl Task {
         Ok(())
     }
 
-    /// Returns the total cost across all LLM usage for this task.
-    pub fn total_usage_cost(&self) -> f64 {
-        self.usage_history.iter().map(|u| u.total_cost).sum()
+    /// Returns the summed usage of every LLM call in this task.
+    pub fn total_usage(&self) -> UsageInfo {
+        self.usage_history.iter().sum()
     }
 
-    /// Returns the total input tokens across all LLM usage for this task.
+    /// Returns the amount billed across all LLM usage for this task.
+    /// Subscription (ChatGPT OAuth) calls contribute nothing; see
+    /// [`UsageInfo::billed`].
+    pub fn total_usage_cost(&self) -> f64 {
+        self.total_usage().billed()
+    }
+
+    /// Returns the total input tokens (including cached input) across all LLM
+    /// usage for this task.
     pub fn total_input_tokens(&self) -> usize {
-        self.usage_history.iter().map(|u| u.input_tokens).sum()
+        self.total_usage().input_tokens
     }
 
     /// Returns the total output tokens across all LLM usage for this task.
     pub fn total_output_tokens(&self) -> usize {
-        self.usage_history.iter().map(|u| u.output_tokens).sum()
+        self.total_usage().output_tokens
     }
 
-    /// Returns the context size of the most recent LLM call, if available.
+    /// Returns the context size of the most recent LLM call, if available:
+    /// its total input tokens, including cached input.
     pub fn current_context_size(&self) -> Option<usize> {
         self.usage_history.last().map(|u| u.input_tokens)
     }

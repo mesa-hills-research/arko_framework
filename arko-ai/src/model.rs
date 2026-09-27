@@ -1,3 +1,4 @@
+use crate::pricing::{ResidencyPricing, TierPricing};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,18 +24,45 @@ pub enum ModelType {
     Reasoning,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Standard list prices in USD per million tokens, plus documented price
+/// variants (see [`crate::pricing`]).
+///
+/// Token classes without their own price (for example a cached-input price on
+/// a model with no caching discount, or cache writes on models that do not
+/// charge extra for them) are billed at the input rate. Constructors set the
+/// fields they need and take the rest from `..ModelPricing::default()`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelPricing {
     pub input_cost_per_million: f64,
     pub output_cost_per_million: f64,
+    /// Cache reads.
     pub cached_input_cost_per_million: Option<f64>,
+    /// Cache writes; for Anthropic this is the 5-minute TTL rate.
     pub cache_write_cost_per_million: Option<f64>,
+    /// Input above which the `large_*` rates apply (inclusive of cached and
+    /// written input tokens).
     pub large_input_threshold: Option<usize>,
     pub large_input_cost_per_million: Option<f64>,
     pub large_output_cost_per_million: Option<f64>,
     pub large_cached_input_cost_per_million: Option<f64>,
     pub large_cache_write_cost_per_million: Option<f64>,
+    /// Unused; reasoning tokens are billed as output by every provider.
     pub reasoning_output_cost_per_million: Option<f64>,
+    /// Anthropic 1-hour TTL cache writes (2x base input).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h_cost_per_million: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub large_cache_write_1h_cost_per_million: Option<f64>,
+    /// Processing tiers this model offers besides standard, and their prices.
+    /// A tier listed here may also be requested (OpenAI `service_tier`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_tiers: Vec<crate::pricing::TierPricing>,
+    /// Data-residency multipliers keyed by the reported region.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub residency: Vec<crate::pricing::ResidencyPricing>,
+    /// Dated price changes (for example the end of promotional pricing).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schedule: Vec<crate::pricing::ScheduledPricing>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +83,17 @@ pub struct Model {
 /// https://ai.google.dev/gemini-api/docs/pricing (+ model pages).
 /// `max_input_tokens` is the vendor's published maximum input tokens where one is
 /// given (OpenAI lists it separately for some models), otherwise the context window.
+///
+/// Price variants, checked 2026-09-27 against the same pricing pages:
+/// - OpenAI `service_tiers` are the Flex and Fast tables as multipliers of the
+///   Standard table. The tables round a few cached prices (for example gpt-5.4
+///   Flex cached input $0.13 for 0.5 x $0.25). Fast mode on GPT-5.4/5.5 is
+///   listed for short context only. Models without an entry do not offer the tier.
+/// - Anthropic 1-hour cache writes cost 2x base input on every model; fast mode
+///   (Opus 5, Opus 4.8) is 2x across the full context window; US-only inference
+///   (`inference_geo: "us"`) is 1.1x on Claude 4.6 and later.
+/// - Gemini Flex/Priority require the v1beta endpoint, which this client does
+///   not use, so no Gemini tiers are listed.
 impl Model {
     /// Standard API pricing verified September 6, 2026.
     /// https://developers.openai.com/api/docs/pricing
@@ -78,6 +117,8 @@ impl Model {
                 large_cached_input_cost_per_million: Some(2.00),
                 large_cache_write_cost_per_million: Some(25.00),
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -104,6 +145,8 @@ impl Model {
                 large_cached_input_cost_per_million: Some(0.40),
                 large_cache_write_cost_per_million: Some(5.00),
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -130,6 +173,8 @@ impl Model {
                 large_cached_input_cost_per_million: Some(0.02),
                 large_cache_write_cost_per_million: Some(0.25),
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -157,6 +202,8 @@ impl Model {
                 large_cached_input_cost_per_million: Some(0.80),
                 large_cache_write_cost_per_million: Some(10.00),
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -183,6 +230,8 @@ impl Model {
                 large_cached_input_cost_per_million: Some(0.40),
                 large_cache_write_cost_per_million: Some(5.00),
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -209,6 +258,8 @@ impl Model {
                 large_cached_input_cost_per_million: Some(0.04),
                 large_cache_write_cost_per_million: Some(0.50),
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -233,6 +284,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -257,6 +310,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -281,6 +336,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -305,6 +362,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(2.0)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -329,6 +388,8 @@ impl Model {
                 large_cached_input_cost_per_million: Some(0.50),
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(2.0).short_context_only(), TierPricing::flex(0.5)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -353,6 +414,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::flex(0.5)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -377,6 +440,8 @@ impl Model {
                 large_cached_input_cost_per_million: Some(1.00),
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(2.5).short_context_only(), TierPricing::flex(0.5)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -401,6 +466,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -425,6 +492,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::flex(0.5)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -449,6 +518,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(1.8), TierPricing::flex(0.5)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -473,6 +544,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::flex(0.5)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -497,6 +570,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(20.0 / 11.0), TierPricing::flex(0.5)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -521,6 +596,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(1.75), TierPricing::flex(0.5)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -545,6 +622,7 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                ..ModelPricing::default()
             },
         }
     }
@@ -569,6 +647,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(1.75)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -593,6 +673,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(1.75)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -617,6 +699,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(2.0)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -642,6 +726,9 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                cache_write_1h_cost_per_million: Some(20.00),
+                residency: vec![ResidencyPricing::new("us", 1.1)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -666,6 +753,9 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                cache_write_1h_cost_per_million: Some(20.00),
+                residency: vec![ResidencyPricing::new("us", 1.1)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -691,6 +781,10 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                cache_write_1h_cost_per_million: Some(10.00),
+                service_tiers: vec![TierPricing::fast(2.0)],
+                residency: vec![ResidencyPricing::new("us", 1.1)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -715,6 +809,10 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                cache_write_1h_cost_per_million: Some(10.00),
+                service_tiers: vec![TierPricing::fast(2.0)],
+                residency: vec![ResidencyPricing::new("us", 1.1)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -742,6 +840,9 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                cache_write_1h_cost_per_million: Some(4.00),
+                residency: vec![ResidencyPricing::new("us", 1.1)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -768,6 +869,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                cache_write_1h_cost_per_million: Some(6.00),
+                ..ModelPricing::default()
             },
         }
     }
@@ -794,6 +897,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                cache_write_1h_cost_per_million: Some(6.00),
+                ..ModelPricing::default()
             },
         }
     }
@@ -820,6 +925,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                cache_write_1h_cost_per_million: Some(6.00),
+                ..ModelPricing::default()
             },
         }
     }
@@ -846,6 +953,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                cache_write_1h_cost_per_million: Some(30.00),
+                ..ModelPricing::default()
             },
         }
     }
@@ -872,6 +981,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                cache_write_1h_cost_per_million: Some(30.00),
+                ..ModelPricing::default()
             },
         }
     }
@@ -896,6 +1007,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                cache_write_1h_cost_per_million: Some(10.00),
+                ..ModelPricing::default()
             },
         }
     }
@@ -920,6 +1033,9 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                cache_write_1h_cost_per_million: Some(10.00),
+                residency: vec![ResidencyPricing::new("us", 1.1)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -944,6 +1060,9 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                cache_write_1h_cost_per_million: Some(10.00),
+                residency: vec![ResidencyPricing::new("us", 1.1)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -970,6 +1089,9 @@ impl Model {
                 large_cached_input_cost_per_million: Some(0.60),
                 large_cache_write_cost_per_million: Some(7.50),
                 reasoning_output_cost_per_million: None,
+                cache_write_1h_cost_per_million: Some(6.00),
+                large_cache_write_1h_cost_per_million: Some(12.00),
+                ..ModelPricing::default()
             },
         }
     }
@@ -996,6 +1118,9 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                cache_write_1h_cost_per_million: Some(6.00),
+                residency: vec![ResidencyPricing::new("us", 1.1)],
+                ..ModelPricing::default()
             },
         }
     }
@@ -1023,6 +1148,9 @@ impl Model {
                 large_cached_input_cost_per_million: Some(0.60),
                 large_cache_write_cost_per_million: Some(7.50),
                 reasoning_output_cost_per_million: None,
+                cache_write_1h_cost_per_million: Some(6.00),
+                large_cache_write_1h_cost_per_million: Some(12.00),
+                ..ModelPricing::default()
             },
         }
     }
@@ -1047,6 +1175,8 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                cache_write_1h_cost_per_million: Some(2.00),
+                ..ModelPricing::default()
             },
         }
     }
@@ -1071,6 +1201,7 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                ..ModelPricing::default()
             },
         }
     }
@@ -1097,6 +1228,7 @@ impl Model {
                 large_cached_input_cost_per_million: Some(0.25),
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                ..ModelPricing::default()
             },
         }
     }
@@ -1123,6 +1255,7 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                ..ModelPricing::default()
             },
         }
     }
@@ -1150,6 +1283,7 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                ..ModelPricing::default()
             },
         }
     }
@@ -1177,6 +1311,7 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                ..ModelPricing::default()
             },
         }
     }
@@ -1204,6 +1339,7 @@ impl Model {
                 large_cached_input_cost_per_million: Some(1.00),
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                ..ModelPricing::default()
             },
         }
     }
@@ -1230,6 +1366,7 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                ..ModelPricing::default()
             },
         }
     }
@@ -1254,6 +1391,7 @@ impl Model {
                 large_cached_input_cost_per_million: Some(0.40),
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                ..ModelPricing::default()
             },
         }
     }
@@ -1278,6 +1416,7 @@ impl Model {
                 large_cached_input_cost_per_million: Some(0.40),
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                ..ModelPricing::default()
             },
         }
     }
@@ -1305,6 +1444,7 @@ impl Model {
                 large_cached_input_cost_per_million: None,
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
+                ..ModelPricing::default()
             },
         }
     }

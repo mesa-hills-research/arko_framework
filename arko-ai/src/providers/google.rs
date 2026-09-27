@@ -986,15 +986,17 @@ impl GoogleClient {
         }
     }
 
+    /// `total_input_tokens` includes cached input. Output is visible output
+    /// plus thought tokens, both billed as output. `total_tokens` is not used
+    /// because it also counts other internal tokens such as tool-use prompts.
+    /// https://ai.google.dev/api/interactions-api-v1
     fn calculate_usage(usage: &InteractionUsage) -> UsageInfo {
         let input_tokens = usage.total_input_tokens as usize;
-
-        let output_tokens = usage
-            .total_tokens
-            .map(|total| (total as usize).saturating_sub(input_tokens))
-            .unwrap_or((usage.total_output_tokens + usage.total_thought_tokens) as usize);
+        let output_tokens = (usage.total_output_tokens + usage.total_thought_tokens) as usize;
 
         let mut info = UsageInfo::new(input_tokens, output_tokens);
+        info.reasoning_tokens =
+            (usage.total_thought_tokens > 0).then_some(usage.total_thought_tokens as usize);
 
         if let Some(cached_tokens) = usage.total_cached_tokens
             && cached_tokens > 0
@@ -1167,8 +1169,6 @@ struct InteractionUsage {
     #[serde(default)]
     total_thought_tokens: u64,
     #[serde(default)]
-    total_tokens: Option<u64>,
-    #[serde(default)]
     total_cached_tokens: Option<u64>,
 }
 
@@ -1233,6 +1233,21 @@ mod tests {
     fn completed(status: &str) -> Value {
         json!({"event_type":"interaction.completed","interaction":{"id":"int_1","status":status,
             "usage":{"total_input_tokens":3,"total_output_tokens":2}}})
+    }
+
+    #[test]
+    fn usage_counts_thoughts_as_output_and_ignores_other_total_tokens() {
+        let usage: InteractionUsage = serde_json::from_value(json!({
+            "total_input_tokens": 1000, "total_output_tokens": 200,
+            "total_thought_tokens": 300, "total_cached_tokens": 400,
+            "total_tool_use_tokens": 50, "total_tokens": 1550
+        }))
+        .unwrap();
+        let info = GoogleClient::calculate_usage(&usage);
+        assert_eq!(info.input_tokens, 1000);
+        assert_eq!(info.output_tokens, 500);
+        assert_eq!(info.reasoning_tokens, Some(300));
+        assert_eq!(info.cached_tokens, Some(400));
     }
 
     #[tokio::test]

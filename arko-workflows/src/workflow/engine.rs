@@ -228,33 +228,33 @@ pub(crate) async fn drive_event_loop(
             }
 
             AgentEvent::UsageReported(ref usage) => {
-                if !ctx.budget.is_oauth_exempt(agent_name) {
-                    let cost_result = ctx.budget.add_agent_cost(agent_name, usage);
+                // Subscription (ChatGPT OAuth) calls are recorded with a
+                // billed amount of zero.
+                let cost_result = ctx.budget.add_agent_cost(agent_name, usage);
 
-                    if cost_result.warning_triggered {
-                        let _ = fire_hooks_on_context(ctx, HookPoint::OnBudgetWarning, |hctx| {
-                            hctx.budget_spent = cost_result.new_total;
-                        });
-                    }
+                if cost_result.warning_triggered {
+                    let _ = fire_hooks_on_context(ctx, HookPoint::OnBudgetWarning, |hctx| {
+                        hctx.budget_spent = cost_result.new_total;
+                    });
+                }
 
-                    if cost_result.exceeded {
-                        let _ = fire_hooks_on_context(ctx, HookPoint::OnBudgetExceeded, |hctx| {
-                            hctx.budget_spent = cost_result.new_total;
-                        });
-                        let _ = cmd_tx.send(UserCommand::CancelTask).await;
-                        return Err(WorkflowError::BudgetExceeded {
-                            spent: cost_result.new_total,
-                            limit: ctx.budget.limit().unwrap_or(0.0),
-                        });
-                    }
-                    if ctx.budget.is_agent_exceeded(agent_name) {
-                        let _ = cmd_tx.send(UserCommand::CancelTask).await;
-                        return Err(WorkflowError::AgentBudgetExceeded {
-                            agent: agent_name.to_string(),
-                            spent: ctx.budget.agent_spent(agent_name),
-                            limit: ctx.budget.agent_limit(agent_name).unwrap_or(0.0),
-                        });
-                    }
+                if cost_result.exceeded {
+                    let _ = fire_hooks_on_context(ctx, HookPoint::OnBudgetExceeded, |hctx| {
+                        hctx.budget_spent = cost_result.new_total;
+                    });
+                    let _ = cmd_tx.send(UserCommand::CancelTask).await;
+                    return Err(WorkflowError::BudgetExceeded {
+                        spent: cost_result.new_total,
+                        limit: ctx.budget.limit().unwrap_or(0.0),
+                    });
+                }
+                if ctx.budget.is_agent_exceeded(agent_name) {
+                    let _ = cmd_tx.send(UserCommand::CancelTask).await;
+                    return Err(WorkflowError::AgentBudgetExceeded {
+                        agent: agent_name.to_string(),
+                        spent: ctx.budget.agent_spent(agent_name),
+                        limit: ctx.budget.agent_limit(agent_name).unwrap_or(0.0),
+                    });
                 }
 
                 if ctx.budget.is_exceeded() {

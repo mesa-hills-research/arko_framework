@@ -10,6 +10,7 @@ use crate::{
     },
     stop::{Refusal, RefusalSource, StopReason},
     tool::{ToolCall, ToolChoice},
+    pricing::ServiceTier,
     usage::{ModelCallUsage, UsageInfo},
 };
 use async_stream::try_stream;
@@ -323,12 +324,6 @@ impl AnthropicClient {
         Ok(())
     }
 
-    fn unified_input_tokens(usage: &AnthropicUsage) -> usize {
-        usage.input_tokens
-            + usage.cache_creation_input_tokens.unwrap_or(0)
-            + usage.cache_read_input_tokens.unwrap_or(0)
-    }
-
     fn with_stream_stop_metadata(usage: ModelCallUsage, delta: &Value) -> ModelCallUsage {
         usage.with_stop_metadata(
             delta.get("stop_reason").and_then(Value::as_str).map(str::to_owned),
@@ -342,15 +337,15 @@ impl AnthropicClient {
         config: &GenerationConfig,
     ) -> GenerationResponse {
         let (mut message, _) = Self::parse_response(&response_data);
-        let mut usage = Self::calculate_usage(&response_data);
+        let mut usage = Self::calculate_usage(&response_data.usage);
         usage.calculate_cost(&conversation.model, Some(config));
 
         let model_call_usage = ModelCallUsage::new(
             response_data.id.clone(),
             conversation.model.provider.as_telemetry_str().to_string(),
             response_data.model.clone(),
-            Self::unified_input_tokens(&response_data.usage),
-            response_data.usage.output_tokens,
+            usage.input_tokens,
+            usage.output_tokens,
             conversation.model.max_input_tokens,
         ).with_stop_metadata(
             response_data.stop_reason.clone(),
@@ -540,7 +535,9 @@ impl AnthropicClient {
             let mut fragments = Vec::new();
             let mut current_thinking: Option<(String, Option<String>)> = None;
             let mut full_text = String::new();
-            let mut initial_usage: Option<UsageInfo> = None;
+            // `message_start` usage, updated by the final `message_delta`
+            // (which carries cumulative counts).
+            let mut usage_fields = serde_json::Map::new();
             let mut tool_calls = Vec::new();
             let mut current_tool: Option<(String, String, String)> = None;
             let mut tool_call_index = 0usize;
@@ -572,28 +569,7 @@ impl AnthropicClient {
                                 .to_string();
 
                             if let Some(usage_value) = message.get("usage") {
-                                let input_tokens = usage_value
-                                    .get("input_tokens")
-                                    .and_then(Value::as_u64)
-                                    .unwrap_or(0) as usize;
-
-                                let mut usage = UsageInfo::new(input_tokens, 0);
-
-                                if let Some(cached) = usage_value
-                                    .get("cache_read_input_tokens")
-                                    .and_then(Value::as_u64)
-                                {
-                                    usage.cached_tokens = Some(cached as usize);
-                                }
-
-                                if let Some(written) = usage_value
-                                    .get("cache_creation_input_tokens")
-                                    .and_then(Value::as_u64)
-                                {
-                                    usage.cache_write_tokens = Some(written as usize);
-                                }
-
-                                initial_usage = Some(usage);
+                                merge_usage(&mut usage_fields, usage_value);
                             }
                         }
                     }
@@ -710,29 +686,20 @@ impl AnthropicClient {
                             .is_some_and(|reason| !reason.is_null())
                             && let Some(usage_value) = value.get("usage")
                         {
-                            let output_tokens = usage_value
-                                .get("output_tokens")
-                                .and_then(Value::as_u64)
-                                .unwrap_or(0) as usize;
-
-                            let mut usage = initial_usage
-                                .take()
-                                .unwrap_or_else(|| UsageInfo::new(0, 0));
-
-                            usage.output_tokens = output_tokens;
-
-                            let unified_input = usage.input_tokens
-                                + usage.cached_tokens.unwrap_or(0)
-                                + usage.cache_write_tokens.unwrap_or(0);
-
+                            merge_usage(&mut usage_fields, usage_value);
+                            let reported: AnthropicUsage = serde_json::from_value(
+                                Value::Object(std::mem::take(&mut usage_fields)),
+                            )
+                            .map_err(Error::JsonError)?;
+                            let mut usage = Self::calculate_usage(&reported);
                             usage.calculate_cost(&model, Some(&cost_config));
 
                             let model_call_usage = ModelCallUsage::new(
                                 response_id.clone(),
                                 model.provider.as_telemetry_str().to_string(),
                                 response_model.clone(),
-                                unified_input,
-                                output_tokens,
+                                usage.input_tokens,
+                                usage.output_tokens,
                                 model.max_input_tokens,
                             );
                             let model_call_usage = Self::with_stream_stop_metadata(
@@ -1166,17 +1133,30 @@ impl AnthropicClient {
         (message, reasoning_artifact)
     }
 
-    fn calculate_usage(response: &AnthropicResponse) -> UsageInfo {
-        let mut usage = UsageInfo::new(response.usage.input_tokens, response.usage.output_tokens);
-
-        if let Some(cache_read) = response.usage.cache_read_input_tokens {
-            usage = usage.with_cached_tokens(cache_read);
-        }
-
-        if let Some(cache_creation) = response.usage.cache_creation_input_tokens {
-            usage = usage.with_cache_write_tokens(cache_creation);
-        }
-
+    /// Anthropic's `input_tokens` counts only uncached input; arko's
+    /// `UsageInfo::input_tokens` is the total, so cache reads and writes are
+    /// added back. The 1-hour share of cache writes, fast mode (`speed`) and
+    /// `inference_geo` select price variants.
+    /// https://platform.claude.com/docs/en/build-with-claude/prompt-caching#tracking-cache-performance
+    fn calculate_usage(reported: &AnthropicUsage) -> UsageInfo {
+        let cache_read = reported.cache_read_input_tokens;
+        let cache_write = reported.cache_creation_input_tokens;
+        let mut usage = UsageInfo::new(
+            reported.input_tokens + cache_read.unwrap_or(0) + cache_write.unwrap_or(0),
+            reported.output_tokens,
+        );
+        usage.cached_tokens = cache_read;
+        usage.cache_write_tokens = cache_write;
+        usage.cache_write_1h_tokens = reported
+            .cache_creation
+            .as_ref()
+            .and_then(|breakdown| breakdown.ephemeral_1h_input_tokens)
+            .filter(|tokens| *tokens > 0);
+        usage.service_tier = ServiceTier::from_anthropic(
+            reported.service_tier.as_deref(),
+            reported.speed.as_deref(),
+        );
+        usage.inference_geo = reported.inference_geo.clone();
         usage
     }
 }
@@ -1366,12 +1346,45 @@ enum AnthropicResponseContent {
     Unknown,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct AnthropicUsage {
+    #[serde(default)]
     input_tokens: usize,
+    #[serde(default)]
     output_tokens: usize,
+    #[serde(default)]
     cache_creation_input_tokens: Option<usize>,
+    #[serde(default)]
     cache_read_input_tokens: Option<usize>,
+    /// Cache writes split by TTL.
+    #[serde(default)]
+    cache_creation: Option<AnthropicCacheCreation>,
+    #[serde(default)]
+    service_tier: Option<String>,
+    /// `"fast"` when fast mode ran.
+    #[serde(default)]
+    speed: Option<String>,
+    /// Where inference ran (`"global"` or `"us"`).
+    #[serde(default)]
+    inference_geo: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AnthropicCacheCreation {
+    #[serde(default)]
+    ephemeral_1h_input_tokens: Option<usize>,
+}
+
+/// Overlays usage fields from a later stream event; `message_delta` carries
+/// cumulative counts that replace the `message_start` values.
+fn merge_usage(fields: &mut serde_json::Map<String, Value>, update: &Value) {
+    if let Some(update) = update.as_object() {
+        for (key, value) in update {
+            if !value.is_null() {
+                fields.insert(key.clone(), value.clone());
+            }
+        }
+    }
 }
 
 pub fn list_models() -> Vec<crate::model::Model> {
@@ -1771,5 +1784,81 @@ mod tests {
         let config = GenerationConfig::default().with_reasoning(ReasoningConfig::anthropic(2048));
         let request = client.build_request(&conversation, &config).unwrap();
         assert!(serde_json::to_value(request).unwrap().get("temperature").is_none());
+    }
+
+    fn close(actual: f64, expected: f64) -> bool {
+        (actual - expected).abs() < 1e-9
+    }
+
+    #[test]
+    fn non_streaming_usage_reports_total_input_and_prices_cache_ttls() {
+        let response: super::AnthropicResponse = serde_json::from_value(json!({
+            "id": "msg_usage", "type": "message", "role": "assistant", "model": "claude-opus-4-6",
+            "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 100, "output_tokens": 100,
+                "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 200,
+                "cache_creation": {"ephemeral_5m_input_tokens": 50, "ephemeral_1h_input_tokens": 150},
+                "service_tier": "standard", "inference_geo": "global"
+            }
+        }))
+        .unwrap();
+        let conversation = Conversation::new(Model::anthropic_claude_opus_4_6());
+        let result = AnthropicClient::generation_response(
+            response,
+            &conversation,
+            &GenerationConfig::default(),
+        );
+        let usage = &result.usage;
+        assert_eq!(usage.input_tokens, 1300);
+        assert_eq!(result.model_call_usage.input_tokens, 1300);
+        assert_eq!(usage.cached_tokens, Some(1000));
+        assert_eq!(usage.cache_write_tokens, Some(200));
+        assert_eq!(usage.cache_write_1h_tokens, Some(150));
+        assert_eq!(usage.service_tier, Some(crate::pricing::ServiceTier::Standard));
+        // Opus 4.6: $5 input, $0.50 reads, $6.25 5m writes, $10 1h writes, $25 output.
+        assert!(close(usage.input_cost, 100.0 * 5.0 / 1e6));
+        assert!(close(usage.cache_read_cost.unwrap(), 1000.0 * 0.5 / 1e6));
+        assert!(close(
+            usage.cache_write_cost.unwrap(),
+            (50.0 * 6.25 + 150.0 * 10.0) / 1e6
+        ));
+        assert!(close(usage.output_cost, 100.0 * 25.0 / 1e6));
+        assert!(close(usage.billed(), usage.total_cost));
+    }
+
+    #[tokio::test]
+    async fn streamed_usage_uses_the_final_cumulative_counts() {
+        let mut events = vec![message_start()];
+        events.extend(text_block(0, "Hi"));
+        events.push(json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},
+            "usage":{"input_tokens":12,"cache_read_input_tokens":100,"output_tokens":50}}));
+        let (events, error) = stream_events(&events).await;
+        assert!(error.is_none(), "{error:?}");
+        let response = end(&events);
+        assert_eq!(response.usage.input_tokens, 112);
+        assert_eq!(response.usage.cached_tokens, Some(100));
+        assert_eq!(response.usage.cache_write_tokens, Some(0));
+        assert_eq!(response.usage.output_tokens, 50);
+        assert_eq!(response.model_call_usage.input_tokens, 112);
+        assert_eq!(response.model_call_usage.output_tokens, 50);
+    }
+
+    #[test]
+    fn fast_mode_and_us_inference_are_parsed_and_priced() {
+        let reported: super::AnthropicUsage = serde_json::from_value(json!({
+            "input_tokens": 1_000_000, "output_tokens": 1_000_000,
+            "speed": "fast", "inference_geo": "us"
+        }))
+        .unwrap();
+        let mut usage = AnthropicClient::calculate_usage(&reported);
+        assert_eq!(usage.service_tier, Some(crate::pricing::ServiceTier::Fast));
+        assert_eq!(usage.inference_geo.as_deref(), Some("us"));
+        // Opus 4.8: $5 + $25 standard; fast 2x and US-only 1.1x stack.
+        usage.calculate_cost(&Model::anthropic_claude_opus_4_8(), None);
+        assert!(close(usage.total_cost, 30.0 * 2.0 * 1.1));
+        // Opus 4.5 offers neither modifier.
+        usage.calculate_cost(&Model::anthropic_claude_opus_4_5(), None);
+        assert!(close(usage.total_cost, 30.0));
     }
 }

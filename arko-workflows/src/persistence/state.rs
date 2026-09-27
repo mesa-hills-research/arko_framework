@@ -28,8 +28,8 @@ pub struct WorkflowState {
     /// created before the ledger was introduced.
     #[serde(default)]
     pub cost_ledger: CostLedger,
-    #[serde(default)]
-    pub oauth_exempt_agents: std::collections::HashSet<String>,
+    // Older checkpoints may contain `oauth_exempt_agents`; it is ignored now
+    // that subscription calls record a billed amount of zero.
     #[serde(default)]
     pub freshness_snapshot: Option<FreshnessSnapshot>,
     #[serde(default)]
@@ -75,7 +75,6 @@ mod tests {
             message_queues: HashMap::new(),
             budget_spent: 0.0,
             cost_ledger: CostLedger::default(),
-            oauth_exempt_agents: std::collections::HashSet::new(),
             freshness_snapshot: Some(tracker.snapshot()),
             agent_results: Vec::new(),
             verification_records: Vec::new(),
