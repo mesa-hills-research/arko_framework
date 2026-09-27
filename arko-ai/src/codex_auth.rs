@@ -128,24 +128,7 @@ impl CodexAuthFile {
             return Ok(CodexAuthSync::Unchanged);
         }
 
-        let mut value: Value = serde_json::from_slice(&self.snapshot)?;
-        let nested = value.get("tokens").is_some_and(Value::is_object);
-        let tokens = if nested {
-            &mut value["tokens"]
-        } else {
-            &mut value
-        };
-        tokens["access_token"] = Value::String(credentials.access_token.clone());
-        if let Some(refresh_token) = &credentials.refresh_token {
-            tokens["refresh_token"] = Value::String(refresh_token.clone());
-        }
-        tokens["account_id"] = Value::String(credentials.account_id.clone());
-        if nested || value.get("last_refresh").is_some() {
-            value["last_refresh"] = Value::String(rfc3339_utc(SystemTime::now()));
-        }
-        let mut bytes = serde_json::to_vec_pretty(&value)?;
-        bytes.push(b'\n');
-
+        let bytes = self.contents_with(credentials)?;
         let target = std::fs::canonicalize(&self.path)?;
         let permissions = std::fs::metadata(&target)?.permissions();
         let backup = with_suffix(&target, ".bak");
@@ -171,6 +154,81 @@ impl CodexAuthFile {
             );
         }
         Ok(CodexAuthSync::Saved)
+    }
+
+    /// Writes `credentials` to a new file next to this one,
+    /// `auth.json.recovered-<unix seconds>`, in this file's format, and
+    /// returns its path. On Unix only the owner can read it (mode 0600 from
+    /// creation). An existing file is never replaced.
+    ///
+    /// For when [`persist`](Self::persist) or [`sync`](Self::sync) fails
+    /// after a refresh: the previous refresh token no longer works, so the
+    /// rotated credentials must not be lost with the process. Move the
+    /// recovery file over `auth.json` (or sign in again) before Codex next
+    /// refreshes.
+    pub fn write_recovery(&self, credentials: &ChatGptOAuthCredentials) -> Result<PathBuf, Error> {
+        let bytes = self.contents_with(credentials)?;
+        let seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        let base = with_suffix(&self.path, &format!(".recovered-{seconds}"));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        for attempt in 0..100 {
+            let path = if attempt == 0 {
+                base.clone()
+            } else {
+                with_suffix(&base, &format!("-{attempt}"))
+            };
+            let mut file = match options.open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let written = file.write_all(&bytes).and_then(|()| file.sync_all());
+            if let Err(error) = written {
+                // Close first: Windows cannot remove an open file.
+                drop(file);
+                let _ = std::fs::remove_file(&path);
+                return Err(error.into());
+            }
+            if let Err(error) = sync_parent_directory(&path) {
+                log::warn!(
+                    "arko_ai: could not sync the directory of {}: {error}",
+                    path.display()
+                );
+            }
+            return Ok(path);
+        }
+        Err(Error::IoError(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{} and 99 numbered variants already exist", base.display()),
+        )))
+    }
+
+    /// This file's contents (as last read or written) with `credentials` in
+    /// place of its tokens, keeping every other field and the layout.
+    fn contents_with(&self, credentials: &ChatGptOAuthCredentials) -> Result<Vec<u8>, Error> {
+        let mut value: Value = serde_json::from_slice(&self.snapshot)?;
+        let nested = value.get("tokens").is_some_and(Value::is_object);
+        let tokens = if nested {
+            &mut value["tokens"]
+        } else {
+            &mut value
+        };
+        tokens["access_token"] = Value::String(credentials.access_token.clone());
+        if let Some(refresh_token) = &credentials.refresh_token {
+            tokens["refresh_token"] = Value::String(refresh_token.clone());
+        }
+        tokens["account_id"] = Value::String(credentials.account_id.clone());
+        if nested || value.get("last_refresh").is_some() {
+            value["last_refresh"] = Value::String(rfc3339_utc(SystemTime::now()));
+        }
+        let mut bytes = serde_json::to_vec_pretty(&value)?;
+        bytes.push(b'\n');
+        Ok(bytes)
     }
 
     /// Reconciles the file with `client`'s ChatGPT OAuth credentials: writes
@@ -472,6 +530,35 @@ mod tests {
             CodexAuthFile::load(&path).unwrap().credentials().unwrap(),
             rotated()
         );
+    }
+
+    #[test]
+    fn recovery_files_are_private_new_files_next_to_the_original() {
+        let (dir, path) = temp_file(NESTED);
+        let file = CodexAuthFile::load(&path).unwrap();
+        let first = file.write_recovery(&rotated()).unwrap();
+        let second = file.write_recovery(&rotated()).unwrap();
+        assert_ne!(first, second, "an existing recovery file is never replaced");
+        for recovery in [&first, &second] {
+            assert_eq!(recovery.parent(), Some(dir.path()));
+            let name = recovery.file_name().unwrap().to_string_lossy();
+            assert!(name.starts_with("auth.json.recovered-"), "{name}");
+            assert_eq!(
+                CodexAuthFile::load(recovery).unwrap().credentials().unwrap(),
+                rotated()
+            );
+            let saved: Value = serde_json::from_slice(&std::fs::read(recovery).unwrap()).unwrap();
+            assert_eq!(saved["tokens"]["id_token"], "id-1");
+            assert_eq!(saved["auth_mode"], "chatgpt");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(recovery).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600);
+            }
+        }
+        // The original is untouched.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), NESTED);
     }
 
     #[test]
