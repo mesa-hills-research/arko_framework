@@ -26,7 +26,7 @@ pub struct DistillationConfig {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use arko_ai::{Model, OpenAIEffort, ReasoningConfig};
 
@@ -83,6 +83,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_default_output_limit_leaves_room_for_reasoning_within_the_model_limit() {
+        assert_eq!(
+            DistillationConfig::new("a", Model::anthropic_claude_opus_5_5()).max_output_tokens,
+            16_000
+        );
+        assert_eq!(
+            DistillationConfig::new("b", Model::anthropic_claude_3_5_sonnet_20241022())
+                .max_output_tokens,
+            8_192
+        );
+        // An OpenRouter model without catalog metadata has no known limit.
+        assert_eq!(
+            DistillationConfig::new("c", Model::openrouter("anthropic/claude-sonnet-5"))
+                .max_output_tokens,
+            16_000
+        );
+        for model in Model::all() {
+            let config = DistillationConfig::new("d", model.clone());
+            assert!(config.max_output_tokens > 0, "{}", model.id);
+            assert!(
+                model.max_output_tokens == 0 || config.max_output_tokens <= model.max_output_tokens,
+                "{}",
+                model.id
+            );
+        }
+    }
+
     fn response(
         text: &str,
         stop_reason: arko_ai::StopReason,
@@ -114,34 +142,43 @@ mod tests {
                 "short summary"
             );
         }
+        // (response, reason, retryable): refusals and token-limit cuts would
+        // most likely repeat, so they are not retried.
         let rejected = [
             (
                 response("The failing test is in", StopReason::MaxTokens, None),
                 "summary truncated",
+                false,
             ),
             (
                 response("The failing", StopReason::ContextWindowExceeded, None),
                 "summary truncated",
+                false,
             ),
             (
                 response("Partial summary", StopReason::PauseTurn, None),
                 "summary incomplete",
+                true,
             ),
             (
                 response("Partial summary", StopReason::Other("cancelled".into()), None),
                 "summary incomplete",
+                true,
             ),
-            // No stop reason reported (for example a response saved before
-            // stop reasons existed): completeness can't be established.
+            // No stop reason: a live response without one (OpenRouter
+            // `finish_reason: null`, Anthropic `stop_reason: null`) or one
+            // saved before stop reasons existed. Completeness can't be told.
             (
                 response("Summary", StopReason::Other("unknown".into()), None),
                 "summary incomplete",
+                true,
             ),
             (
                 response("Summary", StopReason::ToolUse, None),
                 "summary incomplete",
+                true,
             ),
-            (response("  \n", StopReason::EndTurn, None), "returned no text"),
+            (response("  \n", StopReason::EndTurn, None), "returned no text", true),
             // A model refusal keeps the turn, so text can accompany it.
             (
                 response(
@@ -150,6 +187,7 @@ mod tests {
                     Some(Refusal::new(RefusalSource::Model)),
                 ),
                 "refused by model",
+                false,
             ),
             // Even with a clean stop reason, a refusal is never a summary.
             (
@@ -159,6 +197,7 @@ mod tests {
                     Some(Refusal::new(RefusalSource::Model)),
                 ),
                 "refused by model",
+                false,
             ),
             (
                 response(
@@ -167,6 +206,7 @@ mod tests {
                     Some(Refusal::new(RefusalSource::SafetyClassifier)),
                 ),
                 "refused by safety classifier",
+                false,
             ),
             (
                 response(
@@ -175,11 +215,13 @@ mod tests {
                     Some(Refusal::new(RefusalSource::ContentFilter)),
                 ),
                 "refused by content filter",
+                false,
             ),
         ];
-        for (response, reason) in rejected {
-            let error = complete_summary(&response).unwrap_err();
-            assert!(error.contains(reason), "{error:?} for {response:?}");
+        for (response, reason, retryable) in rejected {
+            let rejection = complete_summary(&response).unwrap_err();
+            assert!(rejection.reason.contains(reason), "{rejection:?} for {response:?}");
+            assert_eq!(rejection.retryable, retryable, "{rejection:?} for {response:?}");
         }
     }
 
@@ -209,44 +251,77 @@ mod tests {
         assert_eq!(restored.rejection.as_deref(), Some("refused by model"));
     }
 
-    /// Serves `bodies` as JSON, one per connection, and returns the base URL.
-    async fn serve(bodies: Vec<serde_json::Value>) -> (String, tokio::task::JoinHandle<()>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            for body in bodies {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                loop {
-                    let mut chunk = [0; 8192];
-                    let n = socket.read(&mut chunk).await.unwrap();
-                    assert!(n > 0, "connection closed before the request was complete");
-                    request.extend_from_slice(&chunk[..n]);
-                    let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
-                        continue;
-                    };
-                    let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
-                    let length: usize = head
-                        .lines()
-                        .find_map(|line| line.strip_prefix("content-length:"))
-                        .map_or(0, |value| value.trim().parse().unwrap());
-                    if request.len() >= end + 4 + length {
-                        break;
-                    }
-                }
-                let body = body.to_string();
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                socket.write_all(response.as_bytes()).await.unwrap();
-            }
-        });
-        (url, server)
+    /// A local HTTP server answering every request with the same JSON body
+    /// until dropped.
+    pub(crate) struct MockServer {
+        pub url: String,
+        requests: Arc<std::sync::atomic::AtomicUsize>,
+        task: tokio::task::JoinHandle<()>,
     }
 
-    fn anthropic_reply(text: &str, stop_reason: &str) -> serde_json::Value {
+    impl MockServer {
+        pub async fn start(body: serde_json::Value) -> Self {
+            Self::start_with_status(200, body).await
+        }
+
+        pub async fn start_with_status(status: u16, body: serde_json::Value) -> Self {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counter = requests.clone();
+            let body = body.to_string();
+            let task = tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    loop {
+                        let mut chunk = [0; 8192];
+                        let n = socket.read(&mut chunk).await.unwrap();
+                        assert!(n > 0, "connection closed before the request was complete");
+                        request.extend_from_slice(&chunk[..n]);
+                        let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                            continue;
+                        };
+                        let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                        let length: usize = head
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .map_or(0, |value| value.trim().parse().unwrap());
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let response = format!(
+                        "HTTP/1.1 {status} Test\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                }
+            });
+            Self { url, requests, task }
+        }
+
+        pub fn requests(&self) -> usize {
+            self.requests.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        pub fn anthropic_client(&self) -> arko_ai::LLMClient {
+            arko_ai::LLMClient::new().with_anthropic_client(
+                arko_ai::providers::anthropic::AnthropicClient::new("test-key")
+                    .with_base_url(&self.url),
+            )
+        }
+    }
+
+    impl Drop for MockServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    pub(crate) fn anthropic_reply(text: &str, stop_reason: &str) -> serde_json::Value {
         serde_json::json!({
             "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
             "content": [{"type": "text", "text": text}], "stop_reason": stop_reason,
@@ -301,77 +376,117 @@ mod tests {
         (outcome, workflow.context().clone())
     }
 
-    fn anthropic_client(url: &str) -> arko_ai::LLMClient {
-        arko_ai::LLMClient::new().with_anthropic_client(
-            arko_ai::providers::anthropic::AnthropicClient::new("test-key").with_base_url(url),
-        )
-    }
-
     #[tokio::test]
-    async fn truncated_and_refused_summaries_keep_the_tool_output_but_are_charged() {
-        for (reply, reason) in [
+    async fn truncated_and_refused_summaries_keep_the_tool_output_without_a_retry_but_are_charged() {
+        for (reply, reason, output_chars) in [
             (
                 anthropic_reply("The failing test is in", "max_tokens"),
                 "summary truncated (stop reason MaxTokens)",
+                "The failing test is in".len(),
             ),
+            // The classifier's partial output moves out of the message and
+            // is still counted.
             (
                 anthropic_reply("The failing test", "refusal"),
                 "refused by safety classifier",
+                "The failing test".len(),
             ),
         ] {
-            let (url, server) = serve(vec![reply]).await;
+            let server = MockServer::start(reply).await;
             let (outcome, context) =
-                distill(anthropic_client(&url), Model::anthropic_claude_opus_5_5()).await;
-            server.await.unwrap();
-            let Err(ToolError::ExecutionFailed(error)) = outcome else {
-                panic!("a {reason} summary must not replace the tool output");
-            };
-            assert!(error.starts_with("distiller 'bulk' result not used: "), "{error}");
-            assert!(error.contains(reason), "{error}");
+                distill(server.anthropic_client(), Model::anthropic_claude_opus_5_5()).await;
+            assert!(
+                matches!(outcome, Ok(InterceptedResult::Unchanged)),
+                "a {reason} summary keeps the tool output and is not retried"
+            );
+            assert_eq!(server.requests(), 1);
             let spent = context.budget.total_spent();
             assert!(spent > 0.0, "the billed call is charged");
             let records = context.distillation_records.read();
             assert_eq!(records.len(), 1);
             assert!(records[0].rejection.as_deref().unwrap().contains(reason));
+            assert_eq!(records[0].output_chars, output_chars);
             assert!((records[0].cost - spent).abs() < 1e-6);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_incomplete_or_empty_summary_is_a_retryable_error_and_charged() {
+        for (reply, reason) in [
+            (anthropic_reply("", "end_turn"), "returned no text"),
+            (anthropic_reply("Summary", "pause_turn"), "summary incomplete (stop reason PauseTurn)"),
+        ] {
+            let server = MockServer::start(reply).await;
+            let (outcome, context) =
+                distill(server.anthropic_client(), Model::anthropic_claude_opus_5_5()).await;
+            let Err(ToolError::ExecutionFailed(error)) = outcome else {
+                panic!("a {reason} summary is an interceptor error");
+            };
+            assert_eq!(error, format!("distiller 'bulk' result not used: {reason}"));
+            assert!(context.budget.total_spent() > 0.0);
+            assert_eq!(
+                context.distillation_records.read()[0].rejection.as_deref(),
+                Some(reason)
+            );
         }
     }
 
     #[tokio::test]
     async fn a_model_refusal_with_text_does_not_replace_the_tool_output() {
         // OpenRouter reports a model refusal next to kept message text.
-        let (url, server) = serve(vec![serde_json::json!({
+        let server = MockServer::start(serde_json::json!({
             "id": "gen-1", "object": "chat.completion", "created": 1,
             "model": "anthropic/claude-sonnet-5", "provider": "Anthropic",
             "choices": [{"index": 0, "finish_reason": "stop", "native_finish_reason": "end_turn",
                 "message": {"role": "assistant", "content": "Here is a summ",
                     "refusal": "I can't help with that."}}],
             "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6, "cost": 0.25}
-        })])
+        }))
         .await;
         let client = arko_ai::LLMClient::new().with_openrouter_client(
             arko_ai::providers::openrouter::OpenRouterClient::new("sk-or-test")
-                .with_base_url(format!("{url}/api/v1")),
+                .with_base_url(format!("{}/api/v1", server.url)),
         );
         let (outcome, context) =
             distill(client, Model::openrouter("anthropic/claude-sonnet-5")).await;
-        server.await.unwrap();
-        let Err(ToolError::ExecutionFailed(error)) = outcome else {
-            panic!("a refusal must not replace the tool output");
-        };
-        assert!(error.contains("refused by model: I can't help with that."), "{error}");
+        assert!(matches!(outcome, Ok(InterceptedResult::Unchanged)));
+        assert_eq!(server.requests(), 1);
         assert_eq!(context.budget.total_spent(), 0.25);
         let records = context.distillation_records.read();
+        // The explanation is not counted; the kept message text is.
         assert_eq!(records[0].output_chars, "Here is a summ".len());
-        assert!(records[0].rejection.is_some());
+        assert_eq!(
+            records[0].rejection.as_deref(),
+            Some("refused by model: I can't help with that.")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_reported_as_an_error_keeps_the_tool_output_without_a_retry() {
+        let server = MockServer::start_with_status(
+            403,
+            serde_json::json!({"error": {"code": 403,
+                "message": "This content was flagged for possible cybersecurity risk.",
+                "metadata": {"error_type": "refusal", "provider_code": "cyber_policy"}}}),
+        )
+        .await;
+        let client = arko_ai::LLMClient::new().with_openrouter_client(
+            arko_ai::providers::openrouter::OpenRouterClient::new("sk-or-test")
+                .with_base_url(format!("{}/api/v1", server.url)),
+        );
+        let (outcome, context) = distill(client, Model::openrouter("openai/gpt-6-sol")).await;
+        assert!(matches!(outcome, Ok(InterceptedResult::Unchanged)));
+        assert_eq!(server.requests(), 1);
+        // Nothing was generated or billed.
+        assert_eq!(context.budget.total_spent(), 0.0);
+        assert!(context.distillation_records.read().is_empty());
     }
 
     #[tokio::test]
     async fn a_finished_summary_replaces_the_tool_output() {
-        let (url, server) = serve(vec![anthropic_reply("The failing test is x.rs:12.", "end_turn")]).await;
+        let server = MockServer::start(anthropic_reply("The failing test is x.rs:12.", "end_turn")).await;
         let (outcome, context) =
-            distill(anthropic_client(&url), Model::anthropic_claude_opus_5_5()).await;
-        server.await.unwrap();
+            distill(server.anthropic_client(), Model::anthropic_claude_opus_5_5()).await;
         let Ok(InterceptedResult::Replaced(summary)) = outcome else {
             panic!("a complete summary replaces the output");
         };
@@ -384,15 +499,29 @@ mod tests {
     }
 }
 
+/// The default [`DistillationConfig::max_output_tokens`], lowered to the
+/// model's output limit when that is smaller. Reasoning (thinking) tokens
+/// count against the limit, and models such as Claude Opus 5.5 (adaptive
+/// thinking) or GPT-5.5 and later (medium effort) reason by default, so the
+/// limit leaves room for reasoning as well as the summary. It is a cap, not
+/// a target: a summary cut off at the limit is billed but not used.
+const DEFAULT_MAX_OUTPUT_TOKENS: usize = 16_000;
+
 impl DistillationConfig {
     pub fn new(name: impl Into<String>, model: arko_ai::Model) -> Self {
+        // 0 means the limit is unknown (an OpenRouter model without catalog
+        // metadata).
+        let max_output_tokens = match model.max_output_tokens {
+            0 => DEFAULT_MAX_OUTPUT_TOKENS,
+            limit => DEFAULT_MAX_OUTPUT_TOKENS.min(limit),
+        };
         Self {
             name: name.into(),
             model,
             target_agents: HashSet::new(),
             target_tools: HashSet::new(),
             min_chars: 8_000,
-            max_output_tokens: 4_000,
+            max_output_tokens,
             instructions: "Preserve every fact relevant to the task, exact errors, paths, identifiers, constraints, and actionable details. Remove repetition and irrelevant bulk. Never invent facts.".to_string(),
             reasoning: None,
         }
@@ -479,30 +608,53 @@ pub struct DistillationRecord {
     pub rejection: Option<String>,
 }
 
-/// The distilled text when `response` is a complete summary, else why it
-/// can't stand in for the tool output: a refusal (whatever text accompanies
-/// it), a turn cut short by a token limit or ended any other way than the
-/// model finishing, or no text at all.
-fn complete_summary(response: &arko_ai::GenerationResponse) -> Result<String, String> {
-    if let Some(refusal) = &response.refusal {
-        return Err(refusal.to_string());
-    }
-    match &response.stop_reason {
-        arko_ai::StopReason::EndTurn | arko_ai::StopReason::StopSequence => {}
-        reason if reason.is_truncated() => {
-            return Err(format!("summary truncated (stop reason {reason:?})"));
-        }
-        reason => return Err(format!("summary incomplete (stop reason {reason:?})")),
-    }
-    let text = response
+/// Why a distillation response can't replace the tool output.
+#[derive(Debug)]
+struct Rejection {
+    reason: String,
+    /// Whether another attempt could turn out differently. A refusal or a
+    /// token-limit cut would most likely repeat, at full price, so those
+    /// keep the tool output without being retried.
+    retryable: bool,
+}
+
+/// The response's text content, joined as a summary is.
+fn response_text(response: &arko_ai::GenerationResponse) -> String {
+    response
         .message
         .content
         .iter()
         .filter_map(arko_ai::Content::as_text)
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n")
+}
+
+/// The distilled text when `response` is a complete summary, else why it
+/// can't stand in for the tool output: a refusal (whatever text accompanies
+/// it), a turn cut short by a token limit, a turn that ended any other way
+/// than the model finishing (including an unreported stop reason), or no
+/// text at all.
+fn complete_summary(response: &arko_ai::GenerationResponse) -> Result<String, Rejection> {
+    let rejection = |reason: String, retryable: bool| Err(Rejection { reason, retryable });
+    if let Some(refusal) = &response.refusal {
+        return rejection(refusal.to_string(), false);
+    }
+    match &response.stop_reason {
+        arko_ai::StopReason::EndTurn | arko_ai::StopReason::StopSequence => {}
+        reason if reason.is_truncated() => {
+            return rejection(format!("summary truncated (stop reason {reason:?})"), false);
+        }
+        // `Other("unknown")` is a response without a stop reason (OpenRouter
+        // `finish_reason: null`, an Anthropic `stop_reason: null`, or a
+        // response saved before stop reasons existed): whether the summary
+        // is complete can't be told, so it is not used.
+        reason => {
+            return rejection(format!("summary incomplete (stop reason {reason:?})"), true);
+        }
+    }
+    let text = response_text(response);
     if text.trim().is_empty() {
-        return Err("returned no text".to_string());
+        return rejection("returned no text".to_string(), true);
     }
     Ok(text)
 }
@@ -543,16 +695,30 @@ impl ToolResultInterceptor for DistillationInterceptor {
             serde_json::to_string(params).unwrap_or_else(|_| "{}".to_string()),
             raw_result
         ));
-        let response = self
+        let response = match self
             .client
             .generate_text(&conversation, self.config.generation_config())
             .await
-            .map_err(|error| {
-                ToolError::ExecutionFailed(format!(
+        {
+            Ok(response) => response,
+            // A refusal reported as an error (such as an OpenRouter
+            // moderation 403) would repeat like any other refusal.
+            Err(arko_ai::Error::Refusal(refusal)) => {
+                log::warn!(
+                    "Task {}: distiller '{}' request for tool '{}' was {refusal}; keeping the tool output",
+                    task_context.task_id,
+                    self.config.name,
+                    tool_name
+                );
+                return Ok(InterceptedResult::Unchanged);
+            }
+            Err(error) => {
+                return Err(ToolError::ExecutionFailed(format!(
                     "distiller '{}' failed: {error}",
                     self.config.name
-                ))
-            })?;
+                )));
+            }
+        };
         // A refused or cut-off summary is billed like a complete one, so
         // every returned response is charged and recorded, used or not.
         let summary = complete_summary(&response);
@@ -581,10 +747,17 @@ impl ToolResultInterceptor for DistillationInterceptor {
             )
             .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
         }
-        let output_chars = match &summary {
-            Ok(distilled) => distilled.chars().count(),
-            Err(_) => response.text().chars().count(),
-        };
+        // The text the model generated, joined as a summary is: the message
+        // text, plus the partial output a refusal moved out of the message
+        // (safety classifier, content filter). A refusal's explanation is not
+        // counted.
+        let partial_output = response
+            .refusal
+            .as_ref()
+            .and_then(|refusal| refusal.partial_output.as_deref())
+            .unwrap_or_default();
+        let output_chars =
+            response_text(&response).chars().count() + partial_output.chars().count();
         self.context
             .distillation_records
             .write()
@@ -597,15 +770,32 @@ impl ToolResultInterceptor for DistillationInterceptor {
                 input_chars: raw_result.chars().count(),
                 output_chars,
                 cost,
-                rejection: summary.as_ref().err().cloned(),
+                rejection: summary
+                    .as_ref()
+                    .err()
+                    .map(|rejection| rejection.reason.clone()),
             });
-        // An error keeps the tool output: the agent runtime falls back to the
-        // raw result under the workflow's interception failure policy.
-        summary.map(InterceptedResult::Replaced).map_err(|reason| {
-            ToolError::ExecutionFailed(format!(
+        match summary {
+            Ok(distilled) => Ok(InterceptedResult::Replaced(distilled)),
+            // Keeps the tool output without a retry.
+            Err(Rejection {
+                reason,
+                retryable: false,
+            }) => {
+                log::warn!(
+                    "Task {}: distiller '{}' result for tool '{}' not used ({reason}); keeping the tool output",
+                    task_context.task_id,
+                    self.config.name,
+                    tool_name
+                );
+                Ok(InterceptedResult::Unchanged)
+            }
+            // The interception failure policy may retry; the tool output is
+            // kept once it gives up.
+            Err(Rejection { reason, .. }) => Err(ToolError::ExecutionFailed(format!(
                 "distiller '{}' result not used: {reason}",
                 self.config.name
-            ))
-        })
+            ))),
+        }
     }
 }

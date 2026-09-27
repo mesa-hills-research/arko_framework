@@ -722,7 +722,7 @@ Register `DistillationConfig` through `WorkflowBuilder::distiller` to replace su
 | `target_agents` | `HashSet<String>` | Matching workflow registration names; empty matches all. |
 | `target_tools` | `HashSet<String>` | Matching tool names; empty matches all. |
 | `min_chars` | `usize` | Minimum input Unicode character count, inclusive; default `8_000`. |
-| `max_output_tokens` | `usize` | Generation limit, default `4_000`; must be positive. |
+| `max_output_tokens` | `usize` | Generation limit including reasoning tokens; default `16_000`, or the model's output limit when smaller (`Model::max_output_tokens`, when known); must be positive. |
 | `instructions` | `String` | Content-preservation instructions described below. |
 | `reasoning` | `Option<arko_ai::ReasoningConfig>` | Default `None`; omitted when serializing None and defaults to None when absent on deserialization. |
 
@@ -736,9 +736,14 @@ Register `DistillationConfig` through `WorkflowBuilder::distiller` to replace su
 | `pub fn instructions(mut self, instructions: impl Into<String>) -> Self` | Replace distillation instructions. |
 | `pub fn reasoning(mut self, reasoning: arko_ai::ReasoningConfig) -> Self` | Set reasoning; workflow build rejects a provider that differs from the model's provider. |
 
-There is no `Default` implementation. Build validates token limit and reasoning/provider compatibility; it does not validate target agent/tool names. Only a finished summary replaces the result: model errors, refusals (`GenerationResponse::refusal`, even when text accompanies it), responses that stopped for any reason other than `StopReason::EndTurn` or `StopReason::StopSequence` (such as `MaxTokens` when the summary hit `max_output_tokens`), and empty text produce interceptor errors handled by the workflow's interception failure policy, which keeps the raw result. A finished, non-empty summary replaces the result even if it is longer than its input; `max_output_tokens` is a generation cap, not a guaranteed compression ratio.
+There is no `Default` implementation. Build validates token limit and reasoning/provider compatibility; it does not validate target agent/tool names. Only a finished summary replaces the result: a response with no refusal, a `StopReason::EndTurn` or `StopReason::StopSequence` stop reason, and non-empty text. Otherwise the raw result is kept:
 
-Distillation charges the billed amount `response.usage.billed()` (zero for subscription calls such as ChatGPT OAuth) as a **manual workflow cost**, with description `distillation: <name>` and agent/task/tool metadata. It therefore affects the workflow budget and does not add to the agent's own LLM-spend counter. Warning/exceeded hooks run when indicated; normal managed execution enforces the exceeded workflow budget. Every response the model returns is charged, including refused, cut-off, and empty ones, since they are billed too; the distillation record is appended after the budget hooks succeed.
+- A refusal (`GenerationResponse::refusal`, from any source and even when text accompanies it, or an `arko_ai::Error::Refusal` such as an OpenRouter moderation 403) or a truncated stop reason (`StopReason::is_truncated`: `MaxTokens`, when the summary hit `max_output_tokens`, or `ContextWindowExceeded`) would most likely repeat, so the distiller logs a warning and returns `InterceptedResult::Unchanged`: the interception failure policy does not retry it.
+- Model errors, empty text, and any other stop reason produce interceptor errors, which the workflow's interception failure policy may retry before keeping the raw result. That includes `StopReason::Other("unknown")`, a response that reported no stop reason (OpenRouter `finish_reason: null`, an Anthropic `stop_reason: null`), whose completeness can't be told.
+
+A finished, non-empty summary replaces the result even if it is longer than its input; `max_output_tokens` is a generation cap, not a guaranteed compression ratio. Reasoning (thinking) tokens count against `max_output_tokens` with OpenAI API keys and on Anthropic (a manual thinking budget must stay below it unless interleaved thinking is on), so a limit that is too small for the model's reasoning yields truncated summaries, which are charged but not used. ChatGPT OAuth requests send no output limit.
+
+Distillation charges the billed amount `response.usage.billed()` (zero for subscription calls such as ChatGPT OAuth) as a **manual workflow cost**, with description `distillation: <name>` and agent/task/tool metadata. It therefore affects the workflow budget and does not add to the agent's own LLM-spend counter. Warning/exceeded hooks run when indicated; normal managed execution enforces the exceeded workflow budget. Every response the model returns is charged and recorded, including refused, cut-off, and empty ones, since they are billed too (each retry of an interceptor error is another billed call); the distillation record is appended after the budget hooks succeed.
 
 ### `DistillationRecord`
 
@@ -754,7 +759,7 @@ pub cost: f64;
 pub rejection: Option<String>;
 ```
 
-Public fields identify the target task/agent/tool and configuration, UTC timestamp, input/output Unicode character counts, and reported dollar cost. `rejection` is `None` when the distilled text replaced the result; otherwise it says why the text was not used (the refusal, the stop reason, or no text), and `output_chars` counts the unused text. It is omitted when serializing `None`, and records saved before it existed load as `None`. Records are available through `SharedContext::distillation_records` and checkpoint state.
+Public fields identify the target task/agent/tool and configuration, UTC timestamp, input/output Unicode character counts, and reported dollar cost. `output_chars` counts the text the model generated, joined as a summary is (text parts separated by newlines): the message text, plus the `Refusal::partial_output` that a safety-classifier or content-filter refusal moves out of the message; a refusal's explanation is not counted. `rejection` is `None` when the distilled text replaced the result; otherwise it says why the text was not used (the refusal, the stop reason, or no text). It is omitted when serializing `None`, and records saved before it existed load as `None`. Records are available through `SharedContext::distillation_records` and checkpoint state.
 
 ## Budget and cost accounting
 

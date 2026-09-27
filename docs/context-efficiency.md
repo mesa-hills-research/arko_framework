@@ -75,21 +75,28 @@ let distiller = DistillationConfig::new("bulk-research", Model::openai_gpt_5_6_l
     .target_agent("researcher")
     .target_tool("search_documents")
     .min_chars(12_000)
-    .max_output_tokens(2_000)
+    .max_output_tokens(16_000)
     .instructions("Preserve exact findings, qualifications, and source references. Remove irrelevant repetition.");
 // Register with Workflow::builder().distiller(distiller).
 ```
 
-The existing defaults remain 8,000 input characters and 4,000 output tokens;
-omitted reasoning uses the provider's default. Reasoning must match the selected
+The defaults are 8,000 input characters and 16,000 output tokens (or the model's
+output limit when smaller); omitted reasoning uses the provider's default.
+Reasoning (thinking) tokens count against the output limit with OpenAI API keys
+and on Anthropic, and models such as Claude Opus 5.5 or GPT-5.5 and later reason
+by default, so leave room for reasoning as well as the summary: a limit that is
+too small yields truncated summaries, which are charged but not used. ChatGPT
+OAuth requests send no output limit. Reasoning must match the selected
 provider and the output limit must be positive. Distillers see the task prompt,
 tool name, parameters, and raw result. Their output is model-authored, not a
 deterministic accuracy guarantee. Keep source evidence accessible through tools.
 Interception events and the `PostToolResultInterception` hook expose original and
 effective text; use a host hook to retain source artifacts when needed. A summary
-is used only when the model finished it: a refusal, a summary cut off by the output
-limit, or any other early stop is an interceptor error (the call is still charged).
-Configured interceptor-error policies still fall back to raw output. Bound huge outputs in the producing tool
+is used only when the model finished it, and every call is charged. A refusal or a
+summary cut off by the output limit keeps the raw output without a retry, since it
+would most likely repeat; any other early stop (including an unreported stop
+reason) or an empty summary is an interceptor error, which configured
+interceptor-error policies may retry before falling back to raw output. Bound huge outputs in the producing tool
 when raw fallback would be unsuitable.
 
 ## Shell tools and background jobs

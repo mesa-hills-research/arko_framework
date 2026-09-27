@@ -1621,4 +1621,84 @@ mod tests {
         assert_eq!(observed_agent.lock().unwrap().as_deref(), Some("coder"));
         std::fs::remove_dir(&workspace).unwrap();
     }
+
+    #[derive(Debug)]
+    struct PassThrough;
+
+    #[async_trait]
+    impl ToolResultInterceptor for PassThrough {
+        async fn intercept(
+            &self,
+            _tool_name: &str,
+            _raw_result: &str,
+            _params: &HashMap<String, Value>,
+            _task_context: &TaskContext<'_>,
+        ) -> Result<InterceptedResult, ToolError> {
+            Ok(InterceptedResult::Unchanged)
+        }
+    }
+
+    /// Under a retrying failure policy, a refused or truncated summary is not
+    /// requested (and billed) again; an empty one is.
+    #[tokio::test]
+    async fn chained_distillers_retry_only_rejections_that_could_turn_out_differently() {
+        use crate::distillation::DistillationConfig;
+        use crate::distillation::tests::{MockServer, anthropic_reply};
+        let config = AgentConfig::builder(
+            "coder".to_string(),
+            "Coder".to_string(),
+            AgentLLMConfig {
+                model: Model::anthropic_claude_opus_5_5(),
+                generation_config: GenerationConfig::default(),
+            },
+        )
+        .role_description("test coder".to_string())
+        .instructions("test instructions".to_string())
+        .build()
+        .unwrap();
+        for (reply, requests) in [
+            (anthropic_reply("The failing test is in", "max_tokens"), 1),
+            (anthropic_reply("The failing test", "refusal"), 1),
+            (anthropic_reply("", "end_turn"), 3),
+        ] {
+            let server = MockServer::start(reply).await;
+            let workflow = Workflow::builder()
+                .name("distillation-retry-test")
+                .workspace(std::env::temp_dir())
+                .llm_client(Arc::new(server.anthropic_client()))
+                .agent("coder", config.clone())
+                .ephemeral()
+                // A second interceptor makes the engine chain them.
+                .tool_result_interceptor(Arc::new(PassThrough))
+                .distiller(
+                    DistillationConfig::new("bulk", Model::anthropic_claude_opus_5_5())
+                        .min_chars(10),
+                )
+                .interception_failure_policy(
+                    arko_agents::InterceptionFailurePolicy::RetryThenUseRawResult {
+                        max_attempts: 3,
+                    },
+                )
+                .build()
+                .unwrap();
+            let interceptor = workflow
+                .engine
+                .build_interceptor_config("coder", workflow.context())
+                .unwrap()
+                .interceptor;
+            let task = TaskContext {
+                task_id: uuid::Uuid::new_v4(),
+                agent_name: "coder",
+                initial_task_prompt: "find the failing test",
+                current_working_directory: &workflow.context().workspace,
+            };
+            let outcome = interceptor
+                .intercept("search", &"raw tool output ".repeat(10), &HashMap::new(), &task)
+                .await
+                .unwrap();
+            assert!(matches!(outcome, InterceptedResult::Unchanged));
+            assert_eq!(server.requests(), requests);
+            assert_eq!(workflow.context().distillation_records.read().len(), requests);
+        }
+    }
 }
