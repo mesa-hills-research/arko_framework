@@ -1485,6 +1485,11 @@ impl AgentLoop {
                                 // unchanged, and never treated as a turn that
                                 // failed to call a tool.
                                 if let Some(refusal) = generation_response.refusal.clone() {
+                                    // The call's routing token still belongs
+                                    // to this turn, as for any other response.
+                                    if let Some(token) = &generation_response.openai_turn_state {
+                                        self.task.conversation.record_openai_turn_state(token);
+                                    }
                                     if let Some(ref mut p) = parser {
                                         raw_events_for_turn.extend(p.finalize());
                                     }
@@ -2647,8 +2652,9 @@ impl AgentLoop {
     /// ([`ai::RefusalSource::keeps_turn`]) stays in history so the model can
     /// see what it declined, with the refusal explanation as its text when the
     /// turn has none. Its tool calls are not run, so they are not kept either
-    /// (a call without a result would invalidate the history), and a turn
-    /// with no text at all is not kept. Classifier and content-filter
+    /// (a call without a result would invalidate the history; OpenAI output
+    /// items stored with the turn replay only the calls it still holds), and
+    /// a turn with no text at all is not kept. Classifier and content-filter
     /// refusals are removed from history.
     async fn handle_refusal(
         &mut self,

@@ -945,6 +945,75 @@ async fn native_mode_model_refusals_are_kept_reported_and_not_retried() {
     assert_model_refusal_reported(&task, messages_before, &events);
 }
 
+/// An OpenAI response keeps its output items for replay. A refused turn the
+/// agent keeps without its tool calls must replay those items without the
+/// dropped call (a call with no result is rejected by the API), and the
+/// turn keeps the response's routing token.
+#[tokio::test(start_paused = true)]
+async fn a_kept_openai_refusal_replays_its_items_without_the_dropped_calls() {
+    use serde_json::json;
+    let reasoning = json!({"type":"reasoning", "id":"rs_1", "summary":[], "encrypted_content":"enc_1"});
+    let refusal_message = json!({"type":"message", "id":"msg_1", "role":"assistant",
+        "content":[{"type":"refusal", "refusal":"I can't help with that."}]});
+    let call = json!({"type":"function_call", "id":"fc_1", "call_id":"refused-call",
+        "name":"complete_task", "arguments":"{\"summary\":\"done\"}"});
+    let mut message = ai::Message::new_assistant("");
+    message.id = Some("msg_1".into());
+    message.reasoning_artifact = Some(ai::ReasoningArtifact::OpenAIOutputItems {
+        items: vec![reasoning.clone(), refusal_message.clone(), call],
+    });
+    message.tool_calls.push(ai::ToolCall {
+        id: Some("refused-call".into()),
+        name: "complete_task".into(),
+        arguments: json!({"summary":"done"}),
+        thought_signature: None,
+        provider_id: Some("fc_1".into()),
+        invalid_arguments: None,
+    });
+    let ai::StreamEvent::End(mut response) = refused_response(message, model_refusal()) else {
+        unreachable!()
+    };
+    response.openai_turn_state = Some("turn-1".into());
+    let (task, messages_before, events) = run_refused_turn(
+        ToolCallingMode::Native,
+        vec![ai::StreamEvent::Refusal(model_refusal()), ai::StreamEvent::End(response)],
+    )
+    .await;
+    assert_model_refusal_reported(&task, messages_before, &events);
+    assert_eq!(task.conversation.current_openai_turn_state(), Some("turn-1"));
+
+    // The trace records the next request before it is sent; nothing listens
+    // on the port, so the call itself fails.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let dir = std::env::temp_dir().join(format!("arko-agents-refusal-replay-{}", Uuid::new_v4()));
+    let client = ai::LLMClient::new()
+        .with_request_trace(ai::RequestTrace::new(&dir))
+        .with_openai_client(
+            ai::providers::openai::OpenAIClient::new("test")
+                .with_base_url(format!("http://127.0.0.1:{port}")),
+        );
+    assert!(client.generate_text(&task.conversation, Default::default()).await.is_err());
+    let request_file = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.is_dir())
+        .unwrap()
+        .join("0001-request.json");
+    let request: Value = serde_json::from_str(&std::fs::read_to_string(request_file).unwrap()).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    let input = request["body"]["input"].as_array().unwrap();
+    assert!(!input.iter().any(|item| item["type"] == "function_call"), "{input:?}");
+    let replayed: Vec<&Value> = input
+        .iter()
+        .filter(|item| item["type"] == "reasoning" || item["role"] == "assistant")
+        .collect();
+    assert_eq!(replayed, [&reasoning, &refusal_message]);
+}
+
 #[tokio::test(start_paused = true)]
 async fn text_mode_model_refusals_are_kept_reported_and_not_retried() {
     let (task, messages_before, events) = run_refused_turn(

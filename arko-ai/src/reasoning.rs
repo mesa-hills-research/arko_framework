@@ -497,7 +497,9 @@ pub enum ReasoningArtifact {
     /// renders the same from request to request (prompt caching) and lets
     /// reasoning carry across turns with `store: false`. A `function_call`
     /// item is replayed only while the message still holds that call (by
-    /// `call_id`), so every replayed call has an output.
+    /// `call_id`), so every replayed call has an output. When the items hold
+    /// no `message`, the message's own text (for example the explanation an
+    /// agent keeps for a refused turn) is replayed after them.
     OpenAIOutputItems {
         items: Vec<Value>,
     },

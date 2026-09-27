@@ -287,6 +287,77 @@ fn a_replayed_call_needs_the_message_to_still_hold_it() {
     assert_eq!(calls, ["reasoning:", "function_call:call_b", "function_call:call_c"]);
 }
 
+/// A refused turn an agent keeps (arko-agents' `handle_refusal`) loses its
+/// tool calls and gets the refusal explanation as its text when it has
+/// none. Its replay must not carry the dropped calls, and must still show
+/// what the model declined.
+#[tokio::test]
+async fn a_kept_refusal_replays_without_the_calls_it_dropped() {
+    let refusal_message = json!({"type": "message", "id": "msg_r", "status": "completed", "role": "assistant",
+        "content": [{"type": "refusal", "refusal": "Fixture refusal."}]});
+    let refusal_deltas = [
+        json!({"type": "response.refusal.delta", "item_id": "msg_r", "content_index": 0, "delta": "Fixture refusal."}),
+        json!({"type": "response.refusal.done", "item_id": "msg_r", "content_index": 0, "refusal": "Fixture refusal."}),
+    ];
+    let done = |index: u64, item: Value| json!({"type": "response.output_item.done", "output_index": index, "item": item});
+    let completed_event = json!({"type": "response.completed", "response": completed(json!([]))});
+    // The backend's usual stream, and one whose message item never arrived.
+    let with_message = [
+        vec![done(0, reasoning_item())],
+        refusal_deltas.to_vec(),
+        vec![done(1, refusal_message.clone()), done(2, call_item("a")), completed_event.clone()],
+    ]
+    .concat();
+    let without_message =
+        [vec![done(0, reasoning_item())], refusal_deltas.to_vec(), vec![done(1, call_item("a")), completed_event]]
+            .concat();
+
+    for (events, expected_message) in [
+        (with_message, without_status(&refusal_message)),
+        (
+            without_message,
+            json!({"type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "Fixture refusal."}]}),
+        ),
+    ] {
+        let bytes = futures::stream::iter([Ok::<_, std::io::Error>(sse(&events))]);
+        let mut stream =
+            OpenAIClient::stream_events(bytes, Model::openai_gpt_6_astra(), GenerationConfig::default(), true);
+        let mut response = None;
+        while let Some(event) = stream.next().await {
+            if let StreamEvent::End(end) = event.unwrap() {
+                response = Some(*end);
+            }
+        }
+        let response = response.unwrap();
+        let refusal = response.refusal.clone().unwrap();
+        assert_eq!(refusal.source, RefusalSource::Model);
+        assert_eq!(response.message.tool_calls[0].id.as_deref(), Some("call_a"));
+        let Some(ReasoningArtifact::OpenAIOutputItems { items }) = &response.message.reasoning_artifact else {
+            panic!("expected output items");
+        };
+        assert!(items.iter().any(|item| item["type"] == "function_call"));
+
+        // What the agent keeps: no calls, and the explanation as the text.
+        let mut kept = response.message;
+        kept.tool_calls.clear();
+        kept.content = vec![Content::Text(refusal.explanation.unwrap())];
+        let mut conversation = conversation();
+        conversation.messages.push(kept);
+        conversation.add_user_message("Something else, then.");
+
+        let request = OpenAIClient::new("test").build_request(&conversation, &GenerationConfig::default(), false).unwrap();
+        let input = serde_json::to_value(request).unwrap()["input"].as_array().unwrap().clone();
+        assert!(
+            !input.iter().any(|item| item["type"] == "function_call" || item["type"] == "function_call_output"),
+            "a dropped call must not be replayed: {input:?}"
+        );
+        assert_eq!(input[1..3], [without_status(&reasoning_item()), expected_message]);
+        assert_eq!(input[3]["role"], "user");
+        assert_eq!(input.len(), 4);
+    }
+}
+
 #[tokio::test]
 async fn turn_state_is_echoed_within_a_turn_and_dropped_at_the_next_user_message() {
     tokio::time::timeout(Duration::from_secs(5), async {

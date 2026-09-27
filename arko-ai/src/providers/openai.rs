@@ -1737,6 +1737,21 @@ impl OpenAIClient {
                     &message.reasoning_artifact
                 {
                     Self::replay_output_items(&mut request.input, message, items);
+                    // Text the items don't hold (the application's own, such
+                    // as the explanation kept for a refused turn) follows them.
+                    let holds_message = items
+                        .iter()
+                        .any(|item| item.get("type").and_then(Value::as_str) == Some("message"));
+                    let has_text = message
+                        .content
+                        .iter()
+                        .filter_map(Content::as_text)
+                        .any(|text| !text.is_empty());
+                    if !holds_message && has_text {
+                        request.input.push(OpenAIInputEntry::Message(
+                            self.convert_message_to_openai(message)?,
+                        ));
+                    }
                     continue;
                 }
 
@@ -1842,8 +1857,9 @@ impl OpenAIClient {
     /// Replays a response's stored output items verbatim and in order (see
     /// [`ReasoningArtifact::OpenAIOutputItems`]). A `function_call` item is
     /// replayed only if the message still holds that call, so every
-    /// replayed call gets an output; calls the message holds without an
-    /// item follow in the reconstructed shape.
+    /// replayed call gets an output (an application that drops a call, such
+    /// as an agent keeping a refused turn, drops its item too); calls the
+    /// message holds without an item follow in the reconstructed shape.
     fn replay_output_items(input: &mut Vec<OpenAIInputEntry>, message: &Message, items: &[Value]) {
         let held: HashSet<&str> = message
             .tool_calls
