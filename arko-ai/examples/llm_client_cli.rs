@@ -104,7 +104,8 @@ struct GenerationArgs {
 
     /// Claude effort (low, medium, high, xhigh, max), with adaptive thinking
     /// or together with a --reasoning-level token budget (Claude Opus 4.5);
-    /// for other providers the same as --reasoning-level
+    /// otherwise the same setting as --reasoning-level, which it must match
+    /// when both are given
     #[arg(long)]
     reasoning_effort: Option<String>,
 
@@ -438,6 +439,14 @@ fn build_config(model: &Model, args: &GenerationArgs) -> Result<GenerationConfig
     let mut config = GenerationConfig::default();
 
     if let Some(temp) = args.temperature {
+        // OpenAI reasoning models and Gemini reject a temperature with an
+        // error; these Claude models get none, so say so.
+        if model.provider == Provider::Anthropic && model.omits_anthropic_sampling_parameters() {
+            eprintln!(
+                "Warning: {} takes no temperature; --temperature is not sent.",
+                model.id
+            );
+        }
         config = config.with_temperature(temp);
     }
     if let Some(tokens) = args.max_tokens {
@@ -485,9 +494,16 @@ fn reasoning_config(
 ) -> Result<ReasoningConfig, Error> {
     let level = args.reasoning_level.as_deref();
     let effort = args.reasoning_effort.as_deref();
+    // Outside a Claude token budget, the two flags name the same setting.
+    let setting = || match (level, effort) {
+        (Some(level), Some(effort)) if level != effort => Err(invalid(format!(
+            "--reasoning-level '{level}' and --reasoning-effort '{effort}' disagree; give one of them."
+        ))),
+        (level, effort) => Ok(level.or(effort)),
+    };
     Ok(match model.provider {
         Provider::OpenAI => {
-            let effort = match level.or(effort).unwrap_or("medium") {
+            let effort = match setting()?.unwrap_or("medium") {
                 "none" => OpenAIEffort::None,
                 "minimal" => OpenAIEffort::Minimal,
                 "low" => OpenAIEffort::Low,
@@ -504,31 +520,25 @@ fn reasoning_config(
             ReasoningConfig::openai(effort, true)
         }
         Provider::Anthropic => {
-            let effort = effort.map(anthropic_effort).transpose()?;
-            // A number is a manual thinking budget; a name, an adaptive effort.
-            let budget = level.and_then(|level| level.parse::<usize>().ok());
-            match (level, budget, effort) {
-                (_, Some(budget), None) => ReasoningConfig::anthropic(budget),
-                (_, Some(budget), Some(effort)) => {
-                    ReasoningConfig::anthropic_with_effort(budget, effort)
+            // A number is a manual thinking budget, which an effort may
+            // accompany (Claude Opus 4.5); a name is an effort, for adaptive
+            // thinking where the model supports it.
+            if let Some(budget) = level.and_then(|level| level.parse::<usize>().ok()) {
+                match effort.map(anthropic_effort).transpose()? {
+                    Some(effort) => ReasoningConfig::anthropic_with_effort(budget, effort),
+                    None => ReasoningConfig::anthropic(budget),
                 }
-                (Some(_), None, Some(_)) => {
-                    return Err(invalid(
-                        "Give a Claude effort once: --reasoning-level <effort>, or --reasoning-effort with a token budget.".into(),
-                    ));
+            } else {
+                let effort = setting()?.map(anthropic_effort).transpose()?;
+                match (model.supports_anthropic_adaptive_thinking(), effort) {
+                    (true, Some(effort)) => ReasoningConfig::anthropic_adaptive_with_effort(effort),
+                    (true, None) => ReasoningConfig::anthropic_adaptive(),
+                    (false, Some(effort)) => ReasoningConfig::anthropic_with_effort(1024, effort),
+                    (false, None) => ReasoningConfig::anthropic(1024),
                 }
-                (Some(level), None, None) => {
-                    ReasoningConfig::anthropic_adaptive_with_effort(anthropic_effort(level)?)
-                }
-                (None, _, effort) if model.supports_anthropic_adaptive_thinking() => match effort {
-                    Some(effort) => ReasoningConfig::anthropic_adaptive_with_effort(effort),
-                    None => ReasoningConfig::anthropic_adaptive(),
-                },
-                (None, _, Some(effort)) => ReasoningConfig::anthropic_with_effort(1024, effort),
-                (None, _, None) => ReasoningConfig::anthropic(1024),
             }
         }
-        Provider::Google => match level.or(effort) {
+        Provider::Google => match setting()? {
             // -1: the model's default level or dynamic budget.
             None => ReasoningConfig::google(-1, true),
             Some(level) => match level.parse::<isize>() {
@@ -551,7 +561,7 @@ fn reasoning_config(
         },
         Provider::OpenRouter => {
             // An effort name, or a number as a reasoning token budget.
-            let mut reasoning = match level.or(effort) {
+            let mut reasoning = match setting()? {
                 None if !args.reasoning => OpenRouterReasoning::default(),
                 None | Some("medium") => OpenRouterReasoning::effort(ReasoningEffort::Medium),
                 Some("none") => OpenRouterReasoning::effort(ReasoningEffort::None),
