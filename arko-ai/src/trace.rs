@@ -12,11 +12,13 @@
 //! ```
 //!
 //! A key made only of lowercase ASCII letters, digits, `.`, `-` and `_` is
-//! its own directory name. Other keys are lowercased with other characters
-//! replaced by `_`, plus `-` and 16 hex digits of the key's SHA-256
+//! its own directory name (unless it ends in `-` and 16 hex digits, like a
+//! hashed name). Other keys are lowercased with other characters replaced
+//! by `_`, plus `-` and 16 hex digits of the key's SHA-256
 //! (`arko:conversation:x` → `arko_conversation_x-ed168f36ad25bfa2`), so
 //! different keys never share a directory, even on case-insensitive
-//! filesystems.
+//! filesystems. Each `calls.jsonl` line names its directory in
+//! `conversation_dir`.
 //!
 //! The previous request is the last one that didn't fail: a failed or
 //! abandoned call is traced, but the call after it (typically its retry) is
@@ -455,7 +457,7 @@ impl TraceCall {
             .and_then(Value::as_str)
             .and_then(|value| value.strip_prefix("sha256:"));
 
-        let line = json!({
+        let mut line = json!({
             "completed_unix_ms": unix_ms(SystemTime::now()),
             "started_unix_ms": self.started_unix_ms,
             "conversation": self.conversation_key,
@@ -502,6 +504,8 @@ impl TraceCall {
                 "completed": completed_ms,
             },
         });
+        // Added outside `json!`, which is at its macro recursion limit.
+        line["conversation_dir"] = Value::String(sanitize(&self.conversation_key));
         self.trace.append_summary(&line);
     }
 
@@ -626,12 +630,14 @@ fn response_id_prefix(id: &str) -> Option<String> {
 /// than ASCII letters, digits,
 /// `.`, `-` and `_` become `_` and ASCII letters are lowercased, so the name
 /// holds no path separators or drive prefixes. A key this leaves unchanged
-/// is its own name; any other key gets `-<hash of the key>` appended, so
-/// keys that differ only in replaced characters or in case (`team/a`,
-/// `team:a`, `Team_a`) keep apart, also on case-insensitive filesystems. A
-/// name that would still be unsafe (empty, `.`/`..` or any other leading or
-/// trailing dot, a Windows device name such as `CON`, or too long) becomes
-/// `_<readable part>-<hash of the key>` instead.
+/// is its own name, unless it ends like a hashed name (`-` and 16 lowercase
+/// hex digits); any other key gets `-<hash of the key>` appended, so keys
+/// that differ only in replaced characters or in case (`team/a`, `team:a`,
+/// `Team_a`) keep apart, also on case-insensitive filesystems, and no key
+/// can take another's hashed name. A name that would still be unsafe
+/// (empty, `.`/`..` or any other leading or trailing dot, a Windows device
+/// name such as `CON`, or too long) becomes `_<readable part>-<hash of the
+/// key>` instead.
 fn sanitize(key: &str) -> String {
     const MAX_LEN: usize = 100;
     let mapped: String = key
@@ -648,7 +654,7 @@ fn sanitize(key: &str) -> String {
         && !mapped.ends_with('.')
         && mapped.len() <= MAX_LEN
         && !is_windows_device_name(stem);
-    if safe && mapped == key {
+    if safe && mapped == key && !ends_with_hash(key) {
         return mapped;
     }
     let hash = &hex_sha256(key.as_bytes())[..16];
@@ -657,6 +663,16 @@ fn sanitize(key: &str) -> String {
     }
     let readable: String = mapped.trim_matches('.').chars().take(64).collect();
     format!("_{readable}-{hash}")
+}
+
+/// Whether `name` ends as a hashed name does: `-` and 16 lowercase hex digits.
+fn ends_with_hash(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() >= 17
+        && bytes[bytes.len() - 17] == b'-'
+        && bytes[bytes.len() - 16..]
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Names Windows reserves for devices in every directory, with or without
@@ -774,6 +790,13 @@ mod tests {
         assert_eq!(sanitize("team:a"), "team_a-5752fddeb3d6826d");
         assert_eq!(sanitize("Team_a"), "team_a-ce273f5f4372bcfa");
         assert_eq!(sanitize("TEAM_A"), "team_a-a44a58ae06e1266c");
+        // A key that looks like a hashed name is hashed too, so it can't
+        // take the directory of the key that hashes to it.
+        assert_eq!(sanitize("team_a-65f838a2fbff37d8"), "team_a-65f838a2fbff37d8-288075f2d9c64d12");
+        assert_ne!(sanitize("team_a-65f838a2fbff37d8"), sanitize("team/a"));
+        for key in ["team_a-65f838a2fbff37d", "team_a-65f838a2fbff37dg", "team_a_65f838a2fbff37d8"] {
+            assert_eq!(sanitize(key), key, "not a hashed name");
+        }
         // Distinct even compared case-insensitively.
         let keys = ["team_a", "team/a", "team:a", "team\\a", "Team_a", "TEAM_A", "team a", "tëam_a", "CON", "con", ".", ".."];
         let names: std::collections::HashSet<String> =
@@ -969,7 +992,9 @@ mod tests {
         assert_eq!(lines[1]["streamed_reasoning_with_encrypted_content"], 1);
         assert_eq!(lines[1]["completed_output_count"], 0);
         assert_eq!(lines[1]["response_id_prefix"], "0123456789abcdef");
-        assert!(dir.join(sanitize("arko:conversation:x")).join("0002-response.json").exists());
+        assert_eq!(lines[1]["conversation_dir"], "arko_conversation_x-ed168f36ad25bfa2");
+        let conversation_dir = lines[1]["conversation_dir"].as_str().unwrap();
+        assert!(dir.join(conversation_dir).join("0002-response.json").exists());
         fs::remove_dir_all(&dir).ok();
     }
 
