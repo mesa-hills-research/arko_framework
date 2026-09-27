@@ -117,7 +117,7 @@ mod transport_tests {
         let address=listener.local_addr().unwrap();
         let (release,ready)=tokio::sync::oneshot::channel();
         let server=tokio::spawn(async move {
-            let(mut socket,_)=listener.accept().await.unwrap();let mut bytes=[0;4096];socket.read(&mut bytes).await.unwrap();
+            let(mut socket,_)=listener.accept().await.unwrap();let mut bytes=[0;4096];assert!(socket.read(&mut bytes).await.unwrap()>0);
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n").await.unwrap();
             ready.await.unwrap();socket.write_all(b"ok").await.unwrap();
         });

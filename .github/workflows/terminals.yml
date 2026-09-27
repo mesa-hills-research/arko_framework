@@ -14,6 +14,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # See "Native (C) dependencies" in README.md.
+      - name: Reject aws-lc and OpenSSL builds
+        if: runner.os == 'Linux'
+        run: |
+          cargo metadata --locked --format-version 1 > "$RUNNER_TEMP/metadata.json"
+          banned=$(jq -r '.packages[].name' "$RUNNER_TEMP/metadata.json" | grep -xE 'aws-lc-sys|aws-lc-rs|openssl-sys' || true)
+          if [ -n "$banned" ]; then
+            echo "::error::Unexpected native dependency: $banned"
+            exit 1
+          fi
       - name: Framework library tests, including native terminal interactions
         run: cargo test --workspace --lib --locked
       - name: Index pipeline and watcher tests
