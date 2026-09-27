@@ -466,10 +466,22 @@ impl Error {
 /// backoff, so underestimating costs one early retry while the longer reset
 /// (often minutes for tokens) could stall a request that would already
 /// succeed.
+///
+/// Capped at [`MAX_SERVER_DELAY_HINT`](crate::retry::MAX_SERVER_DELAY_HINT).
 pub(crate) fn retry_after_from_headers(
     status: u16,
     headers: &reqwest::header::HeaderMap,
 ) -> Option<Duration> {
+    header_delay(status, headers).map(cap_server_hint)
+}
+
+/// A delay hint from a response, capped so callers can add it to the current
+/// time; see [`MAX_SERVER_DELAY_HINT`](crate::retry::MAX_SERVER_DELAY_HINT).
+fn cap_server_hint(delay: Duration) -> Duration {
+    delay.min(crate::retry::MAX_SERVER_DELAY_HINT)
+}
+
+fn header_delay(status: u16, headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     retry_after_header(headers).or_else(|| {
         if status != 429 {
             return None;
@@ -583,7 +595,12 @@ fn find_numeric_field(value: &Value, names: &[&str]) -> Option<f64> {
 /// Delay hints anywhere in an error body: `retry_after_ms`/`retryAfterMs`,
 /// `retry_after`/`retryAfter` (seconds), or a reset time
 /// `resets_at`/`reset_at`/`resetsAt`/`resetAt` (epoch seconds or milliseconds).
+/// Capped at [`MAX_SERVER_DELAY_HINT`](crate::retry::MAX_SERVER_DELAY_HINT).
 pub(crate) fn retry_after_from_value(value: &Value) -> Option<Duration> {
+    body_delay(value).map(cap_server_hint)
+}
+
+fn body_delay(value: &Value) -> Option<Duration> {
     if let Some(milliseconds) =
         find_numeric_field(value, &["retry_after_ms", "retryAfterMs"])
     {
@@ -1014,6 +1031,32 @@ mod tests {
             "Thu, 01 Jan 1970 00:00:00 GMT".parse().unwrap(),
         );
         assert_eq!(retry_after_from_headers(429, &headers), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn huge_server_delay_hints_are_capped() {
+        let cap = crate::retry::MAX_SERVER_DELAY_HINT;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, u64::MAX.to_string().parse().unwrap());
+        assert_eq!(retry_after_from_headers(429, &headers), Some(cap));
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "Fri, 31 Dec 9999 23:59:59 GMT".parse().unwrap(),
+        );
+        assert_eq!(retry_after_from_headers(429, &headers), Some(cap));
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-reset-requests", "99999999999999999999h".parse().unwrap());
+        assert_eq!(retry_after_from_headers(429, &headers), Some(cap));
+        for body in [
+            r#"{"retry_after_ms":1e300}"#,
+            r#"{"retry_after":18446744073709551615}"#,
+            r#"{"resets_at":1e300}"#,
+        ] {
+            assert_eq!(retry_after_from_body(body), Some(cap), "{body}");
+        }
+        // A capped hint can be added to the current time.
+        let _ = std::time::Instant::now() + cap;
+        let _ = std::time::SystemTime::now() + cap;
     }
 
     #[test]

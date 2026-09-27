@@ -7,6 +7,13 @@
 
 use std::time::Duration;
 
+/// The longest delay hint arko-ai takes from a provider response
+/// (`Retry-After`, rate-limit reset headers, `retry_after`/`resets_at` in an
+/// error body): 30 days, longer than any real reset window (ChatGPT usage
+/// limits reset within a week). Longer hints are capped to it, so callers can
+/// add a hint to the current time without overflowing.
+pub const MAX_SERVER_DELAY_HINT: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
 /// Exponential backoff with an optional equal jitter and a server-supplied
 /// minimum.
 ///
@@ -126,5 +133,19 @@ mod tests {
         assert!(policy.delay(u32::MAX, Some(Duration::MAX), u64::MAX) >= Duration::from_secs(1));
         let zero = BackoffPolicy::new(Duration::ZERO, Duration::ZERO);
         assert_eq!(zero.delay(5, None, 12345), Duration::ZERO);
+    }
+
+    #[test]
+    fn huge_server_hints_saturate_and_parsed_hints_keep_deadlines_representable() {
+        let policy = BackoffPolicy::new(Duration::from_secs(1), Duration::from_secs(60));
+        for sample in [0, 7, u64::MAX] {
+            let huge = Duration::from_secs(u64::MAX);
+            assert!(policy.delay(3, Some(huge), sample) >= huge);
+            // Hints parsed from responses are capped, so a caller can add the
+            // delay to the current time (as arko-index's scheduler does).
+            let delay = policy.delay(3, Some(MAX_SERVER_DELAY_HINT), sample);
+            assert!(delay <= MAX_SERVER_DELAY_HINT + Duration::from_secs(30), "{delay:?}");
+            let _ = std::time::Instant::now() + delay;
+        }
     }
 }

@@ -58,5 +58,13 @@ mod tests {
                 .iter()
                 .all(|d| *d >= Duration::from_secs(60) && *d <= Duration::from_secs(61))
         );
+        // A huge hint saturates instead of overflowing; the recovery loop
+        // then fails the retry (checked deadline) rather than panicking.
+        let huge = retry_delay(&config, 3, Some(Duration::from_secs(u64::MAX)), u64::MAX);
+        assert!(huge >= Duration::from_secs(u64::MAX));
+        assert!(tokio::time::Instant::now().checked_add(huge).is_none());
+        // Hints parsed from responses are capped and schedule normally.
+        let capped = retry_delay(&config, 3, Some(arko_ai::retry::MAX_SERVER_DELAY_HINT), u64::MAX);
+        assert!(tokio::time::Instant::now().checked_add(capped).is_some());
     }
 }
