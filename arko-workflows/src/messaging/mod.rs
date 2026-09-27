@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use arko_agents::runtime::command::UserCommand;
 
+pub mod registry;
 pub mod tools;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,15 +77,21 @@ impl MessagingPolicy {
         self.can_message(agent, std::iter::empty::<String>())
     }
 
+    /// Whether `sender` may message `recipient`; never itself.
+    pub fn permits(&self, sender: &str, recipient: &str) -> bool {
+        sender != recipient
+            && self
+                .recipients
+                .get(sender)
+                .is_none_or(|allowed| allowed.contains(recipient))
+    }
+
     /// The agents of `roster` that `sender` may message, in roster order;
     /// never the sender itself.
     pub fn recipients_of(&self, sender: &str, roster: &[String]) -> Vec<String> {
-        let permitted = self.recipients.get(sender);
         roster
             .iter()
-            .filter(|agent| {
-                agent.as_str() != sender && permitted.is_none_or(|allowed| allowed.contains(*agent))
-            })
+            .filter(|agent| self.permits(sender, agent))
             .cloned()
             .collect()
     }
@@ -390,6 +397,9 @@ impl MessageBus {
         content: String,
         attachments: Vec<MessageAttachment>,
     ) -> Result<AgentMessage, String> {
+        if to == from {
+            return Err(format!("'{to}' is not a permitted recipient"));
+        }
         if !self.roster.contains(to) {
             return Err(format!(
                 "unknown recipient '{to}'; valid recipients: {}",

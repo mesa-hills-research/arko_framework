@@ -69,6 +69,8 @@ pub(crate) struct RunControl {
     /// Command channels of the run's agents, to tell them to stop at once.
     agents: parking_lot::Mutex<HashMap<uuid::Uuid, mpsc::WeakSender<UserCommand>>>,
     grace_period: Duration,
+    /// When the run stopped, for the drivers' wind-down deadlines.
+    stopped_at: parking_lot::Mutex<Option<tokio::time::Instant>>,
     stop_saved: AtomicBool,
 }
 
@@ -78,6 +80,7 @@ impl RunControl {
             state: watch::Sender::new(None),
             agents: parking_lot::Mutex::new(HashMap::new()),
             grace_period,
+            stopped_at: parking_lot::Mutex::new(None),
             stop_saved: AtomicBool::new(false),
         }
     }
@@ -101,6 +104,7 @@ impl RunControl {
             true
         });
         if stopped {
+            *self.stopped_at.lock() = Some(tokio::time::Instant::now());
             // Queued before any agent takes its next step; the driver's own
             // (awaited) CancelTask covers a full command channel.
             for sender in self.agents.lock().values() {
@@ -114,6 +118,11 @@ impl RunControl {
 
     pub fn cancellation(&self) -> Option<Cancellation> {
         self.state.borrow().clone()
+    }
+
+    /// When the run stopped, once it has.
+    pub fn stopped_at(&self) -> Option<tokio::time::Instant> {
+        *self.stopped_at.lock()
     }
 
     pub fn is_stopped(&self) -> bool {

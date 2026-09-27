@@ -520,7 +520,7 @@ async fn the_tool_middleware_enforces_the_stop() {
         .unwrap();
     let middleware = workflow
         .engine
-        .build_execution_middleware("coder", workflow.context());
+        .build_execution_middleware("coder", workflow.context(), 0);
     let path = workspace.0.join("lib.rs");
     let parameters = HashMap::from([("path".to_string(), json!(path.to_string_lossy()))]);
     let reader = ToolExecutionContext {
@@ -540,7 +540,7 @@ async fn the_tool_middleware_enforces_the_stop() {
     };
     let reviewer = workflow
         .engine
-        .build_execution_middleware("reviewer", workflow.context());
+        .build_execution_middleware("reviewer", workflow.context(), 0);
     reviewer
         .after(
             &reader,
@@ -578,6 +578,141 @@ async fn the_tool_middleware_enforces_the_stop() {
             }
         );
     }
+}
+
+/// An agent delegated through `run_workflow_agent` and stuck in a tool call
+/// winds down within half its parent's time: it is aborted and recorded
+/// before its parent is, and its tool call doesn't keep running.
+#[tokio::test]
+async fn a_stuck_delegated_agent_is_aborted_and_recorded_before_its_parent() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|_, body| {
+        if body.contains("Delegate.") && !body.contains("function_call_output") {
+            Some(tool_call_turn(
+                "delegate",
+                crate::services::RUN_WORKFLOW_AGENT_TOOL_NAME,
+                json!({"agent": "reviewer", "prompt": "Block."}),
+            ))
+        } else if body.contains("Block.") && !body.contains("Delegate.") {
+            Some(tool_call_turn("block", "block", json!({})))
+        } else {
+            None
+        }
+    })
+    .await;
+    let block = ProbeTool::new("block", true);
+    let workflow = Arc::new(
+        builder(&server, &workspace)
+            .agent_tool("reviewer", block.clone())
+            .workflow_services(crate::services::WorkflowServicesConfig::default())
+            .cancel_grace_period(Duration::from_millis(400))
+            .build()
+            .unwrap(),
+    );
+    let run = tokio::spawn({
+        let workflow = workflow.clone();
+        async move { workflow.run_agent("coder", "Delegate.").await }
+    });
+    within(block.started.notified()).await;
+    assert!(workflow.cancel());
+    assert!(matches!(
+        within(run).await.unwrap(),
+        Err(WorkflowError::Cancelled)
+    ));
+    let results = workflow.result().agent_results;
+    let reviewer = results
+        .iter()
+        .find(|result| result.agent_name == "reviewer")
+        .expect("the delegated agent is recorded");
+    assert_eq!(reviewer.status, AgentRunStatus::Cancelled);
+    assert!(
+        reviewer
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("did not stop within"),
+        "{:?}",
+        reviewer.error
+    );
+    assert_eq!(block.dropped.load(Ordering::SeqCst), 1);
+    let coder = results
+        .iter()
+        .find(|result| result.agent_name == "coder")
+        .unwrap();
+    assert_eq!(coder.status, AgentRunStatus::Cancelled);
+}
+
+/// A verifier running when the run is cancelled decides nothing: the target
+/// is cancelled, not failed.
+#[tokio::test]
+async fn a_verifier_running_at_the_stop_cancels_its_target() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|_, body| {
+        (!body.contains("You are a completion verifier"))
+            .then(|| tool_call_turn("done", "complete_task", json!({"summary": "done"})))
+    })
+    .await;
+    let workflow = Arc::new(
+        builder(&server, &workspace)
+            .completion_verifier(
+                crate::verification::CompletionVerifierConfig::correctness("check", "reviewer")
+                    .target("coder"),
+            )
+            .build()
+            .unwrap(),
+    );
+    let run = tokio::spawn({
+        let workflow = workflow.clone();
+        async move { workflow.run_agent("coder", "Write it.").await }
+    });
+    server.wait_for_requests(2).await;
+    assert!(workflow.cancel());
+    assert!(matches!(
+        within(run).await.unwrap(),
+        Err(WorkflowError::Cancelled)
+    ));
+    for result in workflow.result().agent_results {
+        assert_eq!(
+            result.status,
+            AgentRunStatus::Cancelled,
+            "{}",
+            result.agent_name
+        );
+    }
+}
+
+/// An agent the workflow stops over budget records why.
+#[tokio::test]
+async fn an_agent_stopped_over_budget_records_why() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|index, _| {
+        (index == 0).then(|| tool_call_turn("probe", "probe", json!({})))
+    })
+    .await;
+    let workflow = builder(&server, &workspace)
+        .agent_tool("coder", ProbeTool::new("probe", false))
+        .budget(0.0)
+        .build()
+        .unwrap();
+    let error = within(workflow.run_agent("coder", "Probe."))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, WorkflowError::BudgetExceeded { .. }),
+        "{error:?}"
+    );
+    assert!(workflow.cancellation().is_none());
+    let result = &workflow.result().agent_results[0];
+    assert_eq!(result.status, AgentRunStatus::Cancelled);
+    assert!(
+        result
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with("Stopped by the workflow: Budget exceeded"),
+        "{:?}",
+        result.error
+    );
 }
 
 #[test]

@@ -1,4 +1,5 @@
-//! Send-message tool for inter-agent communication.
+//! Tools for inter-agent communication: `send_message` and
+//! `list_recipients`, and the start notices agents receive.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,12 +13,15 @@ use arko_agents::tool::{
 };
 
 use crate::context::SharedContext;
+use crate::messaging::registry::AgentStatus;
 
 pub const SEND_MESSAGE_TOOL_NAME: &str = "send_message";
+pub const LIST_RECIPIENTS_TOOL_NAME: &str = "list_recipients";
 
 /// Tool allowing agents to send messages to other agents in the workflow.
-/// It lists, and accepts, only the recipients the workflow's messaging
-/// policy permits the agent.
+/// It accepts only recipients the workflow's messaging policy permits the
+/// agent that are running or waiting. Its definition names no agent, so it
+/// never changes during a task.
 #[derive(Debug)]
 pub struct SendMessageTool {
     context: Arc<SharedContext>,
@@ -38,10 +42,7 @@ impl Tool for SendMessageTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: SEND_MESSAGE_TOOL_NAME.to_string(),
-            description: format!(
-                "Send a message to another agent in the workflow. Active agents receive it at their next safe turn boundary. Valid recipients: {}.",
-                self.context.message_recipients(&self.agent_name).join(", ")
-            ),
+            description: "Send a message to another workflow agent that is running (or waiting); it receives the message at its next safe turn boundary. Your task lists the agents you can message, workflow context updates tell you when one starts, and list_recipients reports their current status.".to_string(),
             output_based_example: None,
             parameters: vec![
                 ToolParameterDefinition {
@@ -105,15 +106,31 @@ impl Tool for SendMessageTool {
             })?
             .unwrap_or_default();
 
+        // Only permitted recipients are named, never other agents.
         let recipients = self.context.message_recipients(&self.agent_name);
         if !recipients.iter().any(|recipient| recipient == to) {
             return Err(ToolError::ParameterValidation {
                 param_name: "to".to_string(),
                 message: format!(
-                    "'{to}' is not a recipient you may message; valid recipients: {}",
+                    "'{to}' is not an agent you can message. The agents you can message: {}.",
                     recipients.join(", ")
                 ),
             });
+        }
+        let status = self.context.recipient_status(to);
+        match &status {
+            AgentStatus::NotStarted => {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Agent '{to}' has not started, so it can't receive messages. A workflow context update will tell you when it starts."
+                )));
+            }
+            AgentStatus::Finished(_) => {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Agent '{to}' is {}; it no longer receives messages.",
+                    status.describe()
+                )));
+            }
+            AgentStatus::Running | AgentStatus::Waiting(_) => {}
         }
 
         let message = self
@@ -145,6 +162,118 @@ impl Tool for SendMessageTool {
         )
         .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
 
-        Ok(format!("Message {} sent to agent '{}'.", message.id, to))
+        Ok(match status {
+            AgentStatus::Waiting(_) => format!(
+                "Message {} sent to agent '{to}', which is {}; it receives the message when it continues.",
+                message.id,
+                status.describe()
+            ),
+            _ => format!("Message {} sent to agent '{to}'.", message.id),
+        })
     }
+}
+
+/// Tool reporting the agents an agent may message, with their roles and
+/// current statuses. Offered with `send_message`.
+#[derive(Debug)]
+pub struct ListRecipientsTool {
+    context: Arc<SharedContext>,
+    agent_name: String,
+}
+
+impl ListRecipientsTool {
+    pub fn new(context: Arc<SharedContext>, agent_name: String) -> Self {
+        Self {
+            context,
+            agent_name,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for ListRecipientsTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: LIST_RECIPIENTS_TOOL_NAME.to_string(),
+            description: "List the agents you can message with send_message, with each one's role and current status: not_started, running, waiting (with the reason and, when known, until when), or finished (with the outcome). Running and waiting agents receive messages.".to_string(),
+            output_based_example: None,
+            parameters: vec![],
+            supports_batched_calls: true,
+            tool_type_details: ToolTypeDetails::DeveloperDefined,
+            raw_json_schema_override: None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _task_context: &TaskContext<'_>,
+        _params: HashMap<String, Value>,
+    ) -> Result<String, ToolError> {
+        let statuses = self.context.recipient_statuses(&self.agent_name);
+        if statuses.is_empty() {
+            return Ok("There are no agents you can message.".to_string());
+        }
+        Ok(render_recipients(&self.context, &statuses))
+    }
+}
+
+/// One line per agent: its name, role, and status.
+pub(crate) fn render_recipients(
+    context: &SharedContext,
+    statuses: &[(String, AgentStatus)],
+) -> String {
+    statuses
+        .iter()
+        .map(|(agent, status)| {
+            format!(
+                "- `{agent}` ({}): {}",
+                role(context, agent),
+                status.describe()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn role<'a>(context: &'a SharedContext, agent: &str) -> &'a str {
+    context
+        .agent_configs
+        .get(agent)
+        .map_or("", |config| config.role_description.as_str())
+}
+
+/// The start notices a running agent receives at each safe turn boundary:
+/// one line for every agent it may message that started after the registry
+/// version it has seen.
+pub(crate) struct StartNotices {
+    pub context: Arc<SharedContext>,
+    pub agent_name: String,
+}
+
+impl arko_agents::TurnContextSource for StartNotices {
+    fn turn_context(&self, task_id: uuid::Uuid) -> Option<String> {
+        let recipients = self.context.message_recipients(&self.agent_name);
+        if recipients.is_empty() {
+            return None;
+        }
+        let started = self
+            .context
+            .registry
+            .started_since_seen(task_id, &recipients);
+        (!started.is_empty()).then(|| {
+            started
+                .iter()
+                .map(|agent| start_notice(&self.context, agent))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    }
+}
+
+/// The notice that `agent` started.
+pub(crate) fn start_notice(context: &SharedContext, agent: &str) -> String {
+    format!(
+        "Agent `{agent}` (role: {}) is now running. You can message it with send_message.",
+        role(context, agent)
+    )
 }

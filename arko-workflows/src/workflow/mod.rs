@@ -19,7 +19,8 @@ use crate::freshness::{ActorId, ResourceId};
 use crate::freshness::{ContextFreshnessConfig, ResourceTracker};
 use crate::hooks::{HookCallback, HookPoint, HookRegistry};
 use crate::memory::MemoryConfig;
-use crate::messaging::tools::SEND_MESSAGE_TOOL_NAME;
+use crate::messaging::registry::{AgentRegistry, AgentStatus};
+use crate::messaging::tools::{LIST_RECIPIENTS_TOOL_NAME, SEND_MESSAGE_TOOL_NAME};
 use crate::messaging::{MessageBus, MessagingPolicy};
 use crate::persistence::{PersistenceConfig, PersistenceManager};
 use crate::services::{RUN_WORKFLOW_AGENT_TOOL_NAME, WorkflowServices, WorkflowServicesConfig};
@@ -185,6 +186,15 @@ impl Workflow {
     /// Why and when the run stopped, once it has.
     pub fn cancellation(&self) -> Option<Cancellation> {
         self.context.run_control.cancellation()
+    }
+
+    /// The status of a registered agent in this run, as `list_recipients`
+    /// reports it; `None` for an unknown name.
+    pub fn agent_status(&self, agent_name: &str) -> Option<AgentStatus> {
+        self.context
+            .agent_configs
+            .contains_key(agent_name)
+            .then(|| self.context.recipient_status(agent_name))
     }
 
     /// Add a manual cost entry to the workflow budget.
@@ -517,16 +527,44 @@ impl Workflow {
 /// 2. **Custom driving**: Call [`into_parts`](AgentHandle::into_parts) to get
 ///    the raw event receiver, command sender, and join handle for manual event
 ///    processing.
+///
+/// Dropping the handle without calling either stops the agent: its runtime
+/// task is aborted and no result is recorded.
 pub struct AgentHandle {
-    run: StartedRun,
+    /// Taken by `wait` or `into_parts`.
+    run: Option<StartedRun>,
     context: Arc<SharedContext>,
     persistence: Option<Arc<PersistenceManager>>,
 }
 
 impl AgentHandle {
+    pub(crate) fn new(
+        run: StartedRun,
+        context: Arc<SharedContext>,
+        persistence: Option<Arc<PersistenceManager>>,
+    ) -> Self {
+        Self {
+            run: Some(run),
+            context,
+            persistence,
+        }
+    }
+
+    fn run(&self) -> &StartedRun {
+        self.run
+            .as_ref()
+            .expect("the run is taken only by consuming the handle")
+    }
+
+    fn take_run(&mut self) -> StartedRun {
+        self.run
+            .take()
+            .expect("the run is taken only by consuming the handle")
+    }
+
     /// Returns the name of the agent this handle controls.
     pub fn agent_name(&self) -> &str {
-        &self.run.agent_name
+        &self.run().agent_name
     }
 
     /// Drive the event loop with default workflow behavior and wait for completion.
@@ -534,9 +572,9 @@ impl AgentHandle {
     /// Handles hooks, context freshness, budget tracking, and error recovery
     /// automatically. Returns the agent result on completion, and otherwise
     /// the same errors as [`Workflow::run_agent`].
-    pub async fn wait(self) -> Result<AgentResult, WorkflowError> {
-        let result =
-            engine::drive_to_result(self.run, &self.context, self.persistence.as_ref()).await;
+    pub async fn wait(mut self) -> Result<AgentResult, WorkflowError> {
+        let run = self.take_run();
+        let result = engine::drive_to_result(run, &self.context, self.persistence.as_ref()).await;
         if self.context.run_control.is_stopped() {
             engine::save_stop_checkpoint(&self.context, self.persistence.as_ref()).await;
         }
@@ -552,22 +590,34 @@ impl AgentHandle {
     /// appropriate [`UserCommand`](arko_agents::runtime::command::UserCommand)s.
     /// Hooks and budget tracking are **not** applied automatically. Cancelling
     /// the run still sends the agent `CancelTask`, and the tool middleware
-    /// still cancels it at its next tool call.
+    /// still cancels it at its next tool call. The workflow can't observe
+    /// the agent's end: other agents see it as running for the rest of the
+    /// run.
     #[allow(clippy::type_complexity)]
     pub fn into_parts(
-        self,
+        mut self,
     ) -> (
         tokio::sync::mpsc::Receiver<arko_agents::runtime::event::AgentEvent>,
         tokio::sync::mpsc::Sender<arko_agents::runtime::command::UserCommand>,
         tokio::task::JoinHandle<Result<arko_agents::Task, arko_agents::ArkoAgentsError>>,
         String,
     ) {
+        let run = self.take_run();
         (
-            self.run.event_rx,
-            self.run.cmd_tx,
-            self.run.join_handle,
-            self.run.agent_name,
+            run.event_rx,
+            run.cmd_tx,
+            run.join_handle.into_inner(),
+            run.agent_name,
         )
+    }
+}
+
+impl Drop for AgentHandle {
+    fn drop(&mut self) {
+        // Dropped unused: the runtime task is aborted with the run.
+        if let Some(run) = self.run.take() {
+            engine::abandon_run(&run, &self.context);
+        }
     }
 }
 
@@ -964,7 +1014,10 @@ impl WorkflowBuilder {
                     | "list_memories"
                     | RUN_WORKFLOW_AGENT_TOOL_NAME
                     | CAST_VOTE_TOOL_NAME
-            ) || (tool_name == SEND_MESSAGE_TOOL_NAME && !messaging_agents.is_empty())
+            ) || (matches!(
+                tool_name.as_str(),
+                SEND_MESSAGE_TOOL_NAME | LIST_RECIPIENTS_TOOL_NAME
+            ) && !messaging_agents.is_empty())
             {
                 return Err(WorkflowError::BuilderInvalid(format!(
                     "tool name '{tool_name}' is reserved"
@@ -981,7 +1034,11 @@ impl WorkflowBuilder {
             let mut names = global_tool_names.clone();
             for tool in tools {
                 let tool_name = tool.name();
-                if tool_name == SEND_MESSAGE_TOOL_NAME && messaging_agents.contains(agent_name) {
+                if matches!(
+                    tool_name.as_str(),
+                    SEND_MESSAGE_TOOL_NAME | LIST_RECIPIENTS_TOOL_NAME
+                ) && messaging_agents.contains(agent_name)
+                {
                     return Err(WorkflowError::BuilderInvalid(format!(
                         "tool name '{tool_name}' is reserved for agent '{agent_name}', which messaging permits to send"
                     )));
@@ -1118,6 +1175,12 @@ impl WorkflowBuilder {
             paused: std::sync::atomic::AtomicBool::new(false),
             resume_notify: tokio::sync::Notify::new(),
             run_control: Arc::new(RunControl::new(self.cancel_grace_period)),
+            registry: match &resume_state {
+                Some(state) => {
+                    AgentRegistry::restore(state.agent_registry.clone(), &state.agent_results)
+                }
+                None => AgentRegistry::default(),
+            },
             user_input_handler: self.user_input_handler,
             ballots: self
                 .voting_enabled

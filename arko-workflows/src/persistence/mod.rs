@@ -129,6 +129,7 @@ impl PersistenceManager {
                 })
                 .collect(),
             cancellation: ctx.run_control.cancellation(),
+            agent_registry: Some(ctx.registry.snapshot()),
         };
 
         std::fs::create_dir_all(&self.config.checkpoint_dir)?;

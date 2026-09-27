@@ -1,0 +1,626 @@
+//! The run's registry of agent statuses.
+//!
+//! One registry per workflow run records, under one lock, which agents are
+//! running (and whether a running agent is waiting, and why), how each
+//! agent's latest run ended, and a version that every status change
+//! increases. Agents read it three ways:
+//!
+//! - an agent's initial prompt lists its permitted recipients with their
+//!   statuses from a registry snapshot, and the run records the snapshot's
+//!   version as seen;
+//! - at each safe turn boundary a running agent is told about every
+//!   permitted recipient that started after the version it has seen, and
+//!   then has seen the current version (start notices are derived from the
+//!   registry, not queued when an agent starts, so no ordering of starts
+//!   loses or repeats one);
+//! - `list_recipients` reports current statuses.
+
+use std::collections::{BTreeMap, HashMap};
+
+use arko_agents::AgentEvent;
+use arko_agents::task::TaskState;
+use chrono::{DateTime, Utc};
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::workflow::result::{AgentResult, AgentRunStatus};
+
+/// Why a running agent is waiting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitReason {
+    /// Waiting out a provider rate limit.
+    RateLimited { until: Option<DateTime<Utc>> },
+    /// Waiting to retry a failed model request (a transient or capacity
+    /// error).
+    Retrying { until: Option<DateTime<Utc>> },
+    /// Waiting for a plan usage limit to reset.
+    UsageLimit { until: Option<DateTime<Utc>> },
+    /// Waiting for a tool call or error recovery to be approved.
+    AwaitingApproval,
+    /// Waiting for an answer to its questions.
+    AwaitingInput,
+    /// The workflow is paused.
+    Paused,
+}
+
+/// An agent's status in the workflow run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStatus {
+    /// No run of the agent has started.
+    NotStarted,
+    /// A run of the agent is running.
+    Running,
+    /// Every running run of the agent is waiting; the reason is the first
+    /// run's.
+    Waiting(WaitReason),
+    /// No run is running; the latest ended with this outcome.
+    Finished(AgentRunStatus),
+}
+
+impl AgentStatus {
+    /// Running or waiting: a message is delivered at its next safe turn
+    /// boundary.
+    pub fn is_reachable(&self) -> bool {
+        matches!(self, Self::Running | Self::Waiting(_))
+    }
+
+    /// A compact description, as agents are shown it: `not_started`,
+    /// `running`, `waiting (rate_limited until 2026-09-27T12:00:00Z)`, or
+    /// `finished (completed)`.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::NotStarted => "not_started".to_string(),
+            Self::Running => "running".to_string(),
+            Self::Waiting(reason) => {
+                let (name, until) = match reason {
+                    WaitReason::RateLimited { until } => ("rate_limited", *until),
+                    WaitReason::Retrying { until } => ("retrying", *until),
+                    WaitReason::UsageLimit { until } => ("usage_limit", *until),
+                    WaitReason::AwaitingApproval => ("awaiting_approval", None),
+                    WaitReason::AwaitingInput => ("awaiting_input", None),
+                    WaitReason::Paused => ("paused", None),
+                };
+                match until {
+                    Some(until) => format!(
+                        "waiting ({name} until {})",
+                        until.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                    ),
+                    None => format!("waiting ({name})"),
+                }
+            }
+            Self::Finished(outcome) => format!("finished ({})", outcome_name(outcome)),
+        }
+    }
+}
+
+fn outcome_name(outcome: &AgentRunStatus) -> &'static str {
+    match outcome {
+        AgentRunStatus::Completed => "completed",
+        AgentRunStatus::Failed => "failed",
+        AgentRunStatus::Interrupted => "interrupted",
+        AgentRunStatus::Cancelled => "cancelled",
+        AgentRunStatus::WaitingForInput => "waiting_for_input",
+    }
+}
+
+/// What the registry records about one agent across runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRecord {
+    /// The registry version at the agent's latest start (0: never started).
+    #[serde(default)]
+    pub last_start: u64,
+    /// How the agent's latest run ended, when no run is running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished: Option<AgentRunStatus>,
+}
+
+/// The registry state a checkpoint saves:
+/// [`WorkflowState::agent_registry`](crate::persistence::state::WorkflowState::agent_registry).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistrySnapshot {
+    /// Increases with every status change.
+    #[serde(default)]
+    pub version: u64,
+    /// Per registered agent name.
+    #[serde(default)]
+    pub agents: BTreeMap<String, AgentRecord>,
+    /// Per agent run (task ID), the version whose starts it has been told
+    /// about.
+    #[serde(default)]
+    pub seen: HashMap<Uuid, u64>,
+}
+
+struct Run {
+    agent: String,
+    waiting: Option<WaitReason>,
+    /// The agent's record before this run started, restored if the run is
+    /// abandoned before it starts.
+    previous: AgentRecord,
+}
+
+#[derive(Default)]
+struct RegistryState {
+    saved: RegistrySnapshot,
+    runs: HashMap<Uuid, Run>,
+}
+
+/// The status registry of one workflow run.
+#[derive(Default)]
+pub(crate) struct AgentRegistry {
+    state: Mutex<RegistryState>,
+}
+
+impl AgentRegistry {
+    /// Restores the registry of a resumed run. No run is running after a
+    /// resume: an agent that was running at the checkpoint counts as
+    /// finished, interrupted. A checkpoint from before the registry existed
+    /// gives each agent with a recorded result its latest result's outcome.
+    pub fn restore(snapshot: Option<RegistrySnapshot>, results: &[AgentResult]) -> Self {
+        let mut saved = snapshot.unwrap_or_default();
+        let mut latest = HashMap::<&str, &AgentResult>::new();
+        for result in results {
+            let newer = latest
+                .get(result.agent_name.as_str())
+                .is_none_or(|current| {
+                    (result.task.end_time, result.task.start_time)
+                        >= (current.task.end_time, current.task.start_time)
+                });
+            if newer {
+                latest.insert(&result.agent_name, result);
+            }
+        }
+        for record in saved.agents.values_mut() {
+            if record.last_start > 0 && record.finished.is_none() {
+                record.finished = Some(AgentRunStatus::Interrupted);
+            }
+        }
+        for (agent, result) in &latest {
+            let record = saved.agents.entry((*agent).to_string()).or_default();
+            if record.finished.is_none() {
+                record.finished = Some(result.status.clone());
+            }
+        }
+        Self {
+            state: Mutex::new(RegistryState {
+                saved,
+                runs: HashMap::new(),
+            }),
+        }
+    }
+
+    /// The state a checkpoint saves.
+    pub fn snapshot(&self) -> RegistrySnapshot {
+        self.state.lock().saved.clone()
+    }
+
+    /// Marks agent runs as running, together: a batch started at once sees
+    /// each other as running. An agent that had no running run starts at a
+    /// new version.
+    pub fn start(&self, runs: &[(Uuid, &str)]) {
+        let mut guard = self.state.lock();
+        let state = &mut *guard;
+        for (task_id, agent) in runs {
+            let already_running = state.runs.values().any(|run| run.agent == *agent);
+            let record = state.saved.agents.entry((*agent).to_string()).or_default();
+            let previous = record.clone();
+            if !already_running {
+                state.saved.version += 1;
+                record.last_start = state.saved.version;
+                record.finished = None;
+            }
+            state.runs.insert(
+                *task_id,
+                Run {
+                    agent: (*agent).to_string(),
+                    waiting: None,
+                    previous,
+                },
+            );
+        }
+    }
+
+    /// Removes a run marked running whose start then failed, restoring its
+    /// agent's previous record when no other run of it is running.
+    pub fn abandon(&self, task_id: Uuid) {
+        let mut guard = self.state.lock();
+        let state = &mut *guard;
+        let Some(run) = state.runs.remove(&task_id) else {
+            return;
+        };
+        if !state.runs.values().any(|other| other.agent == run.agent) {
+            state.saved.version += 1;
+            state.saved.agents.insert(run.agent, run.previous);
+        }
+        state.saved.seen.remove(&task_id);
+    }
+
+    /// Records that a run ended with `outcome`. Its agent is finished once
+    /// no other run of it is running. What a run that can't be continued
+    /// has seen is forgotten.
+    pub fn finish(&self, task_id: Uuid, outcome: AgentRunStatus) {
+        let mut guard = self.state.lock();
+        let state = &mut *guard;
+        let continuable = matches!(
+            outcome,
+            AgentRunStatus::Completed | AgentRunStatus::WaitingForInput
+        );
+        if !continuable {
+            state.saved.seen.remove(&task_id);
+        }
+        let Some(run) = state.runs.remove(&task_id) else {
+            return;
+        };
+        state.saved.version += 1;
+        if !state.runs.values().any(|other| other.agent == run.agent) {
+            state.saved.agents.entry(run.agent).or_default().finished = Some(outcome);
+        }
+    }
+
+    /// Updates a running run's waiting state from one of its events.
+    pub fn observe(&self, task_id: Uuid, event: &AgentEvent) {
+        let waiting = match event {
+            AgentEvent::RetryScheduled {
+                delay_ms,
+                rate_limit,
+                ..
+            } => {
+                let until = Some(
+                    Utc::now()
+                        + chrono::Duration::milliseconds(
+                            i64::try_from(*delay_ms).unwrap_or(i64::MAX),
+                        ),
+                );
+                Some(Some(if *rate_limit {
+                    WaitReason::RateLimited { until }
+                } else {
+                    WaitReason::Retrying { until }
+                }))
+            }
+            AgentEvent::UsageLimitReached {
+                waiting_until_unix_ms,
+                ..
+            } => Some(Some(WaitReason::UsageLimit {
+                until: waiting_until_unix_ms
+                    .and_then(|ms| i64::try_from(ms).ok())
+                    .and_then(DateTime::from_timestamp_millis),
+            })),
+            AgentEvent::TaskStateChanged(
+                TaskState::AwaitingToolApproval { .. }
+                | TaskState::AwaitingBatchToolApproval { .. }
+                | TaskState::AwaitingErrorRecoveryApproval { .. },
+            ) => Some(Some(WaitReason::AwaitingApproval)),
+            AgentEvent::TaskStateChanged(TaskState::AwaitingUserResponse { .. })
+            | AgentEvent::UserQuestionsAsked { .. } => Some(Some(WaitReason::AwaitingInput)),
+            // Reports about the wait itself, or about usage, don't end it.
+            AgentEvent::ErrorEncountered { .. }
+            | AgentEvent::TaskLog(_)
+            | AgentEvent::PlanUsageReported(_)
+            | AgentEvent::PlanUsageThresholdReached { .. }
+            | AgentEvent::CacheEfficiencyReported { .. }
+            | AgentEvent::CacheEfficiencyLow { .. }
+            | AgentEvent::TaskStreamEnd => None,
+            // Anything else is progress.
+            _ => Some(None),
+        };
+        let Some(waiting) = waiting else {
+            return;
+        };
+        let mut guard = self.state.lock();
+        let state = &mut *guard;
+        if let Some(run) = state.runs.get_mut(&task_id)
+            && run.waiting != waiting
+        {
+            run.waiting = waiting;
+            state.saved.version += 1;
+        }
+    }
+
+    /// The statuses of `agents` now; `paused` reports running agents as
+    /// waiting for the paused workflow.
+    pub fn statuses(&self, agents: &[String], paused: bool) -> Vec<(String, AgentStatus)> {
+        let state = self.state.lock();
+        agents
+            .iter()
+            .map(|agent| (agent.clone(), status(&state, agent, paused)))
+            .collect()
+    }
+
+    /// The statuses of `recipients` for run `task_id`'s initial prompt,
+    /// recording their version as seen by the run.
+    pub fn roster(
+        &self,
+        task_id: Uuid,
+        recipients: &[String],
+        paused: bool,
+    ) -> Vec<(String, AgentStatus)> {
+        let mut guard = self.state.lock();
+        let state = &mut *guard;
+        let roster = recipients
+            .iter()
+            .map(|agent| (agent.clone(), status(state, agent, paused)))
+            .collect();
+        state.saved.seen.insert(task_id, state.saved.version);
+        roster
+    }
+
+    /// The recipients (of `recipients`) that started after the version run
+    /// `task_id` has seen and are still running, in order; the run has then
+    /// seen the current version. A run without a seen version (a task from
+    /// an older checkpoint) is told about every running recipient.
+    pub fn started_since_seen(&self, task_id: Uuid, recipients: &[String]) -> Vec<String> {
+        let mut guard = self.state.lock();
+        let state = &mut *guard;
+        let seen = state.saved.seen.get(&task_id).copied().unwrap_or(0);
+        let started = recipients
+            .iter()
+            .filter(|agent| {
+                state.runs.values().any(|run| &run.agent == *agent)
+                    && state
+                        .saved
+                        .agents
+                        .get(*agent)
+                        .is_some_and(|record| record.last_start > seen)
+            })
+            .cloned()
+            .collect();
+        state.saved.seen.insert(task_id, state.saved.version);
+        started
+    }
+}
+
+fn status(state: &RegistryState, agent: &str, paused: bool) -> AgentStatus {
+    let mut runs = state
+        .runs
+        .values()
+        .filter(|run| run.agent == agent)
+        .peekable();
+    if runs.peek().is_some() {
+        if paused {
+            return AgentStatus::Waiting(WaitReason::Paused);
+        }
+        let mut first_wait = None;
+        for run in runs {
+            match &run.waiting {
+                None => return AgentStatus::Running,
+                Some(reason) => {
+                    first_wait.get_or_insert_with(|| reason.clone());
+                }
+            }
+        }
+        return AgentStatus::Waiting(first_wait.unwrap_or(WaitReason::Paused));
+    }
+    match state
+        .saved
+        .agents
+        .get(agent)
+        .and_then(|record| record.finished.clone())
+    {
+        Some(outcome) => AgentStatus::Finished(outcome),
+        None => AgentStatus::NotStarted,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(agents: &[&str]) -> Vec<String> {
+        agents.iter().map(|agent| agent.to_string()).collect()
+    }
+
+    fn status_of(registry: &AgentRegistry, agent: &str) -> AgentStatus {
+        registry.statuses(&names(&[agent]), false)[0].1.clone()
+    }
+
+    #[test]
+    fn statuses_follow_a_run_from_start_through_waits_to_its_end() {
+        let registry = AgentRegistry::default();
+        let run = Uuid::new_v4();
+        assert_eq!(status_of(&registry, "worker"), AgentStatus::NotStarted);
+        registry.start(&[(run, "worker")]);
+        assert_eq!(status_of(&registry, "worker"), AgentStatus::Running);
+        registry.observe(
+            run,
+            &AgentEvent::RetryScheduled {
+                attempt: 1,
+                delay_ms: 30_000,
+                elapsed_ms: 0,
+                rate_limit: true,
+            },
+        );
+        // The error report that accompanies the wait doesn't end it.
+        registry.observe(
+            run,
+            &AgentEvent::ErrorEncountered {
+                error_message: "429".into(),
+                requires_approval_to_retry: false,
+                tool_call_id: None,
+            },
+        );
+        let AgentStatus::Waiting(WaitReason::RateLimited { until: Some(until) }) =
+            status_of(&registry, "worker")
+        else {
+            panic!("rate limited");
+        };
+        assert!(until > Utc::now());
+        assert!(
+            status_of(&registry, "worker")
+                .describe()
+                .starts_with("waiting (rate_limited until ")
+        );
+        assert_eq!(
+            registry.statuses(&names(&["worker"]), true)[0].1,
+            AgentStatus::Waiting(WaitReason::Paused)
+        );
+        registry.observe(run, &AgentEvent::AssistantResponseChunk("ok".into()));
+        assert_eq!(status_of(&registry, "worker"), AgentStatus::Running);
+        registry.observe(
+            run,
+            &AgentEvent::UsageLimitReached {
+                resets_at_unix_ms: None,
+                waiting_until_unix_ms: Some(4_102_444_800_000),
+                error_message: "limit".into(),
+            },
+        );
+        assert_eq!(
+            status_of(&registry, "worker").describe(),
+            "waiting (usage_limit until 2100-01-01T00:00:00Z)"
+        );
+        registry.finish(run, AgentRunStatus::Completed);
+        assert_eq!(
+            status_of(&registry, "worker").describe(),
+            "finished (completed)"
+        );
+    }
+
+    #[test]
+    fn a_run_is_told_about_each_start_after_its_roster_exactly_once() {
+        let registry = AgentRegistry::default();
+        let (lead, worker) = (Uuid::new_v4(), Uuid::new_v4());
+        let recipients = names(&["worker"]);
+        registry.start(&[(lead, "lead")]);
+        assert_eq!(
+            registry.roster(lead, &recipients, false),
+            [("worker".to_string(), AgentStatus::NotStarted)]
+        );
+        assert!(registry.started_since_seen(lead, &recipients).is_empty());
+        registry.start(&[(worker, "worker")]);
+        assert_eq!(registry.started_since_seen(lead, &recipients), ["worker"]);
+        assert!(registry.started_since_seen(lead, &recipients).is_empty());
+        // A second run of a running agent is not a new start.
+        registry.start(&[(Uuid::new_v4(), "worker")]);
+        assert!(registry.started_since_seen(lead, &recipients).is_empty());
+    }
+
+    /// Whatever the order of the other agent's start relative to a run's
+    /// start and roster, the run learns that it is running exactly once.
+    #[test]
+    fn every_ordering_of_two_starts_tells_each_run_once() {
+        for order in 0..3 {
+            let registry = AgentRegistry::default();
+            let (lead, worker) = (Uuid::new_v4(), Uuid::new_v4());
+            let recipients = names(&["worker"]);
+            if order == 0 {
+                registry.start(&[(worker, "worker")]);
+            }
+            registry.start(&[(lead, "lead")]);
+            if order == 1 {
+                registry.start(&[(worker, "worker")]);
+            }
+            let roster = registry.roster(lead, &recipients, false);
+            if order == 2 {
+                registry.start(&[(worker, "worker")]);
+            }
+            let notices = registry.started_since_seen(lead, &recipients);
+            let in_roster = roster[0].1 == AgentStatus::Running;
+            assert!(in_roster != !notices.is_empty(), "order {order}");
+            assert_eq!(in_roster, order < 2, "order {order}");
+            assert!(registry.started_since_seen(lead, &recipients).is_empty());
+        }
+    }
+
+    /// Three agents that may all message each other start concurrently, many
+    /// times over: each learns of each other agent exactly once, from its
+    /// roster or a notice.
+    #[test]
+    fn concurrent_starts_neither_miss_nor_repeat_a_start() {
+        let agents = ["a", "b", "c"];
+        for _ in 0..200 {
+            let registry = std::sync::Arc::new(AgentRegistry::default());
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(agents.len()));
+            let threads = agents
+                .iter()
+                .map(|agent| {
+                    let registry = registry.clone();
+                    let barrier = barrier.clone();
+                    let agent = agent.to_string();
+                    std::thread::spawn(move || {
+                        let others = ["a", "b", "c"]
+                            .iter()
+                            .filter(|other| **other != agent)
+                            .map(|other| other.to_string())
+                            .collect::<Vec<_>>();
+                        let run = Uuid::new_v4();
+                        barrier.wait();
+                        registry.start(&[(run, agent.as_str())]);
+                        let roster = registry.roster(run, &others, false);
+                        let mut told = roster
+                            .into_iter()
+                            .filter(|(_, status)| *status == AgentStatus::Running)
+                            .map(|(other, _)| other)
+                            .collect::<Vec<_>>();
+                        // Turn boundaries until everyone has started.
+                        barrier.wait();
+                        for _ in 0..3 {
+                            told.extend(registry.started_since_seen(run, &others));
+                        }
+                        told.sort();
+                        assert_eq!(told, others, "{agent}");
+                    })
+                })
+                .collect::<Vec<_>>();
+            for thread in threads {
+                thread.join().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_batch_started_together_sees_each_other_as_running() {
+        let registry = AgentRegistry::default();
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        registry.start(&[(a, "a"), (b, "b")]);
+        assert_eq!(
+            registry.roster(a, &names(&["b"]), false)[0].1,
+            AgentStatus::Running
+        );
+        assert_eq!(
+            registry.roster(b, &names(&["a"]), false)[0].1,
+            AgentStatus::Running
+        );
+        assert!(registry.started_since_seen(a, &names(&["b"])).is_empty());
+        assert!(registry.started_since_seen(b, &names(&["a"])).is_empty());
+        // A run abandoned before it started restores its agent's status.
+        registry.abandon(b);
+        assert_eq!(status_of(&registry, "b"), AgentStatus::NotStarted);
+    }
+
+    #[test]
+    fn a_resumed_run_neither_repeats_nor_misses_a_start() {
+        let registry = AgentRegistry::default();
+        let (lead, worker) = (Uuid::new_v4(), Uuid::new_v4());
+        let recipients = names(&["worker", "reviewer"]);
+        registry.start(&[(worker, "worker")]);
+        registry.start(&[(lead, "lead")]);
+        registry.roster(lead, &recipients, false);
+        registry.finish(lead, AgentRunStatus::Completed);
+        let snapshot = registry.snapshot();
+        let json = serde_json::to_value(&snapshot).unwrap();
+        let restored: RegistrySnapshot = serde_json::from_value(json).unwrap();
+        assert_eq!(restored, snapshot);
+
+        // The worker was running at the checkpoint: after the resume it is
+        // no longer running.
+        let resumed = AgentRegistry::restore(Some(restored), &[]);
+        assert_eq!(
+            status_of(&resumed, "worker"),
+            AgentStatus::Finished(AgentRunStatus::Interrupted)
+        );
+        // The lead continues; a reviewer starts, then the worker again.
+        resumed.start(&[(lead, "lead")]);
+        assert!(resumed.started_since_seen(lead, &recipients).is_empty());
+        resumed.start(&[(Uuid::new_v4(), "reviewer")]);
+        resumed.start(&[(Uuid::new_v4(), "worker")]);
+        assert_eq!(
+            resumed.started_since_seen(lead, &recipients),
+            ["worker", "reviewer"]
+        );
+        assert!(resumed.started_since_seen(lead, &recipients).is_empty());
+        // An older checkpoint has no registry.
+        let legacy = AgentRegistry::restore(None, &[]);
+        assert_eq!(status_of(&legacy, "worker"), AgentStatus::NotStarted);
+    }
+}

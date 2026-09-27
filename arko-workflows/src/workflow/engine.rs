@@ -159,8 +159,8 @@ fn fire_hooks(
 }
 
 /// Stops the run because a hook at `point` returned `Abort(reason)`: every
-/// running agent is told to stop and later run calls fail. Returns the
-/// hook's `AbortedByHook` error. A run already stopped keeps its first cause.
+/// running agent is told to stop and later run calls fail. Returns the run's
+/// stop error: a run already stopped keeps its first cause.
 pub(crate) fn abort_run(ctx: &SharedContext, point: &HookPoint, reason: String) -> WorkflowError {
     let cause = CancelCause::AbortedByHook {
         hook_point: format!("{point:?}"),
@@ -168,7 +168,7 @@ pub(crate) fn abort_run(ctx: &SharedContext, point: &HookPoint, reason: String) 
     };
     let error = cause.to_error();
     ctx.run_control.stop(cause);
-    error
+    ctx.run_control.error().unwrap_or(error)
 }
 
 /// The error of a stopped run.
@@ -267,6 +267,7 @@ pub(crate) async fn drive_event_loop(
         };
         wait_while_paused(ctx).await?;
         publish_event(agent_name, agent_run_id, &event, ctx, persistence).await?;
+        ctx.registry.observe(agent_run_id, &event);
         if ctx.budget.is_exceeded() && !matches!(&event, AgentEvent::UsageReported(_)) {
             let _ = cmd_tx.send(UserCommand::CancelTask).await;
             return Err(WorkflowError::BudgetExceeded {
@@ -426,57 +427,159 @@ pub(crate) async fn drive_event_loop(
     Ok(())
 }
 
+/// How a run starts.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StartOptions {
+    /// The run's task ID, already marked running in the agent registry.
+    pub reserved: Option<uuid::Uuid>,
+    /// Whether the initial prompt lists the agents it may message.
+    pub roster: bool,
+    /// See [`StartedRun::depth`].
+    pub depth: u32,
+}
+
+impl Default for StartOptions {
+    fn default() -> Self {
+        Self {
+            reserved: None,
+            roster: true,
+            depth: 0,
+        }
+    }
+}
+
+/// The heading of the initial prompt's list of the agents it may message.
+const ROSTER_HEADING: &str = "\n\n# Agents you can message\n\nMessage these agents with send_message while they are running or waiting; call list_recipients for their current status. You are told when one starts.\n";
+
+/// `prompt` without the list of agents it may message.
+pub(crate) fn without_roster(prompt: &str) -> &str {
+    prompt
+        .rfind(ROSTER_HEADING)
+        .map_or(prompt, |start| &prompt[..start])
+}
+
 /// An agent run the engine started, to be driven to its result.
 pub(crate) struct StartedRun {
     pub agent_name: String,
     pub agent_run_id: uuid::Uuid,
     pub event_rx: tokio::sync::mpsc::Receiver<AgentEvent>,
     pub cmd_tx: tokio::sync::mpsc::Sender<UserCommand>,
-    pub join_handle: tokio::task::JoinHandle<Result<Task, arko_agents::ArkoAgentsError>>,
+    pub join_handle: AbortOnDrop,
     /// The task as the run started it: the record of an agent that had to be
     /// aborted.
     pub started_task: Task,
     /// Messages delivered in the prompt, acknowledged once the agent
     /// completes.
     pub pending_message_ids: Vec<uuid::Uuid>,
+    /// How many agent runs this one runs inside (a verifier or a delegated
+    /// agent runs inside the tool call of the agent that started it).
+    pub depth: u32,
 }
 
 /// What an agent runtime's task returned.
 type Joined = Result<Result<Task, arko_agents::ArkoAgentsError>, tokio::task::JoinError>;
 
-/// Waits for an agent that was sent `CancelTask` to end, recording its last
-/// events and usage, and aborts it at `deadline`. `None` means the agent was
-/// aborted.
+/// An agent runtime's task, aborted if its handle is dropped first: an
+/// agent whose driver is dropped (for example the driver of a delegated
+/// agent inside an agent that was itself aborted) doesn't keep running
+/// unsupervised.
+pub(crate) struct AbortOnDrop(
+    pub Option<tokio::task::JoinHandle<Result<Task, arko_agents::ArkoAgentsError>>>,
+);
+
+impl AbortOnDrop {
+    /// Hands the task over without aborting it on drop.
+    pub fn into_inner(
+        mut self,
+    ) -> tokio::task::JoinHandle<Result<Task, arko_agents::ArkoAgentsError>> {
+        self.0.take().expect("the task is handed over once")
+    }
+
+    fn handle(
+        &mut self,
+    ) -> &mut tokio::task::JoinHandle<Result<Task, arko_agents::ArkoAgentsError>> {
+        self.0.as_mut().expect("the task is handed over once")
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.0 {
+            handle.abort();
+        }
+    }
+}
+
+/// When a stopped agent at `depth` is aborted. Every driver of a stopped run
+/// counts from the moment the run stopped; one nested inside another agent's
+/// tool call gets half its parent's time, so it winds down, and is recorded,
+/// before its parent can be aborted.
+fn stop_deadline(ctx: &SharedContext, depth: u32) -> tokio::time::Instant {
+    let grace = ctx.run_control.grace_period() / 2_u32.checked_pow(depth).unwrap_or(u32::MAX);
+    let start = ctx
+        .run_control
+        .stopped_at()
+        .unwrap_or_else(tokio::time::Instant::now);
+    // A grace period too long to represent waits as long as possible.
+    start
+        .checked_add(grace)
+        .unwrap_or_else(|| start + std::time::Duration::from_secs(30 * 365 * 86_400))
+}
+
+/// Waits for an agent that is being stopped to end: sends it `CancelTask`,
+/// records its last events and usage meanwhile (its generic cancellation
+/// reason replaced by `reason`), and aborts it at `deadline`. `None` means
+/// the agent was aborted.
+#[allow(clippy::too_many_arguments)]
 async fn wind_down(
     agent_name: &str,
     agent_run_id: uuid::Uuid,
     event_rx: &mut tokio::sync::mpsc::Receiver<AgentEvent>,
-    join_handle: &mut tokio::task::JoinHandle<Result<Task, arko_agents::ArkoAgentsError>>,
+    cmd_tx: &tokio::sync::mpsc::Sender<UserCommand>,
+    join_handle: &mut AbortOnDrop,
     deadline: tokio::time::Instant,
+    reason: &str,
     ctx: &Arc<SharedContext>,
     persistence: Option<&Arc<PersistenceManager>>,
 ) -> Option<Joined> {
     let mut events_open = true;
+    // Sent while events are drained: an agent blocked on a full event
+    // channel must be able to take the command.
+    let cancel = cmd_tx.send(UserCommand::CancelTask);
+    tokio::pin!(cancel);
+    let mut cancel_sent = false;
     loop {
         tokio::select! {
             biased;
             event = event_rx.recv(), if events_open => match event {
                 Some(event) => {
+                    let event = match event {
+                        AgentEvent::TaskStateChanged(TaskState::Cancelled { reason: generic })
+                            if generic == CANCELLED_BY_USER =>
+                        {
+                            AgentEvent::TaskStateChanged(TaskState::Cancelled {
+                                reason: reason.to_string(),
+                            })
+                        }
+                        event => event,
+                    };
                     if let Err(error) =
                         publish_event(agent_name, agent_run_id, &event, ctx, persistence).await
                     {
                         log::warn!("Could not record an event of stopping agent '{agent_name}': {error}");
                     }
+                    ctx.registry.observe(agent_run_id, &event);
                     if let AgentEvent::UsageReported(usage) = &event {
                         charge_usage(agent_name, usage, ctx);
                     }
                 }
                 None => events_open = false,
             },
-            joined = &mut *join_handle => return Some(joined),
+            _ = &mut cancel, if !cancel_sent => cancel_sent = true,
+            joined = &mut *join_handle.handle() => return Some(joined),
             _ = tokio::time::sleep_until(deadline) => {
-                join_handle.abort();
-                return match join_handle.await {
+                join_handle.handle().abort();
+                return match join_handle.handle().await {
                     Err(error) if error.is_cancelled() => None,
                     joined => Some(joined),
                 };
@@ -486,10 +589,10 @@ async fn wind_down(
 }
 
 /// Drives a started agent run to its result: runs the event loop, stops the
-/// agent when the workflow must (waiting at most the run's grace period
-/// before aborting it), records the final task, and maps it to the call's
-/// outcome. Once the run is stopped the outcome is the stop's error; the
-/// agent's result is recorded either way.
+/// agent when the workflow must (aborting it after the run's grace period),
+/// records the final task, and maps it to the call's outcome. Once the run
+/// is stopped the outcome is the stop's error; the agent's result is
+/// recorded either way.
 pub(crate) async fn drive_to_result(
     run: StartedRun,
     ctx: &Arc<SharedContext>,
@@ -503,6 +606,7 @@ pub(crate) async fn drive_to_result(
         mut join_handle,
         started_task,
         pending_message_ids,
+        depth,
     } = run;
     let drive_result = drive_event_loop(
         &agent_name,
@@ -518,24 +622,21 @@ pub(crate) async fn drive_to_result(
         .as_ref()
         .is_err_and(|error| !matches!(error, WorkflowError::UserInputRequired { .. }));
     let wound_down = if stopping {
-        let now = tokio::time::Instant::now();
-        // A grace period too long to represent waits as long as possible.
-        let deadline = now
-            .checked_add(ctx.run_control.grace_period())
-            .unwrap_or_else(|| now + std::time::Duration::from_secs(30 * 365 * 86_400));
-        let _ = tokio::time::timeout_at(deadline, cmd_tx.send(UserCommand::CancelTask)).await;
+        let deadline = stop_deadline(ctx, depth);
         wind_down(
             &agent_name,
             agent_run_id,
             &mut event_rx,
+            &cmd_tx,
             &mut join_handle,
             deadline,
+            &stop_reason(ctx, &drive_result),
             ctx,
             persistence,
         )
         .await
     } else {
-        Some((&mut join_handle).await)
+        Some(join_handle.handle().await)
     };
 
     let final_task = match wound_down {
@@ -555,6 +656,12 @@ pub(crate) async fn drive_to_result(
         }
     };
 
+    ctx.registry.finish(
+        agent_run_id,
+        final_task.as_ref().map_or(AgentRunStatus::Failed, |task| {
+            run_status(&task.current_state)
+        }),
+    );
     let result = match final_task {
         Ok(mut task) => {
             // The runtime records its generic reason for a CancelTask; the
@@ -610,6 +717,28 @@ pub(crate) async fn drive_to_result(
                     .unwrap_or_else(|| "Agent failed".to_string()),
             ),
         )),
+    }
+}
+
+/// Unregisters a run dropped before it was driven (its runtime task is
+/// aborted with it): its agent is finished, cancelled, unless another run
+/// of it is running.
+pub(crate) fn abandon_run(run: &StartedRun, ctx: &SharedContext) {
+    ctx.registry
+        .finish(run.agent_run_id, AgentRunStatus::Cancelled);
+    ctx.messages
+        .unregister_active(&run.agent_name, run.agent_run_id);
+    ctx.run_control.unregister(run.agent_run_id);
+}
+
+/// The run status a final task state records.
+fn run_status(state: &TaskState) -> AgentRunStatus {
+    match state {
+        TaskState::Completed { .. } => AgentRunStatus::Completed,
+        TaskState::Cancelled { .. } => AgentRunStatus::Cancelled,
+        TaskState::Failed { .. } => AgentRunStatus::Failed,
+        TaskState::AwaitingUserResponse { .. } => AgentRunStatus::WaitingForInput,
+        _ => AgentRunStatus::Interrupted,
     }
 }
 
@@ -761,10 +890,13 @@ impl WorkflowEngine {
         }
     }
 
+    /// The workflow tools of `agent_name`'s run at `depth` (see
+    /// [`StartedRun::depth`]).
     pub(crate) fn build_tool_registry(
         &self,
         agent_name: &str,
         ctx: &Arc<SharedContext>,
+        depth: u32,
     ) -> ToolRegistry {
         let mut registry = ToolRegistry::new();
 
@@ -788,6 +920,10 @@ impl WorkflowEngine {
                 ctx.clone(),
                 agent_name.to_string(),
             )));
+            registry.register(Arc::new(ListRecipientsTool::new(
+                ctx.clone(),
+                agent_name.to_string(),
+            )));
         }
         if let Some(services) = ctx.workflow_services.get()
             && services.is_allowed(agent_name)
@@ -795,6 +931,7 @@ impl WorkflowEngine {
             registry.register(Arc::new(RunWorkflowAgentTool::new(
                 services.clone(),
                 agent_name.to_string(),
+                depth,
             )));
         }
         if let Some(ballots) = &ctx.ballots {
@@ -867,12 +1004,14 @@ impl WorkflowEngine {
         &self,
         agent_name: &str,
         ctx: &Arc<SharedContext>,
+        depth: u32,
     ) -> Arc<dyn ToolExecutionMiddleware> {
         Arc::new(WorkflowExecutionMiddleware {
             agent_name: agent_name.to_string(),
             context: ctx.clone(),
             llm_client: self.llm_client.clone(),
             persistence: self.persistence.clone(),
+            depth,
         })
     }
 
@@ -891,6 +1030,7 @@ impl WorkflowEngine {
         }
         if !ctx.message_recipients(agent_name).is_empty() {
             ensure_tool_name(&mut config, SEND_MESSAGE_TOOL_NAME);
+            ensure_tool_name(&mut config, LIST_RECIPIENTS_TOOL_NAME);
         }
         if let Some(services) = ctx.workflow_services.get()
             && services.is_allowed(agent_name)
@@ -913,27 +1053,20 @@ impl WorkflowEngine {
         config
     }
 
-    fn augment_prompt_with_messages(
+    /// The prompt section delivering the agent's pending messages, and
+    /// their IDs, acknowledged once the run completes.
+    fn pending_messages(
         &self,
         agent_name: &str,
-        prompt: &str,
         ctx: &Arc<SharedContext>,
     ) -> (String, Vec<uuid::Uuid>) {
         let messages = ctx.messages.pending(agent_name);
         let message_ids = messages.iter().map(|message| message.id).collect();
-        let mut augmented = prompt.to_string();
-        if ctx.agent_configs.len() > 1 {
-            augmented.push_str("\n\n# Workflow agent roster\n");
-            let mut roster = ctx.agent_configs.iter().collect::<Vec<_>>();
-            roster.sort_by_key(|(name, _)| *name);
-            for (name, config) in roster {
-                augmented.push_str(&format!("\n- {name}: {}", config.role_description));
-            }
-        }
+        let mut section = String::new();
         if !messages.is_empty() {
-            augmented.push_str("\n\n# Messages from other agents:\n");
+            section.push_str("\n\n# Messages from other agents:\n");
             for msg in messages {
-                augmented.push_str(&format!(
+                section.push_str(&format!(
                     "\n--- Message {} from '{}' ---\n{}{}\n--- End message ---\n",
                     msg.id,
                     msg.from,
@@ -949,7 +1082,7 @@ impl WorkflowEngine {
                 ));
             }
         }
-        (augmented, message_ids)
+        (section, message_ids)
     }
 
     /// Checks that the run may start an agent and fires `PreAgentSpawn`.
@@ -972,26 +1105,59 @@ impl WorkflowEngine {
         })
     }
 
-    /// Prepares a new run of a registered agent and starts it.
+    /// Prepares a new run of a registered agent and starts it. A run
+    /// `reserved` is already marked running in the agent registry (a batch
+    /// started together) and is abandoned if it can't start.
     fn start_agent(
         &self,
         agent_name: &str,
         prompt: &str,
         ctx: &Arc<SharedContext>,
+        options: StartOptions,
     ) -> Result<StartedRun, WorkflowError> {
-        self.admit(agent_name, None, ctx)?;
-        let base_config = ctx
-            .agent_configs
-            .get(agent_name)
-            .ok_or_else(|| WorkflowError::AgentNotFound(agent_name.to_string()))?
-            .clone();
+        let prepared = self.admit(agent_name, None, ctx).and_then(|()| {
+            let base_config = ctx
+                .agent_configs
+                .get(agent_name)
+                .ok_or_else(|| WorkflowError::AgentNotFound(agent_name.to_string()))?;
+            let mut config = self.prepare_agent_config(agent_name, base_config, ctx);
+            let mut registry = self.build_tool_registry(agent_name, ctx, options.depth);
+            let skill_prompt_context =
+                Self::setup_skills(&mut config, &mut registry, &ctx.workspace)?;
+            Ok((config, registry, skill_prompt_context))
+        });
+        let (config, registry, skill_prompt_context) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if let Some(task_id) = options.reserved {
+                    ctx.registry.abandon(task_id);
+                }
+                return Err(error);
+            }
+        };
 
-        let mut config = self.prepare_agent_config(agent_name, &base_config, ctx);
-        let mut registry = self.build_tool_registry(agent_name, ctx);
-        let skill_prompt_context = Self::setup_skills(&mut config, &mut registry, &ctx.workspace)?;
-        let (augmented_prompt, pending_message_ids) =
-            self.augment_prompt_with_messages(agent_name, prompt, ctx);
-        let task = Task::new(config, augmented_prompt, ctx.workspace.clone(), None);
+        let mut task = Task::new(config, String::new(), ctx.workspace.clone(), None);
+        match options.reserved {
+            Some(task_id) => task.id = task_id,
+            None => ctx.registry.start(&[(task.id, agent_name)]),
+        }
+        let (messages, pending_message_ids) = self.pending_messages(agent_name, ctx);
+        let mut initial_prompt = format!("{prompt}{messages}");
+        let recipients = ctx.message_recipients(agent_name);
+        if !recipients.is_empty() {
+            // The roster's statuses and the version the run has seen come
+            // from one registry snapshot.
+            let roster = ctx.registry.roster(
+                task.id,
+                &recipients,
+                ctx.paused.load(std::sync::atomic::Ordering::Acquire),
+            );
+            if options.roster {
+                initial_prompt.push_str(ROSTER_HEADING);
+                initial_prompt.push_str(&render_recipients(ctx, &roster));
+            }
+        }
+        task.initial_task_prompt = initial_prompt;
         Ok(self.launch(
             agent_name,
             task,
@@ -999,11 +1165,13 @@ impl WorkflowEngine {
             skill_prompt_context,
             pending_message_ids,
             ctx,
+            options.depth,
         ))
     }
 
     /// Starts the agent runtime on `task` and registers the running agent
     /// with the message bus and the run's cancellation.
+    #[allow(clippy::too_many_arguments)]
     fn launch(
         &self,
         agent_name: &str,
@@ -1012,12 +1180,17 @@ impl WorkflowEngine {
         skill_prompt_context: Option<SkillPromptContext>,
         pending_message_ids: Vec<uuid::Uuid>,
         ctx: &Arc<SharedContext>,
+        depth: u32,
     ) -> StartedRun {
         let interceptor_config = self.build_interceptor_config(agent_name, ctx);
-        let execution_middleware = self.build_execution_middleware(agent_name, ctx);
+        let execution_middleware = self.build_execution_middleware(agent_name, ctx, depth);
         let agent_run_id = task.id;
         let started_task = task.clone();
-        let runtime = AgentRuntime::new(self.llm_client.clone());
+        let runtime =
+            AgentRuntime::new(self.llm_client.clone()).with_turn_context(Arc::new(StartNotices {
+                context: ctx.clone(),
+                agent_name: agent_name.to_string(),
+            }));
         let (event_rx, cmd_tx, join_handle) = runtime.run_task(
             task,
             Arc::new(registry),
@@ -1035,9 +1208,10 @@ impl WorkflowEngine {
             agent_run_id,
             event_rx,
             cmd_tx,
-            join_handle,
+            join_handle: AbortOnDrop(Some(join_handle)),
             started_task,
             pending_message_ids,
+            depth,
         }
     }
 
@@ -1048,20 +1222,62 @@ impl WorkflowEngine {
         prompt: &str,
         ctx: &Arc<SharedContext>,
     ) -> Result<AgentResult, WorkflowError> {
-        let run = self.start_agent(agent_name, prompt, ctx)?;
+        let run = self.start_agent(agent_name, prompt, ctx, StartOptions::default())?;
+        drive_to_result(run, ctx, self.persistence.as_ref()).await
+    }
+
+    /// Run an agent inside the tool call of a run at `depth - 1`.
+    pub(crate) async fn run_nested(
+        &self,
+        agent_name: &str,
+        prompt: &str,
+        ctx: &Arc<SharedContext>,
+        depth: u32,
+    ) -> Result<AgentResult, WorkflowError> {
+        let options = StartOptions {
+            depth,
+            ..StartOptions::default()
+        };
+        let run = self.start_agent(agent_name, prompt, ctx, options)?;
+        drive_to_result(run, ctx, self.persistence.as_ref()).await
+    }
+
+    /// Run a completion verifier at `depth`: its prompt gets no roster of
+    /// the agents it may message.
+    async fn run_verifier(
+        &self,
+        agent_name: &str,
+        prompt: &str,
+        ctx: &Arc<SharedContext>,
+        depth: u32,
+    ) -> Result<AgentResult, WorkflowError> {
+        let options = StartOptions {
+            roster: false,
+            depth,
+            ..StartOptions::default()
+        };
+        let run = self.start_agent(agent_name, prompt, ctx, options)?;
         drive_to_result(run, ctx, self.persistence.as_ref()).await
     }
 
     /// Run multiple agents in parallel.
+    ///
+    /// The agents are marked running together before any of them is
+    /// prompted, so each one's roster shows the others as running.
     pub async fn run_agents_parallel(
         &self,
         agents: Vec<(&str, String)>,
         ctx: &Arc<SharedContext>,
     ) -> Result<Vec<AgentResult>, WorkflowError> {
         ctx.run_control.check()?;
+        let reserved = agents
+            .iter()
+            .map(|(name, _)| (uuid::Uuid::new_v4(), *name))
+            .collect::<Vec<_>>();
+        ctx.registry.start(&reserved);
         let mut join_handles = Vec::new();
 
-        for (name, prompt) in agents {
+        for ((task_id, name), (_, prompt)) in reserved.into_iter().zip(agents) {
             let engine_client = self.llm_client.clone();
             let persistence = self.persistence.clone();
             let ctx_clone = ctx.clone();
@@ -1072,7 +1288,14 @@ impl WorkflowEngine {
                     llm_client: engine_client,
                     persistence,
                 };
-                async move { engine.run_agent(&name_owned, &prompt, &ctx_clone).await }
+                async move {
+                    let options = StartOptions {
+                        reserved: Some(task_id),
+                        ..StartOptions::default()
+                    };
+                    let run = engine.start_agent(&name_owned, &prompt, &ctx_clone, options)?;
+                    drive_to_result(run, &ctx_clone, engine.persistence.as_ref()).await
+                }
             });
             join_handles.push(handle);
         }
@@ -1119,12 +1342,8 @@ impl WorkflowEngine {
         prompt: &str,
         ctx: &Arc<SharedContext>,
     ) -> Result<AgentHandle, WorkflowError> {
-        let run = self.start_agent(agent_name, prompt, ctx)?;
-        Ok(AgentHandle {
-            run,
-            context: ctx.clone(),
-            persistence: self.persistence.clone(),
-        })
+        let run = self.start_agent(agent_name, prompt, ctx, StartOptions::default())?;
+        Ok(AgentHandle::new(run, ctx.clone(), self.persistence.clone()))
     }
 
     pub async fn continue_agent(
@@ -1133,10 +1352,29 @@ impl WorkflowEngine {
         continuation_prompt: &str,
         ctx: &Arc<SharedContext>,
     ) -> Result<AgentResult, WorkflowError> {
-        if !matches!(
-            previous.status,
-            AgentRunStatus::Completed | AgentRunStatus::WaitingForInput
-        ) {
+        self.continue_at(previous, continuation_prompt, ctx, 0)
+            .await
+    }
+
+    /// Continue an agent run at `depth` (see [`StartedRun::depth`]).
+    async fn continue_at(
+        &self,
+        previous: &AgentResult,
+        continuation_prompt: &str,
+        ctx: &Arc<SharedContext>,
+        depth: u32,
+    ) -> Result<AgentResult, WorkflowError> {
+        let resumable = match previous.status {
+            AgentRunStatus::Completed => {
+                matches!(previous.task.current_state, TaskState::Completed { .. })
+            }
+            AgentRunStatus::WaitingForInput => matches!(
+                previous.task.current_state,
+                TaskState::AwaitingUserResponse { .. }
+            ),
+            _ => false,
+        };
+        if !resumable {
             return Err(WorkflowError::BuilderInvalid(
                 "only a completed or user-input-suspended agent run can be continued".to_string(),
             ));
@@ -1144,20 +1382,22 @@ impl WorkflowEngine {
         let agent_name = &previous.agent_name;
         self.admit(agent_name, Some(previous.agent_run_id), ctx)?;
         let mut task = previous.task.clone();
-        let (prompt, pending_message_ids) =
-            self.augment_prompt_with_messages(agent_name, continuation_prompt, ctx);
+        let mut registry = self.build_tool_registry(agent_name, ctx, depth);
+        let skill_prompt_context =
+            Self::setup_skills(&mut task.agent_config, &mut registry, &ctx.workspace)?;
+        // No roster: the task's initial prompt has one. Start notices tell it
+        // about recipients that started since it last ran.
+        let (messages, pending_message_ids) = self.pending_messages(agent_name, ctx);
+        let prompt = format!("{continuation_prompt}{messages}");
         match previous.status {
             AgentRunStatus::Completed => {
                 task.prepare_for_resumption_from_completed(prompt)?;
             }
-            AgentRunStatus::WaitingForInput => {
+            _ => {
                 task.prepare_for_resumption_with_user_response(prompt)?;
             }
-            _ => unreachable!(),
         }
-        let mut registry = self.build_tool_registry(agent_name, ctx);
-        let skill_prompt_context =
-            Self::setup_skills(&mut task.agent_config, &mut registry, &ctx.workspace)?;
+        ctx.registry.start(&[(task.id, agent_name.as_str())]);
         let run = self.launch(
             agent_name,
             task,
@@ -1165,6 +1405,7 @@ impl WorkflowEngine {
             skill_prompt_context,
             pending_message_ids,
             ctx,
+            depth,
         );
         drive_to_result(run, ctx, self.persistence.as_ref()).await
     }
@@ -1207,6 +1448,8 @@ struct WorkflowExecutionMiddleware {
     context: Arc<SharedContext>,
     llm_client: Arc<LLMClient>,
     persistence: Option<Arc<PersistenceManager>>,
+    /// The depth of this agent's run; its verifiers run one deeper.
+    depth: u32,
 }
 
 impl WorkflowExecutionMiddleware {
@@ -1315,7 +1558,7 @@ impl WorkflowExecutionMiddleware {
                     crate::verification::VERIFIER_OUTPUT_CONTRACT,
                 );
                 match engine
-                    .continue_agent(previous, &prompt, &self.context)
+                    .continue_at(previous, &prompt, &self.context, self.depth + 1)
                     .await
                 {
                     Ok(result) => result,
@@ -1332,13 +1575,18 @@ impl WorkflowExecutionMiddleware {
                 let prompt = format!(
                     "You are a completion verifier for agent '{}'.\n\nOriginal task:\n{}\n\nCandidate completion summary:\n{}\n\nVerification instructions:\n{}\n\nThis is the first review pass. Inspect the actual workspace and relevant artifacts, systematically cover the applicable requirement and failure classes, and consolidate every evidenced related finding into this verdict rather than drip-feeding one counterexample per repair cycle. Do not approve merely because the summary claims success. Batch independent read-only tool calls when useful, but call non-batch-safe tools alone. Finish by calling complete_task using this exact contract:\n\n{}",
                     self.agent_name,
-                    execution.initial_task_prompt,
+                    without_roster(execution.initial_task_prompt),
                     summary,
                     verifier.instructions,
                     crate::verification::VERIFIER_OUTPUT_CONTRACT,
                 );
                 match engine
-                    .run_agent(&verifier.verifier_agent, &prompt, &self.context)
+                    .run_verifier(
+                        &verifier.verifier_agent,
+                        &prompt,
+                        &self.context,
+                        self.depth + 1,
+                    )
                     .await
                 {
                     Ok(result) => result,
@@ -1363,7 +1611,9 @@ impl WorkflowExecutionMiddleware {
                             "Your verification conclusion could not be parsed ({error}). Do not repeat the review or change your conclusion. Re-emit it through complete_task using only this contract:\n\n{}",
                             crate::verification::VERIFIER_OUTPUT_CONTRACT,
                         );
-                        result = match engine.continue_agent(&result, &prompt, &self.context).await
+                        result = match engine
+                            .continue_at(&result, &prompt, &self.context, self.depth + 1)
+                            .await
                         {
                             Ok(result) => result,
                             Err(retry_error) => {
@@ -1845,6 +2095,7 @@ mod tests {
             context: workflow.context().clone(),
             llm_client: Arc::new(LLMClient::new()),
             persistence: None,
+            depth: 0,
         };
         assert_eq!(
             concrete_middleware
@@ -1855,7 +2106,7 @@ mod tests {
         );
         let middleware = workflow
             .engine
-            .build_execution_middleware("coder", workflow.context());
+            .build_execution_middleware("coder", workflow.context(), 0);
         let parameters = HashMap::new();
         let execution = ToolExecutionContext {
             task_id: uuid::Uuid::new_v4(),

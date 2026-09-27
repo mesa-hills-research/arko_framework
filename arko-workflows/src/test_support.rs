@@ -12,13 +12,50 @@ use arko_agents::{
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// Answers each request (its index and body) with a streamed response, or
-/// `None` to keep the request waiting until the server is dropped.
-pub(crate) type Respond = dyn Fn(usize, &str) -> Option<String> + Send + Sync;
+/// A reply to a model request.
+pub(crate) enum Reply {
+    /// A 200 response streaming these server-sent events.
+    Stream(String),
+    /// An error status, with an optional `Retry-After` in seconds.
+    Status {
+        status: u16,
+        retry_after: Option<u64>,
+        body: String,
+    },
+}
+
+impl Reply {
+    fn http(&self) -> String {
+        match self {
+            Self::Stream(stream) => format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{stream}",
+                stream.len()
+            ),
+            Self::Status {
+                status,
+                retry_after,
+                body,
+            } => format!(
+                "HTTP/1.1 {status} Error\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                retry_after.map_or(String::new(), |seconds| format!(
+                    "Retry-After: {seconds}\r\n"
+                )),
+                body.len()
+            ),
+        }
+    }
+}
+
+/// Answers each request (its index and body), or `None` to keep it waiting
+/// until the server is dropped.
+pub(crate) type Respond = dyn Fn(usize, String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Reply>> + Send>>
+    + Send
+    + Sync;
 
 pub(crate) struct ResponsesServer {
     url: String,
     requests: Arc<AtomicUsize>,
+    bodies: Arc<parking_lot::Mutex<Vec<String>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -26,38 +63,65 @@ impl ResponsesServer {
     pub async fn start(
         respond: impl Fn(usize, &str) -> Option<String> + Send + Sync + 'static,
     ) -> Self {
+        Self::start_async(move |index, body| {
+            let reply = respond(index, &body).map(Reply::Stream);
+            Box::pin(async move { reply })
+        })
+        .await
+    }
+
+    /// Like [`start`](Self::start), with replies that may wait for something.
+    pub async fn start_async(
+        respond: impl Fn(
+            usize,
+            String,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Reply>> + Send>>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
         let respond: Arc<Respond> = Arc::new(respond);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(AtomicUsize::new(0));
+        let bodies = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let counter = requests.clone();
+        let recorded = bodies.clone();
         let task = tokio::spawn(async move {
             let mut connections = tokio::task::JoinSet::new();
             while let Ok((mut socket, _)) = listener.accept().await {
                 let counter = counter.clone();
+                let recorded = recorded.clone();
                 let respond = respond.clone();
                 connections.spawn(async move {
                     let Some(body) = read_request(&mut socket).await else {
                         return;
                     };
-                    let index = counter.fetch_add(1, Ordering::SeqCst);
-                    let Some(stream) = respond(index, &body) else {
+                    let index = {
+                        let mut bodies = recorded.lock();
+                        bodies.push(body.clone());
+                        counter.fetch_add(1, Ordering::SeqCst)
+                    };
+                    let Some(reply) = respond(index, body).await else {
                         // Hold the connection until the server is dropped.
                         return std::future::pending::<()>().await;
                     };
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{stream}",
-                        stream.len()
-                    );
-                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.write_all(reply.http().as_bytes()).await;
                 });
             }
         });
         Self {
             url,
             requests,
+            bodies,
             task,
         }
+    }
+
+    /// The bodies of the requests received so far, in order.
+    pub fn bodies(&self) -> Vec<String> {
+        self.bodies.lock().clone()
     }
 
     /// Requests received in full so far.
@@ -132,6 +196,11 @@ pub(crate) fn tool_call_turn(call_id: &str, name: &str, arguments: Value) -> Str
     .collect()
 }
 
+/// A streamed model turn completing the task with `summary`.
+pub(crate) fn complete_turn(call_id: &str, summary: &str) -> String {
+    tool_call_turn(call_id, "complete_task", json!({ "summary": summary }))
+}
+
 /// A native-mode agent that runs every tool call without approval, with
 /// display name `display_name`.
 pub(crate) fn agent_config(display_name: &str) -> AgentConfig {
@@ -179,6 +248,8 @@ pub(crate) struct ProbeTool {
     pub calls: AtomicUsize,
     pub block: bool,
     pub started: tokio::sync::Notify,
+    /// Blocked calls whose future was dropped (their task was aborted).
+    pub dropped: AtomicUsize,
 }
 
 impl ProbeTool {
@@ -217,6 +288,13 @@ impl Tool for ProbeTool {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.started.notify_one();
         if self.block {
+            struct Dropped<'a>(&'a AtomicUsize);
+            impl Drop for Dropped<'_> {
+                fn drop(&mut self) {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            let _dropped = Dropped(&self.dropped);
             std::future::pending::<()>().await;
         }
         Ok("probed".to_string())

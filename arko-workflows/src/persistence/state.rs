@@ -44,6 +44,10 @@ pub struct WorkflowState {
     /// this checkpoint. Resuming from the checkpoint starts the run again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancellation: Option<crate::workflow::cancel::Cancellation>,
+    /// Agent statuses and what each agent run has been told about the
+    /// agents it may message. Absent in checkpoints from before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_registry: Option<crate::messaging::registry::RegistrySnapshot>,
 }
 
 /// Lightweight serializable agent result for checkpoints.
@@ -85,6 +89,7 @@ mod tests {
             distillation_records: Vec::new(),
             completed_agents: Vec::new(),
             cancellation: None,
+            agent_registry: None,
         };
 
         let json = serde_json::to_string_pretty(&state).unwrap();

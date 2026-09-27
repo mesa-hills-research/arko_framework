@@ -106,6 +106,18 @@ impl WorkflowServices {
         agent_name: &str,
         prompt: &str,
     ) -> Result<AgentResult, WorkflowError> {
+        self.run_agent_at(caller, agent_name, prompt, 0).await
+    }
+
+    /// Runs `agent_name` for `caller` at `depth`: inside the tool call of a
+    /// run at `depth - 1`.
+    pub(crate) async fn run_agent_at(
+        &self,
+        caller: &str,
+        agent_name: &str,
+        prompt: &str,
+        depth: u32,
+    ) -> Result<AgentResult, WorkflowError> {
         if !self.is_allowed(caller) {
             return Err(WorkflowError::BuilderInvalid(format!(
                 "agent '{caller}' is not authorized to invoke workflow services"
@@ -141,7 +153,7 @@ impl WorkflowServices {
             WorkflowError::Channel("workflow services outlived their workflow".to_string())
         })?;
         WorkflowEngine::from_shared(self.client.clone(), self.persistence.clone())
-            .run_agent(agent_name, prompt, &context)
+            .run_nested(agent_name, prompt, &context, depth)
             .await
     }
 }
@@ -149,6 +161,8 @@ impl WorkflowServices {
 pub(crate) struct RunWorkflowAgentTool {
     services: WorkflowServices,
     caller: String,
+    /// The depth of the caller's run; the agent it runs is one deeper.
+    depth: u32,
 }
 
 impl std::fmt::Debug for RunWorkflowAgentTool {
@@ -161,8 +175,12 @@ impl std::fmt::Debug for RunWorkflowAgentTool {
 }
 
 impl RunWorkflowAgentTool {
-    pub fn new(services: WorkflowServices, caller: String) -> Self {
-        Self { services, caller }
+    pub fn new(services: WorkflowServices, caller: String, depth: u32) -> Self {
+        Self {
+            services,
+            caller,
+            depth,
+        }
     }
 }
 
@@ -206,7 +224,7 @@ impl Tool for RunWorkflowAgentTool {
                 param_name: "prompt".to_string(),
             })?;
         self.services
-            .run_agent(&self.caller, agent, prompt)
+            .run_agent_at(&self.caller, agent, prompt, self.depth + 1)
             .await
             .map(|result| result.summary)
             .map_err(|error| ToolError::ExecutionFailed(error.to_string()))

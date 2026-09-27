@@ -48,6 +48,8 @@ pub struct SharedContext {
     pub workflow_services: std::sync::OnceLock<crate::services::WorkflowServices>,
     pub paused: std::sync::atomic::AtomicBool,
     pub resume_notify: tokio::sync::Notify,
+    /// Agent statuses: rosters, start notices, and `list_recipients`.
+    pub(crate) registry: crate::messaging::registry::AgentRegistry,
     /// Whether and why the run was stopped (cancelled or aborted by a hook).
     pub(crate) run_control: Arc<crate::workflow::cancel::RunControl>,
     pub user_input_handler: Option<Arc<dyn crate::user_input::UserInputHandler>>,
@@ -63,6 +65,28 @@ impl SharedContext {
         self.messaging.as_ref().map_or_else(Vec::new, |policy| {
             policy.recipients_of(agent_name, &self.messages.roster())
         })
+    }
+
+    /// The current statuses of the agents `agent_name` may message.
+    pub fn recipient_statuses(
+        &self,
+        agent_name: &str,
+    ) -> Vec<(String, crate::messaging::registry::AgentStatus)> {
+        self.registry.statuses(
+            &self.message_recipients(agent_name),
+            self.paused.load(std::sync::atomic::Ordering::Acquire),
+        )
+    }
+
+    /// The current status of `agent`.
+    pub fn recipient_status(&self, agent: &str) -> crate::messaging::registry::AgentStatus {
+        self.registry
+            .statuses(
+                &[agent.to_string()],
+                self.paused.load(std::sync::atomic::Ordering::Acquire),
+            )
+            .remove(0)
+            .1
     }
 }
 
