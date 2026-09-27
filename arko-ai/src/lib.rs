@@ -21,7 +21,7 @@ pub mod embedding_provider_identifier;
 pub mod token_utils;
 
 pub use client::LLMClient;
-pub use codex_auth::{CodexAuthFile, CodexAuthSync};
+pub use codex_auth::{CodexAuthFile, CodexAuthStore, CodexAuthSync};
 pub use config::{
     AnthropicCacheTtl, AnthropicInferenceGeo, GenerationConfig, OpenAIServiceTier, Verbosity,
 };
@@ -56,6 +56,6 @@ pub use providers::openrouter::{
 };
 
 pub use providers::openai::{
-    ChatGptOAuthCredentials, OAuthRefreshResult, OpenAIAuth, OpenAIRequestHook,
+    ChatGptOAuthCredentials, ChatGptOAuthStore, OAuthRefreshResult, OpenAIAuth, OpenAIRequestHook,
     is_token_expired, parse_jwt_expiry, refresh_chatgpt_oauth_token,
 };

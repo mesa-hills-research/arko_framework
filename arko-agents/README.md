@@ -101,6 +101,10 @@ normalized to one attempt.
   Transient refresh errors also return here without a provider retry loop.
 - Proactive OAuth refresh participates in the same attempt and elapsed limits as
   model calls. The runtime explicitly bypasses the legacy provider retry loop.
+  With credentials from a Codex `auth.json`, build the client with
+  `LLMClient::with_codex_auth_file` so both refresh paths re-read the file first
+  and save rotated tokens at once (see arko-ai's README, "Shared Codex
+  credentials"); the example CLI's `--openai-auth-json` does.
   `CancelTask`, `SuspendTask`, and command-channel closure interrupt backoff and
   pending requests. Suspending returns the current task for persistence.
 - At exhaustion, `RetryThenPauseAndAwaitApproval` waits for explicit recovery or

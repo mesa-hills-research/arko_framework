@@ -3,18 +3,25 @@
 //! ChatGPT OAuth refresh tokens rotate: once a refresh succeeds, the previous
 //! refresh token stops working. When arko refreshes credentials loaded from the
 //! file Codex also uses, the new tokens must be written back, or Codex is left
-//! with a dead refresh token. [`CodexAuthFile`] loads the file, writes rotated
-//! tokens back atomically (after a backup), and never overwrites tokens that
-//! another process (such as Codex) wrote in the meantime.
+//! with a dead refresh token; and before refreshing, the file must be read
+//! again, since Codex may already have refreshed (a second use of a rotated
+//! refresh token makes Codex ask the user to sign in again).
+//!
+//! [`CodexAuthFile::openai_client`] and [`CodexAuthFile::client`] build a
+//! client that does both on every refresh (through a [`CodexAuthStore`]).
+//! [`CodexAuthFile`] loads the file, writes rotated tokens back atomically
+//! (after a backup), and never overwrites tokens that another process (such
+//! as Codex) wrote in the meantime.
 
 use crate::{
     client::LLMClient,
     error::Error,
-    providers::openai::{ChatGptOAuthCredentials, OpenAIAuth},
+    providers::openai::{ChatGptOAuthCredentials, ChatGptOAuthStore, OpenAIClient},
 };
 use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Result of [`CodexAuthFile::persist`] and [`CodexAuthFile::sync`].
@@ -47,6 +54,34 @@ impl std::fmt::Debug for CodexAuthFile {
             .field("path", &self.path)
             .finish_non_exhaustive()
     }
+}
+
+/// How [`CodexAuthFile::reconcile`] brought the file and a client's
+/// credentials together.
+enum Reconciled {
+    Unchanged,
+    Saved,
+    /// The file holds newer credentials; `bytes` become the snapshot once
+    /// they are adopted.
+    Newer {
+        credentials: ChatGptOAuthCredentials,
+        bytes: Vec<u8>,
+    },
+}
+
+/// How often [`CodexAuthFile::persist_tokens`] starts over when the file
+/// changes between reading it and replacing it.
+const PERSIST_ATTEMPTS: usize = 3;
+
+#[cfg(test)]
+type RenameHook = Box<dyn FnMut(&Path)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Runs just before `persist_tokens` re-reads the file ahead of the
+    /// rename, so tests can change the file in that window.
+    static BEFORE_RENAME: std::cell::RefCell<Option<RenameHook>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 impl CodexAuthFile {
@@ -87,14 +122,24 @@ impl CodexAuthFile {
         parse_credentials(&self.snapshot, &self.path)
     }
 
-    /// An [`LLMClient`] using the file's ChatGPT OAuth credentials.
-    pub fn client(&self) -> Result<LLMClient, Error> {
+    /// An OpenAI client using the file's ChatGPT OAuth credentials and kept
+    /// in step with the file: every token refresh first re-reads the file
+    /// (adopting tokens Codex refreshed, for the same account only), and
+    /// rotated tokens are written back as soon as a refresh succeeds. See
+    /// [`CodexAuthStore`].
+    pub fn openai_client(&self) -> Result<OpenAIClient, Error> {
         let credentials = self.credentials()?;
-        Ok(LLMClient::new().with_openai_chatgpt_oauth(
+        Ok(OpenAIClient::new_chatgpt_oauth(
             &credentials.access_token,
             credentials.refresh_token.as_deref(),
             &credentials.account_id,
-        ))
+        )
+        .with_credential_store(Some(Arc::new(CodexAuthStore::new(self.clone())))))
+    }
+
+    /// An [`LLMClient`] using [`openai_client`](Self::openai_client).
+    pub fn client(&self) -> Result<LLMClient, Error> {
+        Ok(LLMClient::new().with_openai_client(self.openai_client()?))
     }
 
     /// Writes `credentials` to the file, keeping every other field and the
@@ -110,50 +155,91 @@ impl CodexAuthFile {
         &mut self,
         credentials: &ChatGptOAuthCredentials,
     ) -> Result<CodexAuthSync, Error> {
-        let current = std::fs::read(&self.path)?;
-        if current != self.snapshot {
-            let in_file = parse_credentials(&current, &self.path)?;
-            if in_file == *credentials {
-                self.snapshot = current;
+        self.persist_tokens(credentials, None)
+    }
+
+    /// [`persist`](Self::persist), also writing the `id_token` a refresh
+    /// returned (Codex reads the account's plan and email from it). Without
+    /// one, the file keeps its `id_token`.
+    ///
+    /// The file is read again just before it is replaced; if it changed in
+    /// between, the checks start over with its new contents.
+    pub fn persist_tokens(
+        &mut self,
+        credentials: &ChatGptOAuthCredentials,
+        id_token: Option<&str>,
+    ) -> Result<CodexAuthSync, Error> {
+        for _ in 0..PERSIST_ATTEMPTS {
+            let current = std::fs::read(&self.path)?;
+            if current != self.snapshot {
+                let in_file = parse_credentials(&current, &self.path)?;
+                if in_file == *credentials {
+                    self.snapshot = current;
+                    return Ok(CodexAuthSync::Unchanged);
+                }
+                if in_file != self.credentials()? {
+                    return Err(Error::AuthenticationFailed(format!(
+                        "{} changed since it was loaded; refusing to overwrite newer credentials",
+                        self.path.display()
+                    )));
+                }
+                self.snapshot = current.clone();
+            } else if self.credentials()? == *credentials {
                 return Ok(CodexAuthSync::Unchanged);
             }
-            if in_file != self.credentials()? {
-                return Err(Error::AuthenticationFailed(format!(
-                    "{} changed since it was loaded; refusing to overwrite newer credentials",
-                    self.path.display()
-                )));
-            }
-            self.snapshot = current;
-        } else if self.credentials()? == *credentials {
-            return Ok(CodexAuthSync::Unchanged);
-        }
 
-        let bytes = self.contents_with(credentials)?;
-        let target = std::fs::canonicalize(&self.path)?;
-        let permissions = std::fs::metadata(&target)?.permissions();
-        let backup = with_suffix(&target, ".bak");
-        write_file(&backup, &self.snapshot, &permissions)?;
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_nanos());
-        let temporary = with_suffix(&target, &format!(".tmp-{}-{nanos}", std::process::id()));
-        // The contents are synced before the rename, so the new name never
-        // refers to a partly written file.
-        write_temporary(&temporary, &permissions, |file| file.write_all(&bytes))?;
-        if let Err(error) = std::fs::rename(&temporary, &target) {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(error.into());
+            let bytes = self.contents_with(credentials, id_token)?;
+            let target = std::fs::canonicalize(&self.path)?;
+            let permissions = std::fs::metadata(&target)?.permissions();
+            let backup = with_suffix(&target, ".bak");
+            write_file(&backup, &self.snapshot, &permissions)?;
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos());
+            let temporary = with_suffix(&target, &format!(".tmp-{}-{nanos}", std::process::id()));
+            // The contents are synced before the rename, so the new name never
+            // refers to a partly written file.
+            write_temporary(&temporary, &permissions, |file| file.write_all(&bytes))?;
+            // Narrow the window in which another process's write could be
+            // lost: the file must still hold what the new contents are based
+            // on. (Codex takes no lock on auth.json, so the window cannot be
+            // closed entirely.)
+            #[cfg(test)]
+            BEFORE_RENAME.with(|hook| {
+                if let Some(hook) = hook.borrow_mut().as_mut() {
+                    hook(&target);
+                }
+            });
+            match std::fs::read(&target) {
+                Ok(latest) if latest == current => {}
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&temporary);
+                    continue;
+                }
+                Err(error) => {
+                    let _ = std::fs::remove_file(&temporary);
+                    return Err(error.into());
+                }
+            }
+            if let Err(error) = std::fs::rename(&temporary, &target) {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(error.into());
+            }
+            self.snapshot = bytes;
+            // The file is replaced; make the rename itself durable. A failure here
+            // is only logged: the new contents are already in place.
+            if let Err(error) = sync_parent_directory(&target) {
+                log::warn!(
+                    "arko_ai: could not sync the directory of {}: {error}",
+                    target.display()
+                );
+            }
+            return Ok(CodexAuthSync::Saved);
         }
-        self.snapshot = bytes;
-        // The file is replaced; make the rename itself durable. A failure here
-        // is only logged: the new contents are already in place.
-        if let Err(error) = sync_parent_directory(&target) {
-            log::warn!(
-                "arko_ai: could not sync the directory of {}: {error}",
-                target.display()
-            );
-        }
-        Ok(CodexAuthSync::Saved)
+        Err(Error::AuthenticationFailed(format!(
+            "{} kept changing while rotated credentials were being saved; not overwriting it",
+            self.path.display()
+        )))
     }
 
     /// Writes `credentials` to a new file next to this one,
@@ -167,7 +253,17 @@ impl CodexAuthFile {
     /// recovery file over `auth.json` (or sign in again) before Codex next
     /// refreshes.
     pub fn write_recovery(&self, credentials: &ChatGptOAuthCredentials) -> Result<PathBuf, Error> {
-        let bytes = self.contents_with(credentials)?;
+        self.write_recovery_tokens(credentials, None)
+    }
+
+    /// [`write_recovery`](Self::write_recovery) with the `id_token` a refresh
+    /// returned.
+    pub fn write_recovery_tokens(
+        &self,
+        credentials: &ChatGptOAuthCredentials,
+        id_token: Option<&str>,
+    ) -> Result<PathBuf, Error> {
+        let bytes = self.contents_with(credentials, id_token)?;
         let seconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs());
@@ -208,9 +304,14 @@ impl CodexAuthFile {
         )))
     }
 
-    /// This file's contents (as last read or written) with `credentials` in
-    /// place of its tokens, keeping every other field and the layout.
-    fn contents_with(&self, credentials: &ChatGptOAuthCredentials) -> Result<Vec<u8>, Error> {
+    /// This file's contents (as last read or written) with `credentials` (and
+    /// `id_token`, when given) in place of its tokens, keeping every other
+    /// field and the layout.
+    fn contents_with(
+        &self,
+        credentials: &ChatGptOAuthCredentials,
+        id_token: Option<&str>,
+    ) -> Result<Vec<u8>, Error> {
         let mut value: Value = serde_json::from_slice(&self.snapshot)?;
         let nested = value.get("tokens").is_some_and(Value::is_object);
         let tokens = if nested {
@@ -222,6 +323,9 @@ impl CodexAuthFile {
         if let Some(refresh_token) = &credentials.refresh_token {
             tokens["refresh_token"] = Value::String(refresh_token.clone());
         }
+        if let Some(id_token) = id_token.filter(|token| !token.is_empty()) {
+            tokens["id_token"] = Value::String(id_token.to_string());
+        }
         tokens["account_id"] = Value::String(credentials.account_id.clone());
         if nested || value.get("last_refresh").is_some() {
             value["last_refresh"] = Value::String(rfc3339_utc(SystemTime::now()));
@@ -231,29 +335,32 @@ impl CodexAuthFile {
         Ok(bytes)
     }
 
-    /// Reconciles the file with `client`'s ChatGPT OAuth credentials: writes
-    /// credentials the client rotated, or loads newer credentials another
-    /// process wrote into the client. Fails when both changed, since only one
-    /// rotation can be valid. Clients without ChatGPT OAuth are left alone.
-    pub async fn sync(&mut self, client: &LLMClient) -> Result<CodexAuthSync, Error> {
-        let Some(in_client) = client.openai_chatgpt_oauth_credentials().await else {
-            return Ok(CodexAuthSync::Unchanged);
-        };
+    /// Brings the file and a client's credentials together: saves
+    /// credentials the client rotated, or reports newer credentials another
+    /// process wrote. Only credentials of the same account are ever saved or
+    /// reported; both having rotated is an error, since only one rotation can
+    /// be valid.
+    fn reconcile(&mut self, in_client: &ChatGptOAuthCredentials) -> Result<Reconciled, Error> {
         let known = self.credentials()?;
         let current = std::fs::read(&self.path)?;
+        let in_file = parse_credentials(&current, &self.path)?;
+        if in_file.account_id != in_client.account_id {
+            return Err(Error::AuthenticationFailed(format!(
+                "{} holds a different ChatGPT account than this client (signed out, or signed in to another account); sign in again",
+                self.path.display()
+            )));
+        }
         if current != self.snapshot {
-            let in_file = parse_credentials(&current, &self.path)?;
-            if in_file == in_client {
+            if in_file == *in_client {
                 self.snapshot = current;
-                return Ok(CodexAuthSync::Unchanged);
+                return Ok(Reconciled::Unchanged);
             }
             if in_file != known {
-                if in_client == known {
-                    client
-                        .update_openai_auth(OpenAIAuth::ChatGptOAuth(in_file))
-                        .await?;
-                    self.snapshot = current;
-                    return Ok(CodexAuthSync::Reloaded);
+                if *in_client == known {
+                    return Ok(Reconciled::Newer {
+                        credentials: in_file,
+                        bytes: current,
+                    });
                 }
                 return Err(Error::AuthenticationFailed(format!(
                     "Both {} and this client rotated ChatGPT OAuth credentials; sign in again",
@@ -263,10 +370,134 @@ impl CodexAuthFile {
             // Only formatting or other fields changed: not a rotation.
             self.snapshot = current;
         }
-        if in_client == known {
-            return Ok(CodexAuthSync::Unchanged);
+        if *in_client == known {
+            return Ok(Reconciled::Unchanged);
         }
-        self.persist(&in_client)
+        self.persist(in_client)?;
+        Ok(Reconciled::Saved)
+    }
+
+    /// Reconciles the file with `client`'s ChatGPT OAuth credentials: writes
+    /// credentials the client rotated, or loads newer credentials another
+    /// process wrote into the client. Fails when both changed, since only one
+    /// rotation can be valid, and when the file holds a different account
+    /// (nothing is then written or loaded). Clients without ChatGPT OAuth are
+    /// left alone.
+    ///
+    /// A client from [`client`](Self::client) or
+    /// [`openai_client`](Self::openai_client) keeps the file in step on its
+    /// own; `sync` is for clients configured some other way.
+    pub async fn sync(&mut self, client: &LLMClient) -> Result<CodexAuthSync, Error> {
+        let Some(in_client) = client.openai_chatgpt_oauth_credentials().await else {
+            return Ok(CodexAuthSync::Unchanged);
+        };
+        match self.reconcile(&in_client)? {
+            Reconciled::Unchanged => Ok(CodexAuthSync::Unchanged),
+            Reconciled::Saved => Ok(CodexAuthSync::Saved),
+            Reconciled::Newer { credentials, bytes } => {
+                // Only replace what was read: a refresh that finished in
+                // the meantime must not be undone.
+                if client
+                    .replace_openai_chatgpt_credentials(&in_client, credentials.clone())
+                    .await
+                {
+                    self.snapshot = bytes;
+                    return Ok(CodexAuthSync::Reloaded);
+                }
+                if client.openai_chatgpt_oauth_credentials().await.as_ref() == Some(&credentials) {
+                    self.snapshot = bytes;
+                    return Ok(CodexAuthSync::Unchanged);
+                }
+                Err(Error::AuthenticationFailed(format!(
+                    "Both {} and this client rotated ChatGPT OAuth credentials; sign in again",
+                    self.path.display()
+                )))
+            }
+        }
+    }
+}
+
+/// A [`CodexAuthFile`] as the [`ChatGptOAuthStore`] of an OpenAI client:
+/// before every refresh the file is read again, and tokens Codex refreshed
+/// are used instead of refreshing (for the same account only; a file now
+/// holding another account stops the refresh). Rotated tokens, with the
+/// refresh's `id_token`, are written back as soon as a refresh succeeds
+/// (backup, atomic replace, never over newer tokens).
+///
+/// When rotated tokens cannot be written back, they go to a private
+/// recovery file next to `auth.json` (see
+/// [`CodexAuthFile::write_recovery`]) and the refresh returns an error
+/// naming it; the client keeps using the new tokens, and the next refresh
+/// tries to save them again first.
+pub struct CodexAuthStore {
+    file: Mutex<CodexAuthFile>,
+}
+
+impl CodexAuthStore {
+    pub fn new(file: CodexAuthFile) -> Self {
+        Self {
+            file: Mutex::new(file),
+        }
+    }
+
+    /// The `auth.json` this store keeps in step.
+    pub fn path(&self) -> PathBuf {
+        self.lock().path.clone()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, CodexAuthFile> {
+        // Every update leaves the file state consistent, so a holder that
+        // panicked leaves nothing half-done.
+        self.file.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl std::fmt::Debug for CodexAuthStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CodexAuthStore")
+            .field("path", &self.path())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ChatGptOAuthStore for CodexAuthStore {
+    fn before_refresh(
+        &self,
+        current: &ChatGptOAuthCredentials,
+    ) -> Result<Option<ChatGptOAuthCredentials>, Error> {
+        let mut file = self.lock();
+        match file.reconcile(current)? {
+            Reconciled::Unchanged | Reconciled::Saved => Ok(None),
+            Reconciled::Newer { credentials, bytes } => {
+                file.snapshot = bytes;
+                Ok(Some(credentials))
+            }
+        }
+    }
+
+    fn save_refreshed(
+        &self,
+        refreshed: &ChatGptOAuthCredentials,
+        id_token: Option<&str>,
+    ) -> Result<(), Error> {
+        let mut file = self.lock();
+        let error = match file.persist_tokens(refreshed, id_token) {
+            Ok(_) => return Ok(()),
+            Err(error) => error,
+        };
+        let path = file.path.display().to_string();
+        let message = match file.write_recovery_tokens(refreshed, id_token) {
+            Ok(recovery) => format!(
+                "refreshed ChatGPT OAuth tokens could not be saved to {path} ({error}); they are in {} (readable only by you): put it in place of {path}, or sign in to Codex again, before Codex next refreshes",
+                recovery.display()
+            ),
+            Err(recovery_error) => format!(
+                "refreshed ChatGPT OAuth tokens could not be saved to {path} ({error}) nor to a recovery file ({recovery_error}); sign in to Codex again"
+            ),
+        };
+        log::error!("arko_ai: {message}");
+        Err(Error::AuthenticationFailed(message))
     }
 }
 
@@ -372,6 +603,7 @@ fn rfc3339_utc(at: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::openai::OpenAIAuth;
     use std::time::Duration;
 
     const NESTED: &str = r#"{
@@ -628,6 +860,221 @@ mod tests {
         std::fs::write(&path, &external).unwrap();
         assert!(file.sync(&client).await.is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), external);
+    }
+
+    #[test]
+    fn persisting_a_refresh_writes_its_id_token_and_keeps_the_old_one_otherwise() {
+        let (_dir, path) = temp_file(NESTED);
+        let mut file = CodexAuthFile::load(&path).unwrap();
+        assert_eq!(
+            file.persist_tokens(&rotated(), Some("id-2")).unwrap(),
+            CodexAuthSync::Saved
+        );
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["tokens"]["id_token"], "id-2");
+        assert_eq!(saved["tokens"]["refresh_token"], "refresh-2");
+
+        let third = ChatGptOAuthCredentials {
+            refresh_token: Some("refresh-3".into()),
+            ..rotated()
+        };
+        file.persist_tokens(&third, None).unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["tokens"]["id_token"], "id-2");
+
+        // The flat layout gets the id token at the top level.
+        let (_dir, path) =
+            temp_file(r#"{"access_token":"a","refresh_token":"r","account_id":"account-1"}"#);
+        let mut file = CodexAuthFile::load(&path).unwrap();
+        file.persist_tokens(&rotated(), Some("id-2")).unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["id_token"], "id-2");
+        assert!(saved.get("tokens").is_none());
+    }
+
+    fn set_before_rename(hook: Option<RenameHook>) {
+        BEFORE_RENAME.with(|slot| *slot.borrow_mut() = hook);
+    }
+
+    fn temporary_files(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".tmp-")
+            })
+            .count()
+    }
+
+    #[test]
+    fn a_rotation_written_just_before_the_rename_is_not_overwritten() {
+        let (dir, path) = temp_file(NESTED);
+        let mut file = CodexAuthFile::load(&path).unwrap();
+        let external = NESTED.replace("refresh-1", "refresh-from-codex");
+        let written = external.clone();
+        set_before_rename(Some(Box::new(move |target| {
+            std::fs::write(target, &written).unwrap();
+        })));
+        let result = file.persist_tokens(&rotated(), Some("id-2"));
+        set_before_rename(None);
+        assert!(matches!(result, Err(Error::AuthenticationFailed(_))), "{result:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), external);
+        assert_eq!(temporary_files(dir.path()), 0);
+    }
+
+    #[test]
+    fn a_change_without_a_rotation_just_before_the_rename_is_merged() {
+        let (dir, path) = temp_file(NESTED);
+        let mut file = CodexAuthFile::load(&path).unwrap();
+        let mut once = Some(reformatted());
+        set_before_rename(Some(Box::new(move |target| {
+            if let Some(contents) = once.take() {
+                std::fs::write(target, contents).unwrap();
+            }
+        })));
+        let result = file.persist_tokens(&rotated(), None);
+        set_before_rename(None);
+        assert_eq!(result.unwrap(), CodexAuthSync::Saved);
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["tokens"]["refresh_token"], "refresh-2");
+        assert_eq!(saved["written_by"], "another program");
+        assert_eq!(temporary_files(dir.path()), 0);
+    }
+
+    fn other_account() -> String {
+        NESTED
+            .replace("account-1", "account-2")
+            .replace("refresh-1", "refresh-other")
+    }
+
+    fn codex_refreshed() -> String {
+        NESTED
+            .replace("access-1", "access-codex")
+            .replace("refresh-1", "refresh-codex")
+    }
+
+    #[tokio::test]
+    async fn sync_never_adopts_or_saves_another_account() {
+        let (_dir, path) = temp_file(NESTED);
+        let mut file = CodexAuthFile::load(&path).unwrap();
+        let client =
+            LLMClient::new().with_openai_chatgpt_oauth("access-1", Some("refresh-1"), "account-1");
+        // Codex signed in to another account: the client keeps its own.
+        std::fs::write(&path, other_account()).unwrap();
+        let error = file.sync(&client).await.unwrap_err();
+        assert!(error.to_string().contains("different ChatGPT account"), "{error}");
+        let credentials = client.openai_chatgpt_oauth_credentials().await.unwrap();
+        assert_eq!(credentials.account_id, "account-1");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), other_account());
+
+        // A client holding another account never writes it over the file.
+        let (_dir, path) = temp_file(NESTED);
+        let mut file = CodexAuthFile::load(&path).unwrap();
+        let client =
+            LLMClient::new().with_openai_chatgpt_oauth("access-9", Some("refresh-9"), "account-2");
+        assert!(file.sync(&client).await.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), NESTED);
+    }
+
+    #[test]
+    fn the_store_adopts_codex_rotations_saves_unsaved_ones_and_refuses_other_accounts() {
+        let (_dir, path) = temp_file(NESTED);
+        let store = CodexAuthStore::new(CodexAuthFile::load(&path).unwrap());
+        let loaded = CodexAuthFile::load(&path).unwrap().credentials().unwrap();
+        assert_eq!(store.before_refresh(&loaded).unwrap(), None);
+
+        // Codex refreshed: its tokens are used instead of refreshing, once.
+        std::fs::write(&path, codex_refreshed()).unwrap();
+        let newer = store.before_refresh(&loaded).unwrap().unwrap();
+        assert_eq!(newer.access_token, "access-codex");
+        assert_eq!(newer.refresh_token.as_deref(), Some("refresh-codex"));
+        assert_eq!(store.before_refresh(&newer).unwrap(), None);
+
+        // A client holding a rotation that was never saved saves it first.
+        let unsaved = ChatGptOAuthCredentials {
+            access_token: "access-unsaved".into(),
+            refresh_token: Some("refresh-unsaved".into()),
+            account_id: "account-1".into(),
+        };
+        assert_eq!(store.before_refresh(&unsaved).unwrap(), None);
+        assert_eq!(
+            CodexAuthFile::load(&path).unwrap().credentials().unwrap(),
+            unsaved
+        );
+
+        // Another account in the file stops the refresh and changes nothing.
+        std::fs::write(&path, other_account()).unwrap();
+        let error = store.before_refresh(&unsaved).unwrap_err();
+        assert!(matches!(error, Error::AuthenticationFailed(_)));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), other_account());
+        // A file that can't be read stops it too.
+        std::fs::write(&path, "{not json").unwrap();
+        assert!(store.before_refresh(&unsaved).is_err());
+    }
+
+    #[test]
+    fn the_store_saves_refreshes_and_keeps_unsaveable_ones_in_a_recovery_file() {
+        let (dir, path) = temp_file(NESTED);
+        let store = CodexAuthStore::new(CodexAuthFile::load(&path).unwrap());
+        store.save_refreshed(&rotated(), Some("id-2")).unwrap();
+        assert_eq!(
+            CodexAuthFile::load(&path).unwrap().credentials().unwrap(),
+            rotated()
+        );
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["tokens"]["id_token"], "id-2");
+
+        // Codex wrote a different rotation meanwhile: nothing is overwritten
+        // and the refreshed tokens go to a recovery file.
+        let external = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("refresh-2", "refresh-codex");
+        std::fs::write(&path, &external).unwrap();
+        let refreshed = ChatGptOAuthCredentials {
+            access_token: "access-3".into(),
+            refresh_token: Some("refresh-3".into()),
+            account_id: "account-1".into(),
+        };
+        let error = store
+            .save_refreshed(&refreshed, Some("id-3"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), external);
+        for secret in ["access-3", "refresh-3", "id-3", "account-1", "refresh-codex"] {
+            assert!(!error.contains(secret), "{error}");
+        }
+        let recovery = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.to_string_lossy().contains(".recovered-"))
+            .unwrap();
+        assert!(error.contains(&recovery.display().to_string()), "{error}");
+        assert_eq!(
+            CodexAuthFile::load(&recovery).unwrap().credentials().unwrap(),
+            refreshed
+        );
+        let debug = format!("{store:?}");
+        assert!(debug.contains("auth.json") && !debug.contains("refresh"), "{debug}");
+    }
+
+    #[tokio::test]
+    async fn clients_from_the_file_carry_the_store() {
+        let (_dir, path) = temp_file(NESTED);
+        let file = CodexAuthFile::load(&path).unwrap();
+        let client = file.client().unwrap();
+        // Codex refreshed; a refresh adopts its tokens without a request (no
+        // token endpoint is reachable from this test).
+        std::fs::write(&path, codex_refreshed()).unwrap();
+        let result = client.refresh_openai_oauth_token_once().await.unwrap();
+        assert_eq!(result.access_token, "access-codex");
+        let credentials = client.openai_chatgpt_oauth_credentials().await.unwrap();
+        assert_eq!(credentials.refresh_token.as_deref(), Some("refresh-codex"));
+        let via_builder = LLMClient::new().with_codex_auth_file(&file).unwrap();
+        assert!(via_builder.is_openai_chatgpt_oauth().await);
     }
 
     #[test]

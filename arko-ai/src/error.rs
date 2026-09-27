@@ -628,6 +628,9 @@ fn body_delay(value: &Value) -> Option<Duration> {
     ))
 }
 
+/// [`retry_after_from_value`] for an unparsed body. Error bodies reach it
+/// through [`Error::provider_error`], so only tests call it directly.
+#[cfg(test)]
 pub(crate) fn retry_after_from_body(body: &str) -> Option<Duration> {
     let value: Value = serde_json::from_str(body).ok()?;
     retry_after_from_value(&value)

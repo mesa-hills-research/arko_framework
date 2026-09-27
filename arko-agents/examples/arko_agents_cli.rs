@@ -3,7 +3,7 @@ use arko_agents::{
     ToolRegistry,
     runtime::{command::ToolApprovalDecision, command::UserCommand, event::AgentEvent},
 };
-use arko_ai::{CodexAuthFile, CodexAuthSync, LLMClient, UsageInfo};
+use arko_ai::{CodexAuthFile, LLMClient, UsageInfo};
 use clap::Parser;
 use dotenv::dotenv;
 use std::{
@@ -52,7 +52,9 @@ struct Cli {
     /// running `npx @openai/codex login` (typically at ~/.codex/auth.json).
     ///
     /// Token refresh is handled automatically by the agent runtime when the
-    /// access token expires; rotated tokens are saved back to this file.
+    /// access token expires. Every refresh first re-reads this file (using
+    /// tokens Codex already refreshed instead of refreshing again), and
+    /// rotated tokens are saved back to it immediately.
     #[arg(long)]
     openai_auth_json: Option<PathBuf>,
 }
@@ -68,23 +70,6 @@ fn parse_tool_calling_mode(s: &str) -> Result<ToolCallingMode, String> {
     }
 }
 
-/// Writes tokens the client rotated back to the auth file.
-async fn sync_openai_auth(auth: &mut Option<CodexAuthFile>, client: &LLMClient) {
-    let Some(auth) = auth else {
-        return;
-    };
-    match auth.sync(client).await {
-        Ok(CodexAuthSync::Saved) => {
-            println!("[SYSTEM] Saved rotated OpenAI OAuth tokens to {:?}", auth.path())
-        }
-        Ok(CodexAuthSync::Reloaded) => {
-            println!("[SYSTEM] Reloaded OpenAI OAuth tokens from {:?}", auth.path())
-        }
-        Ok(CodexAuthSync::Unchanged) => {}
-        Err(e) => eprintln!("[ERROR] Failed to save OpenAI OAuth tokens: {}", e),
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
@@ -94,16 +79,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut llm_client_builder = LLMClient::from_env();
 
-    let mut openai_auth = None;
     if let Some(ref auth_json_path) = cli.openai_auth_json {
         println!("[SYSTEM] Loading OpenAI OAuth from {:?}", auth_json_path);
         let auth = CodexAuthFile::load(auth_json_path)?;
         let credentials = auth.credentials()?;
-        llm_client_builder = llm_client_builder.with_openai_chatgpt_oauth(
-            &credentials.access_token,
-            credentials.refresh_token.as_deref(),
-            &credentials.account_id,
-        );
+        llm_client_builder = llm_client_builder.with_codex_auth_file(&auth)?;
         println!(
             "[SYSTEM] OpenAI ChatGPT OAuth configured (token refresh {})",
             if credentials.refresh_token.is_some() {
@@ -112,7 +92,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "disabled — no refresh_token"
             }
         );
-        openai_auth = Some(auth);
     }
     let llm_client = Arc::new(llm_client_builder);
 
@@ -252,7 +231,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             AgentEvent::TaskStateChanged(new_state) => {
                 close_active_blocks(&mut in_reasoning_block, &mut in_assistant_response_block)?;
                 println!("\n[STATE] {:?}", new_state);
-                sync_openai_auth(&mut openai_auth, &llm_client).await;
                 if new_state.is_terminal() {
                     println!("[SYSTEM] Task reached terminal state.");
                 }
@@ -458,7 +436,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let final_task_result = task_join_handle.await;
-    sync_openai_auth(&mut openai_auth, &llm_client).await;
 
     match final_task_result {
         Ok(Ok(final_task)) => {

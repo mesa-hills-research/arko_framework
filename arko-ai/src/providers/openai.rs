@@ -44,6 +44,9 @@ mod codex_parity_tests;
 mod request_hook;
 pub use request_hook::OpenAIRequestHook;
 
+mod credential_store;
+pub use credential_store::ChatGptOAuthStore;
+
 type StreamingRefusals = BTreeMap<(String, u64), String>;
 
 const CHATGPT_OAUTH_DEFAULT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -68,14 +71,15 @@ fn redacted(secret: Option<&str>) -> Option<&'static str> {
     secret.map(|_| REDACTED)
 }
 
-// Tokens never appear in `Debug` output (logs, panics, error reports).
+// Tokens and the account id never appear in `Debug` output (logs, panics,
+// error reports).
 impl std::fmt::Debug for ChatGptOAuthCredentials {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ChatGptOAuthCredentials")
             .field("access_token", &REDACTED)
             .field("refresh_token", &redacted(self.refresh_token.as_deref()))
-            .field("account_id", &self.account_id)
+            .field("account_id", &REDACTED)
             .finish()
     }
 }
@@ -257,13 +261,12 @@ fn response_error(
 const OAUTH_REFRESH_BACKOFF: BackoffPolicy =
     BackoffPolicy::new(Duration::from_secs(30), Duration::from_secs(900));
 
-fn oauth_retry_delay(
-    header_delay: Option<Duration>,
-    body: &str,
-    attempt: u32,
-) -> Duration {
-    let hint = header_delay.or_else(|| crate::error::retry_after_from_body(body));
-    OAUTH_REFRESH_BACKOFF.next_delay(attempt.saturating_add(1), hint)
+/// Retries of a rate-limited OAuth refresh when rate-limit retries are
+/// enabled: about an hour of backoff before the 429 is returned.
+const OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES: u32 = 8;
+
+fn oauth_retry_delay(server_hint: Option<Duration>, attempt: u32) -> Duration {
+    OAUTH_REFRESH_BACKOFF.next_delay(attempt.saturating_add(1), server_hint)
 }
 
 /// Exchanges a ChatGPT OAuth refresh token for new tokens, once; an HTTP
@@ -283,23 +286,6 @@ pub async fn refresh_chatgpt_oauth_token(
     client_id: Option<&str>,
     token_url: Option<&str>,
 ) -> Result<OAuthRefreshResult, Error> {
-    refresh_chatgpt_oauth_token_with_policy(
-        http_client,
-        refresh_token,
-        client_id,
-        token_url,
-        false,
-    )
-    .await
-}
-
-async fn refresh_chatgpt_oauth_token_with_policy(
-    http_client: &reqwest::Client,
-    refresh_token: &str,
-    client_id: Option<&str>,
-    token_url: Option<&str>,
-    retry_rate_limits: bool,
-) -> Result<OAuthRefreshResult, Error> {
     let resolved_client_id = client_id.unwrap_or(CHATGPT_OAUTH_DEFAULT_CLIENT_ID);
     let resolved_token_url = token_url.unwrap_or(CHATGPT_OAUTH_DEFAULT_TOKEN_URL);
 
@@ -310,47 +296,26 @@ async fn refresh_chatgpt_oauth_token_with_policy(
         "scope": "openid profile email offline_access",
     });
 
-    let mut rate_limit_attempts = 0_u32;
-    let response = loop {
-        let response = http_client
-            .post(resolved_token_url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
-        let status = response.status();
-        if status.is_success() {
-            break response;
-        }
-
+    let response = http_client
+        .post(resolved_token_url)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
         let header_delay = retry_after_from_headers(&response);
         let error_text = response
             .text()
             .await
             .unwrap_or_else(|_| "<unavailable error body>".into());
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS && retry_rate_limits {
-            let delay = oauth_retry_delay(
-                header_delay,
-                &error_text,
-                rate_limit_attempts,
-            );
-            rate_limit_attempts = rate_limit_attempts.saturating_add(1);
-            log::warn!(
-                "ChatGPT OAuth refresh was rate limited; waiting {:?} before retry {}",
-                delay,
-                rate_limit_attempts,
-            );
-            tokio::time::sleep(delay).await;
-            continue;
-        }
-
         return Err(response_error(
             "OAuth token refresh failed",
             status,
             header_delay,
             &error_text,
         ));
-    };
+    }
 
     let data: Value = response.json().await?;
 
@@ -379,6 +344,7 @@ pub struct OpenAIClient {
     request_hook: Option<Arc<dyn OpenAIRequestHook>>,
     originator: Option<String>,
     user_agent: Option<String>,
+    credential_store: Option<Arc<dyn ChatGptOAuthStore>>,
 }
 
 impl OpenAIClient {
@@ -395,6 +361,7 @@ impl OpenAIClient {
             request_hook: None,
             originator: None,
             user_agent: None,
+            credential_store: None,
         }
     }
 
@@ -419,6 +386,7 @@ impl OpenAIClient {
             request_hook: None,
             originator: None,
             user_agent: None,
+            credential_store: None,
         }
     }
 
@@ -433,6 +401,7 @@ impl OpenAIClient {
             request_hook: None,
             originator: None,
             user_agent: None,
+            credential_store: None,
         }
     }
 
@@ -452,9 +421,25 @@ impl OpenAIClient {
         self
     }
 
-    /// Configures whether OAuth refresh requests retry HTTP 429 responses.
+    /// Configures whether OAuth refresh requests retry HTTP 429 responses
+    /// (off by default): up to 8 retries, waiting for the advertised reset
+    /// when available and otherwise backing off from 30 seconds to 15
+    /// minutes, before the 429 is returned. Refreshes made for a request
+    /// the server rejected, and [`refresh_oauth_token_once`](Self::refresh_oauth_token_once),
+    /// never wait.
     pub fn with_oauth_rate_limit_retries(mut self, enabled: bool) -> Self {
         self.retry_oauth_rate_limits = enabled;
+        self
+    }
+
+    /// Keeps ChatGPT OAuth credentials in step with `store`, which other
+    /// programs share (for a Codex `auth.json`, see
+    /// [`CodexAuthFile::openai_client`](crate::codex_auth::CodexAuthFile::openai_client)):
+    /// every refresh first re-reads the store and adopts tokens another
+    /// program already refreshed, and rotated tokens are stored as soon as a
+    /// refresh succeeds. See [`ChatGptOAuthStore`]. Clones share the store.
+    pub fn with_credential_store(mut self, store: Option<Arc<dyn ChatGptOAuthStore>>) -> Self {
+        self.credential_store = store;
         self
     }
 
@@ -542,60 +527,130 @@ impl OpenAIClient {
         // Serialize rotation across clones. Holding this lock also prevents
         // a refresh response from overwriting credentials installed by the host.
         let mut auth = self.auth.write().await;
-        let (refresh_token, account_id) = {
-            match (&*auth, expected) {
-                (OpenAIAuth::ChatGptOAuth(credentials), OpenAIAuth::ChatGptOAuth(previous)) => {
-                    if credentials.account_id != previous.account_id {
-                        return Err(Error::AuthenticationFailed(
-                            "OAuth account changed during the request; start a new request.".into(),
-                        ));
-                    }
-                    if credentials.access_token != previous.access_token {
-                        // Another caller already replaced the rejected token.
-                        return Ok(OAuthRefreshResult {
-                            access_token: credentials.access_token.clone(),
-                            refresh_token: credentials.refresh_token.clone(),
-                            id_token: None,
-                        });
-                    }
-                    let refresh_token = credentials.refresh_token.as_ref().ok_or_else(|| {
-                        Error::AuthenticationFailed(
-                            "No refresh_token stored in ChatGPT OAuth credentials. Provide a refresh_token when constructing the client to enable automatic token refresh."
-                                .to_string(),
-                        )
-                    })?;
-
-                    (refresh_token.clone(), credentials.account_id.clone())
-                }
-                _ => {
-                    return Err(Error::InvalidRequest(
-                        "Cannot refresh OAuth token: client is using API key auth".to_string(),
+        let current = match (&*auth, expected) {
+            (OpenAIAuth::ChatGptOAuth(credentials), OpenAIAuth::ChatGptOAuth(previous)) => {
+                if credentials.account_id != previous.account_id {
+                    return Err(Error::AuthenticationFailed(
+                        "OAuth account changed during the request; start a new request.".into(),
                     ));
                 }
+                if credentials.access_token != previous.access_token {
+                    // Another caller already replaced the rejected token.
+                    return Ok(OAuthRefreshResult {
+                        access_token: credentials.access_token.clone(),
+                        refresh_token: credentials.refresh_token.clone(),
+                        id_token: None,
+                    });
+                }
+                credentials.clone()
+            }
+            _ => {
+                return Err(Error::InvalidRequest(
+                    "Cannot refresh OAuth token: client is using API key auth".to_string(),
+                ));
             }
         };
 
         let token_url = self.oauth_token_url.as_deref();
-        let result = refresh_chatgpt_oauth_token_with_policy(
-            &self.http_client,
-            &refresh_token,
-            None,
-            token_url,
-            retry_rate_limits,
-        )
-        .await?;
+        let mut rate_limit_retries = 0_u32;
+        let result = loop {
+            // Another program sharing the credentials may have refreshed
+            // already; refreshing again would reuse a rotated refresh token.
+            // Never refresh without reading the store first.
+            if let Some(store) = &self.credential_store
+                && let Some(newer) = store.before_refresh(&current)?
+            {
+                return Self::adopt_stored(&mut auth, &current, newer);
+            }
+            let refresh_token = current.refresh_token.as_deref().ok_or_else(|| {
+                Error::AuthenticationFailed(
+                    "No refresh_token stored in ChatGPT OAuth credentials. Provide a refresh_token when constructing the client to enable automatic token refresh."
+                        .to_string(),
+                )
+            })?;
+            let error = match refresh_chatgpt_oauth_token(
+                &self.http_client,
+                refresh_token,
+                None,
+                token_url,
+            )
+            .await
+            {
+                Ok(result) => break result,
+                Err(error) => error,
+            };
+            let rate_limited = matches!(error, Error::ProviderError { status: Some(429), .. });
+            if retry_rate_limits
+                && rate_limited
+                && rate_limit_retries < OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES
+            {
+                let delay = oauth_retry_delay(error.retry_after(), rate_limit_retries);
+                rate_limit_retries += 1;
+                log::warn!(
+                    "ChatGPT OAuth refresh was rate limited; waiting {delay:?} before retry {rate_limit_retries}"
+                );
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+            // The server rejects a refresh token another program rotated in
+            // the meantime; its new tokens are then in the store.
+            if let Some(store) = &self.credential_store
+                && let Ok(Some(newer)) = store.before_refresh(&current)
+            {
+                return Self::adopt_stored(&mut auth, &current, newer);
+            }
+            return Err(error);
+        };
 
-        let new_refresh_token = result.refresh_token.clone().unwrap_or(refresh_token);
-
-        let new_auth = OpenAIAuth::ChatGptOAuth(ChatGptOAuthCredentials {
+        let refreshed = ChatGptOAuthCredentials {
             access_token: result.access_token.clone(),
-            refresh_token: Some(new_refresh_token),
-            account_id,
-        });
-
-        *auth = new_auth;
-
+            refresh_token: result.refresh_token.clone().or(current.refresh_token),
+            account_id: current.account_id,
+        };
+        *auth = OpenAIAuth::ChatGptOAuth(refreshed.clone());
+        // The previous refresh token no longer works: store the new tokens
+        // before anything else can fail.
+        if let Some(store) = &self.credential_store {
+            store.save_refreshed(&refreshed, result.id_token.as_deref())?;
+        }
         Ok(result)
+    }
+
+    /// Installs credentials another program stored, in place of a refresh.
+    fn adopt_stored(
+        auth: &mut OpenAIAuth,
+        current: &ChatGptOAuthCredentials,
+        stored: ChatGptOAuthCredentials,
+    ) -> Result<OAuthRefreshResult, Error> {
+        if stored.account_id != current.account_id {
+            return Err(Error::AuthenticationFailed(
+                "The credential store holds a different ChatGPT account; sign in again.".into(),
+            ));
+        }
+        let result = OAuthRefreshResult {
+            access_token: stored.access_token.clone(),
+            refresh_token: stored.refresh_token.clone(),
+            id_token: None,
+        };
+        *auth = OpenAIAuth::ChatGptOAuth(stored);
+        Ok(result)
+    }
+
+    /// Replaces the ChatGPT OAuth credentials only if the client still holds
+    /// `expected`; returns whether it did.
+    pub(crate) async fn replace_chatgpt_credentials(
+        &self,
+        expected: &ChatGptOAuthCredentials,
+        new: ChatGptOAuthCredentials,
+    ) -> bool {
+        let mut auth = self.auth.write().await;
+        match &*auth {
+            OpenAIAuth::ChatGptOAuth(current) if current == expected => {
+                *auth = OpenAIAuth::ChatGptOAuth(new);
+                true
+            }
+            _ => false,
+        }
     }
 
     async fn snapshot_auth(&self) -> OpenAIAuth {
@@ -3230,11 +3285,14 @@ mod tests {
     #[test]
     fn oauth_refresh_backoff_doubles_to_a_cap_and_honors_server_hints() {
         for _ in 0..50 {
-            let first = super::oauth_retry_delay(None, "{}", 0);
+            let first = super::oauth_retry_delay(None, 0);
             assert!(first >= Duration::from_secs(15) && first <= Duration::from_secs(30));
-            let late = super::oauth_retry_delay(None, "{}", 20);
+            let late = super::oauth_retry_delay(None, 20);
             assert!(late >= Duration::from_secs(450) && late <= Duration::from_secs(900));
-            let hinted = super::oauth_retry_delay(None, r#"{"retry_after":1200}"#, 0);
+            // A body hint reaches the delay through the error's retry_after.
+            let hint = Error::provider_error("refresh", Some(429), None, r#"{"retry_after":1200}"#)
+                .retry_after();
+            let hinted = super::oauth_retry_delay(hint, 0);
             assert!(hinted >= Duration::from_secs(1200));
         }
     }

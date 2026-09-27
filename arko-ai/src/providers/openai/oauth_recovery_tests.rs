@@ -333,8 +333,8 @@ fn credential_debug_output_redacts_tokens() {
         account_id: "synthetic-account".into(),
     };
     let debug = format!("{credentials:?}");
-    assert!(debug.contains("synthetic-account"), "{debug}");
-    assert!(debug.contains("<redacted>"), "{debug}");
+    assert!(!debug.contains("synthetic-account"), "{debug}");
+    assert!(debug.contains("account_id: \"<redacted>\""), "{debug}");
     let refreshed = OAuthRefreshResult {
         access_token: "synthetic-access".into(),
         refresh_token: Some("synthetic-refresh".into()),
@@ -349,4 +349,216 @@ fn credential_debug_output_redacts_tokens() {
         ..credentials
     };
     assert!(format!("{without_refresh:?}").contains("refresh_token: None"));
+}
+
+/// A scripted [`ChatGptOAuthStore`]: `before_refresh` answers from `reads`
+/// in order (then `None`), and saved credentials are recorded.
+#[derive(Default)]
+struct ScriptedStore {
+    reads: std::sync::Mutex<std::collections::VecDeque<Result<Option<ChatGptOAuthCredentials>, Error>>>,
+    seen: std::sync::Mutex<Vec<ChatGptOAuthCredentials>>,
+    saved: std::sync::Mutex<Vec<(ChatGptOAuthCredentials, Option<String>)>>,
+    fail_saves: bool,
+}
+
+impl ChatGptOAuthStore for ScriptedStore {
+    fn before_refresh(
+        &self,
+        current: &ChatGptOAuthCredentials,
+    ) -> Result<Option<ChatGptOAuthCredentials>, Error> {
+        self.seen.lock().unwrap().push(current.clone());
+        self.reads.lock().unwrap().pop_front().unwrap_or(Ok(None))
+    }
+
+    fn save_refreshed(
+        &self,
+        refreshed: &ChatGptOAuthCredentials,
+        id_token: Option<&str>,
+    ) -> Result<(), Error> {
+        self.saved
+            .lock()
+            .unwrap()
+            .push((refreshed.clone(), id_token.map(String::from)));
+        if self.fail_saves {
+            return Err(Error::AuthenticationFailed("could not save".into()));
+        }
+        Ok(())
+    }
+}
+
+fn stored(access: &str, refresh: &str) -> ChatGptOAuthCredentials {
+    ChatGptOAuthCredentials {
+        access_token: access.into(),
+        refresh_token: Some(refresh.into()),
+        account_id: "synthetic-account".into(),
+    }
+}
+
+fn with_store(client: OpenAIClient, store: &Arc<ScriptedStore>) -> OpenAIClient {
+    client.with_credential_store(Some(store.clone() as Arc<dyn ChatGptOAuthStore>))
+}
+
+fn completed_stream() -> String {
+    format!(
+        "data: {}\n\n",
+        serde_json::json!({"type":"response.completed", "response":completed_response()})
+    )
+}
+
+#[tokio::test]
+async fn a_store_is_read_before_each_refresh_and_receives_the_rotated_tokens() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (url, server) = server(vec![
+            expired(),
+            reply(
+                "/token",
+                200,
+                r#"{"access_token":"synthetic-new-access","refresh_token":"synthetic-new-refresh","id_token":"synthetic-id"}"#,
+            ),
+            reply("/responses", 200, &completed_stream()),
+        ])
+        .await;
+        let store = Arc::new(ScriptedStore::default());
+        let client = with_store(client(&url), &store);
+        client
+            .generate_text(&Conversation::new(Model::openai_gpt_6_astra()), &GenerationConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(server.await.unwrap().len(), 3);
+        let seen = store.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "read once, before the refresh");
+        assert_eq!(seen[0].refresh_token.as_deref(), Some("synthetic-refresh"));
+        let saved = store.saved.lock().unwrap().clone();
+        assert_eq!(
+            saved,
+            [(stored("synthetic-new-access", "synthetic-new-refresh"), Some("synthetic-id".into()))]
+        );
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn tokens_another_program_refreshed_are_used_without_a_refresh_request() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        // No /token reply: a refresh request would fail the test.
+        let (url, server) = server(vec![expired(), reply("/responses", 200, &completed_stream())]).await;
+        let store = Arc::new(ScriptedStore::default());
+        store
+            .reads
+            .lock()
+            .unwrap()
+            .push_back(Ok(Some(stored("access-from-codex", "refresh-from-codex"))));
+        let client = with_store(client(&url), &store);
+        client
+            .generate_text(&Conversation::new(Model::openai_gpt_6_astra()), &GenerationConfig::default())
+            .await
+            .unwrap();
+        let calls = server.await.unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[1].0.to_lowercase().contains("authorization: bearer access-from-codex"));
+        assert_eq!(
+            client.chatgpt_oauth_credentials().await.unwrap(),
+            stored("access-from-codex", "refresh-from-codex")
+        );
+        assert!(store.saved.lock().unwrap().is_empty(), "nothing was refreshed");
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn an_unreadable_store_or_another_account_stops_the_refresh() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for read in [
+            Err(Error::AuthenticationFailed("the store holds another account".into())),
+            Ok(Some(ChatGptOAuthCredentials {
+                account_id: "another-account".into(),
+                ..stored("a", "r")
+            })),
+        ] {
+            let (url, server) = server(vec![expired()]).await;
+            let store = Arc::new(ScriptedStore::default());
+            store.reads.lock().unwrap().push_back(read);
+            let client = with_store(client(&url), &store);
+            let error = client
+                .generate_text(&Conversation::new(Model::openai_gpt_6_astra()), &GenerationConfig::default())
+                .await
+                .unwrap_err();
+            assert!(matches!(error, Error::AuthenticationFailed(_)), "{error}");
+            assert!(!error.is_retryable());
+            assert_eq!(server.await.unwrap().len(), 1, "no refresh request");
+            let credentials = client.chatgpt_oauth_credentials().await.unwrap();
+            assert_eq!(credentials.account_id, "synthetic-account");
+            assert_eq!(credentials.refresh_token.as_deref(), Some("synthetic-refresh"));
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_refresh_rejected_after_another_program_rotated_adopts_its_tokens() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (url, server) = server(vec![reply(
+            "/token",
+            400,
+            r#"{"error":{"code":"refresh_token_reused"}}"#,
+        )])
+        .await;
+        let store = Arc::new(ScriptedStore::default());
+        {
+            let mut reads = store.reads.lock().unwrap();
+            reads.push_back(Ok(None));
+            reads.push_back(Ok(Some(stored("access-from-codex", "refresh-from-codex"))));
+        }
+        let client = with_store(client(&url), &store);
+        let result = client.refresh_oauth_token_once().await.unwrap();
+        assert_eq!(result.access_token, "access-from-codex");
+        assert_eq!(server.await.unwrap().len(), 1);
+        assert_eq!(store.seen.lock().unwrap().len(), 2);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_save_is_reported_but_the_client_keeps_the_new_tokens() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (url, server) = server(vec![refreshed()]).await;
+        let store = Arc::new(ScriptedStore {
+            fail_saves: true,
+            ..Default::default()
+        });
+        let client = with_store(client(&url), &store);
+        let error = client.refresh_oauth_token_once().await.unwrap_err();
+        assert!(matches!(error, Error::AuthenticationFailed(_)), "{error}");
+        assert_eq!(server.await.unwrap().len(), 1);
+        assert_eq!(
+            client.chatgpt_oauth_credentials().await.unwrap(),
+            stored("synthetic-new-access", "synthetic-new-refresh")
+        );
+    })
+    .await
+    .unwrap();
+}
+
+/// Each rate-limited retry re-reads the store (Codex may refresh while this
+/// client waits), and the retries stop at the cap.
+#[tokio::test(start_paused = true)]
+async fn rate_limited_refreshes_retry_a_bounded_number_of_times() {
+    let limited = || reply("/token", 429, r#"{"error":{"code":"rate_limit_exceeded"}}"#);
+    let (url, server) =
+        server((0..=OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES).map(|_| limited()).collect()).await;
+    let store = Arc::new(ScriptedStore::default());
+    let client = with_store(client(&url), &store).with_oauth_rate_limit_retries(true);
+    let started = tokio::time::Instant::now();
+    let error = client.refresh_oauth_token().await.unwrap_err();
+    assert!(matches!(error, Error::ProviderError { status: Some(429), .. }), "{error}");
+    let requests = server.await.unwrap().len() as u32;
+    assert_eq!(requests, OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES + 1);
+    // One read before each request, plus one after the last failure.
+    assert_eq!(store.seen.lock().unwrap().len() as u32, requests + 1);
+    // Every wait honored the server's Retry-After: 60.
+    assert!(started.elapsed() >= Duration::from_secs(60) * OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES);
 }

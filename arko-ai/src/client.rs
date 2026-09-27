@@ -184,8 +184,8 @@ impl LLMClient {
     ///
     /// When `retry_rate_limits` is true, HTTP 429 responses from the OAuth
     /// token endpoint wait for the advertised reset when available and
-    /// otherwise use bounded exponential backoff. Retrying continues until
-    /// the refresh succeeds or a different error is returned.
+    /// otherwise use bounded exponential backoff, for up to 8 retries; see
+    /// [`OpenAIClient::with_oauth_rate_limit_retries`](providers::openai::OpenAIClient::with_oauth_rate_limit_retries).
     pub fn with_openai_chatgpt_oauth_rate_limit_retries(
         mut self,
         access_token: &str,
@@ -202,6 +202,20 @@ impl LLMClient {
             .with_oauth_rate_limit_retries(retry_rate_limits),
         ));
         self
+    }
+
+    /// Configures the OpenAI provider with the ChatGPT OAuth credentials in
+    /// a Codex `auth.json`, kept in step with the file: every token refresh
+    /// first re-reads it (adopting tokens Codex refreshed, for the same
+    /// account only) and rotated tokens are written back at once. See
+    /// [`CodexAuthFile::openai_client`](crate::codex_auth::CodexAuthFile::openai_client)
+    /// and [`CodexAuthStore`](crate::codex_auth::CodexAuthStore).
+    pub fn with_codex_auth_file(
+        mut self,
+        file: &crate::codex_auth::CodexAuthFile,
+    ) -> Result<Self, Error> {
+        self.openai_client = Some(self.configure_openai(file.openai_client()?));
+        Ok(self)
     }
 
     /// Configures the OpenAI provider with a pre-constructed [`OpenAIAuth`]
@@ -261,6 +275,19 @@ impl LLMClient {
         match &self.openai_client {
             Some(client) => client.chatgpt_oauth_credentials().await,
             None => None,
+        }
+    }
+
+    /// Replaces the ChatGPT OAuth credentials only if the client still holds
+    /// `expected`; returns whether it did.
+    pub(crate) async fn replace_openai_chatgpt_credentials(
+        &self,
+        expected: &providers::openai::ChatGptOAuthCredentials,
+        new: providers::openai::ChatGptOAuthCredentials,
+    ) -> bool {
+        match &self.openai_client {
+            Some(client) => client.replace_chatgpt_credentials(expected, new).await,
+            None => false,
         }
     }
 
