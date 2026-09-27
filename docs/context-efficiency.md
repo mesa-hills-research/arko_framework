@@ -75,7 +75,7 @@ let distiller = DistillationConfig::new("bulk-research", Model::openai_gpt_5_6_l
     .target_agent("researcher")
     .target_tool("search_documents")
     .min_chars(12_000)
-    .max_output_tokens(16_000)
+    .max_output_tokens(16_000) // High-effort reasoning plus the summary
     .instructions("Preserve exact findings, qualifications, and source references. Remove irrelevant repetition.");
 // Register with Workflow::builder().distiller(distiller).
 ```
