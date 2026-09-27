@@ -322,74 +322,41 @@ fn agent_config(
         .build()?)
 }
 
-/// OAuth environment variables, then the Codex `auth.json` (returned so that
-/// rotated tokens can be saved back), then `OPENAI_API_KEY`.
-fn build_client() -> ExampleResult<(LLMClient, Option<CodexAuthFile>)> {
+/// OAuth environment variables, then the Codex `auth.json`, then
+/// `OPENAI_API_KEY`. A client from `auth.json` keeps the file in step: every
+/// token refresh reads it again first, and rotated tokens are saved to it at
+/// once.
+fn build_client() -> ExampleResult<LLMClient> {
     if let (Ok(access_token), Ok(account_id)) = (
         std::env::var("OPENAI_OAUTH_ACCESS_TOKEN"),
         std::env::var("OPENAI_OAUTH_ACCOUNT_ID"),
     ) {
         let refresh_token = std::env::var("OPENAI_OAUTH_REFRESH_TOKEN").ok();
-        return Ok((
+        return Ok(
             LLMClient::new().with_openai_chatgpt_oauth_rate_limit_retries(
                 &access_token,
                 refresh_token.as_deref(),
                 &account_id,
                 true,
             ),
-            None,
-        ));
+        );
     }
     if let Some(path) = CodexAuthFile::default_path().filter(|path| path.is_file()) {
         match CodexAuthFile::load(&path) {
             Ok(auth) => {
-                let credentials = auth.credentials()?;
-                let client = LLMClient::new().with_openai_chatgpt_oauth_rate_limit_retries(
-                    &credentials.access_token,
-                    credentials.refresh_token.as_deref(),
-                    &credentials.account_id,
-                    true,
-                );
-                return Ok((client, Some(auth)));
+                let client = auth.openai_client()?.with_oauth_rate_limit_retries(true);
+                return Ok(LLMClient::new().with_openai_client(client));
             }
             Err(error) => eprintln!("ignoring {}: {error}", path.display()),
         }
     }
     if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
-        return Ok((LLMClient::new().with_openai_api_key(&api_key), None));
+        return Ok(LLMClient::new().with_openai_api_key(&api_key));
     }
     Err(
         io::Error::other("configure Codex OAuth, OAuth environment variables, or OPENAI_API_KEY")
             .into(),
     )
-}
-
-/// Saves tokens the client rotated to the Codex `auth.json` every 30 seconds
-/// and once more when `stop` resolves, so an interrupted run does not leave
-/// the Codex login holding a spent refresh token.
-fn spawn_codex_auth_sync(
-    mut auth: CodexAuthFile,
-    client: Arc<LLMClient>,
-    mut stop: tokio::sync::oneshot::Receiver<()>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
-        loop {
-            let stopping = tokio::select! {
-                _ = interval.tick() => false,
-                _ = &mut stop => true,
-            };
-            if let Err(error) = auth.sync(&client).await {
-                eprintln!(
-                    "could not save rotated OAuth tokens to {}: {error}",
-                    auth.path().display()
-                );
-            }
-            if stopping {
-                return;
-            }
-        }
-    })
 }
 
 fn resolve_checkpoint(path: &Path) -> ExampleResult<PathBuf> {
@@ -651,10 +618,7 @@ async fn main() -> ExampleResult<()> {
         args.shell_timeout_seconds,
         args.shell_output_bytes,
     ));
-    let (client, codex_auth) = build_client()?;
-    let client = Arc::new(client);
-    let (stop_auth_sync, stop) = tokio::sync::oneshot::channel();
-    let auth_sync = codex_auth.map(|auth| spawn_codex_auth_sync(auth, client.clone(), stop));
+    let client = Arc::new(build_client()?);
     let mut builder = Workflow::builder()
         .name("deepcoder-example")
         .metadata(WorkflowMetadata {
@@ -681,7 +645,7 @@ async fn main() -> ExampleResult<()> {
             ],
         })
         .workspace(workspace.clone())
-        .llm_client(client)
+        .llm_client(client.clone())
         .agent("orchestrator", orchestrator)
         .agent("coder", coder)
         .agent("correctness_verifier", correctness)
@@ -773,10 +737,9 @@ async fn main() -> ExampleResult<()> {
         ExampleResult::Ok((orchestrator_result, workflow.finish().await?))
     }
     .await;
-    let _ = stop_auth_sync.send(());
-    if let Some(auth_sync) = auth_sync {
-        auth_sync.await?;
-    }
+    // A token refresh still in flight holds the credentials until its new
+    // tokens are saved: wait for it before the runtime shuts down.
+    client.openai_chatgpt_oauth_credentials().await;
     let (orchestrator_result, result) = run?;
 
     println!("{}", orchestrator_result.summary);
