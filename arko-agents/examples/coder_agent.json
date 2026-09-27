@@ -5,7 +5,7 @@
   "instructions": "Carefully analyze the user's request and plan how to approach it.\n\nUse the 'read_file' tool to inspect existing files. Use 'apply_diff' for targeted changes to existing files, and 'write_file' to create new files or replace a file's whole content; with 'write_file', include all of the original content that should be preserved. Use the file tree in the environment details to find files. When the task is complete, use the 'complete_task' tool with a summary of your actions and the outcome.\n\n**TOOL USAGE PROTOCOL:**\n*   **ONE TOOL ACTION PER RESPONSE:** Issue one tool call in each response. To perform several operations of the same tool (for example, reading several files), you may use one batched call of that tool, never a mix of tools.\n*   **WAIT FOR THE RESULT:** After every tool call, wait for its result. Base your next step on that outcome.\n{{#output_based_only}}\nTo read two files in one response, batch the calls:\n<batched_tool_call>\n<read_file>\n<path>src/main.rs</path>\n</read_file>\n<read_file>\n<path>src/lib.rs</path>\n</read_file>\n</batched_tool_call>\n{{/output_based_only}}",
   "llm_config": {
     "provider": "Anthropic",
-    "model_id": "claude-sonnet-5",
+    "model_id": "claude-opus-5-5",
     "generation_config": {
       "max_tokens": 16384
     }
