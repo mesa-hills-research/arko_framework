@@ -41,6 +41,70 @@ impl AnthropicClient {
         )
     }
 
+    /// Manual extended thinking (`budget_tokens`) is in effect.
+    fn uses_manual_thinking(config: &GenerationConfig) -> bool {
+        !Self::thinking_explicitly_disabled(config)
+            && matches!(
+                config.reasoning,
+                Some(ReasoningConfig::Anthropic { budget_tokens, .. }) if budget_tokens > 0
+            )
+    }
+
+    /// Fast mode, data residency and cache lifetime options.
+    fn validate_request_options(
+        conversation: &Conversation,
+        config: &GenerationConfig,
+    ) -> Result<(), Error> {
+        if config.anthropic_fast_mode == Some(true)
+            && !conversation.model.supports_anthropic_fast_mode()
+        {
+            return Err(Error::InvalidRequest(format!(
+                "Fast mode is not supported for model '{}' (supported: Claude Opus 5.5, Opus 5 and Opus 4.8; Opus 4.6 would silently run at standard speed).",
+                conversation.model.id
+            )));
+        }
+
+        if config.anthropic_inference_geo.is_some()
+            && !conversation.model.supports_anthropic_inference_geo()
+        {
+            return Err(Error::InvalidRequest(format!(
+                "inference_geo is only supported on Claude 4.6 and later models, not '{}'.",
+                conversation.model.id
+            )));
+        }
+
+        if config.anthropic_cache_ttl.is_some() && !Self::caching_enabled(conversation, config) {
+            return Err(Error::InvalidRequest(format!(
+                "An Anthropic cache TTL requires prompt caching to be enabled for model '{}'.",
+                conversation.model.id
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn caching_enabled(conversation: &Conversation, config: &GenerationConfig) -> bool {
+        config.prompt_caching.unwrap_or(conversation.enable_cache)
+            && conversation.model.supports_cache
+    }
+
+    /// Top-level automatic caching; `ttl` defaults to 5 minutes when omitted.
+    /// https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+    fn apply_cache_control(
+        json: &mut Value,
+        conversation: &Conversation,
+        config: &GenerationConfig,
+    ) {
+        if !Self::caching_enabled(conversation, config) {
+            return;
+        }
+        let mut cache_control = serde_json::json!({"type": "ephemeral"});
+        if let Some(ttl) = config.anthropic_cache_ttl {
+            cache_control["ttl"] = serde_json::to_value(ttl).unwrap_or(Value::Null);
+        }
+        json["cache_control"] = cache_control;
+    }
+
     fn thinking_explicitly_disabled(config: &GenerationConfig) -> bool {
         config.anthropic_thinking_enabled == Some(false)
     }
@@ -79,27 +143,15 @@ impl AnthropicClient {
         }
     }
 
+    /// Beta headers. The 1M-context beta (`context-1m-2025-08-07`, retired for
+    /// Sonnet 4/4.5 on 2026-04-30) and the effort betas (`effort-2025-11-24`,
+    /// not required since 2026-02-05; `max-effort-2026-01-24`, undocumented) are
+    /// no longer sent. https://platform.claude.com/docs/en/release-notes/overview
     fn compute_betas(conversation: &Conversation, config: &GenerationConfig) -> Vec<&'static str> {
         let mut betas = Vec::new();
 
-        if config.long_context == Some(true) && conversation.model.requires_long_context_beta() {
-            betas.push("context-1m-2025-08-07");
-        }
-
-        let effort = match &config.reasoning {
-            Some(ReasoningConfig::AnthropicAdaptive { effort }) => effort.as_ref(),
-            Some(ReasoningConfig::Anthropic { effort, .. }) => effort.as_ref(),
-            _ => None,
-        };
-
-        if let Some(effort) = effort
-            && conversation.model.requires_anthropic_effort_beta()
-        {
-            betas.push("effort-2025-11-24");
-
-            if matches!(effort, AnthropicReasoningEffort::Max) {
-                betas.push("max-effort-2026-01-24");
-            }
+        if config.anthropic_fast_mode == Some(true) {
+            betas.push("fast-mode-2026-02-01");
         }
 
         let adaptive = Self::uses_adaptive_thinking(conversation, config);
@@ -143,23 +195,38 @@ impl AnthropicClient {
         config: &GenerationConfig,
     ) -> Result<(), Error> {
         if config.long_context == Some(true) && !conversation.model.supports_long_context() {
+            if conversation.model.had_retired_anthropic_long_context_beta() {
+                return Err(Error::InvalidRequest(format!(
+                    "The 1M-context beta for model '{}' was retired on 2026-04-30; requests over 200K tokens now fail. Use a Claude 4.6 or later model for 1M context.",
+                    conversation.model.id
+                )));
+            }
             return Err(Error::InvalidRequest(format!(
                 "Long context configuration is not supported for model '{}'.",
                 conversation.model.id
             )));
         }
 
-        if conversation.model.is_fable_5_1()
-            && matches!(
-                config.tool_config.as_ref().and_then(|tools| tools.tool_choice.as_ref()),
-                Some(ToolChoice::Required | ToolChoice::Specific(_))
-            )
-        {
+        let forced_tool_choice = matches!(
+            config.tool_config.as_ref().and_then(|tools| tools.tool_choice.as_ref()),
+            Some(ToolChoice::Required | ToolChoice::Specific(_))
+        );
+
+        if forced_tool_choice && conversation.model.rejects_anthropic_forced_tool_choice() {
             return Err(Error::InvalidRequest(format!(
                 "Forced tool use is not supported for model '{}'. Use Auto or None tool choice.",
                 conversation.model.id
             )));
         }
+
+        if forced_tool_choice && Self::uses_manual_thinking(config) {
+            return Err(Error::InvalidRequest(
+                "Forced tool use is not supported with manual extended thinking (budget_tokens). Use Auto or None tool choice."
+                    .to_string(),
+            ));
+        }
+
+        Self::validate_request_options(conversation, config)?;
 
         if Self::thinking_explicitly_disabled(config) {
             if conversation.model.always_uses_anthropic_adaptive_thinking() {
@@ -196,22 +263,16 @@ impl AnthropicClient {
 
         let adaptive = Self::uses_adaptive_thinking(conversation, config);
 
-        if config.anthropic_summarized_thinking == Some(true) {
-            if !adaptive {
-                return Err(Error::InvalidRequest(
-                    "Anthropic summarized thinking requires adaptive thinking.".to_string(),
-                ));
-            }
-
-            if !conversation
-                .model
-                .supports_anthropic_summarized_thinking_display()
-            {
-                return Err(Error::InvalidRequest(format!(
-                    "Summarized thinking display is not supported for model '{}'.",
-                    conversation.model.id
-                )));
-            }
+        // `thinking.display` works in both adaptive and manual modes; where
+        // summarized text is already the default it is a no-op.
+        // https://platform.claude.com/docs/en/build-with-claude/thinking
+        if config.anthropic_summarized_thinking == Some(true)
+            && !Self::has_anthropic_reasoning(conversation, config)
+        {
+            return Err(Error::InvalidRequest(format!(
+                "Anthropic summarized thinking requires thinking to be enabled for model '{}'.",
+                conversation.model.id
+            )));
         }
 
         if let Some(reasoning) = &config.reasoning {
@@ -307,6 +368,16 @@ impl AnthropicClient {
                 if !Self::has_anthropic_reasoning(conversation, config) {
                     return Err(Error::InvalidRequest(
                         "Interleaved thinking requires Anthropic reasoning to be enabled."
+                            .to_string(),
+                    ));
+                }
+
+                // Opus 4.6 has no interleaved thinking in manual mode; the beta
+                // header would be a silent no-op.
+                // https://platform.claude.com/docs/en/build-with-claude/extended-thinking
+                if conversation.model.is_opus_4_6() && Self::uses_manual_thinking(config) {
+                    return Err(Error::InvalidRequest(
+                        "Claude Opus 4.6 does not interleave thinking with manual budget_tokens; use adaptive thinking instead."
                             .to_string(),
                     ));
                 }
@@ -439,12 +510,7 @@ impl Provider for AnthropicClient {
 
         let request = self.build_request(conversation, config)?;
         let mut json = serde_json::to_value(request).map_err(Error::JsonError)?;
-
-        let caching_enabled = config.prompt_caching.unwrap_or(conversation.enable_cache);
-
-        if caching_enabled && conversation.model.supports_cache {
-            json["cache_control"] = serde_json::json!({"type": "ephemeral"});
-        }
+        Self::apply_cache_control(&mut json, conversation, config);
 
         let mut request = self
             .http_client
@@ -482,12 +548,7 @@ impl Provider for AnthropicClient {
 
         let request = self.build_request(conversation, config)?;
         let mut json = serde_json::to_value(request).map_err(Error::JsonError)?;
-
-        let caching_enabled = config.prompt_caching.unwrap_or(conversation.enable_cache);
-
-        if caching_enabled && conversation.model.supports_cache {
-            json["cache_control"] = serde_json::json!({"type": "ephemeral"});
-        }
+        Self::apply_cache_control(&mut json, conversation, config);
 
         json["stream"] = Value::Bool(true);
 
@@ -798,7 +859,16 @@ impl AnthropicClient {
             output_config: None,
             tools: None,
             tool_choice: None,
+            speed: (config.anthropic_fast_mode == Some(true)).then_some("fast"),
+            inference_geo: config.anthropic_inference_geo,
         };
+
+        // Summarized thinking text must be requested where the model defaults to
+        // omitted text; elsewhere it is already the default.
+        let display = (config.anthropic_summarized_thinking == Some(true)
+            && conversation.model.supports_anthropic_summarized_thinking_display())
+        .then(|| "summarized".to_string());
+        let max_tokens = request.max_tokens;
 
         if Self::thinking_explicitly_disabled(config) {
             request.thinking = Some(AnthropicThinking {
@@ -825,6 +895,23 @@ impl AnthropicClient {
                         ));
                     }
 
+                    // budget_tokens must be below max_tokens unless interleaved
+                    // thinking lets thinking span tool calls.
+                    // https://platform.claude.com/docs/en/build-with-claude/extended-thinking
+                    let interleaved = Self::is_interleaved_thinking_active(
+                        config,
+                        false,
+                        &conversation.model,
+                    );
+                    if !interleaved && *budget_tokens >= max_tokens {
+                        return Err(Error::InvalidRequest(format!(
+                            "Anthropic reasoning budget ({budget_tokens}) must be less than max_tokens ({max_tokens}) unless interleaved thinking is enabled."
+                        )));
+                    }
+
+                    // These caps come from older Anthropic guidance for manual
+                    // budgets and are no longer in the current docs; they are kept
+                    // deliberately for models on the numeric-budget path.
                     if (conversation.model.is_opus_4_5() || conversation.model.is_sonnet_4_6())
                         && *budget_tokens > 52_000
                     {
@@ -843,7 +930,7 @@ impl AnthropicClient {
 
                     request.thinking = Some(AnthropicThinking {
                         type_: "enabled".to_string(),
-                        display: None,
+                        display: display.clone(),
                         budget_tokens: Some(*budget_tokens),
                     });
 
@@ -856,11 +943,7 @@ impl AnthropicClient {
                 Some(ReasoningConfig::AnthropicAdaptive { effort }) => {
                     request.thinking = Some(AnthropicThinking {
                         type_: "adaptive".to_string(),
-                        display: if config.anthropic_summarized_thinking == Some(true) {
-                            Some("summarized".to_string())
-                        } else {
-                            None
-                        },
+                        display: display.clone(),
                         budget_tokens: None,
                     });
 
@@ -871,24 +954,16 @@ impl AnthropicClient {
                     }
                 }
                 _ => {
-                    if Self::thinking_explicitly_enabled(config)
-                        && conversation.model.supports_anthropic_adaptive_thinking()
-                    {
+                    // Explicitly enabled adaptive thinking, or a summarized display
+                    // on a model whose adaptive thinking is on by default.
+                    let explicit = Self::thinking_explicitly_enabled(config)
+                        && conversation.model.supports_anthropic_adaptive_thinking();
+                    let default_with_display = display.is_some()
+                        && conversation.model.defaults_anthropic_adaptive_thinking();
+                    if explicit || default_with_display {
                         request.thinking = Some(AnthropicThinking {
                             type_: "adaptive".to_string(),
-                            display: if config.anthropic_summarized_thinking == Some(true) {
-                                Some("summarized".to_string())
-                            } else {
-                                None
-                            },
-                            budget_tokens: None,
-                        });
-                    } else if config.anthropic_summarized_thinking == Some(true)
-                        && conversation.model.defaults_anthropic_adaptive_thinking()
-                    {
-                        request.thinking = Some(AnthropicThinking {
-                            type_: "adaptive".to_string(),
-                            display: Some("summarized".to_string()),
+                            display: display.clone(),
                             budget_tokens: None,
                         });
                     }
@@ -1188,6 +1263,10 @@ struct AnthropicRequest {
     tools: Option<Vec<AnthropicToolDef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<AnthropicToolChoiceValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    speed: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inference_geo: Option<crate::config::AnthropicInferenceGeo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1860,5 +1939,278 @@ mod tests {
         // Opus 4.5 offers neither modifier.
         usage.calculate_cost(&Model::anthropic_claude_opus_4_5(), None);
         assert!(close(usage.total_cost, 30.0));
+    }
+}
+
+#[cfg(test)]
+mod model_rule_tests {
+    use super::AnthropicClient;
+    use crate::{
+        config::{AnthropicCacheTtl, AnthropicInferenceGeo, GenerationConfig},
+        conversation::Conversation,
+        error::Error,
+        model::Model,
+        reasoning::{AnthropicReasoningEffort, ReasoningConfig},
+        tool::{ToolChoice, ToolConfig, ToolDefinition},
+    };
+    use serde_json::{Value, json};
+
+    fn request(model: Model, config: &GenerationConfig) -> Result<Value, Error> {
+        let conversation = Conversation::new(model);
+        AnthropicClient::validate_config(&conversation, config)?;
+        let request = AnthropicClient::new("test").build_request(&conversation, config)?;
+        let mut value = serde_json::to_value(request).unwrap();
+        AnthropicClient::apply_cache_control(&mut value, &conversation, config);
+        Ok(value)
+    }
+
+    fn betas(model: Model, config: &GenerationConfig) -> Option<String> {
+        AnthropicClient::build_beta_header(&Conversation::new(model), config)
+    }
+
+    fn forced(config: GenerationConfig) -> GenerationConfig {
+        let tool = ToolDefinition::new("lookup", "Look up a value", json!({"type": "object"}));
+        config.with_tool_config(
+            ToolConfig::new(vec![tool]).with_tool_choice(ToolChoice::Specific("lookup".into())),
+        )
+    }
+
+    fn invalid(result: Result<Value, Error>) -> String {
+        match result {
+            Err(Error::InvalidRequest(message)) => message,
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn opus_5_5_is_always_adaptive_and_rejects_forced_tools_and_manual_budgets() {
+        let model = Model::anthropic_claude_opus_5_5();
+        let value = request(model.clone(), &GenerationConfig::default()).unwrap();
+        assert!(value.get("thinking").is_none(), "adaptive is the server default");
+        assert!(betas(model.clone(), &GenerationConfig::default()).is_none());
+
+        let summarized = GenerationConfig::default().with_anthropic_summarized_thinking(true);
+        let value = request(model.clone(), &summarized).unwrap();
+        assert_eq!(value["thinking"]["type"], "adaptive");
+        assert_eq!(value["thinking"]["display"], "summarized");
+
+        for effort in [AnthropicReasoningEffort::XHigh, AnthropicReasoningEffort::Max] {
+            let config = GenerationConfig::default()
+                .with_reasoning(ReasoningConfig::anthropic_adaptive_with_effort(effort));
+            request(model.clone(), &config).unwrap();
+        }
+
+        invalid(request(
+            model.clone(),
+            &GenerationConfig::default().with_anthropic_thinking_enabled(false),
+        ));
+        invalid(request(
+            model.clone(),
+            &GenerationConfig::default().with_reasoning(ReasoningConfig::anthropic(4096)),
+        ));
+        invalid(request(model.clone(), &forced(GenerationConfig::default())));
+
+        // Non-default sampling parameters return 400 on Opus 5.5, so none is sent.
+        let value = request(model, &GenerationConfig::new(0.3)).unwrap();
+        assert!(value.get("temperature").is_none());
+    }
+
+    #[test]
+    fn retired_sonnet_long_context_beta_is_rejected_and_never_sent() {
+        let config = GenerationConfig::default().with_long_context(true);
+        for model in [Model::anthropic_claude_sonnet_4_5(), Model::anthropic_claude_sonnet_4()] {
+            let message = invalid(request(model.clone(), &config));
+            assert!(message.contains("2026-04-30"), "{message}");
+            assert!(betas(model.clone(), &config).is_none());
+            assert!(model.pricing.large_input_threshold.is_none());
+        }
+        for model in [Model::anthropic_claude_sonnet_4_6(), Model::anthropic_claude_opus_4_6()] {
+            request(model.clone(), &config).unwrap();
+            assert!(betas(model, &config).is_none());
+        }
+    }
+
+    #[test]
+    fn opus_4_5_effort_needs_no_beta_header() {
+        let config = GenerationConfig::default().with_reasoning(
+            ReasoningConfig::anthropic_with_effort(4096, AnthropicReasoningEffort::High),
+        );
+        let value = request(Model::anthropic_claude_opus_4_5(), &config).unwrap();
+        assert_eq!(value["output_config"]["effort"], "high");
+        assert!(betas(Model::anthropic_claude_opus_4_5(), &config).is_none());
+    }
+
+    #[test]
+    fn forced_tool_choice_is_rejected_with_manual_thinking_on_any_model() {
+        let manual = GenerationConfig::default().with_reasoning(ReasoningConfig::anthropic(4096));
+        let message = invalid(request(Model::anthropic_claude_sonnet_4_5(), &forced(manual)));
+        assert!(message.contains("manual extended thinking"), "{message}");
+        // Without manual thinking the same model may force a tool.
+        request(Model::anthropic_claude_sonnet_4_5(), &forced(GenerationConfig::default()))
+            .unwrap();
+        // Fable 5.1 rejects forced tools regardless.
+        invalid(request(
+            Model::anthropic_claude_fable_5_1(),
+            &forced(GenerationConfig::default()),
+        ));
+    }
+
+    #[test]
+    fn manual_budgets_stay_below_max_tokens_unless_interleaved_and_keep_legacy_caps() {
+        let model = Model::anthropic_claude_sonnet_4_5();
+        let config = GenerationConfig::default()
+            .with_max_tokens(8_000)
+            .with_reasoning(ReasoningConfig::anthropic(8_000));
+        let message = invalid(request(model.clone(), &config));
+        assert!(message.contains("less than max_tokens"), "{message}");
+        request(model.clone(), &config.clone().with_interleaved_thinking(true)).unwrap();
+        request(
+            model,
+            &GenerationConfig::default()
+                .with_max_tokens(8_000)
+                .with_reasoning(ReasoningConfig::anthropic(7_999)),
+        )
+        .unwrap();
+
+        // Caps kept deliberately from older Anthropic guidance.
+        let over = GenerationConfig::default().with_reasoning(ReasoningConfig::anthropic(52_001));
+        invalid(request(Model::anthropic_claude_opus_4_5(), &over));
+        invalid(request(Model::anthropic_claude_sonnet_4_6(), &over));
+        request(Model::anthropic_claude_opus_4_6(), &over).unwrap();
+        invalid(request(
+            Model::anthropic_claude_opus_4_6(),
+            &GenerationConfig::default().with_reasoning(ReasoningConfig::anthropic(102_401)),
+        ));
+    }
+
+    #[test]
+    fn summarized_display_works_in_both_modes_and_is_a_no_op_where_default() {
+        // Opus 4.6: summarized is already the default.
+        let adaptive = GenerationConfig::default()
+            .with_reasoning(ReasoningConfig::anthropic_adaptive())
+            .with_anthropic_summarized_thinking(true);
+        let value = request(Model::anthropic_claude_opus_4_6(), &adaptive).unwrap();
+        assert_eq!(value["thinking"]["type"], "adaptive");
+        assert!(value["thinking"].get("display").is_none());
+
+        let manual = GenerationConfig::default()
+            .with_reasoning(ReasoningConfig::anthropic(4096))
+            .with_anthropic_summarized_thinking(true);
+        let value = request(Model::anthropic_claude_sonnet_4_5(), &manual).unwrap();
+        assert_eq!(value["thinking"]["type"], "enabled");
+        assert!(value["thinking"].get("display").is_none());
+
+        // Summaries need thinking to be on.
+        invalid(request(
+            Model::anthropic_claude_sonnet_4_5(),
+            &GenerationConfig::default().with_anthropic_summarized_thinking(true),
+        ));
+    }
+
+    #[test]
+    fn opus_4_6_manual_budgets_do_not_interleave() {
+        let config = GenerationConfig::default()
+            .with_reasoning(ReasoningConfig::anthropic(4096))
+            .with_interleaved_thinking(true);
+        invalid(request(Model::anthropic_claude_opus_4_6(), &config));
+        // Opus 4.5 manual mode still interleaves with the beta header.
+        request(Model::anthropic_claude_opus_4_5(), &config).unwrap();
+        assert_eq!(
+            betas(Model::anthropic_claude_opus_4_5(), &config).as_deref(),
+            Some("interleaved-thinking-2025-05-14")
+        );
+    }
+
+    #[test]
+    fn fast_mode_sends_speed_and_beta_only_on_supported_models() {
+        let fast = GenerationConfig::default().with_anthropic_fast_mode(true);
+        for model in [
+            Model::anthropic_claude_opus_5_5(),
+            Model::anthropic_claude_opus_5(),
+            Model::anthropic_claude_opus_4_8(),
+        ] {
+            let value = request(model.clone(), &fast).unwrap();
+            assert_eq!(value["speed"], "fast");
+            assert_eq!(betas(model, &fast).as_deref(), Some("fast-mode-2026-02-01"));
+        }
+        for model in [Model::anthropic_claude_opus_4_7(), Model::anthropic_claude_opus_4_6()] {
+            invalid(request(model, &fast));
+        }
+        let value =
+            request(Model::anthropic_claude_opus_5_5(), &GenerationConfig::default()).unwrap();
+        assert!(value.get("speed").is_none());
+        let off = GenerationConfig::default().with_anthropic_fast_mode(false);
+        let value = request(Model::anthropic_claude_opus_4_7(), &off).unwrap();
+        assert!(value.get("speed").is_none());
+        assert!(betas(Model::anthropic_claude_opus_4_7(), &off).is_none());
+    }
+
+    #[test]
+    fn inference_geo_is_sent_only_on_claude_4_6_and_later() {
+        let us =
+            GenerationConfig::default().with_anthropic_inference_geo(AnthropicInferenceGeo::Us);
+        let value = request(Model::anthropic_claude_opus_5_5(), &us).unwrap();
+        assert_eq!(value["inference_geo"], "us");
+        let global = GenerationConfig::default()
+            .with_anthropic_inference_geo(AnthropicInferenceGeo::Global);
+        let value = request(Model::anthropic_claude_sonnet_4_6(), &global).unwrap();
+        assert_eq!(value["inference_geo"], "global");
+        for model in [
+            Model::anthropic_claude_opus_4_5(),
+            Model::anthropic_claude_sonnet_4_5(),
+            Model::anthropic_claude_haiku_4_5(),
+        ] {
+            invalid(request(model, &us));
+        }
+        let value =
+            request(Model::anthropic_claude_opus_5_5(), &GenerationConfig::default()).unwrap();
+        assert!(value.get("inference_geo").is_none());
+    }
+
+    #[test]
+    fn cache_ttl_sets_the_automatic_cache_control_lifetime() {
+        let model = Model::anthropic_claude_opus_5_5();
+        let value = request(model.clone(), &GenerationConfig::default()).unwrap();
+        assert_eq!(value["cache_control"], json!({"type": "ephemeral"}));
+
+        let hour =
+            GenerationConfig::default().with_anthropic_cache_ttl(AnthropicCacheTtl::OneHour);
+        let value = request(model.clone(), &hour).unwrap();
+        assert_eq!(value["cache_control"], json!({"type": "ephemeral", "ttl": "1h"}));
+
+        let five =
+            GenerationConfig::default().with_anthropic_cache_ttl(AnthropicCacheTtl::FiveMinutes);
+        assert_eq!(request(model.clone(), &five).unwrap()["cache_control"]["ttl"], "5m");
+
+        invalid(request(model.clone(), &hour.clone().with_prompt_caching(false)));
+        let value =
+            request(model, &GenerationConfig::default().with_prompt_caching(false)).unwrap();
+        assert!(value.get("cache_control").is_none());
+    }
+
+    #[test]
+    fn opus_5_5_reported_speed_geo_and_hour_writes_drive_the_price() {
+        let reported: super::AnthropicUsage = serde_json::from_value(json!({
+            "input_tokens": 1_000_000, "output_tokens": 1_000_000,
+            "cache_creation_input_tokens": 1_000_000,
+            "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 1_000_000},
+            "speed": "fast", "inference_geo": "us"
+        }))
+        .unwrap();
+        let mut usage = AnthropicClient::calculate_usage(&reported);
+        usage.calculate_cost(&Model::anthropic_claude_opus_5_5(), None);
+        // $4 input + $20 output + $8 1-hour writes; fast 2x and US-only 1.1x stack.
+        let expected = (4.0 + 20.0 + 8.0) * 2.0 * 1.1;
+        assert!((usage.total_cost - expected).abs() < 1e-6, "{}", usage.total_cost);
+
+        // The response, not the request, decides: standard speed, global inference.
+        let standard: super::AnthropicUsage = serde_json::from_value(json!({
+            "input_tokens": 1_000_000, "output_tokens": 0,
+            "speed": "standard", "inference_geo": "global"
+        }))
+        .unwrap();
+        let mut usage = AnthropicClient::calculate_usage(&standard);
+        usage.calculate_cost(&Model::anthropic_claude_opus_5_5(), None);
+        assert!((usage.total_cost - 4.0).abs() < 1e-6, "{}", usage.total_cost);
     }
 }

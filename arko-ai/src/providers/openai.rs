@@ -1055,6 +1055,11 @@ impl OpenAIClient {
             ));
         }
 
+        // Pro models share prefixes with their base models, so they are checked
+        // first below.
+        let is_gpt5_pro = conversation.model.is_openai_gpt_5_pro();
+        let is_gpt5_2_pro = conversation.model.is_openai_gpt_5_2_pro();
+        let is_gpt5_5_pro = conversation.model.is_openai_gpt_5_5_pro();
         let is_gpt5 = conversation.model.id.starts_with("gpt-5-");
         let is_gpt5_1 = conversation.model.id.starts_with("gpt-5.1");
         let is_gpt5_2 = conversation.model.id.starts_with("gpt-5.2");
@@ -1134,7 +1139,7 @@ impl OpenAIClient {
                         ],
                         "none, low, medium, high, xhigh, max",
                     )
-                } else if is_gpt5_4_pro {
+                } else if is_gpt5_5_pro || is_gpt5_4_pro || is_gpt5_2_pro {
                     (
                         &[
                             OpenAIEffort::Medium,
@@ -1143,11 +1148,23 @@ impl OpenAIClient {
                         ],
                         "medium, high, xhigh",
                     )
-                } else if is_gpt5_5
-                    || is_gpt5_4
-                    || is_gpt5_2
-                    || is_gpt5_1
-                {
+                } else if is_gpt5_pro {
+                    // gpt-5-pro defaults to, and only supports, high.
+                    // https://developers.openai.com/api/docs/models/gpt-5-pro
+                    (&[OpenAIEffort::High], "high")
+                } else if is_gpt5_1 {
+                    // xhigh arrived with GPT-5.2; GPT-5.1 supports none through high.
+                    // https://developers.openai.com/api/docs/models/gpt-5.1
+                    (
+                        &[
+                            OpenAIEffort::None,
+                            OpenAIEffort::Low,
+                            OpenAIEffort::Medium,
+                            OpenAIEffort::High,
+                        ],
+                        "none, low, medium, high",
+                    )
+                } else if is_gpt5_5 || is_gpt5_4 || is_gpt5_2 {
                     (
                         &[
                             OpenAIEffort::None,
@@ -1203,17 +1220,26 @@ impl OpenAIClient {
 
             request.reasoning = Some(OpenAIReasoning {
                 mode: config.openai_reasoning_mode,
-                effort: *effort,
+                effort: Some(*effort),
                 summary: if *include_summaries {
                     Some("auto".to_string())
                 } else {
                     None
                 },
             });
-        } else if is_gpt5_family || is_gpt6 {
+        } else if is_chatgpt_oauth && (is_gpt5_family || is_gpt6) {
             request.reasoning = Some(OpenAIReasoning {
                 mode: config.openai_reasoning_mode,
-                effort: OpenAIEffort::Medium,
+                effort: Some(OpenAIEffort::Medium),
+                summary: None,
+            });
+        } else if config.openai_reasoning_mode.is_some() {
+            // API key: without a configured effort the model's own default
+            // applies (none on GPT-5.1/5.2/5.4, high on GPT-5.5 Pro, medium on
+            // GPT-5.5/5.6/6). https://developers.openai.com/api/docs/guides/reasoning
+            request.reasoning = Some(OpenAIReasoning {
+                mode: config.openai_reasoning_mode,
+                effort: None,
                 summary: None,
             });
         }
@@ -1737,7 +1763,8 @@ enum OpenAIPromptCacheMode {
 struct OpenAIReasoning {
     #[serde(skip_serializing_if = "Option::is_none")]
     mode: Option<OpenAIReasoningMode>,
-    effort: OpenAIEffort,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<OpenAIEffort>,
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<String>,
 }
@@ -2152,8 +2179,16 @@ mod tests {
                 Err(Error::InvalidRequest(_))
             ));
 
+            // API key: no effort configured means the model default applies.
             let request = client
                 .build_request(&conversation, &GenerationConfig::default(), false)
+                .unwrap();
+            let value = serde_json::to_value(request).unwrap();
+            assert!(value.get("reasoning").is_none());
+
+            // ChatGPT OAuth keeps sending medium (owned by the OAuth request path).
+            let request = client
+                .build_request(&conversation, &GenerationConfig::default(), true)
                 .unwrap();
             let value = serde_json::to_value(request).unwrap();
             assert_eq!(value["reasoning"]["effort"], "medium");
@@ -2395,7 +2430,7 @@ mod tests {
             let value = serde_json::to_value(request).unwrap();
 
             assert_eq!(value["reasoning"]["mode"], "pro");
-            assert_eq!(value["reasoning"]["effort"], "medium");
+            assert!(value["reasoning"].get("effort").is_none());
         }
     }
 
@@ -2452,8 +2487,7 @@ mod tests {
 
         let value = serde_json::to_value(request).unwrap();
 
-        assert!(value["reasoning"].get("mode").is_none());
-        assert_eq!(value["reasoning"]["effort"], "medium");
+        assert!(value.get("reasoning").is_none());
     }
 
     #[test]
@@ -2601,5 +2635,80 @@ mod tests {
         assert!(close(usage.total_cost, 51.0));
         assert!(close(usage.input_cost, 1.0));
         assert_eq!(usage.billed(), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod model_rule_tests {
+    use super::OpenAIClient;
+    use crate::{
+        config::GenerationConfig,
+        conversation::Conversation,
+        error::Error,
+        model::Model,
+        reasoning::{OpenAIEffort, ReasoningConfig},
+    };
+    use serde_json::Value;
+
+    fn request(model: Model, config: &GenerationConfig) -> Result<Value, Error> {
+        let request = OpenAIClient::new("test").build_request(&Conversation::new(model), config, false)?;
+        Ok(serde_json::to_value(request).unwrap())
+    }
+
+    fn accepts(model: &Model, effort: OpenAIEffort) -> bool {
+        let config = GenerationConfig::default().with_reasoning(ReasoningConfig::openai(effort, false));
+        request(model.clone(), &config).is_ok()
+    }
+
+    #[test]
+    fn pro_models_have_their_own_effort_rules() {
+        use OpenAIEffort::{High, Low, Max, Medium, Minimal, XHigh};
+        for model in [Model::openai_gpt_5_5_pro(), Model::openai_gpt_5_2_pro(), Model::openai_gpt_5_4_pro()] {
+            for effort in [Medium, High, XHigh] {
+                assert!(accepts(&model, effort), "{} {effort:?}", model.id);
+            }
+            for effort in [OpenAIEffort::None, Minimal, Low, Max] {
+                assert!(!accepts(&model, effort), "{} {effort:?}", model.id);
+            }
+        }
+        let gpt_5_pro = Model::openai_gpt_5_pro();
+        assert!(accepts(&gpt_5_pro, High));
+        for effort in [Minimal, Low, Medium, XHigh] {
+            assert!(!accepts(&gpt_5_pro, effort), "{effort:?}");
+        }
+    }
+
+    #[test]
+    fn gpt_5_1_supports_none_through_high_but_not_xhigh() {
+        use OpenAIEffort::{High, Low, Medium, XHigh};
+        let model = Model::openai_gpt_5_1();
+        for effort in [OpenAIEffort::None, Low, Medium, High] {
+            assert!(accepts(&model, effort), "{effort:?}");
+        }
+        assert!(!accepts(&model, XHigh));
+        assert!(accepts(&Model::openai_gpt_5_2(), XHigh));
+    }
+
+    #[test]
+    fn api_key_requests_without_effort_use_the_model_default() {
+        for model in [
+            Model::openai_gpt_5_1(),
+            Model::openai_gpt_5_4(),
+            Model::openai_gpt_5_5_pro(),
+            Model::openai_gpt_6_astra(),
+        ] {
+            let value = request(model.clone(), &GenerationConfig::default()).unwrap();
+            assert!(value.get("reasoning").is_none(), "{}", model.id);
+            assert_eq!(value["include"][0], "reasoning.encrypted_content");
+        }
+    }
+
+    #[test]
+    fn gpt_5_6_alias_shares_sol_data_and_rules() {
+        let alias = Model::openai_gpt_5_6();
+        let sol = Model::openai_gpt_5_6_sol();
+        assert_eq!(alias.pricing.input_cost_per_million, sol.pricing.input_cost_per_million);
+        assert!(alias.is_openai_gpt_5_6());
+        assert!(accepts(&alias, OpenAIEffort::Max));
     }
 }

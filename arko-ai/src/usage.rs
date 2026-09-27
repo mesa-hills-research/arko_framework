@@ -512,7 +512,11 @@ mod tests {
 
     #[test]
     fn anthropic_long_context_rates_need_the_long_context_request() {
-        let model = Model::anthropic_claude_sonnet_4_5();
+        // The rates Sonnet 4.5 had while its (now retired) 1M beta existed.
+        let mut model = Model::anthropic_claude_sonnet_4_5();
+        model.pricing.large_input_threshold = Some(200_000);
+        model.pricing.large_input_cost_per_million = Some(6.00);
+        model.pricing.large_output_cost_per_million = Some(22.50);
         let usage = || UsageInfo::new(250_000, 0);
         assert!(close(priced(&model, usage(), None).total_cost, 0.25 * 3.0));
         let long = GenerationConfig {

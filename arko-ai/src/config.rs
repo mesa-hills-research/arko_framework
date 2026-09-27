@@ -51,18 +51,23 @@ pub struct GenerationConfig {
     ///
     /// [`Conversation::enable_cache`]: crate::conversation::Conversation::enable_cache
     pub prompt_caching: Option<bool>,
-    /// Requests summarized Anthropic thinking text when adaptive thinking is enabled.
+    /// Requests summarized Anthropic thinking text while thinking is enabled
+    /// (adaptive or manual budgets).
     ///
-    /// Supported by Claude Fable 5, Claude Opus 4.8, Claude Opus 4.7, and
-    /// Claude Sonnet 5. `None` and `Some(false)` keep the provider default.
+    /// Claude Fable 5.1, Fable 5, Opus 5.5, Opus 5, Opus 4.8, Opus 4.7 and Sonnet 5
+    /// default to omitted thinking text, so this sends `thinking.display:
+    /// "summarized"`. On Opus 4.6, Sonnet 4.6 and earlier thinking models
+    /// summarized text is already the default and nothing extra is sent.
+    /// `None` and `Some(false)` keep the provider default.
+    /// https://platform.claude.com/docs/en/build-with-claude/thinking
     pub anthropic_summarized_thinking: Option<bool>,
-    /// Enables the opt-in 1M context beta for Anthropic models that still require it.
+    /// Requests the 1M-token context window on Anthropic models.
     ///
-    /// Currently this is used for Claude Sonnet 4 and Claude Sonnet 4.5.
-    ///
-    /// Newer supported Claude models include the full 1M context window at
-    /// standard pricing. For those models this flag is accepted for
-    /// compatibility but does not add a beta header or alter pricing.
+    /// Claude 4.6 and later models include 1M context at standard pricing, so the
+    /// flag is accepted there without a beta header or price change. The
+    /// `context-1m-2025-08-07` beta that gave Claude Sonnet 4 and 4.5 1M context
+    /// was retired on 2026-04-30, so the flag is rejected for those models and
+    /// any other model without 1M context.
     pub long_context: Option<bool>,
     /// Tool calling configuration. When set, tool definitions are sent
     /// with the request and the model may respond with tool calls instead
@@ -91,6 +96,45 @@ pub struct GenerationConfig {
     /// [`ModelPricing::service_tiers`]: crate::model::ModelPricing::service_tiers
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai_service_tier: Option<OpenAIServiceTier>,
+    /// Anthropic prompt-cache lifetime for the automatic `cache_control` this
+    /// client sends when caching is enabled. `None` sends no `ttl`, which is the
+    /// provider's 5-minute default. 1-hour writes cost 2x base input (5-minute
+    /// writes 1.25x). https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_cache_ttl: Option<AnthropicCacheTtl>,
+    /// Anthropic fast mode (`speed: "fast"` with the `fast-mode-2026-02-01` beta
+    /// header; research preview, Claude API only). Supported on Claude Opus 5.5,
+    /// Opus 5 and Opus 4.8 and rejected locally for other models. Priced at the
+    /// model's fast-mode rates; the response's `usage.speed` decides the price.
+    /// `None` and `Some(false)` send nothing.
+    /// https://platform.claude.com/docs/en/build-with-claude/fast-mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_fast_mode: Option<bool>,
+    /// Anthropic `inference_geo` (where inference runs), for Claude 4.6 and later;
+    /// older models reject it. `None` sends nothing, so the workspace default
+    /// applies. US-only inference costs 1.1x; the response's `usage.inference_geo`
+    /// decides the price. https://platform.claude.com/docs/en/manage-claude/data-residency
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_inference_geo: Option<AnthropicInferenceGeo>,
+}
+
+/// Anthropic prompt-cache lifetimes (`cache_control.ttl`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnthropicCacheTtl {
+    #[serde(rename = "5m")]
+    FiveMinutes,
+    #[serde(rename = "1h")]
+    OneHour,
+}
+
+/// Anthropic `inference_geo` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnthropicInferenceGeo {
+    /// Inference may run in any available geography (the API default).
+    Global,
+    /// Inference runs only in US-based infrastructure (1.1x pricing).
+    Us,
 }
 
 /// OpenAI `service_tier` request values.
@@ -138,6 +182,9 @@ impl GenerationConfig {
             tool_config: None,
             interleaved_thinking: None,
             openai_service_tier: None,
+            anthropic_cache_ttl: None,
+            anthropic_fast_mode: None,
+            anthropic_inference_geo: None,
         }
     }
 
@@ -194,13 +241,32 @@ impl GenerationConfig {
         self
     }
 
-    /// Requests summarized Anthropic thinking text when adaptive thinking is enabled.
+    /// Requests summarized Anthropic thinking text while thinking is enabled.
     pub fn with_anthropic_summarized_thinking(mut self, enabled: bool) -> Self {
         self.anthropic_summarized_thinking = Some(enabled);
         self
     }
 
-    /// Enables the opt-in extended context beta for Anthropic models that still require it.
+    /// Sets the Anthropic prompt-cache lifetime.
+    pub fn with_anthropic_cache_ttl(mut self, ttl: AnthropicCacheTtl) -> Self {
+        self.anthropic_cache_ttl = Some(ttl);
+        self
+    }
+
+    /// Requests Anthropic fast mode on supported models.
+    pub fn with_anthropic_fast_mode(mut self, enabled: bool) -> Self {
+        self.anthropic_fast_mode = Some(enabled);
+        self
+    }
+
+    /// Sets where Anthropic inference runs (Claude 4.6 and later).
+    pub fn with_anthropic_inference_geo(mut self, geo: AnthropicInferenceGeo) -> Self {
+        self.anthropic_inference_geo = Some(geo);
+        self
+    }
+
+    /// Requests the 1M-token context window on Anthropic models (see
+    /// [`long_context`](Self::long_context)).
     pub fn with_long_context(mut self, enabled: bool) -> Self {
         self.long_context = Some(enabled);
         self

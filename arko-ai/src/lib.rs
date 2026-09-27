@@ -19,7 +19,9 @@ pub mod embedding_provider_identifier;
 pub mod token_utils;
 
 pub use client::LLMClient;
-pub use config::{GenerationConfig, OpenAIServiceTier, Verbosity};
+pub use config::{
+    AnthropicCacheTtl, AnthropicInferenceGeo, GenerationConfig, OpenAIServiceTier, Verbosity,
+};
 pub use conversation::Conversation;
 pub use error::{Error, RetryClass};
 pub use message::{Content, Image, Message, Role};

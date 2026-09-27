@@ -4,7 +4,7 @@ use crate::{
     conversation::Conversation,
     error::Error,
     message::{Content, Image, Message, Role},
-    model::Provider as ProviderType,
+    model::{ModelType, Provider as ProviderType},
     reasoning::{GeminiThinkingLevel, GoogleReasoningFragment, ReasoningArtifact, ReasoningConfig},
     stop::StopReason,
     tool::{ToolCall, ToolChoice},
@@ -529,10 +529,16 @@ impl GoogleClient {
         }
     }
 
+    /// Per-model defaults, checked 2026-09-27 against
+    /// https://ai.google.dev/gemini-api/docs/thinking
     fn default_thinking_level(model: &crate::model::Model) -> GeminiThinkingLevel {
-        if model.is_gemini_3_5_flash() {
+        if model.is_gemini_3_5_flash()
+            || model.is_gemini_3_6_flash()
+            || model.is_gemini_3_7_flash()
+            || model.is_gemini_3_8_flash()
+        {
             GeminiThinkingLevel::Medium
-        } else if model.is_gemini_3_1_flash_lite() {
+        } else if model.is_gemini_3_1_flash_lite() || model.is_gemini_3_5_flash_lite() {
             GeminiThinkingLevel::Minimal
         } else {
             GeminiThinkingLevel::High
@@ -701,18 +707,49 @@ impl GoogleClient {
                     summaries_value(false),
                 )),
             }
-        } else if let Some(ReasoningConfig::Google {
-            thinking_budget,
-            include_summaries,
-        }) = &config.reasoning
-        {
-            Ok((
-                Self::budget_level_without_thinking_levels(&conversation.model, *thinking_budget)?
-                    .map(|level| Self::thinking_level_request_value(level).to_string()),
-                summaries_value(*include_summaries),
-            ))
         } else {
-            Ok((None, None))
+            let thinking_config = matches!(
+                config.reasoning,
+                Some(ReasoningConfig::Google { .. } | ReasoningConfig::Gemini { .. })
+            );
+            if thinking_config && conversation.model.model_type != ModelType::Reasoning {
+                return Err(Error::InvalidRequest(format!(
+                    "Model '{}' does not support thinking.",
+                    conversation.model.id
+                )));
+            }
+            match &config.reasoning {
+                Some(ReasoningConfig::Google {
+                    thinking_budget,
+                    include_summaries,
+                }) => Ok((
+                    Self::budget_level_without_thinking_levels(&conversation.model, *thinking_budget)?
+                        .map(|level| Self::thinking_level_request_value(level).to_string()),
+                    summaries_value(*include_summaries),
+                )),
+                // Gemini 2.5 on the Interactions API takes LOW, MEDIUM and HIGH.
+                // https://ai.google.dev/gemini-api/docs/thinking
+                Some(ReasoningConfig::Gemini {
+                    thinking_level,
+                    include_summaries,
+                }) if conversation.model.is_gemini_2_5() => {
+                    if matches!(thinking_level, GeminiThinkingLevel::Minimal) {
+                        return Err(Error::InvalidRequest(format!(
+                            "Gemini 2.5 models only support LOW, MEDIUM, and HIGH thinking levels, got {}.",
+                            thinking_level.as_str()
+                        )));
+                    }
+                    Ok((
+                        Some(Self::thinking_level_request_value(*thinking_level).to_string()),
+                        summaries_value(*include_summaries),
+                    ))
+                }
+                Some(ReasoningConfig::Gemini { .. }) => Err(Error::InvalidRequest(format!(
+                    "Thinking levels are not supported for model '{}'.",
+                    conversation.model.id
+                ))),
+                _ => Ok((None, None)),
+            }
         }
     }
 
@@ -759,6 +796,18 @@ impl GoogleClient {
         if model.is_gemini_3_1_pro() && matches!(level, GeminiThinkingLevel::Minimal) {
             return Err(Error::InvalidRequest(format!(
                 "Gemini 3.1 Pro only supports LOW, MEDIUM, and HIGH thinking levels, got {}.",
+                level.as_str()
+            )));
+        }
+
+        // Gemini 3.7 and 3.8 Flash return an error for MINIMAL.
+        // https://ai.google.dev/gemini-api/docs/thinking
+        if (model.is_gemini_3_7_flash() || model.is_gemini_3_8_flash())
+            && matches!(level, GeminiThinkingLevel::Minimal)
+        {
+            return Err(Error::InvalidRequest(format!(
+                "Model '{}' only supports LOW, MEDIUM, and HIGH thinking levels, got {}.",
+                model.id,
                 level.as_str()
             )));
         }
@@ -1433,5 +1482,108 @@ mod tests {
             .build_request(&conversation, &GenerationConfig::default(), false)
             .unwrap();
         assert!(serde_json::to_value(request).unwrap()["generation_config"].get("temperature").is_none());
+    }
+}
+
+#[cfg(test)]
+mod model_rule_tests {
+    use super::GoogleClient;
+    use crate::{
+        config::GenerationConfig,
+        conversation::Conversation,
+        error::Error,
+        model::Model,
+        reasoning::{GeminiThinkingLevel, ReasoningConfig},
+    };
+
+    fn thinking(model: Model, config: &GenerationConfig) -> Result<(Option<String>, Option<String>), Error> {
+        GoogleClient::new("test").resolve_thinking(&Conversation::new(model), config)
+    }
+
+    fn level(model: Model, config: &GenerationConfig) -> Option<String> {
+        thinking(model, config).unwrap().0
+    }
+
+    #[test]
+    fn new_gemini_models_use_their_documented_default_levels() {
+        let default = GenerationConfig::default();
+        for model in [
+            Model::google_gemini_3_8_flash(),
+            Model::google_gemini_3_7_flash(),
+            Model::google_gemini_3_6_flash(),
+            Model::google_gemini_3_5_flash(),
+        ] {
+            assert_eq!(level(model, &default).as_deref(), Some("medium"));
+        }
+        for model in [
+            Model::google_gemini_3_5_flash_lite(),
+            Model::google_gemini_3_1_flash_lite_stable(),
+            Model::google_gemini_3_1_flash_lite(),
+        ] {
+            assert_eq!(level(model, &default).as_deref(), Some("minimal"));
+        }
+        assert_eq!(level(Model::google_gemini_3_1_pro(), &default).as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn gemini_3_7_and_3_8_flash_reject_minimal_explicitly_and_from_a_zero_budget() {
+        let minimal =
+            GenerationConfig::default().with_reasoning(ReasoningConfig::gemini(GeminiThinkingLevel::Minimal, false));
+        let zero_budget = GenerationConfig::default().with_reasoning(ReasoningConfig::google(0, false));
+        for model in [Model::google_gemini_3_7_flash(), Model::google_gemini_3_8_flash()] {
+            assert!(matches!(thinking(model.clone(), &minimal), Err(Error::InvalidRequest(_))));
+            assert!(matches!(thinking(model.clone(), &zero_budget), Err(Error::InvalidRequest(_))));
+            let low = GenerationConfig::default()
+                .with_reasoning(ReasoningConfig::gemini(GeminiThinkingLevel::Low, true));
+            assert_eq!(thinking(model, &low).unwrap(), (Some("low".into()), Some("auto".into())));
+        }
+        // 3.6 Flash accepts minimal.
+        assert_eq!(level(Model::google_gemini_3_6_flash(), &minimal).as_deref(), Some("minimal"));
+    }
+
+    #[test]
+    fn gemini_2_5_takes_levels_but_not_minimal_and_2_0_has_no_thinking() {
+        let medium = GenerationConfig::default()
+            .with_reasoning(ReasoningConfig::gemini(GeminiThinkingLevel::Medium, false));
+        assert_eq!(level(Model::google_gemini_2_5_flash(), &medium).as_deref(), Some("medium"));
+        let minimal = GenerationConfig::default()
+            .with_reasoning(ReasoningConfig::gemini(GeminiThinkingLevel::Minimal, false));
+        assert!(matches!(
+            thinking(Model::google_gemini_2_5_pro(), &minimal),
+            Err(Error::InvalidRequest(_))
+        ));
+        for config in [medium, GenerationConfig::default().with_reasoning(ReasoningConfig::google(2048, false))] {
+            assert!(matches!(
+                thinking(Model::google_gemini_2_0_flash(), &config),
+                Err(Error::InvalidRequest(_))
+            ));
+        }
+        assert_eq!(thinking(Model::google_gemini_2_0_flash(), &GenerationConfig::default()).unwrap(), (None, None));
+    }
+
+    #[test]
+    fn gemini_3_6_to_3_8_flash_promotional_pricing_ends_on_2027_01_01() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let new_year = UNIX_EPOCH + Duration::from_secs(1_798_761_600);
+        for model in [
+            Model::google_gemini_3_6_flash(),
+            Model::google_gemini_3_7_flash(),
+            Model::google_gemini_3_8_flash(),
+        ] {
+            let before = model.pricing.at(new_year - Duration::from_secs(1));
+            assert_eq!(before.input_cost_per_million, 0.75);
+            assert_eq!(before.cached_input_cost_per_million, Some(0.075));
+            let after = model.pricing.at(new_year);
+            assert_eq!(after.input_cost_per_million, 1.50);
+            assert_eq!(after.output_cost_per_million, 7.50);
+            assert_eq!(after.cached_input_cost_per_million, Some(0.15));
+        }
+    }
+
+    #[test]
+    fn gemini_3_pro_preview_cache_reads_use_the_published_rates() {
+        let pricing = Model::google_gemini_3_0_pro().pricing;
+        assert_eq!(pricing.cached_input_cost_per_million, Some(0.20));
+        assert_eq!(pricing.large_cached_input_cost_per_million, Some(0.40));
     }
 }

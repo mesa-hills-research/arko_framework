@@ -1,4 +1,4 @@
-use crate::pricing::{ResidencyPricing, TierPricing};
+use crate::pricing::{ResidencyPricing, ScheduledPricing, TierPricing};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +83,11 @@ pub struct Model {
 /// https://ai.google.dev/gemini-api/docs/pricing (+ model pages).
 /// `max_input_tokens` is the vendor's published maximum input tokens where one is
 /// given (OpenAI lists it separately for some models), otherwise the context window.
+/// OpenAI publishes no separate maximum input for GPT-5.1, 5.2, 5.4, 5.4-pro, 5.5 and
+/// 5.5-pro, so those entries use the context window (checked 2026-09-27).
+///
+/// GPT-5.4/5.5 long-context rates apply "for the full session" per OpenAI's model
+/// pages; the docs don't define a session, so the rates are applied per request.
 ///
 /// Price variants, checked 2026-09-27 against the same pricing pages:
 /// - OpenAI `service_tiers` are the Flex and Fast tables as multipliers of the
@@ -264,6 +269,18 @@ impl Model {
         }
     }
 
+    /// The `gpt-5.6` alias routes requests to `gpt-5.6-sol` (same prices and limits);
+    /// responses report the served model. Checked 2026-09-27 against
+    /// https://developers.openai.com/api/docs/models/gpt-5.6-sol
+    pub fn openai_gpt_5_6() -> Self {
+        Self {
+            id: "gpt-5.6".to_string(),
+            ..Self::openai_gpt_5_6_sol()
+        }
+    }
+
+    /// Shuts down December 11, 2026 (replacement: gpt-5.6-sol). Checked 2026-09-27
+    /// against https://developers.openai.com/api/docs/deprecations
     pub fn openai_gpt_5() -> Self {
         Self {
             provider: Provider::OpenAI,
@@ -285,6 +302,28 @@ impl Model {
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
                 service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
+                ..ModelPricing::default()
+            },
+        }
+    }
+
+    /// Defaults to, and only supports, `reasoning.effort: high`; no cached-input
+    /// discount; Responses and Batch only. Shuts down December 11, 2026
+    /// (replacement: gpt-5.6-sol with `reasoning.mode: "pro"`). Checked 2026-09-27
+    /// against https://developers.openai.com/api/docs/models/gpt-5-pro and
+    /// https://developers.openai.com/api/docs/deprecations
+    pub fn openai_gpt_5_pro() -> Self {
+        Self {
+            provider: Provider::OpenAI,
+            id: "gpt-5-pro-2025-10-06".to_string(),
+            model_type: ModelType::Reasoning,
+            max_input_tokens: 400_000,
+            max_output_tokens: 272_000,
+            supports_image_input: true,
+            supports_cache: false,
+            pricing: ModelPricing {
+                input_cost_per_million: 15.00,
+                output_cost_per_million: 120.00,
                 ..ModelPricing::default()
             },
         }
@@ -337,6 +376,27 @@ impl Model {
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
                 service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
+                ..ModelPricing::default()
+            },
+        }
+    }
+
+    /// Reasoning effort medium, high or xhigh; no cached-input discount; Responses
+    /// only; no Flex or Fast mode. Checked 2026-09-27 against
+    /// https://developers.openai.com/api/docs/models/gpt-5.2-pro and
+    /// https://developers.openai.com/api/docs/pricing
+    pub fn openai_gpt_5_2_pro() -> Self {
+        Self {
+            provider: Provider::OpenAI,
+            id: "gpt-5.2-pro".to_string(),
+            model_type: ModelType::Reasoning,
+            max_input_tokens: 400_000,
+            max_output_tokens: 128_000,
+            supports_image_input: true,
+            supports_cache: false,
+            pricing: ModelPricing {
+                input_cost_per_million: 21.00,
+                output_cost_per_million: 168.00,
                 ..ModelPricing::default()
             },
         }
@@ -446,6 +506,32 @@ impl Model {
         }
     }
 
+    /// Reasoning effort medium, high (default) or xhigh; no cached-input discount;
+    /// Responses and Batch only; Flex (Batch rates) for short context only, no Fast
+    /// mode. Checked 2026-09-27 against
+    /// https://developers.openai.com/api/docs/models/gpt-5.5-pro and
+    /// https://developers.openai.com/api/docs/pricing
+    pub fn openai_gpt_5_5_pro() -> Self {
+        Self {
+            provider: Provider::OpenAI,
+            id: "gpt-5.5-pro-2026-04-23".to_string(),
+            model_type: ModelType::Reasoning,
+            max_input_tokens: 1_050_000,
+            max_output_tokens: 128_000,
+            supports_image_input: true,
+            supports_cache: false,
+            pricing: ModelPricing {
+                input_cost_per_million: 30.00,
+                output_cost_per_million: 180.00,
+                large_input_threshold: Some(272_000),
+                large_input_cost_per_million: Some(60.00),
+                large_output_cost_per_million: Some(270.00),
+                service_tiers: vec![TierPricing::flex(0.5).short_context_only()],
+                ..ModelPricing::default()
+            },
+        }
+    }
+
     pub fn openai_gpt_5_4_mini() -> Self {
         Self {
             provider: Provider::OpenAI,
@@ -498,6 +584,8 @@ impl Model {
         }
     }
 
+    /// Shuts down December 11, 2026 (replacement: gpt-5.6-terra). Checked 2026-09-27
+    /// against https://developers.openai.com/api/docs/deprecations
     pub fn openai_gpt_5_mini() -> Self {
         Self {
             provider: Provider::OpenAI,
@@ -524,6 +612,8 @@ impl Model {
         }
     }
 
+    /// Shuts down December 11, 2026 (replacement: gpt-5.6-luna). Checked 2026-09-27
+    /// against https://developers.openai.com/api/docs/deprecations
     pub fn openai_gpt_5_nano() -> Self {
         Self {
             provider: Provider::OpenAI,
@@ -550,6 +640,8 @@ impl Model {
         }
     }
 
+    /// Shuts down October 23, 2026 (replacement: gpt-5.6-terra). Checked 2026-09-27
+    /// against https://developers.openai.com/api/docs/deprecations
     pub fn openai_o4_mini() -> Self {
         Self {
             provider: Provider::OpenAI,
@@ -576,6 +668,8 @@ impl Model {
         }
     }
 
+    /// Shuts down December 11, 2026 (replacement: gpt-5.6-sol). Checked 2026-09-27
+    /// against https://developers.openai.com/api/docs/deprecations
     pub fn openai_o3() -> Self {
         Self {
             provider: Provider::OpenAI,
@@ -602,6 +696,9 @@ impl Model {
         }
     }
 
+    /// Shuts down December 11, 2026 (replacement: gpt-5.6-sol with
+    /// `reasoning.mode: "pro"`). Checked 2026-09-27 against
+    /// https://developers.openai.com/api/docs/deprecations
     pub fn openai_o3_pro() -> Self {
         Self {
             provider: Provider::OpenAI,
@@ -679,6 +776,8 @@ impl Model {
         }
     }
 
+    /// Shuts down October 23, 2026 (replacement: gpt-5.6-luna). Checked 2026-09-27
+    /// against https://developers.openai.com/api/docs/deprecations
     pub fn openai_gpt_4_1_nano() -> Self {
         Self {
             provider: Provider::OpenAI,
@@ -754,6 +853,35 @@ impl Model {
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
                 cache_write_1h_cost_per_million: Some(20.00),
+                residency: vec![ResidencyPricing::new("us", 1.1)],
+                ..ModelPricing::default()
+            },
+        }
+    }
+
+    /// Released 2026-09-22; retirement not sooner than 2027-09-22. Adaptive thinking
+    /// is always on (default effort `medium`); `thinking` disabled or manual budgets,
+    /// non-default sampling parameters, prefill and forced tool choice are rejected.
+    /// Cache reads are 0.05x input. Fast mode is $8/$40 (2x). Checked 2026-09-27
+    /// against https://platform.claude.com/docs/en/models/opus-5-5/overview,
+    /// https://platform.claude.com/docs/en/about-claude/pricing and
+    /// https://platform.claude.com/docs/en/build-with-claude/fast-mode
+    pub fn anthropic_claude_opus_5_5() -> Self {
+        Self {
+            provider: Provider::Anthropic,
+            id: "claude-opus-5-5".to_string(),
+            model_type: ModelType::Reasoning,
+            max_input_tokens: 1_000_000,
+            max_output_tokens: 128_000,
+            supports_image_input: true,
+            supports_cache: true,
+            pricing: ModelPricing {
+                input_cost_per_million: 4.00,
+                output_cost_per_million: 20.00,
+                cached_input_cost_per_million: Some(0.20),
+                cache_write_cost_per_million: Some(5.00),
+                cache_write_1h_cost_per_million: Some(8.00),
+                service_tiers: vec![TierPricing::fast(2.0)],
                 residency: vec![ResidencyPricing::new("us", 1.1)],
                 ..ModelPricing::default()
             },
@@ -847,7 +975,10 @@ impl Model {
         }
     }
 
-    /// Retired on the Claude API February 19, 2026; may remain on other cloud platforms.
+    /// Retired on the Claude API February 19, 2026 (requests return an error);
+    /// partner platforms set their own retirement dates. Max output is 64K: 128K
+    /// required the `output-128k-2025-02-19` beta header, which this client never
+    /// sends. Checked 2026-09-27 against
     /// https://platform.claude.com/docs/en/about-claude/model-deprecations
     pub fn anthropic_claude_3_7_sonnet() -> Self {
         Self {
@@ -855,7 +986,7 @@ impl Model {
             id: "claude-3-7-sonnet-20250219".to_string(),
             model_type: ModelType::Reasoning,
             max_input_tokens: 200_000,
-            max_output_tokens: 128_000,
+            max_output_tokens: 64_000,
             supports_image_input: true,
             supports_cache: true,
             pricing: ModelPricing {
@@ -987,6 +1118,8 @@ impl Model {
         }
     }
 
+    /// Retirement not sooner than November 24, 2026 (no deprecation notice as of
+    /// 2026-09-27). https://platform.claude.com/docs/en/about-claude/model-deprecations
     pub fn anthropic_claude_opus_4_5() -> Self {
         Self {
             provider: Provider::Anthropic,
@@ -1069,6 +1202,12 @@ impl Model {
 
     /// Retired on the Claude API June 15, 2026; may remain on other cloud platforms.
     /// https://platform.claude.com/docs/en/about-claude/model-deprecations
+    ///
+    /// The 1M-context beta (`context-1m-2025-08-07`) was retired for Sonnet 4 and
+    /// 4.5 on 2026-04-30: the header has no effect and requests over 200K tokens
+    /// return an error. While it was available, input above 200K was priced at
+    /// $6 input / $22.50 output, with caching multipliers on top ($0.60 reads, $7.50
+    /// 5-minute and $12 1-hour writes). https://platform.claude.com/docs/en/release-notes/overview
     pub fn anthropic_claude_sonnet_4() -> Self {
         Self {
             provider: Provider::Anthropic,
@@ -1083,14 +1222,7 @@ impl Model {
                 output_cost_per_million: 15.00,
                 cached_input_cost_per_million: Some(0.30),
                 cache_write_cost_per_million: Some(3.75),
-                large_input_threshold: Some(200_000),
-                large_input_cost_per_million: Some(6.00),
-                large_output_cost_per_million: Some(22.50),
-                large_cached_input_cost_per_million: Some(0.60),
-                large_cache_write_cost_per_million: Some(7.50),
-                reasoning_output_cost_per_million: None,
                 cache_write_1h_cost_per_million: Some(6.00),
-                large_cache_write_1h_cost_per_million: Some(12.00),
                 ..ModelPricing::default()
             },
         }
@@ -1125,9 +1257,16 @@ impl Model {
         }
     }
 
-    /// The long-context rates below applied to the retired 1M-context beta; current
-    /// docs list a 200K context window and no long-context tier (checked 2026-09-27,
-    /// https://platform.claude.com/docs/en/build-with-claude/context-windows).
+    /// Retirement not sooner than September 29, 2026 (no deprecation notice as of
+    /// 2026-09-27). The 1M-context beta (`context-1m-2025-08-07`) was retired for
+    /// this model on 2026-04-30: the header has no effect and requests over 200K
+    /// tokens return an error, so `long_context` is rejected locally. While it was
+    /// available, input above 200K was priced at $6 input / $22.50 output, with
+    /// caching multipliers on top ($0.60 reads, $7.50 5-minute and $12 1-hour
+    /// writes). Checked 2026-09-27 against
+    /// https://platform.claude.com/docs/en/about-claude/model-deprecations,
+    /// https://platform.claude.com/docs/en/build-with-claude/context-windows and
+    /// https://platform.claude.com/docs/en/release-notes/overview
     pub fn anthropic_claude_sonnet_4_5() -> Self {
         Self {
             provider: Provider::Anthropic,
@@ -1142,19 +1281,14 @@ impl Model {
                 output_cost_per_million: 15.00,
                 cached_input_cost_per_million: Some(0.30),
                 cache_write_cost_per_million: Some(3.75),
-                large_input_threshold: Some(200_000),
-                large_input_cost_per_million: Some(6.00),
-                large_output_cost_per_million: Some(22.50),
-                large_cached_input_cost_per_million: Some(0.60),
-                large_cache_write_cost_per_million: Some(7.50),
-                reasoning_output_cost_per_million: None,
                 cache_write_1h_cost_per_million: Some(6.00),
-                large_cache_write_1h_cost_per_million: Some(12.00),
                 ..ModelPricing::default()
             },
         }
     }
 
+    /// Retirement not sooner than October 15, 2026 (no deprecation notice as of
+    /// 2026-09-27). https://platform.claude.com/docs/en/about-claude/model-deprecations
     pub fn anthropic_claude_haiku_4_5() -> Self {
         Self {
             provider: Provider::Anthropic,
@@ -1206,8 +1340,10 @@ impl Model {
         }
     }
 
-    /// Cache-read prices corrected, checked 2026-09-27 against
-    /// https://ai.google.dev/gemini-api/docs/pricing
+    /// Since 2026-09-18 access is limited to existing users. Cache-read prices
+    /// corrected, checked 2026-09-27 against
+    /// https://ai.google.dev/gemini-api/docs/pricing and
+    /// https://ai.google.dev/gemini-api/docs/models
     pub fn google_gemini_2_5_pro() -> Self {
         Self {
             provider: Provider::Google,
@@ -1233,8 +1369,10 @@ impl Model {
         }
     }
 
-    /// Cache-read price corrected, checked 2026-09-27 against
-    /// https://ai.google.dev/gemini-api/docs/pricing
+    /// Since 2026-09-18 access is limited to existing users. Cache-read price
+    /// corrected, checked 2026-09-27 against
+    /// https://ai.google.dev/gemini-api/docs/pricing and
+    /// https://ai.google.dev/gemini-api/docs/models
     pub fn google_gemini_2_5_flash() -> Self {
         Self {
             provider: Provider::Google,
@@ -1260,7 +1398,8 @@ impl Model {
         }
     }
 
-    /// Cache-read price and token limits corrected, checked 2026-09-27 against
+    /// Since 2026-09-18 access is limited to existing users. Cache-read price and
+    /// token limits corrected, checked 2026-09-27 against
     /// https://ai.google.dev/gemini-api/docs/pricing
     /// https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-lite
     pub fn google_gemini_2_5_flash_lite() -> Self {
@@ -1291,6 +1430,8 @@ impl Model {
     /// Shut down on the Gemini API June 1, 2026. Output limit corrected from
     /// https://ai.google.dev/gemini-api/docs/models/gemini-2.0-flash
     /// https://ai.google.dev/gemini-api/docs/deprecations
+    /// `supports_cache` is false: the Interactions API offers only implicit caching,
+    /// which starts with Gemini 2.5 (https://ai.google.dev/gemini-api/docs/caching).
     pub fn google_gemini_2_0_flash() -> Self {
         Self {
             provider: Provider::Google,
@@ -1317,8 +1458,13 @@ impl Model {
     }
 
     /// Shut down on the Gemini API March 9, 2026 (replacement: gemini-3.1-pro-preview).
-    /// Token limits corrected from the model page; pricing is no longer published.
-    /// https://ai.google.dev/gemini-api/docs/deprecations
+    /// The changelog entry for that date also says the id "now points to"
+    /// gemini-3.1-pro-preview; both statements are recorded because the docs conflict.
+    /// Pricing is no longer published; cached-input prices corrected to $0.20 / $0.40
+    /// (>200K) from the launch-day and 2026-02-01 archived pricing pages. Checked
+    /// 2026-09-27 against https://ai.google.dev/gemini-api/docs/deprecations,
+    /// https://ai.google.dev/gemini-api/docs/changelog and
+    /// https://web.archive.org/web/20251118161504/https://ai.google.dev/gemini-api/docs/pricing
     pub fn google_gemini_3_0_pro() -> Self {
         Self {
             provider: Provider::Google,
@@ -1331,12 +1477,12 @@ impl Model {
             pricing: ModelPricing {
                 input_cost_per_million: 2.00,
                 output_cost_per_million: 12.00,
-                cached_input_cost_per_million: Some(0.50),
+                cached_input_cost_per_million: Some(0.20),
                 cache_write_cost_per_million: None,
                 large_input_threshold: Some(200_000),
                 large_input_cost_per_million: Some(4.00),
                 large_output_cost_per_million: Some(18.00),
-                large_cached_input_cost_per_million: Some(1.00),
+                large_cached_input_cost_per_million: Some(0.40),
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
                 ..ModelPricing::default()
@@ -1344,8 +1490,10 @@ impl Model {
         }
     }
 
+    /// Legacy model (replacement: gemini-3.6-flash); no shutdown date published.
     /// Input limit corrected, checked 2026-09-27 against
-    /// https://ai.google.dev/gemini-api/docs/models/gemini-3-flash-preview
+    /// https://ai.google.dev/gemini-api/docs/models/gemini-3-flash-preview and
+    /// https://ai.google.dev/gemini-api/docs/deprecations
     pub fn google_gemini_3_0_flash() -> Self {
         Self {
             provider: Provider::Google,
@@ -1449,6 +1597,98 @@ impl Model {
         }
     }
 
+    /// Shared limits for Gemini 3.1+ Flash and Flash-Lite models: 1,048,576 input and
+    /// 65,536 output tokens, image input, implicit caching, no >200K price tier.
+    fn google_gemini_flash(id: &str, pricing: ModelPricing) -> Self {
+        Self {
+            provider: Provider::Google,
+            id: id.to_string(),
+            model_type: ModelType::Reasoning,
+            max_input_tokens: 1_048_576,
+            max_output_tokens: 65_536,
+            supports_image_input: true,
+            supports_cache: true,
+            pricing,
+        }
+    }
+
+    /// Introductory $0.75/$3.75 (cached $0.075) through 2026-12-31, then $1.50/$7.50
+    /// (cached $0.15) from 2027-01-01, for Gemini 3.6, 3.7 and 3.8 Flash.
+    /// https://ai.google.dev/gemini-api/docs/pricing
+    fn google_gemini_3_6_to_3_8_flash_pricing() -> ModelPricing {
+        ModelPricing {
+            input_cost_per_million: 0.75,
+            output_cost_per_million: 3.75,
+            cached_input_cost_per_million: Some(0.075),
+            schedule: vec![ScheduledPricing::new(
+                "2027-01-01",
+                ModelPricing {
+                    input_cost_per_million: 1.50,
+                    output_cost_per_million: 7.50,
+                    cached_input_cost_per_million: Some(0.15),
+                    ..ModelPricing::default()
+                },
+            )],
+            ..ModelPricing::default()
+        }
+    }
+
+    /// GA 2026-09-02. Thinking levels low, medium (default) and high; `minimal`
+    /// returns an error. Checked 2026-09-27 against
+    /// https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash and
+    /// https://ai.google.dev/gemini-api/docs/thinking
+    pub fn google_gemini_3_8_flash() -> Self {
+        Self::google_gemini_flash("gemini-3.8-flash", Self::google_gemini_3_6_to_3_8_flash_pricing())
+    }
+
+    /// GA 2026-08-13. Thinking levels low, medium (default) and high; `minimal`
+    /// returns an error. Checked 2026-09-27 against
+    /// https://ai.google.dev/gemini-api/docs/models/gemini-3.7-flash and
+    /// https://ai.google.dev/gemini-api/docs/thinking
+    pub fn google_gemini_3_7_flash() -> Self {
+        Self::google_gemini_flash("gemini-3.7-flash", Self::google_gemini_3_6_to_3_8_flash_pricing())
+    }
+
+    /// GA 2026-07-21. Thinking levels minimal through high; default medium. Checked
+    /// 2026-09-27 against https://ai.google.dev/gemini-api/docs/models/gemini-3.6-flash
+    /// and https://ai.google.dev/gemini-api/docs/thinking
+    pub fn google_gemini_3_6_flash() -> Self {
+        Self::google_gemini_flash("gemini-3.6-flash", Self::google_gemini_3_6_to_3_8_flash_pricing())
+    }
+
+    /// GA 2026-07-21. Thinking levels minimal (default) through high. Checked
+    /// 2026-09-27 against https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite
+    /// and https://ai.google.dev/gemini-api/docs/pricing
+    pub fn google_gemini_3_5_flash_lite() -> Self {
+        Self::google_gemini_flash(
+            "gemini-3.5-flash-lite",
+            ModelPricing {
+                input_cost_per_million: 0.30,
+                output_cost_per_million: 2.50,
+                cached_input_cost_per_million: Some(0.03),
+                ..ModelPricing::default()
+            },
+        )
+    }
+
+    /// Stable release (GA 2026-05-07) of the retired preview; earliest shutdown
+    /// 2027-05-07 (replacement: gemini-3.5-flash-lite). Thinking levels minimal
+    /// (default) through high. Checked 2026-09-27 against
+    /// https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite,
+    /// https://ai.google.dev/gemini-api/docs/pricing and
+    /// https://ai.google.dev/gemini-api/docs/deprecations
+    pub fn google_gemini_3_1_flash_lite_stable() -> Self {
+        Self::google_gemini_flash(
+            "gemini-3.1-flash-lite",
+            ModelPricing {
+                input_cost_per_million: 0.25,
+                output_cost_per_million: 1.50,
+                cached_input_cost_per_million: Some(0.025),
+                ..ModelPricing::default()
+            },
+        )
+    }
+
     pub(crate) fn list_openai_models() -> Vec<Self> {
         vec![
             Self::openai_gpt_6_astra(),
@@ -1457,14 +1697,18 @@ impl Model {
             Self::openai_gpt_5_6_sol(),
             Self::openai_gpt_5_6_terra(),
             Self::openai_gpt_5_6_luna(),
+            Self::openai_gpt_5_6(),
+            Self::openai_gpt_5_5_pro(),
             Self::openai_gpt_5_5(),
             Self::openai_gpt_5_4(),
             Self::openai_gpt_5_4_mini(),
             Self::openai_gpt_5_4_nano(),
             Self::openai_gpt_5_4_pro(),
             Self::openai_gpt_5_3_codex(),
+            Self::openai_gpt_5_2_pro(),
             Self::openai_gpt_5_2(),
             Self::openai_gpt_5_1(),
+            Self::openai_gpt_5_pro(),
             Self::openai_gpt_5(),
             Self::openai_gpt_5_mini(),
             Self::openai_gpt_5_nano(),
@@ -1481,6 +1725,7 @@ impl Model {
         vec![
             Self::anthropic_claude_fable_5_1(),
             Self::anthropic_claude_fable_5(),
+            Self::anthropic_claude_opus_5_5(),
             Self::anthropic_claude_opus_5(),
             Self::anthropic_claude_opus_4_8(),
             Self::anthropic_claude_sonnet_5(),
@@ -1501,9 +1746,14 @@ impl Model {
 
     pub(crate) fn list_google_models() -> Vec<Self> {
         vec![
+            Self::google_gemini_3_8_flash(),
+            Self::google_gemini_3_7_flash(),
+            Self::google_gemini_3_6_flash(),
             Self::google_gemini_3_5_flash(),
+            Self::google_gemini_3_5_flash_lite(),
             Self::google_gemini_3_1_pro(),
             Self::google_gemini_3_1_pro_customtools(),
+            Self::google_gemini_3_1_flash_lite_stable(),
             Self::google_gemini_3_1_flash_lite(),
             Self::google_gemini_3_0_pro(),
             Self::google_gemini_3_0_flash(),
@@ -1556,8 +1806,24 @@ impl Model {
                 || self.is_openai_gpt_6_sol_or_luna())
     }
 
+    pub fn is_openai_gpt_5_5_pro(&self) -> bool {
+        self.id.starts_with("gpt-5.5-pro")
+    }
+
+    pub fn is_openai_gpt_5_2_pro(&self) -> bool {
+        self.id.starts_with("gpt-5.2-pro")
+    }
+
+    pub fn is_openai_gpt_5_pro(&self) -> bool {
+        self.id.starts_with("gpt-5-pro")
+    }
+
     pub fn is_fable_5_1(&self) -> bool {
         self.id == "claude-fable-5-1"
+    }
+
+    pub fn is_opus_5_5(&self) -> bool {
+        self.id == "claude-opus-5-5"
     }
 
     pub fn is_opus_5(&self) -> bool {
@@ -1592,9 +1858,12 @@ impl Model {
         self.id == "claude-sonnet-5"
     }
 
-    pub fn supports_anthropic_adaptive_thinking(&self) -> bool {
+    /// Claude models whose 1M context window is standard (no beta header), which
+    /// is also the "Claude 4.6 and later" set used by data residency.
+    fn is_anthropic_4_6_or_later(&self) -> bool {
         self.is_fable_5_1()
             || self.is_fable_5()
+            || self.is_opus_5_5()
             || self.is_opus_5()
             || self.is_opus_4_8()
             || self.is_opus_4_7()
@@ -1603,56 +1872,70 @@ impl Model {
             || self.is_sonnet_4_6()
     }
 
-    pub fn defaults_anthropic_adaptive_thinking(&self) -> bool {
-        self.is_fable_5_1() || self.is_fable_5() || self.is_opus_5() || self.is_sonnet_5()
+    /// Thinking predicates checked 2026-09-27 against
+    /// https://platform.claude.com/docs/en/build-with-claude/thinking and
+    /// https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting
+    pub fn supports_anthropic_adaptive_thinking(&self) -> bool {
+        self.is_anthropic_4_6_or_later()
     }
 
+    pub fn defaults_anthropic_adaptive_thinking(&self) -> bool {
+        self.is_fable_5_1()
+            || self.is_fable_5()
+            || self.is_opus_5_5()
+            || self.is_opus_5()
+            || self.is_sonnet_5()
+    }
+
+    /// Adaptive thinking can't be disabled (`thinking.type: "disabled"` returns 400).
     pub fn always_uses_anthropic_adaptive_thinking(&self) -> bool {
-        self.is_fable_5_1() || self.is_fable_5()
+        self.is_fable_5_1() || self.is_fable_5() || self.is_opus_5_5()
     }
 
     pub fn rejects_anthropic_manual_thinking(&self) -> bool {
         self.is_fable_5_1()
             || self.is_fable_5()
+            || self.is_opus_5_5()
             || self.is_opus_5()
             || self.is_opus_4_8()
             || self.is_opus_4_7()
             || self.is_sonnet_5()
     }
 
+    /// Non-default `temperature`, `top_p` or `top_k` return 400 on these models.
     pub fn omits_anthropic_sampling_parameters(&self) -> bool {
         self.is_fable_5_1()
             || self.is_fable_5()
+            || self.is_opus_5_5()
             || self.is_opus_5()
             || self.is_opus_4_8()
             || self.is_opus_4_7()
             || self.is_sonnet_5()
     }
 
+    /// Models whose thinking display defaults to `"omitted"`, so summarized text must
+    /// be requested with `thinking.display`. On Opus 4.6, Sonnet 4.6 and earlier
+    /// thinking models summarized text is already the default.
     pub fn supports_anthropic_summarized_thinking_display(&self) -> bool {
         self.is_fable_5_1()
             || self.is_fable_5()
+            || self.is_opus_5_5()
             || self.is_opus_5()
             || self.is_opus_4_8()
             || self.is_opus_4_7()
             || self.is_sonnet_5()
     }
 
+    /// Effort predicates checked 2026-09-27 against
+    /// https://platform.claude.com/docs/en/build-with-claude/effort
     pub fn supports_anthropic_effort(&self) -> bool {
-        self.is_fable_5_1()
-            || self.is_fable_5()
-            || self.is_opus_5()
-            || self.is_opus_4_8()
-            || self.is_opus_4_7()
-            || self.is_opus_4_6()
-            || self.is_opus_4_5()
-            || self.is_sonnet_5()
-            || self.is_sonnet_4_6()
+        self.is_anthropic_4_6_or_later() || self.is_opus_4_5()
     }
 
     pub fn supports_anthropic_xhigh_effort(&self) -> bool {
         self.is_fable_5_1()
             || self.is_fable_5()
+            || self.is_opus_5_5()
             || self.is_opus_5()
             || self.is_opus_4_8()
             || self.is_opus_4_7()
@@ -1660,37 +1943,45 @@ impl Model {
     }
 
     pub fn supports_anthropic_max_effort(&self) -> bool {
-        self.is_fable_5_1()
-            || self.is_fable_5()
-            || self.is_opus_5()
-            || self.is_opus_4_8()
-            || self.is_opus_4_7()
-            || self.is_opus_4_6()
-            || self.is_sonnet_5()
-            || self.is_sonnet_4_6()
+        self.is_anthropic_4_6_or_later()
     }
 
-    pub fn requires_anthropic_effort_beta(&self) -> bool {
-        self.is_opus_4_5()
+    /// Forced `tool_choice` (`any` or a named tool) returns 400 on every request to
+    /// these models. It is also rejected on any model while manual extended thinking
+    /// is enabled. Checked 2026-09-27 against
+    /// https://platform.claude.com/docs/en/build-with-claude/thinking
+    pub fn rejects_anthropic_forced_tool_choice(&self) -> bool {
+        self.is_fable_5_1() || self.is_opus_5_5()
+    }
+
+    /// Fast mode (`speed: "fast"`, research preview): Opus 5.5, Opus 5 and Opus 4.8
+    /// on the Claude API. Opus 4.7 rejects it; Opus 4.6 silently runs at standard
+    /// speed. Checked 2026-09-27 against
+    /// https://platform.claude.com/docs/en/build-with-claude/fast-mode
+    pub fn supports_anthropic_fast_mode(&self) -> bool {
+        self.is_opus_5_5() || self.is_opus_5() || self.is_opus_4_8()
+    }
+
+    /// `inference_geo` is accepted on Claude 4.6 and later; older models return 400.
+    /// Checked 2026-09-27 against
+    /// https://platform.claude.com/docs/en/manage-claude/data-residency
+    pub fn supports_anthropic_inference_geo(&self) -> bool {
+        self.is_anthropic_4_6_or_later()
     }
 
     pub fn has_standard_anthropic_1m_context(&self) -> bool {
-        self.is_fable_5_1()
-            || self.is_fable_5()
-            || self.is_opus_5()
-            || self.is_opus_4_8()
-            || self.is_opus_4_7()
-            || self.is_opus_4_6()
-            || self.is_sonnet_5()
-            || self.is_sonnet_4_6()
+        self.is_anthropic_4_6_or_later()
     }
 
-    pub fn requires_long_context_beta(&self) -> bool {
+    /// Sonnet 4 and 4.5 reached 1M context through the `context-1m-2025-08-07` beta,
+    /// retired on 2026-04-30 (the header now has no effect and requests over 200K
+    /// tokens return an error). https://platform.claude.com/docs/en/release-notes/overview
+    pub fn had_retired_anthropic_long_context_beta(&self) -> bool {
         self.id == "claude-sonnet-4-20250514" || self.id == "claude-sonnet-4-5-20250929"
     }
 
     pub fn supports_long_context(&self) -> bool {
-        self.requires_long_context_beta() || self.has_standard_anthropic_1m_context()
+        self.has_standard_anthropic_1m_context()
     }
 
     pub fn supports_interleaved_thinking(&self) -> bool {
@@ -1698,6 +1989,7 @@ impl Model {
             self.id.as_str(),
             "claude-fable-5-1"
                 | "claude-fable-5"
+                | "claude-opus-5-5"
                 | "claude-opus-5"
                 | "claude-opus-4-20250514"
                 | "claude-opus-4-1-20250805"
@@ -1712,15 +2004,10 @@ impl Model {
         )
     }
 
+    /// Interleaved thinking is automatic on every model that supports adaptive
+    /// thinking, whenever adaptive thinking is active.
     pub fn auto_enables_interleaved_thinking(&self) -> bool {
-        self.is_fable_5_1()
-            || self.is_fable_5()
-            || self.is_opus_5()
-            || self.is_opus_4_8()
-            || self.is_opus_4_7()
-            || self.is_opus_4_6()
-            || self.is_sonnet_5()
-            || self.is_sonnet_4_6()
+        self.is_anthropic_4_6_or_later()
     }
 
     pub fn is_gemini_3_pro(&self) -> bool {
@@ -1735,12 +2022,32 @@ impl Model {
         self.id.starts_with("gemini-3.1-pro-preview")
     }
 
+    /// The stable `gemini-3.1-flash-lite` and its retired preview.
     pub fn is_gemini_3_1_flash_lite(&self) -> bool {
-        self.id == "gemini-3.1-flash-lite-preview"
+        matches!(
+            self.id.as_str(),
+            "gemini-3.1-flash-lite" | "gemini-3.1-flash-lite-preview"
+        )
     }
 
     pub fn is_gemini_3_5_flash(&self) -> bool {
         self.id == "gemini-3.5-flash"
+    }
+
+    pub fn is_gemini_3_5_flash_lite(&self) -> bool {
+        self.id == "gemini-3.5-flash-lite"
+    }
+
+    pub fn is_gemini_3_6_flash(&self) -> bool {
+        self.id == "gemini-3.6-flash"
+    }
+
+    pub fn is_gemini_3_7_flash(&self) -> bool {
+        self.id == "gemini-3.7-flash"
+    }
+
+    pub fn is_gemini_3_8_flash(&self) -> bool {
+        self.id == "gemini-3.8-flash"
     }
 
     pub fn is_gemini_2_5_pro(&self) -> bool {
@@ -1755,11 +2062,19 @@ impl Model {
         self.id == "gemini-2.5-flash-lite"
     }
 
+    pub fn is_gemini_2_5(&self) -> bool {
+        self.is_gemini_2_5_pro() || self.is_gemini_2_5_flash() || self.is_gemini_2_5_flash_lite()
+    }
+
     pub fn uses_gemini_thinking_levels(&self) -> bool {
         self.is_gemini_3_pro()
             || self.is_gemini_3_flash()
             || self.is_gemini_3_1_pro()
             || self.is_gemini_3_1_flash_lite()
             || self.is_gemini_3_5_flash()
+            || self.is_gemini_3_5_flash_lite()
+            || self.is_gemini_3_6_flash()
+            || self.is_gemini_3_7_flash()
+            || self.is_gemini_3_8_flash()
     }
 }
