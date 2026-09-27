@@ -118,6 +118,22 @@ normalized to one attempt.
   refusals) stays in history with its explanation as the assistant text, so the
   model can see what it declined; its tool calls are not run. Classifier and
   content-filter refusals are removed from history.
+- Waits that don't count against the ordinary limits (opt-in `capacity_retry`)
+  neither reset nor consume them: ordinary attempts keep counting across
+  interleaved capacity failures, and the ordinary elapsed clock stops while such
+  a wait lasts.
+- Output a failed stream delivered is kept (followed by the error message) when
+  recovery adds a message, and dropped when the retry resends the request
+  unchanged (capacity waits), so no retried request ends on an assistant turn.
+  A request whose conversation still ends on assistant text (for example a task
+  resumed after `SuspendTask` mid-stream) first gets a user message asking the
+  model to continue; Claude 4.6 and later reject prefill.
+- Calls a native stream announced (`ToolCallInitiated`) but that never run,
+  because the stream failed, was interrupted or was refused, get a
+  `ToolRejected` event.
+- Tasks and conversations loaded from JSON take the registry's current data
+  (pricing, limits) for their model, as `AgentLLMConfig` does; unknown ids and
+  OpenRouter slugs keep their saved copy.
 - `RetryScheduled` events expose attempt, delay, and elapsed milliseconds.
   Tool executions are not replayed by model recovery. Interrupted streams may
   have incurred provider usage without delivering final usage metadata.

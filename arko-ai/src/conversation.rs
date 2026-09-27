@@ -5,7 +5,7 @@ use crate::{
     reasoning::{ReasoningArtifact, ReasoningEffort},
     tool::ToolResult,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -13,8 +13,22 @@ fn new_prompt_cache_key() -> String {
     format!("arko:conversation:{}", Uuid::new_v4())
 }
 
+/// A saved model copy, replaced by the registry's entry for its id when there
+/// is one, so a restored conversation prices calls and checks limits with
+/// current data (the rule `AgentLLMConfig` follows too). Ids the registry
+/// doesn't know (OpenRouter slugs, models added after this build) keep the
+/// saved copy.
+fn registry_model<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Model, D::Error> {
+    let saved = Model::deserialize(deserializer)?;
+    Ok(Model::get(saved.provider.clone(), &saved.id).unwrap_or(saved))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
+    /// The model the conversation is sent to. When a conversation is
+    /// deserialized, a model the registry knows is replaced by its current
+    /// registry entry (see [`Model::get`]); other ids keep the saved copy.
+    #[serde(deserialize_with = "registry_model")]
     pub model: Model,
     pub system_message: Option<String>,
     pub enable_cache: bool,
@@ -454,6 +468,39 @@ mod tests {
         // Providers that can't send updates refuse rather than dropping them.
         let error = crate::providers::ensure_supported_inputs(&conversation).unwrap_err();
         assert!(matches!(error, crate::error::Error::UnsupportedFeature(_)), "{error}");
+    }
+
+    #[test]
+    fn restored_conversations_take_current_registry_data_for_known_models() {
+        let mut conversation = Conversation::new(Model::openai_gpt_6_astra());
+        conversation.model.max_input_tokens = 1;
+        conversation.model.pricing.input_cost_per_million = 999.0;
+        let restored: Conversation =
+            serde_json::from_str(&serde_json::to_string(&conversation).unwrap()).unwrap();
+        let current = Model::openai_gpt_6_astra();
+        assert_eq!(restored.model.max_input_tokens, current.max_input_tokens);
+        assert_eq!(
+            restored.model.pricing.input_cost_per_million,
+            current.pricing.input_cost_per_million
+        );
+
+        // Ids the registry doesn't know keep their saved copy.
+        let mut future = Model::openai_gpt_6_astra();
+        future.id = "gpt-future".into();
+        future.max_input_tokens = 7;
+        let restored: Conversation =
+            serde_json::from_str(&serde_json::to_string(&Conversation::new(future)).unwrap())
+                .unwrap();
+        assert_eq!(
+            (restored.model.id.as_str(), restored.model.max_input_tokens),
+            ("gpt-future", 7)
+        );
+        let mut routed = Model::openrouter("anthropic/claude-sonnet-5");
+        routed.max_input_tokens = 12_345;
+        let restored: Conversation =
+            serde_json::from_str(&serde_json::to_string(&Conversation::new(routed)).unwrap())
+                .unwrap();
+        assert_eq!(restored.model.max_input_tokens, 12_345);
     }
 
     #[test]

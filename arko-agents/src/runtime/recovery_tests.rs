@@ -1,0 +1,216 @@
+//! Recovery follow-ups: attempt accounting across capacity waits, partial
+//! output of failed streams, and conversations that end on an assistant turn.
+
+use super::retry_tests::{capacity_failure, complete_response, harness, provider_failure};
+use super::*;
+use futures::StreamExt;
+
+fn events_of(events: &mut mpsc::Receiver<AgentEvent>) -> Vec<AgentEvent> {
+    let mut received = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        received.push(event);
+    }
+    received
+}
+
+fn assistant_texts(task: &Task) -> Vec<String> {
+    task.conversation
+        .messages
+        .iter()
+        .filter(|message| message.role == ai::Role::Assistant)
+        .map(|message| message.content.iter().filter_map(ai::Content::as_text).collect())
+        .collect()
+}
+
+/// Capacity failures between ordinary ones neither reset nor consume the
+/// ordinary limits: the attempt limit still ends recovery, and hours of
+/// capacity waiting don't use up the ordinary elapsed budget.
+#[tokio::test(start_paused = true)]
+async fn alternating_capacity_and_ordinary_failures_still_exhaust_the_attempt_limit() {
+    let (mut agent, mut events, _commands) = harness();
+    agent.task.agent_config.llm_retry_config.capacity_retry = Some(Default::default());
+    agent.task.agent_config.llm_retry_config.max_elapsed_ms = 10_000;
+    agent.task.agent_config.llm_error_policy =
+        LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts: 3 };
+    for round in 1..=3_u32 {
+        agent
+            .run_llm_attempt::<()>(async { Err(provider_failure(503, None)) })
+            .await
+            .unwrap();
+        assert_eq!(agent.ordinary_attempts(), round);
+        if round == 3 {
+            break;
+        }
+        assert!(matches!(agent.task.current_state, TaskState::InProgress));
+        agent
+            .run_llm_attempt::<()>(async { Err(capacity_failure(Some(Duration::from_secs(3600)))) })
+            .await
+            .unwrap();
+        assert!(matches!(agent.task.current_state, TaskState::InProgress));
+    }
+    assert!(matches!(
+        agent.task.current_state,
+        TaskState::AwaitingErrorRecoveryApproval { ref error_message }
+            if error_message.contains("attempt limit exhausted")
+    ));
+    let delays: Vec<u64> = events_of(&mut events)
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::RetryScheduled { delay_ms, .. } => Some(delay_ms),
+            _ => None,
+        })
+        .collect();
+    // Ordinary backoff continues from attempt to attempt (250, 500 ms);
+    // capacity waits honor the hour-long hint in between.
+    assert_eq!(delays, [250, 3_600_000, 500, 3_600_000]);
+}
+
+/// A stream that fails with a capacity error under opt-in capacity recovery
+/// is retried unchanged: its partial output is not kept (it would end the
+/// retried request on an assistant turn), and no message is added.
+#[tokio::test(start_paused = true)]
+async fn a_capacity_retry_after_partial_output_resends_the_request_unchanged() {
+    let (mut agent, _events, _commands) = harness();
+    agent.task.agent_config.llm_retry_config.capacity_retry = Some(Default::default());
+    agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
+    agent.task.agent_config.tool_config.default_auto_approve_tool_use = true;
+    let scripted = agent.scripted_responses.get_mut().unwrap();
+    scripted.push_back(Ok(futures::stream::iter([
+        Ok(ai::StreamEvent::TextChunk("partial answer".into())),
+        Err(capacity_failure(None)),
+    ])
+    .boxed()));
+    scripted.push_back(Ok(futures::stream::iter([Ok(complete_response())]).boxed()));
+    let task = timeout(Duration::from_secs(3600), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(assistant_texts(&task), ["Finished after recovery."]);
+    // The task prompt, the completed turn and its tool result.
+    let roles: Vec<_> = task.conversation.messages.iter().map(|m| m.role.clone()).collect();
+    assert_eq!(roles, [ai::Role::User, ai::Role::Assistant, ai::Role::User]);
+}
+
+/// An ordinary retry keeps the partial output and adds the error message
+/// after it, so the conversation alternates as before.
+#[tokio::test(start_paused = true)]
+async fn an_ordinary_retry_keeps_partial_output_followed_by_a_user_turn() {
+    let (mut agent, _events, _commands) = harness();
+    agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
+    agent.task.agent_config.tool_config.default_auto_approve_tool_use = true;
+    let scripted = agent.scripted_responses.get_mut().unwrap();
+    scripted.push_back(Ok(futures::stream::iter([
+        Ok(ai::StreamEvent::TextChunk("partial answer".into())),
+        Err(provider_failure(503, None)),
+    ])
+    .boxed()));
+    scripted.push_back(Ok(futures::stream::iter([Ok(complete_response())]).boxed()));
+    let task = timeout(Duration::from_secs(60), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let roles: Vec<_> = task.conversation.messages.iter().map(|m| m.role.clone()).collect();
+    assert_eq!(
+        roles,
+        [
+            ai::Role::User,
+            ai::Role::Assistant,
+            ai::Role::User,
+            ai::Role::Assistant,
+            ai::Role::User
+        ]
+    );
+    assert_eq!(assistant_texts(&task)[0], "partial answer");
+}
+
+/// A task resumed while its conversation ends on assistant text (output
+/// kept from an interrupted stream) asks the model to continue rather than
+/// sending a request that ends on an assistant turn.
+#[tokio::test(start_paused = true)]
+async fn a_resumed_conversation_ending_on_assistant_text_gets_a_user_turn() {
+    let (mut agent, _events, _commands) = harness();
+    agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
+    agent.task.agent_config.tool_config.default_auto_approve_tool_use = true;
+    agent.task.conversation.system_message = Some("resumed".into());
+    agent.task.conversation.add_user_message("task");
+    agent.task.conversation.add_assistant_message("interrupted output");
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(Ok(futures::stream::iter([Ok(complete_response())]).boxed()));
+    let task = timeout(Duration::from_secs(60), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let continuation = &task.conversation.messages[2];
+    assert_eq!(continuation.role, ai::Role::User);
+    let text: String = continuation.content.iter().filter_map(ai::Content::as_text).collect();
+    assert!(text.contains("Continue the task"), "{text}");
+}
+
+/// Calls a native stream announced before it failed are reported as not
+/// run, with the ids their `ToolCallInitiated` events carried.
+#[tokio::test(start_paused = true)]
+async fn calls_announced_by_a_failed_stream_are_reported_as_rejected() {
+    let (mut agent, mut events, _commands) = harness();
+    agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
+    agent.task.agent_config.tool_config.default_auto_approve_tool_use = true;
+    let scripted = agent.scripted_responses.get_mut().unwrap();
+    scripted.push_back(Ok(futures::stream::iter([
+        Ok(ai::StreamEvent::ToolCallStart {
+            index: 0,
+            name: "complete_task".into(),
+        }),
+        Err(provider_failure(503, None)),
+    ])
+    .boxed()));
+    scripted.push_back(Ok(futures::stream::iter([Ok(complete_response())]).boxed()));
+    let task = timeout(Duration::from_secs(60), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let events = events_of(&mut events);
+    let initiated: Vec<Uuid> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolCallInitiated { tool_call_id, .. } => Some(*tool_call_id),
+            _ => None,
+        })
+        .collect();
+    let rejected: Vec<Uuid> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolRejected {
+                tool_call_id,
+                reason: Some(reason),
+                ..
+            } if reason == FAILED_STREAM_CALL => Some(*tool_call_id),
+            _ => None,
+        })
+        .collect();
+    // The scripted completion carries its call without announcing it.
+    assert_eq!(initiated.len(), 1);
+    assert_eq!(rejected, initiated);
+}
+
+/// Resumed tasks price calls with the registry's current data for their
+/// model, not the copy saved with the task.
+#[test]
+fn a_resumed_task_takes_current_model_data_from_the_registry() {
+    let (agent, _events, _commands) = harness();
+    let mut task = agent.task;
+    task.conversation.model.pricing.input_cost_per_million = 999.0;
+    task.conversation.model.max_input_tokens = 1;
+    let restored: Task = serde_json::from_str(&serde_json::to_string(&task).unwrap()).unwrap();
+    let current = ai::Model::openai_gpt_5_6_luna();
+    assert_eq!(
+        restored.conversation.model.pricing.input_cost_per_million,
+        current.pricing.input_cost_per_million
+    );
+    assert_eq!(restored.conversation.model.max_input_tokens, current.max_input_tokens);
+}

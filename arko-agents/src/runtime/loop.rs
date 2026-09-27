@@ -28,6 +28,10 @@ use uuid::Uuid;
 
 const OAUTH_REFRESH_MARGIN_SECS: u64 = 5 * 60;
 
+/// `ToolRejected` reasons for calls a stream announced but never finished.
+const INTERRUPTED_CALL: &str = "The model's response was interrupted before this call finished; it was not run.";
+const FAILED_STREAM_CALL: &str = "The model's response failed before this call finished; it was not run.";
+
 async fn wait_for_recovery_deadline(deadline: Option<tokio::time::Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -92,6 +96,12 @@ pub struct AgentLoop {
     recovery_started: Option<tokio::time::Instant>,
     capacity_recovery_started: Option<tokio::time::Instant>,
     capacity_retry_attempts: u32,
+    /// Requests in this recovery episode that ended in a wait that doesn't
+    /// count against the ordinary limits (capacity, rate limits).
+    indefinite_interactions: u32,
+    /// Ordinary recovery time used before its clock was paused for such a
+    /// wait.
+    paused_recovery_elapsed: Option<Duration>,
     stop_requested: bool,
     #[cfg(test)]
     scripted_responses: std::sync::Mutex<VecDeque<ScriptedStreamResult>>,
@@ -148,6 +158,8 @@ impl AgentLoop {
             recovery_started: None,
             capacity_recovery_started: None,
             capacity_retry_attempts: 0,
+            indefinite_interactions: 0,
+            paused_recovery_elapsed: None,
             stop_requested: false,
             #[cfg(test)]
             scripted_responses: std::sync::Mutex::new(VecDeque::new()),
@@ -378,6 +390,39 @@ impl AgentLoop {
         self.recovery_started = None;
         self.capacity_recovery_started = None;
         self.capacity_retry_attempts = 0;
+        self.indefinite_interactions = 0;
+        self.paused_recovery_elapsed = None;
+    }
+
+    /// Ordinary recovery attempts in this episode: requests made, less those
+    /// that ended in a wait that doesn't count against the ordinary limits.
+    fn ordinary_attempts(&self) -> u32 {
+        self.llm_interaction_attempts
+            .saturating_sub(self.indefinite_interactions)
+            .max(1)
+    }
+
+    /// Stops the ordinary elapsed-recovery clock (and its deadline) while an
+    /// indefinite wait lasts; see [`resume_ordinary_recovery_clock`](Self::resume_ordinary_recovery_clock).
+    fn pause_ordinary_recovery_clock(&mut self) {
+        if let Some(started) = self.recovery_started.take() {
+            self.paused_recovery_elapsed = Some(
+                self.paused_recovery_elapsed
+                    .unwrap_or_default()
+                    .saturating_add(started.elapsed()),
+            );
+        }
+    }
+
+    /// Restarts a paused ordinary recovery clock with the time it had
+    /// already used.
+    fn resume_ordinary_recovery_clock(&mut self) {
+        if self.recovery_started.is_none()
+            && let Some(used) = self.paused_recovery_elapsed.take()
+        {
+            let now = tokio::time::Instant::now();
+            self.recovery_started = Some(now.checked_sub(used).unwrap_or(now));
+        }
     }
 
     fn recovery_deadline(&self) -> Option<tokio::time::Instant> {
@@ -1343,6 +1388,7 @@ impl AgentLoop {
             self.flush_context_injections()?;
 
             self.refresh_file_tree_context();
+            self.ensure_user_turn_before_request()?;
             self.observe_committed_tool_context();
 
             let llm_client = Arc::clone(&self.llm_client);
@@ -1391,7 +1437,7 @@ impl AgentLoop {
             let mut had_stream_error = false;
             let mut final_generation_response: Option<ai::GenerationResponse> = None;
             let mut current_assistant_response_text_for_conv = String::new();
-            let mut native_stream_call_ids: HashMap<usize, Uuid> = HashMap::new();
+            let mut native_stream_call_ids: HashMap<usize, (Uuid, String)> = HashMap::new();
             let mut streamed_refusal: Option<ai::Refusal> = None;
 
             let stream_recovery_deadline = self.recovery_deadline();
@@ -1402,6 +1448,7 @@ impl AgentLoop {
                         if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
                             self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
                         }
+                        self.reject_announced_calls(&mut native_stream_call_ids, INTERRUPTED_CALL).await?;
                         self.finish_llm_recovery("Elapsed model recovery budget exhausted during stream.".into(), None).await?;
                         had_stream_error = true;
                         break;
@@ -1412,6 +1459,7 @@ impl AgentLoop {
                                 if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
                                     self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
                                 }
+                                self.reject_announced_calls(&mut native_stream_call_ids, INTERRUPTED_CALL).await?;
                                 self.task.set_state(TaskState::Failed { reason: "Task cancelled by user.".to_string() });
                                 self.emit_event(AgentEvent::TaskStateChanged(self.task.current_state.clone())).await?;
                                 had_stream_error = true;
@@ -1421,6 +1469,7 @@ impl AgentLoop {
                                 if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
                                     self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
                                 }
+                                self.reject_announced_calls(&mut native_stream_call_ids, INTERRUPTED_CALL).await?;
                                 self.stop_requested = true;
                                 had_stream_error = true;
                                 break;
@@ -1463,7 +1512,7 @@ impl AgentLoop {
                                 if self.is_native_mode() {
                                     self.flush_throttled_text().await?;
                                     let uuid = Uuid::new_v4();
-                                    native_stream_call_ids.insert(index, uuid);
+                                    native_stream_call_ids.insert(index, (uuid, name.clone()));
                                     self.emit_event(AgentEvent::ToolCallInitiated {
                                         tool_call_id: uuid,
                                         tool_name: name,
@@ -1514,6 +1563,8 @@ impl AgentLoop {
                                     had_stream_error = true;
                                     break;
                                 }
+                                // Without a final response no announced call runs.
+                                self.reject_announced_calls(&mut native_stream_call_ids, FAILED_STREAM_CALL).await?;
                                 if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
                                     self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
                                 }
@@ -1532,9 +1583,10 @@ impl AgentLoop {
                                 break;
                             }
                             Err(e) => {
-                                if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
-                                    self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
+                                if final_generation_response.is_none() {
+                                    self.keep_partial_output(&current_assistant_response_text_for_conv, &e);
                                 }
+                                self.reject_announced_calls(&mut native_stream_call_ids, FAILED_STREAM_CALL).await?;
                                 self.handle_llm_error(e, None).await?;
                                 had_stream_error = true;
                                 break;
@@ -1590,7 +1642,7 @@ impl AgentLoop {
                 for (call_index, ai_tool_call) in tool_calls.iter().enumerate() {
                     let tool_call_id = native_stream_call_ids
                         .remove(&call_index)
-                        .unwrap_or_else(Uuid::new_v4);
+                        .map_or_else(Uuid::new_v4, |(id, _)| id);
                     let params_map = Self::tool_call_args_to_map(ai_tool_call);
 
                     self.emit_event(AgentEvent::ToolCallFormatted {
@@ -2267,6 +2319,27 @@ impl AgentLoop {
         Ok(self.task)
     }
 
+    /// Reports calls a stream announced (`ToolCallInitiated`) that will not
+    /// run because the turn ended without them, so every announced call gets
+    /// an outcome.
+    async fn reject_announced_calls(
+        &self,
+        announced: &mut HashMap<usize, (Uuid, String)>,
+        reason: &str,
+    ) -> Result<(), ArkoAgentsError> {
+        let mut calls: Vec<_> = announced.drain().collect();
+        calls.sort_by_key(|(index, _)| *index);
+        for (_, (tool_call_id, tool_name)) in calls {
+            self.emit_event(AgentEvent::ToolRejected {
+                tool_call_id,
+                tool_name,
+                reason: Some(reason.to_string()),
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn emit_event(&self, event: AgentEvent) -> Result<(), ArkoAgentsError> {
         if self.event_sender.send(event.clone()).await.is_err() {
             let err_msg = format!("Failed to send AgentEvent: {:?}", event);
@@ -2692,6 +2765,55 @@ impl AgentLoop {
             .await
     }
 
+    /// The opt-in indefinite capacity wait `error` gets, if any.
+    fn capacity_wait(&self, error: &ai::Error) -> Option<crate::agent_config::LLMCapacityRetryConfig> {
+        let retrying = matches!(
+            self.task.agent_config.llm_error_policy,
+            LLMErrorPolicy::RetryThenInformAgent { .. }
+                | LLMErrorPolicy::RetryThenPauseAndAwaitApproval { .. }
+        );
+        self.task
+            .agent_config
+            .llm_retry_config
+            .capacity_retry
+            .clone()
+            .filter(|_| retrying && error.is_capacity_error())
+    }
+
+    /// Whether recovering from `error` resends the same request without
+    /// adding to the conversation. Output a failed stream delivered is then
+    /// dropped: kept, it would end the retried request on an assistant turn
+    /// (a prefill, which Claude 4.6 and later reject).
+    fn retries_unchanged(&self, error: &ai::Error) -> bool {
+        self.capacity_wait(error).is_some()
+    }
+
+    /// Records the output a failed stream delivered before it failed with
+    /// `error`, unless the retry resends the request unchanged; see
+    /// [`retries_unchanged`](Self::retries_unchanged).
+    fn keep_partial_output(&mut self, text: &str, error: &ai::Error) {
+        if !text.is_empty() && !self.retries_unchanged(error) {
+            self.task.conversation.add_assistant_message(text);
+        }
+    }
+
+    /// Before a model request: a conversation that ends on an assistant
+    /// turn (output kept from an interrupted stream, or a kept refusal, in a
+    /// task resumed without a new message) gets a user message asking to
+    /// continue, since several providers reject a request that ends on an
+    /// assistant turn (Claude 4.6 and later reject prefill).
+    fn ensure_user_turn_before_request(&mut self) -> Result<(), ArkoAgentsError> {
+        let ends_on_assistant_text = self.task.conversation.messages.last().is_some_and(|message| {
+            message.role == ai::Role::Assistant && message.tool_calls.is_empty()
+        });
+        if ends_on_assistant_text {
+            self.append_error_recovery_user_message(
+                "Continue the task from where your previous response ended.",
+            )?;
+        }
+        Ok(())
+    }
+
     async fn handle_llm_error(
         &mut self,
         error: ai::Error,
@@ -2699,33 +2821,25 @@ impl AgentLoop {
     ) -> Result<(), ArkoAgentsError> {
         let mut config = self.task.agent_config.llm_retry_config.clone();
         let policy = self.task.agent_config.llm_error_policy.clone();
-        let capacity = config.capacity_retry.clone().filter(|_| {
-            error.is_capacity_error()
-                && matches!(policy, LLMErrorPolicy::RetryThenInformAgent { .. }
-                    | LLMErrorPolicy::RetryThenPauseAndAwaitApproval { .. })
-        });
+        let capacity = self.capacity_wait(&error);
         let indefinite_capacity = capacity.is_some();
         let (attempt, started) = if let Some(capacity) = capacity {
-            if self.capacity_recovery_started.is_none() {
-                self.reset_llm_recovery();
-                self.capacity_recovery_started = Some(tokio::time::Instant::now());
-            }
+            // Capacity waits neither consume nor reset ordinary recovery:
+            // its elapsed clock stops while they last, and the requests they
+            // make are not counted as its attempts.
+            self.pause_ordinary_recovery_clock();
+            self.indefinite_interactions = self.indefinite_interactions.saturating_add(1);
+            let started = *self
+                .capacity_recovery_started
+                .get_or_insert_with(tokio::time::Instant::now);
             self.capacity_retry_attempts = self.capacity_retry_attempts.saturating_add(1);
             config.initial_delay_ms = capacity.initial_delay_ms;
             config.max_delay_ms = capacity.max_delay_ms;
-            (
-                self.capacity_retry_attempts,
-                self.capacity_recovery_started.unwrap(),
-            )
+            (self.capacity_retry_attempts, started)
         } else {
-            if self.capacity_recovery_started.is_some() {
-                // A different failure begins ordinary bounded recovery; a long
-                // capacity wait must not exhaust that budget before it starts.
-                self.reset_llm_recovery();
-                self.llm_interaction_attempts = 1;
-            }
+            self.resume_ordinary_recovery_clock();
             (
-                self.llm_interaction_attempts.max(1),
+                self.ordinary_attempts(),
                 *self
                     .recovery_started
                     .get_or_insert_with(tokio::time::Instant::now),
@@ -3122,6 +3236,10 @@ mod tests {
 #[cfg(test)]
 #[path = "retry_tests.rs"]
 mod retry_tests;
+
+#[cfg(test)]
+#[path = "recovery_tests.rs"]
+mod recovery_tests;
 
 #[cfg(test)]
 #[path = "image_tests.rs"]

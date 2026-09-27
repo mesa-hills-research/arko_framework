@@ -1,7 +1,7 @@
 use super::*;
 use crate::agent_config::{AgentLLMConfig, LLMCapacityRetryConfig, LLMRetryConfig};
 
-fn harness() -> (
+pub(super) fn harness() -> (
     AgentLoop,
     mpsc::Receiver<AgentEvent>,
     mpsc::Sender<UserCommand>,
@@ -44,7 +44,7 @@ fn harness() -> (
     )
 }
 
-fn provider_failure(status: u16, delay: Option<Duration>) -> ai::Error {
+pub(super) fn provider_failure(status: u16, delay: Option<Duration>) -> ai::Error {
     ai::Error::ProviderError {
         message: "synthetic outage".into(),
         status: Some(status),
@@ -53,7 +53,7 @@ fn provider_failure(status: u16, delay: Option<Duration>) -> ai::Error {
     }
 }
 
-fn capacity_failure(delay: Option<Duration>) -> ai::Error {
+pub(super) fn capacity_failure(delay: Option<Duration>) -> ai::Error {
     ai::Error::ProviderError {
         message: "synthetic capacity outage".into(),
         status: None,
@@ -201,7 +201,9 @@ async fn capacity_wait_does_not_disable_permanent_errors_or_other_retry_limits()
             agent.task.current_state,
             TaskState::AwaitingErrorRecoveryApproval { .. }
         ));
-        assert!(agent.capacity_recovery_started.is_none());
+        // The capacity request counted toward neither ordinary limit.
+        assert_eq!(agent.indefinite_interactions, 1);
+        assert!(agent.ordinary_attempts() <= 2);
     }
     let (mut agent, _events, _commands) = harness();
     agent.task.agent_config.llm_retry_config.capacity_retry = Some(Default::default());
@@ -592,7 +594,7 @@ async fn refresh_failure_consumes_the_shared_budget_before_model_request() {
     assert_eq!(agent.llm_interaction_attempts, 2);
 }
 
-fn complete_response() -> ai::StreamEvent {
+pub(super) fn complete_response() -> ai::StreamEvent {
     let mut message = ai::Message::new_assistant("Finished after recovery.");
     message.tool_calls.push(ai::ToolCall {
         id: Some("complete-once".into()),
@@ -830,7 +832,7 @@ async fn classifier_refusals_are_not_kept_or_retried() {
 }
 
 /// Runs one scripted stream to the end under a policy that returns to the host.
-async fn run_refused_turn(
+pub(super) async fn run_refused_turn(
     mode: ToolCallingMode,
     stream: Vec<ai::StreamEvent>,
 ) -> (Task, usize, Vec<AgentEvent>) {
@@ -861,13 +863,13 @@ async fn run_refused_turn(
     (task, messages_before, received)
 }
 
-fn model_refusal() -> ai::Refusal {
+pub(super) fn model_refusal() -> ai::Refusal {
     let mut refusal = ai::Refusal::new(ai::RefusalSource::Model);
     refusal.explanation = Some("I can't help with that.".into());
     refusal
 }
 
-fn refused_response(message: ai::Message, refusal: ai::Refusal) -> ai::StreamEvent {
+pub(super) fn refused_response(message: ai::Message, refusal: ai::Refusal) -> ai::StreamEvent {
     ai::StreamEvent::End(Box::new(ai::GenerationResponse {
         message,
         usage: ai::UsageInfo::new(0, 0),
