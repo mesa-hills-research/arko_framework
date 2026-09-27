@@ -346,9 +346,37 @@ the model calls. See [budget and cost accounting](INDEX.md#budget-and-cost-accou
 Agents send messages with the injected `send_message` tool. A message stays queued
 until a run of the recipient that received it completes successfully. A recipient
 that is already running receives the message at its next turn boundary.
-Recipients are validated against the workflow's agent names, and messages carry
-stable IDs, sender task IDs, typed attachments, and timestamps, all of which
-survive checkpoints.
+Messages carry stable IDs, sender task IDs, typed attachments, and timestamps, all
+of which survive checkpoints.
+
+A `MessagingPolicy` sets whom each agent may message. By default every agent may
+message every other registered agent. An agent is offered `send_message` only when
+it has at least one permitted recipient, so a single-agent workflow has no such
+tool. The tool lists exactly that agent's recipients, and a message to anyone else
+is rejected. Restrict an agent with `can_message`, or turn messaging off with
+`disable_messaging`:
+
+```rust
+use arko_workflows::messaging::MessagingPolicy;
+
+let workflow = Workflow::builder()
+    // ...
+    .agent("lead", lead_config)
+    .agent("worker_a", worker_config.clone())
+    .agent("worker_b", worker_config)
+    // Workers report to the lead; the lead may message both workers.
+    .messaging(
+        MessagingPolicy::all()
+            .can_message("worker_a", ["lead"])
+            .can_message("worker_b", ["lead"]),
+    )
+    .build()?;
+```
+
+Names in the policy are registration names; an unknown one fails the build. The
+policy applies to every run of an agent, including runs started through workflow
+services. With messaging disabled, or for agents that are not offered it, the name
+`send_message` is free for a tool of your own.
 
 The optional `attachments_json` parameter is a JSON array of typed references.
 They are described to the recipient; files, memory, and transcripts are not loaded

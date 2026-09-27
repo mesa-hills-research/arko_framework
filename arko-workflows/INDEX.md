@@ -43,7 +43,7 @@ Root re-exports: `Workflow`, `WorkflowBuilder`, `AgentHandle`, `WorkflowError`, 
 | `freshness` | `ActorId`, `ContextFreshnessConfig`, `FreshnessConflict`, `ResourceId`, `ResourceTracker`, `ToolResourceEffect` |
 | `hooks` | `HookCallback`, `HookPoint`, `HookResult` |
 | `memory` | `AccessScope`, `MemoryConfig`, `MemoryEntry`, `MemoryTier`, `WriteMode` |
-| `messaging` | `AgentMessage`, `MessageAttachment` |
+| `messaging` | `AgentMessage`, `MessageAttachment`, `MessagingPolicy` |
 | `persistence` | `PersistenceConfig` |
 | `services` | `WorkflowServices`, `WorkflowServicesConfig` |
 | `user_input` | `UserInputHandler`, `UserInputRequest` |
@@ -100,6 +100,8 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 | `completion_verifier(self, config: CompletionVerifierConfig) -> Self` | Append a gate on matching agents' `complete_task` calls. See [Completion verification](#completion-verification). |
 | `distiller(self, config: DistillationConfig) -> Self` | Append an LLM distiller; distillers run after all custom interceptors. See [Tool-result distillation](#tool-result-distillation). |
 | `workflow_services(self, config: WorkflowServicesConfig) -> Self` | Enable bounded agent-to-agent delegation through the `run_workflow_agent` tool. |
+| `messaging(self, policy: MessagingPolicy) -> Self` | Set whom each agent may message with `send_message`. Default `MessagingPolicy::all()`: every agent may message every other agent. See [Messaging policy](#messaging-policy). |
+| `disable_messaging(self) -> Self` | Offer no agent `send_message`. |
 | `user_input_handler(self, handler: Arc<dyn UserInputHandler>) -> Self` | Answer agents' `ask_user` questions asynchronously. Without a handler, the run suspends and returns `UserInputRequired`. |
 | `enable_voting(self) -> Self` | Create an in-memory ballot store and give every agent the `cast_vote` tool. |
 | `cancel_grace_period(self, grace_period: std::time::Duration) -> Self` | How long a stopped run waits for each running agent to stop before aborting it. Default `workflow::cancel::DEFAULT_CANCEL_GRACE_PERIOD`, 30 seconds. See [Stopping a run](#stopping-a-run). |
@@ -113,15 +115,15 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 - a host that matches none of a nonempty `metadata.supported_platforms` list;
 - duplicate agent names;
 - a negative or non-finite workflow budget, warning threshold, or agent budget;
-- an unknown agent name in `agent_tool`, `agent_tool_result_interceptor`, `agent_budget`, a completion verifier's verifier or targets, or a distiller's targets (`distiller '<name>' targets unknown agent '<target>'`);
+- an unknown agent name in `agent_tool`, `agent_tool_result_interceptor`, `agent_budget`, a completion verifier's verifier or targets, a distiller's targets (`distiller '<name>' targets unknown agent '<target>'`), or the messaging policy (`messaging policy references unknown agent '<name>'`);
 - a distiller whose `max_output_tokens` is zero or whose `reasoning` configuration is for a different provider than its model;
 - `resume_from` without `persistence`, a checkpoint for a different workflow name, or a checkpoint run ID that differs from the persistence directory's.
 
 Checkpoint read and parse failures return `Io` or `Json`. A warning threshold may exceed the budget limit. Metadata dependencies are descriptive: the builder neither installs nor checks executables.
 
-Tool names: duplicate global tool names, duplicate names within one agent's tools, and a name shared by a global and an agent-local tool are rejected. Global tools cannot use the reserved names `complete_task`, `ask_user`, `read_memory`, `write_memory`, `list_memories`, `send_message`, `run_workflow_agent`, or `cast_vote`. Agent-local tools are not checked against reserved names: an agent-local tool with a reserved name replaces that workflow or built-in tool for its agent, except `complete_task`, which `arko_agents` never lets a non-built-in tool replace. Custom tools are registered after the workflow tools, so a custom tool named like an `arko_agents` built-in (for example `read_file`) replaces it for the agents that receive it.
+Tool names: duplicate global tool names, duplicate names within one agent's tools, and a name shared by a global and an agent-local tool are rejected. Global tools cannot use the reserved names `complete_task`, `ask_user`, `read_memory`, `write_memory`, `list_memories`, `run_workflow_agent`, or `cast_vote`, nor `send_message` while any agent is offered the workflow's `send_message`; an agent-local tool named `send_message` is rejected for an agent that is offered it. Agent-local tools are not checked against reserved names: an agent-local tool with a reserved name replaces that workflow or built-in tool for its agent, except `complete_task`, which `arko_agents` never lets a non-built-in tool replace. Custom tools are registered after the workflow tools, so a custom tool named like an `arko_agents` built-in (for example `read_file`) replaces it for the agents that receive it.
 
-Tools added automatically: `send_message` for every agent; `read_memory`, `write_memory`, and `list_memories` when at least one memory tier exists; `run_workflow_agent` for permitted callers when services are enabled; `cast_vote` when voting is enabled. When more than one agent is registered, each prompt is extended with the agent roster, sorted by name, with role descriptions. Pending messages for the agent are appended to its prompt. Skills configured on an agent are initialized against the workspace. There is no separate graph or scheduler configuration.
+Tools added automatically: `send_message` for each agent with at least one recipient under the messaging policy; `read_memory`, `write_memory`, and `list_memories` when at least one memory tier exists; `run_workflow_agent` for permitted callers when services are enabled; `cast_vote` when voting is enabled. When more than one agent is registered, each prompt is extended with the agent roster, sorted by name, with role descriptions. Pending messages for the agent are appended to its prompt. Skills configured on an agent are initialized against the workspace. There is no separate graph or scheduler configuration.
 
 Interceptors run in this order: global interceptors, the agent's own interceptors, then the distillers that target the agent, each group in registration order. Each stage receives the previous stage's result. An interceptor that still fails after the retries allowed by the failure policy is skipped, and the chain continues with the result so far. Every agent's tool calls pass through the workflow's execution middleware, which enforces a stopped run and runs tool hooks, freshness checks, and completion verification at tool execution, so these also apply to automatically approved and batched calls.
 
@@ -466,6 +468,7 @@ Source: [context/mod.rs](src/context/mod.rs). `context::SharedContext`, returned
 | `durable_store` | `Option<Arc<durable::DurableStore>>` | Present when persistence is configured. |
 | `memory` | `memory::MemoryStore` | Shared tier store. |
 | `messages` | `messaging::MessageBus` | Queued and live messaging. |
+| `messaging` | `Option<messaging::MessagingPolicy>` | Whom each agent may message with `send_message`; `None` when messaging is disabled. `fn message_recipients(&self, agent_name: &str) -> Vec<String>` returns an agent's permitted recipients, sorted (empty when disabled). |
 | `resource_tracker` | `Option<freshness::ResourceTracker>` | Context freshness tracker. |
 | `hooks` | `Arc<hooks::HookRegistry>` | Registered callbacks. |
 | `agent_configs` | `HashMap<String, AgentConfig>` | Agent configurations keyed by registration name. |
@@ -619,6 +622,30 @@ Methods on `MessageBus`. `Default` is an empty roster with no queues or active r
 
 Queueing, channel acceptance, context confirmation, and acknowledgment are separate steps. Messages reach disk only in a checkpoint; returning from `send` or `inject_task` is not a disk commit. A message can be delivered again after interrupted work, so consumers that need deduplication should use its stable ID. `MessageBus::send` fires no hooks; the `send_message` tool does.
 
+### Messaging policy
+
+`MessagingPolicy` sets whom each agent may message with the `send_message` tool. It implements `Debug`, `Clone`, and `Default`.
+
+| Item | Behavior |
+| --- | --- |
+| `recipients: HashMap<String, HashSet<String>>` | For each agent listed, the only agents it may message (none when the set is empty). An agent without an entry may message every other registered agent. |
+| `fn all() -> Self` | No restrictions; the same as `default()` and the builder's default. |
+| `fn can_message<I, S>(self, agent: impl Into<String>, recipients: I) -> Self` (`I: IntoIterator<Item = S>`, `S: Into<String>`) | Restrict `agent` to `recipients`; an empty list means no one. Replaces an earlier setting for the agent. |
+| `fn cannot_message(self, agent: impl Into<String>) -> Self` | `agent` may message no one. |
+| `fn recipients_of(&self, sender: &str, roster: &[String]) -> Vec<String>` | The roster agents `sender` may message, in roster order, never `sender` itself. |
+
+An agent is offered `send_message` only when it has at least one permitted recipient: a single-agent workflow, an agent restricted to no one, and every agent of a workflow built with `disable_messaging` get none. Names are registration names, and `build` rejects a policy naming an unregistered agent. The policy is read whenever an agent run starts, so it applies to runs started through workflow services and to resumed runs alike. Message queues restored from a checkpoint are delivered whatever the policy; it governs only new `send_message` calls, not `MessageBus::send`.
+
+```rust
+use arko_workflows::messaging::MessagingPolicy;
+
+// `worker_a` may message only `lead`; `auditor` may message no one; every
+// other agent may message every other agent.
+let policy = MessagingPolicy::all()
+    .can_message("worker_a", ["lead"])
+    .cannot_message("auditor");
+```
+
 ### Send-message tool
 
 `messaging::tools::SEND_MESSAGE_TOOL_NAME: &str = "send_message"`. `SendMessageTool` implements `Debug` and `arko_agents::tool::Tool`:
@@ -633,7 +660,7 @@ async fn execute(
 ) -> Result<String, arko_agents::tool::ToolError>;
 ```
 
-Parameters: required `to: string` and `content: string`; optional `attachments_json: string`, a JSON array in the attachment format above (default: no attachments). The tool description lists the valid recipients. Invalid attachment JSON is a `ParameterValidation` error; a non-string `attachments_json` is ignored. An unknown recipient is an `ExecutionFailed` error. On success the tool records the current task as the sender's task, fires `OnAgentMessage`, and returns `Message {id} sent to agent '{to}'.` Not batch-safe. A hook's `Abort` is returned as an `ExecutionFailed` error even though the message has already been queued, and it stops the run.
+Parameters: required `to: string` and `content: string`; optional `attachments_json: string`, a JSON array in the attachment format above (default: no attachments). The tool description lists the agent's permitted recipients, never the agent itself. Invalid attachment JSON is a `ParameterValidation` error; a non-string `attachments_json` is ignored. A `to` that is not a permitted recipient, including the agent itself and unknown names, is a `ParameterValidation` error listing the valid recipients, and nothing is queued. On success the tool records the current task as the sender's task, fires `OnAgentMessage`, and returns `Message {id} sent to agent '{to}'.` Not batch-safe. A hook's `Abort` is returned as an `ExecutionFailed` error even though the message has already been queued, and it stops the run.
 
 ## Context freshness
 
