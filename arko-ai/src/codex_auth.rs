@@ -13,6 +13,7 @@ use crate::{
     providers::openai::{ChatGptOAuthCredentials, OpenAIAuth},
 };
 use serde_json::Value;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -31,11 +32,21 @@ pub enum CodexAuthSync {
 /// A Codex CLI `auth.json`. Both layouts are accepted: tokens nested under
 /// `"tokens"` (what Codex writes) and top-level `access_token` /
 /// `refresh_token` / `account_id` fields.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CodexAuthFile {
     path: PathBuf,
     /// The file's bytes as last read or written by this value.
     snapshot: Vec<u8>,
+}
+
+// The snapshot holds tokens and possibly an API key: show only the path.
+impl std::fmt::Debug for CodexAuthFile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CodexAuthFile")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
 }
 
 impl CodexAuthFile {
@@ -92,23 +103,28 @@ impl CodexAuthFile {
     ///
     /// Fails without writing when the file changed since it was loaded or last
     /// written and now holds different credentials; newer credentials written by
-    /// another process are never overwritten.
+    /// another process are never overwritten. A change that leaves the
+    /// credentials as loaded (formatting or other fields) is not a rotation:
+    /// `credentials` are then written onto the file's current contents.
     pub fn persist(
         &mut self,
         credentials: &ChatGptOAuthCredentials,
     ) -> Result<CodexAuthSync, Error> {
         let current = std::fs::read(&self.path)?;
         if current != self.snapshot {
-            if parse_credentials(&current, &self.path)? == *credentials {
+            let in_file = parse_credentials(&current, &self.path)?;
+            if in_file == *credentials {
                 self.snapshot = current;
                 return Ok(CodexAuthSync::Unchanged);
             }
-            return Err(Error::AuthenticationFailed(format!(
-                "{} changed since it was loaded; refusing to overwrite newer credentials",
-                self.path.display()
-            )));
-        }
-        if self.credentials()? == *credentials {
+            if in_file != self.credentials()? {
+                return Err(Error::AuthenticationFailed(format!(
+                    "{} changed since it was loaded; refusing to overwrite newer credentials",
+                    self.path.display()
+                )));
+            }
+            self.snapshot = current;
+        } else if self.credentials()? == *credentials {
             return Ok(CodexAuthSync::Unchanged);
         }
 
@@ -138,12 +154,22 @@ impl CodexAuthFile {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_nanos());
         let temporary = with_suffix(&target, &format!(".tmp-{}-{nanos}", std::process::id()));
-        write_file(&temporary, &bytes, &permissions)?;
+        // The contents are synced before the rename, so the new name never
+        // refers to a partly written file.
+        write_temporary(&temporary, &permissions, |file| file.write_all(&bytes))?;
         if let Err(error) = std::fs::rename(&temporary, &target) {
             let _ = std::fs::remove_file(&temporary);
             return Err(error.into());
         }
         self.snapshot = bytes;
+        // The file is replaced; make the rename itself durable. A failure here
+        // is only logged: the new contents are already in place.
+        if let Err(error) = sync_parent_directory(&target) {
+            log::warn!(
+                "arko_ai: could not sync the directory of {}: {error}",
+                target.display()
+            );
+        }
         Ok(CodexAuthSync::Saved)
     }
 
@@ -163,17 +189,21 @@ impl CodexAuthFile {
                 self.snapshot = current;
                 return Ok(CodexAuthSync::Unchanged);
             }
-            if in_client == known {
-                client
-                    .update_openai_auth(OpenAIAuth::ChatGptOAuth(in_file))
-                    .await?;
-                self.snapshot = current;
-                return Ok(CodexAuthSync::Reloaded);
+            if in_file != known {
+                if in_client == known {
+                    client
+                        .update_openai_auth(OpenAIAuth::ChatGptOAuth(in_file))
+                        .await?;
+                    self.snapshot = current;
+                    return Ok(CodexAuthSync::Reloaded);
+                }
+                return Err(Error::AuthenticationFailed(format!(
+                    "Both {} and this client rotated ChatGPT OAuth credentials; sign in again",
+                    self.path.display()
+                )));
             }
-            return Err(Error::AuthenticationFailed(format!(
-                "Both {} and this client rotated ChatGPT OAuth credentials; sign in again",
-                self.path.display()
-            )));
+            // Only formatting or other fields changed: not a rotation.
+            self.snapshot = current;
         }
         if in_client == known {
             return Ok(CodexAuthSync::Unchanged);
@@ -212,12 +242,48 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 }
 
 fn write_file(path: &Path, bytes: &[u8], permissions: &std::fs::Permissions) -> Result<(), Error> {
-    use std::io::Write;
     let mut file = std::fs::File::create(path)?;
+    fill_file(&mut file, permissions, |file| file.write_all(bytes))?;
+    Ok(())
+}
+
+/// Creates `path` and writes it with `write`, removing it again when anything
+/// fails after it was created.
+fn write_temporary(
+    path: &Path,
+    permissions: &std::fs::Permissions,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<(), Error> {
+    let mut file = std::fs::File::create(path)?;
+    let result = fill_file(&mut file, permissions, write);
+    if result.is_err() {
+        // Close first: Windows cannot remove an open file.
+        drop(file);
+        let _ = std::fs::remove_file(path);
+    }
+    result.map_err(Error::from)
+}
+
+fn fill_file(
+    file: &mut std::fs::File,
+    permissions: &std::fs::Permissions,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     // Credentials: match the original file's permissions before writing.
     file.set_permissions(permissions.clone())?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
+    write(file)?;
+    file.sync_all()
+}
+
+/// Syncs the directory containing `path`, so a rename into it survives a
+/// crash. Windows cannot open a directory as a file; there this does nothing.
+fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -358,6 +424,82 @@ mod tests {
             Err(Error::AuthenticationFailed(_))
         ));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), external);
+    }
+
+    /// `NESTED` rewritten by another program: same credentials, different
+    /// formatting and an extra field.
+    fn reformatted() -> String {
+        let mut value: Value = serde_json::from_str(NESTED).unwrap();
+        value["written_by"] = Value::String("another program".into());
+        serde_json::to_string(&value).unwrap()
+    }
+
+    #[test]
+    fn persist_writes_onto_a_file_changed_without_a_rotation() {
+        let (_dir, path) = temp_file(NESTED);
+        let mut file = CodexAuthFile::load(&path).unwrap();
+        let external = reformatted();
+        std::fs::write(&path, &external).unwrap();
+
+        assert_eq!(file.persist(&rotated()).unwrap(), CodexAuthSync::Saved);
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["tokens"]["access_token"], "access-2");
+        assert_eq!(saved["tokens"]["refresh_token"], "refresh-2");
+        // Merged onto the current contents, not the loaded ones.
+        assert_eq!(saved["written_by"], "another program");
+        let backup = std::fs::read_to_string(with_suffix(&path, ".bak")).unwrap();
+        assert_eq!(backup, external);
+        assert_eq!(file.persist(&rotated()).unwrap(), CodexAuthSync::Unchanged);
+    }
+
+    #[tokio::test]
+    async fn sync_saves_a_client_rotation_onto_a_file_changed_without_a_rotation() {
+        let (_dir, path) = temp_file(NESTED);
+        let mut file = CodexAuthFile::load(&path).unwrap();
+        let client = file.client().unwrap();
+        std::fs::write(&path, reformatted()).unwrap();
+        // Nothing rotated: the file is left as it is.
+        assert_eq!(file.sync(&client).await.unwrap(), CodexAuthSync::Unchanged);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), reformatted());
+
+        std::fs::write(&path, NESTED).unwrap();
+        client
+            .update_openai_auth(OpenAIAuth::ChatGptOAuth(rotated()))
+            .await
+            .unwrap();
+        assert_eq!(file.sync(&client).await.unwrap(), CodexAuthSync::Saved);
+        assert_eq!(
+            CodexAuthFile::load(&path).unwrap().credentials().unwrap(),
+            rotated()
+        );
+    }
+
+    #[test]
+    fn a_failed_temporary_write_leaves_no_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json.tmp-test");
+        let permissions = std::fs::metadata(dir.path()).unwrap().permissions();
+        let result = write_temporary(&path, &permissions, |file| {
+            file.write_all(b"{\"tokens\":")?;
+            Err(std::io::Error::other("disk full"))
+        });
+        assert!(matches!(result, Err(Error::IoError(_))));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn debug_output_shows_the_path_but_no_file_contents() {
+        let contents = NESTED.replace(
+            r#""OPENAI_API_KEY": null"#,
+            r#""OPENAI_API_KEY": "sk-synthetic""#,
+        );
+        let (_dir, path) = temp_file(&contents);
+        let file = CodexAuthFile::load(&path).unwrap();
+        let debug = format!("{file:?}");
+        assert!(debug.contains("auth.json"), "{debug}");
+        for secret in ["access-1", "refresh-1", "id-1", "sk-synthetic"] {
+            assert!(!debug.contains(secret), "{debug}");
+        }
     }
 
     #[tokio::test]

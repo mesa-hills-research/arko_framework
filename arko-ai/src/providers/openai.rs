@@ -37,11 +37,30 @@ const CHATGPT_OAUTH_DEFAULT_TOKEN_URL: &str = "https://auth.openai.com/oauth/tok
 const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatGptOAuthCredentials {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub account_id: String,
+}
+
+/// Stands in for a secret in `Debug` output.
+const REDACTED: &str = "<redacted>";
+
+fn redacted(secret: Option<&str>) -> Option<&'static str> {
+    secret.map(|_| REDACTED)
+}
+
+// Tokens never appear in `Debug` output (logs, panics, error reports).
+impl std::fmt::Debug for ChatGptOAuthCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChatGptOAuthCredentials")
+            .field("access_token", &REDACTED)
+            .field("refresh_token", &redacted(self.refresh_token.as_deref()))
+            .field("account_id", &self.account_id)
+            .finish()
+    }
 }
 
 #[derive(Clone)]
@@ -56,11 +75,22 @@ impl OpenAIAuth {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthRefreshResult {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub id_token: Option<String>,
+}
+
+impl std::fmt::Debug for OAuthRefreshResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OAuthRefreshResult")
+            .field("access_token", &REDACTED)
+            .field("refresh_token", &redacted(self.refresh_token.as_deref()))
+            .field("id_token", &redacted(self.id_token.as_deref()))
+            .finish()
+    }
 }
 
 struct StreamingToolCall {

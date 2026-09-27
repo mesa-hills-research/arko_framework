@@ -281,3 +281,29 @@ async fn oauth_recovery_concurrent_rejections_rotate_once_and_share_the_new_cred
     .await
     .unwrap();
 }
+
+#[test]
+fn credential_debug_output_redacts_tokens() {
+    let credentials = ChatGptOAuthCredentials {
+        access_token: "synthetic-access".into(),
+        refresh_token: Some("synthetic-refresh".into()),
+        account_id: "synthetic-account".into(),
+    };
+    let debug = format!("{credentials:?}");
+    assert!(debug.contains("synthetic-account"), "{debug}");
+    assert!(debug.contains("<redacted>"), "{debug}");
+    let refreshed = OAuthRefreshResult {
+        access_token: "synthetic-access".into(),
+        refresh_token: Some("synthetic-refresh".into()),
+        id_token: Some("synthetic-id".into()),
+    };
+    let all = format!("{debug} {refreshed:?} {refreshed:#?}");
+    for secret in ["synthetic-access", "synthetic-refresh", "synthetic-id"] {
+        assert!(!all.contains(secret), "{all}");
+    }
+    let without_refresh = ChatGptOAuthCredentials {
+        refresh_token: None,
+        ..credentials
+    };
+    assert!(format!("{without_refresh:?}").contains("refresh_token: None"));
+}
