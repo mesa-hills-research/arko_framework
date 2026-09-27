@@ -116,7 +116,9 @@ impl PyWorkflowBuilder {
     fn build(&self) -> PyResult<PyWorkflow> {
         let mut builder = crate::Workflow::builder();
         if let Some(seconds) = self.cancel_grace_period {
-            builder = builder.cancel_grace_period(std::time::Duration::from_secs_f64(seconds));
+            let grace_period = std::time::Duration::try_from_secs_f64(seconds)
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+            builder = builder.cancel_grace_period(grace_period);
         }
 
         if let Some(ref name) = self.name {

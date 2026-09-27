@@ -10,7 +10,7 @@ use arko_agents::{
     ToolError, ToolExecutionContext, ToolExecutionDecision, ToolExecutionMiddleware,
     ToolExecutionOutcome, ToolRegistry, ToolResultInterceptor,
     runtime::{command::UserCommand, event::AgentEvent},
-    task::TaskState,
+    task::{CANCELLED_BY_USER, TaskState},
     tool::TaskContext,
 };
 use arko_ai::LLMClient;
@@ -518,7 +518,11 @@ pub(crate) async fn drive_to_result(
         .as_ref()
         .is_err_and(|error| !matches!(error, WorkflowError::UserInputRequired { .. }));
     let wound_down = if stopping {
-        let deadline = tokio::time::Instant::now() + ctx.run_control.grace_period();
+        let now = tokio::time::Instant::now();
+        // A grace period too long to represent waits as long as possible.
+        let deadline = now
+            .checked_add(ctx.run_control.grace_period())
+            .unwrap_or_else(|| now + std::time::Duration::from_secs(30 * 365 * 86_400));
         let _ = tokio::time::timeout_at(deadline, cmd_tx.send(UserCommand::CancelTask)).await;
         wind_down(
             &agent_name,
@@ -539,14 +543,11 @@ pub(crate) async fn drive_to_result(
         Some(Ok(Err(error))) => Err(WorkflowError::Agent(error)),
         Some(Err(error)) => Err(WorkflowError::Channel(format!("Agent join error: {error}"))),
         None => {
-            let cause = ctx.run_control.cancellation().map_or_else(
-                || "Stopped by the workflow.".to_string(),
-                |cancellation| cancellation.cause.agent_reason(),
-            );
             let mut task = started_task;
             task.set_state(TaskState::Cancelled {
                 reason: format!(
-                    "{cause} The agent did not stop within {:?} and was aborted.",
+                    "{} The agent did not stop within {:?} and was aborted.",
+                    stop_reason(ctx, &drive_result),
                     ctx.run_control.grace_period()
                 ),
             });
@@ -555,7 +556,16 @@ pub(crate) async fn drive_to_result(
     };
 
     let result = match final_task {
-        Ok(task) => {
+        Ok(mut task) => {
+            // The runtime records its generic reason for a CancelTask; the
+            // workflow knows why it sent it.
+            if stopping
+                && matches!(&task.current_state, TaskState::Cancelled { reason } if reason == CANCELLED_BY_USER)
+            {
+                task.set_state(TaskState::Cancelled {
+                    reason: stop_reason(ctx, &drive_result),
+                });
+            }
             let completed = matches!(task.current_state, TaskState::Completed { .. });
             let finalized = finalize_agent_task(agent_name.clone(), task, ctx, persistence).await;
             if completed {
@@ -600,6 +610,16 @@ pub(crate) async fn drive_to_result(
                     .unwrap_or_else(|| "Agent failed".to_string()),
             ),
         )),
+    }
+}
+
+/// Why the workflow stopped an agent: the run's stop, or the error the
+/// driver stopped it for (an exceeded budget, an interruption, a hook).
+fn stop_reason(ctx: &SharedContext, drive_result: &Result<(), WorkflowError>) -> String {
+    match (ctx.run_control.cancellation(), drive_result) {
+        (Some(cancellation), _) => cancellation.cause.agent_reason(),
+        (None, Err(error)) => format!("Stopped by the workflow: {error}"),
+        (None, Ok(())) => "Stopped by the workflow.".to_string(),
     }
 }
 

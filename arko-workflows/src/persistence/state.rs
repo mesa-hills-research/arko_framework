@@ -94,8 +94,9 @@ mod tests {
         assert!(restored.freshness_snapshot.is_some());
     }
 
-    /// A checkpoint from an early version, with fields since removed (the
-    /// OAuth exemption set, MESI file tracking settings), still loads.
+    /// A checkpoint from an early version still loads, with fields this
+    /// version doesn't know: the removed OAuth exemption set, and settings
+    /// of the removed MESI layer an application may have stored alongside.
     #[test]
     fn an_early_checkpoint_with_removed_fields_still_loads() {
         let checkpoint = serde_json::json!({

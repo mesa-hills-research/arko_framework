@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use arko_agents::task::{CANCELLED_BY_USER, TaskState};
+use arko_agents::task::TaskState;
 use arko_agents::{ToolCallContext, ToolExecutionContext, ToolExecutionDecision};
 use serde_json::json;
 
@@ -113,10 +113,11 @@ async fn cancelling_a_sequential_run_stops_its_agent_and_every_later_call() {
     assert_eq!(result.agent_results.len(), 1);
     let agent = &result.agent_results[0];
     assert_eq!(agent.status, AgentRunStatus::Cancelled);
+    // The runtime's generic reason is replaced by the workflow's.
     assert_eq!(
         agent.task.current_state,
         TaskState::Cancelled {
-            reason: CANCELLED_BY_USER.to_string()
+            reason: "Workflow cancelled.".to_string()
         }
     );
     assert_eq!(result.cancellation.unwrap().cause, CancelCause::Requested);
@@ -160,11 +161,17 @@ async fn cancelling_a_sequential_run_stops_its_agent_and_every_later_call() {
     assert_eq!(hooks.get(HookPoint::OnWorkflowCancelled), 1);
 }
 
+/// A grace period too long to represent still stops agents that stop.
 #[tokio::test]
 async fn cancelling_a_parallel_run_stops_every_agent() {
     let workspace = Workspace::new();
     let server = ResponsesServer::start(|_, _| None).await;
-    let workflow = Arc::new(builder(&server, &workspace).build().unwrap());
+    let workflow = Arc::new(
+        builder(&server, &workspace)
+            .cancel_grace_period(Duration::MAX)
+            .build()
+            .unwrap(),
+    );
     let run = tokio::spawn({
         let workflow = workflow.clone();
         async move {
@@ -489,9 +496,11 @@ async fn a_post_tool_hook_abort_aborts_the_run_after_the_call() {
     );
     assert_eq!(probe.calls(), 1);
     assert_eq!(server.requests(), 1, "no model call after the abort");
+    let result = &workflow.result().agent_results[0];
+    assert_eq!(result.status, AgentRunStatus::Cancelled);
     assert_eq!(
-        workflow.result().agent_results[0].status,
-        AgentRunStatus::Cancelled
+        result.error.as_deref(),
+        Some("Workflow aborted by PostToolExecution hook: unexpected output")
     );
 }
 
