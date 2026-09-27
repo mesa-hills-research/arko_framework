@@ -1,70 +1,81 @@
-# Accurate, efficient context
+# Context management
 
-Context tooling must preserve the evidence needed for a decision. Use deterministic
-changes for mutable state and structured reports; use model distillation selectively
-for bulk material. Keep authoritative inputs and expandable evidence available.
+Arko keeps an agent's context accurate and compact with four mechanisms:
+versioned memory reads, file-tree change notices, opt-in tool-result distillation,
+and background shell jobs with completion notices. State that changes during a run
+is delivered as exact, deterministic changes. Model-written summaries are reserved
+for bulk tool output, and only where a workflow opts in; the original material
+stays retrievable through tools.
 
 ## Memory reads
 
-`read_memory` returns a full, versioned snapshot on the first read in an agent
-runtime. Later reads return exact changes or an unchanged result. `full: true`
-requests a fresh snapshot. Append-only updates return the exact appended text;
-editable memory returns a line replacement including deletions. The tool returns
-a full snapshot when that is smaller than the change record.
+In an agent runtime, the `read_memory` tool from
+[arko-workflows](../arko-workflows/README.md) returns a full, versioned snapshot on
+the first read of a tier. Later reads return the exact change since the last
+snapshot the agent received, or an unchanged record. `full: true` requests a fresh
+snapshot. When the new text extends the previous text, as appends do, the change
+is the exact appended text; otherwise it is a single line replacement, which can
+include deletions. When a full snapshot would be no larger than the change, the
+tool returns the snapshot instead.
 
-Responses are JSON records with `tier`, `version`, and `kind`. Full and append
-records carry `content`. A replacement carries `base_version`, `start_line`
-(zero-based), `delete_lines`, and replacement `content`. Lines retain their newline
-terminators, so applying the change reconstructs the current text byte for byte.
-Append records also identify `base_version`. An unchanged record identifies the
-current version. Versions count the tier's accepted writes.
+Responses are JSON records with `tier`, `version`, and `kind`:
 
-Baselines belong to a task and tier, and advance only after the exact result enters
-that task's conversation. Reads waiting for batch completion do not advance them.
-Restarting or resuming a runtime resets its baselines; the next read is full.
-Applications replacing/compacting a conversation should start a new runtime.
-Custom runners can use `Tool::reset_context(task_id)` and
-`Tool::observe_context(task_id, message)` for the same lifecycle. Observations
-must contain the actual message sent to the model. Without observations, reads
-conservatively return full snapshots. These synchronous callbacks only track
-delivery; they do not perform model calls.
-When `max_chars` truncates the content, it returns an explicitly partial trailing
-window and does not establish or advance a baseline. Exact memory results bypass result
-interceptors, including distillers.
+| `kind` | Meaning |
+| --- | --- |
+| `full` | `content` is the complete current text. |
+| `append` | Append `content` to the text at `base_version`. |
+| `replace` | At `base_version`, replace `delete_lines` lines starting at zero-based `start_line` with `content`. |
+| `unchanged` | The text is unchanged; adopt the returned `version`. |
+| `partial` | `max_chars` truncated the text: `content` is the trailing window of `total_chars` characters. |
 
-The tool response changed from raw text to JSON. Applications parsing tool output
-must handle the record kinds; direct `MemoryStore::read` and the Python host's
-`read_memory` retain their existing full/window behavior. This protocol belongs
-to an agent's conversation, not a process-wide memory cache.
+Lines keep their newline terminators, so applying a change reproduces the current
+text byte for byte. A version counts the tier's accepted writes. A `partial`
+response is not a complete snapshot and does not establish a baseline. The
+[API index](../arko-workflows/INDEX.md#memory) documents the full record contract.
+
+Baselines are kept per task and tier, and advance only once the exact result has
+entered that task's conversation; reads still waiting on a tool batch do not
+advance them. Restarting or resuming a runtime resets its baselines, so the next
+read is full. An application that replaces or compacts a conversation should start
+a new runtime. Custom runners reproduce this lifecycle with
+`Tool::reset_context(task_id)` and `Tool::observe_context(task_id, message)`,
+passing the actual messages sent to the model. Without observations, reads
+conservatively return full snapshots. Both callbacks are synchronous and only
+track delivery.
+
+Memory read results bypass result interceptors, including distillers. The
+versioned protocol belongs to the agent tool: `MemoryStore::read` and the Python
+`read_memory` method return plain text.
 
 ## File-tree context
 
-When file-tree environment context is enabled, `file_tree_mode: "diff"` is the
-default. Before the first model call, the runtime injects a complete tree within
-the configured depth and ignore rules. Before subsequent calls it sends only
-visible additions, removals, type changes, and identifiable moves. An unchanged
-tree produces no message. This applies to native and text-based tool calling.
+When file-tree environment details are enabled in `EnvironmentDetailsConfig`,
+`file_tree_mode` defaults to `diff`. Before the first model call the runtime sends
+the complete tree, within the configured depth (3 when unset) and ignore rules.
+Before later calls it sends only visible additions, removals, type changes, and
+identifiable moves; an unchanged tree adds no message. This works with native and
+text-based tool calling. Configurations without `file_tree_mode` use diff mode.
 
-Diff mode sends tree context in user messages at model-call boundaries, independent
-of the legacy placement setting. Set `file_tree_mode: "full"` to preserve full-tree
-rendering at the configured placement. An agent can use `list_files` for an explicit
-full listing at any time. Restart/resume supplies a new full baseline.
-Rust struct literals for `EnvironmentDetailsConfig` now need `file_tree_mode`
-or `..Default::default()`; saved configurations without the field use diff mode.
+Diff mode sends tree context as user messages at model-call boundaries, regardless
+of the file tree's placement setting. `file_tree_mode: "full"` renders the full
+tree at the configured placement instead. Agents can call `list_files` for a full
+listing at any time, and a restarted or resumed runtime starts from a new full
+snapshot.
 
 Tree entries are sorted. The scanner does not follow symlinked directories or read
-file contents. On Unix, move matching uses unambiguous filesystem identity and
-metadata; uncertain matches and platforms without that identity show removal and
-addition. Tree changes describe the visible inventory, not file-content edits.
-Ignore/depth changes can also change that inventory. A failed scan does not replace
-the last successful baseline. The runtime reports the scan failure and retries.
+file contents, so the notices describe the visible inventory, not edits to file
+contents. On Unix, moves are detected from filesystem identity and metadata when
+the match is unambiguous; other platforms, and uncertain matches, report a removal
+and an addition. Changing ignore rules or depth also changes the visible
+inventory. A failed scan keeps the last successful baseline; the runtime reports
+the failure and scans again before the next call.
 
-## Distillation
+## Tool-result distillation
 
-Distillers are opt-in through `WorkflowBuilder::distiller`. Configure the model,
-reasoning, target agents/tools, minimum input characters, maximum output tokens,
-and instructions. The threshold applies to Unicode characters. Empty target sets
-apply to all eligible agents/tools; select targets for predictable use.
+Distillers are opt-in and registered with `WorkflowBuilder::distiller`. Each one
+selects its model, reasoning, target agents and tools, minimum input size (in
+Unicode characters), maximum output tokens, and instructions. An empty target set
+matches every agent or tool; name targets explicitly for predictable behavior.
 
 ```rust,ignore
 use arko_ai::{Model, OpenAIEffort, ReasoningConfig};
@@ -75,85 +86,80 @@ let distiller = DistillationConfig::new("bulk-research", Model::openai_gpt_5_6_l
     .target_agent("researcher")
     .target_tool("search_documents")
     .min_chars(12_000)
-    .max_output_tokens(16_000) // High-effort reasoning plus the summary
+    .max_output_tokens(16_000) // Room for high-effort reasoning plus the summary.
     .instructions("Preserve exact findings, qualifications, and source references. Remove irrelevant repetition.");
 // Register with Workflow::builder().distiller(distiller).
 ```
 
-The defaults are 8,000 input characters and 16,000 output tokens (or the model's
-output limit when smaller); omitted reasoning uses the provider's default.
-Reasoning (thinking) tokens count against the output limit with OpenAI API keys
-and on Anthropic, and models such as Claude Opus 5.5 or GPT-5.5 and later reason
-by default, so leave room for reasoning as well as the summary: a limit that is
-too small yields truncated summaries, which are charged but not used. ChatGPT
-OAuth requests send no output limit. Reasoning must match the selected
-provider and the output limit must be positive. Distillers see the task prompt,
-tool name, parameters, and raw result. Their output is model-authored, not a
-deterministic accuracy guarantee. Keep source evidence accessible through tools.
-Interception events and the `PostToolResultInterception` hook expose original and
-effective text; use a host hook to retain source artifacts when needed. A summary
-is used only when the model finished it, and every call is charged. A refusal or a
-summary cut off by the output limit keeps the raw output without a retry, since it
-would most likely repeat; any other early stop (including an unreported stop
-reason) or an empty summary is an interceptor error, which configured
-interceptor-error policies may retry before falling back to raw output. Bound huge outputs in the producing tool
-when raw fallback would be unsuitable.
+Defaults are 8,000 input characters and 16,000 output tokens (or the model's output
+limit, when smaller). Without an explicit reasoning setting, the provider's default
+applies. The reasoning configuration must match the model's provider, and the
+output limit must be positive.
 
-## Shell tools and background jobs
+Reasoning tokens count against the output limit with OpenAI API keys and on
+Anthropic, and some models reason by default (for example GPT-5.5 and later, and
+Claude Opus 5.5). Leave room for reasoning as well as the summary: a limit that is
+too small produces truncated summaries, which are billed but not used. ChatGPT
+OAuth requests send no output limit.
 
-`arko-agents::terminal` supplies reusable interactive background tools for Linux,
-macOS, and Windows.
-See [interactive terminals](interactive-terminals.md) for the separate detection
-experiment, program request/reply protocol, inferred prompt notices, and setup.
+A distiller sees the task prompt, the tool name and parameters, and the raw
+result. Its output is model-written, not a guaranteed-accurate transformation, so
+keep source evidence reachable through tools. Interception events and the
+`PostToolResultInterception` hook expose both the original and the delivered text;
+use a hook to retain source artifacts when needed.
 
-Workflows offering shell tools should provide an immediate-return background mode
-for long commands. Keep quick reads convenient; use a configurable short foreground
-wait and return a running job handle when that wait expires. A wait limit and an
-execution deadline are separate settings. Background jobs must be owned by the
-host runtime so they survive the return of the tool call.
+Only a finished summary replaces the tool result, and every call is billed:
 
-Use this contract when designing a shell tool:
+- A refusal, or a summary cut off by the output limit, keeps the raw result
+  without a retry, because a retry would most likely end the same way.
+- Any other early stop (including an unreported stop reason) or an empty summary
+  is an interceptor error. The workflow's interception failure policy may retry it
+  before falling back to the raw result.
 
-- Start returns a stable job ID, status, working directory, and log/artifact paths.
-  Configure concurrency limits and execution deadlines for the workflow's workload.
-- Completion sends a compact notice containing job ID, terminal status, exit code,
-  relevant diagnostic excerpts, and log/artifact references. Preserve failure and
-  cancellation details. Report truncation and provide bounded range or cursor
-  reads for logs; repeated progress reads should return only new output.
-- The host monitors jobs and delivers notices through `SharedContext.messages`
-  (`MessageBus::send` for a named recipient, or `inject_task` for an active task).
-  An idle owner needs a host continuation policy; a queued message alone does not
-  start a model run. Avoid agent polling loops or a separate polling agent.
-- Persist job ownership and notification IDs for workflows that support resume.
-  Checkpoint queued delivery before acknowledging it; deduplicate replayed notices
-  by job/event ID. Reconcile interrupted jobs against recorded state and artifacts
-  before retrying commands with side effects.
-- Provide status, bounded wait, log read, and cancellation operations. Document
-  pause/shutdown behavior and which shell state persists between invocations.
-  Explicitly terminate owned processes when cancellation requires it.
+If a raw fallback would be unsuitable for very large outputs, bound the output in
+the tool that produces it. `complete_task` results are never distilled. The
+[API index](../arko-workflows/INDEX.md#tool-result-distillation) documents
+configuration fields, records, and cost accounting.
 
-The local `arko-research` workflow demonstrates this pattern in `src/jobs.rs`,
-`src/tools.rs` (`lab_start_job` / `lab_shell(background=true)`), and
-`src/research.rs::notify_jobs`. Its test
-`immediate_jobs_inject_success_and_failure_without_polling_model` checks compact
-completion delivery. These are reference implementations in that workflow;
-the reusable terminal manager can provide transport and job handling for new hosts.
-Hosts still select the process permissions and lifecycle appropriate to their workflow.
+## Background shell jobs
 
-Reusable agent guidance:
+The [interactive terminal tools](interactive-terminals.md) in
+`arko-agents::terminal` run commands as background jobs on Linux, macOS, and
+Windows, accept input while they run, and notify the owning agent on completion.
 
-> Start long shell commands in background mode and retain their job IDs. Continue
-> useful independent work while they run. Completion notifications will identify
-> the outcome and where to retrieve details. If the next step depends on a job,
-> use the host's bounded wait or yield mechanism. Inspect progress only when it
-> informs a decision, and cancel work that is no longer needed. Save substantial
-> output and checkpoints to artifacts. Keep model turns purposeful; avoid filler
-> turns whose only purpose is to keep a prompt cache warm.
+A workflow that provides its own shell tool should follow the same pattern: long
+commands start in the background and return a job handle immediately, while quick
+commands stay convenient through a short, configurable foreground wait that
+returns the handle when it expires. The foreground wait and the execution deadline
+are separate settings. The host runtime owns background jobs, so they outlive the
+tool call that started them. A complete design provides:
 
-## Review and prompting
+- **Start**: returns a stable job ID, status, working directory, and log or
+  artifact paths. Concurrency limits and execution deadlines are configurable.
+- **Completion notices**: a compact notice with the job ID, final status, exit
+  code, relevant diagnostic excerpts, and log or artifact references, preserving
+  failure and cancellation details. Truncation is reported, logs support bounded
+  range or cursor reads, and repeated progress reads return only new output.
+- **Delivery**: the host monitors jobs and delivers notices through
+  `SharedContext.messages` (`MessageBus::send` for a named recipient, or
+  `inject_task` for an active task). A queued message does not start a model run
+  on its own, so an idle owner needs a host continuation policy. Agents should not
+  poll in a loop, and no separate polling agent is needed.
+- **Resume**: workflows that support resume persist job ownership and
+  notification IDs, checkpoint queued deliveries before acknowledging them,
+  deduplicate replayed notices by job or event ID, and reconcile interrupted jobs
+  against recorded state and artifacts before retrying commands with side effects.
+- **Control**: status, bounded wait, log reads, and cancellation, with documented
+  pause and shutdown behavior, a statement of which shell state persists between
+  invocations, and explicit termination of owned processes when cancellation
+  requires it.
 
-For each workflow, define authoritative inputs, ownership, freshness, required
-evidence, and retrieval paths before implementation. Prefer the simplest design
-that supports accurate decisions. Explain useful changes without repeating known
-facts. Evaluate context optimizations against exact reconstruction/coverage tests
-and representative agent behavior; fewer characters alone do not establish quality.
+Reusable agent instructions:
+
+> Start long shell commands in background mode and keep their job IDs. Continue
+> useful independent work while they run. Completion notifications identify the
+> outcome and where to retrieve details. If the next step depends on a job, use the
+> host's bounded wait or yield mechanism. Inspect progress only when it informs a
+> decision, and cancel work that is no longer needed. Save substantial output and
+> checkpoints to artifacts. Keep model turns purposeful; avoid turns whose only
+> purpose is to keep a prompt cache warm.
