@@ -1,5 +1,10 @@
 name: Framework portability
 on: [push, pull_request, workflow_dispatch]
+# A newer push to the same branch cancels its older run. Every commit that
+# reaches main is still tested to completion.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 jobs:
   native:
     strategy:
@@ -11,6 +16,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # Caches the cargo registry and compiled dependencies. Only main saves,
+      # so branches reuse main's cache without filling the per-repo limit.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
