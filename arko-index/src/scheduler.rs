@@ -23,6 +23,19 @@ use tokio::{
 const RETRY_BACKOFF: arko_ai::BackoffPolicy =
     arko_ai::BackoffPolicy::new(Duration::from_secs(1), Duration::from_secs(60));
 
+/// Delay before retry `attempt`. A backend's hint is capped like the hints
+/// arko-ai parses from responses, so the retry deadline stays representable.
+fn retry_delay(attempt: u32, hint: Option<Duration>) -> Duration {
+    let hint = hint.map(|hint| hint.min(arko_ai::retry::MAX_SERVER_DELAY_HINT));
+    RETRY_BACKOFF.next_delay(attempt, hint)
+}
+/// `now + delay`, saturating instead of panicking on overflow.
+fn deadline(now: Instant, delay: Duration) -> Instant {
+    now.checked_add(delay)
+        .or_else(|| now.checked_add(arko_ai::retry::MAX_SERVER_DELAY_HINT))
+        .unwrap_or(now)
+}
+
 #[derive(Clone)]
 pub(crate) enum Operation {
     Chunk(ModelRequest),
@@ -195,9 +208,9 @@ impl Scheduler {
                                         if !capacity { task.transient_failures = task.transient_failures.saturating_add(1); }
                                         if capacity || task.transient_failures < max_transient_attempts {
                                             let attempt = u32::try_from(task.attempts).unwrap_or(u32::MAX);
-                                            let delay = RETRY_BACKOFF.next_delay(attempt, *retry_after);
+                                            let delay = retry_delay(attempt, *retry_after);
                                             task.event("retry_wait",serde_json::json!({"delay_ms":delay.as_millis(),"capacity":capacity}));
-                                            task.attempts = task.attempts.saturating_add(1); task.initial = false; task.ready = Instant::now()+delay;
+                                            task.attempts = task.attempts.saturating_add(1); task.initial = false; task.ready = deadline(Instant::now(), delay);
                                             queue.push_back(task); continue;
                                         }
                                         task.event("retries_exhausted",serde_json::json!({"transient_failures":task.transient_failures}));
@@ -577,5 +590,44 @@ mod tests {
         };
         assert_eq!(gate.tries.lock().unwrap()[0], 6);
         assert_eq!(reply.usage["attempts"], 6);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn huge_backend_retry_hints_are_capped_instead_of_overflowing() {
+        // A custom backend may report any Retry-After; adding it to the current
+        // time used to panic the scheduler task.
+        let (gate, _started) = failing_gate(1, false);
+        let gate = Arc::new(Gate {
+            retry_delay: Duration::MAX,
+            ..Arc::into_inner(gate).unwrap()
+        });
+        gate.gates[0].add_permits(1);
+        let scheduler = Scheduler::new(gate.clone(), 1, 2);
+        let (progress, mut events) = mpsc::unbounded_channel();
+        let Reply::Chunk(reply) = scheduler
+            .call_tracked(chunk_request(), true, &Control::new(), Some(progress))
+            .await
+            .unwrap()
+        else {
+            panic!("wrong response")
+        };
+        assert_eq!(reply.usage["attempts"], 2);
+        assert_eq!(gate.tries.lock().unwrap()[0], 2);
+        let mut waits = vec![];
+        while let Ok(event) = events.try_recv() {
+            if event["phase"] == "retry_wait" {
+                waits.push(event["detail"]["delay_ms"].as_u64().unwrap());
+            }
+        }
+        let cap = arko_ai::retry::MAX_SERVER_DELAY_HINT.as_millis() as u64;
+        assert_eq!(waits.len(), 1);
+        assert!(waits[0] >= cap && waits[0] <= cap + 1_000, "{waits:?}");
+    }
+    #[test]
+    fn retry_deadlines_saturate() {
+        let now = Instant::now();
+        assert_eq!(deadline(now, Duration::from_secs(5)), now + Duration::from_secs(5));
+        assert!(deadline(now, Duration::MAX) >= now + arko_ai::retry::MAX_SERVER_DELAY_HINT);
+        let delay = retry_delay(3, Some(Duration::MAX));
+        assert!(delay <= arko_ai::retry::MAX_SERVER_DELAY_HINT + Duration::from_secs(60));
     }
 }
