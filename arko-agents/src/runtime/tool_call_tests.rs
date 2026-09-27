@@ -6,6 +6,7 @@ use super::*;
 use crate::agent_config::PerToolConfigOverride;
 use crate::tool::{Tool, ToolError, ToolParameterDefinition, ToolParameterType, ToolTypeDetails};
 use async_trait::async_trait;
+use futures::StreamExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -129,6 +130,18 @@ fn complete() -> ScriptedStreamResult {
         "complete_task",
         serde_json::json!({"summary": "done"}),
     )])
+}
+
+/// An output-based turn: the response text streamed, then the response.
+fn text_turn(text: &str) -> ScriptedStreamResult {
+    let Ok(end) = response(ai::Message::new_assistant(text)) else {
+        unreachable!()
+    };
+    Ok(
+        futures::stream::iter([Ok(ai::StreamEvent::TextChunk(text.into()))])
+            .chain(end)
+            .boxed(),
+    )
 }
 
 fn drain(events: &mut mpsc::Receiver<AgentEvent>) -> Vec<AgentEvent> {
@@ -680,5 +693,74 @@ async fn a_native_turn_an_older_version_left_without_results_is_settled_when_run
         UNDECIDED_CALL
     );
     assert_eq!(result_for(&task.conversation, "read")[0].output, "1 | a");
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+// Boolean parameters of output-based calls.
+
+#[cfg(unix)]
+#[tokio::test]
+async fn output_based_end_user_tools_receive_boolean_parameters() {
+    let workspace = workspace();
+    let parameter = |name: &str, param_type, flag: Option<&str>| ToolParameterDefinition {
+        name: name.into(),
+        description: name.into(),
+        param_type,
+        required: false,
+        is_path: false,
+        flag: flag.map(Into::into),
+        default_value: None,
+    };
+    let mut registry = ToolRegistry::new();
+    registry
+        .load_end_user_tool(ToolDefinition {
+            name: "say".into(),
+            description: "Echoes its text".into(),
+            output_based_example: None,
+            parameters: vec![
+                parameter("text", ToolParameterType::String, None),
+                parameter("shout", ToolParameterType::Bool, Some("--shout")),
+            ],
+            supports_batched_calls: false,
+            tool_type_details: ToolTypeDetails::EndUserDefined {
+                command_template: "echo".into(),
+            },
+            raw_json_schema_override: None,
+        })
+        .unwrap();
+    let (mut agent, mut events, _commands) = agent(
+        config(ToolCallingMode::OutputBased, &["say"]),
+        registry,
+        &workspace,
+    );
+    agent.scripted_responses.get_mut().unwrap().extend([
+        text_turn("<say>\n<text>hi</text>\n<shout> TRUE </shout>\n</say>"),
+        text_turn("<say>\n<text>hi</text>\n<shout>false</shout>\n</say>"),
+        text_turn("<complete_task>\n<summary>done</summary>\n</complete_task>"),
+    ]);
+    let task = timeout(Duration::from_secs(5), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let events = drain(&mut events);
+    let outputs: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolResult {
+                tool_name, output, ..
+            } if tool_name == "say" => Some(output.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(outputs, ["hi --shout\n", "hi\n"]);
+    let shout: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolCallFormatted { parameters, .. } => parameters.get("shout").cloned(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shout, [Value::Bool(true), Value::Bool(false)]);
     std::fs::remove_dir_all(workspace).unwrap();
 }

@@ -16,6 +16,18 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// `"true"` or `"false"`, in any case and with surrounding whitespace.
+pub(crate) fn parse_bool_text(text: &str) -> Option<bool> {
+    let text = text.trim();
+    if text.eq_ignore_ascii_case("true") {
+        Some(true)
+    } else if text.eq_ignore_ascii_case("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolParameterDefinition {
     pub name: String,
@@ -69,6 +81,21 @@ impl ToolDefinition {
             path: path.to_path_buf(),
             source: e,
         })
+    }
+
+    /// Gives text arguments their declared types. Output-based tool calls
+    /// carry every value as a string: a `bool` parameter's `"true"` or
+    /// `"false"` (in any case, surrounding whitespace ignored) becomes a
+    /// JSON boolean. Other values are left as they are.
+    pub fn coerce_text_arguments(&self, params: &mut std::collections::HashMap<String, Value>) {
+        for def in &self.parameters {
+            if def.param_type == ToolParameterType::Bool
+                && let Some(value) = params.get_mut(&def.name)
+                && let Some(boolean) = value.as_str().and_then(parse_bool_text)
+            {
+                *value = Value::Bool(boolean);
+            }
+        }
     }
 
     pub fn validate_params(
@@ -198,5 +225,47 @@ mod tests {
         assert!(definition.validate_params(&HashMap::new()).is_err());
         let wire = serde_json::to_value(native).unwrap();
         assert_eq!(wire["strict"], false);
+    }
+
+    #[test]
+    fn text_arguments_of_boolean_parameters_become_booleans() {
+        let parameter = |name: &str, param_type| ToolParameterDefinition {
+            name: name.into(),
+            description: name.into(),
+            param_type,
+            required: false,
+            is_path: false,
+            flag: None,
+            default_value: None,
+        };
+        let definition = ToolDefinition {
+            name: "fixture".into(),
+            description: "Fixture".into(),
+            output_based_example: None,
+            parameters: vec![
+                parameter("a", ToolParameterType::Bool),
+                parameter("b", ToolParameterType::Bool),
+                parameter("c", ToolParameterType::Bool),
+                parameter("d", ToolParameterType::Bool),
+                parameter("text", ToolParameterType::String),
+            ],
+            supports_batched_calls: false,
+            tool_type_details: ToolTypeDetails::DeveloperDefined,
+            raw_json_schema_override: None,
+        };
+        let mut params = HashMap::from([
+            ("a".to_string(), serde_json::json!(" TRUE\n")),
+            ("b".to_string(), serde_json::json!("False")),
+            ("c".to_string(), serde_json::json!("yes")),
+            ("d".to_string(), serde_json::json!(true)),
+            ("text".to_string(), serde_json::json!("true")),
+        ]);
+        definition.coerce_text_arguments(&mut params);
+        assert_eq!(params["a"], serde_json::json!(true));
+        assert_eq!(params["b"], serde_json::json!(false));
+        // Other text is left for the tool to reject, and strings stay strings.
+        assert_eq!(params["c"], serde_json::json!("yes"));
+        assert_eq!(params["d"], serde_json::json!(true));
+        assert_eq!(params["text"], serde_json::json!("true"));
     }
 }

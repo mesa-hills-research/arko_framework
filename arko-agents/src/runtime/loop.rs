@@ -2389,6 +2389,16 @@ impl AgentLoop {
                                     }
                                 };
 
+                            // Text calls carry every value as a string: give
+                            // boolean parameters booleans, as in native mode.
+                            let mut calls_to_process_with_ids = calls_to_process_with_ids;
+                            for (call, _) in &mut calls_to_process_with_ids {
+                                if let Some(tool) = self.tool_registry.get(&call.name) {
+                                    tool.definition()
+                                        .coerce_text_arguments(&mut call.parameters);
+                                }
+                            }
+
                             let mut calls_needing_approval = Vec::new();
                             let mut auto_approved_call_results = Vec::new();
                             let overall_batch_id = if calls_to_process_with_ids.len() > 1 {

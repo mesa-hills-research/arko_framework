@@ -1,6 +1,6 @@
 use super::ToolError;
 use super::definition::ToolParameterDefinition;
-use super::definition::ToolParameterType;
+use super::definition::{ToolParameterType, parse_bool_text};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
@@ -67,16 +67,18 @@ pub(crate) async fn execute_command_from_template(
                 }
             }
             ToolParameterType::Bool => {
-                let bool_val =
-                    current_value
-                        .as_bool()
-                        .ok_or_else(|| ToolError::ParameterValidation {
-                            param_name: def.name.clone(),
-                            message: format!(
-                                "Expected boolean for parameter '{}', got {:?}",
-                                def.name, current_value
-                            ),
-                        })?;
+                // Also `"true"` or `"false"` text, as output-based calls and
+                // hand-written defaults give it.
+                let bool_val = current_value
+                    .as_bool()
+                    .or_else(|| current_value.as_str().and_then(parse_bool_text))
+                    .ok_or_else(|| ToolError::ParameterValidation {
+                        param_name: def.name.clone(),
+                        message: format!(
+                            "Expected boolean for parameter '{}', got {:?}",
+                            def.name, current_value
+                        ),
+                    })?;
                 if bool_val {
                     if let Some(flag_str) = &def.flag {
                         command_args.push(flag_str.clone());
@@ -164,5 +166,44 @@ pub(crate) async fn execute_command_from_template(
             stdout,
             stderr,
         })
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn boolean_parameters_accept_true_and_false_text() {
+        let definitions = [ToolParameterDefinition {
+            name: "shout".into(),
+            description: "Shout".into(),
+            param_type: ToolParameterType::Bool,
+            required: false,
+            is_path: false,
+            flag: Some("--shout".into()),
+            default_value: None,
+        }];
+        let run = |value: Value| {
+            let definitions = definitions.clone();
+            async move {
+                let params = HashMap::from([("shout".to_string(), value)]);
+                execute_command_from_template(
+                    "say",
+                    "echo hi",
+                    &definitions,
+                    &params,
+                    &std::env::temp_dir(),
+                )
+                .await
+            }
+        };
+        assert_eq!(run(Value::Bool(true)).await.unwrap(), "hi --shout\n");
+        assert_eq!(run(Value::from("True")).await.unwrap(), "hi --shout\n");
+        assert_eq!(run(Value::from(" false ")).await.unwrap(), "hi\n");
+        assert!(matches!(
+            run(Value::from("loudly")).await,
+            Err(ToolError::ParameterValidation { .. })
+        ));
     }
 }
