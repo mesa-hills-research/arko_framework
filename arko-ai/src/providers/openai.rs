@@ -757,9 +757,14 @@ impl OpenAIClient {
                         break;
                     }
                     Some("error" | "response.failed") => {
+                        // `error` events are flat (`code` may be null) or wrap
+                        // an `error` object; `response.failed` carries the
+                        // error on its response. Classified in `provider_error`.
                         let value = value.get("response").unwrap_or(&value);
-                        let message = value["message"]
-                            .as_str()
+                        let message = value
+                            .pointer("/error/message")
+                            .or_else(|| value.get("message"))
+                            .and_then(Value::as_str)
                             .unwrap_or("");
 
                         Err(Error::provider_error(

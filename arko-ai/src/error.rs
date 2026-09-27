@@ -24,13 +24,20 @@ impl RetryClass {
 }
 
 /// Codes meaning the request itself must change. They take precedence over a
-/// retryable HTTP status. Includes OpenAI/Anthropic error codes and types,
+/// retryable HTTP status. Includes OpenAI/Anthropic error codes and types
+/// (OpenAI Responses `ResponseError.code` values:
+/// https://developers.openai.com/api/reference/resources/responses/streaming-events),
 /// OpenRouter `error.metadata.error_type` values
-/// (https://openrouter.ai/docs/api_reference/errors-and-debugging) and Google
-/// RPC status names.
+/// (https://openrouter.ai/docs/api_reference/errors-and-debugging), Gemini
+/// Interactions API codes (https://ai.google.dev/gemini-api/docs/api-errors)
+/// and Google RPC status names.
 const PERMANENT_CODES: &[&str] = &[
     "insufficient_quota",
     "billing_hard_limit_reached",
+    // Gemini: "You have exceeded your daily quota. Wait until the quota
+    // resets or request a quota increase." A daily wall, like OpenAI's
+    // `insufficient_quota`, not a short rate limit.
+    "quota_exceeded",
     "invalid_api_key",
     "invalid_grant",
     "invalid_client",
@@ -41,6 +48,8 @@ const PERMANENT_CODES: &[&str] = &[
     "permission_denied",
     "invalid_request_error",
     "invalid_request",
+    "failed_precondition",
+    "parameter_unknown",
     "invalid_prompt",
     "context_length_exceeded",
     "max_tokens_exceeded",
@@ -48,42 +57,135 @@ const PERMANENT_CODES: &[&str] = &[
     "string_too_long",
     "model_not_found",
     "not_found",
+    "not_found_error",
+    // A 409 conflict that needs resolving, unlike Gemini's retryable `aborted`.
+    "already_exists",
+    "conflict_error",
+    // A 501: the operation is not supported.
+    "unimplemented",
+    "not_implemented",
     "precondition_failed",
     "payload_too_large",
+    "request_too_large",
     "unprocessable",
     "content_policy_violation",
     "refusal",
+    "data_residency_mismatch",
+    "bio_policy",
+    "misalignment_policy_violation",
+    "invalid_image",
+    "invalid_image_format",
+    "invalid_base64_image",
+    "invalid_image_url",
+    "invalid_image_mode",
+    "image_too_large",
+    "image_too_small",
+    "image_parse_error",
+    "image_content_policy_violation",
+    "image_file_too_large",
+    "image_file_not_found",
+    "unsupported_image_media_type",
+    "empty_image_file",
+    "failed_to_download_image",
+    // Gemini: the replayed history lacks a required thought signature.
+    "missing_thought_signature",
     "INVALID_ARGUMENT",
     "FAILED_PRECONDITION",
     "PERMISSION_DENIED",
     "UNAUTHENTICATED",
     "NOT_FOUND",
+    "UNIMPLEMENTED",
 ];
 
 /// Explicit temporary capacity signals (Gemini reports an overloaded model as
-/// 503 `UNAVAILABLE`).
+/// 503 `UNAVAILABLE` on generateContent and `service_unavailable` on the
+/// Interactions API: "The service is temporarily overloaded or down").
 const CAPACITY_CODES: &[&str] = &[
     "server_is_overloaded",
     "overloaded_error",
     "service_unavailable_error",
+    "service_unavailable",
     "provider_overloaded",
     "UNAVAILABLE",
 ];
 
-/// Temporary failures recognised without an HTTP status (stream errors).
-const TRANSIENT_CODES: &[&str] = &[
-    "rate_limit_exceeded",
-    "rate_limit_error",
-    "server_error",
-    "internal_error",
-    "temporarily_unavailable",
-    "provider_unavailable",
-    "timeout",
-    "server",
-    "RESOURCE_EXHAUSTED",
-    "INTERNAL",
-    "DEADLINE_EXCEEDED",
+/// HTTP statuses of documented string codes, used to classify errors that
+/// arrive without one: a stream error event or failed interaction reported
+/// after the HTTP 200. Sources: Gemini Interactions API
+/// (https://ai.google.dev/gemini-api/docs/api-errors; unlisted codes fall back
+/// to the snake_case HTTP status name, e.g. `gateway_timeout`), Anthropic
+/// (https://platform.claude.com/docs/en/api/errors) and Google RPC names.
+const CODE_STATUSES: &[(&str, u16)] = &[
+    // Gemini Interactions API.
+    ("invalid_request", 400),
+    ("failed_precondition", 400),
+    ("parameter_unknown", 400),
+    ("authentication", 401),
+    ("payment_required", 402),
+    ("permission_denied", 403),
+    ("not_found", 404),
+    ("model_not_found", 404),
+    ("already_exists", 409),
+    ("aborted", 409),
+    ("out_of_range", 416),
+    ("rate_limit_exceeded", 429),
+    ("quota_exceeded", 429),
+    ("too_many_requests", 429),
+    ("cancelled", 499),
+    ("api_error", 500),
+    ("unimplemented", 501),
+    ("service_unavailable", 503),
+    ("deadline_exceeded", 504),
+    // snake_case HTTP status names (Gemini fallback codes).
+    ("bad_request", 400),
+    ("unauthorized", 401),
+    ("forbidden", 403),
+    ("method_not_allowed", 405),
+    ("request_timeout", 408),
+    ("conflict", 409),
+    ("gone", 410),
+    ("payload_too_large", 413),
+    ("content_too_large", 413),
+    ("unprocessable_entity", 422),
+    ("unprocessable_content", 422),
+    ("internal_server_error", 500),
+    ("not_implemented", 501),
+    ("bad_gateway", 502),
+    ("gateway_timeout", 504),
+    // Anthropic error types (`api_error` is shared with Gemini).
+    ("invalid_request_error", 400),
+    ("authentication_error", 401),
+    ("billing_error", 402),
+    ("permission_error", 403),
+    ("not_found_error", 404),
+    ("conflict_error", 409),
+    ("request_too_large", 413),
+    ("rate_limit_error", 429),
+    ("timeout_error", 504),
+    ("overloaded_error", 529),
+    // Google RPC status names.
+    ("INVALID_ARGUMENT", 400),
+    ("FAILED_PRECONDITION", 400),
+    ("OUT_OF_RANGE", 400),
+    ("UNAUTHENTICATED", 401),
+    ("PERMISSION_DENIED", 403),
+    ("NOT_FOUND", 404),
+    ("ALREADY_EXISTS", 409),
+    ("ABORTED", 409),
+    ("RESOURCE_EXHAUSTED", 429),
+    ("CANCELLED", 499),
+    ("INTERNAL", 500),
+    ("UNKNOWN", 500),
+    ("UNIMPLEMENTED", 501),
+    ("UNAVAILABLE", 503),
+    ("DEADLINE_EXCEEDED", 504),
 ];
+
+fn code_status(code: &str) -> Option<u16> {
+    CODE_STATUSES
+        .iter()
+        .find_map(|(known, status)| (*known == code).then_some(*status))
+}
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -190,7 +292,9 @@ impl Error {
                     return RetryClass::Permanent;
                 }
                 let capacity = code.is_some_and(|code| CAPACITY_CODES.contains(&code));
-                if let Some(status) = status {
+                // Without an HTTP status (an error reported after the 200), a
+                // documented code stands in for it.
+                if let Some(status) = status.or_else(|| code.and_then(code_status)) {
                     return if !matches!(status, 408 | 409 | 429 | 500..=599) {
                         RetryClass::Permanent
                     } else if capacity {
@@ -199,12 +303,16 @@ impl Error {
                         RetryClass::Transient
                     };
                 }
+                // Any other error reported after the 200 is bounded-transient:
+                // the request was accepted, so an unrecognised code (for
+                // example OpenAI `server_error`, a Gemini generation error such
+                // as `malformed_function_call`, or an event with no code) is
+                // most likely a server-side failure. Permanent codes were
+                // handled above.
                 if capacity {
                     RetryClass::Capacity
-                } else if code.is_some_and(|code| TRANSIENT_CODES.contains(&code)) {
-                    RetryClass::Transient
                 } else {
-                    RetryClass::Permanent
+                    RetryClass::Transient
                 }
             }
             Self::HttpError(error) => {
@@ -277,7 +385,14 @@ impl Error {
             .pointer("/metadata/error_type")
             .and_then(Value::as_str)
             .or_else(|| error.get("code").and_then(Value::as_str))
-            .or_else(|| error.get("type").and_then(Value::as_str))
+            // A flat stream event (OpenAI `{"type":"error","code":null,...}`)
+            // has the event name in `type`, not an error type.
+            .or_else(|| {
+                error
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .filter(|kind| *kind != "error")
+            })
             .or_else(|| error.get("status").and_then(Value::as_str))
             .or_else(|| error.as_str())
             .map(str::to_owned);
@@ -634,6 +749,134 @@ mod tests {
         assert_eq!(
             Error::provider_error("google", Some(400), None, invalid).retry_class(),
             RetryClass::Permanent
+        );
+    }
+
+    #[test]
+    fn gemini_interaction_codes_classify_by_their_documented_status() {
+        use RetryClass::{Capacity, Permanent, Transient};
+        // SSE error event shape from https://ai.google.dev/gemini-api/docs/api-errors;
+        // stream errors carry the same codes as HTTP errors.
+        for (code, class) in [
+            ("invalid_request", Permanent),
+            ("failed_precondition", Permanent),
+            ("out_of_range", Permanent),
+            ("parameter_unknown", Permanent),
+            ("authentication", Permanent),
+            ("payment_required", Permanent),
+            ("permission_denied", Permanent),
+            ("not_found", Permanent),
+            ("model_not_found", Permanent),
+            ("already_exists", Permanent),
+            ("aborted", Transient),
+            ("rate_limit_exceeded", Transient),
+            ("quota_exceeded", Permanent),
+            ("too_many_requests", Transient),
+            ("cancelled", Permanent),
+            ("api_error", Transient),
+            ("unimplemented", Permanent),
+            ("service_unavailable", Capacity),
+            ("deadline_exceeded", Transient),
+            // Fallback codes: snake_case HTTP status names.
+            ("gateway_timeout", Transient),
+            ("bad_gateway", Transient),
+            ("unprocessable_entity", Permanent),
+            // Generation errors: resampling may produce a valid output...
+            ("malformed_function_call", Transient),
+            ("malformed_tool_call", Transient),
+            ("unexpected_tool_call", Transient),
+            ("too_many_tool_calls", Transient),
+            ("no_image", Transient),
+            // ...but a missing signature is in the request history.
+            ("missing_thought_signature", Permanent),
+        ] {
+            let event = format!(
+                r#"{{"event_type":"error","error":{{"code":"{code}","message":"m"}}}}"#
+            );
+            let error = Error::provider_error("google stream", None, None, &event);
+            assert_eq!(error.retry_class(), class, "{code}");
+        }
+        // The daily quota wall stays permanent with its HTTP 429; an overload
+        // is a capacity signal with or without its 503.
+        let quota = r#"{"error":{"code":"quota_exceeded","message":"You have exceeded your daily quota."}}"#;
+        assert_eq!(
+            Error::provider_error("google", Some(429), None, quota).retry_class(),
+            Permanent
+        );
+        let overloaded = r#"{"error":{"code":"service_unavailable","message":"m"}}"#;
+        assert_eq!(
+            Error::provider_error("google", Some(503), None, overloaded).retry_class(),
+            Capacity
+        );
+    }
+
+    #[test]
+    fn anthropic_stream_error_types_classify_like_their_http_status() {
+        use RetryClass::{Capacity, Permanent, Transient};
+        // https://platform.claude.com/docs/en/api/errors
+        for (kind, class) in [
+            ("api_error", Transient),
+            ("timeout_error", Transient),
+            ("rate_limit_error", Transient),
+            ("overloaded_error", Capacity),
+            ("invalid_request_error", Permanent),
+            ("authentication_error", Permanent),
+            ("billing_error", Permanent),
+            ("permission_error", Permanent),
+            ("not_found_error", Permanent),
+            ("conflict_error", Permanent),
+            ("request_too_large", Permanent),
+        ] {
+            let event = format!(
+                r#"{{"type":"error","error":{{"type":"{kind}","message":"m"}},"request_id":"req_1"}}"#
+            );
+            let error = Error::provider_error("Anthropic stream error", None, None, &event);
+            assert_eq!(error.retry_class(), class, "{kind}");
+        }
+    }
+
+    #[test]
+    fn unknown_errors_after_a_success_are_bounded_transient_but_permanent_codes_win() {
+        // OpenAI's flat `error` stream event; `code` may be null and `type`
+        // is the event name, not an error type.
+        let event = r#"{"type":"error","code":null,"message":"An error occurred while processing your request.","param":null,"sequence_number":4}"#;
+        let error = Error::provider_error("OpenAI stream error", None, None, event);
+        assert!(matches!(&error, Error::ProviderError { status: None, code: None, .. }));
+        assert_eq!(error.retry_class(), RetryClass::Transient);
+        for (code, class) in [
+            ("server_error", RetryClass::Transient),
+            ("vector_store_timeout", RetryClass::Transient),
+            ("invalid_prompt", RetryClass::Permanent),
+            ("image_content_policy_violation", RetryClass::Permanent),
+        ] {
+            let event = format!(
+                r#"{{"type":"error","code":"{code}","message":"m","param":null,"sequence_number":1}}"#
+            );
+            assert_eq!(
+                Error::provider_error("OpenAI stream error", None, None, &event).retry_class(),
+                class,
+                "{code}"
+            );
+        }
+        // `response.failed` carries the error inside the response object.
+        let failed = r#"{"id":"resp_1","status":"failed","error":{"code":"invalid_image","message":"m"}}"#;
+        assert_eq!(
+            Error::provider_error("OpenAI stream error", None, None, failed).retry_class(),
+            RetryClass::Permanent
+        );
+        // Every permanent code stays permanent without an HTTP status.
+        for code in PERMANENT_CODES {
+            let body = format!(r#"{{"error":{{"code":"{code}"}}}}"#);
+            assert_eq!(
+                Error::provider_error("stream", None, None, &body).retry_class(),
+                RetryClass::Permanent,
+                "{code}"
+            );
+        }
+        // A body-less failure after the 200 is retried (boundedly).
+        assert_eq!(
+            Error::provider_error("stream", None, None, "{}").retry_class(),
+            RetryClass::Transient
         );
     }
 

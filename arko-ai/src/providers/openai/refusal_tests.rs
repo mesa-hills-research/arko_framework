@@ -208,6 +208,29 @@ async fn a_stream_without_a_terminal_event_is_truncated() {
     assert!(error.is_retryable());
 }
 
+#[tokio::test]
+async fn stream_error_events_without_a_code_stay_retryable() {
+    // Flat `error` event with a null code: `type` is the event name.
+    let body = event(serde_json::json!({"type":"error","code":null,
+        "message":"An error occurred while processing your request.","param":null,"sequence_number":3}));
+    let (_, error) = events(body).await;
+    let error = error.unwrap();
+    assert!(matches!(&error, Error::ProviderError { code: None, .. }), "{error:?}");
+    assert_eq!(error.retry_class(), crate::RetryClass::Transient);
+    // `response.failed` is classified by the error on its response.
+    for (code, class) in [
+        ("server_error", crate::RetryClass::Transient),
+        ("invalid_prompt", crate::RetryClass::Permanent),
+    ] {
+        let body = event(serde_json::json!({"type":"response.failed","sequence_number":5,
+            "response":{"id":"resp_1","status":"failed","error":{"code":code,"message":"Fixture failure."}}}));
+        let (_, error) = events(body).await;
+        let error = error.unwrap();
+        assert!(error.to_string().contains("OpenAI stream error: Fixture failure."), "{error}");
+        assert_eq!(error.retry_class(), class, "{code}");
+    }
+}
+
 #[test]
 fn invalid_argument_json_is_kept_raw_and_replayed_verbatim() {
     let mut value = completed_response();

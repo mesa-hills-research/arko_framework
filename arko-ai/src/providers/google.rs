@@ -6,7 +6,7 @@ use crate::{
     message::{Content, Image, Message, Role},
     model::{ModelType, Provider as ProviderType},
     reasoning::{GeminiThinkingLevel, GoogleReasoningFragment, ReasoningArtifact, ReasoningConfig},
-    stop::StopReason,
+    stop::{Refusal, RefusalSource, StopReason},
     tool::{ToolCall, ToolChoice},
     usage::{ModelCallUsage, UsageInfo},
 };
@@ -73,16 +73,13 @@ impl ProviderClient for GoogleClient {
             .await?;
 
         if !response.status().is_success() {
-            return Err(Error::from_response("google API error", response).await);
+            return Err(response_error(response).await);
         }
 
         let interaction: InteractionResponse = response.json().await?;
 
         if interaction.status.as_deref() == Some("failed") {
-            return Err(interaction_error(
-                "Google Interactions API returned a failed interaction",
-                interaction.error.as_ref(),
-            ));
+            return Err(interaction.failure());
         }
 
         let message = Self::parse_steps(&interaction.steps);
@@ -130,7 +127,7 @@ impl ProviderClient for GoogleClient {
             .await?;
 
         if !response.status().is_success() {
-            return Err(Error::from_response("google API error", response).await);
+            return Err(response_error(response).await);
         }
 
         Ok(Self::stream_events(
@@ -212,14 +209,30 @@ impl GoogleClient {
                             .to_string();
 
                         match last_step_type.as_str() {
+                            // A step can start with its first content: text on
+                            // `model_output`, a summary on `thought`.
+                            // https://ai.google.dev/gemini-api/docs/interactions/thinking
+                            "model_output" => {
+                                let mut text = String::new();
+                                Self::collect_content_text(step.get("content"), &mut text);
+                                if !text.is_empty() {
+                                    full_text.push_str(&text);
+                                    yield StreamEvent::TextChunk(text);
+                                }
+                            }
                             "thought" => {
+                                let mut summary = String::new();
+                                Self::collect_content_text(step.get("summary"), &mut summary);
                                 current_thought = Some(PendingThought {
-                                    summary: String::new(),
+                                    summary: summary.clone(),
                                     signature: step
                                         .get("signature")
                                         .and_then(Value::as_str)
                                         .map(String::from),
                                 });
+                                if emit_reasoning && !summary.is_empty() {
+                                    yield StreamEvent::ReasoningChunk(summary);
+                                }
                             }
                             "function_call" => {
                                 let name = step
@@ -386,13 +399,18 @@ impl GoogleClient {
                         } else {
                             "completed"
                         };
-                        terminal_status = Some(
-                            interaction
-                                .get("status")
-                                .and_then(Value::as_str)
-                                .unwrap_or(default_status)
-                                .to_string(),
-                        );
+                        let status = interaction
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or(default_status);
+                        if status == "failed" {
+                            Err(interaction_error(
+                                "Google Interactions stream completed with a failed interaction",
+                                first_error(interaction).or_else(|| first_error(&value)),
+                                &full_text,
+                            ))?;
+                        }
+                        terminal_status = Some(status.to_string());
 
                         break;
                     }
@@ -411,9 +429,9 @@ impl GoogleClient {
                             Some("failed") => {
                                 Err(interaction_error(
                                     "Google Interactions stream reported a failed interaction",
-                                    value
-                                        .get("error")
-                                        .or_else(|| value.pointer("/interaction/error")),
+                                    first_error(&value)
+                                        .or_else(|| value.get("interaction").and_then(first_error)),
+                                    &full_text,
                                 ))?;
 
                                 break;
@@ -431,7 +449,8 @@ impl GoogleClient {
                     Some("interaction.failed") => {
                         Err(interaction_error(
                             "Google Interactions stream failed",
-                            value.pointer("/interaction/error"),
+                            value.get("interaction").and_then(first_error),
+                            &full_text,
                         ))?;
 
                         break;
@@ -439,7 +458,8 @@ impl GoogleClient {
                     Some("error") => {
                         Err(interaction_error(
                             "Google Interactions stream error",
-                            value.get("error"),
+                            first_error(&value),
+                            &full_text,
                         ))?;
 
                         break;
@@ -1073,18 +1093,85 @@ impl GoogleClient {
     }
 }
 
-/// Classifies an interaction or stream error by its `code` (numeric
-/// HTTP-style or string) and `status` (e.g. `UNAVAILABLE`,
-/// `RESOURCE_EXHAUSTED`). An error without either stays a generic,
-/// boundedly retryable API error.
-fn interaction_error(label: &str, error: Option<&Value>) -> Error {
-    match error {
-        Some(error) if error.get("code").is_some() || error.get("status").is_some() => {
-            Error::provider_error(label, None, None, &serde_json::json!({ "error": error }).to_string())
-        }
-        Some(error) => Error::ApiError(format!("{label}: {error}")),
-        None => Error::ApiError(format!("{label}: unknown error")),
+/// Gemini codes for output blocked by policy, safety or content
+/// restrictions. They arrive in the standard error object of HTTP and SSE
+/// responses. https://ai.google.dev/gemini-api/docs/api-errors
+const GENERATION_BLOCKED_CODES: &[&str] = &[
+    "safety",
+    "recitation",
+    "language",
+    "prohibited_content",
+    "spii",
+    "blocklist",
+    "image_safety",
+    "image_prohibited_content",
+    "image_recitation",
+    "image_other",
+    "content_blocked",
+];
+
+/// A content-filter refusal for a generation-blocked error, with the code as
+/// its category.
+fn blocked_generation(error: &Value) -> Option<Refusal> {
+    let code = error.get("code").and_then(Value::as_str)?;
+    GENERATION_BLOCKED_CODES.contains(&code).then(|| {
+        let mut refusal = Refusal::new(RefusalSource::ContentFilter);
+        refusal.category = Some(code.to_string());
+        refusal.explanation = error.get("message").and_then(Value::as_str).map(str::to_owned);
+        refusal.provider_details = error.clone();
+        refusal
+    })
+}
+
+/// The error recorded on a failed interaction or error event: the v1
+/// `Interaction.errors` list (the first entry classifies it), or `error`.
+/// https://ai.google.dev/static/api/interactions-v1.openapi.json
+fn first_error(value: &Value) -> Option<&Value> {
+    value
+        .get("errors")
+        .and_then(Value::as_array)
+        .and_then(|errors| errors.first())
+        .or_else(|| value.get("error"))
+        .filter(|error| !error.is_null())
+}
+
+/// Classifies an interaction or stream error. A generation-blocked code is a
+/// [`Error::Refusal`] (keeping any text streamed before it as
+/// `partial_output`); otherwise the `code` (string or numeric HTTP-style) and
+/// `status` (e.g. `UNAVAILABLE`) decide. An error without either stays a
+/// generic, boundedly retryable API error.
+fn interaction_error(label: &str, error: Option<&Value>, partial_output: &str) -> Error {
+    let Some(error) = error else {
+        return Error::ApiError(format!("{label}: unknown error"));
+    };
+    if let Some(mut refusal) = blocked_generation(error) {
+        refusal.partial_output = (!partial_output.is_empty()).then(|| partial_output.to_string());
+        return Error::Refusal(Box::new(refusal));
     }
+    if error.get("code").is_some() || error.get("status").is_some() {
+        Error::provider_error(label, None, None, &serde_json::json!({ "error": error }).to_string())
+    } else {
+        Error::ApiError(format!("{label}: {error}"))
+    }
+}
+
+/// An HTTP error response, with generation-blocked codes as refusals.
+async fn response_error(response: reqwest::Response) -> Error {
+    let status = response.status().as_u16();
+    let retry_after = crate::error::retry_after_from_headers(status, response.headers());
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|_| "<unavailable error body>".into());
+    http_error(status, retry_after, &body)
+}
+
+fn http_error(status: u16, retry_after: Option<std::time::Duration>, body: &str) -> Error {
+    let value = serde_json::from_str::<Value>(body).unwrap_or_default();
+    if let Some(refusal) = first_error(&value).and_then(blocked_generation) {
+        return Error::Refusal(Box::new(refusal));
+    }
+    Error::provider_error("google API error", Some(status), retry_after, body)
 }
 
 struct PendingThought {
@@ -1221,8 +1308,25 @@ struct InteractionResponse {
     steps: Vec<Value>,
     #[serde(default)]
     usage: Option<InteractionUsage>,
+    /// Errors recorded on a failed interaction (v1 `errors`).
+    #[serde(default)]
+    errors: Vec<Value>,
+    /// Single-error form, kept for tolerance.
     #[serde(default)]
     error: Option<Value>,
+}
+
+impl InteractionResponse {
+    fn failure(&self) -> Error {
+        interaction_error(
+            "Google Interactions API returned a failed interaction",
+            self.errors
+                .first()
+                .or(self.error.as_ref())
+                .filter(|error| !error.is_null()),
+            "",
+        )
+    }
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -1331,6 +1435,127 @@ mod tests {
             "interaction":{"id":"int_1","status":"failed"}})])
         .await;
         assert!(matches!(error, Some(Error::ApiError(_))));
+    }
+
+    #[tokio::test]
+    async fn interaction_error_codes_are_classified_and_blocked_output_is_a_refusal() {
+        // SSE error events carry the documented snake_case codes.
+        // https://ai.google.dev/gemini-api/docs/api-errors
+        for (code, class) in [
+            ("service_unavailable", crate::RetryClass::Capacity),
+            ("deadline_exceeded", crate::RetryClass::Transient),
+            ("api_error", crate::RetryClass::Transient),
+            ("quota_exceeded", crate::RetryClass::Permanent),
+            ("not_found", crate::RetryClass::Permanent),
+        ] {
+            let (_, error) = stream_events(&[json!({"event_type":"error",
+                "error":{"code":code,"message":"m"}})])
+            .await;
+            let error = error.unwrap();
+            assert!(matches!(error, Error::ProviderError { .. }), "{error:?}");
+            assert_eq!(error.retry_class(), class, "{code}");
+        }
+        // A generation-blocked code after some text is a content-filter
+        // refusal that keeps the streamed text aside.
+        let mut events = vec![
+            json!({"event_type":"step.start","index":0,"step":{"type":"model_output"}}),
+            json!({"event_type":"step.delta","index":0,"delta":{"type":"text","text":"Once upon"}}),
+        ];
+        events.push(json!({"event_type":"error","error":{"code":"recitation","message":"Blocked for recitation."}}));
+        let (_, error) = stream_events(&events).await;
+        let Some(Error::Refusal(refusal)) = error else {
+            panic!("expected a refusal, got {error:?}");
+        };
+        assert_eq!(refusal.source, RefusalSource::ContentFilter);
+        assert_eq!(refusal.category.as_deref(), Some("recitation"));
+        assert_eq!(refusal.explanation.as_deref(), Some("Blocked for recitation."));
+        assert_eq!(refusal.partial_output.as_deref(), Some("Once upon"));
+        assert!(!Error::Refusal(refusal).is_retryable());
+        // The same codes in an HTTP error body.
+        let error = http_error(400, None, r#"{"error":{"code":"prohibited_content","message":"m"}}"#);
+        assert!(matches!(&error, Error::Refusal(refusal)
+            if refusal.category.as_deref() == Some("prohibited_content") && refusal.partial_output.is_none()));
+        let error = http_error(429, None, r#"{"error":{"code":"rate_limit_exceeded","message":"m"}}"#);
+        assert!(matches!(error, Error::ProviderError { status: Some(429), .. }));
+    }
+
+    #[tokio::test]
+    async fn a_completed_event_with_a_failed_status_is_an_error() {
+        let mut events = text_step().to_vec();
+        events.push(json!({"event_type":"interaction.completed",
+            "interaction":{"id":"int_1","status":"failed"}}));
+        let (events, error) = stream_events(&events).await;
+        assert!(!events.iter().any(|event| matches!(event, StreamEvent::End(_))));
+        assert!(matches!(error, Some(Error::ApiError(_))), "{error:?}");
+        let mut events = text_step().to_vec();
+        events.push(json!({"event_type":"interaction.completed",
+            "interaction":{"id":"int_1","status":"failed",
+                "errors":[{"code":"service_unavailable","message":"overloaded"}]}}));
+        let (_, error) = stream_events(&events).await;
+        assert!(error.unwrap().is_capacity_error());
+    }
+
+    #[test]
+    fn failed_non_streaming_interactions_read_the_errors_list() {
+        let failed = |body: Value| serde_json::from_value::<InteractionResponse>(body).unwrap().failure();
+        let error = failed(json!({"id":"int_1","status":"failed","steps":[],
+            "errors":[{"code":"service_unavailable","message":"The service is temporarily overloaded."}]}));
+        assert!(error.is_capacity_error(), "{error:?}");
+        let error = failed(json!({"id":"int_1","status":"failed",
+            "errors":[{"code":"safety","message":"Blocked."},{"code":"api_error","message":"x"}]}));
+        assert!(matches!(&error, Error::Refusal(refusal) if refusal.category.as_deref() == Some("safety")));
+        // The single-error form still works; no details stays a generic error.
+        let error = failed(json!({"id":"int_1","status":"failed","error":{"code":"invalid_request","message":"m"}}));
+        assert_eq!(error.retry_class(), crate::RetryClass::Permanent);
+        assert!(matches!(failed(json!({"id":"int_1","status":"failed"})), Error::ApiError(_)));
+    }
+
+    #[tokio::test]
+    async fn content_carried_on_step_start_is_kept() {
+        // Event shapes from https://ai.google.dev/gemini-api/docs/interactions/thinking
+        let events = [
+            json!({"index":0,"step":{"signature":"","summary":[{"text":"**Evaluating the clues**","type":"text"}],"type":"thought"},"event_type":"step.start"}),
+            json!({"index":0,"delta":{"content":{"text":" further","type":"text"},"type":"thought_summary"},"event_type":"step.delta"}),
+            json!({"index":0,"delta":{"signature":"EpoGCpcG","type":"thought_signature"},"event_type":"step.delta"}),
+            json!({"index":0,"event_type":"step.stop"}),
+            json!({"index":1,"step":{"content":[{"text":"Based on the clues provided, here","type":"text"}],"type":"model_output"},"event_type":"step.start"}),
+            json!({"index":1,"delta":{"text":" is the answer.","type":"text"},"event_type":"step.delta"}),
+            json!({"index":1,"event_type":"step.stop"}),
+            completed("completed"),
+        ];
+        let body: String = events.iter().map(|event| format!("data: {event}\n\n")).collect();
+        let config = GenerationConfig {
+            reasoning: Some(ReasoningConfig::Gemini {
+                thinking_level: GeminiThinkingLevel::High,
+                include_summaries: true,
+            }),
+            ..GenerationConfig::default()
+        };
+        let mut stream = GoogleClient::stream_events(
+            futures::stream::iter([Ok::<_, std::io::Error>(body)]),
+            Model::google_gemini_3_5_flash(),
+            config,
+        );
+        let mut text = String::new();
+        let mut reasoning = String::new();
+        let mut response = None;
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                StreamEvent::TextChunk(chunk) => text.push_str(&chunk),
+                StreamEvent::ReasoningChunk(chunk) => reasoning.push_str(&chunk),
+                StreamEvent::End(end) => response = Some(end),
+                _ => {}
+            }
+        }
+        let response = response.unwrap();
+        assert_eq!(text, "Based on the clues provided, here is the answer.");
+        assert_eq!(response.text(), text);
+        assert_eq!(reasoning, "**Evaluating the clues** further");
+        let Some(ReasoningArtifact::GoogleReasoning { fragments }) = &response.message.reasoning_artifact else {
+            panic!("expected Google reasoning");
+        };
+        assert_eq!(fragments[0].summary, "**Evaluating the clues** further");
+        assert_eq!(fragments[0].signature, "EpoGCpcG");
     }
 
     #[tokio::test]
