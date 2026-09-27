@@ -403,8 +403,9 @@ mod tests {
 
     #[test]
     fn timestamps_use_codex_format() {
-        let at = UNIX_EPOCH + Duration::new(1_790_577_224, 750_634_434);
-        assert_eq!(rfc3339_utc(at), "2026-09-28T06:33:44.750634434Z");
+        // A multiple of 100 ns: Windows `SystemTime` has 100 ns resolution.
+        let at = UNIX_EPOCH + Duration::new(1_790_577_224, 750_634_400);
+        assert_eq!(rfc3339_utc(at), "2026-09-28T06:33:44.750634400Z");
         assert_eq!(rfc3339_utc(UNIX_EPOCH), "1970-01-01T00:00:00.000000000Z");
     }
 }

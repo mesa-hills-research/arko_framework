@@ -70,7 +70,10 @@ impl Fixture {
         id: Uuid,
         predicate: impl Fn(&TerminalSnapshot) -> bool,
     ) -> TerminalSnapshot {
-        timeout(Duration::from_secs(5), async {
+        // Only bounds a genuinely stuck job; passing waits return as soon as the
+        // predicate holds. Loaded Windows CI runners spawning many ConPTY
+        // children in parallel have exceeded 5 s.
+        timeout(Duration::from_secs(30), async {
             loop {
                 let snapshot = self.manager.status(self.owner, id, None).unwrap();
                 if predicate(&snapshot) {

@@ -25,8 +25,8 @@ jobs:
             exit 1
           fi
       - name: Framework library tests, including native terminal interactions
-        run: cargo test --workspace --lib --locked
+        run: cargo test --workspace --lib --locked --no-fail-fast
       - name: Index pipeline and watcher tests
-        run: cargo test -p arko-index --locked
+        run: cargo test -p arko-index --locked --no-fail-fast
       - name: Interactive terminal example
         run: cargo run -p arko-agents --example interactive_terminal --locked
