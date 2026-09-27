@@ -5,7 +5,11 @@
 //! The key metric is `prev_found`: the share of calls whose cached prefix
 //! covers the previous request of the same conversation (within 1,024
 //! tokens), which reflects whether requests reach the server holding that
-//! conversation's cache.
+//! conversation's cache. Raw hit rates depend on run length (every call adds
+//! uncacheable tokens), so the summary also reports the `ceiling` (the share
+//! of input the previous call of the conversation could have cached),
+//! `efficiency` (hit rate / ceiling) and `prev_input_cached` (how much of the
+//! previous call's input was cached).
 //!
 //! Credentials come from `~/.codex/auth.json` (or `--auth-file`). The access
 //! token is used as is while valid. If it is about to expire, or the server
@@ -14,25 +18,35 @@
 //! replaced atomically with only the token fields and `last_refresh`
 //! changed. Tokens and the account id are never printed.
 //!
-//! Experiment flags (all off by default; the baseline uses none of them)
-//! adjust requests through an [`OpenAIRequestHook`]:
+//! By default requests go out exactly as the provider builds them (Codex
+//! parity: identity headers, turn state, verbatim output-item replay,
+//! `reasoning.context`). `--legacy` reproduces the provider as it was before
+//! that fix; the other experiment flags re-enable one piece each on top of
+//! `--legacy` (they are the default otherwise). Adjustments go through an
+//! [`OpenAIRequestHook`]:
 //!
 //! ```text
-//! cargo run -p arko-ai --example oauth_cache_probe -- --out <dir>              # baseline
-//! cargo run -p arko-ai --example oauth_cache_probe -- --out <dir> --session-id-header
+//! cargo run -p arko-ai --example oauth_cache_probe -- --out <dir>              # provider defaults
+//! cargo run -p arko-ai --example oauth_cache_probe -- --out <dir> --legacy     # before the fix
+//! cargo run -p arko-ai --example oauth_cache_probe -- --out <dir> --legacy --session-id-header
 //! cargo run -p arko-ai --example oauth_cache_probe -- --summarize-only --out <dir>
 //! ```
+//!
+//! A short-term rate limit (HTTP 429 that isn't a plan or quota limit) is
+//! retried after its `Retry-After` delay, up to three times per call; every
+//! attempt is traced. Plan limits, 401 and 403 stop every conversation.
 
 use arko_ai::{
-    Error, GenerationConfig, LLMClient, Model, OpenAIEffort, OpenAIRequestHook, Provider,
-    ReasoningConfig, RequestTrace, StreamEvent, ToolConfig, ToolDefinition, ToolResult,
+    Content, Error, GenerationConfig, GenerationResponse, LLMClient, Model, OpenAIEffort,
+    OpenAIRequestHook, Provider, ReasoningConfig, RequestTrace, StreamEvent, ToolConfig,
+    ToolDefinition, ToolResult,
 };
 use clap::Parser;
 use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -69,89 +83,160 @@ struct Args {
     #[arg(long)]
     summarize_only: bool,
 
-    /// Send `session-id: <prompt_cache_key>` (Codex parity).
+    /// Reproduce the provider as it was before the Codex-parity fix: no
+    /// identity headers, `OpenAI-Beta: responses=experimental`, no turn state,
+    /// no `Accept` header, no `reasoning.context`, and the old replay (the
+    /// assistant output came from `response.completed`, which the ChatGPT
+    /// backend leaves empty: no text, reasoning or output items; tool calls
+    /// from the stream, each followed by an empty assistant message). The
+    /// flags below re-enable single pieces on top of it.
+    #[arg(long)]
+    legacy: bool,
+    /// With --legacy: send `session-id: <prompt_cache_key>`.
     #[arg(long)]
     session_id_header: bool,
-    /// Send `thread-id: <prompt_cache_key>` (Codex parity).
+    /// With --legacy: send `thread-id: <prompt_cache_key>`.
     #[arg(long)]
     thread_id_header: bool,
-    /// Send `x-client-request-id: <prompt_cache_key>` (Codex sends its thread id).
+    /// With --legacy: send `x-client-request-id: <prompt_cache_key>`.
     #[arg(long)]
     client_request_id_header: bool,
-    /// Echo the last `x-codex-turn-state` response header of each conversation.
+    /// With --legacy: echo the turn's `x-codex-turn-state`.
     #[arg(long)]
     echo_turn_state: bool,
-    /// Omit `OpenAI-Beta: responses=experimental` (Codex dropped it).
+    /// With --legacy: omit `OpenAI-Beta: responses=experimental`.
     #[arg(long)]
     no_legacy_beta_header: bool,
-    /// Set `reasoning.context` in the body, e.g. `all_turns` (Codex sends this for GPT-6).
-    #[arg(long)]
-    reasoning_context: Option<String>,
-    /// Replay output items assembled from `response.output_item.done`. Needs the
-    /// provider change planned in the cache fix; rejected until then.
+    /// With --legacy: replay the output items assembled from
+    /// `response.output_item.done`, verbatim and in order.
     #[arg(long)]
     replay_output_items: bool,
+    /// Override `reasoning.context` (`auto`, `current_turn`, `all_turns`), or
+    /// `omit` to leave it out. Default: what the provider sends (`all_turns`
+    /// for GPT-5.6 and GPT-6), or nothing with --legacy.
+    #[arg(long)]
+    reasoning_context: Option<String>,
 }
 
-impl Args {
-    fn experiment_flags(&self) -> Value {
+/// What requests look like in a run, after --legacy and the flags.
+#[derive(Clone, Debug, PartialEq)]
+struct Settings {
+    legacy: bool,
+    session_id_header: bool,
+    thread_id_header: bool,
+    client_request_id_header: bool,
+    turn_state: bool,
+    legacy_beta_header: bool,
+    /// The provider sends `Accept: text/event-stream`; the old one didn't.
+    accept_header: bool,
+    replay_output_items: bool,
+    /// `None` keeps what the provider sends; `Some("omit")` removes it.
+    reasoning_context: Option<String>,
+}
+
+impl Settings {
+    fn new(args: &Args) -> Self {
+        let legacy = args.legacy;
+        Self {
+            legacy,
+            session_id_header: !legacy || args.session_id_header,
+            thread_id_header: !legacy || args.thread_id_header,
+            client_request_id_header: !legacy || args.client_request_id_header,
+            turn_state: !legacy || args.echo_turn_state,
+            legacy_beta_header: legacy && !args.no_legacy_beta_header,
+            accept_header: !legacy,
+            replay_output_items: !legacy || args.replay_output_items,
+            reasoning_context: args
+                .reasoning_context
+                .clone()
+                .or_else(|| legacy.then(|| "omit".to_string())),
+        }
+    }
+
+    fn manifest(&self) -> Value {
         json!({
+            "legacy": self.legacy,
             "session_id_header": self.session_id_header,
             "thread_id_header": self.thread_id_header,
             "client_request_id_header": self.client_request_id_header,
-            "echo_turn_state": self.echo_turn_state,
-            "no_legacy_beta_header": self.no_legacy_beta_header,
-            "reasoning_context": self.reasoning_context,
+            "turn_state": self.turn_state,
+            "legacy_beta_header": self.legacy_beta_header,
+            "accept_header": self.accept_header,
             "replay_output_items": self.replay_output_items,
+            "reasoning_context": self.reasoning_context.as_deref().unwrap_or("provider default"),
         })
     }
 }
 
-/// Probe-local request tweaks for A/B arms. With every flag off, requests
-/// are sent exactly as the provider builds them.
+/// Probe-local request changes for A/B arms. With the default settings,
+/// requests are sent exactly as the provider builds them.
 struct ProbeHook {
-    args: Args,
-    turn_states: Mutex<HashMap<String, String>>,
+    settings: Settings,
 }
 
 impl OpenAIRequestHook for ProbeHook {
-    fn prepare(&self, conversation_key: &str, headers: &mut HeaderMap, body: &mut Value) {
-        let mut set = |name: &'static str, value: &str| {
-            if let Ok(value) = HeaderValue::from_str(value) {
-                headers.insert(HeaderName::from_static(name), value);
+    fn prepare(&self, _conversation_key: &str, headers: &mut HeaderMap, body: &mut Value) {
+        let settings = &self.settings;
+        for (name, keep) in [
+            ("session-id", settings.session_id_header),
+            ("thread-id", settings.thread_id_header),
+            ("x-client-request-id", settings.client_request_id_header),
+            ("x-codex-turn-state", settings.turn_state),
+            ("accept", settings.accept_header),
+        ] {
+            if !keep {
+                headers.remove(name);
             }
-        };
-        if self.args.session_id_header {
-            set("session-id", conversation_key);
         }
-        if self.args.thread_id_header {
-            set("thread-id", conversation_key);
+        if settings.legacy_beta_header {
+            headers.insert(
+                HeaderName::from_static("openai-beta"),
+                HeaderValue::from_static("responses=experimental"),
+            );
         }
-        if self.args.client_request_id_header {
-            set("x-client-request-id", conversation_key);
-        }
-        if self.args.echo_turn_state
-            && let Some(state) = self.turn_states.lock().unwrap().get(conversation_key)
-        {
-            set("x-codex-turn-state", state);
-        }
-        if self.args.no_legacy_beta_header {
-            headers.remove("openai-beta");
-        }
-        if let Some(context) = &self.args.reasoning_context
+        if let Some(context) = &settings.reasoning_context
             && let Some(reasoning) = body.get_mut("reasoning").and_then(Value::as_object_mut)
         {
-            reasoning.insert("context".into(), Value::String(context.clone()));
+            if context == "omit" {
+                reasoning.remove("context");
+            } else {
+                reasoning.insert("context".into(), Value::String(context.clone()));
+            }
+        }
+        if !settings.replay_output_items
+            && let Some(input) = body.get_mut("input").and_then(Value::as_array_mut)
+        {
+            insert_legacy_empty_messages(input);
         }
     }
+}
 
-    fn observe_response(&self, conversation_key: &str, headers: &HeaderMap) {
-        if let Some(state) = headers.get("x-codex-turn-state").and_then(|v| v.to_str().ok()) {
-            self.turn_states
-                .lock()
-                .unwrap()
-                .insert(conversation_key.to_string(), state.to_string());
+/// The pre-fix provider kept only what `response.completed.output` held,
+/// which the ChatGPT backend leaves empty: the message had no text,
+/// reasoning or id, and its tool calls came from the stream.
+fn legacy_response(mut response: GenerationResponse) -> GenerationResponse {
+    response.message.content = vec![Content::Text(String::new())];
+    response.message.reasoning_artifact = None;
+    response.message.id = None;
+    response
+}
+
+/// The pre-fix provider replayed an empty assistant message after each
+/// turn's function calls; the provider no longer does.
+fn insert_legacy_empty_messages(input: &mut Vec<Value>) {
+    let empty = json!({"role": "assistant", "type": "message", "content": [{"type": "output_text", "text": ""}]});
+    let mut index = 0;
+    while index < input.len() {
+        let ends_calls = input[index]["type"] == "function_call"
+            && input.get(index + 1).is_none_or(|next| next["type"] != "function_call");
+        let followed_by_assistant = input
+            .get(index + 1)
+            .is_some_and(|next| next["type"] == "message" && next["role"] == "assistant");
+        if ends_calls && !followed_by_assistant {
+            input.insert(index + 1, empty.clone());
+            index += 1;
         }
+        index += 1;
     }
 }
 
@@ -170,8 +255,16 @@ async fn run(args: Args) -> Result<(), String> {
         write_summary(&args.out, &summary)?;
         return Ok(());
     }
-    if args.replay_output_items {
-        return Err("--replay-output-items needs the provider's output-item assembly (planned cache fix); not available yet".into());
+    let settings = Settings::new(&args);
+    if !args.legacy
+        && (args.session_id_header
+            || args.thread_id_header
+            || args.client_request_id_header
+            || args.echo_turn_state
+            || args.no_legacy_beta_header
+            || args.replay_output_items)
+    {
+        eprintln!("oauth_cache_probe: without --legacy, the header and replay flags are already the default");
     }
     if args.out.exists() && fs::read_dir(&args.out).map_err(|e| e.to_string())?.next().is_some() {
         return Err(format!("{} is not empty; choose a new --out directory", args.out.display()));
@@ -185,7 +278,7 @@ async fn run(args: Args) -> Result<(), String> {
     let credentials = Credentials::load(&auth_path)?;
     fs::create_dir_all(&args.out).map_err(|e| e.to_string())?;
 
-    let hook = Arc::new(ProbeHook { args: args.clone(), turn_states: Mutex::new(HashMap::new()) });
+    let hook = Arc::new(ProbeHook { settings: settings.clone() });
     let client = LLMClient::new()
         .with_request_trace(RequestTrace::new(&args.out))
         .with_openai_request_hook(hook)
@@ -205,21 +298,23 @@ async fn run(args: Args) -> Result<(), String> {
         "conversations": args.conversations,
         "turns": args.turns,
         "label": args.label,
-        "experiment": args.experiment_flags(),
+        "experiment": settings.manifest(),
         "endpoint": "chatgpt.com/backend-api/codex/responses (ChatGPT OAuth, HTTP SSE)",
     });
     fs::write(args.out.join("manifest.json"), serde_json::to_string_pretty(&manifest).unwrap())
         .map_err(|e| e.to_string())?;
-    println!("oauth_cache_probe: {} conversations x {} turns on {} ({}) -> {}",
-        args.conversations, args.turns, args.model, args.effort, args.out.display());
+    println!("oauth_cache_probe: {} conversations x {} turns on {} ({}){} -> {}",
+        args.conversations, args.turns, args.model, args.effort,
+        if settings.legacy { ", legacy" } else { "" }, args.out.display());
 
     let stop = Arc::new(AtomicBool::new(false));
     let mut tasks = Vec::new();
     for index in 0..args.conversations {
         let (client, model, args, stop, tokens) =
             (client.clone(), model.clone(), args.clone(), stop.clone(), tokens.clone());
+        let legacy_replay = !settings.replay_output_items;
         tasks.push(tokio::spawn(async move {
-            run_conversation(index, &client, model, effort, &args, &stop, &tokens).await
+            run_conversation(index, &client, model, effort, &args, legacy_replay, &stop, &tokens).await
         }));
     }
     let mut outcomes = Vec::new();
@@ -236,12 +331,14 @@ async fn run(args: Args) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_conversation(
     index: usize,
     client: &LLMClient,
     model: Model,
     effort: OpenAIEffort,
     args: &Args,
+    legacy_replay: bool,
     stop: &AtomicBool,
     tokens: &TokenKeeper,
 ) -> String {
@@ -261,11 +358,12 @@ async fn run_conversation(
             stop.store(true, Ordering::SeqCst);
             return format!("stopped: {message}");
         }
-        match generate(client, &conversation, &config).await {
+        match generate(index, client, &conversation, &config, tokens).await {
             Ok(response) => {
                 tokens.persist_if_rotated(client).await;
                 consecutive_errors = 0;
                 let calls = response.message.tool_calls.clone();
+                let response = if legacy_replay { legacy_response(response) } else { response };
                 conversation.add_assistant_message_from_response(response);
                 if calls.is_empty() {
                     conversation.add_user_message(
@@ -284,9 +382,9 @@ async fn run_conversation(
             Err(error) => {
                 tokens.persist_if_rotated(client).await;
                 let text = error.to_string();
-                let rate_limited = matches!(&error, Error::ProviderError { status: Some(429), .. })
-                    || text.contains("usage_limit") || text.contains("rate_limit");
-                if rate_limited || matches!(&error, Error::ProviderError { status: Some(401 | 403), .. }) {
+                // A short-term rate limit that outlasted its retries also
+                // stops the run: the account is being throttled.
+                if matches!(classify(&error), Failure::StopAll | Failure::RateLimited(_)) {
                     stop.store(true, Ordering::SeqCst);
                     return format!("stopped all conversations after {turn} turns: {}", truncate(&text, 300));
                 }
@@ -301,11 +399,47 @@ async fn run_conversation(
     format!("completed {turn} turns")
 }
 
+/// One model call. A short-term rate limit is retried after its delay, up
+/// to [`RATE_LIMIT_RETRIES`] times; each attempt is traced as its own call.
 async fn generate(
+    index: usize,
     client: &LLMClient,
     conversation: &arko_ai::Conversation,
     config: &GenerationConfig,
-) -> Result<arko_ai::GenerationResponse, Error> {
+    tokens: &TokenKeeper,
+) -> Result<GenerationResponse, Error> {
+    let mut retries = 0;
+    loop {
+        let error = match generate_once(client, conversation, config).await {
+            Ok(response) => return Ok(response),
+            Err(error) => error,
+        };
+        let Failure::RateLimited(hint) = classify(&error) else {
+            return Err(error);
+        };
+        if retries == RATE_LIMIT_RETRIES {
+            return Err(error);
+        }
+        retries += 1;
+        let delay = rate_limit_delay(hint, arko_ai::retry::random_sample());
+        eprintln!(
+            "conversation {index}: rate limited ({}); retry {retries}/{RATE_LIMIT_RETRIES} in {:.1}s",
+            truncate(&error.to_string(), 160),
+            delay.as_secs_f64(),
+        );
+        tokio::time::sleep(delay).await;
+        tokens.persist_if_rotated(client).await;
+        if let Err(message) = tokens.ensure_fresh(client).await {
+            return Err(Error::AuthenticationFailed(message));
+        }
+    }
+}
+
+async fn generate_once(
+    client: &LLMClient,
+    conversation: &arko_ai::Conversation,
+    config: &GenerationConfig,
+) -> Result<GenerationResponse, Error> {
     let mut stream = client.generate_stream(conversation, config.clone()).await?;
     while let Some(event) = stream.next().await {
         if let StreamEvent::End(response) = event? {
@@ -313,6 +447,59 @@ async fn generate(
         }
     }
     Err(Error::StreamTruncated("stream ended without a response".into()))
+}
+
+const RATE_LIMIT_RETRIES: u32 = 3;
+/// Wait when a rate limit comes without a delay hint.
+const DEFAULT_RATE_LIMIT_WAIT: Duration = Duration::from_secs(30);
+const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(120);
+
+/// Error codes of plan, quota and spend limits, which waiting a minute
+/// doesn't lift (the codes Codex maps to usage-limit and quota errors).
+const PLAN_LIMIT_CODES: &[&str] = &[
+    "usage_limit_reached",
+    "usage_not_included",
+    "insufficient_quota",
+    "credit_balance_exhausted",
+    "organization_spend_limit_exceeded",
+    "project_spend_limit_exceeded",
+    "organization_usage_limit_exceeded",
+];
+
+#[derive(Debug, PartialEq)]
+enum Failure {
+    /// A plan limit or an authentication failure: stop every conversation.
+    StopAll,
+    /// A short-term rate limit, with the server's delay hint.
+    RateLimited(Option<Duration>),
+    Other,
+}
+
+fn classify(error: &Error) -> Failure {
+    let text = error.to_string();
+    if PLAN_LIMIT_CODES.iter().any(|code| text.contains(code)) {
+        return Failure::StopAll;
+    }
+    match error {
+        Error::ProviderError { status: Some(401 | 403), .. } | Error::AuthenticationFailed(_) => {
+            Failure::StopAll
+        }
+        Error::ProviderError { status: Some(429), .. } => Failure::RateLimited(error.retry_after()),
+        // Rate limits reported by a stream error event after a 200.
+        Error::ProviderError { status: None, code: Some(code), .. }
+            if code == "rate_limit_exceeded" || code == "slow_down" =>
+        {
+            Failure::RateLimited(error.retry_after())
+        }
+        _ => Failure::Other,
+    }
+}
+
+/// The server's delay (or a default) plus up to three seconds of jitter,
+/// capped at two minutes.
+fn rate_limit_delay(hint: Option<Duration>, sample: u64) -> Duration {
+    let jitter = Duration::from_millis(250 + sample % 2_750);
+    (hint.unwrap_or(DEFAULT_RATE_LIMIT_WAIT) + jitter).min(MAX_RATE_LIMIT_WAIT)
 }
 
 // ---------------------------------------------------------------------------
@@ -718,6 +905,7 @@ fn stats(calls: &[Value]) -> Value {
     let streamed_reasoning: u64 =
         ok.iter().filter_map(|c| c["streamed_reasoning_with_encrypted_content"].as_u64()).sum();
     let not_prefix = ok.iter().filter(|c| c["prefix"]["previous_is_prefix"] == false).count();
+    let reuse = PrefixReuse::of(&ok);
     let ratio = |a: u64, b: u64| if b == 0 { Value::Null } else { json!(round(a as f64 / b as f64)) };
     json!({
         "calls": calls.len(),
@@ -728,6 +916,9 @@ fn stats(calls: &[Value]) -> Value {
         "output_tokens": output,
         "reasoning_tokens": reasoning,
         "hit_rate": ratio(cached, input),
+        "ceiling": ratio(reuse.reusable, input),
+        "efficiency": ratio(cached, reuse.reusable),
+        "prev_input_cached": ratio(reuse.previous_cached, reuse.previous_input),
         "warm_hit_rate_seq_ge_3": ratio(warm_cached, warm_input),
         "zero_cache_share_seq_ge_2": ratio(zero as u64, later.len() as u64),
         "prev_found_share": ratio(prev.iter().filter(|p| **p).count() as u64, prev.len() as u64),
@@ -744,14 +935,49 @@ fn stats(calls: &[Value]) -> Value {
     })
 }
 
+/// How much of each call's input the previous successful call of the same
+/// conversation could have left in the cache, summed over calls.
+#[derive(Debug, Default, PartialEq)]
+struct PrefixReuse {
+    /// Σ min(previous input, input): the input a perfect cache would serve.
+    reusable: u64,
+    /// Σ previous input.
+    previous_input: u64,
+    /// Σ min(cached, previous input).
+    previous_cached: u64,
+}
+
+impl PrefixReuse {
+    fn of(calls: &[&Value]) -> Self {
+        let mut by_conversation: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
+        for call in calls {
+            by_conversation.entry(call["conversation"].as_str().unwrap_or("?")).or_default().push(call);
+        }
+        let mut reuse = Self::default();
+        for calls in by_conversation.values_mut() {
+            calls.sort_by_key(|call| call["seq"].as_u64().unwrap_or(0));
+            for pair in calls.windows(2) {
+                let previous = pair[0]["input_tokens"].as_u64().unwrap_or(0);
+                let input = pair[1]["input_tokens"].as_u64().unwrap_or(0);
+                let cached = pair[1]["cached_tokens"].as_u64().unwrap_or(0);
+                reuse.reusable += previous.min(input);
+                reuse.previous_input += previous;
+                reuse.previous_cached += cached.min(previous);
+            }
+        }
+        reuse
+    }
+}
+
 fn write_summary(out: &Path, summary: &Value) -> Result<(), String> {
     fs::write(out.join("summary.json"), serde_json::to_string_pretty(summary).unwrap()).map_err(|e| e.to_string())?;
     let mut text = String::new();
     let line = |label: &str, s: &Value| {
         format!(
-            "{label:<28} calls {:>3}  hit {:>6}  warm {:>6}  zero {:>6}  prev_found {:>6}  shortfall_p50 {:>7}  input {:>8}  cached {:>8}  output {:>6}  served {}\n",
-            s["successful_calls"], fmt(&s["hit_rate"]), fmt(&s["warm_hit_rate_seq_ge_3"]),
-            fmt(&s["zero_cache_share_seq_ge_2"]), fmt(&s["prev_found_share"]),
+            "{label:<28} calls {:>3}  hit {:>6}  ceiling {:>6}  efficiency {:>6}  prev_input_cached {:>6}  prev_found {:>6}  warm {:>6}  zero {:>6}  shortfall_p50 {:>7}  input {:>8}  cached {:>8}  output {:>6}  served {}\n",
+            s["successful_calls"], fmt(&s["hit_rate"]), fmt(&s["ceiling"]), fmt(&s["efficiency"]),
+            fmt(&s["prev_input_cached"]), fmt(&s["prev_found_share"]), fmt(&s["warm_hit_rate_seq_ge_3"]),
+            fmt(&s["zero_cache_share_seq_ge_2"]),
             s["median_shortfall_on_hits"], s["input_tokens"], s["cached_tokens"], s["output_tokens"],
             s["served_models"]
         )
@@ -857,6 +1083,110 @@ mod tests {
         let now = rfc3339_now();
         assert_eq!(now.len(), "2026-09-21T06:33:44.750634434Z".len());
         assert!(now.starts_with("20") && now.ends_with('Z') && now.as_bytes()[10] == b'T');
+    }
+
+    fn provider_error(status: Option<u16>, body: &str, retry_after: Option<Duration>) -> Error {
+        let value: Value = serde_json::from_str(body).unwrap_or_default();
+        let error = value.get("error").unwrap_or(&value);
+        let code = error.get("code").or_else(|| error.get("type")).and_then(Value::as_str);
+        Error::ProviderError {
+            message: format!("OpenAI request failed: {body}"),
+            status,
+            code: code.map(String::from),
+            retry_after,
+        }
+    }
+
+    #[test]
+    fn short_term_rate_limits_are_retried_and_plan_limits_stop_the_run() {
+        let seconds = Duration::from_secs;
+        let rate_limited = provider_error(Some(429), r#"{"detail":"Rate limit exceeded"}"#, Some(seconds(36)));
+        assert_eq!(classify(&rate_limited), Failure::RateLimited(Some(seconds(36))));
+        let unhinted = provider_error(Some(429), r#"{"error":{"code":"rate_limit_exceeded"}}"#, None);
+        assert_eq!(classify(&unhinted), Failure::RateLimited(None));
+        let streamed = provider_error(None, r#"{"error":{"code":"rate_limit_exceeded","message":"slow down"}}"#, None);
+        assert_eq!(classify(&streamed), Failure::RateLimited(None));
+
+        for body in [
+            r#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":3600}}"#,
+            r#"{"error":{"type":"usage_not_included"}}"#,
+            r#"{"error":{"code":"insufficient_quota"}}"#,
+        ] {
+            assert_eq!(classify(&provider_error(Some(429), body, Some(seconds(3600)))), Failure::StopAll, "{body}");
+        }
+        for status in [401, 403] {
+            assert_eq!(classify(&provider_error(Some(status), "{}", None)), Failure::StopAll);
+        }
+        assert_eq!(classify(&Error::AuthenticationFailed("refresh failed".into())), Failure::StopAll);
+        assert_eq!(classify(&provider_error(Some(500), r#"{"error":{"code":"server_error"}}"#, None)), Failure::Other);
+        assert_eq!(classify(&Error::StreamTruncated("eof".into())), Failure::Other);
+
+        for sample in [0, 1, 2_749, u64::MAX] {
+            let delay = rate_limit_delay(Some(seconds(36)), sample);
+            assert!(delay >= seconds(36) && delay <= Duration::from_millis(39_000), "{delay:?}");
+            assert!(rate_limit_delay(None, sample) >= DEFAULT_RATE_LIMIT_WAIT);
+            assert_eq!(rate_limit_delay(Some(seconds(600)), sample), MAX_RATE_LIMIT_WAIT);
+        }
+    }
+
+    #[test]
+    fn ceiling_and_efficiency_use_the_previous_successful_call() {
+        let call = |conversation: &str, seq: u64, input: u64, cached: u64, status: &str| json!({
+            "conversation": conversation, "seq": seq, "status": status,
+            "input_tokens": input, "cached_tokens": cached,
+        });
+        let calls = [
+            call("a", 1, 4_000, 0, "completed"),
+            call("a", 2, 0, 0, "error"),
+            call("a", 3, 5_000, 3_000, "completed"),
+            call("a", 4, 4_500, 4_500, "completed"),
+            call("b", 1, 2_000, 1_000, "completed"),
+        ];
+        let summary = stats(&calls);
+        // Pairs: (4000 -> 5000) and (5000 -> 4500); the failed call and each
+        // conversation's first call have no previous.
+        assert_eq!(summary["ceiling"], json!(round(8_500.0 / 15_500.0)));
+        assert_eq!(summary["efficiency"], json!(round(8_500.0 / 8_500.0)));
+        assert_eq!(summary["prev_input_cached"], json!(round(7_500.0 / 9_000.0)));
+        assert_eq!(summary["hit_rate"], json!(round(8_500.0 / 15_500.0)));
+    }
+
+    #[test]
+    fn legacy_replay_adds_the_empty_message_after_each_turns_calls() {
+        let user = json!({"role": "user", "type": "message", "content": "go"});
+        let call = |id: &str| json!({"type": "function_call", "call_id": id});
+        let output = |id: &str| json!({"type": "function_call_output", "call_id": id});
+        let empty = json!({"role": "assistant", "type": "message", "content": [{"type": "output_text", "text": ""}]});
+        let mut input = vec![user.clone(), call("a"), output("a"), call("b"), call("c"), output("b"), output("c"), empty.clone()];
+        insert_legacy_empty_messages(&mut input);
+        assert_eq!(input, [
+            user, call("a"), empty.clone(), output("a"), call("b"), call("c"), empty.clone(),
+            output("b"), output("c"), empty,
+        ]);
+    }
+
+    #[test]
+    fn legacy_turns_off_every_fix_and_flags_restore_them_one_by_one() {
+        let parse = |flags: &[&str]| {
+            let mut argv = vec!["probe", "--out", "x"];
+            argv.extend_from_slice(flags);
+            Settings::new(&Args::parse_from(argv))
+        };
+        let current = parse(&[]);
+        assert!(current.session_id_header && current.turn_state && current.replay_output_items && current.accept_header);
+        assert!(!current.legacy_beta_header);
+        assert_eq!(current.reasoning_context, None);
+
+        let legacy = parse(&["--legacy"]);
+        assert!(!legacy.session_id_header && !legacy.thread_id_header && !legacy.client_request_id_header);
+        assert!(!legacy.turn_state && !legacy.replay_output_items && !legacy.accept_header);
+        assert!(legacy.legacy_beta_header);
+        assert_eq!(legacy.reasoning_context.as_deref(), Some("omit"));
+
+        let arm = parse(&["--legacy", "--session-id-header", "--replay-output-items"]);
+        assert!(arm.session_id_header && arm.replay_output_items && !arm.thread_id_header);
+        assert_eq!(parse(&["--replay-output-items"]), current);
+        assert_eq!(parse(&["--reasoning-context", "current_turn"]).reasoning_context.as_deref(), Some("current_turn"));
     }
 
     #[test]
