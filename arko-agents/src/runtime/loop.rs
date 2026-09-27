@@ -2688,7 +2688,7 @@ impl AgentLoop {
             &config,
             attempt,
             error.retry_after(),
-            Uuid::new_v4().as_u128() as u64,
+            ai::retry::random_sample(),
         );
         if !indefinite_capacity
             && elapsed.saturating_add(delay) >= Duration::from_millis(config.max_elapsed_ms) {

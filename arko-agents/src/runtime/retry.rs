@@ -1,37 +1,22 @@
 use crate::agent_config::LLMRetryConfig;
+use arko_ai::BackoffPolicy;
 use std::time::Duration;
 
-/// `sample` is supplied separately so timing tests need no random generator.
+/// Delay before recovery `attempt` under `config`, using the framework's
+/// shared [`BackoffPolicy`]. `sample` is supplied separately so timing tests
+/// need no random generator.
 pub(super) fn retry_delay(
     config: &LLMRetryConfig,
     attempt: u32,
     server: Option<Duration>,
     sample: u64,
 ) -> Duration {
-    let multiplier = 1_u64
-        .checked_shl(attempt.saturating_sub(1))
-        .unwrap_or(u64::MAX);
-    let cap = config
-        .initial_delay_ms
-        .saturating_mul(multiplier)
-        .min(config.max_delay_ms);
-    let millis = if config.jitter {
-        let floor = cap.div_ceil(2);
-        floor + sample % (cap - floor + 1)
-    } else {
-        cap
-    };
-    // Add nonnegative jitter to a server minimum too, so a shared reset
-    // does not synchronize all agents. Never retry before that minimum.
-    let server_jitter = if config.jitter {
-        sample % (cap / 2 + 1)
-    } else {
-        0
-    };
-    let minimum = server
-        .unwrap_or_default()
-        .saturating_add(Duration::from_millis(server_jitter));
-    Duration::from_millis(millis).max(minimum)
+    BackoffPolicy {
+        initial: Duration::from_millis(config.initial_delay_ms),
+        max: Duration::from_millis(config.max_delay_ms),
+        jitter: config.jitter,
+    }
+    .delay(attempt, server, sample)
 }
 
 #[cfg(test)]

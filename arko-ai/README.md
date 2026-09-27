@@ -80,6 +80,12 @@ Google's Interactions API reports only an interaction `status`: `completed` maps
 
 References: [Anthropic streaming refusals](https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/handle-streaming-refusals), [official Anthropic streaming event schema](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/types/raw_message_delta_event.py), [OpenAI refusal and content-filter handling](https://developers.openai.com/api/docs/guides/structured-outputs), [OpenAI streaming refusal events](https://platform.openai.com/docs/api-reference/responses-streaming/response/refusal), [Gemini Interactions API](https://ai.google.dev/api/interactions-api-v1).
 
+## Errors and retries
+
+`Error::retry_class()` returns `Permanent`, `Transient` or `Capacity`; `is_retryable()` and `is_capacity_error()` are views of it. Provider error bodies are read generically: string codes (`error.code`, `error.type`, `error.status`), OpenRouter's `error.metadata.error_type`, and numeric HTTP-style codes, which stand in for the status on stream errors that arrive after a 200. Delay hints come from `Retry-After`, OpenAI's `x-ratelimit-reset-*` headers, or body fields (`retry_after_ms`, `retry_after`, `resets_at`) for every provider.
+
+`arko_ai::retry::BackoffPolicy` is the shared backoff: exponential with a cap and equal jitter, treating a server hint as a minimum with jitter above it. arko-ai does not retry model calls itself; arko-agents, arko-index and the OpenAI OAuth refresh loop use this policy.
+
 ### Long requests and embedding tokenizers
 
 The shared model HTTP client has no total request deadline. Connection setup and idle

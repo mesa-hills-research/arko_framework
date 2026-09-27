@@ -6,6 +6,7 @@ pub mod message;
 pub mod model;
 pub mod providers;
 pub mod reasoning;
+pub mod retry;
 pub mod stop;
 pub mod tool;
 pub mod usage;
@@ -19,7 +20,7 @@ pub mod token_utils;
 pub use client::LLMClient;
 pub use config::{GenerationConfig, Verbosity};
 pub use conversation::Conversation;
-pub use error::Error;
+pub use error::{Error, RetryClass};
 pub use message::{Content, Image, Message, Role};
 pub use model::{Model, Provider};
 pub use providers::{GenerationResponse, StreamEvent};
@@ -29,6 +30,7 @@ pub use reasoning::{
 };
 pub use stop::{Refusal, RefusalSource, StopReason};
 pub use tool::{ToolCall, ToolChoice, ToolConfig, ToolDefinition, ToolResult};
+pub use retry::BackoffPolicy;
 pub use usage::{ContextEvent, ContextEventType, ModelCallUsage, UsageInfo};
 
 pub use embedding_client::EmbeddingClient;

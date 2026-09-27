@@ -64,14 +64,10 @@ impl Provider for GoogleClient {
         let interaction: InteractionResponse = response.json().await?;
 
         if interaction.status.as_deref() == Some("failed") {
-            return Err(Error::ApiError(format!(
-                "Google Interactions API returned a failed interaction: {}",
-                interaction
-                    .error
-                    .as_ref()
-                    .map(Value::to_string)
-                    .unwrap_or_else(|| "unknown error".to_string())
-            )));
+            return Err(interaction_error(
+                "Google Interactions API returned a failed interaction",
+                interaction.error.as_ref(),
+            ));
         }
 
         let message = Self::parse_steps(&interaction.steps);
@@ -398,9 +394,11 @@ impl GoogleClient {
                             .and_then(Value::as_str)
                         {
                             Some("failed") => {
-                                Err(Error::ApiError(
-                                    "Google Interactions stream reported a failed interaction."
-                                        .to_string(),
+                                Err(interaction_error(
+                                    "Google Interactions stream reported a failed interaction",
+                                    value
+                                        .get("error")
+                                        .or_else(|| value.pointer("/interaction/error")),
                                 ))?;
 
                                 break;
@@ -416,27 +414,18 @@ impl GoogleClient {
                         }
                     }
                     Some("interaction.failed") => {
-                        Err(Error::ApiError(format!(
-                            "Google Interactions stream failed: {}",
-                            value["interaction"]
-                        )))?;
+                        Err(interaction_error(
+                            "Google Interactions stream failed",
+                            value.pointer("/interaction/error"),
+                        ))?;
 
                         break;
                     }
                     Some("error") => {
-                        let message = value
-                            .pointer("/error/message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("unknown");
-
-                        let code = value
-                            .pointer("/error/code")
-                            .and_then(Value::as_str)
-                            .unwrap_or("error");
-
-                        Err(Error::ApiError(format!(
-                            "Google Interactions stream error {code}: {message}"
-                        )))?;
+                        Err(interaction_error(
+                            "Google Interactions stream error",
+                            value.get("error"),
+                        ))?;
 
                         break;
                     }
@@ -1017,6 +1006,20 @@ impl GoogleClient {
     }
 }
 
+/// Classifies an interaction or stream error by its `code` (numeric
+/// HTTP-style or string) and `status` (e.g. `UNAVAILABLE`,
+/// `RESOURCE_EXHAUSTED`). An error without either stays a generic,
+/// boundedly retryable API error.
+fn interaction_error(label: &str, error: Option<&Value>) -> Error {
+    match error {
+        Some(error) if error.get("code").is_some() || error.get("status").is_some() => {
+            Error::provider_error(label, None, None, &serde_json::json!({ "error": error }).to_string())
+        }
+        Some(error) => Error::ApiError(format!("{label}: {error}")),
+        None => Error::ApiError(format!("{label}: unknown error")),
+    }
+}
+
 struct PendingThought {
     summary: String,
     signature: Option<String>,
@@ -1230,6 +1233,24 @@ mod tests {
     fn completed(status: &str) -> Value {
         json!({"event_type":"interaction.completed","interaction":{"id":"int_1","status":status,
             "usage":{"total_input_tokens":3,"total_output_tokens":2}}})
+    }
+
+    #[tokio::test]
+    async fn stream_errors_are_classified_by_code_and_status() {
+        let (_, error) = stream_events(&[json!({"event_type":"error",
+            "error":{"code":503,"message":"The model is overloaded.","status":"UNAVAILABLE"}})])
+        .await;
+        let error = error.unwrap();
+        assert!(error.is_capacity_error(), "{error:?}");
+        let (_, error) = stream_events(&[json!({"event_type":"error",
+            "error":{"code":400,"message":"bad","status":"INVALID_ARGUMENT"}})])
+        .await;
+        assert!(!error.unwrap().is_retryable());
+        // A failure without details stays boundedly retryable.
+        let (_, error) = stream_events(&[json!({"event_type":"interaction.failed",
+            "interaction":{"id":"int_1","status":"failed"}})])
+        .await;
+        assert!(matches!(error, Some(Error::ApiError(_))));
     }
 
     #[tokio::test]

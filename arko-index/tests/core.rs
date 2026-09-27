@@ -390,6 +390,7 @@ async fn judged_search_rejects_invalid_partitions_and_never_hides_provider_error
             message: "rate limit".into(),
             transient: true,
             retry_after: Some(Duration::from_secs(2)),
+            source: None,
         })
     });
     assert!(matches!(

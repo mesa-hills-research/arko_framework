@@ -8,6 +8,7 @@ use crate::{
     reasoning::{
         OpenAIEffort, OpenAIReasoningItem, OpenAIReasoningMode, ReasoningArtifact,
     },
+    retry::BackoffPolicy,
     stop::{Refusal, RefusalSource, StopReason},
     tool::{ToolCall, ToolChoice},
     usage::{ModelCallUsage, UsageInfo},
@@ -18,11 +19,7 @@ use eventsource_stream::Eventsource;
 use futures::{StreamExt, stream::BoxStream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{
-    collections::BTreeMap,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
 #[cfg(test)]
@@ -139,115 +136,7 @@ pub fn is_token_expired(token: &str, margin: std::time::Duration) -> bool {
 }
 
 fn retry_after_from_headers(response: &reqwest::Response) -> Option<Duration> {
-    let headers = response.headers();
-    if let Some(delay) = crate::error::retry_after_from_headers(headers) {
-        return Some(delay);
-    }
-
-    ["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"]
-        .iter()
-        .filter_map(|name| headers.get(*name))
-        .filter_map(|value| value.to_str().ok())
-        .filter_map(parse_relative_duration)
-        .max()
-}
-
-fn parse_relative_duration(value: &str) -> Option<Duration> {
-    let mut remainder = value.trim();
-    let mut total_millis = 0_f64;
-    let mut parsed_component = false;
-
-    while !remainder.is_empty() {
-        let numeric_end = remainder
-            .char_indices()
-            .find_map(|(index, character)| {
-                (!character.is_ascii_digit() && character != '.').then_some(index)
-            })
-            .unwrap_or(remainder.len());
-        if numeric_end == 0 {
-            return None;
-        }
-        let amount = remainder[..numeric_end].parse::<f64>().ok()?;
-        remainder = &remainder[numeric_end..];
-        let (multiplier, suffix_bytes) = if remainder.starts_with("ms") {
-            (1_f64, 2)
-        } else if remainder.starts_with('s') {
-            (1_000_f64, 1)
-        } else if remainder.starts_with('m') {
-            (60_000_f64, 1)
-        } else if remainder.starts_with('h') {
-            (3_600_000_f64, 1)
-        } else {
-            return None;
-        };
-        total_millis += amount * multiplier;
-        parsed_component = true;
-        remainder = remainder[suffix_bytes..].trim_start();
-    }
-
-    parsed_component.then(|| Duration::from_millis(total_millis.ceil() as u64))
-}
-
-fn value_as_f64(value: &Value) -> Option<f64> {
-    value
-        .as_f64()
-        .or_else(|| value.as_str().and_then(|value| value.parse::<f64>().ok()))
-}
-
-fn find_numeric_field(value: &Value, names: &[&str]) -> Option<f64> {
-    match value {
-        Value::Object(object) => {
-            for name in names {
-                if let Some(number) = object
-                    .get(*name)
-                    .and_then(value_as_f64)
-                    .filter(|n| n.is_finite() && *n >= 0.0)
-                {
-                    return Some(number);
-                }
-            }
-            object
-                .values()
-                .find_map(|child| find_numeric_field(child, names))
-        }
-        Value::Array(array) => array
-            .iter()
-            .find_map(|child| find_numeric_field(child, names)),
-        _ => None,
-    }
-}
-
-fn retry_after_from_value(value: &Value) -> Option<Duration> {
-    if let Some(milliseconds) =
-        find_numeric_field(value, &["retry_after_ms", "retryAfterMs"])
-    {
-        return Some(Duration::from_millis(milliseconds.ceil() as u64));
-    }
-    if let Some(seconds) = find_numeric_field(value, &["retry_after", "retryAfter"])
-    {
-        return Some(Duration::from_millis((seconds * 1_000_f64).ceil() as u64));
-    }
-    let reset_at = find_numeric_field(
-        value,
-        &["resets_at", "reset_at", "resetsAt", "resetAt"],
-    )?;
-    let reset_millis = if reset_at >= 10_000_000_000_f64 {
-        reset_at
-    } else {
-        reset_at * 1_000_f64
-    };
-    let now_millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_millis() as f64;
-    Some(Duration::from_millis(
-        (reset_millis - now_millis).max(1_000_f64).ceil() as u64,
-    ))
-}
-
-fn retry_after_from_body(body: &str) -> Option<Duration> {
-    let value: Value = serde_json::from_str(body).ok()?;
-    retry_after_from_value(&value)
+    crate::error::retry_after_from_headers(response.headers())
 }
 
 fn response_error(
@@ -256,34 +145,21 @@ fn response_error(
     header_delay: Option<Duration>,
     body: &str,
 ) -> Error {
-    Error::provider_error(
-        label,
-        Some(status.as_u16()),
-        header_delay.or_else(|| retry_after_from_body(body)),
-        body,
-    )
+    Error::provider_error(label, Some(status.as_u16()), header_delay, body)
 }
+
+/// Backoff for the opt-in OAuth refresh rate-limit loop: 30 s doubling to a
+/// 15-minute cap; a server hint is a minimum.
+const OAUTH_REFRESH_BACKOFF: BackoffPolicy =
+    BackoffPolicy::new(Duration::from_secs(30), Duration::from_secs(900));
 
 fn oauth_retry_delay(
     header_delay: Option<Duration>,
     body: &str,
     attempt: u32,
 ) -> Duration {
-    let minimum = header_delay
-        .or_else(|| retry_after_from_body(body))
-        .unwrap_or_else(|| {
-            Duration::from_secs(
-                30_u64
-                    .saturating_mul(2_u64.pow(attempt.min(5)))
-                    .min(900),
-            )
-        });
-    let jitter = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_millis() as u64
-        % 1_001;
-    minimum.saturating_add(Duration::from_millis(250 + jitter))
+    let hint = header_delay.or_else(|| crate::error::retry_after_from_body(body));
+    OAUTH_REFRESH_BACKOFF.next_delay(attempt.saturating_add(1), hint)
 }
 
 pub async fn refresh_chatgpt_oauth_token(
@@ -897,7 +773,7 @@ impl OpenAIClient {
                         Err(Error::provider_error(
                             &format!("OpenAI stream error: {message}"),
                             None,
-                            retry_after_from_value(value),
+                            None,
                             &value.to_string(),
                         ))?;
 
@@ -1994,7 +1870,8 @@ pub fn list_models() -> Vec<crate::model::Model> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpenAIClient, parse_relative_duration, retry_after_from_body};
+    use super::OpenAIClient;
+    use crate::error::{parse_relative_duration, retry_after_from_body};
     use crate::{
         config::{GenerationConfig, Verbosity},
         conversation::Conversation,
@@ -2060,7 +1937,7 @@ mod tests {
             r#"{"retry_after":"NaN"}"#,
             r#"{"retry_after":"inf"}"#,
         ] {
-            assert_eq!(super::retry_after_from_body(body), None);
+            assert_eq!(retry_after_from_body(body), None);
         }
     }
 
@@ -2581,5 +2458,17 @@ mod tests {
             .build_request(&conversation, &GenerationConfig::new(0.3), false)
             .unwrap();
         assert_eq!(serde_json::to_value(request).unwrap()["temperature"], 0.3);
+    }
+
+    #[test]
+    fn oauth_refresh_backoff_doubles_to_a_cap_and_honors_server_hints() {
+        for _ in 0..50 {
+            let first = super::oauth_retry_delay(None, "{}", 0);
+            assert!(first >= Duration::from_secs(15) && first <= Duration::from_secs(30));
+            let late = super::oauth_retry_delay(None, "{}", 20);
+            assert!(late >= Duration::from_secs(450) && late <= Duration::from_secs(900));
+            let hinted = super::oauth_retry_delay(None, r#"{"retry_after":1200}"#, 0);
+            assert!(hinted >= Duration::from_secs(1200));
+        }
     }
 }

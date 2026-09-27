@@ -16,6 +16,11 @@ use tokio::{
     time::Instant,
 };
 
+/// Delay between transient provider failures: 1 s doubling to a 60 s cap,
+/// jittered, and never shorter than the provider's Retry-After.
+const RETRY_BACKOFF: arko_ai::BackoffPolicy =
+    arko_ai::BackoffPolicy::new(Duration::from_secs(1), Duration::from_secs(60));
+
 #[derive(Clone)]
 pub(crate) enum Operation {
     Chunk(ModelRequest),
@@ -29,7 +34,6 @@ struct Task {
     operation: Operation,
     initial: bool,
     attempts: usize,
-    retry_delay: Duration,
     failures: Vec<serde_json::Value>,
     ready: Instant,
     control: watch::Receiver<u8>,
@@ -182,9 +186,8 @@ impl Scheduler {
                                 if let Err(error)=&result {task.event("failed",serde_json::json!({"error":error.to_string()}));task.failures.push(serde_json::json!({"attempt":task.attempts,"error":error.to_string()}));}
                                 if let Err(Error::Provider { transient: true, retry_after, .. }) = &result
                                     && *task.control.borrow() == 0 {
-                                        let jitter = (task.attempts.wrapping_mul(137).wrapping_add(queue.len().wrapping_mul(31))) % 251;
-                                        let delay = task.retry_delay.saturating_add(Duration::from_millis(1000 + jitter as u64)).max(retry_after.unwrap_or(Duration::ZERO));
-                                        task.retry_delay = delay;
+                                        let attempt = u32::try_from(task.attempts).unwrap_or(u32::MAX);
+                                        let delay = RETRY_BACKOFF.next_delay(attempt, *retry_after);
                                         task.event("retry_wait",serde_json::json!({"delay_ms":delay.as_millis()}));
                                         task.attempts = task.attempts.saturating_add(1); task.initial = false; task.ready = Instant::now()+delay;
                                         queue.push_back(task); continue;
@@ -224,7 +227,6 @@ impl Scheduler {
                 operation,
                 initial,
                 attempts: 1,
-                retry_delay: Duration::ZERO,
                 failures: vec![],
                 ready: Instant::now(),
                 control: control.0.subscribe(),
@@ -271,6 +273,7 @@ mod tests {
                     message: "temporary capacity".into(),
                     transient: true,
                     retry_after: Some(self.retry_delay),
+                    source: None,
                 });
             }
             self.gates[id].acquire().await.unwrap().forget();
@@ -472,8 +475,15 @@ mod tests {
             .filter(|e| e["phase"] == "retry_wait")
             .map(|e| e["detail"]["delay_ms"].as_u64().unwrap())
             .collect();
-        assert!(waits[0] >= 10_000);
-        assert!(waits.windows(2).all(|pair| pair[1] > pair[0]));
+        // Each wait honors the 10 s Retry-After and adds at most half of the
+        // attempt's backoff cap (1 s doubling) as jitter above it.
+        for (index, wait) in waits.iter().enumerate() {
+            let cap = 1_000_u64 << index;
+            assert!(
+                *wait >= 10_000 && *wait <= 10_000 + cap / 2,
+                "retry {index} waited {wait} ms"
+            );
+        }
         assert!(observed.iter().all(|e| e["unix_ms"].is_u64()));
         assert_eq!(observed.last().unwrap()["phase"], "completed");
     }
