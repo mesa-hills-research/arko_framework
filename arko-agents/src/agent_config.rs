@@ -177,8 +177,9 @@ pub enum ToolCallingMode {
 pub struct AgentToolConfig {
     /// The tools the agent is offered, besides `complete_task`, which is
     /// always offered. The runtime offers and runs only these (those the
-    /// task's registry holds): a call to any other tool gets an error result
-    /// and `AgentEvent::UnavailableToolAttempted`.
+    /// task's registry holds): a native call to any other tool gets an error
+    /// result and `AgentEvent::UnavailableToolAttempted`, and output-based
+    /// parsing recognizes only these tools' tags.
     pub available_tool_names: Vec<String>,
     #[serde(default)]
     pub allow_batched_tool_calls: bool,

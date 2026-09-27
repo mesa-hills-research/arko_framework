@@ -3881,10 +3881,15 @@ impl AgentLoop {
         custom_tool_output: Option<String>,
         message_to_agent_on_approval: Option<String>,
     ) -> Result<String, ArkoAgentsError> {
-        let tool_arc = self
-            .tool_registry
-            .get(tool_name)
-            .ok_or_else(|| ArkoAgentsError::ToolNotFound(tool_name.to_string()))?;
+        // A call saved awaiting approval whose tool this run does not offer
+        // is answered like any unavailable tool.
+        let Some(tool_arc) = self.tool_registry.get(tool_name) else {
+            self.emit_event(AgentEvent::UnavailableToolAttempted {
+                tool_name: tool_name.to_string(),
+            })
+            .await?;
+            return Ok(format!("Error: Tool '{tool_name}' is not available."));
+        };
 
         let result_str_or_error_msg_for_llm: String;
         let tool_definition_for_pb = tool_arc.definition();

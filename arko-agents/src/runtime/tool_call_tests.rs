@@ -367,23 +367,44 @@ async fn an_approved_call_to_a_tool_the_run_does_not_offer_is_answered_as_unavai
     // configuration) whose tool this run does not offer.
     let workspace = workspace();
     let runs = Arc::new(AtomicUsize::new(0));
-    let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(Counter(Arc::clone(&runs))));
-    let (mut agent, _events, _commands) =
-        agent(config(ToolCallingMode::Native, &[]), registry, &workspace);
-    let result = agent
-        .execute_native_tool_for_approval(
-            &call("saved", "counter"),
-            Uuid::new_v4(),
-            "counter",
-            HashMap::new(),
-            None,
-            None,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(result.is_error && result.output.contains("is not available"));
+    for mode in [ToolCallingMode::Native, ToolCallingMode::OutputBased] {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(Counter(Arc::clone(&runs))));
+        let (mut agent, mut events, _commands) =
+            agent(config(mode.clone(), &[]), registry, &workspace);
+        let answer = if mode == ToolCallingMode::Native {
+            let result = agent
+                .execute_native_tool_for_approval(
+                    &call("saved", "counter"),
+                    Uuid::new_v4(),
+                    "counter",
+                    HashMap::new(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(result.is_error);
+            result.output
+        } else {
+            agent
+                .execute_tool_and_handle_result(
+                    "counter",
+                    HashMap::new(),
+                    Uuid::new_v4(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+        };
+        assert!(answer.contains("is not available"), "{mode:?}: {answer}");
+        assert!(drain(&mut events).iter().any(|event| matches!(
+            event,
+            AgentEvent::UnavailableToolAttempted { tool_name } if tool_name == "counter"
+        )));
+    }
     assert_eq!(runs.load(Ordering::SeqCst), 0);
     std::fs::remove_dir_all(workspace).unwrap();
 }

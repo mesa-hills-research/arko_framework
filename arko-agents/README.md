@@ -175,11 +175,11 @@ registered tools named in `tool_config.available_tool_names`, and always
 `complete_task`, which ends the task as `Completed { summary }`. `ask_user` puts the task
 in `AwaitingUserResponse` until `UserCommand::SubmitUserResponse` answers it.
 
-The runtime runs only the tools the agent is offered, in either tool calling mode. A call
-to any other tool, registered or not, gets an error result and emits
-`UnavailableToolAttempted`, and output-based parsing recognizes only offered tools.
-`run_task` binds the offered tools to the task with `Tool::bind_runtime`. A saved task
-is offered the tools its own configuration names.
+The runtime runs only the tools the agent is offered, in either tool calling mode. In
+native mode, a call to any other tool, registered or not, gets an error result and emits
+`UnavailableToolAttempted`; output-based parsing recognizes only the offered tools' tags,
+so other markup stays response text. `run_task` binds the offered tools to the task with
+`Tool::bind_runtime`. A saved task is offered the tools its own configuration names.
 
 ### Tool calling modes
 
@@ -223,8 +223,10 @@ byte, is rejected this way under every policy.
 The check and the built-in file tools resolve a path the same way, with
 `arko_agents::utils::resolve_path`: surrounding whitespace is trimmed, `~` and `$VAR` are
 not expanded (`~/notes` names a directory called `~`), a relative path is joined to the
-working directory, and `.` and `..` are resolved lexically. The check is not a sandbox:
-symbolic links are not followed, so a link inside the workspace can lead outside it.
+working directory, and `.` and `..` are resolved lexically. A custom tool with an
+`is_path` parameter should open the path `resolve_path` returns, so the check judges the
+path the tool opens. The check is not a sandbox: symbolic links are not followed, so a
+link inside the workspace can lead outside it.
 
 ### Tool errors
 

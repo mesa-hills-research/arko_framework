@@ -35,6 +35,11 @@ pub struct ToolParameterDefinition {
     #[serde(rename = "type")]
     pub param_type: ToolParameterType,
     pub required: bool,
+    /// The value is a path the runtime checks against the workspace before
+    /// the call runs, as [`crate::utils::resolve_path`] resolves it: taken
+    /// literally, without `~` or `$VAR` expansion. A tool with such a
+    /// parameter should open the path that function returns, so the check
+    /// judges the path the tool opens.
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_path: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

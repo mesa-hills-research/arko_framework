@@ -121,9 +121,11 @@ pub enum AgentEvent {
         #[serde(default)]
         rate_limit: bool,
     },
-    /// The model called a tool the task is not offered (see
-    /// [`AgentToolConfig::available_tool_names`](crate::agent_config::AgentToolConfig::available_tool_names));
-    /// the call was not run.
+    /// The model called a tool the task can't run: in native mode, a tool it
+    /// is not offered (see
+    /// [`AgentToolConfig::available_tool_names`](crate::agent_config::AgentToolConfig::available_tool_names)),
+    /// or in either mode an offered tool the registry doesn't hold. The call
+    /// was not run.
     UnavailableToolAttempted { tool_name: String },
     /// The task stream has ended.
     TaskStreamEnd,
