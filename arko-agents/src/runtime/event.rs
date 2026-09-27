@@ -149,6 +149,32 @@ pub enum AgentEvent {
         resets_at_unix_ms: Option<u64>,
         action: PlanUsageAction,
     },
+    /// The provider served a model call with another model than the one
+    /// requested ([`ModelCallUsage::served_model_changed`]): an OpenRouter
+    /// fallback, router or alias, or a ChatGPT backend reroute. Emitted after
+    /// `ModelCallUsageReported`.
+    ModelRerouted {
+        provider: String,
+        requested_model: String,
+        served_model: String,
+    },
+    /// The conversation's prompt-cache efficiency after a model call (opt-in
+    /// [`MonitoringConfig::cache`](crate::agent_config::MonitoringConfig::cache)):
+    /// cache reads divided by the most that could have been read, for the
+    /// call and over the last `calls` judged calls.
+    CacheEfficiencyReported {
+        call_efficiency: f64,
+        rolling_efficiency: f64,
+        calls: usize,
+    },
+    /// The rolling cache efficiency fell below a monitor threshold
+    /// (`warn_below`, or `pause_below` with `pausing` set: the task pauses
+    /// before its next request). Reported once until it recovers.
+    CacheEfficiencyLow {
+        rolling_efficiency: f64,
+        threshold: f64,
+        pausing: bool,
+    },
     /// A plan usage limit was reached (ChatGPT `usage_limit_reached`, or a
     /// rate limit whose reset is further off than
     /// [`LLMRateLimitRetryConfig::max_wait_ms`](crate::agent_config::LLMRateLimitRetryConfig::max_wait_ms)).

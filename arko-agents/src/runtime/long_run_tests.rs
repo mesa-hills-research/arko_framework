@@ -283,6 +283,7 @@ async fn a_plan_usage_threshold_pauses_once_per_window() {
             percent: 90.0,
             action: PlanUsageAction::Pause,
         }),
+        ..Default::default()
     };
     script(
         &mut agent,
@@ -325,6 +326,7 @@ async fn a_plan_usage_threshold_can_slow_requests_down_instead() {
             percent: 90.0,
             action: PlanUsageAction::SlowDown { delay_ms: 10_000 },
         }),
+        ..Default::default()
     };
     script(
         &mut agent,
@@ -383,6 +385,7 @@ fn new_retry_and_monitoring_settings_default_on_load_and_round_trip() {
     for percent in [0.0, 100.5, f64::NAN] {
         let invalid = MonitoringConfig {
             plan_usage: Some(PlanUsageThreshold { percent, action: PlanUsageAction::Pause }),
+            ..Default::default()
         };
         assert!(invalid.validate().is_err(), "{percent}");
     }

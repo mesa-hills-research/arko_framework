@@ -15,7 +15,7 @@ pub use agent_config::{
     AgentConfig, AgentConfigBuilder, AgentLLMConfig, AgentToolConfig, BuiltInEnvironmentDetail,
     DeveloperDefinableEnvironmentDetail, DynamicContentProvider, EnvironmentDetailPlacement,
     EnvironmentDetailsConfig, ErrorRecoveryConfig, FileTreeMode, LLMCapacityRetryConfig,
-    LLMErrorPolicy, LLMRateLimitRetryConfig, LLMRetryConfig, MonitoringConfig,
+    CacheMonitorConfig, LLMErrorPolicy, LLMRateLimitRetryConfig, LLMRetryConfig, MonitoringConfig,
     PerToolConfigOverride, PlanUsageAction, PlanUsageThreshold, ReminderInjectionFrequency,
     ToolCallingMode, ToolErrorPolicy, UsageLimitPolicy, UserReminder,
 };

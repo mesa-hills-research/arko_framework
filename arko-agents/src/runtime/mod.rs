@@ -14,6 +14,7 @@ use arko_ai::LLMClient;
 pub mod command;
 pub mod event;
 mod r#loop;
+mod monitor;
 mod retry;
 
 const DEFAULT_EVENT_CHANNEL_SIZE: usize = 100;

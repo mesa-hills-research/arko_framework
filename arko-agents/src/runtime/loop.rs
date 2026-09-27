@@ -172,6 +172,11 @@ pub struct AgentLoop {
     fallback_pending: bool,
     /// The request in flight (or last made) went to the fallback model.
     current_request_is_fallback: bool,
+    /// Cache monitor state: a low-efficiency warning is out, a pause
+    /// episode is active, and the pause to apply before the next request.
+    cache_warned: bool,
+    cache_pause_episode: bool,
+    cache_pause_pending: Option<String>,
     stop_requested: bool,
     #[cfg(test)]
     scripted_responses: std::sync::Mutex<VecDeque<ScriptedStreamResult>>,
@@ -236,6 +241,9 @@ impl AgentLoop {
             plan_usage_threshold_reported: None,
             fallback_pending: false,
             current_request_is_fallback: false,
+            cache_warned: false,
+            cache_pause_episode: false,
+            cache_pause_pending: None,
             stop_requested: false,
             #[cfg(test)]
             scripted_responses: std::sync::Mutex::new(VecDeque::new()),
@@ -708,11 +716,80 @@ impl AgentLoop {
         raw_usage: ai::ModelCallUsage,
     ) -> Result<(), ArkoAgentsError> {
         let usage_with_delta = self.task.record_model_call_usage(raw_usage);
-        let plan_usage = usage_with_delta.plan_usage.clone();
+        let usage = usage_with_delta.clone();
         self.emit_event(AgentEvent::ModelCallUsageReported(usage_with_delta))
             .await?;
-        if let Some(plan_usage) = plan_usage {
+        if let Some(plan_usage) = usage.plan_usage.clone() {
             self.emit_event(AgentEvent::PlanUsageReported(plan_usage)).await?;
+        }
+        if usage.served_model_changed() {
+            let requested_model = usage.requested_model.clone().unwrap_or_else(|| {
+                match self.task.agent_config.refusal_fallback.as_ref() {
+                    Some(fallback) if self.current_request_is_fallback => fallback.model.id.clone(),
+                    _ => self.task.conversation.model.id.clone(),
+                }
+            });
+            self.emit_event(AgentEvent::ModelRerouted {
+                provider: usage.provider.clone(),
+                requested_model,
+                served_model: usage.served_model.clone().unwrap_or(usage.model),
+            })
+            .await?;
+        }
+        self.monitor_cache().await
+    }
+
+    /// The opt-in cache monitor ([`MonitoringConfig::cache`](crate::agent_config::MonitoringConfig::cache)),
+    /// after a call's usage is recorded.
+    async fn monitor_cache(&mut self) -> Result<(), ArkoAgentsError> {
+        let Some(config) = self.task.agent_config.monitoring.cache.clone() else {
+            return Ok(());
+        };
+        let Some(efficiency) = super::monitor::cache_efficiency(&self.task.usage_history, &config)
+        else {
+            return Ok(());
+        };
+        self.emit_event(AgentEvent::CacheEfficiencyReported {
+            call_efficiency: efficiency.call,
+            rolling_efficiency: efficiency.rolling,
+            calls: efficiency.calls,
+        })
+        .await?;
+        if efficiency.calls < config.window_calls {
+            return Ok(());
+        }
+        let low = |threshold: Option<f64>| threshold.filter(|threshold| efficiency.rolling < *threshold);
+        match low(config.warn_below) {
+            Some(threshold) if !self.cache_warned => {
+                self.cache_warned = true;
+                self.emit_event(AgentEvent::CacheEfficiencyLow {
+                    rolling_efficiency: efficiency.rolling,
+                    threshold,
+                    pausing: false,
+                })
+                .await?;
+            }
+            Some(_) => {}
+            None => self.cache_warned = false,
+        }
+        match low(config.pause_below) {
+            Some(threshold) if !self.cache_pause_episode => {
+                self.cache_pause_episode = true;
+                self.cache_pause_pending = Some(format!(
+                    "Prompt cache efficiency fell to {:.1}% over the last {} calls (threshold {:.1}%).",
+                    efficiency.rolling * 100.0,
+                    efficiency.calls,
+                    threshold * 100.0
+                ));
+                self.emit_event(AgentEvent::CacheEfficiencyLow {
+                    rolling_efficiency: efficiency.rolling,
+                    threshold,
+                    pausing: true,
+                })
+                .await?;
+            }
+            Some(_) => {}
+            None => self.cache_pause_episode = false,
         }
         Ok(())
     }
@@ -1537,6 +1614,10 @@ impl AgentLoop {
             self.refresh_file_tree_context();
             self.ensure_user_turn_before_request()?;
             if !self.apply_plan_usage_threshold().await? {
+                continue 'main_loop;
+            }
+            if let Some(message) = self.cache_pause_pending.take() {
+                self.finish_llm_recovery(message, None).await?;
                 continue 'main_loop;
             }
             self.observe_committed_tool_context();
@@ -3681,6 +3762,10 @@ mod long_run_tests;
 #[cfg(test)]
 #[path = "refusal_tests.rs"]
 mod refusal_tests;
+
+#[cfg(test)]
+#[path = "monitor_tests.rs"]
+mod monitor_tests;
 
 #[cfg(test)]
 #[path = "image_tests.rs"]

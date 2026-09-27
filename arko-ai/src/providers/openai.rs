@@ -3071,7 +3071,8 @@ mod tests {
 
                 assert_eq!(value["prompt_cache_key"], conversation.prompt_cache_key);
                 assert!(value.get("prompt_cache_options").is_none());
-                // Only GPT-5.6 and GPT-6 get `reasoning.context`.
+                // Only GPT-5.6 (and GPT-6 over ChatGPT OAuth) get
+                // `reasoning.context`.
                 assert!(value.pointer("/reasoning/context").is_none());
             }
         }

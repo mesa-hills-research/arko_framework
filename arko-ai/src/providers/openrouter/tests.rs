@@ -1264,6 +1264,15 @@ fn the_documented_response_parses_with_reported_cost_and_stop_metadata() {
         Some(json!({"native_finish_reason": "stop"}))
     );
     assert!(!call.served_model_changed());
+    assert_eq!(call.served_model.as_deref(), Some("openai/gpt-4o"));
+
+    // Without a reported model, `model` is the requested one and nothing
+    // is claimed to have served it.
+    let mut unreported = documented_response();
+    unreported.as_object_mut().unwrap().remove("model");
+    let response = parse(&unreported, "openai/gpt-4o").unwrap();
+    assert_eq!(response.model_call_usage.model, "openai/gpt-4o");
+    assert_eq!(response.model_call_usage.served_model, None);
 }
 
 #[test]
@@ -1480,6 +1489,11 @@ fn a_different_served_model_is_recorded() {
     value["provider"] = json!("Anthropic");
     let routed = parse(&value, "openrouter/auto").unwrap();
     assert_eq!(routed.model_call_usage.model, "anthropic/claude-sonnet-4.5");
+    assert_eq!(
+        routed.model_call_usage.served_model.as_deref(),
+        Some("anthropic/claude-sonnet-4.5")
+    );
+    assert!(!routed.model_call_usage.rerouted);
     assert_eq!(
         routed.model_call_usage.requested_model.as_deref(),
         Some("openrouter/auto")

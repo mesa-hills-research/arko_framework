@@ -480,6 +480,42 @@ pub struct MonitoringConfig {
     /// ChatGPT OAuth calls) reaches a percentage of a usage-limit window.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_usage: Option<PlanUsageThreshold>,
+    /// Report the conversation's prompt-cache efficiency after each model
+    /// call, and warn or pause when it stays low.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheMonitorConfig>,
+}
+
+/// See [`MonitoringConfig::cache`]. A call's cache efficiency is the input
+/// it read from the prompt cache divided by the most it could have read:
+/// the smaller of the previous call's input and its own (the shared prefix
+/// can't be longer). Above 100% means the provider also cached earlier
+/// output. The first `warmup_calls` calls of the conversation, and calls
+/// whose provider reports no cache figure, are not judged. The rolling
+/// efficiency sums the last `window_calls` judged calls; the thresholds
+/// apply once that many have been judged, and each triggers once until the
+/// efficiency recovers above it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct CacheMonitorConfig {
+    pub warmup_calls: usize,
+    pub window_calls: usize,
+    /// Emit `AgentEvent::CacheEfficiencyLow` below this (0 to 1).
+    pub warn_below: Option<f64>,
+    /// Also pause, before the next request, below this (0 to 1), like
+    /// exhausted recovery. Off by default.
+    pub pause_below: Option<f64>,
+}
+
+impl Default for CacheMonitorConfig {
+    fn default() -> Self {
+        Self {
+            warmup_calls: 2,
+            window_calls: 5,
+            warn_below: Some(0.5),
+            pause_below: None,
+        }
+    }
 }
 
 impl MonitoringConfig {
@@ -497,6 +533,15 @@ impl MonitoringConfig {
                 return Err(ArkoAgentsError::BuilderError {
                     struct_name: "PlanUsageThreshold".into(),
                     message: "percent must be in (0, 100] and a slow-down delay representable.".into(),
+                });
+            }
+        }
+        if let Some(cache) = &self.cache {
+            let fraction = |value: Option<f64>| value.is_none_or(|value| (0.0..=1.0).contains(&value));
+            if cache.window_calls == 0 || !fraction(cache.warn_below) || !fraction(cache.pause_below) {
+                return Err(ArkoAgentsError::BuilderError {
+                    struct_name: "CacheMonitorConfig".into(),
+                    message: "window_calls must be positive and thresholds between 0 and 1.".into(),
                 });
             }
         }

@@ -1,9 +1,24 @@
 use serde::{Deserialize, Serialize};
 
+/// Usage metrics of one model call.
+///
+/// What the model fields hold, per provider:
+///
+/// | Provider | `model` | `served_model` | `requested_model` | `rerouted` |
+/// |---|---|---|---|---|
+/// | OpenAI | the response's `model` | `openai-model` header, else the response's `model`, else `response.created`'s | never set | a reported model differs from the requested one |
+/// | OpenRouter | the model OpenRouter reported serving, else the requested slug | the model OpenRouter reported serving | the requested slug, when a different model served the call | never set |
+/// | Anthropic | the response's `model` | never set | never set | never set |
+/// | Google | the requested model id | never set | never set | never set |
+///
+/// [`served_model_changed`](Self::served_model_changed) is the
+/// provider-independent test for a call served by another model.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelCallUsage {
     pub call_id: String,
     pub provider: String,
+    /// The model that answered, as the provider names it; see the table
+    /// above.
     pub model: String,
     pub input_tokens: usize,
     pub output_tokens: usize,

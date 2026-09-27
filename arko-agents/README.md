@@ -78,6 +78,17 @@ is at or above `percent`: `PlanUsageThresholdReached` is emitted once per window
 reset, then `PlanUsageAction::Pause` pauses once, or `SlowDown { delay_ms }` waits
 before every request while usage stays that high.
 
+**Reroutes and cache monitoring.** A call served by another model than the one
+requested (`ModelCallUsage::served_model_changed()`: an OpenRouter fallback, router
+or alias, or a ChatGPT backend reroute) emits `ModelRerouted` with the requested and
+served model. Opt in to `MonitoringConfig { cache: Some(CacheMonitorConfig::default()) }`
+for `CacheEfficiencyReported` after each call: cache reads divided by the most that
+could have been read (the smaller of the previous and the current input), per call
+and rolling over `window_calls` (default 5), ignoring the first `warmup_calls`
+(default 2) and calls without a cache figure. Below `warn_below` (default 0.5) it
+emits `CacheEfficiencyLow` once until it recovers; the opt-in `pause_below` also
+pauses before the next request.
+
 To wait through explicit provider capacity errors until service recovers, opt in:
 
 ```rust

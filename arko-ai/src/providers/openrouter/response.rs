@@ -722,8 +722,9 @@ fn finish(turn: Turn, context: &ResponseContext) -> GenerationResponse {
         turn.service_tier.as_deref(),
     );
 
-    let served = turn
-        .served_model
+    let reported_model = turn.served_model;
+    let served = reported_model
+        .clone()
         .unwrap_or_else(|| context.requested.clone());
     let stop_details = {
         let mut details = Map::new();
@@ -747,6 +748,10 @@ fn finish(turn: Turn, context: &ResponseContext) -> GenerationResponse {
     if context.served_model_changed(&served) {
         model_call_usage.requested_model = Some(context.requested.clone());
     }
+    // The model OpenRouter reported serving (`model` falls back to the
+    // requested one when it reported none); a change is reported through
+    // `requested_model`, so `rerouted` stays false.
+    model_call_usage.served_model = reported_model;
     model_call_usage.upstream_provider = turn.upstream_provider;
 
     GenerationResponse {
