@@ -49,6 +49,12 @@ pub struct Model {
     pub pricing: ModelPricing,
 }
 
+/// Model data audited 2026-09-27 against vendor docs:
+/// https://developers.openai.com/api/docs/pricing (+ per-model pages),
+/// https://platform.claude.com/docs/en/about-claude/pricing (+ model pages),
+/// https://ai.google.dev/gemini-api/docs/pricing (+ model pages).
+/// `max_input_tokens` is the vendor's published maximum input tokens where one is
+/// given (OpenAI lists it separately for some models), otherwise the context window.
 impl Model {
     /// Standard API pricing verified September 6, 2026.
     /// https://developers.openai.com/api/docs/pricing
@@ -57,7 +63,7 @@ impl Model {
             provider: Provider::OpenAI,
             id: "gpt-6-astra".to_string(),
             model_type: ModelType::Reasoning,
-            max_input_tokens: 1_050_000,
+            max_input_tokens: 922_000,
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
@@ -84,7 +90,7 @@ impl Model {
             provider: Provider::OpenAI,
             id: "gpt-5.6-sol".to_string(),
             model_type: ModelType::Reasoning,
-            max_input_tokens: 1_050_000,
+            max_input_tokens: 922_000,
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
@@ -110,7 +116,7 @@ impl Model {
             provider: Provider::OpenAI,
             id: "gpt-5.6-terra".to_string(),
             model_type: ModelType::Reasoning,
-            max_input_tokens: 1_050_000,
+            max_input_tokens: 922_000,
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
@@ -136,7 +142,7 @@ impl Model {
             provider: Provider::OpenAI,
             id: "gpt-5.6-luna".to_string(),
             model_type: ModelType::Reasoning,
-            max_input_tokens: 1_050_000,
+            max_input_tokens: 922_000,
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
@@ -160,7 +166,7 @@ impl Model {
             provider: Provider::OpenAI,
             id: "gpt-5-2025-08-07".to_string(),
             model_type: ModelType::Reasoning,
-            max_input_tokens: 400_000,
+            max_input_tokens: 272_000,
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
@@ -232,7 +238,7 @@ impl Model {
             provider: Provider::OpenAI,
             id: "gpt-5.3-codex".to_string(),
             model_type: ModelType::Reasoning,
-            max_input_tokens: 400_000,
+            max_input_tokens: 272_000,
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
@@ -328,7 +334,7 @@ impl Model {
             provider: Provider::OpenAI,
             id: "gpt-5.4-mini-2026-03-17".to_string(),
             model_type: ModelType::Reasoning,
-            max_input_tokens: 400_000,
+            max_input_tokens: 272_000,
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
@@ -352,7 +358,7 @@ impl Model {
             provider: Provider::OpenAI,
             id: "gpt-5.4-nano-2026-03-17".to_string(),
             model_type: ModelType::Reasoning,
-            max_input_tokens: 400_000,
+            max_input_tokens: 272_000,
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
@@ -376,7 +382,7 @@ impl Model {
             provider: Provider::OpenAI,
             id: "gpt-5-mini-2025-08-07".to_string(),
             model_type: ModelType::Reasoning,
-            max_input_tokens: 400_000,
+            max_input_tokens: 272_000,
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
@@ -400,7 +406,7 @@ impl Model {
             provider: Provider::OpenAI,
             id: "gpt-5-nano-2025-08-07".to_string(),
             model_type: ModelType::Reasoning,
-            max_input_tokens: 400_000,
+            max_input_tokens: 272_000,
             max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
@@ -661,7 +667,9 @@ impl Model {
         }
     }
 
-    /// Uses Claude Sonnet 5 introductory pricing through August 31, 2026.
+    /// $2/$10 was introductory pricing through August 31, 2026 and is now the
+    /// standard price; the planned increase did not occur. Checked 2026-09-27 against
+    /// https://platform.claude.com/docs/en/about-claude/pricing
     pub fn anthropic_claude_sonnet_5() -> Self {
         Self {
             provider: Provider::Anthropic,
@@ -686,6 +694,8 @@ impl Model {
         }
     }
 
+    /// Retired on the Claude API February 19, 2026; may remain on other cloud platforms.
+    /// https://platform.claude.com/docs/en/about-claude/model-deprecations
     pub fn anthropic_claude_3_7_sonnet() -> Self {
         Self {
             provider: Provider::Anthropic,
@@ -710,6 +720,8 @@ impl Model {
         }
     }
 
+    /// Retired on the Claude API October 28, 2025; may remain on other cloud platforms.
+    /// https://platform.claude.com/docs/en/about-claude/model-deprecations
     pub fn anthropic_claude_3_5_sonnet_20241022() -> Self {
         Self {
             provider: Provider::Anthropic,
@@ -734,6 +746,8 @@ impl Model {
         }
     }
 
+    /// Retired on the Claude API October 28, 2025; may remain on other cloud platforms.
+    /// https://platform.claude.com/docs/en/about-claude/model-deprecations
     pub fn anthropic_claude_3_5_sonnet_20240620() -> Self {
         Self {
             provider: Provider::Anthropic,
@@ -758,6 +772,8 @@ impl Model {
         }
     }
 
+    /// Retired on the Claude API June 15, 2026; may remain on other cloud platforms.
+    /// https://platform.claude.com/docs/en/about-claude/model-deprecations
     pub fn anthropic_claude_opus_4() -> Self {
         Self {
             provider: Provider::Anthropic,
@@ -782,6 +798,8 @@ impl Model {
         }
     }
 
+    /// Retired on the Claude API August 5, 2026; may remain on other cloud platforms.
+    /// https://platform.claude.com/docs/en/about-claude/model-deprecations
     pub fn anthropic_claude_opus_4_1() -> Self {
         Self {
             provider: Provider::Anthropic,
@@ -878,6 +896,8 @@ impl Model {
         }
     }
 
+    /// Retired on the Claude API June 15, 2026; may remain on other cloud platforms.
+    /// https://platform.claude.com/docs/en/about-claude/model-deprecations
     pub fn anthropic_claude_sonnet_4() -> Self {
         Self {
             provider: Provider::Anthropic,
@@ -902,13 +922,15 @@ impl Model {
         }
     }
 
+    /// Max output corrected to 128K, checked 2026-09-27 against
+    /// https://platform.claude.com/docs/en/models/sonnet-4-6/overview
     pub fn anthropic_claude_sonnet_4_6() -> Self {
         Self {
             provider: Provider::Anthropic,
             id: "claude-sonnet-4-6".to_string(),
             model_type: ModelType::Reasoning,
             max_input_tokens: 1_000_000,
-            max_output_tokens: 64_000,
+            max_output_tokens: 128_000,
             supports_image_input: true,
             supports_cache: true,
             pricing: ModelPricing {
@@ -926,6 +948,9 @@ impl Model {
         }
     }
 
+    /// The long-context rates below applied to the retired 1M-context beta; current
+    /// docs list a 200K context window and no long-context tier (checked 2026-09-27,
+    /// https://platform.claude.com/docs/en/build-with-claude/context-windows).
     pub fn anthropic_claude_sonnet_4_5() -> Self {
         Self {
             provider: Provider::Anthropic,
@@ -998,6 +1023,8 @@ impl Model {
         }
     }
 
+    /// Cache-read prices corrected, checked 2026-09-27 against
+    /// https://ai.google.dev/gemini-api/docs/pricing
     pub fn google_gemini_2_5_pro() -> Self {
         Self {
             provider: Provider::Google,
@@ -1010,18 +1037,20 @@ impl Model {
             pricing: ModelPricing {
                 input_cost_per_million: 1.25,
                 output_cost_per_million: 10.00,
-                cached_input_cost_per_million: Some(0.31),
+                cached_input_cost_per_million: Some(0.125),
                 cache_write_cost_per_million: None,
                 large_input_threshold: Some(200_000),
                 large_input_cost_per_million: Some(2.50),
                 large_output_cost_per_million: Some(15.00),
-                large_cached_input_cost_per_million: Some(0.625),
+                large_cached_input_cost_per_million: Some(0.25),
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
             },
         }
     }
 
+    /// Cache-read price corrected, checked 2026-09-27 against
+    /// https://ai.google.dev/gemini-api/docs/pricing
     pub fn google_gemini_2_5_flash() -> Self {
         Self {
             provider: Provider::Google,
@@ -1034,7 +1063,7 @@ impl Model {
             pricing: ModelPricing {
                 input_cost_per_million: 0.30,
                 output_cost_per_million: 2.50,
-                cached_input_cost_per_million: Some(0.075),
+                cached_input_cost_per_million: Some(0.03),
                 cache_write_cost_per_million: None,
                 large_input_threshold: None,
                 large_input_cost_per_million: None,
@@ -1046,19 +1075,22 @@ impl Model {
         }
     }
 
+    /// Cache-read price and token limits corrected, checked 2026-09-27 against
+    /// https://ai.google.dev/gemini-api/docs/pricing
+    /// https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-lite
     pub fn google_gemini_2_5_flash_lite() -> Self {
         Self {
             provider: Provider::Google,
             id: "gemini-2.5-flash-lite".to_string(),
             model_type: ModelType::Reasoning,
-            max_input_tokens: 1_000_000,
-            max_output_tokens: 64_000,
+            max_input_tokens: 1_048_576,
+            max_output_tokens: 65_536,
             supports_image_input: true,
             supports_cache: true,
             pricing: ModelPricing {
                 input_cost_per_million: 0.10,
                 output_cost_per_million: 0.40,
-                cached_input_cost_per_million: Some(0.025),
+                cached_input_cost_per_million: Some(0.01),
                 cache_write_cost_per_million: None,
                 large_input_threshold: None,
                 large_input_cost_per_million: None,
@@ -1070,13 +1102,16 @@ impl Model {
         }
     }
 
+    /// Shut down on the Gemini API June 1, 2026. Output limit corrected from
+    /// https://ai.google.dev/gemini-api/docs/models/gemini-2.0-flash
+    /// https://ai.google.dev/gemini-api/docs/deprecations
     pub fn google_gemini_2_0_flash() -> Self {
         Self {
             provider: Provider::Google,
             id: "gemini-2.0-flash".to_string(),
             model_type: ModelType::Standard,
             max_input_tokens: 1_048_576,
-            max_output_tokens: 65_536,
+            max_output_tokens: 8_192,
             supports_image_input: true,
             supports_cache: false,
             pricing: ModelPricing {
@@ -1094,13 +1129,16 @@ impl Model {
         }
     }
 
+    /// Shut down on the Gemini API March 9, 2026 (replacement: gemini-3.1-pro-preview).
+    /// Token limits corrected from the model page; pricing is no longer published.
+    /// https://ai.google.dev/gemini-api/docs/deprecations
     pub fn google_gemini_3_0_pro() -> Self {
         Self {
             provider: Provider::Google,
             id: "gemini-3-pro-preview".to_string(),
             model_type: ModelType::Reasoning,
-            max_input_tokens: 1_000_000,
-            max_output_tokens: 64_000,
+            max_input_tokens: 1_048_576,
+            max_output_tokens: 65_536,
             supports_image_input: true,
             supports_cache: true,
             pricing: ModelPricing {
@@ -1118,12 +1156,14 @@ impl Model {
         }
     }
 
+    /// Input limit corrected, checked 2026-09-27 against
+    /// https://ai.google.dev/gemini-api/docs/models/gemini-3-flash-preview
     pub fn google_gemini_3_0_flash() -> Self {
         Self {
             provider: Provider::Google,
             id: "gemini-3-flash-preview".to_string(),
             model_type: ModelType::Reasoning,
-            max_input_tokens: 1_000_000,
+            max_input_tokens: 1_048_576,
             max_output_tokens: 65_536,
             supports_image_input: true,
             supports_cache: true,
@@ -1190,6 +1230,9 @@ impl Model {
         }
     }
 
+    /// Shut down on the Gemini API May 25, 2026; the stable replacement is
+    /// `gemini-3.1-flash-lite` (same published prices and limits).
+    /// https://ai.google.dev/gemini-api/docs/deprecations
     pub fn google_gemini_3_1_flash_lite() -> Self {
         Self {
             provider: Provider::Google,
