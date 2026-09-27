@@ -25,6 +25,57 @@ impl Reply {
     }
 }
 
+async fn read_request(socket: &mut tokio::net::TcpStream) -> (String, Value) {
+    let mut bytes = Vec::new();
+    loop {
+        let mut chunk = [0; 4096];
+        let n = socket.read(&mut chunk).await.unwrap();
+        assert!(n > 0);
+        bytes.extend_from_slice(&chunk[..n]);
+        if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+            let headers = String::from_utf8(bytes[..end].to_vec()).unwrap();
+            let length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|s| s.trim().parse().unwrap())
+                })
+                .unwrap();
+            if bytes.len() >= end + 4 + length {
+                let body = serde_json::from_slice(&bytes[end + 4..end + 4 + length]).unwrap();
+                return (headers, body);
+            }
+        }
+    }
+}
+
+/// Writes `reply`, with `Retry-After: 60` unless the reply sets its own.
+async fn write_reply(socket: &mut tokio::net::TcpStream, reply: &Reply) {
+    let content_type = if reply.body.starts_with("data:") {
+        "text/event-stream"
+    } else {
+        "application/json"
+    };
+    let mut extra: String = reply
+        .headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect();
+    if !reply.headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("retry-after")) {
+        extra.push_str("Retry-After: 60\r\n");
+    }
+    let response = format!(
+        "HTTP/1.1 {} Test\r\nContent-Type: {}\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+        reply.status,
+        content_type,
+        extra,
+        reply.body.len(),
+        reply.body,
+    );
+    socket.write_all(response.as_bytes()).await.unwrap();
+}
+
 pub(super) async fn server(replies: Vec<Reply>) -> (String, tokio::task::JoinHandle<Vec<(String, Value)>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -32,67 +83,96 @@ pub(super) async fn server(replies: Vec<Reply>) -> (String, tokio::task::JoinHan
         let mut requests = Vec::new();
         for reply in replies {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut bytes = Vec::new();
-            let (headers, body) = loop {
-                let mut chunk = [0; 4096];
-                let n = socket.read(&mut chunk).await.unwrap();
-                assert!(n > 0);
-                bytes.extend_from_slice(&chunk[..n]);
-                if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
-                    let headers = String::from_utf8(bytes[..end].to_vec()).unwrap();
-                    let length: usize = headers
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .map(|s| s.trim().parse().unwrap())
-                        })
-                        .unwrap();
-                    if bytes.len() >= end + 4 + length {
-                        let body =
-                            serde_json::from_slice(&bytes[end + 4..end + 4 + length]).unwrap();
-                        break (headers, body);
-                    }
-                }
-            };
+            let (headers, body) = read_request(&mut socket).await;
             assert!(headers.starts_with(&format!("POST {} ", reply.path)));
             requests.push((headers, body));
-            let content_type = if reply.body.starts_with("data:") {
-                "text/event-stream"
-            } else {
-                "application/json"
-            };
-            let extra: String = reply
-                .headers
-                .iter()
-                .map(|(name, value)| format!("{name}: {value}\r\n"))
-                .collect();
-            let response = format!(
-                "HTTP/1.1 {} Test\r\nContent-Type: {}\r\nRetry-After: 60\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-                reply.status,
-                content_type,
-                extra,
-                reply.body.len(),
-                reply.body,
-            );
-            socket.write_all(response.as_bytes()).await.unwrap();
+            write_reply(&mut socket, &reply).await;
         }
         requests
     });
     (url, task)
 }
 
-pub(super) fn client(url: &str) -> OpenAIClient {
-    let claims = URL_SAFE_NO_PAD.encode(br#"{"exp":4102444800}"#);
-    let mut client = OpenAIClient::new_chatgpt_oauth(
-        &format!("header.{claims}.signature"),
-        Some("synthetic-refresh"),
-        "synthetic-account",
-    )
-    .with_base_url(url)
-    .with_oauth_token_url(format!("{url}/token"));
+/// A server answering requests concurrently with `replies` in the order the
+/// requests arrive, for as long as the test runs; a request beyond them gets
+/// no answer. Every request is recorded, and `arrived` gets its body as it
+/// comes in. With `gated`, each answer first waits for a permit on `gate`.
+struct TestServer {
+    url: String,
+    requests: Arc<std::sync::Mutex<Vec<(String, Value)>>>,
+    arrived: tokio::sync::mpsc::UnboundedReceiver<Value>,
+    gate: Arc<tokio::sync::Semaphore>,
+}
+
+impl TestServer {
+    async fn start(replies: Vec<Reply>, gated: bool) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (arrivals, arrived) = tokio::sync::mpsc::unbounded_channel();
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let replies = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(replies)));
+        let recorded = requests.clone();
+        let permits = gate.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let (recorded, arrivals, permits, replies) =
+                    (recorded.clone(), arrivals.clone(), permits.clone(), replies.clone());
+                tokio::spawn(async move {
+                    let (headers, body) = read_request(&mut socket).await;
+                    let reply = replies.lock().unwrap().pop_front();
+                    recorded.lock().unwrap().push((headers, body.clone()));
+                    let _ = arrivals.send(body);
+                    if gated {
+                        permits.acquire().await.unwrap().forget();
+                    }
+                    match reply {
+                        Some(reply) => write_reply(&mut socket, &reply).await,
+                        // Hold the connection open: the request never completes.
+                        None => std::future::pending().await,
+                    }
+                });
+            }
+        });
+        Self {
+            url,
+            requests,
+            arrived,
+            gate,
+        }
+    }
+
+    fn request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+}
+
+/// Points `client` at the test server `url` (Responses and token requests).
+fn served_by(mut client: OpenAIClient, url: &str) -> OpenAIClient {
+    client = client
+        .with_base_url(url)
+        .with_oauth_token_url(format!("{url}/token"));
     client.http_client = crate::providers::http_client_builder().no_proxy().build().unwrap();
     client
+}
+
+/// A synthetic JWT expiring at `exp` (Unix seconds).
+fn jwt(exp: u64) -> String {
+    let claims = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{exp}}}"#));
+    format!("header.{claims}.signature")
+}
+
+/// Expires in 2100.
+fn fresh_jwt() -> String {
+    jwt(4_102_444_800)
+}
+
+pub(super) fn client(url: &str) -> OpenAIClient {
+    served_by(
+        OpenAIClient::new_chatgpt_oauth(&fresh_jwt(), Some("synthetic-refresh"), "synthetic-account"),
+        url,
+    )
 }
 
 /// An API-key client sending to the test server.
@@ -561,4 +641,222 @@ async fn rate_limited_refreshes_retry_a_bounded_number_of_times() {
     assert_eq!(store.seen.lock().unwrap().len() as u32, requests + 1);
     // Every wait honored the server's Retry-After: 60.
     assert!(started.elapsed() >= Duration::from_secs(60) * OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES);
+}
+
+/// An `auth.json` in a temporary directory holding `client()`'s refresh
+/// token and account.
+fn auth_file(access_token: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("auth.json");
+    let contents = serde_json::json!({
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "access_token": access_token,
+            "refresh_token": "synthetic-refresh",
+            "account_id": "synthetic-account",
+            "id_token": "synthetic-id",
+        },
+    });
+    std::fs::write(&path, serde_json::to_vec_pretty(&contents).unwrap()).unwrap();
+    (dir, path)
+}
+
+fn file_credentials(path: &std::path::Path) -> ChatGptOAuthCredentials {
+    crate::codex_auth::CodexAuthFile::load(path).unwrap().credentials().unwrap()
+}
+
+fn second_refresh() -> Reply {
+    reply(
+        "/token",
+        200,
+        r#"{"access_token":"second-access","refresh_token":"second-refresh"}"#,
+    )
+}
+
+#[tokio::test]
+async fn clients_made_separately_from_one_auth_file_refresh_it_once() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        // A second refresh request would be answered too.
+        let server = TestServer::start(vec![refreshed(), second_refresh()], false).await;
+        let (_dir, path) = auth_file(&fresh_jwt());
+        let file = crate::codex_auth::CodexAuthFile::load(&path).unwrap();
+        let first = served_by(file.openai_client().unwrap(), &server.url);
+        let second = served_by(file.openai_client().unwrap(), &server.url);
+        let (a, b) = tokio::join!(first.refresh_oauth_token(), second.refresh_oauth_token());
+        assert_eq!(a.unwrap().access_token, "synthetic-new-access");
+        assert_eq!(b.unwrap().access_token, "synthetic-new-access");
+        assert_eq!(server.request_count(), 1);
+        let new = stored("synthetic-new-access", "synthetic-new-refresh");
+        for client in [&first, &second] {
+            assert_eq!(client.chatgpt_oauth_credentials().await.unwrap(), new);
+        }
+        assert_eq!(file_credentials(&path), new);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_refresh_dropped_after_its_request_was_sent_still_installs_and_saves_the_tokens() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut server = TestServer::start(vec![refreshed()], true).await;
+        let (_dir, path) = auth_file(&fresh_jwt());
+        let file = crate::codex_auth::CodexAuthFile::load(&path).unwrap();
+        let client = served_by(file.openai_client().unwrap(), &server.url);
+        let caller = tokio::spawn({
+            let client = client.clone();
+            async move { client.refresh_oauth_token_once().await }
+        });
+        let request = server.arrived.recv().await.unwrap();
+        assert_eq!(request["refresh_token"], "synthetic-refresh");
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        // The refresh token rotates once the server answers, whether or not
+        // the caller is still there.
+        server.gate.add_permits(1);
+        // The refresh holds the credentials until the new tokens are
+        // installed and saved.
+        let new = stored("synthetic-new-access", "synthetic-new-refresh");
+        assert_eq!(client.chatgpt_oauth_credentials().await.unwrap(), new);
+        assert_eq!(file_credentials(&path), new);
+        assert_eq!(server.request_count(), 1);
+    })
+    .await
+    .unwrap();
+}
+
+/// The 429 asks for 30 days; one wait honors 15 minutes of that, with no
+/// lock held.
+#[tokio::test(start_paused = true)]
+async fn a_rate_limited_refresh_waits_without_holding_the_credentials() {
+    let asked = crate::retry::MAX_SERVER_DELAY_HINT;
+    // The paused clock also jumps ahead while the test server's replies are
+    // on their way (to the HTTP client's idle-pool timers), so the bounds on
+    // virtual time are loose; they still tell 15 minutes from 30 days.
+    tokio::time::timeout(asked * 2 / 3, async {
+        let limited = reply("/token", 429, r#"{"error":{"code":"rate_limit_exceeded"}}"#)
+            .with_header("Retry-After", &asked.as_secs().to_string());
+        let mut server = TestServer::start(vec![limited, refreshed()], false).await;
+        let client = client(&server.url).with_oauth_rate_limit_retries(true);
+        let waiting = tokio::spawn({
+            let client = client.clone();
+            async move {
+                let started = tokio::time::Instant::now();
+                let result = client.refresh_oauth_token().await;
+                (result, started.elapsed())
+            }
+        });
+        server.arrived.recv().await.unwrap();
+        // While the first caller waits out the 429, another one refreshes.
+        let other = client.refresh_oauth_token_once().await.unwrap();
+        assert_eq!(other.access_token, "synthetic-new-access");
+        // The waiting caller then finds the new tokens instead of refreshing.
+        let (result, waited) = waiting.await.unwrap();
+        assert_eq!(result.unwrap().access_token, "synthetic-new-access");
+        assert!(waited >= Duration::from_secs(900) && waited < asked / 2, "{waited:?}");
+        assert_eq!(server.request_count(), 2);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn an_explicit_refresh_that_waits_for_another_returns_its_tokens() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut server = TestServer::start(vec![refreshed(), second_refresh()], true).await;
+        let client = client(&server.url);
+        let first = tokio::spawn({
+            let client = client.clone();
+            async move { client.refresh_oauth_token().await }
+        });
+        server.arrived.recv().await.unwrap();
+        // The first refresh holds the credentials; this one waits for them.
+        let second = client.refresh_oauth_token();
+        tokio::pin!(second);
+        assert!(futures::poll!(&mut second).is_pending());
+        server.gate.add_permits(2);
+        assert_eq!(first.await.unwrap().unwrap().access_token, "synthetic-new-access");
+        assert_eq!(second.await.unwrap().access_token, "synthetic-new-access");
+        assert_eq!(server.request_count(), 1);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_expiry_checks_refresh_once() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let margin = Duration::from_secs(60);
+        let answer = || {
+            let body = serde_json::json!({"access_token": fresh_jwt(), "refresh_token": "synthetic-new-refresh"});
+            reply("/token", 200, &body.to_string())
+        };
+        for clones in [false, true] {
+            let server = TestServer::start(vec![answer(), answer()], false).await;
+            let expired = OpenAIClient::new_chatgpt_oauth(&jwt(1), Some("synthetic-refresh"), "synthetic-account");
+            let client = served_by(expired, &server.url);
+            let (a, b) = if clones {
+                let first = crate::LLMClient::new().with_openai_client(client.clone());
+                let second = first.clone();
+                tokio::join!(
+                    first.refresh_openai_oauth_token_if_expiring(margin),
+                    second.refresh_openai_oauth_token_if_expiring(margin),
+                )
+            } else {
+                tokio::join!(
+                    client.refresh_oauth_token_if_expiring(margin),
+                    client.refresh_oauth_token_if_expiring(margin),
+                )
+            };
+            // One call refreshed; the other found the new token.
+            let (a, b) = (a.unwrap(), b.unwrap());
+            assert_eq!(usize::from(a.is_some()) + usize::from(b.is_some()), 1, "{clones}");
+            assert_eq!(a.or(b).unwrap().access_token, fresh_jwt());
+            assert_eq!(server.request_count(), 1, "{clones}");
+            assert!(client.refresh_oauth_token_if_expiring(margin).await.unwrap().is_none());
+            assert_eq!(server.request_count(), 1);
+            let credentials = client.chatgpt_oauth_credentials().await.unwrap();
+            assert_eq!(credentials.refresh_token.as_deref(), Some("synthetic-new-refresh"));
+        }
+        // API-key and unconfigured clients have nothing to refresh.
+        let server = TestServer::start(Vec::new(), false).await;
+        let api_key = api_key_client(&server.url);
+        assert!(api_key.refresh_oauth_token_if_expiring(margin).await.unwrap().is_none());
+        let unconfigured = crate::LLMClient::new();
+        assert!(unconfigured.refresh_openai_oauth_token_if_expiring(margin).await.unwrap().is_none());
+        assert_eq!(server.request_count(), 0);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn an_expiry_check_adopts_stored_tokens_and_refreshes_them_only_if_they_expire_too() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let margin = Duration::from_secs(60);
+        let server = TestServer::start(vec![refreshed()], false).await;
+        for (stored_access, refreshes) in [(fresh_jwt(), false), (jwt(1), true)] {
+            let store = Arc::new(ScriptedStore::default());
+            let from_codex = stored(&stored_access, "refresh-from-codex");
+            store.reads.lock().unwrap().push_back(Ok(Some(from_codex.clone())));
+            let expired = OpenAIClient::new_chatgpt_oauth(&jwt(1), Some("synthetic-refresh"), "synthetic-account");
+            let client = with_store(served_by(expired, &server.url), &store);
+            let result = client.refresh_oauth_token_if_expiring(margin).await.unwrap().unwrap();
+            let saved = store.saved.lock().unwrap().clone();
+            if refreshes {
+                assert_eq!(result.access_token, "synthetic-new-access");
+                assert_eq!(server.request_count(), 1);
+                // The stored refresh token was used, not the client's old one.
+                assert_eq!(server.requests.lock().unwrap()[0].1["refresh_token"], "refresh-from-codex");
+                assert_eq!(saved, [(stored("synthetic-new-access", "synthetic-new-refresh"), None)]);
+            } else {
+                assert_eq!(result.access_token, stored_access);
+                assert_eq!(server.request_count(), 0);
+                assert!(saved.is_empty());
+                assert_eq!(client.chatgpt_oauth_credentials().await.unwrap(), from_codex);
+            }
+        }
+    })
+    .await
+    .unwrap();
 }

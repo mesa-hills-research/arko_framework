@@ -1,5 +1,6 @@
 use super::ChatGptOAuthCredentials;
 use crate::error::Error;
+use std::sync::Arc;
 
 /// Storage for ChatGPT OAuth credentials shared with other programs, such as
 /// the Codex CLI's `auth.json` ([`CodexAuthStore`](crate::codex_auth::CodexAuthStore)).
@@ -19,10 +20,13 @@ use crate::error::Error;
 /// 3. When the refresh request fails, the store is read again: if another
 ///    program rotated the tokens in the meantime, they are adopted.
 ///
-/// The client holds its credential lock across these calls, so clones of one
-/// client never refresh concurrently. Implementations may block briefly (a
-/// small file read or write); they must never log or return tokens or
-/// account ids in error messages.
+/// The client holds its credential lock, and the store's
+/// [`refresh_lock`](Self::refresh_lock) when it has one, across these calls,
+/// so neither clones of one client nor clients sharing the lock refresh
+/// concurrently. The calls run to completion even when the caller of the
+/// refresh is dropped. Implementations may block briefly (a small file read
+/// or write); they must never log or return tokens or account ids in error
+/// messages.
 pub trait ChatGptOAuthStore: Send + Sync {
     /// Called before a refresh with the credentials the client holds (and is
     /// about to refresh). Returns newer credentials for the same account to
@@ -44,4 +48,15 @@ pub trait ChatGptOAuthStore: Send + Sync {
         refreshed: &ChatGptOAuthCredentials,
         id_token: Option<&str>,
     ) -> Result<(), Error>;
+
+    /// A lock shared by every store of the same credentials in this process
+    /// (for a Codex `auth.json`, every [`CodexAuthStore`](crate::codex_auth::CodexAuthStore)
+    /// of the same file), held from [`before_refresh`](Self::before_refresh)
+    /// to [`save_refreshed`](Self::save_refreshed): clients with different
+    /// stores of the same credentials then never refresh concurrently. A
+    /// client takes its own credential lock first, then this one. `None`
+    /// (the default) when no other store shares the credentials.
+    fn refresh_lock(&self) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        None
+    }
 }

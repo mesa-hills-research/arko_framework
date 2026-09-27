@@ -160,8 +160,9 @@ impl LLMClient {
     ///
     /// Access tokens expire periodically (~1 hour). When a `refresh_token`
     /// is provided, call [`refresh_openai_oauth_token`](Self::refresh_openai_oauth_token)
-    /// to obtain a fresh access token. Use [`is_openai_token_expired`](Self::is_openai_token_expired)
-    /// to check proactively. The `arko_agents` runtime performs this check
+    /// to obtain a fresh access token, or
+    /// [`refresh_openai_oauth_token_if_expiring`](Self::refresh_openai_oauth_token_if_expiring)
+    /// to refresh proactively. The `arko_agents` runtime refreshes
     /// automatically before each LLM call.
     /// If the server rejects an OAuth request with HTTP 401 `token_expired`
     /// before that expiry, the provider refreshes once and resends the request.
@@ -313,7 +314,8 @@ impl LLMClient {
     ///
     /// On success, the new credentials are written to the shared credential
     /// slot. All clones of this `LLMClient` will use the new access token
-    /// for subsequent requests.
+    /// for subsequent requests. A call that waits while another refresh
+    /// replaces the credentials returns those instead of refreshing again.
     ///
     /// # Errors
     ///
@@ -338,6 +340,32 @@ impl LLMClient {
         match &self.openai_client {
             Some(client) => client.refresh_oauth_token_once().await,
             None => Err(Error::MissingApiKey("OpenAI".to_string())),
+        }
+    }
+
+    /// Refreshes the OpenAI ChatGPT OAuth credentials if the access token
+    /// expires within `margin`, with at most one refresh request (no
+    /// provider-level retries, like
+    /// [`refresh_openai_oauth_token_once`](Self::refresh_openai_oauth_token_once)).
+    ///
+    /// Use this instead of checking [`is_openai_token_expired`](Self::is_openai_token_expired)
+    /// and then refreshing: two tasks sharing a client could both see an
+    /// expiring token and rotate it twice. Here the decision is made under
+    /// the credential lock, after re-reading the credential store (such as a
+    /// Codex `auth.json`), so concurrent calls refresh once.
+    ///
+    /// Returns `Ok(Some(_))` when this call installed new credentials
+    /// (refreshed, or adopted from the credential store), and `Ok(None)` when
+    /// the credentials don't expire within `margin` (including ones another
+    /// caller just refreshed) and for API-key and unconfigured clients. See
+    /// [`OpenAIClient::refresh_oauth_token_if_expiring`](providers::openai::OpenAIClient::refresh_oauth_token_if_expiring).
+    pub async fn refresh_openai_oauth_token_if_expiring(
+        &self,
+        margin: std::time::Duration,
+    ) -> Result<Option<providers::openai::OAuthRefreshResult>, Error> {
+        match &self.openai_client {
+            Some(client) => client.refresh_oauth_token_if_expiring(margin).await,
+            None => Ok(None),
         }
     }
 

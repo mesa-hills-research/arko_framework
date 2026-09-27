@@ -21,7 +21,7 @@ use crate::{
 use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Result of [`CodexAuthFile::persist`] and [`CodexAuthFile::sync`].
@@ -136,8 +136,9 @@ impl CodexAuthFile {
     /// An OpenAI client using the file's ChatGPT OAuth credentials and kept
     /// in step with the file: every token refresh first re-reads the file
     /// (adopting tokens Codex refreshed, for the same account only), and
-    /// rotated tokens are written back as soon as a refresh succeeds. See
-    /// [`CodexAuthStore`].
+    /// rotated tokens are written back as soon as a refresh succeeds.
+    /// Clients made from the same file in this process refresh one at a
+    /// time. See [`CodexAuthStore`].
     pub fn openai_client(&self) -> Result<OpenAIClient, Error> {
         let credentials = self.credentials()?;
         Ok(OpenAIClient::new_chatgpt_oauth(
@@ -443,8 +444,41 @@ impl CodexAuthFile {
 /// [`CodexAuthFile::write_recovery`]) and the refresh returns an error
 /// naming it; the client keeps using the new tokens, and the next refresh
 /// tries to save them again first (with the refresh's `id_token`).
+///
+/// Every store of the same file (by canonical path) in this process shares
+/// one [`refresh_lock`](ChatGptOAuthStore::refresh_lock), so clients built
+/// separately from one `auth.json` (each [`CodexAuthFile::openai_client`]
+/// call makes its own store) refresh one at a time: the second finds the
+/// first one's tokens in the file instead of reusing the rotated refresh
+/// token. Each store keeps its own record of the file as last read.
 pub struct CodexAuthStore {
     state: Mutex<StoreState>,
+    refresh_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// The refresh locks of the `auth.json` files with a [`CodexAuthStore`] in
+/// this process, by canonical path. An entry lives as long as a store uses
+/// it; dead entries are dropped when a store is made.
+static REFRESH_LOCKS: Mutex<Vec<(PathBuf, Weak<tokio::sync::Mutex<()>>)>> =
+    Mutex::new(Vec::new());
+
+fn shared_refresh_lock(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    let key = std::fs::canonicalize(path)
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_path_buf());
+    // The list is valid after any panic: it only ever gains or drops whole entries.
+    let mut locks = REFRESH_LOCKS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.retain(|(_, lock)| lock.strong_count() > 0);
+    if let Some(lock) = locks
+        .iter()
+        .find(|(path, _)| *path == key)
+        .and_then(|(_, lock)| lock.upgrade())
+    {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.push((key, Arc::downgrade(&lock)));
+    lock
 }
 
 struct StoreState {
@@ -457,6 +491,7 @@ struct StoreState {
 impl CodexAuthStore {
     pub fn new(file: CodexAuthFile) -> Self {
         Self {
+            refresh_lock: shared_refresh_lock(&file.path),
             state: Mutex::new(StoreState {
                 file,
                 unsaved_id_token: None,
@@ -543,6 +578,10 @@ impl ChatGptOAuthStore for CodexAuthStore {
         };
         log::error!("arko_ai: {message}");
         Err(Error::AuthenticationFailed(message))
+    }
+
+    fn refresh_lock(&self) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        Some(self.refresh_lock.clone())
     }
 }
 
@@ -1145,6 +1184,31 @@ mod tests {
         );
         let debug = format!("{store:?}");
         assert!(debug.contains("auth.json") && !debug.contains("refresh"), "{debug}");
+    }
+
+    #[test]
+    fn stores_of_one_file_share_a_refresh_lock() {
+        let (dir, path) = temp_file(NESTED);
+        let first = CodexAuthStore::new(CodexAuthFile::load(&path).unwrap());
+        // Another spelling of the same path.
+        let second =
+            CodexAuthStore::new(CodexAuthFile::load(dir.path().join(".").join("auth.json")).unwrap());
+        let lock = first.refresh_lock().unwrap();
+        assert!(Arc::ptr_eq(&lock, &second.refresh_lock().unwrap()));
+        let (_other_dir, other_path) = temp_file(NESTED);
+        let other = CodexAuthStore::new(CodexAuthFile::load(&other_path).unwrap());
+        assert!(!Arc::ptr_eq(&lock, &other.refresh_lock().unwrap()));
+
+        // An entry goes once no store uses it.
+        let registered = |path: &Path| {
+            let key = std::fs::canonicalize(path).unwrap();
+            REFRESH_LOCKS.lock().unwrap().iter().any(|(path, _)| *path == key)
+        };
+        assert!(registered(&other_path));
+        drop(other);
+        let _ = shared_refresh_lock(&path);
+        assert!(!registered(&other_path));
+        assert!(registered(&path));
     }
 
     fn set_before_read(hook: Option<ReadHook>) {
