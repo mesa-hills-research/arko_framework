@@ -126,7 +126,9 @@ request's prompt cache after its last use: `PromptCacheLifetime::Known(duration)
 makes a request within it stays cached however long it waits in between. Anthropic, and
 Claude on OpenRouter: 5 minutes, or 1 hour with `anthropic_cache_ttl` set to `OneHour`.
 OpenAI GPT-5.6 and later: 30 minutes, the only `prompt_cache_options.ttl` the API accepts
-and its default (over ChatGPT OAuth this is assumed, pending a measurement). Earlier
+and its default, so none is sent. The ChatGPT OAuth backend caches implicitly only, with
+a lifetime no request can configure; it is taken to be the same 30 minutes, pending a
+measurement. Earlier
 OpenAI models: 5 minutes, the least any organization gets (Zero Data Retention
 organizations keep entries in memory for 5 to 10 minutes of inactivity, others around 30
 minutes). Gemini and other OpenRouter models: `Unknown`. Models without caching, and

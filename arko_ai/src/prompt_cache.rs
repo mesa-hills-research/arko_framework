@@ -60,9 +60,11 @@ pub const OPENAI_PROMPT_CACHE_LIFETIME: Duration = Duration::from_secs(30 * 60);
 pub const OPENAI_IN_MEMORY_PROMPT_CACHE_LIFETIME: Duration = Duration::from_secs(5 * 60);
 
 /// The cache lifetime on the ChatGPT OAuth (Codex backend) path for GPT-5.6
-/// and later models. The backend documents none; this assumes the API's
-/// 30 minutes, which a measurement with the `oauth_cache_probe` example's
-/// `--idle-gap` option is confirming.
+/// and later models, a fixed property of the backend: it caches implicitly
+/// only, and no request setting configures the lifetime (this client sends
+/// it no `prompt_cache_options`). The backend documents none; this is the
+/// API's 30 minutes, which a measurement with the `oauth_cache_probe`
+/// example's `--idle-gap` option is confirming.
 pub const CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME: Duration = Duration::from_secs(30 * 60);
 
 impl AnthropicCacheTtl {
@@ -90,8 +92,8 @@ impl AnthropicCacheTtl {
 /// - OpenAI GPT-5.6 and later with an API key: `Disabled` when caching is off
 ///   (explicit mode without breakpoints), otherwise 30 minutes.
 /// - OpenAI GPT-5.6 and later through ChatGPT OAuth:
-///   [`CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME`]. Those requests carry no
-///   `prompt_cache_options`, so turning caching off doesn't change them.
+///   [`CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME`]. The backend caches implicitly
+///   only and can't be configured, so turning caching off doesn't change it.
 /// - Earlier OpenAI models: 5 minutes, the lifetime every organization gets
 ///   at least; their caching is automatic and can't be turned off.
 /// - Gemini (implicit caching the provider manages) and other OpenRouter
@@ -191,7 +193,7 @@ mod tests {
                 model.id
             );
             assert_eq!(lifetime(&model, &off), Disabled);
-            // ChatGPT OAuth sends no cache options: caching stays on.
+            // The ChatGPT backend's caching is implicit and fixed.
             for config in [&default, &off] {
                 assert_eq!(
                     prompt_cache_lifetime(&model, config, true),
