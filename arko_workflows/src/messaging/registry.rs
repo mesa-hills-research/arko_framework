@@ -14,6 +14,9 @@
 //!   registry, not queued when an agent starts, so no ordering of starts
 //!   loses or repeats one);
 //! - `list_recipients` reports current statuses.
+//!
+//! A watch channel publishes the version, so `wait_for_message` wakes when
+//! an agent starts or finishes without polling.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -22,6 +25,7 @@ use arko_agents::task::TaskState;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::workflow::result::{AgentResult, AgentRunStatus};
@@ -41,6 +45,8 @@ pub enum WaitReason {
     AwaitingApproval,
     /// Waiting for an answer to its questions.
     AwaitingInput,
+    /// Waiting in `wait_for_message` for a message from another agent.
+    AwaitingMessage,
     /// The workflow is paused.
     Paused,
 }
@@ -81,6 +87,7 @@ impl AgentStatus {
                     WaitReason::UsageLimit { until } => ("usage_limit", *until),
                     WaitReason::AwaitingApproval => ("awaiting_approval", None),
                     WaitReason::AwaitingInput => ("awaiting_input", None),
+                    WaitReason::AwaitingMessage => ("awaiting_message", None),
                     WaitReason::Paused => ("paused", None),
                 };
                 match until {
@@ -136,6 +143,9 @@ pub struct RegistrySnapshot {
 struct Run {
     agent: String,
     waiting: Option<WaitReason>,
+    /// In `wait_for_message`: set and cleared by the tool alone, so the
+    /// driver's events (observed a little later) can't end the wait early.
+    awaiting_message: bool,
     /// The agent's record before this run started, restored if the run is
     /// abandoned before it starts.
     previous: AgentRecord,
@@ -151,9 +161,24 @@ struct RegistryState {
 }
 
 /// The status registry of one workflow run.
-#[derive(Default)]
 pub(crate) struct AgentRegistry {
     state: Mutex<RegistryState>,
+    /// The current version, published under the state lock.
+    versions: watch::Sender<u64>,
+}
+
+impl Default for AgentRegistry {
+    fn default() -> Self {
+        Self::with_state(RegistryState::default())
+    }
+}
+
+/// Whether an agent runs and when it last started: what a change of tells
+/// a waiting agent that the agent started or finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Activity {
+    pub last_start: u64,
+    pub running: bool,
 }
 
 impl AgentRegistry {
@@ -186,12 +211,33 @@ impl AgentRegistry {
                 record.finished = Some(result.status.clone());
             }
         }
+        Self::with_state(RegistryState {
+            saved,
+            runs: HashMap::new(),
+        })
+    }
+
+    fn with_state(state: RegistryState) -> Self {
         Self {
-            state: Mutex::new(RegistryState {
-                saved,
-                runs: HashMap::new(),
-            }),
+            versions: watch::Sender::new(state.saved.version),
+            state: Mutex::new(state),
         }
+    }
+
+    /// Publishes `state`'s version; called with the state lock held, so
+    /// versions are published in order.
+    fn publish(&self, state: &RegistryState) {
+        let version = state.saved.version;
+        self.versions.send_if_modified(|published| {
+            let changed = *published != version;
+            *published = version;
+            changed
+        });
+    }
+
+    /// The current version, changing with every status change.
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.versions.subscribe()
     }
 
     /// The state a checkpoint saves.
@@ -220,11 +266,13 @@ impl AgentRegistry {
                 Run {
                     agent: (*agent).to_string(),
                     waiting: None,
+                    awaiting_message: false,
                     previous,
                     started,
                 },
             );
         }
+        self.publish(state);
     }
 
     /// Removes a run marked running whose start then failed. When no other
@@ -245,6 +293,7 @@ impl AgentRegistry {
             }
         }
         state.saved.seen.remove(&task_id);
+        self.publish(state);
     }
 
     /// Records that a run ended with `outcome`, the agent's latest outcome;
@@ -265,6 +314,7 @@ impl AgentRegistry {
         };
         state.saved.version += 1;
         state.saved.agents.entry(run.agent).or_default().finished = Some(outcome);
+        self.publish(state);
     }
 
     /// Updates a running run's waiting state from one of its events.
@@ -322,7 +372,37 @@ impl AgentRegistry {
         {
             run.waiting = waiting;
             state.saved.version += 1;
+            self.publish(state);
         }
+    }
+
+    /// Marks run `task_id` as waiting in `wait_for_message`, or no longer.
+    pub fn set_awaiting_message(&self, task_id: Uuid, awaiting: bool) {
+        let mut guard = self.state.lock();
+        let state = &mut *guard;
+        if let Some(run) = state.runs.get_mut(&task_id)
+            && run.awaiting_message != awaiting
+        {
+            run.awaiting_message = awaiting;
+            state.saved.version += 1;
+            self.publish(state);
+        }
+    }
+
+    /// Whether each of `agents` runs, and when it last started.
+    pub fn activity(&self, agents: &[String]) -> Vec<Activity> {
+        let state = self.state.lock();
+        agents
+            .iter()
+            .map(|agent| Activity {
+                last_start: state
+                    .saved
+                    .agents
+                    .get(agent)
+                    .map_or(0, |record| record.last_start),
+                running: state.runs.values().any(|run| &run.agent == agent),
+            })
+            .collect()
     }
 
     /// The statuses of `agents` now; `paused` reports running agents as
@@ -400,6 +480,10 @@ fn status(state: &RegistryState, agent: &str, paused: bool) -> AgentStatus {
         let now = Utc::now();
         let mut first_wait = None;
         for run in runs {
+            if run.awaiting_message {
+                first_wait.get_or_insert(WaitReason::AwaitingMessage);
+                continue;
+            }
             match &run.waiting {
                 // A wait whose time has passed is over: the retry is under way.
                 Some(reason) if !until_passed(reason, now) => {
@@ -616,6 +700,108 @@ mod tests {
             status_of(&registry, "c"),
             AgentStatus::Finished(AgentRunStatus::Completed)
         );
+    }
+
+    /// A run in `wait_for_message` is waiting until the tool says otherwise,
+    /// whatever events the driver observes meanwhile; a pause still reports
+    /// paused. Each change is a new, published version.
+    #[test]
+    fn a_run_awaiting_a_message_waits_until_the_tool_ends_the_wait() {
+        let registry = AgentRegistry::default();
+        let mut versions = registry.subscribe();
+        let run = Uuid::new_v4();
+        registry.start(&[(run, "worker")]);
+        assert!(versions.has_changed().unwrap());
+        let started = *versions.borrow_and_update();
+        registry.observe(
+            run,
+            &AgentEvent::TaskStateChanged(TaskState::AwaitingToolApproval {
+                tool_call_id: Uuid::new_v4(),
+                tool_name: "wait_for_message".into(),
+                parameters: Default::default(),
+                tool_description: String::new(),
+            }),
+        );
+        registry.set_awaiting_message(run, true);
+        let waiting = AgentStatus::Waiting(WaitReason::AwaitingMessage);
+        assert_eq!(status_of(&registry, "worker"), waiting);
+        assert_eq!(waiting.describe(), "waiting (awaiting_message)");
+        // A progress event observed late doesn't end the wait.
+        registry.observe(run, &AgentEvent::AssistantResponseChunk("ok".into()));
+        assert_eq!(status_of(&registry, "worker"), waiting);
+        assert_eq!(
+            registry.statuses(&names(&["worker"]), true)[0].1,
+            AgentStatus::Waiting(WaitReason::Paused)
+        );
+        assert!(*versions.borrow_and_update() > started);
+        // Setting it again changes nothing.
+        registry.set_awaiting_message(run, true);
+        assert!(!versions.has_changed().unwrap());
+        registry.set_awaiting_message(run, false);
+        assert_eq!(status_of(&registry, "worker"), AgentStatus::Running);
+        assert!(versions.has_changed().unwrap());
+        // With another run of the agent running, the agent is running.
+        let other = Uuid::new_v4();
+        registry.start(&[(other, "worker")]);
+        registry.set_awaiting_message(run, true);
+        assert_eq!(status_of(&registry, "worker"), AgentStatus::Running);
+        registry.set_awaiting_message(other, true);
+        assert_eq!(status_of(&registry, "worker"), waiting);
+        // Unknown runs are ignored.
+        registry.set_awaiting_message(Uuid::new_v4(), true);
+    }
+
+    /// Activity changes with starts and finishes only.
+    #[test]
+    fn activity_follows_starts_and_finishes() {
+        let registry = AgentRegistry::default();
+        let agents = names(&["worker"]);
+        let before = registry.activity(&agents);
+        assert_eq!(
+            before,
+            [Activity {
+                last_start: 0,
+                running: false
+            }]
+        );
+        let run = Uuid::new_v4();
+        registry.start(&[(run, "worker")]);
+        let running = registry.activity(&agents);
+        assert!(running[0].running && running[0].last_start > 0);
+        registry.set_awaiting_message(run, true);
+        registry.observe(
+            run,
+            &AgentEvent::RetryScheduled {
+                attempt: 1,
+                delay_ms: 60_000,
+                elapsed_ms: 0,
+                rate_limit: true,
+            },
+        );
+        assert_eq!(registry.activity(&agents), running);
+        registry.finish(run, AgentRunStatus::Completed);
+        let finished = registry.activity(&agents);
+        assert!(!finished[0].running);
+        assert_eq!(finished[0].last_start, running[0].last_start);
+    }
+
+    #[test]
+    fn the_message_wait_reason_serializes_in_snake_case() {
+        let waiting = AgentStatus::Waiting(WaitReason::AwaitingMessage);
+        let json = serde_json::to_value(&waiting).unwrap();
+        assert_eq!(json, serde_json::json!({"waiting": "awaiting_message"}));
+        assert_eq!(
+            serde_json::from_value::<AgentStatus>(json).unwrap(),
+            waiting
+        );
+    }
+
+    #[test]
+    fn a_restored_registry_publishes_its_version() {
+        let registry = AgentRegistry::default();
+        registry.start(&[(Uuid::new_v4(), "worker")]);
+        let restored = AgentRegistry::restore(Some(registry.snapshot()), &[]);
+        assert_eq!(*restored.subscribe().borrow(), registry.snapshot().version);
     }
 
     #[test]

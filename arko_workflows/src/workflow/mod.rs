@@ -20,7 +20,10 @@ use crate::freshness::{ContextFreshnessConfig, ResourceTracker};
 use crate::hooks::{HookCallback, HookPoint, HookRegistry};
 use crate::memory::MemoryConfig;
 use crate::messaging::registry::{AgentRegistry, AgentStatus};
-use crate::messaging::tools::{LIST_RECIPIENTS_TOOL_NAME, SEND_MESSAGE_TOOL_NAME};
+use crate::messaging::tools::{
+    LIST_RECIPIENTS_TOOL_NAME, SEND_MESSAGE_TOOL_NAME, WAIT_FOR_MESSAGE_TOOL_NAME,
+};
+use crate::messaging::wait::{WaitForMessageTimeout, WaitTimeouts};
 use crate::messaging::{MessageBus, MessagingPolicy};
 use crate::persistence::{PersistenceConfig, PersistenceManager};
 use crate::services::{RUN_WORKFLOW_AGENT_TOOL_NAME, WorkflowServices, WorkflowServicesConfig};
@@ -644,6 +647,7 @@ pub struct WorkflowBuilder {
     distillation_configs: Vec<DistillationConfig>,
     services_config: Option<WorkflowServicesConfig>,
     messaging: Option<MessagingPolicy>,
+    wait_timeouts: WaitTimeouts,
     user_input_handler: Option<Arc<dyn UserInputHandler>>,
     voting_enabled: bool,
     interception_failure_policy: Option<InterceptionFailurePolicy>,
@@ -674,6 +678,7 @@ impl WorkflowBuilder {
             distillation_configs: Vec::new(),
             services_config: None,
             messaging: Some(MessagingPolicy::default()),
+            wait_timeouts: WaitTimeouts::default(),
             user_input_handler: None,
             voting_enabled: false,
             interception_failure_policy: None,
@@ -849,6 +854,33 @@ impl WorkflowBuilder {
         self
     }
 
+    /// How long `wait_for_message` waits at most, for every agent without its
+    /// own setting ([`agent_wait_for_message_timeout`](Self::agent_wait_for_message_timeout)).
+    /// Default [`WaitForMessageTimeout::Auto`]: just inside the agent's
+    /// prompt-cache lifetime, so the request after a wait still finds the
+    /// prompt cached (4 minutes 30 seconds for a 5-minute cache, 27 minutes
+    /// for GPT-5.6 and later, 54 minutes with Anthropic's 1-hour TTL, and 4
+    /// minutes 30 seconds when the lifetime is unknown). A `Duration` sets a
+    /// fixed limit, more than zero and at most 24 hours; a limit past the
+    /// cache lifetime costs a cache write after long waits.
+    pub fn wait_for_message_timeout(mut self, timeout: impl Into<WaitForMessageTimeout>) -> Self {
+        self.wait_timeouts.workflow = timeout.into();
+        self
+    }
+
+    /// How long `wait_for_message` waits at most for `agent`, in place of the
+    /// workflow's setting ([`wait_for_message_timeout`](Self::wait_for_message_timeout)).
+    pub fn agent_wait_for_message_timeout(
+        mut self,
+        agent: impl Into<String>,
+        timeout: impl Into<WaitForMessageTimeout>,
+    ) -> Self {
+        self.wait_timeouts
+            .agents
+            .insert(agent.into(), timeout.into());
+        self
+    }
+
     pub fn user_input_handler(mut self, handler: Arc<dyn UserInputHandler>) -> Self {
         self.user_input_handler = Some(handler);
         self
@@ -990,17 +1022,39 @@ impl WorkflowBuilder {
         // permitted recipient.
         let mut roster = agent_names.iter().cloned().collect::<Vec<_>>();
         roster.sort();
-        let messaging_agents = match &self.messaging {
+        let (messaging_agents, receiving_agents) = match &self.messaging {
             Some(policy) => {
                 policy.validate(&agent_names)?;
-                roster
+                let sending = roster
                     .iter()
                     .filter(|agent| !policy.recipients_of(agent, &roster).is_empty())
                     .cloned()
-                    .collect::<HashSet<_>>()
+                    .collect::<HashSet<_>>();
+                // Offered `wait_for_message`: another agent may message it.
+                let receiving = roster
+                    .iter()
+                    .filter(|agent| roster.iter().any(|sender| policy.permits(sender, agent)))
+                    .cloned()
+                    .collect::<HashSet<_>>();
+                (sending, receiving)
             }
-            None => HashSet::new(),
+            None => (HashSet::new(), HashSet::new()),
         };
+        for (agent, timeout) in std::iter::once((None, &self.wait_timeouts.workflow)).chain(
+            self.wait_timeouts
+                .agents
+                .iter()
+                .map(|(agent, timeout)| (Some(agent), timeout)),
+        ) {
+            if let Some(agent) = agent
+                && !agent_names.contains(agent)
+            {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "wait_for_message timeout references unknown agent '{agent}'"
+                )));
+            }
+            timeout.validate().map_err(WorkflowError::BuilderInvalid)?;
+        }
 
         let mut global_tool_names = HashSet::new();
         for tool in &self.global_tools {
@@ -1018,6 +1072,7 @@ impl WorkflowBuilder {
                 tool_name.as_str(),
                 SEND_MESSAGE_TOOL_NAME | LIST_RECIPIENTS_TOOL_NAME
             ) && !messaging_agents.is_empty())
+                || (tool_name == WAIT_FOR_MESSAGE_TOOL_NAME && !receiving_agents.is_empty())
             {
                 return Err(WorkflowError::BuilderInvalid(format!(
                     "tool name '{tool_name}' is reserved"
@@ -1041,6 +1096,12 @@ impl WorkflowBuilder {
                 {
                     return Err(WorkflowError::BuilderInvalid(format!(
                         "tool name '{tool_name}' is reserved for agent '{agent_name}', which messaging permits to send"
+                    )));
+                }
+                if tool_name == WAIT_FOR_MESSAGE_TOOL_NAME && receiving_agents.contains(agent_name)
+                {
+                    return Err(WorkflowError::BuilderInvalid(format!(
+                        "tool name '{tool_name}' is reserved for agent '{agent_name}', which messaging permits to receive"
                     )));
                 }
                 if !names.insert(tool_name.clone()) {
@@ -1141,6 +1202,7 @@ impl WorkflowBuilder {
             memory,
             messages,
             messaging: self.messaging,
+            wait_timeouts: self.wait_timeouts,
             resource_tracker,
             hooks: Arc::new(hook_registry),
             agent_configs: self.agents.iter().cloned().collect(),
@@ -1224,3 +1286,7 @@ impl Default for WorkflowBuilder {
 #[cfg(test)]
 #[path = "messaging_tests.rs"]
 mod messaging_tests;
+
+#[cfg(test)]
+#[path = "wait_tests.rs"]
+mod wait_tests;

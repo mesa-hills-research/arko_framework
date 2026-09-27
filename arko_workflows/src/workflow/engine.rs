@@ -580,6 +580,9 @@ async fn wind_down(
     persistence: Option<&Arc<PersistenceManager>>,
 ) -> Option<Joined> {
     let mut events_open = true;
+    // A tool call waiting for something (`wait_for_message`) returns now; the
+    // runtime reads the command only once the call has returned.
+    ctx.run_control.stop_agent(agent_run_id);
     // Sent while events are drained: an agent blocked on a full event
     // channel must be able to take the command.
     let cancel = cmd_tx.send(UserCommand::CancelTask);
@@ -990,6 +993,13 @@ impl WorkflowEngine {
                 agent_name.to_string(),
             )));
         }
+        if !ctx.message_senders(agent_name).is_empty() {
+            registry.register(Arc::new(WaitForMessageTool::new(
+                ctx.clone(),
+                agent_name.to_string(),
+                self.llm_client.clone(),
+            )));
+        }
         if let Some(services) = ctx.workflow_services.get()
             && services.is_allowed(agent_name)
         {
@@ -1096,6 +1106,9 @@ impl WorkflowEngine {
         if !ctx.message_recipients(agent_name).is_empty() {
             ensure_tool_name(&mut config, SEND_MESSAGE_TOOL_NAME);
             ensure_tool_name(&mut config, LIST_RECIPIENTS_TOOL_NAME);
+        }
+        if !ctx.message_senders(agent_name).is_empty() {
+            ensure_tool_name(&mut config, WAIT_FOR_MESSAGE_TOOL_NAME);
         }
         if let Some(services) = ctx.workflow_services.get()
             && services.is_allowed(agent_name)

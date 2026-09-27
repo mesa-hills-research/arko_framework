@@ -1,5 +1,6 @@
 //! Tools for inter-agent communication: `send_message` and
-//! `list_recipients`, and the start notices agents receive.
+//! `list_recipients` (and `wait_for_message`, from [`wait`](super::wait)),
+//! and the start notices agents receive.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,7 +14,9 @@ use arko_agents::tool::{
 };
 
 use crate::context::SharedContext;
-use crate::messaging::registry::AgentStatus;
+use crate::messaging::registry::{AgentStatus, WaitReason};
+
+pub use super::wait::{WAIT_FOR_MESSAGE_TOOL_NAME, WaitForMessageTool};
 
 pub const SEND_MESSAGE_TOOL_NAME: &str = "send_message";
 pub const LIST_RECIPIENTS_TOOL_NAME: &str = "list_recipients";
@@ -163,6 +166,10 @@ impl Tool for SendMessageTool {
         .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
 
         Ok(match status {
+            // Its wait ends now, and the message arrives with its next turn.
+            AgentStatus::Waiting(WaitReason::AwaitingMessage) => {
+                format!("Message {} sent to agent '{to}'.", message.id)
+            }
             AgentStatus::Waiting(_) => format!(
                 "Message {} sent to agent '{to}', which is {}; it receives the message when it continues.",
                 message.id,

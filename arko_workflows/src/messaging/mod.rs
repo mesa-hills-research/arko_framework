@@ -8,7 +8,7 @@ use std::{
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{Notify, mpsc},
+    sync::{Notify, mpsc, watch},
     task::AbortHandle,
 };
 use uuid::Uuid;
@@ -17,6 +17,11 @@ use arko_agents::runtime::command::UserCommand;
 
 pub mod registry;
 pub mod tools;
+pub mod wait;
+
+/// The sender name of the context notices [`MessageBus::inject_task`]
+/// queues, such as context-freshness notices.
+pub const WORKFLOW_CONTEXT_SENDER: &str = "workflow-context";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -140,6 +145,17 @@ pub struct MessageBus {
 struct BusState {
     queues: HashMap<String, Vec<AgentMessage>>,
     active: HashMap<String, HashMap<Uuid, ActiveRecipient>>,
+    /// Per agent run (task ID): a counter bumped whenever an agent message
+    /// arrives for the run or the run's delivery worker forwards a message.
+    /// Created by whichever comes first, the registration or a waiter, and
+    /// removed when the run is unregistered.
+    arrivals: HashMap<Uuid, watch::Sender<u64>>,
+}
+
+fn signal_arrival(arrivals: &HashMap<Uuid, watch::Sender<u64>>, task_id: Uuid) {
+    if let Some(arrivals) = arrivals.get(&task_id) {
+        arrivals.send_modify(|count| *count = count.wrapping_add(1));
+    }
 }
 
 struct ActiveRecipient {
@@ -148,8 +164,22 @@ struct ActiveRecipient {
     pending_message_ids: Vec<Uuid>,
     confirmed_message_ids: HashSet<Uuid>,
     outbound: VecDeque<(Uuid, String)>,
+    /// Agent messages sent to this run that its conversation doesn't hold
+    /// yet: `(id, sender, injected payload)`. Context notices are left out.
+    unseen: Vec<(Uuid, String, String)>,
     wake: Arc<Notify>,
     pump: Option<AbortHandle>,
+}
+
+/// The agent messages a run hasn't seen yet; see
+/// [`MessageBus::unseen_messages`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct UnseenMessages {
+    /// Their senders, each once, in the order their messages arrived.
+    pub senders: Vec<String>,
+    /// Whether every one of them is in the run's command channel, so the
+    /// runtime adds it at its next turn boundary.
+    pub forwarded: bool,
 }
 
 impl Drop for ActiveRecipient {
@@ -226,6 +256,7 @@ async fn forward(
         if let Some((id, content)) = active.outbound.pop_front() {
             active.pending_message_ids.push(id);
             permit.send(UserCommand::InjectContext { content });
+            signal_arrival(&state.arrivals, task_id);
         }
     }
 }
@@ -258,6 +289,24 @@ fn acknowledge(state: &mut BusState, agent_name: &str, message_ids: &[Uuid]) {
     }
 }
 
+/// The runtime's context update a conversation message carries, without the
+/// environment details and reminder `PromptBuilder` appends after it (copies
+/// in those suffixes are not deliveries). An identical marker inside message
+/// content conservatively doesn't count.
+fn context_update(message: &arko_ai::Message) -> Option<&str> {
+    if message.role != arko_ai::Role::User {
+        return None;
+    }
+    let [arko_ai::Content::Text(text)] = message.content.as_slice() else {
+        return None;
+    };
+    let update = text.strip_prefix("# Workflow context update\n\n")?;
+    let update = update
+        .split("\n\n# Current Environment Information (updated this turn)\n")
+        .next()?;
+    update.split("\n\n# Reminder\n").next()
+}
+
 fn contains_injection(update: &str, payload: &str) -> bool {
     update.match_indices(payload).any(|(start, _)| {
         (start == 0 || update[..start].ends_with("\n\n"))
@@ -281,7 +330,7 @@ impl MessageBus {
         Self {
             state: Arc::new(Mutex::new(BusState {
                 queues,
-                active: HashMap::new(),
+                ..BusState::default()
             })),
             roster: roster.into_iter().collect(),
         }
@@ -312,11 +361,16 @@ impl MessageBus {
                 pending_message_ids: Vec::new(),
                 confirmed_message_ids: HashSet::new(),
                 outbound: VecDeque::new(),
+                unseen: Vec::new(),
                 wake: Arc::new(Notify::new()),
                 pump: None,
             },
         );
         self.start_pump(agent_name, task_id, active.get_mut(&task_id).unwrap());
+        state
+            .arrivals
+            .entry(task_id)
+            .or_insert_with(|| watch::Sender::new(0));
     }
 
     /// Registers a run started with the messages `in_prompt` in its prompt,
@@ -330,14 +384,14 @@ impl MessageBus {
         in_prompt: &[Uuid],
     ) {
         self.register_active(agent_name, task_id, sender);
-        let mut state = self.state.lock();
+        let mut guard = self.state.lock();
+        let state = &mut *guard;
         let late = state
             .queues
             .get(agent_name)
             .into_iter()
             .flatten()
             .filter(|message| !in_prompt.contains(&message.id))
-            .map(|message| (message.id, injection(message)))
             .collect::<Vec<_>>();
         if late.is_empty() {
             return;
@@ -349,8 +403,17 @@ impl MessageBus {
         else {
             return;
         };
-        active.outbound.extend(late);
+        for message in late {
+            let payload = injection(message);
+            if message.from != WORKFLOW_CONTEXT_SENDER {
+                active
+                    .unseen
+                    .push((message.id, message.from.clone(), payload.clone()));
+            }
+            active.outbound.push_back((message.id, payload));
+        }
         active.wake.notify_one();
+        signal_arrival(&state.arrivals, task_id);
     }
 
     fn start_pump(&self, agent_name: &str, task_id: Uuid, active: &mut ActiveRecipient) {
@@ -377,6 +440,69 @@ impl MessageBus {
                 state.active.remove(agent_name);
             }
         }
+        state.arrivals.remove(&task_id);
+    }
+
+    /// Counts agent messages arriving for run `task_id` and their forwarding
+    /// to it: take the receiver, mark its value seen, then check
+    /// [`unseen_messages`](Self::unseen_messages), and no arrival after the
+    /// check goes unnoticed.
+    pub(crate) fn watch_arrivals(&self, task_id: Uuid) -> watch::Receiver<u64> {
+        self.state
+            .lock()
+            .arrivals
+            .entry(task_id)
+            .or_insert_with(|| watch::Sender::new(0))
+            .subscribe()
+    }
+
+    /// The agent messages sent to run `task_id` of `agent_name` since it
+    /// started that its conversation doesn't hold yet, as far as
+    /// [`observe_context`](Self::observe_context) has been told. Messages in
+    /// its initial prompt and context notices don't count.
+    pub(crate) fn unseen_messages(&self, agent_name: &str, task_id: Uuid) -> UnseenMessages {
+        let state = self.state.lock();
+        let Some(active) = state
+            .active
+            .get(agent_name)
+            .and_then(|instances| instances.get(&task_id))
+        else {
+            return UnseenMessages::default();
+        };
+        let mut senders = Vec::new();
+        for (_, from, _) in &active.unseen {
+            if !senders.contains(from) {
+                senders.push(from.clone());
+            }
+        }
+        let forwarded = active
+            .unseen
+            .iter()
+            .all(|(id, _, _)| !active.outbound.iter().any(|(outbound, _)| outbound == id));
+        UnseenMessages { senders, forwarded }
+    }
+
+    /// Notes a message committed to run `task_id`'s conversation: the agent
+    /// messages whose injected payload its context update holds are seen.
+    pub(crate) fn observe_context(
+        &self,
+        agent_name: &str,
+        task_id: Uuid,
+        message: &arko_ai::Message,
+    ) {
+        let Some(update) = context_update(message) else {
+            return;
+        };
+        let mut state = self.state.lock();
+        if let Some(active) = state
+            .active
+            .get_mut(agent_name)
+            .and_then(|instances| instances.get_mut(&task_id))
+        {
+            active
+                .unseen
+                .retain(|(_, _, payload)| !contains_injection(update, payload));
+        }
     }
 
     /// Queue a task-specific context notice without waiting for the recipient.
@@ -394,7 +520,7 @@ impl MessageBus {
         };
         let message = AgentMessage {
             id: Uuid::new_v4(),
-            from: "workflow-context".to_string(),
+            from: WORKFLOW_CONTEXT_SENDER.to_string(),
             from_task_id: None,
             to: agent_name.clone(),
             content,
@@ -458,12 +584,19 @@ impl MessageBus {
             .or_default()
             .push(msg.clone());
 
+        let state = &mut *state;
         if let Some(instances) = state.active.get_mut(to) {
             let content = injection(&msg);
             for (task_id, active) in instances {
+                if msg.from != WORKFLOW_CONTEXT_SENDER {
+                    active
+                        .unseen
+                        .push((msg.id, msg.from.clone(), content.clone()));
+                }
                 active.outbound.push_back((msg.id, content.clone()));
                 self.start_pump(to, *task_id, active);
                 active.wake.notify_one();
+                signal_arrival(&state.arrivals, *task_id);
             }
         }
 
@@ -525,25 +658,10 @@ impl MessageBus {
                 .collect::<Vec<_>>();
             (active.generation, payloads)
         };
-        // PromptBuilder appends environment details/reminders after the runtime
-        // update. Do not mistake copies appearing in those suffixes for delivery.
-        // An identical marker inside message content is conservatively unconfirmed.
         let updates = conversation
             .messages
             .iter()
-            .filter_map(|message| {
-                if message.role != arko_ai::Role::User {
-                    return None;
-                }
-                let [arko_ai::Content::Text(text)] = message.content.as_slice() else {
-                    return None;
-                };
-                let update = text.strip_prefix("# Workflow context update\n\n")?;
-                let update = update
-                    .split("\n\n# Current Environment Information (updated this turn)\n")
-                    .next()?;
-                update.split("\n\n# Reminder\n").next()
-            })
+            .filter_map(context_update)
             .collect::<Vec<_>>();
         let confirmed = payloads
             .into_iter()
@@ -617,6 +735,105 @@ mod tests {
             panic!("expected a context injection");
         };
         content
+    }
+
+    fn update(content: &str) -> arko_ai::Message {
+        arko_ai::Message::new_user(&format!("# Workflow context update\n\n{content}"))
+    }
+
+    /// A run's unseen agent messages: sent after it started, not yet in its
+    /// conversation. Messages in its prompt, delivered ones (still queued
+    /// until acknowledged) and context notices don't count; each arrival and
+    /// forward is signalled.
+    #[tokio::test]
+    async fn a_run_tracks_the_agent_messages_its_conversation_lacks() {
+        let bus = MessageBus::new(["lead".to_string(), "worker".to_string()]);
+        let run = Uuid::new_v4();
+        let early = bus
+            .send("worker", None, "lead", "in the prompt".into(), vec![])
+            .await
+            .unwrap();
+        let mut arrivals = bus.watch_arrivals(run);
+        arrivals.borrow_and_update();
+        let (sender, mut receiver) = mpsc::channel(4);
+        bus.register_run("lead", run, sender, &[early.id]);
+        assert_eq!(
+            bus.unseen_messages("lead", run),
+            UnseenMessages {
+                senders: vec![],
+                forwarded: true,
+            }
+        );
+
+        assert!(bus.inject_task(run, "file changed".into()).await);
+        assert!(received(&mut receiver).await.contains("file changed"));
+        assert!(bus.unseen_messages("lead", run).senders.is_empty());
+
+        bus.send("worker", None, "lead", "reply".into(), vec![])
+            .await
+            .unwrap();
+        assert!(arrivals.has_changed().unwrap());
+        let delivered = received(&mut receiver).await;
+        let unseen = bus.unseen_messages("lead", run);
+        assert_eq!(unseen.senders, ["worker"]);
+        assert!(unseen.forwarded);
+
+        // An update without it, or a copy outside a context update, is not
+        // the delivery.
+        bus.observe_context("lead", run, &update("unrelated"));
+        bus.observe_context("lead", run, &arko_ai::Message::new_user(&delivered));
+        assert_eq!(bus.unseen_messages("lead", run).senders, ["worker"]);
+        bus.observe_context("lead", run, &update(&delivered));
+        assert!(bus.unseen_messages("lead", run).senders.is_empty());
+        // Still queued, with the prompt's message and the notice, until the
+        // run completes and acknowledges them.
+        assert_eq!(bus.pending("lead").len(), 3);
+
+        // Unregistered: nothing is tracked, and the signal is gone.
+        arrivals.borrow_and_update();
+        bus.unregister_active("lead", run);
+        assert!(bus.unseen_messages("lead", run).senders.is_empty());
+        assert!(arrivals.changed().await.is_err());
+    }
+
+    /// A message the delivery worker has not forwarded yet (the command
+    /// channel is full) is unseen but not forwarded.
+    #[tokio::test]
+    async fn an_unforwarded_message_is_reported_as_such() {
+        let bus = MessageBus::new(["lead".to_string(), "worker".to_string()]);
+        let run = Uuid::new_v4();
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender
+            .try_send(UserCommand::InjectContext {
+                content: "fills the channel".into(),
+            })
+            .unwrap();
+        bus.register_run("lead", run, sender, &[]);
+        let mut arrivals = bus.watch_arrivals(run);
+        arrivals.borrow_and_update();
+        bus.send("worker", None, "lead", "first".into(), vec![])
+            .await
+            .unwrap();
+        bus.send("lead", None, "worker", "not for lead".into(), vec![])
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            bus.unseen_messages("lead", run),
+            UnseenMessages {
+                senders: vec!["worker".into()],
+                forwarded: false,
+            }
+        );
+        arrivals.borrow_and_update();
+        assert!(received(&mut receiver).await.contains("fills the channel"));
+        // The forward is signalled.
+        tokio::time::timeout(Duration::from_secs(5), arrivals.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(bus.unseen_messages("lead", run).forwarded);
+        assert!(received(&mut receiver).await.contains("first"));
     }
 
     #[tokio::test]

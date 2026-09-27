@@ -68,6 +68,10 @@ pub(crate) struct RunControl {
     state: watch::Sender<Option<Cancellation>>,
     /// Command channels of the run's agents, to tell them to stop at once.
     agents: parking_lot::Mutex<HashMap<uuid::Uuid, mpsc::WeakSender<UserCommand>>>,
+    /// Per agent run, whether the workflow is stopping it: a tool that
+    /// waits (`wait_for_message`) watches it, since the runtime reads the
+    /// `CancelTask` it is sent only once the tool call returns.
+    stopping: parking_lot::Mutex<HashMap<uuid::Uuid, watch::Sender<bool>>>,
     grace_period: Duration,
     /// When the run stopped, for the drivers' wind-down deadlines.
     stopped_at: parking_lot::Mutex<Option<tokio::time::Instant>>,
@@ -79,6 +83,7 @@ impl RunControl {
         Self {
             state: watch::Sender::new(None),
             agents: parking_lot::Mutex::new(HashMap::new()),
+            stopping: parking_lot::Mutex::new(HashMap::new()),
             grace_period,
             stopped_at: parking_lot::Mutex::new(None),
             stop_saved: AtomicBool::new(false),
@@ -163,6 +168,26 @@ impl RunControl {
 
     pub fn unregister(&self, task_id: uuid::Uuid) {
         self.agents.lock().remove(&task_id);
+        self.stopping.lock().remove(&task_id);
+    }
+
+    /// Marks agent run `task_id` as being stopped by the workflow (the run
+    /// may go on): its waits end.
+    pub fn stop_agent(&self, task_id: uuid::Uuid) {
+        self.stopping
+            .lock()
+            .entry(task_id)
+            .or_insert_with(|| watch::Sender::new(false))
+            .send_replace(true);
+    }
+
+    /// Whether agent run `task_id` is being stopped, now and as it changes.
+    pub fn agent_stopping(&self, task_id: uuid::Uuid) -> watch::Receiver<bool> {
+        self.stopping
+            .lock()
+            .entry(task_id)
+            .or_insert_with(|| watch::Sender::new(false))
+            .subscribe()
     }
 
     /// True once, for the first caller after the run stopped: the caller

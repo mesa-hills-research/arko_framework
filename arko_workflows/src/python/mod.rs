@@ -43,6 +43,31 @@ pub struct PyWorkflowBuilder {
     resume_from: Option<String>,
     memory_tiers: Vec<(String, Option<usize>)>,
     cancel_grace_period: Option<f64>,
+    /// `None`: the automatic limit.
+    wait_for_message_timeout: Option<f64>,
+    agent_wait_for_message_timeouts: Vec<(String, Option<f64>)>,
+}
+
+/// A `wait_for_message` limit from Python: `None` is automatic, otherwise
+/// seconds, more than zero.
+#[cfg(feature = "python")]
+fn wait_timeout_seconds(seconds: Option<f64>) -> PyResult<Option<f64>> {
+    match seconds {
+        Some(seconds) if !seconds.is_finite() || seconds <= 0.0 => Err(
+            pyo3::exceptions::PyValueError::new_err("the timeout must be finite and positive"),
+        ),
+        seconds => Ok(seconds),
+    }
+}
+
+#[cfg(feature = "python")]
+fn wait_timeout(seconds: Option<f64>) -> PyResult<crate::messaging::wait::WaitForMessageTimeout> {
+    match seconds {
+        None => Ok(crate::messaging::wait::WaitForMessageTimeout::Auto),
+        Some(seconds) => std::time::Duration::try_from_secs_f64(seconds)
+            .map(Into::into)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string())),
+    }
 }
 
 #[cfg(feature = "python")]
@@ -60,6 +85,8 @@ impl PyWorkflowBuilder {
             resume_from: None,
             memory_tiers: Vec::new(),
             cancel_grace_period: None,
+            wait_for_message_timeout: None,
+            agent_wait_for_message_timeouts: Vec::new(),
         }
     }
 
@@ -113,12 +140,38 @@ impl PyWorkflowBuilder {
         Ok(())
     }
 
+    /// Seconds `wait_for_message` waits at most; `None` (the default)
+    /// selects the automatic limit, just inside each agent's prompt-cache
+    /// lifetime.
+    #[pyo3(signature = (seconds=None))]
+    fn wait_for_message_timeout(&mut self, seconds: Option<f64>) -> PyResult<()> {
+        self.wait_for_message_timeout = wait_timeout_seconds(seconds)?;
+        Ok(())
+    }
+
+    /// The same for one agent, in place of the workflow's setting.
+    #[pyo3(signature = (agent, seconds=None))]
+    fn agent_wait_for_message_timeout(
+        &mut self,
+        agent: String,
+        seconds: Option<f64>,
+    ) -> PyResult<()> {
+        let seconds = wait_timeout_seconds(seconds)?;
+        self.agent_wait_for_message_timeouts.push((agent, seconds));
+        Ok(())
+    }
+
     fn build(&self) -> PyResult<PyWorkflow> {
         let mut builder = crate::Workflow::builder();
         if let Some(seconds) = self.cancel_grace_period {
             let grace_period = std::time::Duration::try_from_secs_f64(seconds)
                 .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
             builder = builder.cancel_grace_period(grace_period);
+        }
+        builder = builder.wait_for_message_timeout(wait_timeout(self.wait_for_message_timeout)?);
+        for (agent, seconds) in &self.agent_wait_for_message_timeouts {
+            builder =
+                builder.agent_wait_for_message_timeout(agent.clone(), wait_timeout(*seconds)?);
         }
 
         if let Some(ref name) = self.name {

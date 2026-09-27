@@ -26,6 +26,8 @@ pub struct SharedContext {
     pub messages: MessageBus,
     /// Who may message whom with `send_message`; `None` disables it.
     pub messaging: Option<crate::messaging::MessagingPolicy>,
+    /// How long `wait_for_message` waits, for the workflow and per agent.
+    pub(crate) wait_timeouts: crate::messaging::wait::WaitTimeouts,
     pub resource_tracker: Option<ResourceTracker>,
     pub hooks: Arc<HookRegistry>,
     pub agent_configs: HashMap<String, AgentConfig>,
@@ -65,6 +67,31 @@ impl SharedContext {
         self.messaging.as_ref().map_or_else(Vec::new, |policy| {
             policy.recipients_of(agent_name, &self.messages.roster())
         })
+    }
+
+    /// The agents that may message `agent_name` with `send_message`:
+    /// registered agents other than itself whose messaging policy permits it.
+    /// Empty when messaging is disabled; the agent is then not offered
+    /// `wait_for_message`.
+    pub fn message_senders(&self, agent_name: &str) -> Vec<String> {
+        self.messaging.as_ref().map_or_else(Vec::new, |policy| {
+            self.messages
+                .roster()
+                .into_iter()
+                .filter(|sender| policy.permits(sender, agent_name))
+                .collect()
+        })
+    }
+
+    /// The agents whose starts and finishes end `agent_name`'s
+    /// `wait_for_message`: those it may message and those that may message
+    /// it, sorted by name.
+    pub(crate) fn status_peers(&self, agent_name: &str) -> Vec<String> {
+        let mut peers = self.message_recipients(agent_name);
+        peers.extend(self.message_senders(agent_name));
+        peers.sort();
+        peers.dedup();
+        peers
     }
 
     /// The current statuses of the agents `agent_name` may message.
