@@ -102,10 +102,14 @@ impl Conversation {
     /// the request-level effort, earlier turns keep their cache.
     ///
     /// Supported for OpenRouter models that accept mid-conversation effort
-    /// changes (for example GPT-6 Astra, Sol and Luna, Claude Fable 5.1 and
-    /// Claude Opus 5; OpenRouter rejects other models with a 400). Other
-    /// providers reject conversations containing an update with
-    /// [`Error::UnsupportedFeature`](crate::error::Error::UnsupportedFeature).
+    /// changes. Support is per model: OpenRouter names Claude Fable 5.1 and
+    /// OpenAI GPT-6 Astra as the first, and Claude Opus 5 as accepting them
+    /// too, and rejects models without support with a 400
+    /// (https://openrouter.ai/docs/guides/best-practices/reasoning-tokens#mid-conversation-effort).
+    /// Claude rejects an update to [`ReasoningEffort::None`], so the
+    /// OpenRouter provider rejects one for `anthropic/` models before
+    /// sending. Other providers reject conversations containing an update
+    /// with [`Error::UnsupportedFeature`](crate::error::Error::UnsupportedFeature).
     /// Updates can't be combined with pro reasoning mode or `-pro` models.
     ///
     /// Providers reject two updates in a row, so calling this again before any

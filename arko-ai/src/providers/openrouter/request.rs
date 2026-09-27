@@ -554,6 +554,19 @@ impl OpenRouterClient {
                     "Mid-conversation effort updates can't be combined with pro reasoning mode or a -pro model ('{slug}')."
                 )));
             }
+            // "Claude accepts low, medium, high, xhigh, and max (minimal is
+            // sent as low, none is rejected)."
+            let to_none = conversation.messages.iter().any(|message| {
+                message
+                    .configuration_update
+                    .as_ref()
+                    .is_some_and(|update| update.reasoning_effort == ReasoningEffort::None)
+            });
+            if claude && to_none {
+                return Err(invalid(format!(
+                    "Claude models reject a mid-conversation effort update to `none` ('{slug}'); use `minimal` (sent as `low`) or higher."
+                )));
+            }
         }
         let messages = convert_messages(conversation)?;
 

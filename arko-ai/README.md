@@ -272,8 +272,11 @@ content-less system message carrying `configuration_update` (OpenRouter's Chat
 Completions form). A second call before another message replaces the pending update, since
 adjacent updates are rejected. An update between an assistant's tool calls and their
 results is rejected before sending (it would split the pair), and updates can't be combined
-with pro reasoning or OpenAI `-pro` models. OpenRouter accepts them on models that support them (GPT-6 Astra, Sol and Luna,
-Claude Fable 5.1, Claude Opus 5) and answers 400 otherwise. The other providers reject a
+with pro reasoning or OpenAI `-pro` models. Support is per model: OpenRouter names Claude
+Fable 5.1 and OpenAI GPT-6 Astra as the first models to accept updates and Claude Opus 5
+as accepting them too, enables more as providers roll it out, and answers 400 for a model
+without support. Claude rejects an update to `none` (`minimal` is sent as `low`), so arko
+rejects one for `anthropic/` models before sending. The other providers reject a
 conversation containing an update with `Error::UnsupportedFeature`.
 
 ### Responses and streams

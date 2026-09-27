@@ -811,6 +811,33 @@ fn reasoning_effort_updates_use_the_content_less_system_message_form() {
     pro_model.model = Model::openrouter("google/gemini-3-pro");
     prepare(&client(), &pro_model, &GenerationConfig::default()).unwrap();
 
+    // Claude rejects an update to `none` ("Claude accepts low, medium, high,
+    // xhigh, and max (minimal is sent as low, none is rejected)").
+    for slug in [
+        "anthropic/claude-fable-5.1",
+        "~anthropic/claude-opus-latest",
+    ] {
+        let mut claude = Conversation::new(Model::openrouter(slug));
+        claude.add_user_message("Plan the migration.");
+        claude.add_assistant_message("Here's the plan.");
+        claude.add_reasoning_effort_update(ReasoningEffort::None);
+        claude.add_user_message("Now rename the config file.");
+        let rejected = prepare(&client(), &claude, &GenerationConfig::default()).unwrap_err();
+        assert!(
+            matches!(&rejected, Error::InvalidRequest(message) if message.contains("none")),
+            "{rejected}"
+        );
+        claude.add_assistant_message("Done.");
+        claude.add_reasoning_effort_update(ReasoningEffort::Minimal);
+        claude.add_user_message("Thanks.");
+        claude.messages.remove(2);
+        prepare(&client(), &claude, &GenerationConfig::default()).unwrap();
+    }
+    let mut gpt_none = conversation.clone();
+    gpt_none.messages[2].configuration_update =
+        Some(ConfigurationUpdate::reasoning_effort(ReasoningEffort::None));
+    prepare(&client(), &gpt_none, &GenerationConfig::default()).unwrap();
+
     // An update between tool calls and their results would split the pair.
     let mut split = Conversation::new(Model::openrouter(GPT));
     split.add_user_message("Look it up.");
