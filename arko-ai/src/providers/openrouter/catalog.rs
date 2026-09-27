@@ -238,8 +238,54 @@ fn reasoning_info(value: &Value) -> OpenRouterReasoningInfo {
     }
 }
 
+/// Price keys of `pricing.overrides` entries (OpenAPI `PricingOverride`).
+/// Entries use "the same keys and units as the base pricing object", so the
+/// base object's keys are price keys too.
+const OVERRIDE_PRICE_KEYS: &[&str] = &[
+    "prompt",
+    "completion",
+    "input_cache_read",
+    "input_cache_write",
+    "input_cache_write_1h",
+    "audio",
+    "input_audio_cache",
+];
+
+/// The long-context tier: the first `pricing.overrides` entry whose only
+/// condition is `min_prompt_tokens` (the entry applies when the prompt has
+/// more tokens than that), with its threshold.
+///
+/// An entry applies only when all its condition fields match, and arko
+/// evaluates only the prompt size, so entries with any other condition (the
+/// `utc_start`/`utc_end` time window, `utc_days`, or a condition added
+/// later) are skipped, as OpenRouter asks: "Consumers should skip entries
+/// containing condition fields they do not recognize rather than apply their
+/// prices". Keys that aren't prices count as conditions.
+/// https://openrouter.ai/docs/guides/overview/models#pricing-overrides
+fn long_context_override(pricing: &Value) -> Option<(&Value, usize)> {
+    let is_price = |key: &str| {
+        OVERRIDE_PRICE_KEYS.contains(&key)
+            || (key != "overrides" && pricing.get(key).is_some_and(Value::is_string))
+    };
+    pricing
+        .get("overrides")?
+        .as_array()?
+        .iter()
+        .find_map(|entry| {
+            let fields = entry.as_object()?;
+            let threshold = fields
+                .get("min_prompt_tokens")?
+                .as_f64()
+                .filter(|n| n.is_finite() && *n >= 0.0)?;
+            fields
+                .keys()
+                .all(|key| key == "min_prompt_tokens" || is_price(key))
+                .then_some((entry, threshold as usize))
+        })
+}
+
 /// One catalog entry as a [`Model`]: context length, the top provider's
-/// output limit, image input, prices (with the first long-prompt override as
+/// output limit, image input, prices (with the first prompt-size override as
 /// the long-context tier) and the rest in [`OpenRouterModelInfo`].
 pub(crate) fn model_from_entry(entry: &Value) -> Option<Model> {
     let id = entry.get("id")?.as_str()?.to_string();
@@ -249,15 +295,8 @@ pub(crate) fn model_from_entry(entry: &Value) -> Option<Model> {
     let completion = price("completion");
     let cache_read = price("input_cache_read");
     let cache_write = price("input_cache_write");
-    let long = pricing
-        .get("overrides")
-        .and_then(Value::as_array)
-        .and_then(|overrides| {
-            overrides
-                .iter()
-                .find(|o| o.get("min_prompt_tokens").and_then(Value::as_u64).is_some())
-        });
-    let long_price = |name: &str| long.and_then(|o| per_million(o.get(name)));
+    let long = long_context_override(&pricing);
+    let long_price = |name: &str| long.and_then(|(o, _)| per_million(o.get(name)));
 
     let supported_parameters = strings(entry.get("supported_parameters"));
     let reasoning = entry
@@ -314,10 +353,7 @@ pub(crate) fn model_from_entry(entry: &Value) -> Option<Model> {
             cached_input_cost_per_million: cache_read,
             cache_write_cost_per_million: cache_write,
             cache_write_1h_cost_per_million: price("input_cache_write_1h"),
-            large_input_threshold: long
-                .and_then(|o| o.get("min_prompt_tokens"))
-                .and_then(Value::as_u64)
-                .map(|n| n as usize),
+            large_input_threshold: long.map(|(_, threshold)| threshold),
             large_input_cost_per_million: long_price("prompt"),
             large_output_cost_per_million: long_price("completion"),
             large_cached_input_cost_per_million: long_price("input_cache_read"),

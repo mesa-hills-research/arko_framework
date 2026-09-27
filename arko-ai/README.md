@@ -154,10 +154,12 @@ public, no key sent) or `fetch_user_models()` (`GET /models/user`, filtered by t
 provider preferences, privacy settings such as ZDR, and guardrails). It is kept in memory
 and shared by clones; `OpenRouterCatalog::from_json` loads a saved response instead.
 `OpenRouterClient::model(slug)` then returns a `Model` with context length, the top
-provider's output limit, image input, prices (cache reads, cache writes, 1-hour writes and
-the long-prompt override as the long-context tier) and `Model::openrouter_info()`:
-supported parameters, reasoning controls (supported and default efforts, mandatory
-reasoning) and input/output modalities. Variant suffixes resolve to the base model.
+provider's output limit, image input, prices (cache reads, cache writes, 1-hour writes and,
+as the long-context tier, the first `pricing.overrides` entry whose only condition is
+`min_prompt_tokens`; entries with time windows or unknown conditions are skipped) and
+`Model::openrouter_info()`: supported parameters, reasoning controls (supported and default
+efforts, mandatory reasoning) and input/output modalities. Variant suffixes resolve to the
+base model.
 
 With a catalog loaded, or a model taken from it, requests are validated before sending:
 unknown slugs fail (except `@preset/…`), as do parameters the catalog doesn't list for the

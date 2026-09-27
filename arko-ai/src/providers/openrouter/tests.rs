@@ -940,6 +940,74 @@ fn catalog_entries_become_models_with_limits_prices_and_metadata() {
 }
 
 #[test]
+fn only_prompt_size_overrides_become_the_long_context_tier() {
+    // Override shapes from https://openrouter.ai/docs/guides/overview/models
+    // ("Pricing Overrides"): an entry applies only when all its conditions
+    // match, and entries with conditions arko doesn't evaluate are skipped.
+    let model = |id: &str, pricing: Value| {
+        json!({"id": id, "context_length": 1000000, "pricing": pricing,
+            "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]}})
+    };
+    let catalog = OpenRouterCatalog::from_json(
+        &json!({"data": [
+            model("test/peak-long-context", json!({"prompt": "0.000002", "completion": "0.00001", "overrides": [
+                {"min_prompt_tokens": 100000, "utc_start": 1630, "utc_end": 30, "prompt": "0.00001"},
+                {"min_prompt_tokens": 200000, "prompt": "0.000004", "completion": "0.00002"},
+            ]})),
+            model("test/weekend-long-context", json!({"prompt": "0.000002", "completion": "0.00001", "overrides": [
+                {"min_prompt_tokens": 100000, "utc_days": ["saturday", "sunday"], "prompt": "0.000001"},
+            ]})),
+            model("test/unknown-condition", json!({"prompt": "0.000002", "completion": "0.00001", "overrides": [
+                {"min_prompt_tokens": 100000, "max_prompt_tokens": 500000, "prompt": "0.000004"},
+            ]})),
+            model("test/time-windows", json!({"prompt": "0.00000028", "completion": "0.00000042", "overrides": [
+                {"utc_start": 30, "utc_end": 1630, "prompt": "0.00000028", "completion": "0.00000042"},
+                {"utc_start": 1630, "utc_end": 30, "prompt": "0.00000014", "completion": "0.00000021"},
+            ]})),
+            // Price keys are the base pricing object's keys; the threshold is
+            // a number, possibly written as a double.
+            model("test/more-prices", json!({"prompt": "0.000002", "completion": "0.00001", "web_search": "0.01", "overrides": [
+                {"min_prompt_tokens": 150000.0, "prompt": "0.000004", "web_search": "0.02", "input_audio_cache": "0.000001"},
+            ]})),
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let tier = |id: &str| {
+        let pricing = catalog.get(id).unwrap().pricing;
+        (
+            pricing.large_input_threshold,
+            pricing.large_input_cost_per_million,
+            pricing.input_cost_per_million,
+        )
+    };
+    let (threshold, large_input, _) = tier("test/peak-long-context");
+    assert_eq!(threshold, Some(200_000));
+    assert!(close(large_input.unwrap(), 4.0));
+    assert!(close(
+        catalog
+            .get("test/peak-long-context")
+            .unwrap()
+            .pricing
+            .large_output_cost_per_million
+            .unwrap(),
+        20.0
+    ));
+    for id in [
+        "test/weekend-long-context",
+        "test/unknown-condition",
+        "test/time-windows",
+    ] {
+        let (threshold, large_input, _) = tier(id);
+        assert_eq!((threshold, large_input), (None, None), "{id}");
+    }
+    assert!(close(tier("test/time-windows").2, 0.28));
+    let (threshold, large_input, _) = tier("test/more-prices");
+    assert_eq!(threshold, Some(150_000));
+    assert!(close(large_input.unwrap(), 4.0));
+}
+
+#[test]
 fn a_loaded_catalog_validates_slugs_parameters_images_and_mandatory_reasoning() {
     let client = catalog_client();
     let check = |slug: &str, config: &GenerationConfig| {
