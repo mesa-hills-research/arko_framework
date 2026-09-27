@@ -16,6 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       # Caches the cargo registry and compiled dependencies. Only main saves,
       # so branches reuse main's cache without filling the per-repo limit.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -26,6 +28,9 @@ jobs:
           python-version: '3.12'
       # Keeps aws-lc and OpenSSL out of the dependency graph. --all-features
       # also resolves optional dependencies (e.g. arko_workflows' pyo3 bindings).
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
       - name: Reject aws-lc and OpenSSL builds
         if: runner.os == 'Linux'
         run: |
