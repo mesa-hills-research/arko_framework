@@ -642,6 +642,29 @@ async fn a_stuck_delegated_agent_is_aborted_and_recorded_before_its_parent() {
     assert_eq!(coder.status, AgentRunStatus::Cancelled);
 }
 
+/// A run call dropped by its caller (here, a timeout) aborts its agent and
+/// records it as no longer running.
+#[tokio::test]
+async fn a_dropped_run_call_stops_its_agent() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|_, _| None).await;
+    let workflow = builder(&server, &workspace).build().unwrap();
+    let call = workflow.run_agent("coder", "Write it.");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), call)
+            .await
+            .is_err()
+    );
+    assert_eq!(server.requests(), 1);
+    assert_eq!(
+        workflow.agent_status("coder"),
+        Some(crate::messaging::registry::AgentStatus::Finished(
+            AgentRunStatus::Cancelled
+        ))
+    );
+    assert!(workflow.context().messages.snapshot().is_empty());
+}
+
 /// A verifier running when the run is cancelled decides nothing: the target
 /// is cancelled, not failed.
 #[tokio::test]

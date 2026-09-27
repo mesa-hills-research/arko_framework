@@ -53,8 +53,8 @@ pub enum AgentStatus {
     NotStarted,
     /// A run of the agent is running.
     Running,
-    /// Every running run of the agent is waiting; the reason is the first
-    /// run's.
+    /// Every running run of the agent is waiting; the reason is one of
+    /// theirs.
     Waiting(WaitReason),
     /// No run is running; the latest ended with this outcome.
     Finished(AgentRunStatus),

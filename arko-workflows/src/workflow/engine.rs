@@ -608,6 +608,14 @@ pub(crate) async fn drive_to_result(
         pending_message_ids,
         depth,
     } = run;
+    // Until the end is recorded below: if this future is dropped (and with
+    // it, the agent's task aborted), the run is recorded as abandoned.
+    let mut abandoned = Abandoned {
+        ctx,
+        agent_name: agent_name.clone(),
+        agent_run_id,
+        armed: true,
+    };
     let drive_result = drive_event_loop(
         &agent_name,
         agent_run_id,
@@ -656,6 +664,7 @@ pub(crate) async fn drive_to_result(
         }
     };
 
+    abandoned.armed = false;
     ctx.registry.finish(
         agent_run_id,
         final_task.as_ref().map_or(AgentRunStatus::Failed, |task| {
@@ -724,11 +733,29 @@ pub(crate) async fn drive_to_result(
 /// aborted with it): its agent is finished, cancelled, unless another run
 /// of it is running.
 pub(crate) fn abandon_run(run: &StartedRun, ctx: &SharedContext) {
-    ctx.registry
-        .finish(run.agent_run_id, AgentRunStatus::Cancelled);
-    ctx.messages
-        .unregister_active(&run.agent_name, run.agent_run_id);
-    ctx.run_control.unregister(run.agent_run_id);
+    abandon(ctx, &run.agent_name, run.agent_run_id);
+}
+
+fn abandon(ctx: &SharedContext, agent_name: &str, agent_run_id: uuid::Uuid) {
+    ctx.registry.finish(agent_run_id, AgentRunStatus::Cancelled);
+    ctx.messages.unregister_active(agent_name, agent_run_id);
+    ctx.run_control.unregister(agent_run_id);
+}
+
+/// Records a run whose driver was dropped before it recorded the run's end.
+struct Abandoned<'a> {
+    ctx: &'a SharedContext,
+    agent_name: String,
+    agent_run_id: uuid::Uuid,
+    armed: bool,
+}
+
+impl Drop for Abandoned<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            abandon(self.ctx, &self.agent_name, self.agent_run_id);
+        }
+    }
 }
 
 /// The run status a final task state records.
