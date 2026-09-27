@@ -1,8 +1,8 @@
 use crate::{
-    message::{Content, Message},
+    message::{ConfigurationUpdate, Content, Message},
     model::Model,
     providers::GenerationResponse,
-    reasoning::ReasoningArtifact,
+    reasoning::{ReasoningArtifact, ReasoningEffort},
     tool::ToolResult,
 };
 use serde::{Deserialize, Serialize};
@@ -91,6 +91,36 @@ impl Conversation {
         self
     }
 
+    /// Changes the reasoning effort from this point of the conversation
+    /// onward. Call it just before adding the user turn it should apply to.
+    ///
+    /// The request-level effort stays the baseline for earlier turns, and the
+    /// update stays in history at its position, so the prompt prefix before it
+    /// (and the provider's prompt cache for it) is unchanged. Unlike editing
+    /// the request-level effort, earlier turns keep their cache.
+    ///
+    /// Providers that can't send updates reject conversations containing one
+    /// with [`Error::UnsupportedFeature`](crate::error::Error::UnsupportedFeature)
+    /// rather than dropping it; none of the current providers can yet.
+    ///
+    /// Providers reject two updates in a row, so calling this again before any
+    /// other message replaces the pending update.
+    pub fn add_reasoning_effort_update(&mut self, effort: ReasoningEffort) -> &mut Self {
+        self.add_configuration_update(ConfigurationUpdate::reasoning_effort(effort))
+    }
+
+    /// Appends a [`ConfigurationUpdate`]; see
+    /// [`add_reasoning_effort_update`](Self::add_reasoning_effort_update).
+    pub fn add_configuration_update(&mut self, update: ConfigurationUpdate) -> &mut Self {
+        match self.messages.last_mut() {
+            Some(last) if last.is_configuration_update() => {
+                last.configuration_update = Some(update);
+            }
+            _ => self.messages.push(Message::new_configuration_update(update)),
+        }
+        self
+    }
+
     /// Appends the response's assistant message. A refused turn that must not
     /// remain in history (see [`RefusalSource::keeps_turn`]) is not appended;
     /// the caller decides what to do with the input that triggered it.
@@ -159,6 +189,35 @@ mod tests {
 
         assert!(first.prompt_cache_key.starts_with("arko:conversation:"));
         assert_ne!(first.prompt_cache_key, second.prompt_cache_key);
+    }
+
+    #[test]
+    fn effort_updates_are_kept_in_place_and_adjacent_ones_collapse() {
+        let mut conversation = Conversation::new(Model::openai_gpt_6_sol());
+        conversation.add_user_message("Plan.");
+        conversation.add_assistant_message("Planned.");
+        conversation.add_reasoning_effort_update(ReasoningEffort::High);
+        conversation.add_reasoning_effort_update(ReasoningEffort::Low);
+        conversation.add_user_message("Next.");
+        let updates: Vec<_> = conversation
+            .messages
+            .iter()
+            .filter_map(|message| message.configuration_update.as_ref())
+            .collect();
+        assert_eq!(updates, [&ConfigurationUpdate::reasoning_effort(ReasoningEffort::Low)]);
+        assert!(conversation.messages[2].is_configuration_update());
+        assert!(conversation.messages[2].content.is_empty());
+
+        // Messages saved before updates existed still load.
+        let mut saved = serde_json::to_value(&conversation).unwrap();
+        saved["messages"][0].as_object_mut().unwrap().remove("configuration_update");
+        let restored: Conversation = serde_json::from_value(saved).unwrap();
+        assert!(!restored.messages[0].is_configuration_update());
+        assert!(restored.messages[2].is_configuration_update());
+
+        // Providers that can't send updates refuse rather than dropping them.
+        let error = crate::providers::ensure_supported_inputs(&conversation).unwrap_err();
+        assert!(matches!(error, crate::error::Error::UnsupportedFeature(_)), "{error}");
     }
 
     #[test]

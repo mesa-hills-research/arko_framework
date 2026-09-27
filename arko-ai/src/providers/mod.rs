@@ -131,9 +131,16 @@ impl GenerationResponse {
     }
 }
 
-/// Rejects content the model can't take before anything is sent: currently
-/// images for models without image input.
+/// Rejects content the model can't take before anything is sent: images for
+/// models without image input, and mid-conversation configuration updates for
+/// providers that can't send them.
 pub(crate) fn ensure_supported_inputs(conversation: &Conversation) -> Result<(), Error> {
+    if conversation.messages.iter().any(Message::is_configuration_update) {
+        return Err(Error::UnsupportedFeature(format!(
+            "Mid-conversation reasoning-effort updates are not supported for {:?} model '{}'. Remove the update or change the request-level reasoning configuration.",
+            conversation.model.provider, conversation.model.id
+        )));
+    }
     let has_images = conversation
         .messages
         .iter()

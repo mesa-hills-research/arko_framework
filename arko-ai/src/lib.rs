@@ -26,13 +26,14 @@ pub use config::{
 };
 pub use conversation::Conversation;
 pub use error::{Error, RetryClass};
-pub use message::{Content, Image, Message, Role};
+pub use message::{ConfigurationUpdate, Content, Image, Message, Role};
 pub use model::{Model, ModelPricing, Provider};
 pub use pricing::{ResidencyPricing, ScheduledPricing, ServiceTier, TierPricing};
 pub use providers::{GenerationResponse, StreamEvent, http_client, http_client_builder};
 pub use reasoning::{
     AnthropicReasoningEffort, GeminiThinkingLevel, OpenAIEffort,
     OpenAIReasoningItem, OpenAIReasoningMode, ReasoningArtifact, ReasoningConfig,
+    ReasoningEffort,
 };
 pub use stop::{Refusal, RefusalSource, StopReason};
 pub use tool::{ToolCall, ToolChoice, ToolConfig, ToolDefinition, ToolResult};

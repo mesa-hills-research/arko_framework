@@ -1,4 +1,4 @@
-use crate::reasoning::ReasoningArtifact;
+use crate::reasoning::{ReasoningArtifact, ReasoningEffort};
 use crate::tool::{ToolCall, ToolResult};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -69,6 +69,26 @@ impl Image {
     }
 }
 
+/// A request setting changed from a point in the conversation onward,
+/// without editing earlier turns, so the provider's prompt cache for the
+/// turns before it stays valid. Added with
+/// [`Conversation::add_reasoning_effort_update`].
+///
+/// [`Conversation::add_reasoning_effort_update`]: crate::conversation::Conversation::add_reasoning_effort_update
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigurationUpdate {
+    /// Reasoning effort for the turns after this point.
+    pub reasoning_effort: ReasoningEffort,
+}
+
+impl ConfigurationUpdate {
+    pub fn reasoning_effort(effort: ReasoningEffort) -> Self {
+        Self {
+            reasoning_effort: effort,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
@@ -79,6 +99,10 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
     pub id: Option<String>,
+    /// Set on a content-less system message that changes request settings
+    /// from its position onward (see [`ConfigurationUpdate`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration_update: Option<ConfigurationUpdate>,
 }
 
 impl Message {
@@ -89,6 +113,7 @@ impl Message {
             reasoning_artifact: None,
             tool_calls: Vec::new(),
             id: None,
+            configuration_update: None,
         }
     }
 
@@ -99,6 +124,7 @@ impl Message {
             reasoning_artifact: None,
             tool_calls: Vec::new(),
             id: None,
+            configuration_update: None,
         }
     }
 
@@ -109,6 +135,7 @@ impl Message {
             reasoning_artifact: None,
             tool_calls: Vec::new(),
             id: None,
+            configuration_update: None,
         }
     }
 
@@ -119,6 +146,7 @@ impl Message {
             reasoning_artifact: None,
             tool_calls: Vec::new(),
             id: None,
+            configuration_update: None,
         }
     }
 
@@ -129,6 +157,7 @@ impl Message {
             reasoning_artifact: Some(reasoning_artifact),
             tool_calls: Vec::new(),
             id: None,
+            configuration_update: None,
         }
     }
 
@@ -139,11 +168,29 @@ impl Message {
             reasoning_artifact: None,
             tool_calls: Vec::new(),
             id: None,
+            configuration_update: None,
+        }
+    }
+
+    /// A content-less system message carrying a configuration update.
+    pub fn new_configuration_update(update: ConfigurationUpdate) -> Self {
+        Self {
+            role: Role::System,
+            content: Vec::new(),
+            reasoning_artifact: None,
+            tool_calls: Vec::new(),
+            id: None,
+            configuration_update: Some(update),
         }
     }
 
     /// Returns `true` if this assistant message contains tool calls.
     pub fn has_tool_calls(&self) -> bool {
         !self.tool_calls.is_empty()
+    }
+
+    /// Whether this message is a configuration update rather than a turn.
+    pub fn is_configuration_update(&self) -> bool {
+        self.configuration_update.is_some()
     }
 }

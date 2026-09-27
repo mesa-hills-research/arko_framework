@@ -494,6 +494,7 @@ impl GoogleClient {
                     .then(|| ReasoningArtifact::new_google_reasoning(reasoning_fragments)),
                 tool_calls,
                 id: None,
+                configuration_update: None,
             };
 
             yield StreamEvent::End(Box::new(GoogleClient::generation_response(
@@ -1047,6 +1048,7 @@ impl GoogleClient {
             reasoning_artifact,
             tool_calls,
             id: None,
+            configuration_update: None,
         }
     }
 

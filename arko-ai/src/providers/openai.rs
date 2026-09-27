@@ -1671,6 +1671,7 @@ impl OpenAIClient {
             ),
             tool_calls,
             id: message_id,
+            configuration_update: None,
         };
 
         (message, refusals)

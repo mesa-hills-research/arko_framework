@@ -825,6 +825,7 @@ impl AnthropicClient {
                                 },
                                 tool_calls: std::mem::take(&mut tool_calls),
                                 id: None,
+                                configuration_update: None,
                             };
 
                             // A tool block still open here never finished, so it
@@ -1252,6 +1253,7 @@ impl AnthropicClient {
             reasoning_artifact: reasoning_artifact.clone(),
             tool_calls,
             id: None,
+            configuration_update: None,
         };
 
         (message, reasoning_artifact)

@@ -74,6 +74,76 @@ impl GeminiThinkingLevel {
     }
 }
 
+/// Provider-agnostic reasoning effort, from no reasoning to the most.
+///
+/// Used by mid-conversation effort updates
+/// ([`Conversation::add_reasoning_effort_update`]).
+///
+/// [`Conversation::add_reasoning_effort_update`]: crate::conversation::Conversation::add_reasoning_effort_update
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    /// The wire value (`"xhigh"`, `"none"`, ...).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
+impl From<OpenAIEffort> for ReasoningEffort {
+    fn from(effort: OpenAIEffort) -> Self {
+        match effort {
+            OpenAIEffort::None => Self::None,
+            OpenAIEffort::Minimal => Self::Minimal,
+            OpenAIEffort::Low => Self::Low,
+            OpenAIEffort::Medium => Self::Medium,
+            OpenAIEffort::High => Self::High,
+            OpenAIEffort::XHigh => Self::XHigh,
+            OpenAIEffort::Max => Self::Max,
+        }
+    }
+}
+
+impl From<AnthropicReasoningEffort> for ReasoningEffort {
+    fn from(effort: AnthropicReasoningEffort) -> Self {
+        match effort {
+            AnthropicReasoningEffort::Low => Self::Low,
+            AnthropicReasoningEffort::Medium => Self::Medium,
+            AnthropicReasoningEffort::High => Self::High,
+            AnthropicReasoningEffort::XHigh => Self::XHigh,
+            AnthropicReasoningEffort::Max => Self::Max,
+        }
+    }
+}
+
+impl From<GeminiThinkingLevel> for ReasoningEffort {
+    fn from(level: GeminiThinkingLevel) -> Self {
+        match level {
+            GeminiThinkingLevel::Minimal => Self::Minimal,
+            GeminiThinkingLevel::Low => Self::Low,
+            GeminiThinkingLevel::Medium => Self::Medium,
+            GeminiThinkingLevel::High => Self::High,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ReasoningConfig {
     OpenAI {
@@ -313,6 +383,18 @@ impl ReasoningArtifact {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_efforts_use_wire_names_and_convert_from_provider_levels() {
+        use ReasoningEffort::*;
+        for effort in [None, Minimal, Low, Medium, High, XHigh, Max] {
+            assert_eq!(serde_json::to_value(effort).unwrap(), effort.as_str());
+        }
+        assert_eq!(ReasoningEffort::from(OpenAIEffort::None), None);
+        assert_eq!(ReasoningEffort::from(OpenAIEffort::XHigh), XHigh);
+        assert_eq!(ReasoningEffort::from(AnthropicReasoningEffort::Max), Max);
+        assert_eq!(ReasoningEffort::from(GeminiThinkingLevel::Minimal), Minimal);
+    }
 
     #[test]
     fn openai_artifacts_saved_with_a_single_item_still_load() {
