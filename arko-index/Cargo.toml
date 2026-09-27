@@ -22,7 +22,8 @@ notify = "6.1"
 syn = { version = "2", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 pulldown-cmark = "0.13"
-tokenizers = { version = "0.23.2", features = ["http"] }
+# Without esaxx_fast; see arko-ai/Cargo.toml (static CRT conflicts on MSVC).
+tokenizers = { version = "0.23.2", default-features = false, features = ["http", "onig", "progressbar"] }
 
 [dev-dependencies]
 tempfile = "3"
