@@ -5,7 +5,6 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::context::SharedContext;
@@ -173,7 +172,7 @@ impl FileBaseline {
     fn capture(path: &Path, max_text_bytes: usize) -> Self {
         match std::fs::read(path) {
             Ok(bytes) => {
-                let hash = Some(hash_bytes(&bytes));
+                let hash = Some(crate::digest::sha256_hex(&bytes));
                 let text = (bytes.len() <= max_text_bytes)
                     .then(|| String::from_utf8(bytes).ok())
                     .flatten();
@@ -342,15 +341,6 @@ fn resource_label(resource: &ResourceId) -> String {
         ResourceId::DirectoryTree(path) => format!("2:{}", path.display()),
         ResourceId::Custom { namespace, key } => format!("3:{namespace}:{key}"),
     }
-}
-
-fn hash_bytes(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut output = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        let _ = write!(output, "{byte:02x}");
-    }
-    output
 }
 
 fn render_file_delta(path: &str, before: &FileBaseline, after: &FileBaseline) -> String {

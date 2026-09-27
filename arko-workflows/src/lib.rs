@@ -32,6 +32,7 @@
 /// ```
 pub mod budget;
 pub mod context;
+mod digest;
 pub mod distillation;
 pub mod durable;
 pub mod error;

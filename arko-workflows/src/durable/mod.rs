@@ -7,7 +7,6 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -634,8 +633,7 @@ impl DurableStore {
     fn input_hash<I: Serialize>(input: &I) -> Result<String, WorkflowError> {
         let value = serde_json::to_value(input)?;
         let bytes = serde_json::to_vec(&value)?;
-        let digest = Sha256::digest(bytes);
-        Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+        Ok(crate::digest::sha256_hex(&bytes))
     }
 
     fn latest_for<'a>(records: &'a [JournalRecord], identity: &str) -> Option<&'a JournalRecord> {

@@ -2,7 +2,7 @@
 //! and workflow-defined resources.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -407,6 +407,16 @@ impl ResourceTracker {
         self.state.write().reads.remove(actor);
     }
 
+    /// The resource key for a tool's path parameter: a relative path is
+    /// joined to the workspace, then `.` and `..` are resolved lexically with
+    /// arko-agents' [`normalize_path`](arko_agents::utils::normalize_path).
+    ///
+    /// This deliberately differs from
+    /// [`is_path_in_workspace`](arko_agents::utils::is_path_in_workspace),
+    /// which shell-expands `~` and `$VAR` before its containment check: the
+    /// built-in file tools open the literal path joined to the task's working
+    /// directory (the workspace, for workflow agents), and the key must name
+    /// the file they touch.
     fn normalize_path(&self, input: &str) -> PathBuf {
         let path = Path::new(input);
         let joined = if path.is_absolute() {
@@ -414,7 +424,7 @@ impl ResourceTracker {
         } else {
             self.workspace.join(path)
         };
-        lexical_normalize(&joined)
+        arko_agents::utils::normalize_path(&joined)
     }
 }
 
@@ -428,23 +438,37 @@ fn resources_overlap_for_write(observed: &ResourceId, written: &ResourceId) -> b
     }
 }
 
-fn lexical_normalize(path: &Path) -> PathBuf {
-    let mut output = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                output.pop();
-            }
-            other => output.push(other.as_os_str()),
-        }
-    }
-    output
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn tool_paths_resolve_against_the_workspace_lexically_and_literally() {
+        let tracker = ResourceTracker::new(
+            PathBuf::from("/workspace"),
+            ContextFreshnessConfig::default().tool_effect(
+                "read_file",
+                ToolResourceEffect::ReadFile {
+                    parameter: "path".into(),
+                },
+            ),
+        );
+        let key = |path: &str| {
+            let parameters = HashMap::from([("path".to_string(), Value::from(path))]);
+            match tracker.resource_for_tool("read_file", &parameters) {
+                Some((ResourceId::File(path), false)) => path,
+                other => panic!("unexpected resource {other:?}"),
+            }
+        };
+        assert_eq!(key("src/./lib.rs"), PathBuf::from("/workspace/src/lib.rs"));
+        assert_eq!(key("src/../Cargo.toml"), PathBuf::from("/workspace/Cargo.toml"));
+        assert_eq!(key("/other/./a/../b"), PathBuf::from("/other/b"));
+        assert_eq!(key("../../../../etc/hosts"), PathBuf::from("/etc/hosts"));
+        // No shell expansion: the built-in tools open the literal path.
+        assert_eq!(key("~/notes"), PathBuf::from("/workspace/~/notes"));
+        assert_eq!(key("$HOME/notes"), PathBuf::from("/workspace/$HOME/notes"));
+    }
 
     #[test]
     fn same_named_task_instances_are_distinct_and_conflict() {

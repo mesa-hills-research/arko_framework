@@ -23,7 +23,11 @@ pub fn get_current_datetime_utc() -> String {
 
 /// Normalizes a path, resolving `.` and `..` components without accessing the filesystem.
 /// This is crucial for handling paths that may not exist yet (e.g., for `write_file`).
-fn normalize_path(path: &Path) -> PathBuf {
+///
+/// Symlinks are not followed, and a `..` with nothing left to remove (at the
+/// root, or leading a relative path) is dropped. No shell expansion is done;
+/// see [`is_path_in_workspace`] for that.
+pub fn normalize_path(path: &Path) -> PathBuf {
     let mut components = path.components().peekable();
     let mut ret = if let Some(c @ Component::Prefix(..)) = components.peek().cloned() {
         components.next();
