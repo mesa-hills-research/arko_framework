@@ -119,8 +119,11 @@ impl CodexAuthFile {
         Self::load(path)
     }
 
+    /// Loads the file at `path`. A relative path is made absolute against
+    /// the current directory now, so that a later change of directory
+    /// doesn't move the file this value (and its clients) read and write.
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, Error> {
-        let path = path.into();
+        let path = std::path::absolute(path.into())?;
         let (snapshot, _) = read_credentials(&path)?;
         Ok(Self { path, snapshot })
     }
@@ -353,14 +356,12 @@ impl CodexAuthFile {
     /// wrote. Only credentials of the same account are ever saved or
     /// reported; both having rotated is an error, since only one rotation can
     /// be valid.
-    ///
-    /// `spent` tells credentials whose refresh token this process already
-    /// exchanged for a new one: they are neither reported nor saved.
+    /// Credentials holding a refresh token this process knows is spent are
+    /// neither reported nor saved.
     fn reconcile(
         &mut self,
         in_client: &ChatGptOAuthCredentials,
         id_token: Option<&str>,
-        spent: &dyn Fn(&ChatGptOAuthCredentials) -> bool,
     ) -> Result<Reconciled, Error> {
         let known = self.credentials()?;
         let (current, in_file) = read_credentials(&self.path)?;
@@ -374,9 +375,9 @@ impl CodexAuthFile {
             }
             if in_file != known {
                 if *in_client == known {
-                    if spent(&in_file) {
+                    if spent_tokens::credentials_spent(&in_file) {
                         return Err(Error::AuthenticationFailed(format!(
-                            "{} holds a ChatGPT OAuth refresh token that this process already exchanged for a new one; not loading it (using it again would sign you out)",
+                            "{} holds a ChatGPT OAuth refresh token that {SPENT}; not loading it (using it again would sign you out)",
                             self.path.display()
                         )));
                     }
@@ -396,9 +397,9 @@ impl CodexAuthFile {
         if *in_client == known {
             return Ok(Reconciled::Unchanged);
         }
-        if spent(in_client) {
+        if spent_tokens::credentials_spent(in_client) {
             return Err(Error::AuthenticationFailed(format!(
-                "this client holds a ChatGPT OAuth refresh token that this process already exchanged for a new one; not saving it to {}",
+                "this client holds a ChatGPT OAuth refresh token that {SPENT}; not saving it to {}",
                 self.path.display()
             )));
         }
@@ -410,9 +411,11 @@ impl CodexAuthFile {
     /// credentials the client rotated, or loads newer credentials another
     /// process wrote into the client. Fails when both changed, since only one
     /// rotation can be valid, when the file holds a different account, and
-    /// when the credentials to write or load hold a refresh token that this
-    /// process already exchanged for a new one (nothing is then written or
-    /// loaded). Clients without ChatGPT OAuth are left alone.
+    /// when the credentials to write or load hold a refresh token this
+    /// process knows is spent (nothing is then written or loaded). Clients
+    /// without ChatGPT OAuth are left alone. Credentials a client of this
+    /// file rotated but couldn't save are written with their refresh's
+    /// `id_token`.
     ///
     /// A client from [`client`](Self::client) or
     /// [`openai_client`](Self::openai_client) keeps the file in step on its
@@ -421,13 +424,21 @@ impl CodexAuthFile {
         let Some(in_client) = client.openai_chatgpt_oauth_credentials().await else {
             return Ok(CodexAuthSync::Unchanged);
         };
-        let key = file_key(&self.path);
-        let spent = |credentials: &ChatGptOAuthCredentials| {
-            spent_for_file(&key, credentials) || client.openai_refresh_token_spent(credentials)
-        };
-        match self.reconcile(&in_client, None, &spent)? {
+        // A rotation a store of this file couldn't save: saved here with the
+        // `id_token` its refresh returned.
+        let shared = shared_file(&self.path);
+        let rotation = shared
+            .unsaved(&in_client.account_id)
+            .filter(|rotation| rotation.credentials == in_client);
+        let id_token = rotation.as_ref().and_then(|rotation| rotation.id_token.as_deref());
+        match self.reconcile(&in_client, id_token)? {
             Reconciled::Unchanged => Ok(CodexAuthSync::Unchanged),
-            Reconciled::Saved => Ok(CodexAuthSync::Saved),
+            Reconciled::Saved => {
+                if let Some(rotation) = &rotation {
+                    shared.done_with(rotation);
+                }
+                Ok(CodexAuthSync::Saved)
+            }
             Reconciled::Newer { credentials, bytes } => {
                 // Only replace what was read: a refresh that finished in
                 // the meantime must not be undone.
@@ -460,12 +471,16 @@ impl CodexAuthFile {
 ///
 /// This process never sends a refresh token it knows is spent, and neither
 /// the client nor its store adopts or saves credentials holding one. A token
-/// is spent once a refresh with it returned a new one; the replaced token is
-/// then recorded (as a digest), for the token endpoint and for this file,
-/// and both records are checked below and by the client before every
-/// refresh request. (A refresh whose answer was lost may have spent a token
-/// without this process knowing; the next refresh then sends it, and the
-/// server refuses it.)
+/// is spent once a refresh with it returned a new one, or the server refused
+/// it as reused, expired or revoked; it is then recorded (as a digest, in
+/// one record for the whole process), which the rows below and the client
+/// check before every refresh request. What the record can't know: a
+/// refresh whose answer was lost may have spent a token (the next refresh
+/// sends it, the server refuses it, and then it is recorded), and a token
+/// spent by an earlier run of the process or by another one looks live. An
+/// old `auth.json` restored from a backup is then adopted like new
+/// credentials, and drops an unsaved rotation of its account (which stays in
+/// its recovery file).
 ///
 /// When rotated tokens can't be written back, they go to a private
 /// recovery file next to `auth.json` (see [`CodexAuthFile::write_recovery`])
@@ -623,21 +638,14 @@ fn shared_file(path: &Path) -> Arc<SharedFile> {
     shared
 }
 
-/// Whether the refresh token of `credentials` was spent by a refresh of the
-/// credentials in the `auth.json` keyed `key`.
-fn spent_for_file(key: &Path, credentials: &ChatGptOAuthCredentials) -> bool {
-    credentials
-        .refresh_token
-        .as_deref()
-        .is_some_and(|token| spent_tokens::spent_for_file(key, token))
-}
+/// Why a spent refresh token can't be used, for error messages.
+const SPENT: &str = "can't be used again (this process exchanged it for a new one, or the server refused it as reused, expired or revoked)";
 
-/// The error for credentials whose refresh token this process already spent
-/// (a refresh with it returned a new one): they are neither sent nor
-/// adopted. With the credentials' `account_id`, names the recovery file of
-/// that account's unsaved rotation of the `auth.json` the token was read
-/// from, when there is one.
-pub(crate) fn spent_refresh_token_error(refresh_token: &str, account_id: Option<&str>) -> Error {
+/// The error for credentials holding a refresh token this process knows is
+/// spent: they are neither sent nor adopted. With the credentials'
+/// `account_id`, names the recovery file of that account's unsaved rotation
+/// of an `auth.json`, when there is one.
+pub(crate) fn spent_refresh_token_error(account_id: Option<&str>) -> Error {
     let files: Vec<Arc<SharedFile>> = shared_files()
         .iter()
         .filter_map(|entry| entry.shared.upgrade())
@@ -645,11 +653,12 @@ pub(crate) fn spent_refresh_token_error(refresh_token: &str, account_id: Option<
     let unsaved = account_id.and_then(|account_id| {
         files.iter().find_map(|shared| {
             let rotation = shared.unsaved(account_id)?;
-            spent_tokens::spent_for_file(&shared.key, refresh_token)
-                .then(|| (shared.key.clone(), rotation.recovery))
+            Some((shared.key.clone(), rotation.recovery))
         })
     });
-    let refused = "Not using a ChatGPT OAuth refresh token that this process already exchanged for a new one: using it again would sign you out";
+    let refused = format!(
+        "Not using a ChatGPT OAuth refresh token that {SPENT}: using it again would sign you out"
+    );
     Error::AuthenticationFailed(match unsaved {
         Some((path, Some(recovery))) => format!(
             "{refused}. The newest tokens for {path} could not be saved there; they are in {} ({RECOVERY_FILE_PRIVACY}): put it in place of {path}, or sign in to Codex again, before Codex next refreshes",
@@ -738,29 +747,14 @@ impl std::fmt::Debug for CodexAuthStore {
 }
 
 impl ChatGptOAuthStore for CodexAuthStore {
-    /// See the table in the [`CodexAuthStore`] docs. Only this store's
-    /// record of spent tokens applies; the client calls
-    /// [`before_refresh_knowing_spent`](Self::before_refresh_knowing_spent).
+    /// See the table in the [`CodexAuthStore`] docs.
     fn before_refresh(
         &self,
         current: &ChatGptOAuthCredentials,
     ) -> Result<Option<ChatGptOAuthCredentials>, Error> {
-        self.before_refresh_knowing_spent(current, &|_| false)
-    }
-
-    /// See the table in the [`CodexAuthStore`] docs: credentials are spent
-    /// when this store's record or the client's (`spent_at_endpoint`) says
-    /// so.
-    fn before_refresh_knowing_spent(
-        &self,
-        current: &ChatGptOAuthCredentials,
-        spent_at_endpoint: &dyn Fn(&ChatGptOAuthCredentials) -> bool,
-    ) -> Result<Option<ChatGptOAuthCredentials>, Error> {
         let mut file = self.lock();
         let path = file.path.clone();
-        let spent = |credentials: &ChatGptOAuthCredentials| {
-            spent_for_file(&self.shared.key, credentials) || spent_at_endpoint(credentials)
-        };
+        let spent = spent_tokens::credentials_spent;
         let unsaved = self.shared.unsaved(&current.account_id);
         // While a rotation is unsaved, whatever stops the refresh names its
         // recovery file; the rotation is kept.
@@ -787,7 +781,7 @@ impl ChatGptOAuthStore for CodexAuthStore {
             // they can still be refreshed.
             if current.refresh_token.is_none() || spent(current) {
                 return Err(Error::AuthenticationFailed(format!(
-                    "{} holds a ChatGPT OAuth refresh token that this process already exchanged for a new one, and this client holds no newer one (using it again would sign you out); sign in to Codex again",
+                    "{} holds a ChatGPT OAuth refresh token that {SPENT}, and this client holds no newer one (using it again would sign you out); sign in to Codex again",
                     path.display()
                 )));
             }
@@ -812,7 +806,7 @@ impl ChatGptOAuthStore for CodexAuthStore {
             && let Some(spent) = replaced.refresh_token.as_deref()
             && refreshed.refresh_token.as_deref() != Some(spent)
         {
-            spent_tokens::record_for_file(&self.shared.key, spent);
+            spent_tokens::record(spent);
         }
         let error = match file.persist_tokens(refreshed, id_token) {
             Ok(_) => return Ok(()),
@@ -1780,11 +1774,11 @@ mod tests {
         assert_eq!(unsaved.keys().collect::<Vec<_>>(), ["account-2"]);
     }
 
-    /// What the client knows is spent (at its token endpoint) counts as much
-    /// as the store's own record: the store never offers such credentials,
-    /// and replaces them in the file with the client's live ones.
+    /// A token spent anywhere in the process (by a client without a store,
+    /// say) counts: the store never offers credentials holding it, and
+    /// replaces them in the file with the client's live ones.
     #[test]
-    fn the_store_uses_what_the_client_knows_is_spent() {
+    fn the_store_knows_of_tokens_spent_anywhere_in_the_process() {
         let (_dir, path) = temp_file(NESTED);
         let store = CodexAuthStore::new(CodexAuthFile::load(&path).unwrap());
         let host = ChatGptOAuthCredentials {
@@ -1792,20 +1786,58 @@ mod tests {
             refresh_token: Some("refresh-host".into()),
             account_id: "account-1".into(),
         };
-        let spent_elsewhere = |credentials: &ChatGptOAuthCredentials| {
-            credentials.refresh_token.as_deref() == Some("refresh-1")
-        };
-        // Neither record: the file's credentials are offered.
         let loaded = CodexAuthFile::load(&path).unwrap().credentials().unwrap();
         assert_eq!(store.before_refresh(&host).unwrap(), Some(loaded.clone()));
-        // Spent at the client's endpoint: the client's credentials replace them.
-        assert_eq!(store.before_refresh_knowing_spent(&host, &spent_elsewhere).unwrap(), None);
+        spent_tokens::record("refresh-1");
+        assert_eq!(store.before_refresh(&host).unwrap(), None);
         assert_eq!(CodexAuthFile::load(&path).unwrap().credentials().unwrap(), host);
-        // A client whose own credentials are spent there too stops.
+        // A client whose own credentials are spent too stops.
         std::fs::write(&path, NESTED).unwrap();
-        let error = store.before_refresh_knowing_spent(&loaded, &spent_elsewhere).unwrap_err();
-        assert!(matches!(error, Error::AuthenticationFailed(_)), "{error}");
+        let error = store.before_refresh(&loaded).unwrap_err();
+        assert!(error.to_string().contains("can't be used again"), "{error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), NESTED);
+    }
+
+    /// `sync` on a client of the file whose rotation couldn't be saved
+    /// writes it with the `id_token` its refresh returned.
+    #[tokio::test]
+    async fn sync_saves_an_unsaved_rotation_with_its_id_token() {
+        let (_dir, path) = temp_file(NESTED);
+        let mut file = CodexAuthFile::load(&path).unwrap();
+        let client = file.client().unwrap();
+        let store = CodexAuthStore::new(CodexAuthFile::load(&path).unwrap());
+        fail_save(&store, &path);
+        client
+            .update_openai_auth(OpenAIAuth::ChatGptOAuth(rotated()))
+            .await
+            .unwrap();
+        std::fs::remove_dir(with_suffix(&path, ".bak")).unwrap();
+        assert_eq!(file.sync(&client).await.unwrap(), CodexAuthSync::Saved);
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["tokens"]["refresh_token"], "refresh-2");
+        assert_eq!(saved["tokens"]["id_token"], "id-2");
+        assert!(store.shared.unsaved_slot().is_empty());
+    }
+
+    /// A relative path is made absolute when the file is loaded, so a later
+    /// change of directory doesn't move the file its clients use.
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_path_is_made_absolute_when_loaded() {
+        let (_dir, path) = temp_file(NESTED);
+        let cwd = std::env::current_dir().unwrap();
+        let mut relative = PathBuf::new();
+        for _ in cwd.components().skip(1) {
+            relative.push("..");
+        }
+        relative.push(path.strip_prefix("/").unwrap());
+        assert!(relative.is_relative());
+        let file = CodexAuthFile::load(&relative).unwrap();
+        assert!(file.path().is_absolute(), "{}", file.path().display());
+        assert_eq!(
+            std::fs::canonicalize(file.path()).unwrap(),
+            std::fs::canonicalize(&path).unwrap()
+        );
     }
 
     /// The unsaved rotation keeps its own file state alive, even while an
@@ -1847,23 +1879,21 @@ mod tests {
         let mut file = CodexAuthFile::load(&path).unwrap();
         let client =
             LLMClient::new().with_openai_chatgpt_oauth("access-1", Some("refresh-1"), "account-1");
-        spent_tokens::record_for_file(&file_key(&path), "refresh-codex");
+        spent_tokens::record("refresh-codex");
         std::fs::write(&path, codex_refreshed()).unwrap();
         let error = file.sync(&client).await.unwrap_err();
-        assert!(error.to_string().contains("already exchanged"), "{error}");
+        assert!(error.to_string().contains("can't be used again"), "{error}");
         let held = client.openai_chatgpt_oauth_credentials().await.unwrap();
         assert_eq!(held.refresh_token.as_deref(), Some("refresh-1"));
 
-        // Spent at the client's token endpoint: not saved.
+        // A client holding spent credentials: they are not saved.
         let (_dir, path) = temp_file(NESTED);
         let mut file = CodexAuthFile::load(&path).unwrap();
-        let url = "http://sync-spent-test.invalid/token";
-        let openai = OpenAIClient::new_chatgpt_oauth("access-9", Some("sync-spent-refresh"), "account-1")
-            .with_oauth_token_url(url);
-        let client = LLMClient::new().with_openai_client(openai);
-        spent_tokens::record_at_endpoint(url, "sync-spent-refresh");
+        let client =
+            LLMClient::new().with_openai_chatgpt_oauth("access-9", Some("sync-spent-refresh"), "account-1");
+        spent_tokens::record("sync-spent-refresh");
         let error = file.sync(&client).await.unwrap_err();
-        assert!(error.to_string().contains("already exchanged"), "{error}");
+        assert!(error.to_string().contains("can't be used again"), "{error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), NESTED);
     }
 

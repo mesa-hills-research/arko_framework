@@ -12,10 +12,9 @@ use std::sync::Arc;
 /// [`OpenAIClient::with_credential_store`](super::OpenAIClient::with_credential_store))
 /// consults it around every refresh, proactive or after an HTTP 401:
 ///
-/// 1. [`before_refresh`](Self::before_refresh) (through
-///    [`before_refresh_knowing_spent`](Self::before_refresh_knowing_spent))
-///    re-reads the store. When another program already refreshed, its
-///    tokens are adopted and no refresh request is made.
+/// 1. [`before_refresh`](Self::before_refresh) re-reads the store. When
+///    another program already refreshed, its tokens are adopted and no
+///    refresh request is made.
 /// 2. After a refresh, [`save_refreshed`](Self::save_refreshed) stores the
 ///    rotated tokens at once.
 /// 3. When the refresh request fails, the store is read again: if another
@@ -26,8 +25,9 @@ use std::sync::Arc;
 /// `auth.json`: newer tokens are adopted and the request is sent once more.
 ///
 /// Whatever the store returns, the client never sends a refresh token that
-/// a refresh in this process already exchanged for a new one, and never
-/// adopts stored credentials holding one: that refresh fails with
+/// a refresh in this process already exchanged for a new one (or that the
+/// server refused as reused, expired or revoked), and never adopts stored
+/// credentials holding one: that refresh fails with
 /// [`Error::AuthenticationFailed`].
 ///
 /// The client holds the store's [`refresh_lock`](Self::refresh_lock) when it
@@ -47,22 +47,6 @@ pub trait ChatGptOAuthStore: Send + Sync {
         &self,
         current: &ChatGptOAuthCredentials,
     ) -> Result<Option<ChatGptOAuthCredentials>, Error>;
-
-    /// [`before_refresh`](Self::before_refresh), with `spent` telling
-    /// credentials whose refresh token a refresh in this process already
-    /// exchanged for a new one at the client's token endpoint. The client
-    /// calls this one. A store that decides on its own what to keep or offer
-    /// uses `spent` so that it never offers such credentials (the client
-    /// would refuse them) and can replace them with the client's live ones.
-    /// The default calls `before_refresh`.
-    fn before_refresh_knowing_spent(
-        &self,
-        current: &ChatGptOAuthCredentials,
-        spent: &dyn Fn(&ChatGptOAuthCredentials) -> bool,
-    ) -> Result<Option<ChatGptOAuthCredentials>, Error> {
-        let _ = spent;
-        self.before_refresh(current)
-    }
 
     /// Called right after a refresh with the rotated credentials and the
     /// refresh response's `id_token`, if any. The previous refresh token no

@@ -304,17 +304,6 @@ impl LLMClient {
         }
     }
 
-    /// Whether a refresh in this process already exchanged the refresh token
-    /// in `credentials` for a new one at the OpenAI client's token endpoint.
-    pub(crate) fn openai_refresh_token_spent(
-        &self,
-        credentials: &providers::openai::ChatGptOAuthCredentials,
-    ) -> bool {
-        self.openai_client
-            .as_ref()
-            .is_some_and(|client| client.refresh_token_spent(credentials))
-    }
-
     /// Returns `true` if the current OpenAI OAuth access token is expired
     /// or will expire within the given margin.
     ///
