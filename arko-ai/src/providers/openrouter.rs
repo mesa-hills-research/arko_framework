@@ -187,7 +187,7 @@ impl OpenRouterClient {
             return Ok(response);
         }
         let status = response.status().as_u16();
-        let retry_after = retry_after_from_headers(response.headers());
+        let retry_after = retry_after_from_headers(status, response.headers());
         let body = response
             .text()
             .await
