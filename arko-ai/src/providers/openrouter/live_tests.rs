@@ -48,7 +48,7 @@ fn gpt5() -> String {
 }
 
 fn gpt6() -> String {
-    slug("OPENROUTER_LIVE_GPT6", "openai/gpt-6-sol")
+    slug("OPENROUTER_LIVE_GPT6", "openai/gpt-6-astra")
 }
 
 fn weather_tools() -> ToolConfig {

@@ -1947,7 +1947,8 @@ impl Model {
             .and_then(|info| info.alias_target.as_deref())
             .unwrap_or(&self.id);
         let name = slug.trim_start_matches('~').strip_prefix("anthropic/")?;
-        let name = name.split(':').next()?.replace('.', "-");
+        // Strip a variant (`:floor`) and a preset (`@preset/x`) in either order.
+        let name = name.split([':', '@']).next()?.replace('.', "-");
         let dated = format!("{name}-2");
         Self::list_anthropic_models()
             .into_iter()
