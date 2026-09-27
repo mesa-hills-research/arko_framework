@@ -26,6 +26,13 @@ impl EmbeddingClient {
         self
     }
 
+    /// Installs a preconfigured Voyage client (for example one with
+    /// [`VoyageClient::with_base_url`]).
+    pub fn with_voyage_client(mut self, client: VoyageClient) -> Self {
+        self.voyage_provider = Some(client);
+        self
+    }
+
     async fn get_model_details(
         &self,
         config: &EmbeddingConfig,

@@ -161,8 +161,11 @@ pub enum StreamEvent {
     End(Box<GenerationResponse>),
 }
 
+/// A client for one LLM provider's API. Named `ProviderClient` to keep it
+/// distinct from the [`Provider`](crate::model::Provider) enum that identifies
+/// a model's provider.
 #[async_trait::async_trait]
-pub trait Provider {
+pub trait ProviderClient {
     async fn generate_text(
         &self,
         conversation: &Conversation,

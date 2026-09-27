@@ -1,4 +1,4 @@
-use super::{GenerationResponse, Provider, StreamEvent, take_refused_output};
+use super::{GenerationResponse, ProviderClient, StreamEvent, take_refused_output};
 use crate::{
     config::{GenerationConfig, OpenAIServiceTier},
     pricing::ServiceTier,
@@ -33,8 +33,9 @@ type StreamingRefusals = BTreeMap<(String, u64), String>;
 
 const CHATGPT_OAUTH_DEFAULT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CHATGPT_OAUTH_DEFAULT_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
-const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
+/// Default Responses API base URLs; requests go to `{base}/responses`.
+const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatGptOAuthCredentials {
@@ -259,10 +260,8 @@ pub struct OpenAIClient {
     auth: Arc<RwLock<OpenAIAuth>>,
     http_client: reqwest::Client,
     retry_oauth_rate_limits: bool,
-    #[cfg(test)]
-    test_responses_url: Option<String>,
-    #[cfg(test)]
-    test_token_url: Option<String>,
+    base_url: Option<String>,
+    oauth_token_url: Option<String>,
 }
 
 impl OpenAIClient {
@@ -273,10 +272,8 @@ impl OpenAIClient {
             ))),
             http_client: super::default_http_client(),
             retry_oauth_rate_limits: false,
-            #[cfg(test)]
-            test_responses_url: None,
-            #[cfg(test)]
-            test_token_url: None,
+            base_url: None,
+            oauth_token_url: None,
         }
     }
 
@@ -295,10 +292,8 @@ impl OpenAIClient {
             ))),
             http_client: super::default_http_client(),
             retry_oauth_rate_limits: false,
-            #[cfg(test)]
-            test_responses_url: None,
-            #[cfg(test)]
-            test_token_url: None,
+            base_url: None,
+            oauth_token_url: None,
         }
     }
 
@@ -307,11 +302,25 @@ impl OpenAIClient {
             auth: Arc::new(RwLock::new(auth)),
             http_client: super::default_http_client(),
             retry_oauth_rate_limits: false,
-            #[cfg(test)]
-            test_responses_url: None,
-            #[cfg(test)]
-            test_token_url: None,
+            base_url: None,
+            oauth_token_url: None,
         }
+    }
+
+    /// Sends Responses requests to `{base_url}/responses` instead of the
+    /// default for the auth mode (`https://api.openai.com/v1` for API keys,
+    /// `https://chatgpt.com/backend-api/codex` for ChatGPT OAuth), for example
+    /// a proxy or a test server.
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = Some(base_url.into());
+        self
+    }
+
+    /// Sends ChatGPT OAuth token refreshes to `url` instead of
+    /// `https://auth.openai.com/oauth/token`.
+    pub fn with_oauth_token_url(mut self, url: impl Into<String>) -> Self {
+        self.oauth_token_url = Some(url.into());
+        self
     }
 
     /// Configures whether OAuth refresh requests retry HTTP 429 responses.
@@ -410,10 +419,7 @@ impl OpenAIClient {
             }
         };
 
-        #[cfg(test)]
-        let token_url = self.test_token_url.as_deref();
-        #[cfg(not(test))]
-        let token_url = None;
+        let token_url = self.oauth_token_url.as_deref();
         let result = refresh_chatgpt_oauth_token_with_policy(
             &self.http_client,
             &refresh_token,
@@ -446,9 +452,7 @@ impl OpenAIClient {
         mut auth: OpenAIAuth,
     ) -> Result<(reqwest::Response, OpenAIAuth), Error> {
         for attempt in 0..2 {
-            let url = Self::responses_url(&auth);
-            #[cfg(test)]
-            let url = self.test_responses_url.as_deref().unwrap_or(url);
+            let url = self.responses_url(&auth);
             let builder = self
                 .http_client
                 .post(url)
@@ -488,11 +492,12 @@ impl OpenAIClient {
         unreachable!("each request either returns or refreshes once")
     }
 
-    fn responses_url(auth: &OpenAIAuth) -> &'static str {
-        match auth {
-            OpenAIAuth::ApiKey(_) => OPENAI_RESPONSES_URL,
-            OpenAIAuth::ChatGptOAuth(_) => CODEX_RESPONSES_URL,
-        }
+    fn responses_url(&self, auth: &OpenAIAuth) -> String {
+        let base = self.base_url.as_deref().unwrap_or(match auth {
+            OpenAIAuth::ApiKey(_) => OPENAI_BASE_URL,
+            OpenAIAuth::ChatGptOAuth(_) => CODEX_BASE_URL,
+        });
+        format!("{}/responses", base.trim_end_matches('/'))
     }
 
     fn apply_auth_headers(
@@ -516,7 +521,7 @@ impl OpenAIClient {
 }
 
 #[async_trait::async_trait]
-impl Provider for OpenAIClient {
+impl ProviderClient for OpenAIClient {
     async fn generate_text(
         &self,
         conversation: &Conversation,

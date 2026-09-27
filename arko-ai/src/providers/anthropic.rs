@@ -1,4 +1,4 @@
-use super::{GenerationResponse, Provider, StreamEvent, take_refused_output};
+use super::{GenerationResponse, ProviderClient, StreamEvent, take_refused_output};
 use crate::{
     config::GenerationConfig,
     conversation::Conversation,
@@ -19,10 +19,14 @@ use futures::{StreamExt, stream::BoxStream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Default Messages API base URL; requests go to `{base}/v1/messages`.
+const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
+
 #[derive(Clone)]
 pub struct AnthropicClient {
     api_key: String,
     http_client: reqwest::Client,
+    base_url: String,
 }
 
 impl AnthropicClient {
@@ -30,7 +34,20 @@ impl AnthropicClient {
         Self {
             api_key: api_key.to_string(),
             http_client: super::default_http_client(),
+            base_url: ANTHROPIC_BASE_URL.to_string(),
         }
+    }
+
+    /// Sends requests to `{base_url}/v1/messages` instead of
+    /// `https://api.anthropic.com/v1/messages`, for example a proxy or a test
+    /// server.
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = base_url.into();
+        self
+    }
+
+    fn messages_url(&self) -> String {
+        format!("{}/v1/messages", self.base_url.trim_end_matches('/'))
     }
 
     fn has_anthropic_reasoning_config(config: &GenerationConfig) -> bool {
@@ -494,7 +511,7 @@ impl AnthropicClient {
 }
 
 #[async_trait::async_trait]
-impl Provider for AnthropicClient {
+impl ProviderClient for AnthropicClient {
     async fn generate_text(
         &self,
         conversation: &Conversation,
@@ -514,7 +531,7 @@ impl Provider for AnthropicClient {
 
         let mut request = self
             .http_client
-            .post("https://api.anthropic.com/v1/messages")
+            .post(self.messages_url())
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json");
@@ -554,7 +571,7 @@ impl Provider for AnthropicClient {
 
         let mut request = self
             .http_client
-            .post("https://api.anthropic.com/v1/messages")
+            .post(self.messages_url())
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json");
@@ -2213,5 +2230,81 @@ mod model_rule_tests {
         let mut usage = AnthropicClient::calculate_usage(&standard);
         usage.calculate_cost(&Model::anthropic_claude_opus_5_5(), None);
         assert!((usage.total_cost - 4.0).abs() < 1e-6, "{}", usage.total_cost);
+    }
+}
+
+#[cfg(test)]
+mod base_url_tests {
+    use super::AnthropicClient;
+    use crate::{
+        client::LLMClient, config::GenerationConfig, conversation::Conversation, model::Model,
+        providers::{google::GoogleClient, openai::OpenAIClient, voyage::VoyageClient},
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn base_urls_default_to_the_vendor_and_accept_overrides() {
+        assert_eq!(
+            AnthropicClient::new("k").messages_url(),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            AnthropicClient::new("k").with_base_url("http://proxy.local/").messages_url(),
+            "http://proxy.local/v1/messages"
+        );
+        assert_eq!(
+            GoogleClient::new("k").with_base_url("http://proxy.local/v1").interactions_url(),
+            "http://proxy.local/v1/interactions"
+        );
+        // OpenAI and Voyage are covered by their own request tests; construction
+        // with an override must at least be possible for every client.
+        let _ = OpenAIClient::new("k").with_base_url("http://proxy.local/v1");
+        let _ = VoyageClient::new("k").with_base_url("http://proxy.local/v1");
+    }
+
+    #[tokio::test]
+    async fn requests_reach_the_overridden_base_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 8192];
+            // Read until the JSON body's closing brace arrives.
+            loop {
+                let n = socket.read(&mut buffer).await.unwrap();
+                request.extend_from_slice(&buffer[..n]);
+                let text = String::from_utf8_lossy(&request);
+                if n == 0 || (text.contains("\r\n\r\n") && text.trim_end().ends_with('}')) {
+                    break;
+                }
+            }
+            let body = serde_json::json!({
+                "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
+                "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn",
+                "usage": {"input_tokens": 3, "output_tokens": 1}
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8_lossy(&request).into_owned()
+        });
+
+        let mut anthropic = AnthropicClient::new("test-key").with_base_url(format!("http://{address}"));
+        anthropic.http_client = crate::providers::http_client_builder().no_proxy().build().unwrap();
+        let client = LLMClient::new().with_anthropic_client(anthropic);
+        let mut conversation = Conversation::new(Model::anthropic_claude_opus_5_5());
+        conversation.add_user_message("hi");
+        let response = client
+            .generate_text(&conversation, GenerationConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(response.text(), "ok");
+        let request = server.await.unwrap();
+        assert!(request.starts_with("POST /v1/messages HTTP/1.1"), "{request}");
+        assert!(request.to_lowercase().contains("x-api-key: test-key"));
     }
 }

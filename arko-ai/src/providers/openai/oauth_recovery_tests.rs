@@ -73,10 +73,10 @@ pub(super) fn client(url: &str) -> OpenAIClient {
         &format!("header.{claims}.signature"),
         Some("synthetic-refresh"),
         "synthetic-account",
-    );
+    )
+    .with_base_url(url)
+    .with_oauth_token_url(format!("{url}/token"));
     client.http_client = crate::providers::http_client_builder().no_proxy().build().unwrap();
-    client.test_responses_url = Some(format!("{url}/responses"));
-    client.test_token_url = Some(format!("{url}/token"));
     client
 }
 

@@ -10,10 +10,14 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value; // For dynamic input field
 
+/// Default embeddings API base URL; requests go to `{base}/embeddings`.
+const VOYAGE_BASE_URL: &str = "https://api.voyageai.com/v1";
+
 #[derive(Clone)]
 pub struct VoyageClient {
     api_key: String,
     http_client: reqwest::Client,
+    base_url: String,
 }
 
 impl VoyageClient {
@@ -21,7 +25,15 @@ impl VoyageClient {
         Self {
             api_key: api_key.to_string(),
             http_client: super::default_http_client(),
+            base_url: VOYAGE_BASE_URL.to_string(),
         }
+    }
+
+    /// Sends requests to `{base_url}/embeddings` instead of
+    /// `https://api.voyageai.com/v1/embeddings`.
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = base_url.into();
+        self
     }
 }
 
@@ -69,7 +81,7 @@ impl EmbeddingProviderTrait for VoyageClient {
         config: &EmbeddingConfig,
         model_details: &EmbeddingModelDetails,
     ) -> Result<ArkoEmbeddingResponse, Error> {
-        let url = "https://api.voyageai.com/v1/embeddings";
+        let url = format!("{}/embeddings", self.base_url.trim_end_matches('/'));
 
         // Voyage API takes a single string or an array of strings.
         // If texts has one element, pass it as a string, otherwise as an array.

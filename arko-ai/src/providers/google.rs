@@ -1,4 +1,4 @@
-use super::{GenerationResponse, Provider, StreamEvent};
+use super::{GenerationResponse, ProviderClient, StreamEvent};
 use crate::{
     config::GenerationConfig,
     conversation::Conversation,
@@ -16,12 +16,14 @@ use futures::{StreamExt, stream::BoxStream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-const INTERACTIONS_URL: &str = "https://generativelanguage.googleapis.com/v1/interactions";
+/// Default Interactions API base URL; requests go to `{base}/interactions`.
+const GOOGLE_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1";
 
 #[derive(Clone)]
 pub struct GoogleClient {
     api_key: String,
     http_client: reqwest::Client,
+    base_url: String,
 }
 
 impl GoogleClient {
@@ -29,12 +31,25 @@ impl GoogleClient {
         Self {
             api_key: api_key.to_string(),
             http_client: super::default_http_client(),
+            base_url: GOOGLE_BASE_URL.to_string(),
         }
+    }
+
+    /// Sends requests to `{base_url}/interactions` instead of
+    /// `https://generativelanguage.googleapis.com/v1/interactions`, for example
+    /// a proxy or a test server.
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = base_url.into();
+        self
+    }
+
+    pub(crate) fn interactions_url(&self) -> String {
+        format!("{}/interactions", self.base_url.trim_end_matches('/'))
     }
 }
 
 #[async_trait::async_trait]
-impl Provider for GoogleClient {
+impl ProviderClient for GoogleClient {
     async fn generate_text(
         &self,
         conversation: &Conversation,
@@ -50,7 +65,7 @@ impl Provider for GoogleClient {
 
         let response = self
             .http_client
-            .post(INTERACTIONS_URL)
+            .post(self.interactions_url())
             .header("x-goog-api-key", &self.api_key)
             .header("Content-Type", "application/json")
             .json(&request)
@@ -103,7 +118,7 @@ impl Provider for GoogleClient {
         }
 
         let request = self.build_request(conversation, config, true)?;
-        let url = format!("{INTERACTIONS_URL}?alt=sse");
+        let url = format!("{}?alt=sse", self.interactions_url());
 
         let response = self
             .http_client

@@ -3,7 +3,7 @@ use crate::{
     conversation::Conversation,
     error::Error,
     model::{Model, Provider},
-    providers::{self, GenerationResponse, Provider as ProviderTrait, StreamEvent},
+    providers::{self, GenerationResponse, ProviderClient, StreamEvent},
 };
 use futures::stream::BoxStream;
 
@@ -206,22 +206,44 @@ impl LLMClient {
         Conversation::new(model)
     }
 
-    fn get_provider(&self, provider: &Provider) -> Result<&dyn ProviderTrait, Error> {
+    /// Installs a preconfigured OpenAI client (for example one with
+    /// [`with_base_url`](providers::openai::OpenAIClient::with_base_url)).
+    pub fn with_openai_client(mut self, client: providers::openai::OpenAIClient) -> Self {
+        self.openai_client = Some(client);
+        self
+    }
+
+    /// Installs a preconfigured Anthropic client.
+    pub fn with_anthropic_client(
+        mut self,
+        client: providers::anthropic::AnthropicClient,
+    ) -> Self {
+        self.anthropic_client = Some(client);
+        self
+    }
+
+    /// Installs a preconfigured Google client.
+    pub fn with_google_client(mut self, client: providers::google::GoogleClient) -> Self {
+        self.google_client = Some(client);
+        self
+    }
+
+    fn get_provider(&self, provider: &Provider) -> Result<&dyn ProviderClient, Error> {
         match provider {
             Provider::OpenAI => self
                 .openai_client
                 .as_ref()
-                .map(|c| c as &dyn ProviderTrait)
+                .map(|c| c as &dyn ProviderClient)
                 .ok_or_else(|| Error::MissingApiKey("OpenAI".to_string())),
             Provider::Anthropic => self
                 .anthropic_client
                 .as_ref()
-                .map(|c| c as &dyn ProviderTrait)
+                .map(|c| c as &dyn ProviderClient)
                 .ok_or_else(|| Error::MissingApiKey("Anthropic".to_string())),
             Provider::Google => self
                 .google_client
                 .as_ref()
-                .map(|c| c as &dyn ProviderTrait)
+                .map(|c| c as &dyn ProviderClient)
                 .ok_or_else(|| Error::MissingApiKey("Google".to_string())),
         }
     }
