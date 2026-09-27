@@ -1,20 +1,16 @@
 # Arko Workflows
 
-Multi-agent workflow orchestration built on [arko-agents](../arko-agents) and [arko-ai](../arko-ai).
+Multi-agent workflow orchestration built on [arko-agents](../arko-agents/README.md)
+and [arko-ai](../arko-ai/README.md). Workflows are ordinary Rust or Python code: the
+library provides agent execution, shared memory, messaging, budgets, hooks,
+context-freshness tracking, completion verification, durable steps, and
+persistence, and your code decides which agents run and in what order. There is no
+graph or pipeline definition to write.
 
-See the [workflow-author Index](INDEX.md) for the complete API, signatures, parameters, defaults, and agent-tool contracts.
-
-Arko Workflows enables binaries and scripts to compose multiple LLM agent runs into cohesive workflows with shared memory, durable messaging, budget management, lifecycle hooks, context-freshness tracking, completion verification, replay-safe steps, and persistence — via an intuitive builder API in both Rust and Python.
-
-## Background
-
-As tasks scale in volume and complexity, single-agent harnesses break down. They skip steps, miss subtle requirements, or implement them poorly. Arko Workflows is the culmination of over a year of work on `arko_ai` and `arko_agents`, providing a batteries-included library for building multi-agent harnesses across domains — coding, research, creative writing, computer use.
-
-The design philosophy is **maximum moldability balanced with maximum intuitiveness**. The library does not constrain you to DAGs or rigid pipeline shapes. Your Rust or Python code *is* the workflow. The library provides the primitives — agent execution, shared state, hooks, budget, persistence — and you compose them however your problem demands.
+The [API index](INDEX.md) lists every public type, signature, default, and
+agent-tool contract.
 
 ## Installation
-
-Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -24,11 +20,13 @@ arko-ai = { path = "../arko-ai" }
 tokio = { version = "1.37", features = ["full"] }
 ```
 
-Python bindings live behind the `python` feature (`cargo check -p arko-workflows --features python`).
-The crate is not yet packaged as a Python extension module: it builds only an `rlib` (no `cdylib`)
-and has no `pyproject.toml`, so `maturin develop` does not work as is. Packaging needs both.
+The optional `python` feature compiles PyO3 bindings
+(`cargo check -p arko-workflows --features python`). The crate is not yet packaged
+as a Python extension module: it builds only a Rust library (no `cdylib` crate
+type) and has no `pyproject.toml`, so tools such as `maturin develop` need both
+added first.
 
-## Quick Start (Rust)
+## Quick start (Rust)
 
 ```rust
 use arko_workflows::prelude::*;
@@ -38,7 +36,7 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), WorkflowError> {
-    // Every provider whose credentials are in the environment.
+    // Configures every provider whose credentials are in the environment.
     let client = Arc::new(LLMClient::from_env());
 
     let workflow = Workflow::builder()
@@ -58,12 +56,19 @@ async fn main() -> Result<(), WorkflowError> {
 }
 ```
 
-`LLMClient::from_env()` configures OpenAI (ChatGPT OAuth from `OPENAI_OAUTH_ACCESS_TOKEN` and
-`OPENAI_OAUTH_ACCOUNT_ID`, else `OPENAI_API_KEY`), Anthropic (`ANTHROPIC_API_KEY`), Google
-(`GOOGLE_API_KEY`, else `GEMINI_API_KEY`) and OpenRouter (`OPENROUTER_API_KEY`). Build the client
-yourself for anything else, such as credentials from a Codex `auth.json` (`arko_ai::CodexAuthFile`).
+`LLMClient::from_env()` reads these variables and ignores blank values:
 
-## Quick Start (Python)
+| Provider | Variables |
+| --- | --- |
+| OpenAI | ChatGPT OAuth from `OPENAI_OAUTH_ACCESS_TOKEN` and `OPENAI_OAUTH_ACCOUNT_ID` (optional `OPENAI_OAUTH_REFRESH_TOKEN`); otherwise `OPENAI_API_KEY` |
+| Anthropic | `ANTHROPIC_API_KEY` |
+| Google Gemini | `GOOGLE_API_KEY`, otherwise `GEMINI_API_KEY` |
+| OpenRouter | `OPENROUTER_API_KEY` |
+
+For other credential sources, such as a Codex `auth.json` (`arko_ai::CodexAuthFile`),
+build the client yourself.
+
+## Quick start (Python)
 
 ```python
 import asyncio
@@ -87,28 +92,25 @@ async def main():
 asyncio.run(main())
 ```
 
-The Python builder calls `LLMClient::from_env()` during `build`, so it uses the same environment variables.
+The Python builder calls `LLMClient::from_env()` during `build`, so it reads the
+same environment variables. The Python API covers a subset of the Rust API; see
+[Python bindings](INDEX.md#python-bindings).
 
-For a complete sequential orchestrator/coder/correctness-verifier/efficiency-verifier workflow, see
-the [DeepCoder example](examples/deepcoder/README.md).
+For a complete orchestrator, coder, and verifier workflow, see the
+[DeepCoder example](examples/deepcoder/README.md).
 
-The UI proposal generator and private client gallery have moved to the separate
-`arko-ui-studio` repository. That application consumes this library as a dependency.
+## Running agents
 
-## Core Concepts
+Your code drives progression. Run agents in sequence:
 
-### Workflow Progression Patterns
-
-Arko Workflows does not enforce a single execution model. Your code drives progression:
-
-**Code-Driven (Imperative)**
 ```rust
 let a = workflow.run_agent("architect", prompt).await?;
 let c = workflow.run_agent("coder", &a.summary).await?;
 let v = workflow.run_agent("verifier", &c.summary).await?;
 ```
 
-**Parallel Execution**
+In parallel, including several runs of one configured agent:
+
 ```rust
 let results = workflow.run_agents_parallel(vec![
     ("coder", "Implement auth module".into()),
@@ -116,14 +118,34 @@ let results = workflow.run_agents_parallel(vec![
 ]).await?;
 ```
 
-**Non-Blocking Spawn**
+In the background:
+
 ```rust
 let handle = workflow.spawn_agent("researcher", "Find relevant files").await?;
 // ... do other work ...
 let result = handle.wait().await?;
 ```
 
-**Custom Event Handling**
+Or from a loop that decides the next step:
+
+```rust
+loop {
+    let next = my_planning_function(&workflow.context())?;
+    match next {
+        Action::RunAgent { name, prompt } => {
+            workflow.run_agent(&name, &prompt).await?;
+        }
+        Action::Done => break,
+    }
+}
+```
+
+The managed paths (`run_agent`, `continue_agent`, `run_agents_parallel`, and
+`AgentHandle::wait`) approve tool calls automatically, record costs and results,
+and apply budgets, hooks, verification, and persistence. To handle events yourself,
+split a spawned handle into its channels. The caller then takes over event handling,
+approvals, usage accounting, and result recording:
+
 ```rust
 use arko_agents::{AgentEvent, UserCommand};
 
@@ -146,26 +168,12 @@ while let Some(event) = events.recv().await {
 let _task = join.await.expect("agent task panicked")?;
 ```
 
-**Agent-Driven (via custom tools)**
+To let an agent decide which other agents run, enable
+[workflow services](#workflow-services-and-voting).
 
-Register a workflow-aware spawn tool that lets one agent decide which other agents to run. The tool can hold shared workflow state and invoke [`Workflow::run_agent`](src/workflow/mod.rs) internally.
+## Shared memory
 
-**Loop-Driven / External Decision**
-```rust
-loop {
-    let next = my_planning_function(&workflow.context())?;
-    match next {
-        Action::RunAgent { name, prompt } => {
-            workflow.run_agent(&name, &prompt).await?;
-        }
-        Action::Done => break,
-    }
-}
-```
-
-### Memory System
-
-Tiered, access-controlled shared memory across agents:
+Memory tiers are named, access-controlled text stores shared by the agents:
 
 ```rust
 let workflow = Workflow::builder()
@@ -186,13 +194,16 @@ let workflow = Workflow::builder()
     .build()?;
 ```
 
-Agents interact with memory via injected tools: `read_memory`, `write_memory`, `list_memories`. Writes retain author, task, timestamp, and entry identity. Reads can request a bounded window, and tiers can enforce a byte limit.
+Agents use the injected `read_memory`, `write_memory`, and `list_memories` tools.
+Each write records its author, task, timestamp, and entry ID. Reads can request a
+trailing window, and a tier can enforce a byte limit. After the first full read,
+`read_memory` returns exact versioned changes; see
+[context management](../docs/context-efficiency.md#memory-reads).
 
-Memory reads return exact versioned changes after the first full read. See [context management](../docs/context-efficiency.md) for the response contract and delivery baselines.
+## Hooks
 
-### Hooks
-
-Register callbacks at lifecycle points for logging, monitoring, or control flow:
+Hooks are synchronous callbacks at lifecycle points, for logging, monitoring, or
+control flow:
 
 ```rust
 use arko_workflows::prelude::*;
@@ -219,21 +230,28 @@ let workflow = Workflow::builder()
     .build()?;
 ```
 
-Available hook points:
+Hook points:
+
 - `PreWorkflow`, `PostWorkflow`
 - `PreAgentSpawn`, `PostAgentCompletion`, `PostAgentFailure`, `PostAgentInterruption`
-- `PreToolExecution`, `PostToolExecution`
-- `PostToolResultInterception`, `OnUserInputRequired`
+- `PreToolExecution`, `PostToolExecution`, `PostToolResultInterception`
+- `OnUserInputRequired`
 - `OnBudgetWarning`, `OnBudgetExceeded`
 - `OnWorkflowFailed`, `OnWorkflowPause`, `OnWorkflowResume`
 - `OnAgentMessage`, `OnMesiConflict`
 
-Hook results are `Continue`, `Skip`, and `Abort(reason)`. Transform tool output with a
-`ToolResultInterceptor`, which runs before the result enters the agent conversation.
+A hook returns `Continue`, `Skip`, or `Abort(reason)`; `Skip` rejects the current
+tool call only at `PreToolExecution`. Hooks cannot change tool output: use a
+`ToolResultInterceptor`, which runs before the result enters the agent's
+conversation. See [hooks and human input](INDEX.md#hooks-and-human-input) for when
+each point fires and what its context contains.
 
-### Context Freshness
+## Context freshness
 
-Freshness tracking records versioned reads and writes for files, directory trees, memory tiers, and workflow-defined resources. A successful write proactively tells active stale readers that their context changed; a stale writer can also be blocked until it rereads:
+Freshness tracking records versioned reads and writes of files, directory trees,
+memory tiers, and workflow-defined resources. When a write succeeds, active agents
+that read the resource earlier receive a notice that it changed. A stale writer
+can also be blocked until it reads the resource again:
 
 ```rust
 let workflow = Workflow::builder()
@@ -244,11 +262,14 @@ let workflow = Workflow::builder()
     .build()?;
 ```
 
-Tool-to-resource mappings are configurable. The legacy MESI builder is retained as a compatibility adapter. Diff-bearing invalidations are not currently implemented.
+The mapping from tool names to resources is configurable. Notices state that a
+resource changed; they do not include the change. `enable_mesi` and `mesi`
+configure the older name-based file tracker, which is also mapped onto freshness
+tracking. See [context freshness](INDEX.md#context-freshness).
 
-### Budget Management
+## Budgets
 
-Track cost across all agents with optional limits and warnings:
+Track cost across all agents, with optional limits and a warning threshold:
 
 ```rust
 let workflow = Workflow::builder()
@@ -260,15 +281,24 @@ let result = workflow.result();
 println!("Total spent: ${:.6}", result.total_cost);
 ```
 
-Agent costs count what the account is billed (`UsageInfo::billed()`): calls on a subscription such as ChatGPT OAuth record zero against the budget while their per-token estimate stays in the ledger entry's `UsageInfo`. No per-agent exemption is needed.
+Budgets count what the account is billed (`UsageInfo::billed()`). Calls billed to a
+subscription, such as ChatGPT OAuth, add zero to the budget; their per-token
+estimate remains in the ledger entry's `UsageInfo`. `agent_budget` sets a
+cumulative limit for one agent, and `add_manual_cost` records charges from outside
+the model calls. See [budget and cost accounting](INDEX.md#budget-and-cost-accounting).
 
-> **Changed:** `BudgetManager::mark_oauth_exempt`, `is_oauth_exempt` and `oauth_exempt_snapshot` were removed, and `BudgetManager::from_ledger` no longer takes an exemption set (`from_ledger(limit, warning, ledger)`). The `oauth_exempt_agents` field of checkpoints written by older versions is ignored when they are loaded; ledger entries already in those checkpoints keep their recorded amounts.
+## Messaging
 
-### Inter-Agent Messaging
+Agents send messages with the injected `send_message` tool. A message stays queued
+until a run of the recipient that received it completes successfully. A recipient
+that is already running receives the message at its next turn boundary.
+Recipients are validated against the workflow's agent names, and messages carry
+stable IDs, sender task IDs, typed attachments, and timestamps, all of which
+survive checkpoints.
 
-Agents use the injected `send_message` tool. Messages are queued durably and acknowledged only after a successful recipient run. An active recipient receives the same message through a safe turn-boundary context injection.
-
-The optional `attachments_json` string is a JSON array of typed references. References are described to the receiving agent; they are not silently loaded or granted access:
+The optional `attachments_json` parameter is a JSON array of typed references.
+They are described to the recipient; files, memory, and transcripts are not loaded
+or shared automatically:
 
 ```json
 [
@@ -279,17 +309,22 @@ The optional `attachments_json` string is a JSON array of typed references. Refe
 ]
 ```
 
-Recipients are validated against the workflow roster. Messages carry stable IDs, sender task IDs, typed attachments, and timestamps, all of which survive checkpoints.
+## Human input
 
-### Human Input and Suspension
+Register a `UserInputHandler` to route an agent's `ask_user` questions to an
+application, chat service, or UI. Without a handler, the run is suspended:
+`run_agent` returns `WorkflowError::UserInputRequired { agent, task_id, questions }`
+and records an `AgentRunStatus::WaitingForInput` result in
+`workflow.result().agent_results`. With persistence configured, the suspended task
+is also saved. To resume, pass that result and the answer to
+`continue_agent(&waiting_result, answer)`.
 
-Register a `UserInputHandler` to route an agent's `ask_user` request to an application, chat service, or UI. If no handler is configured, the runtime issues internal `SuspendTask` and preserves `AwaitingUserResponse`: `run_agent` returns `WorkflowError::UserInputRequired { agent, task_id, questions }` and records an `AgentRunStatus::WaitingForInput` result in `workflow.result().agent_results` (with persistence configured, the task is also saved and auto-checkpointed). Resume by passing that result and the answer to `continue_agent(&waiting_result, answer)`.
+Suspension stops the live runtime without marking the task failed or cancelled.
 
-`SuspendTask` is intentionally different from cancellation: it stops the live runtime without turning the task into failed or cancelled state. It is a runtime control command, not an agent-facing tool.
+## Durable steps
 
-### Durable Steps
-
-Wrap non-workflow side effects in a durable step with a stable key, input hash, version, and operation ID:
+Wrap side effects outside the workflow in a durable step with a stable key, input
+hash, version, and operation ID:
 
 ```rust
 let receipt: Receipt = workflow
@@ -300,21 +335,54 @@ let receipt: Receipt = workflow
     .await?;
 ```
 
-The journal fsyncs `Started` before running the effect and `Completed` after serializing the output. If execution crashes between those records, replay yields `InDoubt` and does not blindly retry. A `ResolveInDoubt` implementation can query an idempotency key, provider receipt, database, or other domain evidence and return completed, definitely-not-completed, still-in-doubt, or permanently-failed. Operator resolutions are append-only and include actor/reason provenance.
+The journal syncs a `Started` record to disk before running the effect and a
+`Completed` record after serializing its output. A completed step replays its
+output without running again. If the process stops between the two records, the
+step is `InDoubt` on replay and is not retried blindly. A `ResolveInDoubt`
+implementation can check an idempotency key, provider receipt, database, or other
+evidence and report the step as completed, definitely not completed, still in
+doubt, or permanently failed. Operator resolutions are appended to the journal
+with the actor and reason.
 
-This is replay safety, not a universal exactly-once guarantee. An external system must expose idempotency or observation for automatic uncertainty resolution.
+Durable steps make replay safe; they are not an exactly-once guarantee. Automatic
+resolution needs an external system that supports idempotency or can be queried
+for the outcome. Durable steps require persistence. See
+[durable steps](INDEX.md#durable-steps).
 
-### Completion Verification and Distillation
+## Completion verification
 
-Completion verifiers gate the actual `complete_task` tool call. A correctness verifier can approve, request a bounded minor repair, or reject major. An efficiency verifier is advisory: even if it emits a major rejection, the workflow coerces that to a capped minor repair, so efficiency alone cannot hard-fail completion. Verifier configurations can opt into same-conversation rechecks and bounded tracked file/memory repair deltas, retaining a fresh first review while avoiding repeated whole-project inspection after localized repairs.
+Completion verifiers gate an agent's `complete_task` call. A correctness verifier
+approves, requests a minor repair, or rejects with a major finding, within
+configurable repair limits. An efficiency verifier is advisory: a major rejection
+from it counts as a minor repair request, so efficiency alone cannot fail a task.
+A verifier can continue its previous conversation on re-review and, with context
+freshness enabled, receive a bounded summary of the tracked file and memory changes
+since its last verdict, so a localized repair does not require a full
+re-inspection. See
+[completion verification](INDEX.md#completion-verification).
 
-Tool-result distillers are opt-in, agent/tool scoped, LLM-backed interceptors for large outputs. They can select tools/agents and configure size thresholds, models, and reasoning. Their calls are budget-accounted, recorded, and composed with application interceptors; `complete_task` is never distilled. A summary replaces the tool output only when the model finished it: a refusal or a summary cut off by its output limit keeps the raw output. See [context management](../docs/context-efficiency.md) for a Luna High configuration example.
+## Tool-result distillation
 
-### Code-Defined Services and Voting
+Distillers are opt-in interceptors that replace large tool outputs with a
+model-written summary. They are scoped to selected agents and tools and configure
+the size threshold, model, and reasoning. Their calls count against the budget and
+are recorded. A summary replaces the output only when the model finished it; a
+refusal or a summary cut off by its output limit keeps the raw output.
+`complete_task` results are never distilled. See
+[context management](../docs/context-efficiency.md#tool-result-distillation) for a
+configuration example.
 
-Workflows remain ordinary Rust/Python code rather than graphs. Opt-in workflow services allow selected agents to invoke configured workflow-agent targets through `run_workflow_agent`, with independent caller and target allowlists plus inherited budget, verification, and persistence. The voting primitive provides named ballots, eligibility, quorum, thresholds, weights, and explicit or deterministic tie handling without imposing a scheduler.
+## Workflow services and voting
 
-### Persistence
+Workflow services let selected agents run other configured agents through the
+`run_workflow_agent` tool, with separate caller and target allowlists and a limit
+on concurrent calls. Delegated runs share the workflow's memory, budget, hooks,
+verification, and persistence. Voting provides named ballots with eligibility,
+quorum, consensus thresholds, weights, and tie handling. See
+[workflow services](INDEX.md#workflow-services-and-custom-tools) and
+[structured voting](INDEX.md#structured-voting).
+
+## Persistence
 
 Checkpoint workflow state at agent boundaries:
 
@@ -331,11 +399,17 @@ let workflow = Workflow::builder()
 workflow.checkpoint().await?;
 ```
 
-Checkpoints serialize the workflow/run identity, metadata, complete memory state, pending messages, cost ledger, freshness versions, full agent tasks/results, verification records, and distillation records. Agent tasks and a JSONL event log are also stored separately. Writes use temporary files, sync, and rename; `.resume_from(path)` restores operational state rather than only displaying summaries.
+A checkpoint contains the workflow and run identity, metadata, memory, pending
+messages, the cost ledger, freshness versions, complete agent tasks and results,
+and verification and distillation records. Agent tasks and a JSONL event log are
+also stored separately. Files are written to a temporary file, synced, and renamed
+into place. `WorkflowBuilder::resume_from(path)` restores this state into a new
+workflow; see [persistence](INDEX.md#persistence-and-checkpoint-state) for what is
+restored and what must be configured again.
 
-### BYOT (Bring Your Own Tool)
+## Custom tools
 
-Register custom tools for all agents or specific agents:
+Register tools for every agent or for one agent:
 
 ```rust
 use arko_agents::tool::*;
@@ -373,39 +447,28 @@ let workflow = Workflow::builder()
     .build()?;
 ```
 
-For interactive shell work, register the `arko-agents` terminal tools with
-`WorkflowBuilder::agent_tool`. See [terminal integration](../docs/interactive-terminals.md)
-for input requests, background notifications, and host lifecycle handling.
+For interactive shell work, register the arko-agents terminal tools with
+`WorkflowBuilder::agent_tool`; see [interactive terminals](../docs/interactive-terminals.md).
 
 ## Architecture
 
 ```text
-┌─────────────────────────────────────────────────────┐
-│                    User Code                        │
-│  (Rust binary / Python script / Tauri app)         │
-├─────────────────────────────────────────────────────┤
-│                  arko_workflows                     │
-│  ┌──────────┐ ┌────────┐ ┌──────┐ ┌────────────┐   │
-│  │ Workflow │ │ Memory │ │Fresh.│ │   Hooks    │   │
-│  │ Builder  │ │ Store  │ │Track │ │  Registry  │   │
-│  │ & Engine │ │& Tools │ │  er  │ │            │   │
-│  └─────┬────┘ └────────┘ └──────┘ └────────────┘   │
-│        │        ┌────────┐ ┌──────┐ ┌──────────┐   │
-│        │        │Message │ │Budget│ │Persistence│  │
-│        │        │  Bus   │ │ Mgr  │ │ Manager   │  │
-│        │        └────────┘ └──────┘ └──────────┘   │
-├────────┼────────────────────────────────────────────┤
-│        │                  arko_agents               │
-│        ├──→ AgentRuntime.run_task()                 │
-│        │    ┌──────────┐  ┌──────────┐             │
-│        │    │AgentLoop │  │ToolReg.  │             │
-│        │    │(event    │  │(builtins │             │
-│        │    │ stream)  │  │+ custom) │             │
-│        │    └──────────┘  └──────────┘             │
-├─────────────────────────────────────────────────────┤
-│                    arko_ai                          │
-│   LLMClient (OpenAI/Anthropic/Google/OpenRouter)    │
-└─────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────┐
+│ Application code (Rust binary or Python script)       │
+├───────────────────────────────────────────────────────┤
+│ arko-workflows                                        │
+│   workflow builder and engine · memory store, tools   │
+│   freshness tracker · hooks · message bus · budgets   │
+│   verification · distillation · persistence           │
+├───────────────────────────────────────────────────────┤
+│ arko-agents                                           │
+│   AgentRuntime · agent loop (event stream)            │
+│   tool registry (built-in and custom tools)           │
+├───────────────────────────────────────────────────────┤
+│ arko-ai                                               │
+│   LLMClient: OpenAI, Anthropic, Google Gemini,        │
+│   OpenRouter                                          │
+└───────────────────────────────────────────────────────┘
 ```
 
 ## License
