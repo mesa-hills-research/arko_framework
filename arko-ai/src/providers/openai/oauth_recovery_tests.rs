@@ -643,6 +643,92 @@ async fn rate_limited_refreshes_retry_a_bounded_number_of_times() {
     assert!(started.elapsed() >= Duration::from_secs(60) * OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES);
 }
 
+fn permission_denied() -> Reply {
+    reply("/responses", 401, r#"{"error":{"code":"permission_denied"}}"#)
+}
+
+/// Like Codex's unauthorized recovery: any 401 first re-reads the store, and
+/// newer tokens there are used for one more try; only `token_expired`
+/// refreshes.
+#[tokio::test]
+async fn any_401_adopts_newer_stored_tokens_and_sends_again_once() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for second_reply_ok in [true, false] {
+            // No /token reply: a refresh request would fail the test.
+            let second = if second_reply_ok {
+                reply("/responses", 200, &completed_stream())
+            } else {
+                permission_denied()
+            };
+            let (url, server) = server(vec![permission_denied(), second]).await;
+            let store = Arc::new(ScriptedStore::default());
+            store
+                .reads
+                .lock()
+                .unwrap()
+                .push_back(Ok(Some(stored("access-from-codex", "refresh-from-codex"))));
+            let client = with_store(client(&url), &store);
+            let result = client
+                .generate_text(&Conversation::new(Model::openai_gpt_6_astra()), &GenerationConfig::default())
+                .await;
+            let calls = server.await.unwrap();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[0].1, calls[1].1, "the same request is sent again");
+            assert!(calls[1].0.to_lowercase().contains("authorization: bearer access-from-codex"));
+            if second_reply_ok {
+                result.unwrap();
+            } else {
+                // A second rejection is returned; nothing loops.
+                let error = result.unwrap_err();
+                assert!(matches!(error, Error::ProviderError { status: Some(401), .. }), "{error}");
+            }
+            assert_eq!(store.seen.lock().unwrap().len(), 1, "read once");
+            assert!(store.saved.lock().unwrap().is_empty(), "nothing was refreshed");
+            assert_eq!(
+                client.chatgpt_oauth_credentials().await.unwrap(),
+                stored("access-from-codex", "refresh-from-codex")
+            );
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_401_without_newer_stored_tokens_is_returned_without_a_refresh() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for read in [
+            Ok(None),
+            Err(Error::AuthenticationFailed("the store cannot be read".into())),
+            Ok(Some(ChatGptOAuthCredentials {
+                account_id: "another-account".into(),
+                ..stored("a", "r")
+            })),
+        ] {
+            let (url, server) = server(vec![permission_denied()]).await;
+            let store = Arc::new(ScriptedStore::default());
+            store.reads.lock().unwrap().push_back(read);
+            let client = with_store(client(&url), &store);
+            let before = client.chatgpt_oauth_credentials().await.unwrap();
+            let error = client
+                .generate_text(&Conversation::new(Model::openai_gpt_6_astra()), &GenerationConfig::default())
+                .await
+                .unwrap_err();
+            // The 401 itself, not the store's error.
+            assert!(
+                matches!(&error, Error::ProviderError { status: Some(401), code: Some(code), .. } if code == "permission_denied"),
+                "{error}"
+            );
+            assert_eq!(server.await.unwrap().len(), 1, "no refresh request, no resend");
+            assert_eq!(store.seen.lock().unwrap().len(), 1);
+            assert!(store.saved.lock().unwrap().is_empty());
+            assert_eq!(client.chatgpt_oauth_credentials().await.unwrap(), before);
+        }
+    })
+    .await
+    .unwrap();
+}
+
 /// An `auth.json` in a temporary directory holding `client()`'s refresh
 /// token and account.
 fn auth_file(access_token: &str) -> (tempfile::TempDir, std::path::PathBuf) {

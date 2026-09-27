@@ -376,6 +376,9 @@ enum RefreshTarget {
     Since(u64),
     /// The credentials a request was rejected with (HTTP 401 `token_expired`).
     Rejected(ChatGptOAuthCredentials),
+    /// The credentials a request was rejected with by any other HTTP 401:
+    /// replaced only by newer ones from the store, never refreshed.
+    Reload(ChatGptOAuthCredentials),
     /// Whatever the client holds, if its access token expires within this
     /// margin (after the store has been read).
     Expiring(Duration),
@@ -478,7 +481,9 @@ impl OpenAIClient {
     /// [`CodexAuthFile::openai_client`](crate::codex_auth::CodexAuthFile::openai_client)):
     /// every refresh first re-reads the store and adopts tokens another
     /// program already refreshed, and rotated tokens are stored as soon as a
-    /// refresh succeeds. See [`ChatGptOAuthStore`]. Clones share the store.
+    /// refresh succeeds. A request rejected with any other HTTP 401 re-reads
+    /// the store too and is sent once more if it holds newer tokens. See
+    /// [`ChatGptOAuthStore`]. Clones share the store.
     pub fn with_credential_store(mut self, store: Option<Arc<dyn ChatGptOAuthStore>>) -> Self {
         self.credential_store = store;
         self
@@ -628,6 +633,26 @@ impl OpenAIClient {
             .ok_or_else(|| Error::InvalidRequest("Cannot refresh OAuth token: client is using API key auth".into()))
     }
 
+    /// After an HTTP 401 other than `token_expired`, as Codex's unauthorized
+    /// recovery does: reads the credential store and adopts newer
+    /// credentials of the same account from it, without refreshing. Returns
+    /// whether the credentials the request was rejected with have been
+    /// replaced (from the store, or by another caller meanwhile), so the
+    /// request can be sent again. A failure (a store that can't be read, or
+    /// holds another account) is logged: the 401 stands.
+    async fn reload_rejected_auth(&self, rejected: &OpenAIAuth) -> bool {
+        let OpenAIAuth::ChatGptOAuth(rejected) = rejected else {
+            return false;
+        };
+        match self.refresh(RefreshTarget::Reload(rejected.clone()), false).await {
+            Ok(replaced) => replaced.is_some(),
+            Err(error) => {
+                log::warn!("arko_ai: ChatGPT OAuth credentials were not reloaded after an HTTP 401: {error}");
+                false
+            }
+        }
+    }
+
     /// Refresh attempts for `target`. When `retry_rate_limits` is on, an
     /// HTTP 429 is waited out (up to [`OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES`]
     /// times) with no lock held, so the wait can be cancelled and other
@@ -711,7 +736,7 @@ impl OpenAIClient {
                     return Ok(Some(Self::result_for(&current)));
                 }
             }
-            RefreshTarget::Rejected(rejected) => {
+            RefreshTarget::Rejected(rejected) | RefreshTarget::Reload(rejected) => {
                 if current.account_id != rejected.account_id {
                     return Err(Error::AuthenticationFailed(
                         "OAuth account changed during the request; start a new request.".into(),
@@ -742,6 +767,9 @@ impl OpenAIClient {
                 return Ok(Some(adopted));
             }
             current = newer;
+        }
+        if matches!(target, RefreshTarget::Reload(_)) {
+            return Ok(None);
         }
         let refresh_token = current.refresh_token.as_deref().ok_or_else(|| {
             Error::AuthenticationFailed(
@@ -884,11 +912,24 @@ impl OpenAIClient {
             let expired = matches!(&error, Error::ProviderError {
                 status: Some(401), code: Some(code), ..
             } if code == "token_expired");
-            if attempt == 0 && expired && auth.is_chatgpt_oauth() {
+            let recoverable =
+                attempt == 0 && status == reqwest::StatusCode::UNAUTHORIZED && auth.is_chatgpt_oauth();
+            let recovered = if recoverable && expired {
                 // A server can reject a token before its embedded expiry.
                 // Refresh once; transient failures return to the agent's bounded
                 // recovery policy. No stream or tool calls have been delivered.
                 self.refresh_oauth_token_for_auth(&auth, false).await?;
+                true
+            } else if recoverable && self.credential_store.is_some() {
+                // Any other 401: another program may have refreshed or signed
+                // in again (Codex's unauthorized recovery re-reads auth.json
+                // first). Newer stored tokens get one more try; nothing is
+                // refreshed.
+                self.reload_rejected_auth(&auth).await
+            } else {
+                false
+            };
+            if recovered {
                 let updated = self.snapshot_auth().await;
                 if !matches!((&auth, &updated), (OpenAIAuth::ChatGptOAuth(old), OpenAIAuth::ChatGptOAuth(new)) if old.account_id == new.account_id)
                 {

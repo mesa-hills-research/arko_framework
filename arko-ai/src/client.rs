@@ -166,7 +166,9 @@ impl LLMClient {
     /// automatically before each LLM call.
     /// If the server rejects an OAuth request with HTTP 401 `token_expired`
     /// before that expiry, the provider refreshes once and resends the request.
-    /// Other authentication failures and a second rejection return to the caller.
+    /// Other authentication failures and a second rejection return to the
+    /// caller (with a credential store, such as a Codex `auth.json`, any 401
+    /// first re-reads the store, and newer tokens there get one resend).
     pub fn with_openai_chatgpt_oauth(
         self,
         access_token: &str,

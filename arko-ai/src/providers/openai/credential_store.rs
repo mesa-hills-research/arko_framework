@@ -20,6 +20,10 @@ use std::sync::Arc;
 /// 3. When the refresh request fails, the store is read again: if another
 ///    program rotated the tokens in the meantime, they are adopted.
 ///
+/// After any other HTTP 401 (not `token_expired`), the store is read as in
+/// step 1 without refreshing, as Codex's unauthorized recovery re-reads
+/// `auth.json`: newer tokens are adopted and the request is sent once more.
+///
 /// The client holds its credential lock, and the store's
 /// [`refresh_lock`](Self::refresh_lock) when it has one, across these calls,
 /// so neither clones of one client nor clients sharing the lock refresh
