@@ -304,7 +304,6 @@ impl AgentRegistry {
             | AgentEvent::UserQuestionsAsked { .. } => Some(Some(WaitReason::AwaitingInput)),
             // Reports about the wait itself, or about usage, don't end it.
             AgentEvent::ErrorEncountered { .. }
-            | AgentEvent::TaskLog(_)
             | AgentEvent::PlanUsageReported(_)
             | AgentEvent::PlanUsageThresholdReached { .. }
             | AgentEvent::CacheEfficiencyReported { .. }

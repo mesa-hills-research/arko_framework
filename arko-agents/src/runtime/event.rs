@@ -121,10 +121,10 @@ pub enum AgentEvent {
         #[serde(default)]
         rate_limit: bool,
     },
-    /// The LLM attempted to use a tool that is not available.
+    /// The model called a tool the task is not offered (see
+    /// [`AgentToolConfig::available_tool_names`](crate::agent_config::AgentToolConfig::available_tool_names));
+    /// the call was not run.
     UnavailableToolAttempted { tool_name: String },
-    /// A general log message from the agent.
-    TaskLog(String),
     /// The task stream has ended.
     TaskStreamEnd,
     /// LLM usage information for a turn (cost and raw token counts).

@@ -2,7 +2,6 @@ use crate::agent_config::{
     AgentConfig, BuiltInEnvironmentDetail, DynamicContentProvider, EnvironmentDetailPlacement,
     ReminderInjectionFrequency, ToolCallingMode,
 };
-use crate::builtins::complete_task::COMPLETE_TASK_SUMMARY_PARAM_NAME;
 use crate::error::ArkoAgentsError;
 use crate::skill::SkillPromptContext;
 use crate::task::Task;
@@ -246,6 +245,7 @@ impl<'a> PromptBuilder<'a> {
 
     /// Formats a tool definition for output-based tool calling prompts.
     fn format_tool_definition_output_based(&self, tool_def: &ToolDefinition) -> String {
+        let tool_def = &self.agent_config.offered_tool_definition(tool_def.clone());
         let mut s = String::new();
         s.push_str(&format!("Tool: <{}>\n", tool_def.name));
         s.push_str(&format!("Description: {}\n", tool_def.description));
@@ -263,18 +263,9 @@ impl<'a> PromptBuilder<'a> {
         if !tool_def.parameters.is_empty() {
             s.push_str("Parameters:\n");
             for param in &tool_def.parameters {
-                let mut param_desc_content = param.description.clone();
-                if tool_def.name == crate::tool::builtins::COMPLETE_TASK_TOOL_NAME
-                    && param.name == COMPLETE_TASK_SUMMARY_PARAM_NAME
-                    && let Some(override_desc) =
-                        &self.agent_config.complete_task_summary_prompt_override
-                {
-                    param_desc_content = override_desc.clone();
-                }
-
                 s.push_str(&format!(
                     "  - <{}>: {} (Type: {:?}, Required: {}",
-                    param.name, param_desc_content, param.param_type, param.required
+                    param.name, param.description, param.param_type, param.required
                 ));
                 if let Some(default_val) = &param.default_value {
                     s.push_str(&format!(", Default: {}", default_val));

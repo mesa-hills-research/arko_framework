@@ -53,8 +53,8 @@ impl AgentRuntime {
     ///
     /// An optional `InterceptorConfig` enables tool result interception,
     /// allowing results to be transformed (e.g., distilled) before they
-    /// enter the agent's conversation. `complete_task` results are never
-    /// intercepted.
+    /// enter the agent's conversation. `complete_task` and `ask_user`
+    /// results are never intercepted.
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn run_task(
         &self,

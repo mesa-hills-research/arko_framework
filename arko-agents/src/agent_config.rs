@@ -663,6 +663,8 @@ pub struct AgentConfig {
     pub tool_config: AgentToolConfig,
     #[serde(default)]
     pub environment_details_config: EnvironmentDetailsConfig,
+    /// Replaces the description of `complete_task`'s `summary` parameter,
+    /// in both tool calling modes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub complete_task_summary_prompt_override: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -775,6 +777,27 @@ impl AgentConfig {
         self.tool_config.allow_batched_tool_calls
     }
 
+    /// A tool's definition as the agent is shown it, in either tool calling
+    /// mode: with [`complete_task_summary_prompt_override`](Self::complete_task_summary_prompt_override)
+    /// as `complete_task`'s `summary` description.
+    pub(crate) fn offered_tool_definition(
+        &self,
+        mut definition: crate::tool::ToolDefinition,
+    ) -> crate::tool::ToolDefinition {
+        if definition.name == crate::tool::builtins::COMPLETE_TASK_TOOL_NAME
+            && let Some(summary) = &self.complete_task_summary_prompt_override
+        {
+            for parameter in &mut definition.parameters {
+                if parameter.name
+                    == crate::tool::builtins::complete_task::COMPLETE_TASK_SUMMARY_PARAM_NAME
+                {
+                    parameter.description = summary.clone();
+                }
+            }
+        }
+        definition
+    }
+
     /// Gets the tool parsing configuration, using the override if present.
     pub fn get_tool_parsing_config(&self) -> ToolParsingConfig {
         self.parsing_config_override.clone().unwrap_or_default()
@@ -867,7 +890,8 @@ impl AgentConfigBuilder {
         self
     }
 
-    /// Sets the override for the complete_task summary prompt.
+    /// Sets the description of `complete_task`'s `summary` parameter; see
+    /// [`AgentConfig::complete_task_summary_prompt_override`].
     pub fn complete_task_summary_prompt_override(mut self, prompt: String) -> Self {
         self.complete_task_summary_prompt_override = Some(prompt);
         self

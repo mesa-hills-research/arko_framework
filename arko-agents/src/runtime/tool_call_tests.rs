@@ -764,3 +764,43 @@ async fn output_based_end_user_tools_receive_boolean_parameters() {
     assert_eq!(shout, [Value::Bool(true), Value::Bool(false)]);
     std::fs::remove_dir_all(workspace).unwrap();
 }
+
+// complete_task's summary description in both tool calling modes.
+
+#[test]
+fn the_summary_override_applies_in_both_tool_calling_modes() {
+    let workspace = workspace();
+    for mode in [ToolCallingMode::Native, ToolCallingMode::OutputBased] {
+        let mut config = config(mode.clone(), &[]);
+        config.complete_task_summary_prompt_override = Some("List every file changed.".into());
+        let (agent, _events, _commands) = agent(config, ToolRegistry::new(), &workspace);
+        let described = if mode == ToolCallingMode::Native {
+            let tools = agent
+                .build_native_tool_config(&agent.task.conversation.model)
+                .tools;
+            tools[0].parameters["properties"]["summary"]["description"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        } else {
+            let complete_task = agent
+                .tool_registry
+                .get("complete_task")
+                .unwrap()
+                .definition();
+            PromptBuilder::new(
+                &agent.task.agent_config,
+                vec![&complete_task],
+                &agent.parsing_config,
+                None,
+            )
+            .build_system_prompt(&agent.task)
+            .unwrap()
+        };
+        assert!(
+            described.contains("List every file changed."),
+            "{mode:?}: {described}"
+        );
+    }
+    std::fs::remove_dir_all(workspace).unwrap();
+}

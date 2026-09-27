@@ -14,7 +14,8 @@ pub enum InvalidSkillPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillSource {
     /// Path to the directory containing skills.
-    /// For workspace sources: relative to task CWD (e.g., ".skills").
+    /// For workspace sources: relative to the `workspace_root` given to
+    /// [`SkillManager::load`](super::SkillManager::load) (e.g., ".skills").
     /// For global sources: absolute path (e.g., "/home/user/.skills/global").
     pub path: String,
 
@@ -33,7 +34,8 @@ pub struct SkillSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillsConfig {
     /// Optional workspace-relative skills directory (e.g., ".skills", ".claude/skills").
-    /// Path is resolved relative to the task's current working directory.
+    /// Path is resolved relative to the `workspace_root` given to
+    /// [`SkillManager::load`](super::SkillManager::load).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_source: Option<SkillSource>,
 

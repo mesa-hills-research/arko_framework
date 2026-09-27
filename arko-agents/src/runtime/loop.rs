@@ -506,22 +506,26 @@ impl AgentLoop {
     }
 
     fn build_native_tool_config(&self, model: &ai::Model) -> ai::ToolConfig {
+        let agent_config = &self.task.agent_config;
+        let offered = |tool: Arc<dyn crate::tool::Tool>| {
+            agent_config
+                .offered_tool_definition(tool.definition())
+                .to_arko_ai_tool_definition()
+        };
         let mut ai_tools = Vec::new();
-        for name in &self.task.agent_config.tool_config.available_tool_names {
+        for name in &agent_config.tool_config.available_tool_names {
             if let Some(tool) = self.tool_registry.get(name) {
-                ai_tools.push(tool.definition().to_arko_ai_tool_definition());
+                ai_tools.push(offered(tool));
             }
         }
-        if !self
-            .task
-            .agent_config
+        if !agent_config
             .tool_config
             .available_tool_names
             .iter()
             .any(|n| n == COMPLETE_TASK_TOOL_NAME)
             && let Some(ct) = self.tool_registry.get(COMPLETE_TASK_TOOL_NAME)
         {
-            ai_tools.push(ct.definition().to_arko_ai_tool_definition());
+            ai_tools.push(offered(ct));
         }
 
         let mut config = ai::ToolConfig::new(ai_tools);
