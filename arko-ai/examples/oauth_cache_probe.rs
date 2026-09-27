@@ -496,10 +496,11 @@ fn classify(error: &Error) -> Failure {
 }
 
 /// The server's delay (or a default) plus up to three seconds of jitter,
-/// capped at two minutes.
+/// capped at two minutes. The hint is the server's number: the sum
+/// saturates rather than overflow.
 fn rate_limit_delay(hint: Option<Duration>, sample: u64) -> Duration {
     let jitter = Duration::from_millis(250 + sample % 2_750);
-    (hint.unwrap_or(DEFAULT_RATE_LIMIT_WAIT) + jitter).min(MAX_RATE_LIMIT_WAIT)
+    hint.unwrap_or(DEFAULT_RATE_LIMIT_WAIT).saturating_add(jitter).min(MAX_RATE_LIMIT_WAIT)
 }
 
 // ---------------------------------------------------------------------------
@@ -1187,6 +1188,14 @@ mod tests {
         assert!(arm.session_id_header && arm.replay_output_items && !arm.thread_id_header);
         assert_eq!(parse(&["--replay-output-items"]), current);
         assert_eq!(parse(&["--reasoning-context", "current_turn"]).reasoning_context.as_deref(), Some("current_turn"));
+    }
+
+    #[test]
+    fn huge_rate_limit_hints_are_capped_without_overflow() {
+        for sample in [0, 2_749, u64::MAX] {
+            assert_eq!(rate_limit_delay(Some(Duration::from_secs(u64::MAX)), sample), MAX_RATE_LIMIT_WAIT);
+            assert_eq!(rate_limit_delay(Some(Duration::MAX), sample), MAX_RATE_LIMIT_WAIT);
+        }
     }
 
     #[test]
