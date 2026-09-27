@@ -1,3 +1,29 @@
 [workspace]
 resolver = "2"
 members = ["arko-ai", "arko-agents", "arko-workflows", "arko-index"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+
+# Dependencies used by more than one member. Members opt in with
+# `name.workspace = true` and may add features; features are additive.
+[workspace.dependencies]
+arko-ai = { path = "arko-ai" }
+arko-agents = { path = "arko-agents" }
+async-trait = "0.1.79"
+chrono = { version = "0.4.38", features = ["serde"] }
+futures = "0.3.30"
+ignore = "0.4.22"
+log = "0.4.21"
+serde = { version = "1.0.197", features = ["derive"] }
+serde_json = "1.0.115"
+sha2 = "0.10"
+thiserror = "1.0.58"
+tokio = { version = "1.37.0", features = ["full"] }
+uuid = { version = "1.8.0", features = ["v4"] }
+# Dev-only, shared by examples and tests.
+clap = { version = "4.5", features = ["derive"] }
+dotenv = "0.15"
+env_logger = "0.10"

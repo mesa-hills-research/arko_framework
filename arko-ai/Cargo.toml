@@ -1,21 +1,22 @@
 [package]
 name = "arko-ai"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+rust-version.workspace = true
 description = "All-in-one Rust crate for interfacing with LLMs from various providers"
-license = "MIT OR Apache-2.0"
+license.workspace = true
 
 [dependencies]
 reqwest = { version = "0.11", features = ["json", "multipart", "stream"] }
-tokio = { version = "1.37.0", features = ["full"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-thiserror = "1.0"
-async-trait = "0.1"
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
 base64 = "0.21"
 url = "2.4"
-log = "0.4"
-futures = "0.3"
+log.workspace = true
+futures.workspace = true
 tokio-stream = { version = "0.1", features = ["full"] }
 bytes = "1.5"
 async-stream = "0.3"
@@ -24,13 +25,13 @@ eventsource-stream = "0.2.3"
 # which conflicts with Rust's dynamic CRT on MSVC (LNK4098).
 tokenizers = { version = "0.23.2", default-features = false, features = ["http", "onig", "progressbar"] }
 httpdate = "1.0"
-uuid = { version = "1.8.0", features = ["v4"] }
+uuid.workspace = true
 
 [dev-dependencies]
-tokio = { version = "1", features = ["test-util"] }
-clap = { version = "4.5", features = ["derive"] }
-dotenv = "0.15"
-env_logger = "0.10"
+tokio = { workspace = true, features = ["test-util"] }
+clap.workspace = true
+dotenv.workspace = true
+env_logger.workspace = true
 
 [[example]]
 name = "llm_client_cli"
