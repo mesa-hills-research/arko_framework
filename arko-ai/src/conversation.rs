@@ -6,6 +6,7 @@ use crate::{
     tool::ToolResult,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 fn new_prompt_cache_key() -> String {
@@ -43,9 +44,17 @@ pub struct Conversation {
     /// [`add_user_message_with_contents`](Self::add_user_message_with_contents)
     /// clears the token; [`add_tool_results`](Self::add_tool_results) and
     /// [`add_tool_results_with_text`](Self::add_tool_results_with_text) keep
-    /// it. [`OpenAITurnState::turn_start`] also ties the token to its turn,
-    /// so a message pushed onto `messages` directly can't carry it into the
-    /// next turn. Serialized so a task resumed mid-turn keeps its routing.
+    /// it.
+    ///
+    /// When `messages` is edited directly, the token is echoed only while
+    /// the turn's starting message is still the last user message without
+    /// tool results, at the same index and with the same serialized form
+    /// ([`OpenAITurnState::turn_start`] and
+    /// [`OpenAITurnState::turn_start_fingerprint`]). Pushing a new user
+    /// message, or rewinding and pushing a different one at the same index,
+    /// drops it; rewinding to the unchanged starting message (a retry of the
+    /// turn) keeps it. Serialized so a task resumed mid-turn keeps its
+    /// routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai_turn_state: Option<OpenAITurnState>,
 }
@@ -60,6 +69,12 @@ pub struct OpenAITurnState {
     /// the turn (the last user message without tool results when the token
     /// arrived); `None` when there was none.
     pub turn_start: Option<usize>,
+    /// Hex SHA-256 of that message's JSON serialization, so a different
+    /// message at the same index is a different turn. `None` when there was
+    /// no such message; a state saved with an index but no fingerprint is
+    /// never echoed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_start_fingerprint: Option<String>,
 }
 
 impl Conversation {
@@ -74,21 +89,27 @@ impl Conversation {
         }
     }
 
-    /// Index of the message that started the current turn: the last user
-    /// message without tool results.
-    fn turn_start(&self) -> Option<usize> {
-        self.messages
+    /// Index and fingerprint of the message that started the current turn:
+    /// the last user message without tool results.
+    fn turn_start(&self) -> (Option<usize>, Option<String>) {
+        let index = self
+            .messages
             .iter()
-            .rposition(|message| message.role == Role::User && !has_tool_results(&message.content))
+            .rposition(|message| message.role == Role::User && !has_tool_results(&message.content));
+        let fingerprint = index.map(|index| {
+            let serialized = serde_json::to_vec(&self.messages[index]).unwrap_or_default();
+            Sha256::digest(&serialized).iter().map(|byte| format!("{byte:02x}")).collect()
+        });
+        (index, fingerprint)
     }
 
     /// The turn-state token the next request of the current turn should
     /// echo, if the backend issued one in this turn.
     pub fn current_openai_turn_state(&self) -> Option<&str> {
-        self.openai_turn_state
-            .as_ref()
-            .filter(|state| state.turn_start == self.turn_start())
-            .map(|state| state.token.as_str())
+        let state = self.openai_turn_state.as_ref()?;
+        let (index, fingerprint) = self.turn_start();
+        (state.turn_start == index && state.turn_start_fingerprint == fingerprint)
+            .then_some(state.token.as_str())
     }
 
     /// Records a turn-state token from a response. The first token of a
@@ -96,9 +117,11 @@ impl Conversation {
     /// previous turn's.
     pub fn record_openai_turn_state(&mut self, token: &str) {
         if self.current_openai_turn_state().is_none() {
+            let (turn_start, turn_start_fingerprint) = self.turn_start();
             self.openai_turn_state = Some(OpenAITurnState {
                 token: token.to_string(),
-                turn_start: self.turn_start(),
+                turn_start,
+                turn_start_fingerprint,
             });
         }
     }
@@ -333,6 +356,39 @@ mod tests {
         assert_eq!(conversation.current_openai_turn_state(), Some("t4"));
         conversation.add_user_message_with_contents(vec![Content::Text("new turn".into())]);
         assert_eq!(conversation.current_openai_turn_state(), None);
+    }
+
+    #[test]
+    fn a_different_turn_start_at_the_same_index_drops_the_token() {
+        let mut conversation = Conversation::new(Model::openai_gpt_6_astra());
+        conversation.add_user_message("start");
+        conversation.add_assistant_message("done");
+        conversation.add_user_message("first task");
+        let turn_start = conversation.messages.len() - 1;
+        conversation.add_assistant_message_from_response(response(Some("t1")));
+        conversation.add_tool_results(vec![result()]);
+        assert_eq!(conversation.current_openai_turn_state(), Some("t1"));
+
+        // The application rewinds and pushes a different user message
+        // directly, at the same index: a new turn.
+        conversation.messages.truncate(turn_start);
+        conversation.messages.push(Message::new_user("second task"));
+        assert_eq!(conversation.current_openai_turn_state(), None);
+        conversation.add_assistant_message_from_response(response(Some("t2")));
+        assert_eq!(conversation.current_openai_turn_state(), Some("t2"));
+
+        // Rewinding to the same message is a retry of the same turn.
+        conversation.messages.truncate(turn_start + 1);
+        assert_eq!(conversation.current_openai_turn_state(), Some("t2"));
+        // So is restoring it unchanged; the fingerprint survives serialization.
+        let restored: Conversation =
+            serde_json::from_str(&serde_json::to_string(&conversation).unwrap()).unwrap();
+        assert_eq!(restored.current_openai_turn_state(), Some("t2"));
+        // A state without a fingerprint is never echoed.
+        let mut saved = serde_json::to_value(&conversation).unwrap();
+        saved["openai_turn_state"].as_object_mut().unwrap().remove("turn_start_fingerprint");
+        let restored: Conversation = serde_json::from_value(saved).unwrap();
+        assert_eq!(restored.current_openai_turn_state(), None);
     }
 
     #[test]
