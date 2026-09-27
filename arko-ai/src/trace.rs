@@ -11,6 +11,13 @@
 //! <dir>/<conversation prompt_cache_key, sanitized>/NNNN-response.json
 //! ```
 //!
+//! A key made only of lowercase ASCII letters, digits, `.`, `-` and `_` is
+//! its own directory name. Other keys are lowercased with other characters
+//! replaced by `_`, plus `-` and 16 hex digits of the key's SHA-256
+//! (`arko:conversation:x` → `arko_conversation_x-ed168f36ad25bfa2`), so
+//! different keys never share a directory, even on case-insensitive
+//! filesystems.
+//!
 //! The previous request is the last one that didn't fail: a failed or
 //! abandoned call is traced, but the call after it (typically its retry) is
 //! compared with the call before it. A response that doesn't parse counts as
@@ -425,15 +432,16 @@ impl TraceCall {
         });
         self.write_file("response", &document);
 
+        // Usage numbers come from the server: saturate rather than overflow.
         let previous_found = match (self.previous_input_tokens, cached_tokens) {
-            (Some(previous), Some(cached)) => Some(cached + 1024 >= previous),
+            (Some(previous), Some(cached)) => Some(cached.saturating_add(1024) >= previous),
             (Some(_), None) if error.is_none() => Some(false),
             _ => None,
         };
-        let shortfall = match (self.previous_input_tokens, cached_tokens) {
-            (Some(previous), cached) => Some(previous as i64 - cached.unwrap_or(0) as i64),
-            _ => None,
-        };
+        let shortfall = self.previous_input_tokens.map(|previous| {
+            let difference = i128::from(previous) - i128::from(cached_tokens.unwrap_or(0));
+            difference.clamp(i64::MIN.into(), i64::MAX.into()) as i64
+        });
         let mut summary_headers = Map::new();
         for name in SUMMARY_HEADERS {
             if let Some(value) = self.response_headers.get(*name) {
@@ -614,17 +622,25 @@ fn response_id_prefix(id: &str) -> Option<String> {
 }
 
 /// A directory name for a conversation key that stays inside the trace
-/// directory on every platform. Characters other than ASCII letters, digits,
-/// `.`, `-` and `_` become `_`, so the name holds no path separators or
-/// drive prefixes. A name that would still be unsafe (empty, `.`/`..` or
-/// any other leading or trailing dot, a Windows device name such as `CON`,
-/// or too long) becomes `_<readable part>-<hash of the key>` instead, which
-/// also keeps such keys apart.
+/// directory on every platform and differs between keys. Characters other
+/// than ASCII letters, digits,
+/// `.`, `-` and `_` become `_` and ASCII letters are lowercased, so the name
+/// holds no path separators or drive prefixes. A key this leaves unchanged
+/// is its own name; any other key gets `-<hash of the key>` appended, so
+/// keys that differ only in replaced characters or in case (`team/a`,
+/// `team:a`, `Team_a`) keep apart, also on case-insensitive filesystems. A
+/// name that would still be unsafe (empty, `.`/`..` or any other leading or
+/// trailing dot, a Windows device name such as `CON`, or too long) becomes
+/// `_<readable part>-<hash of the key>` instead.
 fn sanitize(key: &str) -> String {
     const MAX_LEN: usize = 100;
     let mapped: String = key
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' })
+        .map(|c| match c {
+            'A'..='Z' => c.to_ascii_lowercase(),
+            'a'..='z' | '0'..='9' | '.' | '-' | '_' => c,
+            _ => '_',
+        })
         .collect();
     let stem = mapped.split('.').next().unwrap_or_default();
     let safe = !mapped.is_empty()
@@ -632,11 +648,15 @@ fn sanitize(key: &str) -> String {
         && !mapped.ends_with('.')
         && mapped.len() <= MAX_LEN
         && !is_windows_device_name(stem);
-    if safe {
+    if safe && mapped == key {
         return mapped;
     }
+    let hash = &hex_sha256(key.as_bytes())[..16];
+    if safe {
+        return format!("{mapped}-{hash}");
+    }
     let readable: String = mapped.trim_matches('.').chars().take(64).collect();
-    format!("_{readable}-{}", &hex_sha256(key.as_bytes())[..16])
+    format!("_{readable}-{hash}")
 }
 
 /// Names Windows reserves for devices in every directory, with or without
@@ -736,11 +756,51 @@ mod tests {
             assert_eq!(joined.components().count(), 2, "{key:?} -> {name:?}");
         }
         // Ordinary keys keep their readable names; unusable ones stay distinct.
-        assert_eq!(sanitize("arko:conversation:x"), "arko_conversation_x");
+        assert_eq!(sanitize("arko:conversation:x"), "arko_conversation_x-ed168f36ad25bfa2");
         assert_ne!(sanitize("."), sanitize(".."));
         assert_ne!(sanitize(""), sanitize("."));
         assert!(sanitize(&"k".repeat(1000)).len() < 128);
         assert_ne!(sanitize(&"k".repeat(1000)), sanitize(&"k".repeat(1001)));
+    }
+
+    #[test]
+    fn keys_that_map_to_the_same_name_get_distinct_stable_dirs() {
+        // A key that is already a lowercase safe name is its own dir.
+        for key in ["team_a", "conv-1.2", "0123abcd"] {
+            assert_eq!(sanitize(key), key);
+        }
+        // Any mapped key gets a stable hash of itself appended.
+        assert_eq!(sanitize("team/a"), "team_a-65f838a2fbff37d8");
+        assert_eq!(sanitize("team:a"), "team_a-5752fddeb3d6826d");
+        assert_eq!(sanitize("Team_a"), "team_a-ce273f5f4372bcfa");
+        assert_eq!(sanitize("TEAM_A"), "team_a-a44a58ae06e1266c");
+        // Distinct even compared case-insensitively.
+        let keys = ["team_a", "team/a", "team:a", "team\\a", "Team_a", "TEAM_A", "team a", "tëam_a", "CON", "con", ".", ".."];
+        let names: std::collections::HashSet<String> =
+            keys.iter().map(|key| sanitize(key).to_ascii_lowercase()).collect();
+        assert_eq!(names.len(), keys.len(), "{names:?}");
+    }
+
+    #[test]
+    fn absurd_usage_numbers_saturate_instead_of_overflowing() {
+        let dir = std::env::temp_dir().join(format!("arko-trace-unit-{}", uuid::Uuid::new_v4()));
+        let trace = RequestTrace::new(&dir);
+        let item = json!({"role": "user", "content": "a"});
+        let usage = |input: u64, cached: u64| json!({"status": "completed",
+            "usage": {"input_tokens": input, "input_tokens_details": {"cached_tokens": cached}, "output_tokens": 1}});
+        trace.begin("k", "m", &body(std::slice::from_ref(&item), "s"), false)
+            .finish(&usage(i64::MAX as u64, 0));
+        trace.begin("k", "m", &body(std::slice::from_ref(&item), "s"), false)
+            .finish(&usage(u64::MAX, u64::MAX));
+        trace.begin("k", "m", &body(std::slice::from_ref(&item), "s"), false)
+            .finish(&usage(0, 0));
+        let lines: Vec<Value> = fs::read_to_string(dir.join("calls.jsonl")).unwrap()
+            .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(lines[1]["previous_found"], true);
+        assert_eq!(lines[1]["shortfall_tokens"], i64::MIN, "i64::MAX - u64::MAX");
+        assert_eq!(lines[2]["previous_found"], false);
+        assert_eq!(lines[2]["shortfall_tokens"], i64::MAX, "u64::MAX - 0, clamped");
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -909,7 +969,7 @@ mod tests {
         assert_eq!(lines[1]["streamed_reasoning_with_encrypted_content"], 1);
         assert_eq!(lines[1]["completed_output_count"], 0);
         assert_eq!(lines[1]["response_id_prefix"], "0123456789abcdef");
-        assert!(dir.join("arko_conversation_x").join("0002-response.json").exists());
+        assert!(dir.join(sanitize("arko:conversation:x")).join("0002-response.json").exists());
         fs::remove_dir_all(&dir).ok();
     }
 
