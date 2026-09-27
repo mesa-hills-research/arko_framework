@@ -16,7 +16,7 @@ impl VoyageInputType {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EmbeddingConfig {
     pub provider: EmbeddingProviderIdentifier,
     pub model_id: String,
@@ -67,5 +67,35 @@ impl EmbeddingConfig {
     pub fn with_hf_token(mut self, token: String) -> Self {
         self.hf_token = Some(token);
         self
+    }
+}
+
+// The Hugging Face token never appears in `Debug` output.
+impl std::fmt::Debug for EmbeddingConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EmbeddingConfig")
+            .field("provider", &self.provider)
+            .field("model_id", &self.model_id)
+            .field("output_dimensionality", &self.output_dimensionality)
+            .field("voyage_input_type", &self.voyage_input_type)
+            .field("voyage_truncation", &self.voyage_truncation)
+            .field("hf_token", &self.hf_token.as_ref().map(|_| "<redacted>"))
+            .field("tokenizer_revision", &self.tokenizer_revision)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_output_redacts_the_hugging_face_token() {
+        let config = EmbeddingConfig::new(EmbeddingProviderIdentifier::Voyage, "voyage-4")
+            .with_hf_token("hf_synthetic_secret".into());
+        let debug = format!("{config:?}");
+        assert!(debug.contains("voyage-4") && debug.contains("<redacted>"), "{debug}");
+        assert!(!debug.contains("hf_synthetic_secret"), "{debug}");
     }
 }
