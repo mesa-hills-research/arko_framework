@@ -58,16 +58,23 @@ pub fn normalize_path(path: &Path) -> PathBuf {
 ///
 /// - Surrounding whitespace is trimmed.
 /// - The path is taken literally: `~` and `$VAR` are not expanded (`~/notes`
-///   names a directory called `~` in the working directory), and `\`
-///   separates components only on Windows.
-/// - A relative path is joined to the working directory, which is itself
-///   made absolute against the process's current directory when it is
-///   relative (such as `./project`).
-/// - `.` and `..` are then resolved lexically with [`normalize_path`];
-///   symbolic links are not followed.
+///   names a directory called `~` in the working directory).
+/// - A relative path is joined to the working directory, and the result is
+///   made absolute with [`std::path::absolute`] against the process's
+///   current directory, so a relative working directory (such as
+///   `./project`) works.
+/// - On Windows, that is the resolution Win32 applies when a file is opened:
+///   `\` and `/` both separate components, `.` and `..` are resolved, a
+///   drive-relative path (`C:dir`) uses that drive's current directory, and
+///   trailing dots and spaces are dropped. A verbatim path (`\\?\C:\...`) is
+///   kept as written. On Unix, `\` is an ordinary character.
+/// - `.` and `..` are then resolved lexically with [`normalize_path`].
+///   Symbolic links are not followed: on macOS, `/var` is a link to
+///   `/private/var`, so a path written through one of them is not inside a
+///   working directory written through the other.
 ///
-/// Fails when the path contains a NUL byte, or when a relative working
-/// directory needs the process's current directory and it is unavailable.
+/// Fails when the path contains a NUL byte, or when a relative path needs
+/// the process's current directory and it is unavailable.
 pub fn resolve_path(path: &str, working_directory: &Path) -> std::io::Result<PathBuf> {
     if path.contains('\0') {
         return Err(std::io::Error::new(
@@ -75,26 +82,68 @@ pub fn resolve_path(path: &str, working_directory: &Path) -> std::io::Result<Pat
             "the path contains a NUL byte",
         ));
     }
-    Ok(normalize_path(
-        &absolute_working_directory(working_directory)?.join(path.trim()),
-    ))
+    Ok(normalize_path(&absolute(
+        &working_directory.join(path.trim()),
+    )?))
 }
 
-fn absolute_working_directory(working_directory: &Path) -> std::io::Result<PathBuf> {
-    Ok(if working_directory.is_absolute() {
-        working_directory.to_path_buf()
+/// [`std::path::absolute`], with an empty path meaning the current
+/// directory.
+fn absolute(path: &Path) -> std::io::Result<PathBuf> {
+    if path.as_os_str().is_empty() {
+        std::path::absolute(".")
     } else {
-        env::current_dir()?.join(working_directory)
-    })
+        std::path::absolute(path)
+    }
 }
 
 /// Whether `path` resolves (with [`resolve_path`]) inside `workspace`, the
-/// task's working directory. The check is lexical, like the resolution: a
-/// symbolic link inside the workspace that points outside it is not
-/// detected.
+/// task's working directory, compared component by component. The check is
+/// lexical, like the resolution: a symbolic link inside the workspace that
+/// points outside it is not detected.
+///
+/// On Windows, whose file systems usually ignore case, components are
+/// compared without regard to ASCII case (`c:\work\x` is inside `C:\Work`),
+/// and a verbatim prefix matches its ordinary form (`\\?\C:\` and `C:\`,
+/// `\\?\UNC\server\share` and `\\server\share`). A directory with case
+/// sensitivity turned on is still compared without regard to case. On other
+/// platforms the comparison is exact, also on macOS file systems that
+/// ignore case: a path spelled in another case is judged outside.
 pub fn is_path_in_workspace(path: &str, workspace: &Path) -> Result<bool, ArkoAgentsError> {
-    let root = normalize_path(&absolute_working_directory(workspace)?);
-    Ok(resolve_path(path, workspace)?.starts_with(root))
+    let root = normalize_path(&absolute(workspace)?);
+    let resolved = resolve_path(path, workspace)?;
+    let mut components = resolved.components();
+    Ok(root.components().all(|root_component| {
+        components
+            .next()
+            .is_some_and(|c| same_component(c, root_component))
+    }))
+}
+
+#[cfg(not(windows))]
+fn same_component(a: Component<'_>, b: Component<'_>) -> bool {
+    a == b
+}
+
+#[cfg(windows)]
+fn same_component(a: Component<'_>, b: Component<'_>) -> bool {
+    use std::path::Prefix::{Disk, UNC, VerbatimDisk, VerbatimUNC};
+    let same_text = |a: &std::ffi::OsStr, b: &std::ffi::OsStr| {
+        a.as_encoded_bytes()
+            .eq_ignore_ascii_case(b.as_encoded_bytes())
+    };
+    match (a, b) {
+        (Component::Prefix(a), Component::Prefix(b)) => match (a.kind(), b.kind()) {
+            (Disk(a) | VerbatimDisk(a), Disk(b) | VerbatimDisk(b)) => a.eq_ignore_ascii_case(&b),
+            (
+                UNC(server_a, share_a) | VerbatimUNC(server_a, share_a),
+                UNC(server_b, share_b) | VerbatimUNC(server_b, share_b),
+            ) => same_text(server_a, server_b) && same_text(share_a, share_b),
+            _ => same_text(a.as_os_str(), b.as_os_str()),
+        },
+        (Component::Normal(a), Component::Normal(b)) => same_text(a, b),
+        (a, b) => a == b,
+    }
 }
 
 /// Generates a file tree string for the given root path.
@@ -163,6 +212,109 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_resolve_and_compare_as_windows_opens_them() {
+        let workspace = Path::new(r"C:\Work\Project");
+        let resolve = |path: &str| resolve_path(path, workspace).unwrap();
+        let inside = |path: &str| is_path_in_workspace(path, workspace).unwrap();
+        let file = PathBuf::from(r"C:\Work\Project\src\lib.rs");
+        // `\` and `/` both separate components, mixed too.
+        assert_eq!(resolve(r"src\lib.rs"), file);
+        assert_eq!(resolve("src/lib.rs"), file);
+        assert_eq!(resolve(r"src/sub\..\lib.rs"), file);
+        assert_eq!(resolve(r" C:\Work\Project\src\lib.rs "), file);
+        // `..` above the drive root stays at the root.
+        assert_eq!(resolve(r"..\..\..\..\x"), PathBuf::from(r"C:\x"));
+        // A root-relative path is on the working directory's drive.
+        assert_eq!(resolve(r"\x"), PathBuf::from(r"C:\x"));
+        // Win32 drops a trailing dot, as when the file is opened.
+        assert_eq!(resolve(r"src\lib.rs."), file);
+        for (path, expected) in [
+            (r"src\lib.rs", true),
+            // Drive letters and names compare without regard to case.
+            (r"c:\work\project\x", true),
+            (r"C:\WORK\PROJECT\x", true),
+            (r"C:/Work/Project/x", true),
+            // A verbatim prefix matches its ordinary form.
+            (r"\\?\C:\Work\Project\x", true),
+            (r"\\?\c:\work\project\x", true),
+            (r"C:\Work\Project\..\..\Work\Project\x", true),
+            (r"C:\Work\Project2\x", false),
+            (r"C:\Work\x", false),
+            (r"..\x", false),
+            (r"..\..\..\..\x", false),
+            (r"\x", false),
+            // Another drive, absolute or drive-relative.
+            (r"D:\Work\Project\x", false),
+            ("D:x", false),
+            // Win32 leaves a verbatim path as written; its `..` is resolved
+            // lexically and still leaves.
+            (r"\\?\C:\Work\Project\..\x", false),
+        ] {
+            assert_eq!(inside(path), expected, "{path}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_unc_and_drive_relative_working_directories() {
+        let share = Path::new(r"\\Server\Share\work");
+        for (path, expected) in [
+            ("x", true),
+            (r"sub/x", true),
+            (r"\\server\share\WORK\x", true),
+            (r"\\?\UNC\server\share\work\x", true),
+            (r"\\server\other\work\x", false),
+            (r"\\other\share\work\x", false),
+            // The root of a UNC working directory is its share's root.
+            (r"\x", false),
+            (r"..\x", false),
+            (r"..\..\..\x", false),
+        ] {
+            assert_eq!(
+                is_path_in_workspace(path, share).unwrap(),
+                expected,
+                "{path}"
+            );
+        }
+        assert_eq!(
+            resolve_path("x", share).unwrap(),
+            PathBuf::from(r"\\Server\Share\work\x")
+        );
+        // A drive-relative working directory uses that drive's current
+        // directory, as Windows does.
+        let drive_relative = Path::new("C:ws");
+        let absolute = std::path::absolute(drive_relative).unwrap();
+        assert!(absolute.is_absolute());
+        assert_eq!(
+            resolve_path("x", drive_relative).unwrap(),
+            absolute.join("x")
+        );
+        assert!(is_path_in_workspace("x", drive_relative).unwrap());
+        assert!(!is_path_in_workspace(r"..\x", drive_relative).unwrap());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_symlinked_directories_are_compared_as_written() {
+        // `/var`, where temporary directories live, links to `/private/var`.
+        assert_eq!(
+            std::fs::canonicalize("/var").unwrap(),
+            PathBuf::from("/private/var")
+        );
+        let written = Path::new("/var/folders");
+        let canonical = Path::new("/private/var/folders");
+        assert!(is_path_in_workspace("x", written).unwrap());
+        assert!(is_path_in_workspace("/var/folders/x", written).unwrap());
+        // Symlinks are not followed: the other spelling is outside.
+        assert!(!is_path_in_workspace("/private/var/folders/x", written).unwrap());
+        assert!(!is_path_in_workspace("/var/folders/x", canonical).unwrap());
+        assert!(is_path_in_workspace("/private/var/folders/x", canonical).unwrap());
+        // Names compare exactly, though the file system may ignore case.
+        assert!(!is_path_in_workspace("/private/var/FOLDERS/x", canonical).unwrap());
     }
 
     #[test]

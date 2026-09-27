@@ -41,7 +41,7 @@ fn resolve_path_parameter(
     })
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::tool::{TaskContext, Tool};
@@ -53,9 +53,19 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
+    /// A new directory under the canonical temporary directory (on macOS,
+    /// `/private/var/...` rather than the `/var/...` link).
+    fn temp_root() -> std::path::PathBuf {
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("arko-file-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
     #[tokio::test]
     async fn file_tools_open_the_path_the_workspace_check_judges() {
-        let root = std::env::temp_dir().join(format!("arko-file-tools-{}", uuid::Uuid::new_v4()));
+        let root = temp_root();
         let workspace = root.join("ws");
         for directory in ["~", "$HOME", "sub"] {
             std::fs::create_dir_all(workspace.join(directory)).unwrap();
@@ -109,6 +119,45 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("NUL"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_file_tools_take_either_separator_and_any_case() {
+        let root = temp_root();
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(workspace.join(r"sub\inner")).unwrap();
+        std::fs::write(workspace.join(r"sub\inner\deep.txt"), "deep").unwrap();
+        let context = TaskContext {
+            task_id: uuid::Uuid::new_v4(),
+            agent_name: "tester",
+            initial_task_prompt: "",
+            current_working_directory: &workspace,
+        };
+        // `\` separates components on Windows, as `/` does.
+        for directory in [r"sub\inner", "sub/inner", r"sub/inner\", r"sub\x\..\inner"] {
+            assert!(
+                is_path_in_workspace(directory, &workspace).unwrap(),
+                "{directory}"
+            );
+            let listed = ListFilesTool
+                .execute(&context, params(json!({"directory": directory})))
+                .await
+                .unwrap();
+            assert!(listed.contains("deep.txt"), "{directory}: {listed}");
+        }
+        // The workspace written in another case is the same directory.
+        let upper = format!(
+            r"{}\SUB\INNER\DEEP.TXT",
+            workspace.to_string_lossy().to_uppercase()
+        );
+        assert!(is_path_in_workspace(&upper, &workspace).unwrap(), "{upper}");
+        let read = ReadFileTool
+            .execute(&context, params(json!({"path": upper})))
+            .await
+            .unwrap();
+        assert_eq!(read, "1 | deep");
         std::fs::remove_dir_all(root).unwrap();
     }
 }
