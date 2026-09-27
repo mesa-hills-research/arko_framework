@@ -171,6 +171,53 @@ let _task = join.await.expect("agent task panicked")?;
 To let an agent decide which other agents run, enable
 [workflow services](#workflow-services-and-voting).
 
+## Cancelling a run
+
+A `Workflow` is one run. `cancel_handle()` returns a `WorkflowCancelHandle` that
+can be cloned and used from any task or thread; `cancel()` on it (or on the
+workflow) stops the run:
+
+```rust
+let cancel = workflow.cancel_handle();
+tokio::spawn(async move {
+    if tokio::signal::ctrl_c().await.is_ok() {
+        cancel.cancel();
+    }
+});
+
+match workflow.run_agent("coder", "Implement the parser").await {
+    Ok(result) => println!("{}", result.summary),
+    Err(WorkflowError::Cancelled) => {
+        // The agents have stopped, and their results are recorded.
+        for agent in workflow.result().agent_results {
+            println!("{}: {:?}", agent.agent_name, agent.status);
+        }
+    }
+    Err(error) => return Err(error),
+}
+```
+
+Every running agent of the run is told to stop, including agents started with
+`spawn_agent`. Each pending call waits for its agents to end, records their
+results (status `AgentRunStatus::Cancelled` for a stopped agent), and returns
+`WorkflowError::Cancelled`; every later call returns it at once without starting
+anything. An agent stops at its next step, or when a long tool call it is running
+returns. One that has not stopped within the grace period (30 seconds by default,
+set with `cancel_grace_period`) is aborted. `cancel()` returns `false` if the run
+was already stopped. The `OnWorkflowCancelled` hook fires once, and
+`PostAgentCancellation` fires for each cancelled agent.
+
+A hook that returns `Abort(reason)` stops the run the same way, and the calls
+return `WorkflowError::AbortedByHook` instead.
+
+With persistence, the checkpoints written after the stop record it in
+`cancellation`, and `finish()` saves one and returns the stop's error. Resuming
+from such a checkpoint starts the run again; to keep a cancelled run stopped,
+check the checkpoint's `cancellation` before calling `resume_from`. From Python,
+`workflow.cancel()` stops the run, and pending `run_agent` and
+`run_agents_parallel` calls raise `arko_workflows.WorkflowCancelled`. See
+[stopping a run](INDEX.md#stopping-a-run) for the details, including durable steps.
+
 ## Shared memory
 
 Memory tiers are named, access-controlled text stores shared by the agents:
@@ -233,18 +280,23 @@ let workflow = Workflow::builder()
 Hook points:
 
 - `PreWorkflow`, `PostWorkflow`
-- `PreAgentSpawn`, `PostAgentCompletion`, `PostAgentFailure`, `PostAgentInterruption`
+- `PreAgentSpawn`, `PostAgentCompletion`, `PostAgentFailure`,
+  `PostAgentCancellation`, `PostAgentInterruption`
 - `PreToolExecution`, `PostToolExecution`, `PostToolResultInterception`
 - `OnUserInputRequired`
 - `OnBudgetWarning`, `OnBudgetExceeded`
-- `OnWorkflowFailed`, `OnWorkflowPause`, `OnWorkflowResume`
-- `OnAgentMessage`, `OnMesiConflict`
+- `OnWorkflowFailed`, `OnWorkflowCancelled`, `OnWorkflowPause`, `OnWorkflowResume`
+- `OnAgentMessage`, `OnFreshnessConflict`
 
-A hook returns `Continue`, `Skip`, or `Abort(reason)`; `Skip` rejects the current
-tool call only at `PreToolExecution`. Hooks cannot change tool output: use a
-`ToolResultInterceptor`, which runs before the result enters the agent's
-conversation. See [hooks and human input](INDEX.md#hooks-and-human-input) for when
-each point fires and what its context contains.
+A hook returns `Continue`, `Skip`, or `Abort(reason)`. `Skip` rejects the current
+tool call only at `PreToolExecution`. `Abort` at any point stops the whole run:
+running agents are cancelled, and the run calls return
+`WorkflowError::AbortedByHook` (see [cancelling a run](#cancelling-a-run)). At
+`PreToolExecution` the call does not run; at `PostToolExecution` its result
+stands. Hooks cannot change tool output: use a `ToolResultInterceptor`, which runs
+before the result enters the agent's conversation. See
+[hooks and human input](INDEX.md#hooks-and-human-input) for when each point fires
+and what its context contains.
 
 ## Context freshness
 
@@ -262,10 +314,12 @@ let workflow = Workflow::builder()
     .build()?;
 ```
 
-The mapping from tool names to resources is configurable. Notices state that a
-resource changed; they do not include the change. The older `enable_mesi` and
-`mesi` builder settings derive an equivalent freshness configuration for the file
-tools. See [context freshness](INDEX.md#context-freshness).
+`ContextFreshnessConfig::default()` tracks reads through `read_file` and
+`list_files` and writes through `write_file` and `apply_diff`, and blocks stale
+writes. The mapping from tool names to resources is configurable. Notices state
+that a resource changed; they do not include the change. A write that makes
+another agent's read stale also fires the `OnFreshnessConflict` hook once per
+stale reader. See [context freshness](INDEX.md#context-freshness).
 
 ## Budgets
 
@@ -364,10 +418,11 @@ re-inspection. See
 ## Tool-result distillation
 
 Distillers are opt-in interceptors that replace large tool outputs with a
-model-written summary. They are scoped to selected agents and tools and configure
-the size threshold, model, and reasoning. Their calls count against the budget and
-are recorded. A summary replaces the output only when the model finished it; a
-refusal or a summary cut off by its output limit keeps the raw output.
+model-written summary. They are scoped to selected agents (by the names they are
+registered under) and tools and configure the size threshold, model, and
+reasoning. Their calls count against the budget and are recorded. A summary
+replaces the output only when the model finished it; a refusal or a summary cut
+off by its output limit keeps the raw output.
 `complete_task` results are never distilled. See
 [context management](../docs/context-efficiency.md#tool-result-distillation) for a
 configuration example.
@@ -401,9 +456,9 @@ workflow.checkpoint().await?;
 
 A checkpoint contains the workflow and run identity, metadata, memory, pending
 messages, the cost ledger, freshness versions, complete agent tasks and results,
-and verification and distillation records. Agent tasks and a JSONL event log are
-also stored separately. Files are written to a temporary file, synced, and renamed
-into place. `WorkflowBuilder::resume_from(path)` restores this state into a new
+verification and distillation records, and, once the run is stopped, its
+cancellation. Agent tasks and a JSONL event log are also stored separately. Files
+are written to a temporary file, synced, and renamed into place. `WorkflowBuilder::resume_from(path)` restores this state into a new
 workflow; see [persistence](INDEX.md#persistence-and-checkpoint-state) for what is
 restored and what must be configured again.
 

@@ -14,7 +14,6 @@ Signatures are declarations with their receivers, not complete implementations. 
 - [Memory](#memory)
 - [Messaging](#messaging)
 - [Context freshness](#context-freshness)
-- [MESI file tracking](#mesi-file-tracking)
 - [Completion verification](#completion-verification)
 - [Tool-result distillation](#tool-result-distillation)
 - [Budget and cost accounting](#budget-and-cost-accounting)
@@ -31,20 +30,19 @@ Source: [Cargo.toml](Cargo.toml), [crate exports](src/lib.rs).
 
 No Cargo features are enabled by default. The `python` feature enables the PyO3 bindings and their Tokio bridge; see [Python bindings](#python-bindings).
 
-Root re-exports: `Workflow`, `WorkflowBuilder`, `AgentHandle`, `WorkflowError`, `SupportedPlatform`, `WorkflowDependency`, `WorkflowMetadata`, `AgentResult`, `AgentRunStatus`, `WorkflowEvent`, `WorkflowResult`.
+Root re-exports: `Workflow`, `WorkflowBuilder`, `AgentHandle`, `WorkflowError`, `WorkflowCancelHandle`, `CancelCause`, `Cancellation`, `SupportedPlatform`, `WorkflowDependency`, `WorkflowMetadata`, `AgentResult`, `AgentRunStatus`, `WorkflowEvent`, `WorkflowResult`.
 
 `use arko_workflows::prelude::*;` re-exports the groups below. Other public types are reached through their module paths.
 
 | Module | Prelude exports |
 | --- | --- |
-| `workflow`, `workflow::config`, `workflow::result`, `error` | All root re-exports above **except `AgentHandle`** |
+| `workflow`, `workflow::cancel`, `workflow::config`, `workflow::result`, `error` | All root re-exports above **except `AgentHandle`** |
 | `budget` | `AddCostResult`, `BudgetManager`, `CostEntry`, `CostLedger`, `CostSource` |
 | `distillation` | `DistillationConfig`, `DistillationRecord` |
 | `durable` | `DurableRetryPolicy`, `DurableStepContext`, `DurableStepSpec`, `DurableStepStatus`, `InDoubtContext`, `InDoubtResolution`, `ResolveInDoubt` |
 | `freshness` | `ActorId`, `ContextFreshnessConfig`, `FreshnessConflict`, `ResourceId`, `ResourceTracker`, `ToolResourceEffect` |
 | `hooks` | `HookCallback`, `HookPoint`, `HookResult` |
 | `memory` | `AccessScope`, `MemoryConfig`, `MemoryEntry`, `MemoryTier`, `WriteMode` |
-| `mesi` | `MesiConfig` |
 | `messaging` | `AgentMessage`, `MessageAttachment` |
 | `persistence` | `PersistenceConfig` |
 | `services` | `WorkflowServices`, `WorkflowServicesConfig` |
@@ -59,8 +57,9 @@ Other public modules: `context`, `hooks::context`, `memory::tools`, `messaging::
 | Build and configure a workflow | `Workflow::builder()` / `WorkflowBuilder` |
 | Sequential, parallel, or background agent execution | `run_agent`, `continue_agent`, `run_agents_parallel`, `spawn_agent` |
 | Monitor progress or control the lifecycle | `subscribe_events`, hooks, `pause`, `resume`, `finish` |
+| Stop a run from any task, or from a hook | `cancel_handle` / `WorkflowCancelHandle`, `HookResult::Abort` |
 | Share structured text and deliver messages | `MemoryConfig`, `MemoryStore`, `MessageBus` |
-| Track stale files, directories, memory, or custom resources | `ContextFreshnessConfig`, `ResourceTracker` (legacy: `MesiConfig`) |
+| Track stale files, directories, memory, or custom resources | `ContextFreshnessConfig`, `ResourceTracker` |
 | Gate completion and retain repair context | `CompletionVerifierConfig` |
 | Condense selected tool outputs | `DistillationConfig`, custom tool result interceptors |
 | Enforce and audit spending | Workflow and agent budgets, manual costs, `CostLedger` |
@@ -75,7 +74,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 
 ### Builder signatures and defaults
 
-`Workflow::builder() -> WorkflowBuilder`, `WorkflowBuilder::new() -> Self`, and `WorkflowBuilder::default() -> Self` return an empty builder. Required: a name, an existing workspace directory, an `Arc<LLMClient>`, and at least one uniquely named agent. By default a workflow has no memory tiers, spending limits, hooks, persistence, freshness tracking, custom tools, interceptors, verifiers, distillers, workflow services, input handler, or voting; metadata is empty, and the interception failure policy is `InterceptionFailurePolicy::UseRawResult`.
+`Workflow::builder() -> WorkflowBuilder`, `WorkflowBuilder::new() -> Self`, and `WorkflowBuilder::default() -> Self` return an empty builder. Required: a name, an existing workspace directory, an `Arc<LLMClient>`, and at least one uniquely named agent. By default a workflow has no memory tiers, spending limits, hooks, persistence, freshness tracking, custom tools, interceptors, verifiers, distillers, workflow services, input handler, or voting; metadata is empty, the interception failure policy is `InterceptionFailurePolicy::UseRawResult`, and the cancel grace period is 30 seconds.
 
 | Signature | Parameters, purpose, and default |
 | --- | --- |
@@ -92,9 +91,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 | `persistence(self, config: PersistenceConfig) -> Self` | Enable checkpoints, event and task files, a persistent run identity, and durable steps. |
 | `resume_from(self, checkpoint: impl Into<PathBuf>) -> Self` | Restore state from a checkpoint JSON file (not a run directory) during `build`. Requires `persistence` whose run directory holds the checkpoint's `workflow_run_id`; a nil ID in the checkpoint is accepted. |
 | `ephemeral(self) -> Self` | Clear the persistence and resume settings made so far. Later setters can enable them again. |
-| `enable_mesi(self) -> Self` | Enable MESI tracking with `MesiConfig::default()` and derive an equivalent freshness configuration unless `context_freshness` is set. |
-| `mesi(self, config: MesiConfig) -> Self` | As `enable_mesi`, with an explicit configuration. See [MESI file tracking](#mesi-file-tracking). |
-| `context_freshness(self, config: ContextFreshnessConfig) -> Self` | Enable versioned resource tracking. Takes precedence over a configuration derived from MESI settings. |
+| `context_freshness(self, config: ContextFreshnessConfig) -> Self` | Enable versioned resource tracking. `ContextFreshnessConfig::default()` maps the built-in file tools `read_file`, `list_files`, `write_file`, and `apply_diff`. See [Context freshness](#context-freshness). |
 | `global_tool(self, tool: Arc<dyn arko_agents::tool::Tool>) -> Self` | Register a tool for every agent and add its name to each agent's available tools. |
 | `agent_tool(self, agent_name: impl Into<String>, tool: Arc<dyn arko_agents::tool::Tool>) -> Self` | Register a tool for one agent and add its name to that agent's available tools. |
 | `tool_result_interceptor(self, interceptor: Arc<dyn ToolResultInterceptor>) -> Self` | Append an interceptor for every agent's tool results. |
@@ -105,6 +102,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 | `workflow_services(self, config: WorkflowServicesConfig) -> Self` | Enable bounded agent-to-agent delegation through the `run_workflow_agent` tool. |
 | `user_input_handler(self, handler: Arc<dyn UserInputHandler>) -> Self` | Answer agents' `ask_user` questions asynchronously. Without a handler, the run suspends and returns `UserInputRequired`. |
 | `enable_voting(self) -> Self` | Create an in-memory ballot store and give every agent the `cast_vote` tool. |
+| `cancel_grace_period(self, grace_period: std::time::Duration) -> Self` | How long a stopped run waits for each running agent to stop before aborting it. Default `workflow::cancel::DEFAULT_CANCEL_GRACE_PERIOD`, 30 seconds. See [Stopping a run](#stopping-a-run). |
 | `build(self) -> Result<Workflow, WorkflowError>` | Validate, initialize or restore state, and fire `PreWorkflow`. May create persistence files; runs no agent. |
 
 ### Build validation and tool composition
@@ -115,7 +113,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 - a host that matches none of a nonempty `metadata.supported_platforms` list;
 - duplicate agent names;
 - a negative or non-finite workflow budget, warning threshold, or agent budget;
-- an unknown agent name in `agent_tool`, `agent_tool_result_interceptor`, `agent_budget`, or a completion verifier's verifier or targets;
+- an unknown agent name in `agent_tool`, `agent_tool_result_interceptor`, `agent_budget`, a completion verifier's verifier or targets, or a distiller's targets (`distiller '<name>' targets unknown agent '<target>'`);
 - a distiller whose `max_output_tokens` is zero or whose `reasoning` configuration is for a different provider than its model;
 - `resume_from` without `persistence`, a checkpoint for a different workflow name, or a checkpoint run ID that differs from the persistence directory's.
 
@@ -125,7 +123,7 @@ Tool names: duplicate global tool names, duplicate names within one agent's tool
 
 Tools added automatically: `send_message` for every agent; `read_memory`, `write_memory`, and `list_memories` when at least one memory tier exists; `run_workflow_agent` for permitted callers when services are enabled; `cast_vote` when voting is enabled. When more than one agent is registered, each prompt is extended with the agent roster, sorted by name, with role descriptions. Pending messages for the agent are appended to its prompt. Skills configured on an agent are initialized against the workspace. There is no separate graph or scheduler configuration.
 
-Interceptors run in this order: global interceptors, the agent's own interceptors, then distillers, each group in registration order. Each stage receives the previous stage's result. An interceptor that still fails after the retries allowed by the failure policy is skipped, and the chain continues with the result so far. Tool hooks, freshness checks, and completion verification run at tool execution, so they also apply to automatically approved and batched calls.
+Interceptors run in this order: global interceptors, the agent's own interceptors, then the distillers that target the agent, each group in registration order. Each stage receives the previous stage's result. An interceptor that still fails after the retries allowed by the failure policy is skipped, and the chain continues with the result so far. Every agent's tool calls pass through the workflow's execution middleware, which enforces a stopped run and runs tool hooks, freshness checks, and completion verification at tool execution, so these also apply to automatically approved and batched calls.
 
 ### Workflow metadata
 
@@ -136,7 +134,7 @@ Source: [workflow/config.rs](src/workflow/config.rs). All four types implement S
 | `SupportedPlatform` | `os: String`, a Rust host OS name (`std::env::consts::OS`); `arch: Option<String>`, an optional architecture restriction (`None` when omitted in JSON). |
 | `WorkflowDependency` | `name: String`, `description: String` (required); `executable`, `install_hint`, `os`, `arch`: `Option<String>`, each `None` when omitted in JSON. Descriptive only; nothing enforces it. |
 | `WorkflowMetadata` | `description: String` and `version: String`, default `""`; `supported_platforms: Vec<SupportedPlatform>`, `required_dependencies: Vec<WorkflowDependency>`, and `tags: Vec<String>`, default empty. Every field may be omitted in JSON. An empty platform list means any host. |
-| `WorkflowConfig` | `name: String`, `workspace: PathBuf`, `metadata: WorkflowMetadata` (default when omitted in JSON). A serializable descriptor; workflows are constructed with the builder. |
+| `WorkflowConfig` | `name: String`, `workspace: PathBuf`, `metadata: WorkflowMetadata` (default when omitted in JSON). A serializable descriptor; workflows are constructed with the builder. Unknown JSON fields are ignored. |
 
 `SupportedPlatform` methods:
 
@@ -161,9 +159,13 @@ Source: [workflow/mod.rs](src/workflow/mod.rs), [engine](src/workflow/engine.rs)
 | `async run_agents_parallel(&self, agents: Vec<(&str, String)>) -> Result<Vec<AgentResult>, WorkflowError>` | Run agent-name/prompt pairs concurrently; one agent may appear several times. Waits for every invocation, then returns the results in input order, or the first error in input order. Finalized outcomes are recorded either way. |
 | `async spawn_agent(&self, agent_name: &str, prompt: &str) -> Result<AgentHandle, WorkflowError>` | Set up and start the agent and return its handle. Nothing drives its events until `wait` is called or the raw channels are used. |
 
-All four return `BudgetExceeded` without starting an agent when the workflow budget is already exceeded.
+All four return `BudgetExceeded` without starting an agent when the workflow budget is already exceeded. Once the run is stopped, all four return the stop's error (`Cancelled` or `AbortedByHook`) at once, without firing `PreAgentSpawn` or starting an agent; see [Stopping a run](#stopping-a-run).
 
-The managed driver (used by `run_agent`, `continue_agent`, `run_agents_parallel`, and `AgentHandle::wait`) approves every pending single and batched tool call, approves the first approval-required error recovery of an invocation and rejects later ones, and cancels the task when the workflow or agent budget is exceeded or the task is interrupted. An error can be returned after the invocation's `AgentResult` has been recorded; `result().agent_results` holds finalized failures and input suspensions. `run_agent`, `continue_agent`, and `run_agents_parallel` fire `OnWorkflowFailed` before returning an error; an `Abort` from that hook replaces the error with `AbortedByHook`. `spawn_agent` and `AgentHandle::wait` do not fire it.
+The managed driver (used by `run_agent`, `continue_agent`, `run_agents_parallel`, and `AgentHandle::wait`) approves every pending single and batched tool call, approves the first approval-required error recovery of an invocation and rejects later ones, and cancels the task when the workflow or agent budget is exceeded or the task is interrupted. A task it cancels ends `Cancelled`, and the call returns `BudgetExceeded`, `AgentBudgetExceeded`, or `AgentInterrupted`. The driver waits for a stopped agent at most the run's grace period, as described under [Stopping a run](#stopping-a-run).
+
+A managed call returns the `AgentResult` of a completed task. Otherwise it returns the driver's error, or an error for the finalized status: `UserInputRequired` for `WaitingForInput`, `AgentInterrupted` for `Interrupted`, `AgentCancelled` for `Cancelled`, and `Agent(ArkoAgentsError::TaskExecution)` with the failure reason for `Failed`. Once the run is stopped, the stop's error replaces any of these outcomes. An error can be returned after the invocation's `AgentResult` has been recorded; `result().agent_results` holds finalized failures, cancellations, and input suspensions.
+
+`run_agent`, `continue_agent`, and `run_agents_parallel` fire `OnWorkflowFailed` before returning an error other than `Cancelled`, including `AbortedByHook`. An `Abort` from that hook stops the run, and the call returns the stop's error; when the run was already stopped, its first cause's error is kept. Calls refused because the run is already stopped do not fire the hook, and neither do `spawn_agent` and `AgentHandle::wait`.
 
 ### AgentHandle
 
@@ -180,20 +182,20 @@ fn into_parts(self) -> (
 );
 ```
 
-`agent_name` returns the registration name. `wait` consumes the handle, runs the managed driver, finalizes and persists the task, and returns the completed result or an error. `into_parts` consumes the handle and returns the event receiver, command sender, task join handle, and agent name. With the raw parts, the caller is responsible for event handling, approvals, usage accounting, event broadcasting and persistence, result recording, and message acknowledgment and unregistration (through `context().messages`). Execution middleware and interceptors are installed at spawn, so tool hooks, freshness checks, verification, and interception still run.
+`agent_name` returns the registration name. `wait` consumes the handle, runs the managed driver, finalizes and persists the task, and returns the completed result or the same errors as `run_agent`. Messages delivered in the agent's prompt are acknowledged when it completes, and the agent is unregistered from the message bus whatever the outcome. `into_parts` consumes the handle and returns the event receiver, command sender, task join handle, and agent name. With the raw parts, the caller is responsible for event handling, approvals, usage accounting, event broadcasting and persistence, result recording, and message acknowledgment and unregistration (through `context().messages`). Execution middleware and interceptors are installed at spawn, so tool hooks, freshness checks, verification, and interception still run. A stopped run still reaches the agent: it is sent `CancelTask`, and the middleware cancels it at its next tool call. The caller must keep receiving its events until it ends.
 
 ### Results, state, costs, events, and pause
 
 | Signature | Purpose and behavior |
 | --- | --- |
 | `context(&self) -> &Arc<SharedContext>` | Shared stores, recorded results, and extension state. See [Shared context](#shared-context). |
-| `result(&self) -> WorkflowResult` | Snapshot of recorded results, metadata, and the cost ledger. Does not finish or checkpoint. |
+| `result(&self) -> WorkflowResult` | Snapshot of recorded results, metadata, the cost ledger, and the run's `cancellation`. Does not finish or checkpoint; also available once the run is stopped. |
 | `cost_ledger(&self) -> CostLedger` | Clone of the chronological ledger of automatic and manual costs. |
-| `add_manual_cost(&self, amount: f64, description: &str, metadata: Option<String>) -> Result<AddCostResult, WorkflowError>` | Record a finite, nonnegative dollar cost with a description and optional free-form metadata. Fires `OnBudgetWarning` and `OnBudgetExceeded` as applicable; a hook `Abort` returns `AbortedByHook`. Returns `BudgetExceeded` when spending exceeds the limit; the cost stays recorded. An invalid amount returns `InvalidCost` and records nothing. |
+| `add_manual_cost(&self, amount: f64, description: &str, metadata: Option<String>) -> Result<AddCostResult, WorkflowError>` | Record a finite, nonnegative dollar cost with a description and optional free-form metadata. Fires `OnBudgetWarning` and `OnBudgetExceeded` as applicable; a hook `Abort` stops the run and returns `AbortedByHook`. Returns `BudgetExceeded` when spending exceeds the limit; the cost stays recorded. An invalid amount returns `InvalidCost` and records nothing. |
 | `subscribe_events(&self) -> tokio::sync::broadcast::Receiver<WorkflowEvent>` | Receive events that managed drivers emit after subscription; there is no replay. The buffer holds 1,024 events; slow receivers can lag. |
 | `async checkpoint(&self) -> Result<(), WorkflowError>` | Save a checkpoint. Succeeds without writing when persistence is not configured. |
-| `async finish(&self) -> Result<WorkflowResult, WorkflowError>` | Fire `PostWorkflow`, save a checkpoint, and return the result snapshot. Does not wait for outstanding agents or prevent later runs; each call repeats the hook and checkpoint. |
-| `pause(&self) -> Result<(), WorkflowError>` | Set the pause flag, firing `OnWorkflowPause` only when the flag changes. Managed drivers stop before processing their next event; model and tool work already in progress continues. |
+| `async finish(&self) -> Result<WorkflowResult, WorkflowError>` | Fire `PostWorkflow`, save a checkpoint, and return the result snapshot. Does not wait for outstanding agents or prevent later runs; each call repeats the hook and checkpoint. On a stopped run, saves a checkpoint without firing `PostWorkflow` and returns the stop's error. |
+| `pause(&self) -> Result<(), WorkflowError>` | Set the pause flag, firing `OnWorkflowPause` only when the flag changes. Managed drivers stop before processing their next event; model and tool work already in progress continues. A pause does not delay stopping the run. |
 | `resume(&self) -> Result<(), WorkflowError>` | Clear the flag, fire `OnWorkflowResume` when it changes, and wake paused drivers. |
 | `is_paused(&self) -> bool` | Current pause flag. `false` after `build`, including after restoring a checkpoint. |
 
@@ -208,7 +210,7 @@ fn begin_ballot(&self, config: BallotConfig) -> Result<Uuid, WorkflowError>;
 fn finish_ballot(&self, ballot_id: Uuid) -> Result<BallotResult, WorkflowError>;
 ```
 
-The resource methods require freshness tracking and return `BuilderInvalid` otherwise. `actor` is the observing or writing actor; `resource` identifies the context. `register_resource_read` records the actor's observation of the current version. `mark_resource_dirty` increments the version, returns the actors whose reads became stale, queues a notice for each active stale reader, and fires `OnMesiConflict` once per stale reader. The version change is recorded before any notification or hook error is returned. See [Resource tracker](#resource-tracker) for identity and overlap rules.
+The resource methods require freshness tracking and return `BuilderInvalid` otherwise. `actor` is the observing or writing actor; `resource` identifies the context. `register_resource_read` records the actor's observation of the current version. `mark_resource_dirty` increments the version, returns the actors whose reads became stale, queues a notice for each active stale reader, and fires `OnFreshnessConflict` once per stale reader; a hook `Abort` stops the run and returns `AbortedByHook`. The version change is recorded before any notification or hook error is returned. See [Resource tracker](#resource-tracker) for identity and overlap rules.
 
 The ballot methods require `enable_voting` and return `BuilderInvalid` otherwise. `begin_ballot` validates and stores the configuration and returns the new ballot's UUID. `finish_ballot` tallies the current votes without closing the ballot. Validation and tally errors are returned as `WorkflowError::Deliberation`.
 
@@ -255,15 +257,61 @@ async fn authorize_in_doubt_retry<I: serde::Serialize>(
 
 `spec` names and versions the operation, `input` establishes its persisted input identity, and `execute` performs one attempt with the supplied context. A completed step returns its recorded `O` without executing again. `resolver` reconciles an uncertain earlier outcome where the retry policy requires it. `in_doubt_steps` lists uncertain attempts. `resolve_in_doubt_completed`, `resolve_in_doubt_failed`, and `authorize_in_doubt_retry` record an externally established output, a permanent failure, or permission for the next call to retry; `actor` and `reason` are audit strings, not authorization checks.
 
+Once the run is stopped, `durable_step` and `durable_step_with_resolver` return the stop's error without journaling anything. A step already executing when the run stops is journaled as any attempt is: when its closure fails because of the stop (for example, its `run_agent` returned `Cancelled`), the attempt is recorded in doubt with the closure's error as the reason, and when the closure still succeeds, the step is recorded `Completed`. Either way the call returns the stop's error, not `DurableInDoubt` or the output. After `resume_from`, the step replays under its retry policy: `RetrySafe` runs it again, and otherwise it is resolved through a resolver or the operator methods above, which remain available on a stopped run.
+
+### Stopping a run
+
+Source: [workflow/cancel.rs](src/workflow/cancel.rs). A `Workflow` is one run. The run is stopped when a `WorkflowCancelHandle` cancels it or when any hook returns `HookResult::Abort` (see [Hook registration and results](#hook-registration-and-results)); the first cause stands, and a stopped run stays stopped.
+
+```rust
+// Workflow
+fn cancel_handle(&self) -> WorkflowCancelHandle;
+fn cancel(&self) -> bool; // cancel_handle().cancel()
+fn is_cancelled(&self) -> bool;
+fn cancellation(&self) -> Option<Cancellation>;
+
+// WorkflowCancelHandle: Clone, Debug, Send, Sync
+fn cancel(&self) -> bool;
+fn is_cancelled(&self) -> bool;
+fn cancellation(&self) -> Option<Cancellation>;
+async fn cancelled(&self);
+
+// workflow::cancel
+pub const DEFAULT_CANCEL_GRACE_PERIOD: std::time::Duration; // 30 seconds
+```
+
+`cancel` stops the run with `CancelCause::Requested` and fires `OnWorkflowCancelled` once, from the calling task, ignoring its result. It returns `false` and changes nothing when the run is already stopped, whether cancelled or aborted by a hook. `is_cancelled` is `true` once the run is stopped for either cause, `cancellation` returns the cause and time, and `cancelled` resolves once the run is stopped. A handle can be cloned and used from any task or thread; clones control the same run. It holds only a weak reference to the workflow's shared context.
+
+| Type | Fields or variants and methods |
+| --- | --- |
+| `CancelCause` | `Requested` (a handle cancelled the run) or `AbortedByHook { hook_point: String, reason: String }`, where `hook_point` is the `HookPoint` variant name. `fn to_error(&self) -> WorkflowError` returns `Cancelled` or `AbortedByHook` with the same fields. `fn agent_reason(&self) -> String` returns `Workflow cancelled.` or `Workflow aborted by {hook_point} hook: {reason}`. Implements `Clone`, `PartialEq`, `Eq`, and Serde. |
+| `Cancellation` | `cause: CancelCause` and `timestamp: chrono::DateTime<chrono::Utc>`, the time the run stopped. Implements `Clone`, `PartialEq`, and Serde. Recorded in `WorkflowResult::cancellation` and `WorkflowState::cancellation`. |
+
+Stopping the run has these effects:
+
+- Every running agent of the run is sent `CancelTask` at once, queued before its next step. This includes agents started with `spawn_agent`, whether driven by `AgentHandle::wait` or through `into_parts` (see [AgentHandle](#agenthandle)).
+- Every run call in progress (`run_agent`, `continue_agent`, `run_agents_parallel`, `AgentHandle::wait`) waits for its agents to end while recording their remaining events (event journal and broadcast) and usage (budget), then returns the stop's error: `Cancelled` or `AbortedByHook`. It does so even when an agent completed during the wind-down; that agent's `Completed` result is still recorded. A `durable_step` or `durable_step_with_resolver` call in progress returns the stop's error once its closure returns. Every later call returns the error at once without starting anything: no `PreAgentSpawn` and no journal record.
+- An agent stops at its next step; model streams and waits are interrupted at once, and an agent running a long tool call stops when the call returns. An agent that has not ended within the grace period is aborted (its Tokio task is dropped) and recorded as `Cancelled` with the task as the run started it, so the record does not contain this invocation's conversation; the event journal does. Its reason is the cause's agent reason followed by `The agent did not stop within <grace period> and was aborted.`, with the period in `Duration` debug form (for example `30s`). The same bounded wait applies whenever the managed driver stops an agent, for example over budget, after an interruption, or after a hook's abort; when the run itself is not stopped, the reason begins `Stopped by the workflow.`
+- A paused workflow does not delay the stop, and a `UserInputHandler` still waiting for an answer is abandoned.
+- Once the run is stopped, the execution middleware answers every tool call with `ToolExecutionDecision::CancelTask`: the call does not run (a `cast_vote` is not recorded, for example), and the agent ends `Cancelled` with the cause's agent reason. A completion verifier stopped with the run decides nothing, so its target agent is cancelled, not failed. Distillers make no further requests and leave tool output unchanged.
+- An agent stopped by the `CancelTask` command records the reason `Task cancelled by user.` (`arko_agents::task::CANCELLED_BY_USER`). An agent that ends because of the stop has status `AgentRunStatus::Cancelled`, and `PostAgentCancellation` fires for it.
+- Budgets and limits are unchanged; usage reported while agents wind down is charged.
+- Votes cast before the stop stand, and `finish_ballot` works as usual, although the quorum may be unmet.
+- `finish` saves a checkpoint and returns the stop's error without firing `PostWorkflow`; `result` still returns the recorded results, with `cancellation` set. `OnWorkflowFailed` does not fire for `Cancelled`.
+
+With persistence, every checkpoint written after the stop records it in `WorkflowState::cancellation`. With `auto_checkpoint`, one is saved as each stopped agent's result is finalized and once more when the first run call returns the stop's error; `checkpoint` and `finish` save one regardless of `auto_checkpoint`. The pause flag is not persisted. A stopped run's checkpoint is recognized by its `cancellation` field and the `Cancelled` status of its stopped agents.
+
+Resuming with `resume_from` from a checkpoint that records a cancellation starts the run again: the new workflow is not stopped, and its checkpoints do not carry the earlier record. To keep a cancelled run stopped, check `WorkflowState::cancellation`, for example with `PersistenceManager::load_checkpoint`, before resuming. Durable steps left in doubt by the stop are handled as described under [Workflow-facing durable operations](#workflow-facing-durable-operations).
+
 ## Result and event types
 
 Source: [workflow/result.rs](src/workflow/result.rs). These types are re-exported at the root and in the prelude, and implement Serde `Serialize` and `Deserialize`.
 
 | Type | Public fields or variants |
 | --- | --- |
-| `AgentRunStatus` | `Completed`, `Failed`, `Interrupted`, `Cancelled`, `WaitingForInput`. |
-| `AgentResult` | `agent_run_id: Uuid`, the stable task identity; `agent_name: String`, the registration name; `status: AgentRunStatus`; `summary: String`, the completion summary for `Completed` and empty otherwise; `error: Option<String>`, the failure or interruption reason or the unanswered questions; `task: arko_agents::Task`, with conversation, usage, and runtime state. |
-| `WorkflowResult` | `workflow_run_id: Uuid`, `workflow_name: String`, `metadata: WorkflowMetadata`, `total_cost: f64` (running workflow total in dollars), `cost_ledger: CostLedger`, `agent_results: Vec<AgentResult>` (finalized outcomes; a continuation replaces the entry with its run ID). |
+| `AgentRunStatus` | `Completed`, `Failed`, `Interrupted`, `Cancelled`, `WaitingForInput`. `Cancelled` is the status of a task that ended in `arko_agents::TaskState::Cancelled`: stopped with the workflow run, stopped by the managed driver (over budget or after an interruption), or cancelled by any other `CancelTask` command or middleware decision. The status follows the task state, never the wording of a failure reason. |
+| `AgentResult` | `agent_run_id: Uuid`, the stable task identity; `agent_name: String`, the registration name; `status: AgentRunStatus`; `summary: String`, the completion summary for `Completed` and empty otherwise; `error: Option<String>`, the failure, interruption, or cancellation reason or the unanswered questions; `task: arko_agents::Task`, with conversation, usage, and runtime state. |
+| `WorkflowResult` | `workflow_run_id: Uuid`, `workflow_name: String`, `metadata: WorkflowMetadata`, `total_cost: f64` (running workflow total in dollars), `cost_ledger: CostLedger`, `agent_results: Vec<AgentResult>` (finalized outcomes; a continuation replaces the entry with its run ID), `cancellation: Option<Cancellation>` (set once the run is stopped; omitted from JSON when `None` and `None` when absent). |
 | `WorkflowEvent` | `timestamp: chrono::DateTime<chrono::Utc>`, `workflow_run_id: Uuid`, `agent_name: String`, `agent_run_id: Uuid`, `event: arko_agents::runtime::event::AgentEvent`. Wraps each broadcast and persisted runtime event. |
 
 `AgentResult` methods:
@@ -297,7 +345,14 @@ fn has_hooks(&self, point: &HookPoint) -> bool;
 
 Callbacks are synchronous and receive an immutable context; capture shared state to act on it. `register` appends to a point's list, `get` borrows the ordered list, and `has_hooks` reports whether the list is nonempty. `Continue` proceeds to the next callback; the first `Skip` or `Abort` ends the chain for that point. `Skip` has an effect only at `PreToolExecution`, where it rejects the tool call with the message `Skipped by PreToolExecution hook`; at other points it only ends the chain. Hooks cannot replace tool output; use a tool result interceptor for that.
 
-`Abort(reason)` at a lifecycle point returns `AbortedByHook` from the operation that fired it. At tool boundaries (`PreToolExecution`, `PostToolExecution`) and inside workflow tools, an abort reaches the agent runtime as `ToolError::ExecutionFailed` instead; it is not guaranteed to cancel the workflow. Budget hooks fired for automatic usage reports ignore `Abort`; budget hooks fired by `add_manual_cost` return it as `AbortedByHook`, and those fired by a distillation charge turn it into an interceptor error. Hooks do not roll back work already performed.
+`Abort(reason)` at any point stops the whole run with `CancelCause::AbortedByHook { hook_point, reason }`, where `hook_point` is the point's variant name: running agents are cancelled, and run calls in progress or made later return `AbortedByHook`. See [Stopping a run](#stopping-a-run). Where the abort surfaces depends on the point:
+
+- At lifecycle points (`PreAgentSpawn`, the `PostAgent*` points, `OnWorkflowPause`, `OnWorkflowResume`, `PostWorkflow`, `OnBudgetWarning` and `OnBudgetExceeded` from `add_manual_cost`, and others), the operation that fired the hook also returns `AbortedByHook`. The managed driver ignores the return value of budget hooks fired for automatic usage reports, including usage reported while agents wind down, but an `Abort` from them still stops the run. Budget hooks fired by a distillation charge also turn an `Abort` into an interceptor error.
+- At `PreToolExecution`, the call does not run, and the agent ends `Cancelled` with the reason `Workflow aborted by PreToolExecution hook: <reason>`; the run call driving the agent returns `AbortedByHook` with `hook_point` `"PreToolExecution"`. `Skip` still rejects only that call.
+- At `PostToolExecution`, and at `OnFreshnessConflict` fired from the execution middleware, the call has run and its result stands; the agent is sent `CancelTask` and ends before its next model request, and the run call returns `AbortedByHook`. The middleware never returns an error for a hook result.
+- Hooks fired inside workflow tools (`OnAgentMessage` from `send_message`, `OnFreshnessConflict` from `write_memory`) return a tool error to the agent after the message or write has been made, and the run stops.
+
+The result of `OnWorkflowCancelled` is ignored. Hooks do not roll back work already performed.
 
 ### HookPoint variants
 
@@ -305,9 +360,10 @@ Callbacks are synchronous and receive an immutable context; capture shared state
 | --- | --- |
 | `PreWorkflow` | End of a successful `build`, before the workflow is returned. |
 | `PostWorkflow` | `finish`, before its checkpoint. |
-| `PreAgentSpawn` | Before a run, spawn, or continuation is set up. `agent_name`; for a continuation, also the prior `agent_run_id`. |
+| `PreAgentSpawn` | Before a run, spawn, or continuation is set up; not fired once the run is stopped. `agent_name`; for a continuation, also the prior `agent_run_id`. |
 | `PostAgentCompletion` | A task finalized as completed. Agent name and run ID; `agent_summary` when nonempty. |
-| `PostAgentFailure` | A task finalized as failed or cancelled. Agent name, run ID, and `error_message`. |
+| `PostAgentFailure` | A task finalized as failed. Agent name, run ID, and `error_message`. |
+| `PostAgentCancellation` | A task finalized as cancelled: stopped with the workflow run, stopped by the managed driver (over budget or after an interruption), or cancelled by any other `CancelTask` command or middleware decision. Agent name, run ID, and the task's reason in `error_message`. Cancelled tasks do not fire `PostAgentFailure`. |
 | `PostAgentInterruption` | A task finalized as interrupted or in a nonterminal state. Agent name, run ID, and the reason in `error_message`. |
 | `OnUserInputRequired` | A task finalized while awaiting user input. Agent name, run ID, and the questions in `error_message`. Not fired when a `UserInputHandler` answers the question. |
 | `PreToolExecution` | Before a tool call executes. Agent name and run ID, `tool_name`, `tool_call_id`, and `tool_params`. `Skip` rejects the call. |
@@ -315,11 +371,12 @@ Callbacks are synchronous and receive an immutable context; capture shared state
 | `PostToolResultInterception` | The managed driver receives an intercepted result. Agent name and run ID, tool name and call ID, the raw output in `original_tool_result`, and the delivered output in `effective_tool_result` and `tool_result`. |
 | `OnWorkflowPause` | The pause flag changes from false to true. |
 | `OnWorkflowResume` | The pause flag changes from true to false, before paused drivers are woken. |
-| `OnWorkflowFailed` | `run_agent`, `continue_agent`, or `run_agents_parallel` is about to return an error. `error_message`; the agent name (and, for a continuation, run ID) when available. |
+| `OnWorkflowFailed` | `run_agent`, `continue_agent`, or `run_agents_parallel` is about to return an error other than `Cancelled`, including `AbortedByHook`. Not fired by a call refused because the run is already stopped. `error_message`; the agent name (and, for a continuation, run ID) when available. |
+| `OnWorkflowCancelled` | A `WorkflowCancelHandle` (or `Workflow::cancel`) cancelled the run. Fires once, from the task that called `cancel`; its result is ignored. A hook's abort does not fire it. |
 | `OnBudgetExceeded` | Each automatic, manual, or distillation cost recorded while workflow spending strictly exceeds the limit. `budget_spent` is the new total. |
 | `OnBudgetWarning` | The first recorded cost that brings spending to or above the warning threshold. `budget_spent` is the new total. |
 | `OnAgentMessage` | The `send_message` tool queued a message. Sender name and run ID; `metadata["message_id"]`, `metadata["recipient"]`, and `metadata["content"]`. Direct `MessageBus::send` calls do not fire it. |
-| `OnMesiConflict` | A successful tracked write (a mapped file tool, `write_memory`, or `mark_resource_dirty`) made another actor's read stale; fires once per stale reader. The reader's `agent_name` and `agent_run_id`, `metadata["resource"]` (the `ResourceId` in debug form, or `memory:<tier>`), and `metadata["writer"]` (the writer's agent name). A blocked write does not fire it. |
+| `OnFreshnessConflict` | A successful tracked write (a mapped file tool, `write_memory`, or `mark_resource_dirty`) made another actor's read stale; fires once per stale reader. The reader's `agent_name` and `agent_run_id`, `metadata["resource"]` (the `ResourceId` in debug form, or `memory:<tier>`), and `metadata["writer"]` (the writer's agent name). A blocked write does not fire it. Its former name, `"OnMesiConflict"`, still deserializes to this variant. |
 
 ### HookContext fields
 
@@ -343,7 +400,7 @@ Callbacks are synchronous and receive an immutable context; capture shared state
 | `error_message` | `Option<String>` | Error, reason, or questions. |
 | `budget_spent` | `f64` | Workflow dollars spent. |
 | `budget_limit` | `Option<f64>` | Configured workflow limit. |
-| `metadata` | `HashMap<String, Value>` | Point-specific data: `resource` and `writer` for `OnMesiConflict`; `message_id`, `recipient`, and `content` for `OnAgentMessage`. |
+| `metadata` | `HashMap<String, Value>` | Point-specific data: `resource` and `writer` for `OnFreshnessConflict`; `message_id`, `recipient`, and `content` for `OnAgentMessage`. |
 
 ### UserInputHandler and UserInputRequest
 
@@ -385,7 +442,7 @@ async fn run_agent(&self, caller: &str, agent_name: &str, prompt: &str)
 
 The `allow_*` setters add a name. `max_active_calls` clamps to at least one; assigning the public field directly bypasses the clamp. Allowlist names are not checked at build time; a target must still resolve to a registered agent when called. `WorkflowServices` has no public constructor; after enabling services, `workflow.context().workflow_services.get()` returns it. It holds a weak reference to the workflow context and returns `Channel` once the workflow has been dropped.
 
-`run_agent` checks the caller and target policies, then runs the target with the workflow's shared memory, budget, hooks, persistence, and completion verifiers. A disallowed caller or target returns `BuilderInvalid`; reaching the active-call limit returns `Channel` immediately instead of queuing. `caller` is a host-supplied identity, not authentication. Apart from the active-call limit, there is no call-depth or cycle limit.
+`run_agent` checks the caller and target policies, then runs the target with the workflow's shared memory, budget, hooks, persistence, and completion verifiers. Once the run is stopped, it returns the stop's error. A disallowed caller or target returns `BuilderInvalid`; reaching the active-call limit returns `Channel` immediately instead of queuing. `caller` is a host-supplied identity, not authentication. Apart from the active-call limit, there is no call-depth or cycle limit.
 
 Tool name constant: `services::RUN_WORKFLOW_AGENT_TOOL_NAME: &str = "run_workflow_agent"`.
 
@@ -409,7 +466,6 @@ Source: [context/mod.rs](src/context/mod.rs). `context::SharedContext`, returned
 | `durable_store` | `Option<Arc<durable::DurableStore>>` | Present when persistence is configured. |
 | `memory` | `memory::MemoryStore` | Shared tier store. |
 | `messages` | `messaging::MessageBus` | Queued and live messaging. |
-| `file_tracker` | `Option<mesi::FileTracker>` | Present when MESI tracking is configured; the workflow engine does not record into it. |
 | `resource_tracker` | `Option<freshness::ResourceTracker>` | Context freshness tracker. |
 | `hooks` | `Arc<hooks::HookRegistry>` | Registered callbacks. |
 | `agent_configs` | `HashMap<String, AgentConfig>` | Agent configurations keyed by registration name. |
@@ -494,7 +550,7 @@ async fn execute(
 | Constant (`pub const …: &str`) and tool name | Input parameters | Output and behavior |
 | --- | --- | --- |
 | `READ_MEMORY_TOOL_NAME = "read_memory"` | Required `tier: string`; optional `full: boolean` (default `false`; the strings `"true"` and `"false"` are also accepted); optional `max_chars: string` holding a positive integer. | Versioned JSON, described below. Batch-safe. Requires read access. When freshness tracking is enabled, a complete read records a read of the tier. |
-| `WRITE_MEMORY_TOOL_NAME = "write_memory"` | Required `tier: string` and `content: string`. | `Successfully wrote to memory tier '{tier}'.` Applies the tier's policy and records the current task ID. With freshness tracking, a write based on a stale read is rejected when `block_on_conflict` is set and allowed otherwise; after a successful write, each stale reader gets a notice if active, and `OnMesiConflict` fires for every stale reader, active or not. Not batch-safe. |
+| `WRITE_MEMORY_TOOL_NAME = "write_memory"` | Required `tier: string` and `content: string`. | `Successfully wrote to memory tier '{tier}'.` Applies the tier's policy and records the current task ID. With freshness tracking, a write based on a stale read is rejected when `block_on_conflict` is set and allowed otherwise; after a successful write, each stale reader gets a notice if active, and `OnFreshnessConflict` fires for every stale reader, active or not. Not batch-safe. |
 | `LIST_MEMORIES_TOOL_NAME = "list_memories"` | None. | `Available memory tiers:` followed by each tier with `read/write`, `read-only`, `write-only`, or `no access`; or `No memory tiers are configured in this workflow.` Batch-safe. |
 
 Every successful `read_memory` response is a JSON object with `tier: string`, `version: integer`, and `kind`; the other fields depend on `kind`:
@@ -517,7 +573,7 @@ fn reset_context(&self, task_id: uuid::Uuid); // discard this task's read baseli
 fn observe_context(&self, task_id: uuid::Uuid, message: &arko_ai::Message);
 ```
 
-`observe_context` confirms delivery when a user-role message carries a successful matching `read_memory` tool result or text containing a pending response. When driving these tools outside the workflow engine, forward context observations and resets to keep deltas correct. Parameter errors are `MissingParameter` or `ParameterValidation`; store and freshness failures are `ExecutionFailed`. A hook error raised after a write is returned even though memory has already changed.
+`observe_context` confirms delivery when a user-role message carries a successful matching `read_memory` tool result or text containing a pending response. When driving these tools outside the workflow engine, forward context observations and resets to keep deltas correct. Parameter errors are `MissingParameter` or `ParameterValidation`; store and freshness failures are `ExecutionFailed`. A hook's `Abort` after a write is returned as an `ExecutionFailed` error even though memory has already changed, and it stops the run.
 
 ## Messaging
 
@@ -577,7 +633,7 @@ async fn execute(
 ) -> Result<String, arko_agents::tool::ToolError>;
 ```
 
-Parameters: required `to: string` and `content: string`; optional `attachments_json: string`, a JSON array in the attachment format above (default: no attachments). The tool description lists the valid recipients. Invalid attachment JSON is a `ParameterValidation` error; a non-string `attachments_json` is ignored. An unknown recipient is an `ExecutionFailed` error. On success the tool records the current task as the sender's task, fires `OnAgentMessage`, and returns `Message {id} sent to agent '{to}'.` Not batch-safe. A hook error is returned even though the message has already been queued.
+Parameters: required `to: string` and `content: string`; optional `attachments_json: string`, a JSON array in the attachment format above (default: no attachments). The tool description lists the valid recipients. Invalid attachment JSON is a `ParameterValidation` error; a non-string `attachments_json` is ignored. An unknown recipient is an `ExecutionFailed` error. On success the tool records the current task as the sender's task, fires `OnAgentMessage`, and returns `Message {id} sent to agent '{to}'.` Not batch-safe. A hook's `Abort` is returned as an `ExecutionFailed` error even though the message has already been queued, and it stops the run.
 
 ## Context freshness
 
@@ -604,7 +660,7 @@ All six types implement `Debug`, `Clone`, `Serialize`, and `Deserialize`; `Resou
 
 `ContextFreshnessConfig::tool_effect(self, tool_name: impl Into<String>, effect: ToolResourceEffect) -> Self` adds or replaces a mapping; assign `tool_effects` to replace them all. Fields omitted in JSON do not take the Rust defaults.
 
-With a tracker configured, the workflow checks each mapped write before the tool runs. When it overlaps context the agent read that another actor has since changed, the call is rejected with feedback to re-read if `block_on_conflict` is set, and allowed otherwise. After a successful mapped tool call, the read or write is recorded; for a write, every active stale reader receives a notice, and `OnMesiConflict` fires once per stale reader.
+With a tracker configured, the workflow checks each mapped write before the tool runs. When it overlaps context the agent read that another actor has since changed, the call is rejected with feedback to re-read if `block_on_conflict` is set, and allowed otherwise. After a successful mapped tool call, the read or write is recorded; for a write, every active stale reader receives a notice, and `OnFreshnessConflict` fires once per stale reader. An `Abort` from that hook stops the run; the write's own result stands.
 
 ### Resource tracker
 
@@ -624,43 +680,11 @@ Methods on `ResourceTracker`.
 
 Resources overlap when they are identical, or when a directory tree that was read contains a written file. Memory and custom resources overlap only by exact identity. `record_read` and `record_write` use their arguments as supplied, so resources constructed manually need consistently normalized paths.
 
-## MESI file tracking
-
-Module: `arko_workflows::mesi`. Source: [MESI tracking](src/mesi/mod.rs).
-
-`FileTracker` compares the time of an agent's latest read of a path with later writes by other agent names. It identifies agents by name only and tracks exact paths; context freshness adds task identity and directory-tree, memory, and custom resources.
-
-`enable_mesi` and `mesi` store a `FileTracker` in `SharedContext::file_tracker` and, unless `context_freshness` is also set, derive a `ContextFreshnessConfig` with the same `block_on_conflict` that maps each read tool to `ReadFile { parameter: "path" }` (`list_files` to `ReadDirectoryTree { parameter: "directory" }`) and each write tool to `WriteFile { parameter: "path" }`. Tool-boundary enforcement uses that derived configuration; the workflow engine does not record reads or writes into the `FileTracker`.
-
-| Public type | Fields or variants; defaults |
-| --- | --- |
-| `FileReadRecord` | `agent: String`, `timestamp: chrono::DateTime<chrono::Utc>`. A recorded read. |
-| `FileWriteRecord` | `agent: String`, `timestamp: chrono::DateTime<chrono::Utc>`. A recorded write. |
-| `FileState` | `readers: Vec<FileReadRecord>`, `writers: Vec<FileWriteRecord>`. `Default` makes both empty. |
-| `ConflictAction` | `Allow`, `Block { conflicting_writes: Vec<FileWriteRecord> }`, `NotifyAndAllow { conflicting_writes: Vec<FileWriteRecord> }`. Result of a conflict check. |
-| `MesiConfig` | `block_on_conflict: bool` (default `true`), `write_tools: HashSet<String>` (default `{"write_file", "apply_diff"}`), `read_tools: HashSet<String>` (default `{"read_file"}`). Configured through its public fields. |
-
-The records, `FileState`, and `MesiConfig` implement `Debug`, `Clone`, `Serialize`, and `Deserialize`; `ConflictAction` implements `Debug` and `Clone`. Fields omitted in JSON do not take the Rust defaults.
-
-Methods on `FileTracker`; `Default` is `new()`.
-
-| Signature | Purpose and behavior |
-| --- | --- |
-| `fn new() -> Self` | Empty tracker with `MesiConfig::default()`. |
-| `fn with_config(config: MesiConfig) -> Self` | Empty tracker with the given tool names and conflict policy. |
-| `fn register_read(&self, agent: &str, path: &Path)` | Record a read at the current UTC time. |
-| `fn register_write(&self, agent: &str, path: &Path)` | Record a write at the current UTC time. |
-| `fn check_write_conflict(&self, agent: &str, path: &PathBuf) -> ConflictAction` | Find other agents' writes strictly newer than this agent's latest read of the exact path. No read, no tracked file, or no newer write by another agent returns `Allow`; conflicts return `Block` or `NotifyAndAllow` according to `block_on_conflict`. |
-| `fn is_write_tool(&self, tool_name: &str) -> bool` | Whether the name is in `write_tools`. |
-| `fn is_read_tool(&self, tool_name: &str) -> bool` | Whether the name is in `read_tools`. |
-
-Paths are stored as supplied. These methods only record state and return decisions; they perform no file operations and send no notifications.
-
 ## Completion verification
 
 Source: [verification/mod.rs](src/verification/mod.rs); execution: [engine](src/workflow/engine.rs). All public types and the protocol constant are in the prelude.
 
-A `CompletionVerifierConfig` registered with `WorkflowBuilder::completion_verifier` gates an agent's `complete_task` call on a review by another registered agent. Configurations run in registration order. A rejection returns the verifier's feedback to the agent for repair; a correctness gate fails the task once its cap is exceeded. Targets are registration names. A configuration never reviews its own verifier agent, even when that agent is listed as a target; empty targets select every other agent, so with several verifiers, explicit targets keep verifiers from reviewing one another. Use distinct configuration names: repair counts and conversation reuse are keyed by target task ID and configuration name.
+A `CompletionVerifierConfig` registered with `WorkflowBuilder::completion_verifier` gates an agent's `complete_task` call on a review by another registered agent. Configurations run in registration order. A rejection returns the verifier's feedback to the agent for repair; a correctness gate fails the task once its cap is exceeded. Targets are registration names. A configuration never reviews its own verifier agent, even when that agent is listed as a target; empty targets select every other agent, so with several verifiers, explicit targets keep verifiers from reviewing one another. Use distinct configuration names: repair counts and conversation reuse are keyed by target task ID and configuration name. A review in progress when the run is stopped decides nothing: the target agent is cancelled with the run, not failed.
 
 ### `CompletionVerifierConfig`, `VerificationKind`, and `RepairContextConfig`
 
@@ -726,7 +750,7 @@ A record identifies the reviewed task and agent, the configuration, the reviewin
 
 Source: [distillation/mod.rs](src/distillation/mod.rs); registration and order: [engine](src/workflow/engine.rs). Both public types implement `Clone` and Serde and are in the prelude.
 
-A `DistillationConfig` registered with `WorkflowBuilder::distiller` replaces large matching tool results with an LLM-written summary. Distillers run after the global and per-agent interceptors, in registration order; each sees the result of the stages before it, and all of a distiller's filters must match. A distiller calls the workflow's LLM client with its model, reasoning, and output-token limit, in a fresh conversation with caching disabled, giving the agent's initial task prompt, the tool name and parameters, and the current tool output as context. Results of tools that opt out of interception (`Tool::allow_result_interception`, for example `read_memory`) are never distilled.
+A `DistillationConfig` registered with `WorkflowBuilder::distiller` replaces large matching tool results with an LLM-written summary. Each distiller is installed only for the agents it targets (every agent when its target set is empty). Distillers run after the global and per-agent interceptors, in registration order; each sees the result of the stages before it, and all of a distiller's filters must match. Once the run is stopped, a distiller makes no request and returns the tool output unchanged. A distiller calls the workflow's LLM client with its model, reasoning, and output-token limit, in a fresh conversation with caching disabled, giving the agent's initial task prompt, the tool name and parameters, and the current tool output as context. Results of tools that opt out of interception (`Tool::allow_result_interception`, for example `read_memory`) are never distilled.
 
 ### `DistillationConfig`
 
@@ -734,7 +758,7 @@ A `DistillationConfig` registered with `WorkflowBuilder::distiller` replaces lar
 | --- | --- | --- |
 | `name` | `String` | Configuration name used in records, errors, and cost descriptions. |
 | `model` | `arko_ai::Model` | Distillation model supplied by the caller. |
-| `target_agents` | `HashSet<String>` | Agent names to match; empty matches all. Compared with the running agent's `AgentConfig::name`, which can differ from its workflow registration name. |
+| `target_agents` | `HashSet<String>` | Registration names to match, as given to `WorkflowBuilder::agent` (not `AgentConfig::name`); empty matches all. |
 | `target_tools` | `HashSet<String>` | Tool names to match; empty matches all. |
 | `min_chars` | `usize` | Minimum input size in Unicode scalar values, inclusive; default `8_000`. |
 | `max_output_tokens` | `usize` | Generation limit, including reasoning tokens; default `16_000`, or the model's `Model::max_output_tokens` when that is known and smaller. Must be positive. |
@@ -744,14 +768,14 @@ A `DistillationConfig` registered with `WorkflowBuilder::distiller` replaces lar
 | Signature on `DistillationConfig` | Parameters and result |
 | --- | --- |
 | `pub fn new(name: impl Into<String>, model: arko_ai::Model) -> Self` | Configuration with the defaults above. Default instructions: "Preserve every fact relevant to the task, exact errors, paths, identifiers, constraints, and actionable details. Remove repetition and irrelevant bulk. Never invent facts." |
-| `pub fn target_agent(mut self, agent: impl Into<String>) -> Self` | Add an agent-name filter; duplicates collapse. |
+| `pub fn target_agent(mut self, agent: impl Into<String>) -> Self` | Add an agent registration-name filter; duplicates collapse. |
 | `pub fn target_tool(mut self, tool: impl Into<String>) -> Self` | Add a tool-name filter; duplicates collapse. |
 | `pub fn min_chars(mut self, chars: usize) -> Self` | Inclusive size threshold; `0` also admits empty output. |
 | `pub fn max_output_tokens(mut self, tokens: usize) -> Self` | Token limit; `build` rejects zero. |
 | `pub fn instructions(mut self, instructions: impl Into<String>) -> Self` | Replace the instructions. |
 | `pub fn reasoning(mut self, reasoning: arko_ai::ReasoningConfig) -> Self` | Set reasoning; `build` rejects a reasoning configuration for a different provider than the model's. |
 
-`DistillationConfig` has no `Default` implementation. `build` validates the token limit and the reasoning provider, not the target agent or tool names. A summary replaces the tool result only when the response has no refusal, stops with `StopReason::EndTurn` or `StopReason::StopSequence`, and contains non-empty text. Otherwise the raw result is kept:
+`DistillationConfig` has no `Default` implementation. `build` validates the token limit, the reasoning provider, and the target agents (each must be a registered agent); target tool names are not checked. A summary replaces the tool result only when the response has no refusal, stops with `StopReason::EndTurn` or `StopReason::StopSequence`, and contains non-empty text. Otherwise the raw result is kept:
 
 - A refusal (`GenerationResponse::refusal` from any source, even with accompanying text, or an `arko_ai::Error::Refusal` such as an OpenRouter moderation 403) or a truncated response (`StopReason::is_truncated`: `MaxTokens`, when the summary reached `max_output_tokens`, or `ContextWindowExceeded`) would likely repeat, so the distiller logs a warning and returns `InterceptedResult::Unchanged`; the failure policy does not retry it.
 - Model errors, empty text, and any other stop reason are interceptor errors, which the interception failure policy may retry before the raw result is kept. This includes `StopReason::Other("unknown")`, a response that reported no stop reason (OpenRouter `finish_reason: null`, Anthropic `stop_reason: null`), whose completeness cannot be determined.
@@ -774,7 +798,7 @@ pub cost: f64;
 pub rejection: Option<String>;
 ```
 
-A record identifies the task, the agent (by `AgentConfig::name`), the tool, and the configuration, with the UTC time, input and output sizes in Unicode scalar values, and the billed dollar cost. `output_chars` counts the text the model generated, joined as a summary is (text parts separated by newlines): the message text plus any `Refusal::partial_output` that a safety-classifier or content-filter refusal moved out of the message; a refusal's explanation is not counted. `rejection` is `None` when the summary replaced the result and otherwise gives the reason it was not used (the refusal, the stop reason, or missing text); it is omitted from JSON when `None` and loads as `None` when absent. Records are available in `SharedContext::distillation_records` and in checkpoints.
+A record identifies the task, the agent (by registration name), the tool, and the configuration, with the UTC time, input and output sizes in Unicode scalar values, and the billed dollar cost. `output_chars` counts the text the model generated, joined as a summary is (text parts separated by newlines): the message text plus any `Refusal::partial_output` that a safety-classifier or content-filter refusal moved out of the message; a refusal's explanation is not counted. `rejection` is `None` when the summary replaced the result and otherwise gives the reason it was not used (the refusal, the stop reason, or missing text); it is omitted from JSON when `None` and loads as `None` when absent. Records are available in `SharedContext::distillation_records` and in checkpoints.
 
 ## Budget and cost accounting
 
@@ -941,7 +965,7 @@ Source: [persistence/mod.rs](src/persistence/mod.rs), [persistence/state.rs](src
 
 ### PersistenceConfig and PersistenceManager
 
-`PersistenceConfig` implements `Debug` and `Clone` and has public fields `checkpoint_dir: std::path::PathBuf` (the run directory) and `auto_checkpoint: bool` (whether a checkpoint is saved after each finalized agent result). It has no `Default` implementation; `new` sets `auto_checkpoint = true`. `PersistenceManager` implements `Clone` and has private fields; clones share the durable store and write lock.
+`PersistenceConfig` implements `Debug` and `Clone` and has public fields `checkpoint_dir: std::path::PathBuf` (the run directory) and `auto_checkpoint: bool` (whether a checkpoint is saved after each finalized agent result, and once when a run call first returns a stopped run's error). It has no `Default` implementation; `new` sets `auto_checkpoint = true`. `PersistenceManager` implements `Clone` and has private fields; clones share the durable store and write lock.
 
 ```rust
 impl PersistenceConfig {
@@ -986,7 +1010,7 @@ impl PersistenceManager {
 
 Filesystem and serialization failures are returned as `WorkflowError`. A run directory holds checkpoints, task snapshots, the event log, and the durable journal; running futures and ballots are not persisted.
 
-`resume_from` restores memory tiers and their history, pending messages, the cost ledger, finalized agent results, and verification and distillation records. The saved memory replaces any `MemoryConfig` given to the new builder. Freshness state is restored only when freshness tracking is configured again. Agents, the client, tools, hooks, policies, budget limits, and metadata come from the new builder, not the checkpoint. The pause flag starts cleared, and active message channels, ballots, and verification repair counts and baselines start empty. Restoring does not continue agents or replay workflow control flow. Accounting is rebuilt from `cost_ledger`; `budget_spent` and `completed_agents` are not used on restore.
+`resume_from` restores memory tiers and their history, pending messages, the cost ledger, finalized agent results, and verification and distillation records. The saved memory replaces any `MemoryConfig` given to the new builder. Freshness state is restored only when freshness tracking is configured again. Agents, the client, tools, hooks, policies, budget limits, and metadata come from the new builder, not the checkpoint. The pause flag starts cleared, and active message channels, ballots, and verification repair counts and baselines start empty. Restoring does not continue agents or replay workflow control flow. Accounting is rebuilt from `cost_ledger`; `budget_spent` and `completed_agents` are not used on restore. A recorded `cancellation` is not restored: the resumed run starts again, as described under [Stopping a run](#stopping-a-run).
 
 ### Checkpoint payloads
 
@@ -1008,8 +1032,9 @@ Filesystem and serialization failures are returned as `WorkflowError`. A run dir
 | `verification_records` | `Vec<crate::verification::VerificationRecord>` | Completion-verification history; empty. |
 | `distillation_records` | `Vec<crate::distillation::DistillationRecord>` | Distillation history; empty. |
 | `completed_agents` | `Vec<SerializableAgentResult>` | Name and summary of each recorded result; empty. |
+| `cancellation` | `Option<crate::workflow::cancel::Cancellation>` | The run's stop, in checkpoints written after it (omitted from JSON when `None`); `None`. |
 
-Checkpoints written by earlier versions can contain an `oauth_exempt_agents` field, which is ignored on load; their ledger entries keep their recorded amounts. Budget accounting records `UsageInfo::billed()`, which is zero for subscription calls such as ChatGPT OAuth.
+Unknown fields are ignored on load, so checkpoints written by earlier versions with fields since removed, such as `oauth_exempt_agents`, still load; their ledger entries keep their recorded amounts. A task state saved as `Failed` with exactly the reason `Task cancelled by user.` deserializes as `TaskState::Cancelled`, in checkpoints, task files, and event-log records alike. Budget accounting records `UsageInfo::billed()`, which is zero for subscription calls such as ChatGPT OAuth.
 
 `SerializableAgentResult` has public fields `agent_name: String` and `summary: String` and implements Serde, `Clone`, and `Default` (both strings empty).
 
@@ -1043,7 +1068,7 @@ impl BallotStore {
 
 ## Python bindings
 
-Source: [python/mod.rs](src/python/mod.rs). Cargo feature: `python`. The Python module `arko_workflows` exports three classes: `PyWorkflowBuilder`, `PyWorkflow`, and `PyAgentResult`. The same names are public Rust wrapper types in `arko_workflows::python`; their Python methods are not public Rust methods. `PyAgentResult` implements `From<arko_workflows::AgentResult>`.
+Source: [python/mod.rs](src/python/mod.rs). Cargo feature: `python`. The Python module `arko_workflows` exports three classes, `PyWorkflowBuilder`, `PyWorkflow`, and `PyAgentResult`, and the exception `WorkflowCancelled`, a subclass of `Exception`. The three class names are public Rust wrapper types in `arko_workflows::python`; their Python methods are not public Rust methods. `PyAgentResult` implements `From<arko_workflows::AgentResult>`.
 
 The tables use Python-facing signatures: `self` and PyO3 interpreter arguments are omitted, and awaitable methods are written as `async def`. Builder setters mutate the builder and return `None`, so they cannot be chained like the Rust builder. Numbers map to the underlying Rust `f64` and `usize` types.
 
@@ -1059,6 +1084,7 @@ The tables use Python-facing signatures: `self` and PyO3 interpreter arguments a
 | `persistence(checkpoint_dir: str, auto_checkpoint: bool = False) -> None` | Enable persistence in `checkpoint_dir`. `auto_checkpoint` defaults to `False` here, unlike `PersistenceConfig::new`. |
 | `resume_from(checkpoint: str) -> None` | Restore a checkpoint JSON file at build; requires `persistence`. |
 | `global_memory_tier(name: str, max_bytes: int \| None = None) -> None` | Add an append-only tier every agent can read and write, with an optional byte limit. |
+| `cancel_grace_period(seconds: float) -> None` | Seconds a stopped run waits for each running agent to stop before aborting it; default 30. A negative or non-finite value raises `ValueError`. |
 | `build() -> PyWorkflow` | Create the LLM client, load the agent files, and build the workflow. Load and build failures raise `ValueError`. The builder is not consumed and can be reused. |
 
 `build` creates the client with `LLMClient::from_env()`, which configures every provider whose credentials are in the process environment, ignoring blank values: OpenAI with ChatGPT OAuth from `OPENAI_OAUTH_ACCESS_TOKEN` and `OPENAI_OAUTH_ACCOUNT_ID` (plus optional `OPENAI_OAUTH_REFRESH_TOKEN`), otherwise with an OpenAI API key from `OPENAI_API_KEY`; Anthropic from `ANTHROPIC_API_KEY`; Google Gemini from `GOOGLE_API_KEY`, else `GEMINI_API_KEY`; and OpenRouter from `OPENROUTER_API_KEY`. A Codex `auth.json` is not read, and refreshed ChatGPT OAuth tokens are kept only in memory. The Python API accepts no custom client, custom tools, hooks, verifiers, distillers, or service settings; those require the Rust API.
@@ -1071,13 +1097,15 @@ Obtained from `PyWorkflowBuilder.build()`; there is no Python constructor.
 | --- | --- |
 | `async def run_agent(agent_name: str, prompt: str) -> PyAgentResult` | Run a registered agent with the managed driver. |
 | `async def run_agents_parallel(agents: list[tuple[str, str]]) -> list[PyAgentResult]` | Run `(name, prompt)` pairs concurrently; results in input order when all succeed. |
+| `cancel() -> bool` | Cancel the run, as `Workflow::cancel`: running agents stop, and pending and later runs raise `WorkflowCancelled`. Returns `False` when the run was already stopped. |
+| `is_cancelled() -> bool` | Whether the run is stopped. |
 | `add_manual_cost(amount: float, description: str, metadata: str \| None = None) -> float` | Record a dollar cost and return the new workflow total. A budget error still leaves the charge recorded. |
 | `cost_ledger_json() -> str` | The current `CostLedger` as JSON. |
 | `async def checkpoint() -> None` | Save a checkpoint; does nothing without persistence. |
 | `read_memory(agent_name: str, tier: str, max_chars: int \| None = None) -> str` | Access-checked plain-text read of a tier, or of its trailing `max_chars` characters (`MemoryStore::read_window`). Not the agent tool's versioned JSON. |
 | `write_memory(agent_name: str, tier: str, content: str) -> None` | Access-checked write using the tier's mode, through the store directly: no task ID, freshness notifications, or hooks. |
 
-Execution, accounting, checkpoint, and memory errors raise `RuntimeError`. Continuation, raw handles, event subscription, pause and resume, `finish`, the aggregate `WorkflowResult`, durable steps, and ballots are not available from Python.
+`run_agent` and `run_agents_parallel` raise `arko_workflows.WorkflowCancelled` once the run is cancelled; their other errors raise `RuntimeError` with the message `Workflow error: <error>`. Accounting, checkpoint, and memory errors raise `RuntimeError`. Continuation, raw handles, cancel handles, event subscription, pause and resume, `finish`, the aggregate `WorkflowResult`, durable steps, and ballots are not available from Python.
 
 ### PyAgentResult
 
@@ -1089,12 +1117,13 @@ Source: [error.rs](src/error.rs). `WorkflowError` is re-exported at the root and
 
 | Variant and payload | Meaning |
 | --- | --- |
-| `Agent(arko_agents::ArkoAgentsError)` | Agent setup, runtime, or task error, including a managed task that ended failed or cancelled. Automatic `From`. |
+| `Agent(arko_agents::ArkoAgentsError)` | Agent setup, runtime, or task error, including a managed task that ended failed (`TaskExecution` with the failure reason). Automatic `From`. |
 | `Llm(arko_ai::Error)` | Model client error. Automatic `From`. |
 | `BuilderMissing { field: String }` | A required builder setting is missing. |
 | `BuilderInvalid(String)` | Invalid configuration or checkpoint identity, an invalid durable step spec, a disabled feature (freshness, voting) used through a `Workflow` method, a non-continuable result passed to `continue_agent`, or a disallowed workflow-services caller or target. |
 | `AgentNotFound(String)` | No agent is registered under the name. |
 | `AgentInterrupted { agent: String, reason: String }` | A managed invocation was interrupted. |
+| `AgentCancelled { agent: String, reason: String }` | A managed invocation's task ended `Cancelled` while the workflow run was not stopped; `reason` is the task's reason. |
 | `UserInputRequired { agent: String, task_id: Uuid, questions: String }` | The run is suspended until an answer is supplied with `continue_agent`. |
 | `MemoryTierNotFound(String)` | Unknown memory tier. |
 | `MemoryAccessDenied { agent: String, tier: String, action: String }` | The tier's reader or writer policy denies the agent. |
@@ -1102,19 +1131,17 @@ Source: [error.rs](src/error.rs). `WorkflowError` is re-exported at the root and
 | `BudgetExceeded { spent: f64, limit: f64 }` | Workflow spending strictly exceeds the dollar limit. |
 | `AgentBudgetExceeded { agent: String, spent: f64, limit: f64 }` | The agent's cumulative LLM spending strictly exceeds its limit. |
 | `InvalidCost(f64)` | A manual cost is negative or non-finite. |
-| `AbortedByHook { hook_point: String, reason: String }` | A lifecycle hook returned `Abort`. |
-| `MesiConflict { agent: String, path: String, modifier: String }` | Not returned by this crate; freshness conflicts are reported to the agent as tool feedback. |
+| `AbortedByHook { hook_point: String, reason: String }` | A hook returned `Abort`, which stopped the run. Returned by the operation that fired a lifecycle hook and by every run call in progress or made later. `hook_point` is the `HookPoint` variant name. |
 | `Persistence(String)` | Run identity, journal, or other persisted-state failure. |
 | `DurableUnavailable` | A durable operation was requested without persistence. |
 | `DurableDefinitionMismatch { step: String, details: String }` | The recorded step definition or input differs from the request, or an operator resolution found no unresolved attempt. |
 | `DurableInDoubt { step: String, operation_id: String }` | The outcome of an earlier attempt is unresolved, or the step is already running on this store. |
 | `DurablePermanentlyFailed { step: String, reason: String }` | The step is recorded as permanently failed. |
 | `DurableAttemptsExhausted { step: String }` | The retry policy's attempt limit is reached. |
-| `Cancelled` | Not returned by this crate; cancelled managed tasks return `Agent` and have status `Cancelled`. |
+| `Cancelled` | The run was cancelled through `WorkflowCancelHandle::cancel` or `Workflow::cancel`. Returned by every run call and durable step in progress or started later, and by `finish`. |
 | `Io(std::io::Error)` | I/O failure. Automatic `From`. |
 | `Json(serde_json::Error)` | JSON encoding or decoding failure. Automatic `From`. |
 | `Channel(String)` | Task join or channel failure, a `UserInputHandler` error, a workflow-services active-call limit, or services used after the workflow was dropped. |
-| `Hook(String)` | Not returned by this crate. |
 | `Tool(arko_agents::ToolError)` | Tool-layer error. Automatic `From`. |
 | `Deliberation(String)` | Ballot configuration or tally failure. |
 

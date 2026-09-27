@@ -74,8 +74,11 @@ the failure and scans again before the next call.
 
 Distillers are opt-in and registered with `WorkflowBuilder::distiller`. Each one
 selects its model, reasoning, target agents and tools, minimum input size (in
-Unicode characters), maximum output tokens, and instructions. An empty target set
-matches every agent or tool; name targets explicitly for predictable behavior.
+Unicode characters), maximum output tokens, and instructions. Target agents are
+the names the agents are registered under with `WorkflowBuilder::agent`, not
+their `AgentConfig::name`, and `build` rejects a target that is not a registered
+agent. An empty target set matches every agent or tool; name targets explicitly
+for predictable behavior.
 
 ```rust,ignore
 use arko_ai::{Model, OpenAIEffort, ReasoningConfig};
@@ -83,12 +86,17 @@ use arko_workflows::prelude::*;
 
 let distiller = DistillationConfig::new("bulk-research", Model::openai_gpt_5_6_luna())
     .reasoning(ReasoningConfig::openai(OpenAIEffort::High, false))
-    .target_agent("researcher")
+    .target_agent("researcher") // The registration name used below.
     .target_tool("search_documents")
     .min_chars(12_000)
     .max_output_tokens(16_000) // Room for high-effort reasoning plus the summary.
     .instructions("Preserve exact findings, qualifications, and source references. Remove irrelevant repetition.");
-// Register with Workflow::builder().distiller(distiller).
+
+let workflow = Workflow::builder()
+    // Name, workspace, and client as usual.
+    .agent("researcher", researcher_config)
+    .distiller(distiller)
+    .build()?;
 ```
 
 Defaults are 8,000 input characters and 16,000 output tokens (or the model's output
@@ -115,6 +123,9 @@ Only a finished summary replaces the tool result, and every call is billed:
 - Any other early stop (including an unreported stop reason) or an empty summary
   is an interceptor error. The workflow's interception failure policy may retry it
   before falling back to the raw result.
+
+Once the workflow run is stopped, cancelled or aborted by a hook, distillers make
+no further requests and leave tool output unchanged.
 
 If a raw fallback would be unsuitable for very large outputs, bound the output in
 the tool that produces it. `complete_task` results are never distilled. The
