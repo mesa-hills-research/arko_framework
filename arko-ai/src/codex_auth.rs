@@ -73,14 +73,27 @@ enum Reconciled {
 /// changes between reading it and replacing it.
 const PERSIST_ATTEMPTS: usize = 3;
 
+/// How often the file is read before a JSON error is believed: Codex writes
+/// `auth.json` in place (truncate, then write), so a read can see it empty or
+/// half written. The reads are [`SETTLE_DELAY`] apart.
+const SETTLE_READS: usize = 5;
+const SETTLE_DELAY: std::time::Duration = std::time::Duration::from_millis(30);
+
 #[cfg(test)]
 type RenameHook = Box<dyn FnMut(&Path)>;
+
+#[cfg(test)]
+type ReadHook = Box<dyn FnMut(&Path)>;
 
 #[cfg(test)]
 thread_local! {
     /// Runs just before `persist_tokens` re-reads the file ahead of the
     /// rename, so tests can change the file in that window.
     static BEFORE_RENAME: std::cell::RefCell<Option<RenameHook>> =
+        const { std::cell::RefCell::new(None) };
+    /// Runs before each read of `read_credentials`, so tests can write the
+    /// file as Codex does.
+    static BEFORE_READ: std::cell::RefCell<Option<ReadHook>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -107,10 +120,8 @@ impl CodexAuthFile {
 
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, Error> {
         let path = path.into();
-        let snapshot = std::fs::read(&path)?;
-        let file = Self { path, snapshot };
-        file.credentials()?;
-        Ok(file)
+        let (snapshot, _) = read_credentials(&path)?;
+        Ok(Self { path, snapshot })
     }
 
     pub fn path(&self) -> &Path {
@@ -170,9 +181,8 @@ impl CodexAuthFile {
         id_token: Option<&str>,
     ) -> Result<CodexAuthSync, Error> {
         for _ in 0..PERSIST_ATTEMPTS {
-            let current = std::fs::read(&self.path)?;
+            let (current, in_file) = read_credentials(&self.path)?;
             if current != self.snapshot {
-                let in_file = parse_credentials(&current, &self.path)?;
                 if in_file == *credentials {
                     self.snapshot = current;
                     return Ok(CodexAuthSync::Unchanged);
@@ -184,7 +194,7 @@ impl CodexAuthFile {
                     )));
                 }
                 self.snapshot = current.clone();
-            } else if self.credentials()? == *credentials {
+            } else if in_file == *credentials {
                 return Ok(CodexAuthSync::Unchanged);
             }
 
@@ -192,7 +202,7 @@ impl CodexAuthFile {
             let target = std::fs::canonicalize(&self.path)?;
             let permissions = std::fs::metadata(&target)?.permissions();
             let backup = with_suffix(&target, ".bak");
-            write_file(&backup, &self.snapshot, &permissions)?;
+            write_backup(&backup, &self.snapshot, &permissions)?;
             let nanos = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |elapsed| elapsed.as_nanos());
@@ -336,14 +346,18 @@ impl CodexAuthFile {
     }
 
     /// Brings the file and a client's credentials together: saves
-    /// credentials the client rotated, or reports newer credentials another
-    /// process wrote. Only credentials of the same account are ever saved or
+    /// credentials the client rotated (with `id_token`, the one their refresh
+    /// returned, when known), or reports newer credentials another process
+    /// wrote. Only credentials of the same account are ever saved or
     /// reported; both having rotated is an error, since only one rotation can
     /// be valid.
-    fn reconcile(&mut self, in_client: &ChatGptOAuthCredentials) -> Result<Reconciled, Error> {
+    fn reconcile(
+        &mut self,
+        in_client: &ChatGptOAuthCredentials,
+        id_token: Option<&str>,
+    ) -> Result<Reconciled, Error> {
         let known = self.credentials()?;
-        let current = std::fs::read(&self.path)?;
-        let in_file = parse_credentials(&current, &self.path)?;
+        let (current, in_file) = read_credentials(&self.path)?;
         if in_file.account_id != in_client.account_id {
             return Err(Error::AuthenticationFailed(format!(
                 "{} holds a different ChatGPT account than this client (signed out, or signed in to another account); sign in again",
@@ -373,7 +387,7 @@ impl CodexAuthFile {
         if *in_client == known {
             return Ok(Reconciled::Unchanged);
         }
-        self.persist(in_client)?;
+        self.persist_tokens(in_client, id_token)?;
         Ok(Reconciled::Saved)
     }
 
@@ -391,7 +405,7 @@ impl CodexAuthFile {
         let Some(in_client) = client.openai_chatgpt_oauth_credentials().await else {
             return Ok(CodexAuthSync::Unchanged);
         };
-        match self.reconcile(&in_client)? {
+        match self.reconcile(&in_client, None)? {
             Reconciled::Unchanged => Ok(CodexAuthSync::Unchanged),
             Reconciled::Saved => Ok(CodexAuthSync::Saved),
             Reconciled::Newer { credentials, bytes } => {
@@ -428,29 +442,45 @@ impl CodexAuthFile {
 /// recovery file next to `auth.json` (see
 /// [`CodexAuthFile::write_recovery`]) and the refresh returns an error
 /// naming it; the client keeps using the new tokens, and the next refresh
-/// tries to save them again first.
+/// tries to save them again first (with the refresh's `id_token`).
 pub struct CodexAuthStore {
-    file: Mutex<CodexAuthFile>,
+    state: Mutex<StoreState>,
+}
+
+struct StoreState {
+    file: CodexAuthFile,
+    /// Rotated credentials that could not be saved, with their refresh's
+    /// `id_token`, kept until the credentials are saved.
+    unsaved_id_token: Option<(ChatGptOAuthCredentials, String)>,
 }
 
 impl CodexAuthStore {
     pub fn new(file: CodexAuthFile) -> Self {
         Self {
-            file: Mutex::new(file),
+            state: Mutex::new(StoreState {
+                file,
+                unsaved_id_token: None,
+            }),
         }
     }
 
     /// The `auth.json` this store keeps in step.
     pub fn path(&self) -> PathBuf {
-        self.lock().path.clone()
+        self.lock().file.path.clone()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, CodexAuthFile> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, StoreState> {
         // Every update leaves the file state consistent, so a holder that
         // panicked leaves nothing half-done.
-        self.file.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
+
+/// Where the recovery file message says the file's privacy stands.
+#[cfg(unix)]
+const RECOVERY_FILE_PRIVACY: &str = "readable only by you";
+#[cfg(not(unix))]
+const RECOVERY_FILE_PRIVACY: &str = "it holds your credentials; keep it private";
 
 impl std::fmt::Debug for CodexAuthStore {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -466,11 +496,19 @@ impl ChatGptOAuthStore for CodexAuthStore {
         &self,
         current: &ChatGptOAuthCredentials,
     ) -> Result<Option<ChatGptOAuthCredentials>, Error> {
-        let mut file = self.lock();
-        match file.reconcile(current)? {
+        let mut state = self.lock();
+        // A rotation whose save failed is saved now, with its id_token.
+        let id_token = state
+            .unsaved_id_token
+            .as_ref()
+            .filter(|(unsaved, _)| unsaved == current)
+            .map(|(_, id_token)| id_token.clone());
+        let reconciled = state.file.reconcile(current, id_token.as_deref())?;
+        state.unsaved_id_token = None;
+        match reconciled {
             Reconciled::Unchanged | Reconciled::Saved => Ok(None),
             Reconciled::Newer { credentials, bytes } => {
-                file.snapshot = bytes;
+                state.file.snapshot = bytes;
                 Ok(Some(credentials))
             }
         }
@@ -481,15 +519,22 @@ impl ChatGptOAuthStore for CodexAuthStore {
         refreshed: &ChatGptOAuthCredentials,
         id_token: Option<&str>,
     ) -> Result<(), Error> {
-        let mut file = self.lock();
-        let error = match file.persist_tokens(refreshed, id_token) {
-            Ok(_) => return Ok(()),
+        let mut state = self.lock();
+        let error = match state.file.persist_tokens(refreshed, id_token) {
+            Ok(_) => {
+                state.unsaved_id_token = None;
+                return Ok(());
+            }
             Err(error) => error,
         };
+        state.unsaved_id_token = id_token
+            .filter(|id_token| !id_token.is_empty())
+            .map(|id_token| (refreshed.clone(), id_token.to_string()));
+        let file = &state.file;
         let path = file.path.display().to_string();
         let message = match file.write_recovery_tokens(refreshed, id_token) {
             Ok(recovery) => format!(
-                "refreshed ChatGPT OAuth tokens could not be saved to {path} ({error}); they are in {} (readable only by you): put it in place of {path}, or sign in to Codex again, before Codex next refreshes",
+                "refreshed ChatGPT OAuth tokens could not be saved to {path} ({error}); they are in {} ({RECOVERY_FILE_PRIVACY}): put it in place of {path}, or sign in to Codex again, before Codex next refreshes",
                 recovery.display()
             ),
             Err(recovery_error) => format!(
@@ -498,6 +543,29 @@ impl ChatGptOAuthStore for CodexAuthStore {
         };
         log::error!("arko_ai: {message}");
         Err(Error::AuthenticationFailed(message))
+    }
+}
+
+/// Reads the file and the credentials in it. A file that is not valid JSON
+/// is read again, up to [`SETTLE_READS`] times, before the error is
+/// returned: Codex writes `auth.json` in place (truncate, then write), so a
+/// read can land between the two.
+fn read_credentials(path: &Path) -> Result<(Vec<u8>, ChatGptOAuthCredentials), Error> {
+    let mut reads = 0;
+    loop {
+        #[cfg(test)]
+        BEFORE_READ.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook(path);
+            }
+        });
+        let bytes = std::fs::read(path)?;
+        reads += 1;
+        match parse_credentials(&bytes, path) {
+            Ok(credentials) => return Ok((bytes, credentials)),
+            Err(Error::JsonError(_)) if reads < SETTLE_READS => std::thread::sleep(SETTLE_DELAY),
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -530,8 +598,26 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-fn write_file(path: &Path, bytes: &[u8], permissions: &std::fs::Permissions) -> Result<(), Error> {
-    let mut file = std::fs::File::create(path)?;
+/// Creates the file `path` for credentials, failing if it exists. On Unix
+/// only the owner can read it from the start (mode 0600), so no other user
+/// can open it before `fill_file` gives it the original file's permissions.
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)
+}
+
+/// Replaces the backup `path` with `bytes`. The previous backup is removed
+/// rather than rewritten, since a file's creation mode applies only to new
+/// files.
+fn write_backup(path: &Path, bytes: &[u8], permissions: &std::fs::Permissions) -> Result<(), Error> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
+    let mut file = create_private(path)?;
     fill_file(&mut file, permissions, |file| file.write_all(bytes))?;
     Ok(())
 }
@@ -543,7 +629,7 @@ fn write_temporary(
     permissions: &std::fs::Permissions,
     write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 ) -> Result<(), Error> {
-    let mut file = std::fs::File::create(path)?;
+    let mut file = create_private(path)?;
     let result = fill_file(&mut file, permissions, write);
     if result.is_err() {
         // Close first: Windows cannot remove an open file.
@@ -1059,6 +1145,97 @@ mod tests {
         );
         let debug = format!("{store:?}");
         assert!(debug.contains("auth.json") && !debug.contains("refresh"), "{debug}");
+    }
+
+    fn set_before_read(hook: Option<ReadHook>) {
+        BEFORE_READ.with(|slot| *slot.borrow_mut() = hook);
+    }
+
+    /// Codex writes `auth.json` in place (truncate, then write): a read can
+    /// see it empty or half written.
+    #[test]
+    fn a_file_codex_is_still_writing_is_read_again() {
+        let (_dir, path) = temp_file(NESTED);
+        let store = CodexAuthStore::new(CodexAuthFile::load(&path).unwrap());
+        let mut file = CodexAuthFile::load(&path).unwrap();
+        let loaded = file.credentials().unwrap();
+        for finished in [codex_refreshed(), NESTED.to_string()] {
+            let persisting = finished == NESTED;
+            let reads = std::rc::Rc::new(std::cell::Cell::new(0));
+            let counted = reads.clone();
+            set_before_read(Some(Box::new(move |target| {
+                counted.set(counted.get() + 1);
+                match counted.get() {
+                    1 => std::fs::write(target, "").unwrap(),
+                    2 => std::fs::write(target, &finished[..finished.len() / 2]).unwrap(),
+                    3 => std::fs::write(target, &finished).unwrap(),
+                    _ => {}
+                }
+            })));
+            if persisting {
+                // Persisting reads the file first too.
+                let result = file.persist_tokens(&rotated(), None);
+                set_before_read(None);
+                assert_eq!(result.unwrap(), CodexAuthSync::Saved);
+                assert_eq!(CodexAuthFile::load(&path).unwrap().credentials().unwrap(), rotated());
+            } else {
+                let result = store.before_refresh(&loaded);
+                set_before_read(None);
+                assert_eq!(result.unwrap().unwrap().access_token, "access-codex");
+            }
+            assert_eq!(reads.get(), 3);
+        }
+
+        // A file that stays invalid fails after a few reads.
+        let reads = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counted = reads.clone();
+        set_before_read(Some(Box::new(move |_| counted.set(counted.get() + 1))));
+        std::fs::write(&path, "{\"tokens\":").unwrap();
+        let result = CodexAuthFile::load(&path);
+        set_before_read(None);
+        assert!(matches!(result, Err(Error::JsonError(_))), "{result:?}");
+        assert_eq!(reads.get(), SETTLE_READS);
+    }
+
+    #[test]
+    fn a_rotation_saved_after_a_failed_save_keeps_its_id_token() {
+        let (_dir, path) = temp_file(NESTED);
+        let store = CodexAuthStore::new(CodexAuthFile::load(&path).unwrap());
+        // A directory where the backup goes makes the save fail.
+        let backup = with_suffix(&path, ".bak");
+        std::fs::create_dir(&backup).unwrap();
+        assert!(store.save_refreshed(&rotated(), Some("id-2")).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), NESTED);
+        std::fs::remove_dir(&backup).unwrap();
+
+        // The next refresh first saves the rotation, with the refresh's id_token.
+        assert_eq!(store.before_refresh(&rotated()).unwrap(), None);
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["tokens"]["refresh_token"], "refresh-2");
+        assert_eq!(saved["tokens"]["id_token"], "id-2");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backups_and_temporary_files_are_created_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let (dir, path) = temp_file(NESTED);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // An earlier backup readable by everyone is replaced, not reused.
+        let backup = with_suffix(&path, ".bak");
+        std::fs::write(&backup, "old backup").unwrap();
+        std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut file = CodexAuthFile::load(&path).unwrap();
+        assert_eq!(file.persist(&rotated()).unwrap(), CodexAuthSync::Saved);
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), NESTED);
+        assert_eq!(mode(&backup), 0o600);
+        assert_eq!(mode(&path), 0o600);
+
+        let created = dir.path().join("created");
+        drop(create_private(&created).unwrap());
+        assert_eq!(mode(&created), 0o600);
+        assert!(create_private(&created).is_err(), "never opens an existing file");
     }
 
     #[tokio::test]
