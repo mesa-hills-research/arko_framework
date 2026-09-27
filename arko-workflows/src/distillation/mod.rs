@@ -360,6 +360,7 @@ pub(crate) mod tests {
     ) -> (Result<InterceptedResult, ToolError>, Arc<SharedContext>) {
         let workflow = workflow(client.clone());
         let interceptor = DistillationInterceptor {
+            agent_name: "researcher".to_string(),
             config: DistillationConfig::new("bulk", model).min_chars(10),
             client: Arc::new(client),
             context: workflow.context().clone(),
@@ -527,6 +528,10 @@ impl DistillationConfig {
         }
     }
 
+    /// Distill only this agent's tool results (by default, every agent's).
+    /// `agent` is the name the agent is registered under with
+    /// [`WorkflowBuilder::agent`](crate::WorkflowBuilder::agent), not its
+    /// `AgentConfig::name`.
     pub fn target_agent(mut self, agent: impl Into<String>) -> Self {
         self.target_agents.insert(agent.into());
         self
@@ -584,9 +589,14 @@ impl DistillationConfig {
         config
     }
 
+    /// Whether the distiller targets the agent registered as `agent`.
+    pub(crate) fn targets_agent(&self, agent: &str) -> bool {
+        self.target_agents.is_empty() || self.target_agents.contains(agent)
+    }
+
     fn applies(&self, agent: &str, tool: &str, chars: usize) -> bool {
         chars >= self.min_chars
-            && (self.target_agents.is_empty() || self.target_agents.contains(agent))
+            && self.targets_agent(agent)
             && (self.target_tools.is_empty() || self.target_tools.contains(tool))
     }
 }
@@ -660,6 +670,10 @@ fn complete_summary(response: &arko_ai::GenerationResponse) -> Result<String, Re
 }
 
 pub(crate) struct DistillationInterceptor {
+    /// The name the agent is registered under in the workflow, which target
+    /// filters and records use; `TaskContext::agent_name` is the
+    /// configuration's display name.
+    pub agent_name: String,
     pub config: DistillationConfig,
     pub client: Arc<arko_ai::LLMClient>,
     pub context: Arc<SharedContext>,
@@ -674,11 +688,10 @@ impl ToolResultInterceptor for DistillationInterceptor {
         params: &HashMap<String, Value>,
         task_context: &TaskContext<'_>,
     ) -> Result<InterceptedResult, ToolError> {
-        if !self.config.applies(
-            task_context.agent_name,
-            tool_name,
-            raw_result.chars().count(),
-        ) {
+        if !self
+            .config
+            .applies(&self.agent_name, tool_name, raw_result.chars().count())
+        {
             return Ok(InterceptedResult::Unchanged);
         }
 
@@ -728,7 +741,7 @@ impl ToolResultInterceptor for DistillationInterceptor {
             &format!("distillation: {}", self.config.name),
             Some(format!(
                 "agent={}, task={}, tool={}",
-                task_context.agent_name, task_context.task_id, tool_name
+                self.agent_name, task_context.task_id, tool_name
             )),
         );
         if cost_result.warning_triggered {
@@ -764,7 +777,7 @@ impl ToolResultInterceptor for DistillationInterceptor {
             .push(DistillationRecord {
                 timestamp: chrono::Utc::now(),
                 task_id: task_context.task_id,
-                agent_name: task_context.agent_name.to_string(),
+                agent_name: self.agent_name.clone(),
                 tool_name: tool_name.to_string(),
                 config_name: self.config.name.clone(),
                 input_chars: raw_result.chars().count(),

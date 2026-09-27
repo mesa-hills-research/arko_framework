@@ -541,7 +541,11 @@ impl WorkflowEngine {
             all.extend(agent_specific.iter().cloned());
         }
         for config in &ctx.distillation_configs {
+            if !config.targets_agent(agent_name) {
+                continue;
+            }
             all.push(Arc::new(DistillationInterceptor {
+                agent_name: agent_name.to_string(),
                 config: config.clone(),
                 client: self.llm_client.clone(),
                 context: ctx.clone(),
@@ -1666,6 +1670,79 @@ mod tests {
         assert_eq!(decision, ToolExecutionDecision::Continue);
         assert_eq!(observed_agent.lock().unwrap().as_deref(), Some("coder"));
         std::fs::remove_dir(&workspace).unwrap();
+    }
+
+    /// A distiller's target is the agent's registration name; its display
+    /// name (`AgentConfig::name`, which the runtime reports) doesn't match.
+    #[tokio::test]
+    async fn distillers_target_registration_names_not_display_names() {
+        use crate::distillation::DistillationConfig;
+        use crate::distillation::tests::{MockServer, anthropic_reply};
+        let model = Model::anthropic_claude_opus_5_5();
+        let coder = AgentConfig::builder(
+            "coder-config".to_string(),
+            "Friendly Coder Display Name".to_string(),
+            AgentLLMConfig {
+                model: model.clone(),
+                generation_config: GenerationConfig::default(),
+            },
+        )
+        .role_description("test coder".to_string())
+        .instructions("test instructions".to_string())
+        .build()
+        .unwrap();
+        let mut reviewer = coder.clone();
+        reviewer.id = "reviewer-config".to_string();
+        reviewer.name = "Friendly Reviewer Display Name".to_string();
+        let builder = |server: &MockServer, target: &str| {
+            Workflow::builder()
+                .name("distillation-target-test")
+                .workspace(std::env::temp_dir())
+                .llm_client(Arc::new(server.anthropic_client()))
+                .agent("coder", coder.clone())
+                .agent("reviewer", reviewer.clone())
+                .ephemeral()
+                .distiller(
+                    DistillationConfig::new("bulk", model.clone())
+                        .min_chars(10)
+                        .target_agent(target),
+                )
+                .build()
+        };
+        let summary = "The failing test is in lib.rs.";
+        let server = MockServer::start(anthropic_reply(summary, "end_turn")).await;
+        assert!(matches!(
+            builder(&server, "Friendly Coder Display Name"),
+            Err(WorkflowError::BuilderInvalid(message)) if message.contains("unknown agent")
+        ));
+
+        let workflow = builder(&server, "coder").unwrap();
+        assert!(
+            workflow
+                .engine
+                .build_interceptor_config("reviewer", workflow.context())
+                .is_none()
+        );
+        let interceptor = workflow
+            .engine
+            .build_interceptor_config("coder", workflow.context())
+            .unwrap()
+            .interceptor;
+        let task = TaskContext {
+            task_id: uuid::Uuid::new_v4(),
+            agent_name: "Friendly Coder Display Name",
+            initial_task_prompt: "find the failing test",
+            current_working_directory: &workflow.context().workspace,
+        };
+        let raw = "raw tool output ".repeat(10);
+        let outcome = interceptor
+            .intercept("search", &raw, &HashMap::new(), &task)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, InterceptedResult::Replaced(ref text) if text == summary));
+        assert_eq!(server.requests(), 1);
+        let records = workflow.context().distillation_records.read();
+        assert_eq!(records[0].agent_name, "coder");
     }
 
     #[derive(Debug)]

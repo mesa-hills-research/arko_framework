@@ -871,6 +871,19 @@ impl WorkflowBuilder {
             }
         }
 
+        for distiller in &self.distillation_configs {
+            if let Some(target) = distiller
+                .target_agents
+                .iter()
+                .find(|target| !agent_names.contains(*target))
+            {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "distiller '{}' targets unknown agent '{target}'",
+                    distiller.name
+                )));
+            }
+        }
+
         let mut global_tool_names = HashSet::new();
         for tool in &self.global_tools {
             let tool_name = tool.name();
