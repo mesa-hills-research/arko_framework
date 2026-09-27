@@ -493,3 +493,44 @@ fn new_retry_and_monitoring_settings_default_on_load_and_round_trip() {
     };
     assert!(invalid.validate().is_err());
 }
+
+/// Rate limits with a delay count toward the same per-episode budget: short
+/// delays that keep coming hand over to the usage-limit policy too.
+#[tokio::test(start_paused = true)]
+async fn repeated_short_rate_limit_delays_also_hand_over_to_the_usage_limit_policy() {
+    let (mut agent, mut events, _commands) = harness();
+    let started = tokio::time::Instant::now();
+    for _ in 0..100 {
+        agent
+            .run_llm_attempt::<()>(async { Err(provider_failure(429, Some(Duration::from_secs(60)))) })
+            .await
+            .unwrap();
+        if paused(&agent) {
+            break;
+        }
+    }
+    assert!(paused(&agent));
+    // Fifteen minutes of 60-second waits, then the usage-limit policy.
+    assert_eq!(started.elapsed(), Duration::from_secs(15 * 60));
+    assert!(events_of(&mut events)
+        .iter()
+        .any(|event| matches!(event, AgentEvent::UsageLimitReached { .. })));
+}
+
+/// The budget counts the time actually waited: a wait cut short by a
+/// command counts only up to then.
+#[tokio::test(start_paused = true)]
+async fn a_rate_limit_wait_cut_short_counts_the_time_waited() {
+    let (mut agent, _events, commands) = harness();
+    let sender = tokio::spawn(async move {
+        tokio_sleep(Duration::from_secs(10)).await;
+        commands.send(UserCommand::SuspendTask).await.unwrap();
+    });
+    agent
+        .run_llm_attempt::<()>(async { Err(provider_failure(429, Some(Duration::from_secs(600)))) })
+        .await
+        .unwrap();
+    sender.await.unwrap();
+    assert!(agent.stop_requested);
+    assert_eq!(agent.rate_limit_waited, Duration::from_secs(10));
+}

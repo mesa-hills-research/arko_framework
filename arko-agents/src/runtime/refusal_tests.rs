@@ -54,6 +54,7 @@ fn host(message_index: usize) -> RefusedMessage {
     RefusedMessage {
         message_index,
         runtime: false,
+        runtime_text: false,
         tool_results: vec![],
         images: 0,
     }
@@ -231,6 +232,7 @@ async fn refused_tool_results_can_be_redacted_and_an_invalid_resolution_keeps_wa
             messages: vec![RefusedMessage {
                 message_index: 2,
                 runtime: false,
+                runtime_text: false,
                 tool_results: vec![RefusedToolResult {
                     call_id: Some("call-missing".into()),
                     tool_name: "missing_tool".into(),
@@ -700,22 +702,29 @@ fn call_item(id: &str, name: &str, arguments: &str) -> Value {
 
 /// B1: over ChatGPT OAuth, a same-provider fallback request doesn't echo the
 /// configured model's turn-state token, the configured model's later
-/// request keeps its own token, and the fallback's reasoning items are
-/// replayed only between models of one Codex compaction family.
+/// request keeps its own token (or none), and reasoning is replayed between
+/// the two models, both ways, only within one Codex compaction family.
+/// Items of a response whose reasoning was dropped lose their ids too.
 #[tokio::test]
 async fn a_fallback_turn_replays_correctly_through_the_openai_request_builders() {
-    for (configured, keeps_reasoning) in [
-        (ai::Model::openai_gpt_5_6_luna(), true),
-        (ai::Model::openai_gpt_5_5(), false),
+    for (configured, same_family, turn_state) in [
+        (ai::Model::openai_gpt_5_6_luna(), true, Some("turn-configured")),
+        (ai::Model::openai_gpt_5_5(), false, Some("turn-configured")),
+        (ai::Model::openai_gpt_5_5(), false, None),
     ] {
+        let reasoning = |id: &str, content: &str| {
+            serde_json::json!({"type": "reasoning", "id": id, "summary": [], "encrypted_content": content})
+        };
         let refusal = serde_json::json!({"type": "message", "id": "msg_refused", "role": "assistant",
             "status": "completed", "content": [{"type": "refusal", "refusal": "I can't help with that."}]});
-        let reasoning = serde_json::json!({"type": "reasoning", "id": "rs_fallback", "summary": [],
-            "encrypted_content": "enc_fallback"});
         let (url, captured) = responses_server(vec![
-            (stream_of(&configured.id, vec![refusal]), Some("turn-configured")),
             (
-                stream_of("gpt-6-sol", vec![reasoning, call_item("1", "missing_tool", "{}")]),
+                stream_of(&configured.id, vec![reasoning("rs_c", "enc_configured"), call_item("0", "missing_tool", "{}")]),
+                turn_state,
+            ),
+            (stream_of(&configured.id, vec![refusal]), None),
+            (
+                stream_of("gpt-6-sol", vec![reasoning("rs_f", "enc_fallback"), call_item("1", "missing_tool", "{}")]),
                 Some("turn-fallback"),
             ),
             (
@@ -747,22 +756,244 @@ async fn a_fallback_turn_replays_correctly_through_the_openai_request_builders()
         assert!(matches!(task.current_state, TaskState::Completed { .. }), "{:?}", task.current_state);
 
         let requests = captured.lock().unwrap().clone();
-        assert_eq!(requests.len(), 3);
+        assert_eq!(requests.len(), 4);
         let models: Vec<&str> = requests.iter().map(|(_, body)| body["model"].as_str().unwrap()).collect();
         // (ChatGPT requests name gpt-5.5 without its snapshot date.)
         assert!(configured.id.starts_with(models[0]), "{models:?}");
-        assert_eq!(models[1..], ["gpt-6-sol", models[0]]);
-        assert!(!requests[1].0.contains("x-codex-turn-state"), "{}", requests[1].0);
-        assert!(requests[2].0.contains("x-codex-turn-state: turn-configured"), "{}", requests[2].0);
-        // The last request replays the fallback's call and its result, and
-        // its reasoning only within the compaction family.
-        let input = requests[2].1["input"].as_array().unwrap();
-        assert!(input.iter().any(|item| item["type"] == "function_call" && item["call_id"] == "call_1"));
-        assert!(input.iter().any(|item| item["type"] == "function_call_output" && item["call_id"] == "call_1"));
-        let replayed_reasoning = input
-            .iter()
-            .any(|item| item["type"] == "reasoning" && item["encrypted_content"] == "enc_fallback");
-        assert_eq!(replayed_reasoning, keeps_reasoning, "{}", configured.id);
-        assert!(!input.iter().any(|item| item["id"] == "msg_refused"), "the refused turn is not kept");
+        assert_eq!(models[1..], [models[0], "gpt-6-sol", models[0]]);
+        let turn_header = |index: usize| {
+            let headers = &requests[index].0;
+            headers
+                .lines()
+                .find_map(|line| line.strip_prefix("x-codex-turn-state: "))
+                .map(str::to_string)
+        };
+        // The fallback request carries no token; the configured model's
+        // later request carries its own turn's token (or none), never the
+        // fallback's.
+        assert_eq!(turn_header(1).as_deref(), turn_state);
+        assert_eq!(turn_header(2), None);
+        assert_eq!(turn_header(3).as_deref(), turn_state);
+
+        let input = |index: usize| requests[index].1["input"].as_array().unwrap().clone();
+        let item = |input: &[Value], kind: &str, call_id: &str| {
+            input
+                .iter()
+                .find(|item| item["type"] == kind && item["call_id"] == call_id)
+                .cloned()
+                .unwrap_or_else(|| panic!("no {kind} {call_id} in {input:?}"))
+        };
+        let has_reasoning = |input: &[Value], content: &str| {
+            input
+                .iter()
+                .any(|item| item["type"] == "reasoning" && item["encrypted_content"] == content)
+        };
+        // Request direction: the fallback request replays the configured
+        // model's earlier turn with its reasoning only within the family,
+        // and without the ids of a turn whose reasoning was dropped.
+        let fallback_input = input(2);
+        assert_eq!(has_reasoning(&fallback_input, "enc_configured"), same_family, "{}", configured.id);
+        let earlier_call = item(&fallback_input, "function_call", "call_0");
+        assert_eq!(earlier_call.get("id").is_some(), same_family, "{earlier_call}");
+        assert!(!fallback_input.iter().any(|item| item["id"] == "msg_refused"), "the refused turn is not kept");
+        // Back to the configured model: the fallback's call and result are
+        // replayed, its reasoning and ids only within the family; the
+        // configured model's own turn keeps everything.
+        let last_input = input(3);
+        assert_eq!(has_reasoning(&last_input, "enc_fallback"), same_family, "{}", configured.id);
+        let fallback_call = item(&last_input, "function_call", "call_1");
+        assert_eq!(fallback_call.get("id").is_some(), same_family, "{fallback_call}");
+        item(&last_input, "function_call_output", "call_1");
+        assert!(has_reasoning(&last_input, "enc_configured"));
+        assert_eq!(item(&last_input, "function_call", "call_0")["id"], "fc_0");
     }
+}
+
+/// M3: nothing is added between a refusal and the fallback's answer to it,
+/// so after a failed fallback the refusal can still be resolved; context
+/// the host sent meanwhile follows the changed input.
+#[tokio::test(start_paused = true)]
+async fn a_failed_fallback_stays_resolvable_when_context_arrives_meanwhile() {
+    let (mut agent, mut events, commands) = harness();
+    native(&mut agent);
+    agent.task.agent_config.refusal_fallback = fallback_config(ai::Model::openai_gpt_6_sol());
+    let requested = Arc::clone(&agent.requested_models);
+    let slow_refusal = futures::stream::once(async {
+        tokio_sleep(Duration::from_secs(1)).await;
+        Ok(refused())
+    })
+    .boxed();
+    let scripted = agent.scripted_responses.get_mut().unwrap();
+    scripted.push_back(Ok(slow_refusal));
+    scripted.push_back(Err(provider_failure(401, None)));
+    push(&mut agent, complete_response());
+    let runner = tokio::spawn(agent.run());
+    tokio_sleep(Duration::from_millis(500)).await;
+    commands
+        .send(UserCommand::InjectContext {
+            content: "peer update".into(),
+        })
+        .await
+        .unwrap();
+    let mut received = Vec::new();
+    loop {
+        let event = timeout(Duration::from_secs(60), events.recv()).await.unwrap().unwrap();
+        if let AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. }) = &event {
+            commands
+                .send(UserCommand::ResolveRefusal {
+                    changes: vec![RefusalResolution::RephraseUserMessage {
+                        message_index: 0,
+                        text: "Rephrased.".into(),
+                    }],
+                })
+                .await
+                .unwrap();
+        }
+        let end = matches!(event, AgentEvent::TaskStreamEnd);
+        received.push(event);
+        if end {
+            break;
+        }
+    }
+    let task = runner.await.unwrap().unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }), "{:?}", task.current_state);
+    assert!(!received.iter().any(|event| matches!(
+        event,
+        AgentEvent::ErrorEncountered { error_message, .. } if error_message.contains("Could not resolve")
+    )));
+    assert_eq!(*requested.lock().unwrap(), ["gpt-5.6-luna", "gpt-6-sol", "gpt-5.6-luna"]);
+    let texts: Vec<String> = task.conversation.messages.iter().map(texts).collect();
+    assert_eq!(texts[0], "Rephrased.");
+    assert!(texts[1].contains("peer update"), "{texts:?}");
+}
+
+/// A refused response reporting plan usage over the opt-in threshold: the
+/// monitor pauses before the fallback request, and the fallback is still
+/// made once the pause is approved.
+#[tokio::test(start_paused = true)]
+async fn a_monitor_pause_before_the_fallback_keeps_it() {
+    let (mut agent, mut events, commands) = harness();
+    native(&mut agent);
+    agent.task.agent_config.refusal_fallback = fallback_config(ai::Model::openai_gpt_6_sol());
+    agent.task.agent_config.monitoring = crate::agent_config::MonitoringConfig {
+        plan_usage: Some(crate::agent_config::PlanUsageThreshold {
+            percent: 90.0,
+            action: crate::agent_config::PlanUsageAction::Pause,
+        }),
+        ..Default::default()
+    };
+    let requested = Arc::clone(&agent.requested_models);
+    let ai::StreamEvent::End(mut refusal) = refused() else { unreachable!() };
+    refusal.model_call_usage.plan_usage = Some(ai::PlanUsage {
+        primary: Some(ai::PlanUsageWindow {
+            used_percent: 95.0,
+            window_minutes: Some(300),
+            resets_at: Some(4_102_444_800),
+            reset_after_seconds: None,
+        }),
+        ..Default::default()
+    });
+    push(&mut agent, ai::StreamEvent::End(refusal));
+    push(&mut agent, complete_response());
+    let runner = tokio::spawn(agent.run());
+    loop {
+        match timeout(Duration::from_secs(60), events.recv()).await.unwrap().unwrap() {
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { error_message }) => {
+                assert!(error_message.contains("Plan usage"), "{error_message}");
+                commands
+                    .send(UserCommand::ApproveErrorRecovery { message: None })
+                    .await
+                    .unwrap();
+            }
+            AgentEvent::TaskStreamEnd => break,
+            _ => {}
+        }
+    }
+    let task = runner.await.unwrap().unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(*requested.lock().unwrap(), ["gpt-5.6-luna", "gpt-6-sol"]);
+}
+
+/// L6: a pending fallback is saved with the task, so a task suspended after
+/// the refusal still sends the refused input to the fallback model.
+#[tokio::test(start_paused = true)]
+async fn a_pending_fallback_survives_a_restart() {
+    let (mut agent, _events, _commands) = harness();
+    native(&mut agent);
+    agent.task.agent_config.refusal_fallback = fallback_config(ai::Model::openai_gpt_6_sol());
+    agent.task.conversation.system_message = Some("resumed".into());
+    agent.task.conversation.add_user_message("task");
+    agent.task.fallback_for = Some(model_refusal());
+    agent.task = serde_json::from_str(&serde_json::to_string(&agent.task).unwrap()).unwrap();
+    assert!(agent.task.fallback_for.is_some());
+    let requested = Arc::clone(&agent.requested_models);
+    push(&mut agent, complete_response());
+    let task = timeout(Duration::from_secs(60), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(*requested.lock().unwrap(), ["gpt-6-sol"]);
+    assert!(task.fallback_for.is_none());
+}
+
+/// A recovery deadline that ends the fallback request names the refusal it
+/// was to answer.
+#[tokio::test(start_paused = true)]
+async fn a_deadline_during_the_fallback_names_the_refusal() {
+    let (mut agent, mut events, commands) = harness();
+    native(&mut agent);
+    agent.task.agent_config.llm_retry_config.max_elapsed_ms = 1000;
+    agent.task.agent_config.refusal_fallback = fallback_config(ai::Model::openai_gpt_6_sol());
+    let scripted = agent.scripted_responses.get_mut().unwrap();
+    scripted.push_back(Err(provider_failure(503, None)));
+    scripted.push_back(Ok(futures::stream::iter([Ok(refused())]).boxed()));
+    scripted.push_back(Ok(futures::stream::pending().boxed()));
+    let runner = tokio::spawn(agent.run());
+    loop {
+        if let AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { error_message }) =
+            timeout(Duration::from_secs(60), events.recv()).await.unwrap().unwrap()
+        {
+            assert!(error_message.contains("refused"), "{error_message}");
+            assert!(error_message.contains("fallback model could not answer"), "{error_message}");
+            assert!(error_message.contains("budget exhausted"), "{error_message}");
+            break;
+        }
+    }
+    commands.send(UserCommand::SuspendTask).await.unwrap();
+    let task = runner.await.unwrap().unwrap();
+    assert!(task.fallback_for.is_none());
+    assert!(task.refused_input.is_some());
+}
+
+/// A command channel that closes mid-stream rejects the calls announced so
+/// far.
+#[tokio::test(start_paused = true)]
+async fn announced_calls_are_rejected_when_the_command_channel_closes() {
+    let (mut agent, mut events, commands) = harness();
+    native(&mut agent);
+    agent.scripted_responses.get_mut().unwrap().push_back(Ok(futures::stream::iter([Ok(
+        ai::StreamEvent::ToolCallStart { index: 0, name: "complete_task".into() },
+    )])
+    .chain(futures::stream::pending())
+    .boxed()));
+    let runner = tokio::spawn(agent.run());
+    let initiated = loop {
+        if let AgentEvent::ToolCallInitiated { tool_call_id, .. } =
+            timeout(Duration::from_secs(60), events.recv()).await.unwrap().unwrap()
+        {
+            break tool_call_id;
+        }
+    };
+    drop(commands);
+    let task = runner.await.unwrap().unwrap();
+    assert!(matches!(task.current_state, TaskState::Interrupted { .. }));
+    let rejected: Vec<(Uuid, String)> = events_of(&mut events)
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolRejected { tool_call_id, reason: Some(reason), .. } => Some((tool_call_id, reason)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rejected, [(initiated, INTERRUPTED_CALL.to_string())]);
 }

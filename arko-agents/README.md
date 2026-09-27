@@ -57,9 +57,9 @@ cargo run -p arko-agents --example arko_agents_cli -- --help
 (`server_is_overloaded`, ...) are retried under either `RetryThen*` policy after
 the provider's delay (`Retry-After`, rate-limit reset headers, a delay in the body)
 plus jitter, or with backoff from 1 s to 60 s when it gives none, until success or
-cancellation. Rate limits without a delay are waited out for at most `max_wait_ms`
-(15 minutes) in all per recovery episode; after that they are handled as a usage
-limit. These retries don't count against the attempt limit or the elapsed
+cancellation. Rate limits are waited out for at most `max_wait_ms` (15 minutes)
+in all per recovery episode, with or without delays (counting the time actually
+waited); after that they are handled as a usage limit. These retries don't count against the attempt limit or the elapsed
 budget and add nothing to the conversation. A rate limit asking for more than
 `max_wait_ms` (15 minutes) is handled as a usage limit. Set `rate_limit_retry: None`
 (JSON `null`) for ordinary bounded recovery.
@@ -169,10 +169,11 @@ normalized to one attempt.
   and content-filter refusals are removed from history.
 - Refusal recovery: a `RefusedInput` event (after `RefusalReceived`) lists the
   input the refused turn answered: every user message after the last assistant
-  turn (`RefusedMessage { message_index, runtime, tool_results, images }`, tool
-  results by provider call id). Messages the runtime added (file-tree updates,
-  error and recovery notes, requests to continue; tracked in
-  `Task::runtime_messages`) are marked `runtime` and can't be changed. The
+  turn (`RefusedMessage { message_index, runtime, runtime_text, tool_results,
+  images }`, tool results by provider call id). Messages the runtime added
+  (file-tree updates, error and recovery notes, requests to continue; tracked in
+  `Task::runtime_messages`) are marked `runtime` and can't be changed, nor can a
+  recovery note the runtime put beside native tool results (`runtime_text`). The
   input is also kept in `Task::refused_input` until it is resolved, recovery is
   approved, or a later turn completes. While the task awaits recovery approval,
   `UserCommand::ResolveRefusal { changes }` applies a list of changes together
@@ -182,10 +183,12 @@ normalized to one attempt.
     but keeps the sections the runtime appended to it (`# Initial Environment
     Information`, `# Current Environment Information (updated this turn)`,
     `# Reminder`); in a tool-results message it replaces the text beside the
-    results (such as a native `ask_user` answer). Rephrasing the task prompt
-    updates `Task::initial_task_prompt`.
+    results (such as a native `ask_user` answer). The text must not be empty.
+    Rephrasing the task prompt applies its `output_based_only` markers as the
+    prompt builder does and updates `Task::initial_task_prompt`.
   - `RemoveUserMessage { message_index }` removes a message without tool
-    results (at least one user message must remain).
+    results; at least one user message not added by the runtime must remain,
+    so the task prompt can't be removed when it is the only one.
   - `RemoveImages { message_index }` removes a message's images (tool
     screenshots with their descriptions).
   - `RedactToolResults { call_ids, replacement }` replaces tool outputs; calls
@@ -195,23 +198,35 @@ normalized to one attempt.
   kept refused turn); the refused turn is then removed and the changed input
   sent as is, and tools that track the history observe it from the start
   again. For a task returned interrupted, call `Task::resolve_refusal(changes)`
-  before running it again. The underlying arko-ai `Conversation` operations
-  (`rephrase_last_user_turn`, `remove_last_user_turn`, `redact_tool_result`)
-  are usable directly. `ApproveErrorRecovery` still continues without a change.
+  before running it again. Change an agent task's input this way rather than
+  through the underlying arko-ai `Conversation` operations
+  (`rephrase_last_user_turn`, `remove_last_user_turn`, `redact_tool_result`),
+  which don't keep the task's bookkeeping (`runtime_messages`, the refused
+  input) in step. `ApproveErrorRecovery` still continues without a change; it
+  accepts the input as it is, so if the model refuses again, the reported input
+  is only the runtime's recovery note, which can't be changed.
 - Opt-in `AgentConfig::refusal_fallback` (an `AgentLLMConfig` on the configured
   model's provider; configs with another provider are rejected, since
   providers can't replay each other's turns): a refusal from the configured
   model is reported (with its `RefusedInput`), then the same input goes once to
   the fallback model (`RefusalFallback` event; the refused turn is not kept),
-  whose response continues the task; later turns use the configured model. If
-  the fallback also refuses or its request fails, the refusal stands and can be
-  resolved as above; approving recovery resends to the configured model. The
-  fallback request doesn't echo the configured model's ChatGPT turn-state
-  token, nor does the configured model later echo the fallback's. The
-  fallback's OpenAI reasoning items are replayed to the configured model only
-  when both are in one Codex compaction family (GPT-5.6 and GPT-6 models;
-  Codex replays history unchanged between such models and compacts it
-  otherwise); for other pairs they are dropped. Anthropic thinking is kept.
+  whose response continues the task; later turns use the configured model. The
+  pending fallback is saved with the task (`Task::fallback_for`), survives a
+  monitor pause, and holds back context updates and file-tree changes until it
+  has answered, so the refused input stays as it was. If the fallback also
+  refuses or its request fails (or a recovery deadline ends it), the refusal
+  stands and can be resolved as above; approving recovery resends to the
+  configured model. The fallback request doesn't echo the configured model's
+  ChatGPT turn-state token, nor does the configured model later echo the
+  fallback's. OpenAI reasoning is replayed between the two models, in both
+  directions, only when both are in one Codex compaction family (GPT-5.6 and
+  GPT-6 models; Codex replays history unchanged between such models and
+  compacts it otherwise); for other pairs it is dropped, together with the ids
+  of that response's other items (the Responses API rejects an `fc_` item sent
+  without its reasoning). The family rule applies to `Provider::OpenAI` only:
+  OpenRouter `openai/*` slugs keep their encrypted reasoning. Anthropic
+  thinking is kept. Whether a same-provider fallback replays correctly for
+  Gemini thought signatures and OpenRouter `reasoning_details` is unverified.
 - Waits that don't count against the ordinary limits (rate limits, opt-in
   `capacity_retry`, usage-limit waits)
   neither reset nor consume them: ordinary attempts keep counting across

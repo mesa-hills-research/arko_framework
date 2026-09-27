@@ -132,6 +132,17 @@ pub struct Task {
     /// [`RefusalResolution`] leaves alone.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub runtime_messages: BTreeSet<usize>,
+    /// Indices of tool-results messages whose text beside the results the
+    /// runtime added (a recovery note), which [`RefusalResolution`] doesn't
+    /// rephrase.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub runtime_text_messages: BTreeSet<usize>,
+    /// Set after a refusal when the opt-in refusal fallback will answer the
+    /// refused input: the refusal the fallback request answers. The next
+    /// model request goes to the fallback model; saved so a task suspended
+    /// in between still makes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_for: Option<arko_ai::Refusal>,
     /// Indices in `usage_history` of calls made to the refusal fallback
     /// model, which the cache monitor skips.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -187,6 +198,8 @@ impl Task {
             pending_tool_images: Vec::new(),
             refused_input: None,
             runtime_messages: BTreeSet::new(),
+            runtime_text_messages: BTreeSet::new(),
+            fallback_for: None,
             fallback_calls: Vec::new(),
             plan_usage_threshold_reported: None,
             monitor_pause: false,

@@ -679,11 +679,13 @@ pub struct AgentConfig {
     /// The fallback must use the configured model's provider ([`validate`](AgentConfig::validate)
     /// rejects others): providers can't replay each other's assistant turns.
     /// Its ChatGPT turn-state token is kept apart from the configured
-    /// model's, and its OpenAI reasoning items are replayed to the configured
-    /// model only when both are in one Codex compaction family (the GPT-5.6
-    /// and GPT-6 models); otherwise they are dropped and its messages and
-    /// calls replayed without them. Anthropic thinking is kept (a model that
-    /// can't read another model's thinking ignores it).
+    /// model's, and OpenAI reasoning is replayed between the two models only
+    /// when both are in one Codex compaction family (the GPT-5.6 and GPT-6
+    /// models of `Provider::OpenAI`); otherwise it is dropped, with the ids of
+    /// that response's other items. Anthropic thinking is kept (a model that
+    /// can't read another model's thinking ignores it). Replaying Gemini
+    /// thought signatures and OpenRouter `reasoning_details` to another model
+    /// of the same provider is unverified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal_fallback: Option<AgentLLMConfig>,
 }
