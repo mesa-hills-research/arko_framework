@@ -34,7 +34,7 @@ pub use embedding_config::{EmbeddingConfig, VoyageInputType};
 pub use embedding_model::EmbeddingModelDetails;
 pub use embedding_provider_identifier::EmbeddingProviderIdentifier;
 pub use providers::EmbeddingResponse;
-pub use token_utils::count_tokens;
+pub use token_utils::{TokenCounter, count_tokens};
 
 pub use providers::openai::{
     ChatGptOAuthCredentials, OAuthRefreshResult, OpenAIAuth,

@@ -101,6 +101,22 @@ impl EmbeddingClient {
         }
     }
 
+    /// Loads the model's tokenizer on a blocking worker, honoring the configured revision
+    /// and Hugging Face token. The counter shares the tokenizer [`embed`](Self::embed)
+    /// uses for the same configuration, so repeated counts need no further loading.
+    pub async fn token_counter(&self, config: &EmbeddingConfig) -> Result<token_utils::TokenCounter, Error> {
+        let model_details = self.get_model_details(config).await?;
+        let hf_token = config.hf_token.clone();
+        let revision = config.tokenizer_revision.clone();
+        let tokenizer = tokio::task::spawn_blocking(move || {
+            token_utils::load_tokenizer(
+                &model_details.tokenizer_id, revision.as_deref(), hf_token.as_deref(),
+                model_details.requires_hf_token,
+            )
+        }).await.map_err(|e| Error::TokenizerError(format!("tokenizer worker failed: {e}")))??;
+        Ok(token_utils::TokenCounter::new(tokenizer))
+    }
+
     /// Counts tokens for a single text according to the specified model configuration.
     /// Uses the batch-aware tokenizer helper so tokenizer initialization can be shared if callers
     /// move to batch-counting. For a single text this is functionally equivalent but avoids
@@ -174,5 +190,25 @@ impl EmbeddingClient {
 impl Default for EmbeddingClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "downloads a Hugging Face tokenizer"]
+    async fn token_counter_matches_batch_counting_for_the_same_revision() {
+        let revision = "44f3b2ae4ddf33403ed4dd66bec3fa48ff7dbbf9";
+        let config = EmbeddingConfig::new(EmbeddingProviderIdentifier::Voyage, "voyage-4")
+            .with_tokenizer_revision(revision);
+        let counter = EmbeddingClient::new().token_counter(&config).await.unwrap();
+        let text = "fn main() { println!(\"Grüße, 世界\"); }";
+        let expected = token_utils::count_tokens_with_revision(
+            "voyageai/voyage-4", [text], None, false, Some(revision),
+        ).unwrap()[0];
+        assert!(expected > 0);
+        assert_eq!(counter.count(text).unwrap(), expected);
     }
 }

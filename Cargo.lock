@@ -196,7 +196,6 @@ dependencies = [
  "syn 2.0.101",
  "tempfile",
  "thiserror",
- "tokenizers",
  "tokio",
  "uuid",
 ]

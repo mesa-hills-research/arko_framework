@@ -2,13 +2,12 @@
 use crate::{EmbeddingProfile, Result, error::invalid};
 use arko_ai::{
     EmbeddingClient, EmbeddingConfig, EmbeddingModelDetails, EmbeddingProviderIdentifier,
-    GenerationConfig, LLMClient, Model, OpenAIEffort, ReasoningConfig, StreamEvent, ToolChoice,
-    ToolConfig, ToolDefinition, Verbosity, VoyageInputType,
+    GenerationConfig, LLMClient, Model, OpenAIEffort, ReasoningConfig, StreamEvent, TokenCounter,
+    ToolChoice, ToolConfig, ToolDefinition, Verbosity, VoyageInputType,
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::Arc;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelRequest {
@@ -51,7 +50,7 @@ pub trait Backend: Send + Sync + 'static {
 pub struct ArkoBackend {
     llm: LLMClient,
     embeddings: EmbeddingClient,
-    tokenizer: Arc<tokenizers::Tokenizer>,
+    tokenizer: TokenCounter,
     profile: EmbeddingProfile,
     limits: Limits,
 }
@@ -77,12 +76,12 @@ impl ArkoBackend {
                 .max_batch_size
                 .ok_or_else(|| invalid("model has no verified item-count limit"))?,
         };
-        let revision = profile.tokenizer_revision.clone();
-        let id = details.tokenizer_id;
-        let tokenizer = tokio::task::spawn_blocking(move || {
-            arko_ai::token_utils::load_tokenizer(&id, Some(&revision), None, false)
-        })
-        .await??;
+        let tokenizer = embeddings
+            .token_counter(
+                &EmbeddingConfig::new(EmbeddingProviderIdentifier::Voyage, &profile.model)
+                    .with_tokenizer_revision(&profile.tokenizer_revision),
+            )
+            .await?;
         Ok(Self {
             llm,
             embeddings,
@@ -157,8 +156,7 @@ impl Backend for ArkoBackend {
     }
     fn tokens(&self, text: &str) -> Result<usize> {
         self.tokenizer
-            .encode(text, false)
-            .map(|e| e.len())
+            .count(text)
             .map_err(|e| invalid(e.to_string()))
     }
     fn limits(&self) -> Limits {
