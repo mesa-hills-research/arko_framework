@@ -392,6 +392,25 @@ impl CodexAuthFile {
         Ok(Reconciled::Saved)
     }
 
+    /// Writes an unsaved rotation to the file if the file still holds
+    /// credentials it replaced. Returns whether the file holds the rotation
+    /// now (written now, or already there); `false` when the file holds other
+    /// credentials, written elsewhere, and nothing was written.
+    fn save_rotation(&mut self, rotation: &UnsavedRotation) -> Result<bool, Error> {
+        let (current, in_file) = read_credentials(&self.path)?;
+        if in_file == rotation.credentials {
+            self.snapshot = current;
+            return Ok(true);
+        }
+        if !rotation.spent.contains(&in_file) {
+            return Ok(false);
+        }
+        // The file is stale: the rotation is based on what it holds.
+        self.snapshot = current;
+        self.persist_tokens(&rotation.credentials, rotation.id_token.as_deref())?;
+        Ok(true)
+    }
+
     /// Reconciles the file with `client`'s ChatGPT OAuth credentials: writes
     /// credentials the client rotated, or loads newer credentials another
     /// process wrote into the client. Fails when both changed, since only one
@@ -442,8 +461,23 @@ impl CodexAuthFile {
 /// When rotated tokens cannot be written back, they go to a private
 /// recovery file next to `auth.json` (see
 /// [`CodexAuthFile::write_recovery`]) and the refresh returns an error
-/// naming it; the client keeps using the new tokens, and the next refresh
-/// tries to save them again first (with the refresh's `id_token`).
+/// naming it; the client keeps using the new tokens. Every store of the
+/// file in this process then knows of the unsaved rotation until the file
+/// holds it or newer credentials written elsewhere:
+///
+/// - Before any refresh through any of them, it is saved first (with the
+///   refresh's `id_token`), as long as the file still holds the credentials
+///   it replaced.
+/// - A client holding other credentials of the account (such as the spent
+///   ones the file still holds) is handed the rotated tokens instead of
+///   refreshing, even while they still can't be saved (a warning is
+///   logged): they are the valid ones.
+/// - A client holding the rotated tokens doesn't refresh them again while
+///   they can't be saved: its refresh fails with the save's error.
+/// - Once the file holds credentials written elsewhere (Codex refreshed, or
+///   the user signed in again), the rotation is forgotten; those are
+///   adopted as usual, and a client holding the rotation gets the error
+///   that both rotated.
 ///
 /// Every store of the same file (by canonical path) in this process shares
 /// one [`refresh_lock`](ChatGptOAuthStore::refresh_lock), so clients built
@@ -452,63 +486,126 @@ impl CodexAuthFile {
 /// first one's tokens in the file instead of reusing the rotated refresh
 /// token. Each store keeps its own record of the file as last read.
 pub struct CodexAuthStore {
-    state: Mutex<StoreState>,
-    refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    file: Mutex<CodexAuthFile>,
+    shared: Arc<SharedFile>,
 }
 
-/// The refresh locks of the `auth.json` files with a [`CodexAuthStore`] in
+/// What every [`CodexAuthStore`] of one `auth.json` in this process shares.
+struct SharedFile {
+    refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    rotations: Mutex<Rotations>,
+}
+
+/// Rotations a store made that the file's other stores must know of.
+#[derive(Default)]
+struct Rotations {
+    /// Rotated credentials a store could not save.
+    unsaved: Option<UnsavedRotation>,
+    /// The last unsaved rotation that has since been saved (or refreshed
+    /// again and the result saved), with file contents holding it. A store
+    /// whose client holds it, having made it or been handed it, takes these
+    /// contents as its record of the file, so that newer credentials in the
+    /// file are then adopted rather than taken for a conflicting rotation.
+    settled: Option<(ChatGptOAuthCredentials, Vec<u8>)>,
+}
+
+#[derive(Clone)]
+struct UnsavedRotation {
+    credentials: ChatGptOAuthCredentials,
+    /// The refresh's `id_token`, saved with the credentials.
+    id_token: Option<String>,
+    /// The credentials the rotation replaced, and those these replaced when
+    /// they were an unsaved rotation too. Their refresh tokens are spent: a
+    /// file holding one of them is stale.
+    spent: Vec<ChatGptOAuthCredentials>,
+}
+
+impl SharedFile {
+    fn rotations(&self) -> std::sync::MutexGuard<'_, Rotations> {
+        // Each update replaces whole values, so a holder that panicked
+        // leaves nothing half-done.
+        self.rotations.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Forgets `rotation` as unsaved; with `contents`, the file contents
+    /// holding it, records it as settled.
+    fn settle(&self, rotation: &ChatGptOAuthCredentials, contents: Option<Vec<u8>>) {
+        let mut rotations = self.rotations();
+        if rotations
+            .unsaved
+            .as_ref()
+            .is_some_and(|unsaved| unsaved.credentials == *rotation)
+        {
+            rotations.unsaved = None;
+        }
+        if let Some(contents) = contents {
+            rotations.settled = Some((rotation.clone(), contents));
+        }
+    }
+}
+
+/// The shared state of the `auth.json` files with a [`CodexAuthStore`] in
 /// this process, by canonical path. An entry lives as long as a store uses
 /// it; dead entries are dropped when a store is made.
-static REFRESH_LOCKS: Mutex<Vec<(PathBuf, Weak<tokio::sync::Mutex<()>>)>> =
-    Mutex::new(Vec::new());
+static SHARED_FILES: Mutex<Vec<(PathBuf, Weak<SharedFile>)>> = Mutex::new(Vec::new());
 
-fn shared_refresh_lock(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
+fn shared_file(path: &Path) -> Arc<SharedFile> {
     let key = std::fs::canonicalize(path)
         .or_else(|_| std::path::absolute(path))
         .unwrap_or_else(|_| path.to_path_buf());
     // The list is valid after any panic: it only ever gains or drops whole entries.
-    let mut locks = REFRESH_LOCKS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    locks.retain(|(_, lock)| lock.strong_count() > 0);
-    if let Some(lock) = locks
+    let mut files = SHARED_FILES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    files.retain(|(_, shared)| shared.strong_count() > 0);
+    if let Some(shared) = files
         .iter()
         .find(|(path, _)| *path == key)
-        .and_then(|(_, lock)| lock.upgrade())
+        .and_then(|(_, shared)| shared.upgrade())
     {
-        return lock;
+        return shared;
     }
-    let lock = Arc::new(tokio::sync::Mutex::new(()));
-    locks.push((key, Arc::downgrade(&lock)));
-    lock
-}
-
-struct StoreState {
-    file: CodexAuthFile,
-    /// Rotated credentials that could not be saved, with their refresh's
-    /// `id_token`, kept until the credentials are saved.
-    unsaved_id_token: Option<(ChatGptOAuthCredentials, String)>,
+    let shared = Arc::new(SharedFile {
+        refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+        rotations: Mutex::new(Rotations::default()),
+    });
+    files.push((key, Arc::downgrade(&shared)));
+    shared
 }
 
 impl CodexAuthStore {
     pub fn new(file: CodexAuthFile) -> Self {
         Self {
-            refresh_lock: shared_refresh_lock(&file.path),
-            state: Mutex::new(StoreState {
-                file,
-                unsaved_id_token: None,
-            }),
+            shared: shared_file(&file.path),
+            file: Mutex::new(file),
         }
     }
 
     /// The `auth.json` this store keeps in step.
     pub fn path(&self) -> PathBuf {
-        self.lock().file.path.clone()
+        self.lock().path.clone()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, StoreState> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, CodexAuthFile> {
         // Every update leaves the file state consistent, so a holder that
-        // panicked leaves nothing half-done.
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        // panicked leaves nothing half-done. (Taken before the shared
+        // rotations' lock, never after it.)
+        self.file.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+/// `rotation`, made by another store of `path`, in place of a refresh of
+/// `current`: for the same account only.
+fn hand_over(
+    current: &ChatGptOAuthCredentials,
+    rotation: ChatGptOAuthCredentials,
+    path: &Path,
+) -> Result<Option<ChatGptOAuthCredentials>, Error> {
+    if rotation.account_id != current.account_id {
+        return Err(Error::AuthenticationFailed(format!(
+            "{} holds a different ChatGPT account than this client (signed out, or signed in to another account); sign in again",
+            path.display()
+        )));
+    }
+    Ok(Some(rotation))
 }
 
 /// Where the recovery file message says the file's privacy stands.
@@ -531,19 +628,45 @@ impl ChatGptOAuthStore for CodexAuthStore {
         &self,
         current: &ChatGptOAuthCredentials,
     ) -> Result<Option<ChatGptOAuthCredentials>, Error> {
-        let mut state = self.lock();
-        // A rotation whose save failed is saved now, with its id_token.
-        let id_token = state
-            .unsaved_id_token
-            .as_ref()
-            .filter(|(unsaved, _)| unsaved == current)
-            .map(|(_, id_token)| id_token.clone());
-        let reconciled = state.file.reconcile(current, id_token.as_deref())?;
-        state.unsaved_id_token = None;
-        match reconciled {
+        let mut file = self.lock();
+        let (unsaved, settled) = {
+            let rotations = self.shared.rotations();
+            (rotations.unsaved.clone(), rotations.settled.clone())
+        };
+        // This client holds a rotation that another store saved: the file
+        // held it then.
+        if let Some((credentials, contents)) = settled
+            && credentials == *current
+            && file.credentials().ok().as_ref() != Some(current)
+        {
+            file.snapshot = contents;
+        }
+        if let Some(rotation) = unsaved {
+            match file.save_rotation(&rotation) {
+                Ok(true) => {
+                    self.shared
+                        .settle(&rotation.credentials, Some(file.snapshot.clone()));
+                    if *current != rotation.credentials {
+                        return hand_over(current, rotation.credentials, &file.path);
+                    }
+                }
+                // The file holds credentials written elsewhere.
+                Ok(false) => self.shared.settle(&rotation.credentials, None),
+                // Not rotated again before it is saved.
+                Err(error) if *current == rotation.credentials => return Err(error),
+                Err(error) => {
+                    log::warn!(
+                        "arko_ai: rotated ChatGPT OAuth tokens that another client of {} made still can't be saved there ({error}); using them",
+                        file.path.display()
+                    );
+                    return hand_over(current, rotation.credentials, &file.path);
+                }
+            }
+        }
+        match file.reconcile(current, None)? {
             Reconciled::Unchanged | Reconciled::Saved => Ok(None),
             Reconciled::Newer { credentials, bytes } => {
-                state.file.snapshot = bytes;
+                file.snapshot = bytes;
                 Ok(Some(credentials))
             }
         }
@@ -554,18 +677,35 @@ impl ChatGptOAuthStore for CodexAuthStore {
         refreshed: &ChatGptOAuthCredentials,
         id_token: Option<&str>,
     ) -> Result<(), Error> {
-        let mut state = self.lock();
-        let error = match state.file.persist_tokens(refreshed, id_token) {
+        let mut file = self.lock();
+        // Set when this refresh replaced an unsaved rotation (one handed
+        // over while it still couldn't be saved).
+        let replaced = self.shared.rotations().unsaved.clone();
+        let error = match file.persist_tokens(refreshed, id_token) {
             Ok(_) => {
-                state.unsaved_id_token = None;
+                if let Some(replaced) = replaced {
+                    let contents = file
+                        .contents_with(&replaced.credentials, replaced.id_token.as_deref())
+                        .ok();
+                    self.shared.settle(&replaced.credentials, contents);
+                }
                 return Ok(());
             }
             Err(error) => error,
         };
-        state.unsaved_id_token = id_token
-            .filter(|id_token| !id_token.is_empty())
-            .map(|id_token| (refreshed.clone(), id_token.to_string()));
-        let file = &state.file;
+        // The file's credentials as last read are the ones refreshed.
+        let mut spent: Vec<ChatGptOAuthCredentials> = file.credentials().ok().into_iter().collect();
+        if let Some(replaced) = replaced {
+            spent.extend(replaced.spent);
+            spent.push(replaced.credentials);
+        }
+        self.shared.rotations().unsaved = Some(UnsavedRotation {
+            credentials: refreshed.clone(),
+            id_token: id_token
+                .filter(|id_token| !id_token.is_empty())
+                .map(str::to_string),
+            spent,
+        });
         let path = file.path.display().to_string();
         let message = match file.write_recovery_tokens(refreshed, id_token) {
             Ok(recovery) => format!(
@@ -581,7 +721,7 @@ impl ChatGptOAuthStore for CodexAuthStore {
     }
 
     fn refresh_lock(&self) -> Option<Arc<tokio::sync::Mutex<()>>> {
-        Some(self.refresh_lock.clone())
+        Some(self.shared.refresh_lock.clone())
     }
 }
 
@@ -589,6 +729,14 @@ impl ChatGptOAuthStore for CodexAuthStore {
 /// is read again, up to [`SETTLE_READS`] times, before the error is
 /// returned: Codex writes `auth.json` in place (truncate, then write), so a
 /// read can land between the two.
+///
+/// The waits between reads block the calling thread, which may be an async
+/// runtime's (the [`ChatGptOAuthStore`] calls are synchronous and run inside
+/// a refresh). They are bounded like the file I/O around them: they only
+/// follow a read that could not be parsed, and add up to at most
+/// `(SETTLE_READS - 1) * SETTLE_DELAY` (120 ms) per call.
+/// (`tokio::task::block_in_place` would not work on a current-thread
+/// runtime.)
 fn read_credentials(path: &Path) -> Result<(Vec<u8>, ChatGptOAuthCredentials), Error> {
     let mut reads = 0;
     loop {
@@ -602,6 +750,7 @@ fn read_credentials(path: &Path) -> Result<(Vec<u8>, ChatGptOAuthCredentials), E
         reads += 1;
         match parse_credentials(&bytes, path) {
             Ok(credentials) => return Ok((bytes, credentials)),
+            // A short, bounded blocking wait; see above.
             Err(Error::JsonError(_)) if reads < SETTLE_READS => std::thread::sleep(SETTLE_DELAY),
             Err(error) => return Err(error),
         }
@@ -1195,6 +1344,7 @@ mod tests {
             CodexAuthStore::new(CodexAuthFile::load(dir.path().join(".").join("auth.json")).unwrap());
         let lock = first.refresh_lock().unwrap();
         assert!(Arc::ptr_eq(&lock, &second.refresh_lock().unwrap()));
+        assert!(Arc::ptr_eq(&first.shared, &second.shared));
         let (_other_dir, other_path) = temp_file(NESTED);
         let other = CodexAuthStore::new(CodexAuthFile::load(&other_path).unwrap());
         assert!(!Arc::ptr_eq(&lock, &other.refresh_lock().unwrap()));
@@ -1202,11 +1352,11 @@ mod tests {
         // An entry goes once no store uses it.
         let registered = |path: &Path| {
             let key = std::fs::canonicalize(path).unwrap();
-            REFRESH_LOCKS.lock().unwrap().iter().any(|(path, _)| *path == key)
+            SHARED_FILES.lock().unwrap().iter().any(|(path, _)| *path == key)
         };
         assert!(registered(&other_path));
         drop(other);
-        let _ = shared_refresh_lock(&path);
+        let _ = shared_file(&path);
         assert!(!registered(&other_path));
         assert!(registered(&path));
     }
@@ -1277,6 +1427,46 @@ mod tests {
         let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["tokens"]["refresh_token"], "refresh-2");
         assert_eq!(saved["tokens"]["id_token"], "id-2");
+    }
+
+    #[test]
+    fn every_store_of_the_file_knows_of_an_unsaved_rotation_until_the_file_moves_on() {
+        let (_dir, path) = temp_file(NESTED);
+        let first = CodexAuthStore::new(CodexAuthFile::load(&path).unwrap());
+        let second = CodexAuthStore::new(CodexAuthFile::load(&path).unwrap());
+        let loaded = CodexAuthFile::load(&path).unwrap().credentials().unwrap();
+        let backup = with_suffix(&path, ".bak");
+        std::fs::create_dir(&backup).unwrap();
+        assert!(first.save_refreshed(&rotated(), Some("id-2")).is_err());
+
+        // The file holds the spent tokens: the second store hands over the
+        // rotation (still unsaved) instead of letting them be refreshed.
+        assert_eq!(second.before_refresh(&loaded).unwrap(), Some(rotated()));
+        // Not for another account.
+        let other = ChatGptOAuthCredentials {
+            account_id: "account-2".into(),
+            ..loaded.clone()
+        };
+        assert!(matches!(
+            second.before_refresh(&other),
+            Err(Error::AuthenticationFailed(_))
+        ));
+        // A client holding the rotation doesn't refresh it again yet.
+        assert!(first.before_refresh(&rotated()).is_err());
+        assert!(second.before_refresh(&rotated()).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), NESTED);
+
+        // Codex refreshed meanwhile: the rotation is forgotten, the file's
+        // tokens are used, and a client holding the rotation learns that
+        // both rotated.
+        std::fs::remove_dir(&backup).unwrap();
+        std::fs::write(&path, codex_refreshed()).unwrap();
+        let newer = second.before_refresh(&loaded).unwrap().unwrap();
+        assert_eq!(newer.refresh_token.as_deref(), Some("refresh-codex"));
+        assert!(first.shared.rotations().unsaved.is_none());
+        let error = first.before_refresh(&rotated()).unwrap_err();
+        assert!(error.to_string().contains("Both"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), codex_refreshed());
     }
 
     #[cfg(unix)]
