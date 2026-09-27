@@ -1,15 +1,22 @@
 # Arko Framework
 
-A Rust workspace for model clients, tool-using agents, and workflow orchestration.
+Rust crates for calling language models, running tool-using agents, orchestrating
+multi-agent workflows, and indexing source code for retrieval.
 
-| Package | Purpose |
+## Crates
+
+| Crate | Purpose |
 | --- | --- |
-| [arko-ai](arko-ai/README.md) | Provider clients, streaming, tool calls, reasoning, embeddings, and usage metadata. |
-| [arko-agents](arko-agents/README.md) | Agent configuration, runtime, tools, skills, and MCP integration. |
-| [arko-index](arko-index/README.md) | Validated source chunking, incremental embeddings, and compact local retrieval. |
-| [arko-workflows](arko-workflows/README.md) | Workflow execution, shared state, persistence, budgets, and verification. |
+| [arko-ai](arko-ai/README.md) | Model clients for OpenAI (API key or ChatGPT OAuth), Anthropic, Google Gemini, and OpenRouter, plus Voyage embeddings. Streaming, tool calls, reasoning controls, and usage and cost reporting. |
+| [arko-agents](arko-agents/README.md) | Agent configuration and runtime, built-in and custom tools, skills, MCP servers, and interactive terminal tools. |
+| [arko-workflows](arko-workflows/README.md) | Multi-agent workflows with shared memory, messaging, budgets, hooks, completion verification, and persistence. Optional Python bindings behind the `python` feature. |
+| [arko-index](arko-index/README.md) | Indexing of source code and documentation with model-selected chunk boundaries, Voyage embeddings, and local SQLite hybrid search. |
+
+arko-agents builds on arko-ai; arko-workflows builds on both; arko-index builds on arko-ai.
 
 ## Build and test
+
+Building requires Rust 1.89 or later and a C compiler.
 
 ```bash
 cargo check --workspace --all-targets --locked
@@ -17,29 +24,21 @@ cargo test --workspace --lib --locked
 cargo test -p arko-index --locked
 ```
 
-Package and directory names use hyphens. Rust imports use underscores, such as
-`arko_ai`, `arko_agents`, `arko_workflows`, and `arko_index`. Optional Python bindings are in
-`arko-workflows` behind its `python` feature.
+Each crate's README starts with a minimal example, and each crate's `examples/`
+directory contains runnable programs.
 
-See each package README and its `examples/` directory for usage.
+## Guides
 
-See [context management](docs/context-efficiency.md) for memory diffs, file-tree
-change notices, and configurable tool-result distillation.
+- [Context management](docs/context-efficiency.md): versioned memory reads,
+  file-tree change notices, tool-result distillation, and background shell jobs.
+- [Interactive terminals](docs/interactive-terminals.md): PTY and pipe terminal
+  tools with input requests and completion notifications.
+- [Asynchronous model features](docs/async-model-features.md): a provider comparison
+  of asynchronous tool calling and mid-turn steering.
+- [Arko Workflows API index](arko-workflows/INDEX.md): the complete arko-workflows
+  API reference.
 
-## Native (C) dependencies
+## License
 
-Building the workspace compiles C code from three crates. A C compiler is required;
-no system libraries need to be installed.
-
-| Crate | Pulled in by | Why | Pure-Rust alternative and its cost |
-| --- | --- | --- | --- |
-| `ring` | `rustls`, used by `reqwest` in arko-ai and by `hf-hub`/`ureq` for tokenizer downloads | TLS cryptography | A pure-Rust rustls crypto provider exists (e.g. `rustls-rustcrypto`) but is not audited. |
-| `onig_sys` | `tokenizers` (`onig` feature) in arko-ai | Regex engine for Hugging Face tokenizer pre-tokenizers | `tokenizers` exposes `fancy-regex` only through its `unstable_wasm` feature, which is not meant for native builds. |
-| `libsqlite3-sys` | `rusqlite` (`bundled` feature) in arko-index | SQLite, compiled from source | Dropping `bundled` links a system SQLite instead (still C, and requires it on every machine); a pure-Rust store would mean rewriting arko-index storage. |
-
-`iana-time-zone-haiku` (via `chrono`) also compiles C, but only when targeting Haiku.
-
-TLS deliberately avoids `reqwest`'s default `aws-lc-rs` backend (another large C
-build) and OpenSSL: arko-ai uses rustls with the `ring` provider and the operating
-system's trust store. CI fails if `aws-lc-sys`, `aws-lc-rs`, or `openssl-sys` enter
-the dependency graph.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT), at your option.

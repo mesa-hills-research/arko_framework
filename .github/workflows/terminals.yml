@@ -24,8 +24,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      # See "Native (C) dependencies" in README.md. --all-features also
-      # resolves optional dependencies (e.g. arko-workflows' pyo3 bindings).
+      # Keeps aws-lc and OpenSSL out of the dependency graph. --all-features
+      # also resolves optional dependencies (e.g. arko-workflows' pyo3 bindings).
       - name: Reject aws-lc and OpenSSL builds
         if: runner.os == 'Linux'
         run: |
