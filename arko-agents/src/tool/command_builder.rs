@@ -3,6 +3,7 @@ use super::definition::ToolParameterDefinition;
 use super::definition::{ToolParameterType, parse_bool_text};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
@@ -15,8 +16,8 @@ pub(crate) async fn execute_command_from_template(
     provided_params: &HashMap<String, Value>,
     task_cwd: &Path,
 ) -> Result<String, ToolError> {
-    let mut command_args: Vec<String> = Vec::new();
-    let mut positional_args_values: HashMap<usize, String> = HashMap::new();
+    let mut command_args: Vec<OsString> = Vec::new();
+    let mut positional_args_values: HashMap<usize, OsString> = HashMap::new();
     let mut max_pos_idx = 0;
 
     for def in param_defs {
@@ -55,12 +56,26 @@ pub(crate) async fn execute_command_from_template(
                 if str_val.is_empty() && !def.required {
                     continue;
                 }
+                // A path parameter passes the path the workspace check
+                // judged: absolute, so the program can't read it as an
+                // option, and with `..` already resolved, so a symbolic link
+                // on the way can't take it elsewhere.
+                let argument = if def.is_path && !str_val.is_empty() {
+                    crate::utils::resolve_path(str_val, task_cwd)
+                        .map_err(|error| ToolError::ParameterValidation {
+                            param_name: def.name.clone(),
+                            message: format!("Invalid path '{str_val}': {error}"),
+                        })?
+                        .into_os_string()
+                } else {
+                    OsString::from(str_val)
+                };
                 if let Some(flag_str) = &def.flag {
-                    command_args.push(flag_str.clone());
-                    command_args.push(str_val.to_string());
+                    command_args.push(flag_str.into());
+                    command_args.push(argument);
                 } else {
                     let pos_idx = positional_args_values.len();
-                    positional_args_values.insert(pos_idx, str_val.to_string());
+                    positional_args_values.insert(pos_idx, argument);
                     if pos_idx > max_pos_idx {
                         max_pos_idx = pos_idx;
                     }
@@ -81,7 +96,7 @@ pub(crate) async fn execute_command_from_template(
                     })?;
                 if bool_val {
                     if let Some(flag_str) = &def.flag {
-                        command_args.push(flag_str.clone());
+                        command_args.push(flag_str.into());
                     } else {
                         return Err(ToolError::Configuration {
                             tool_name: tool_name.to_string(),
@@ -93,7 +108,7 @@ pub(crate) async fn execute_command_from_template(
         }
     }
 
-    let mut final_cmd_parts: Vec<String> = Vec::new();
+    let mut final_cmd_parts: Vec<OsString> = Vec::new();
     let expanded_base_command = shellexpand::full(command_template_base)
         .map_err(|e| ToolError::ShellCommandTemplate {
             tool_name: tool_name.to_string(),
@@ -105,7 +120,7 @@ pub(crate) async fn execute_command_from_template(
         .into_owned();
 
     expanded_base_command.split_whitespace().for_each(|part| {
-        final_cmd_parts.push(part.to_string());
+        final_cmd_parts.push(part.into());
     });
 
     for i in 0..=max_pos_idx {
@@ -130,7 +145,7 @@ pub(crate) async fn execute_command_from_template(
         "Executing command for tool '{}' in CWD '{}': {} {:?}",
         tool_name,
         task_cwd.display(),
-        program,
+        program.display(),
         args
     );
 
@@ -146,12 +161,20 @@ pub(crate) async fn execute_command_from_template(
     let output = cmd
         .spawn()
         .map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to spawn command '{}': {}", program, e))
+            ToolError::ExecutionFailed(format!(
+                "Failed to spawn command '{}': {}",
+                program.display(),
+                e
+            ))
         })?
         .wait_with_output()
         .await
         .map_err(|e| {
-            ToolError::ExecutionFailed(format!("Error waiting for command '{}': {}", program, e))
+            ToolError::ExecutionFailed(format!(
+                "Error waiting for command '{}': {}",
+                program.display(),
+                e
+            ))
         })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -205,5 +228,51 @@ mod tests {
             run(Value::from("loudly")).await,
             Err(ToolError::ParameterValidation { .. })
         ));
+    }
+
+    fn path_parameter() -> [ToolParameterDefinition; 1] {
+        [ToolParameterDefinition {
+            name: "file".into(),
+            description: "A file".into(),
+            param_type: ToolParameterType::String,
+            required: true,
+            is_path: true,
+            flag: None,
+            default_value: None,
+        }]
+    }
+
+    async fn run_with_path(template: &str, file: &str, cwd: &Path) -> Result<String, ToolError> {
+        let params = HashMap::from([("file".to_string(), Value::from(file))]);
+        execute_command_from_template("fixture", template, &path_parameter(), &params, cwd).await
+    }
+
+    #[tokio::test]
+    async fn path_parameters_pass_the_path_the_workspace_check_judged() {
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("arko-command-paths-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(root.join("outside/deep")).unwrap();
+        std::fs::write(root.join("outside/x"), "OUTSIDE").unwrap();
+        std::fs::write(workspace.join("x"), "INSIDE").unwrap();
+        std::os::unix::fs::symlink(root.join("outside/deep"), workspace.join("link")).unwrap();
+
+        // An option-like value is inside the workspace as a path, and the
+        // program gets it as one: absolute, never an option.
+        assert!(crate::utils::is_path_in_workspace("-n", &workspace).unwrap());
+        assert_eq!(
+            run_with_path("echo", "-n", &workspace).await.unwrap(),
+            format!("{}\n", workspace.join("-n").display())
+        );
+        // `link/..` is the workspace lexically, which the check judged; the
+        // kernel would follow the link to `outside` first.
+        assert!(crate::utils::is_path_in_workspace("link/../x", &workspace).unwrap());
+        assert_eq!(
+            run_with_path("cat", "link/../x", &workspace).await.unwrap(),
+            "INSIDE"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
