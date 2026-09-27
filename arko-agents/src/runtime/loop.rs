@@ -2027,6 +2027,7 @@ impl AgentLoop {
                     &tool_calls,
                 );
 
+                let mut reached = tool_calls.len();
                 for (call_index, ai_tool_call) in tool_calls.iter().enumerate() {
                     let tool_call_id = native_stream_call_ids
                         .remove(&call_index)
@@ -2161,9 +2162,37 @@ impl AgentLoop {
                             self.task.pending_native_tool_results.push(r);
                         }
                         if !matches!(self.task.current_state, TaskState::InProgress) {
+                            reached = call_index + 1;
                             break;
                         }
                     }
+                }
+                // A turn a tool stopped (an error that pauses or fails the
+                // task) still answers every call once: calls left awaiting an
+                // approval that won't be asked, and calls it didn't reach.
+                if !matches!(self.task.current_state, TaskState::InProgress) {
+                    for pending in calls_needing_approval.drain(..) {
+                        if let Some(call) = self
+                            .task
+                            .pending_native_tool_calls
+                            .remove(&pending.tool_call_id)
+                        {
+                            self.emit_event(AgentEvent::ToolRejected {
+                                tool_call_id: pending.tool_call_id,
+                                tool_name: pending.tool_name,
+                                reason: Some(UNREACHED_CALL.into()),
+                            })
+                            .await?;
+                            self.task
+                                .pending_native_tool_results
+                                .push(ai::ToolResult::error_from_tool_call(&call, UNREACHED_CALL));
+                        }
+                    }
+                }
+                for ai_tool_call in &tool_calls[reached..] {
+                    self.task.pending_native_tool_results.push(
+                        ai::ToolResult::error_from_tool_call(ai_tool_call, UNREACHED_CALL),
+                    );
                 }
                 // Announced calls the turn ended before reaching, and calls
                 // announced while streaming that the response doesn't hold
@@ -2771,30 +2800,29 @@ impl AgentLoop {
     /// When an approval wait ends without a decision (the command timeout or
     /// a closed command channel), rejects the native calls still awaiting
     /// approval with `reason` and adds the turn's results to the
-    /// conversation. The task returned `Interrupted` then pairs every call
-    /// of its last turn with a result, as providers require, and can run
-    /// again. Does nothing in output-based mode, whose calls have no
-    /// provider-side pairing.
+    /// conversation. A call of the turn with no result at all (a turn an
+    /// older version left early) is answered as unreached. The task returned
+    /// `Interrupted` then pairs every call of its last turn with a result,
+    /// as providers require, and can run again. Does nothing in output-based
+    /// mode, whose calls have no provider-side pairing.
     async fn settle_native_turn(&mut self, reason: &str) -> Result<(), ArkoAgentsError> {
         if !self.is_native_mode() {
             return Ok(());
         }
+        // The turn's results are not in the conversation yet while the
+        // assistant turn is its last message.
+        let turn_calls = match self.task.conversation.messages.last() {
+            Some(message) if message.role == ai::Role::Assistant => message.tool_calls.clone(),
+            _ => Vec::new(),
+        };
         let mut undecided: Vec<_> = self.task.pending_native_tool_calls.drain().collect();
         // In the order the turn made them.
-        if let Some(turn) = self
-            .task
-            .conversation
-            .messages
-            .iter()
-            .rfind(|message| message.role == ai::Role::Assistant)
-        {
-            undecided.sort_by_key(|(_, call)| {
-                turn.tool_calls
-                    .iter()
-                    .position(|turn_call| turn_call.id == call.id)
-                    .unwrap_or(usize::MAX)
-            });
-        }
+        undecided.sort_by_key(|(_, call)| {
+            turn_calls
+                .iter()
+                .position(|turn_call| turn_call.id == call.id)
+                .unwrap_or(usize::MAX)
+        });
         for (tool_call_id, call) in undecided {
             self.emit_event(AgentEvent::ToolRejected {
                 tool_call_id,
@@ -2805,6 +2833,18 @@ impl AgentLoop {
             self.task
                 .pending_native_tool_results
                 .push(ai::ToolResult::error_from_tool_call(&call, reason));
+        }
+        for call in &turn_calls {
+            let answered = self
+                .task
+                .pending_native_tool_results
+                .iter()
+                .any(|result| result.call_id == call.id);
+            if call.id.is_some() && !answered {
+                self.task
+                    .pending_native_tool_results
+                    .push(ai::ToolResult::error_from_tool_call(call, UNREACHED_CALL));
+            }
         }
         self.flush_native_results_to_conversation(None);
         Ok(())

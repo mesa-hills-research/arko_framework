@@ -655,7 +655,8 @@ async fn an_approval_wait_that_ends_without_a_decision_leaves_a_resumable_native
 #[tokio::test]
 async fn a_native_turn_an_older_version_left_without_results_is_settled_when_run() {
     // Saved by a version that dropped the approval wait on a timeout: the
-    // turn's auto-approved result and the undecided call are still pending.
+    // turn's auto-approved result and the undecided call are still pending,
+    // and a call the turn never reached has nothing at all.
     let workspace = workspace();
     let (mut agent, _events, _commands) = agent(
         config(ToolCallingMode::Native, &["read_file", "write_file"]),
@@ -664,8 +665,9 @@ async fn a_native_turn_an_older_version_left_without_results_is_settled_when_run
     );
     let read = native_call("read", "read_file", serde_json::json!({"path": "a.txt"}));
     let write = native_call("write", "write_file", serde_json::json!({"path": "b.txt"}));
+    let skipped = native_call("skipped", "read_file", serde_json::json!({"path": "c.txt"}));
     let mut assistant = ai::Message::new_assistant("");
-    assistant.tool_calls = vec![read.clone(), write.clone()];
+    assistant.tool_calls = vec![read.clone(), write.clone(), skipped];
     let task = &mut agent.task;
     task.conversation.system_message = Some("system".into());
     task.conversation.add_user_message("Do the task");
@@ -693,7 +695,134 @@ async fn a_native_turn_an_older_version_left_without_results_is_settled_when_run
         UNDECIDED_CALL
     );
     assert_eq!(result_for(&task.conversation, "read")[0].output, "1 | a");
+    assert_eq!(
+        result_for(&task.conversation, "skipped")[0].output,
+        UNREACHED_CALL
+    );
     std::fs::remove_dir_all(workspace).unwrap();
+}
+
+/// Waits for the first event `pick` accepts.
+async fn next_event<T>(
+    events: &mut mpsc::Receiver<AgentEvent>,
+    mut pick: impl FnMut(AgentEvent) -> Option<T>,
+) -> T {
+    loop {
+        match timeout(Duration::from_secs(10), events.recv())
+            .await
+            .unwrap()
+        {
+            Some(event) => {
+                if let Some(picked) = pick(event) {
+                    return picked;
+                }
+            }
+            None => panic!("the run ended before the expected event"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_native_turn_a_paused_tool_error_stops_still_answers_every_call() {
+    // write_file waits for approval, the missing file's read_file pauses
+    // the task, and the turn never reaches the last read_file.
+    for timed_out in [false, true] {
+        let workspace = workspace();
+        std::fs::write(workspace.join("c.txt"), "C-CONTENTS").unwrap();
+        let mut config = config(ToolCallingMode::Native, &["read_file", "write_file"]);
+        config.tool_config.default_auto_approve_tool_use = false;
+        config.tool_config.tool_specific_configs.insert(
+            "read_file".into(),
+            PerToolConfigOverride {
+                auto_approve_tool_use: Some(true),
+                ..Default::default()
+            },
+        );
+        config.error_recovery_config.on_tool_execution_error =
+            ToolErrorPolicy::PauseAndAwaitApproval;
+        config.user_command_timeout_seconds = timed_out.then_some(1);
+        let (mut agent, mut events, commands) = agent(config, ToolRegistry::new(), &workspace);
+        agent.scripted_responses.get_mut().unwrap().extend([
+            turn(vec![
+                native_call(
+                    "write",
+                    "write_file",
+                    serde_json::json!({"path": "b.txt", "content": "x"}),
+                ),
+                native_call(
+                    "missing",
+                    "read_file",
+                    serde_json::json!({"path": "missing.txt"}),
+                ),
+                native_call("c", "read_file", serde_json::json!({"path": "c.txt"})),
+            ]),
+            complete(),
+        ]);
+        let run = tokio::spawn(agent.run());
+        next_event(&mut events, |event| match event {
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. }) => {
+                Some(())
+            }
+            _ => None,
+        })
+        .await;
+        // The call left awaiting an approval that won't be asked is rejected.
+        let rejected = next_event(&mut events, |event| match event {
+            AgentEvent::ToolRejected {
+                tool_name,
+                reason: Some(reason),
+                ..
+            } if reason == UNREACHED_CALL => Some(tool_name),
+            _ => None,
+        })
+        .await;
+        assert_eq!(rejected, "write_file");
+        let task = if timed_out {
+            let task = timeout(Duration::from_secs(10), run)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(matches!(task.current_state, TaskState::Interrupted { .. }));
+            assert_calls_paired(&task.conversation);
+            let (mut agent, _events, _commands) =
+                agent_for(task, ToolRegistry::new(), Arc::new(ai::LLMClient::new()));
+            agent
+                .scripted_responses
+                .get_mut()
+                .unwrap()
+                .push_back(complete());
+            timeout(Duration::from_secs(10), agent.run())
+                .await
+                .unwrap()
+                .unwrap()
+        } else {
+            commands
+                .send(UserCommand::ApproveErrorRecovery { message: None })
+                .await
+                .unwrap();
+            timeout(Duration::from_secs(10), run)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        };
+        assert!(matches!(task.current_state, TaskState::Completed { .. }));
+        assert_calls_paired(&task.conversation);
+        assert!(result_for(&task.conversation, "missing")[0].is_error);
+        for id in ["write", "c"] {
+            let results = result_for(&task.conversation, id);
+            assert_eq!(results.len(), 1, "{id}");
+            assert_eq!(results[0].output, UNREACHED_CALL, "{id}");
+        }
+        assert!(
+            !serde_json::to_string(&task.conversation)
+                .unwrap()
+                .contains("C-CONTENTS")
+        );
+        assert!(!workspace.join("b.txt").exists());
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
 }
 
 // Boolean parameters of output-based calls.
