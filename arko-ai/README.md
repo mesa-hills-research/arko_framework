@@ -94,7 +94,7 @@ Costs are estimates at list prices from `model.rs`, computed for what the call a
 - **Cache TTL, residency and dates.** Anthropic 1-hour cache writes use their own rate; `inference_geo: "us"` applies the 1.1x multiplier on Claude 4.6 and later; `ModelPricing::schedule` switches prices on a date (for example the end of promotional pricing). Tier and residency multipliers stack.
 - **Missing prices.** A token class without its own price (cached input on Pro models, cache writes on models that don't charge extra for them) is billed at the input rate, including long-context rates.
 
-`total_cost` is the estimate; `billed()` is what the account is charged, decided by `billing`: `Metered` (the estimate), `Subscription` (ChatGPT OAuth: zero, while the estimate stays visible) or `ProviderReported` (`reported_cost`, used by providers that report their actual charge). `UsageInfo` implements `AddAssign` and `Sum`; summing calls billed differently yields `BillingKind::Mixed` with the billed amounts added. Workflow budgets count `billed()`.
+`total_cost` is the estimate; `billed()` is what the account is charged, decided by `billing`: `Metered` (the estimate), `Subscription` (ChatGPT OAuth: zero, while the estimate stays visible), `NotCharged` (zero: an Anthropic classifier refusal before any output in a category Anthropic does not bill) or `ProviderReported` (`reported_cost`, used by providers that report their actual charge). `UsageInfo` implements `AddAssign` and `Sum`; summing calls billed differently yields `BillingKind::Mixed` with the billed amounts added. Workflow budgets count `billed()`.
 
 ## Errors and retries
 

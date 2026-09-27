@@ -11,7 +11,7 @@ use crate::{
     stop::{Refusal, RefusalSource, StopReason},
     tool::{ToolCall, ToolChoice},
     pricing::ServiceTier,
-    usage::{ModelCallUsage, UsageInfo},
+    usage::{BillingKind, ModelCallUsage, UsageInfo},
 };
 use async_stream::try_stream;
 use eventsource_stream::Eventsource;
@@ -450,6 +450,7 @@ impl AnthropicClient {
             response_data.stop_details.as_ref(),
             trailing_tool_call,
         );
+        let usage = Self::apply_refusal_billing(usage, refusal.as_ref());
 
         GenerationResponse {
             message,
@@ -457,6 +458,30 @@ impl AnthropicClient {
             model_call_usage,
             stop_reason,
             refusal,
+        }
+    }
+
+    /// Marks a classifier refusal that Anthropic does not charge for. A
+    /// refusal before any output is billed only for the categories below; one
+    /// in any other category, or with no category, is not billed, though its
+    /// tokens are still reported. A mid-stream refusal bills the input and the
+    /// output already streamed, which is what `usage` reports.
+    /// https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback#how-refusals-are-billed
+    fn apply_refusal_billing(usage: UsageInfo, refusal: Option<&Refusal>) -> UsageInfo {
+        const BILLED_BEFORE_OUTPUT: &[&str] = &["bio", "frontier_llm", "reasoning_extraction"];
+        let unbilled = refusal.is_some_and(|refusal| {
+            refusal.source == RefusalSource::SafetyClassifier
+                && usage.output_tokens == 0
+                && refusal.partial_output.is_none()
+                && !refusal
+                    .category
+                    .as_deref()
+                    .is_some_and(|category| BILLED_BEFORE_OUTPUT.contains(&category))
+        });
+        if unbilled {
+            usage.with_billing(BillingKind::NotCharged)
+        } else {
+            usage
         }
     }
 
@@ -758,13 +783,17 @@ impl AnthropicClient {
                         }
                     }
                     Some("message_delta") => {
+                        // The stop reason ends the message. Its `usage` carries
+                        // cumulative counts; without it (as from some proxies)
+                        // the `message_start` counts stand.
                         if value
                             .get("delta")
                             .and_then(|delta| delta.get("stop_reason"))
                             .is_some_and(|reason| !reason.is_null())
-                            && let Some(usage_value) = value.get("usage")
                         {
-                            merge_usage(&mut usage_fields, usage_value);
+                            if let Some(usage_value) = value.get("usage") {
+                                merge_usage(&mut usage_fields, usage_value);
+                            }
                             let reported: AnthropicUsage = serde_json::from_value(
                                 Value::Object(std::mem::take(&mut usage_fields)),
                             )
@@ -808,6 +837,8 @@ impl AnthropicClient {
                                 value["delta"].get("stop_details"),
                                 trailing_tool_call,
                             );
+
+                            let usage = Self::apply_refusal_billing(usage, refusal.as_ref());
 
                             if let Some(refusal) = &refusal {
                                 yield StreamEvent::Refusal(refusal.clone());
@@ -1250,6 +1281,10 @@ impl AnthropicClient {
             reported.speed.as_deref(),
         );
         usage.inference_geo = reported.inference_geo.clone();
+        usage.reasoning_tokens = reported
+            .output_tokens_details
+            .as_ref()
+            .and_then(|details| details.thinking_tokens);
         usage
     }
 }
@@ -1464,6 +1499,17 @@ struct AnthropicUsage {
     /// Where inference ran (`"global"` or `"us"`).
     #[serde(default)]
     inference_geo: Option<String>,
+    /// Breakdown of `output_tokens`, which stays the billed total.
+    #[serde(default)]
+    output_tokens_details: Option<AnthropicOutputTokensDetails>,
+}
+
+/// `usage.output_tokens_details`: `thinking_tokens` counts the raw reasoning
+/// (part of `output_tokens`), not the possibly summarized thinking text.
+#[derive(Debug, Default, Deserialize)]
+struct AnthropicOutputTokensDetails {
+    #[serde(default)]
+    thinking_tokens: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1957,6 +2003,119 @@ mod tests {
         // Opus 4.5 offers neither modifier.
         usage.calculate_cost(&Model::anthropic_claude_opus_4_5(), None);
         assert!(close(usage.total_cost, 30.0));
+    }
+
+    #[tokio::test]
+    async fn a_stop_reason_without_usage_still_ends_the_stream() {
+        // Some proxies omit `usage` on the final `message_delta`; the
+        // `message_start` counts stand.
+        let mut events = vec![message_start()];
+        events.extend(text_block(0, "Hi"));
+        events.push(json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}));
+        events.push(json!({"type":"message_stop"}));
+        let (events, error) = stream_events(&events).await;
+        assert!(error.is_none(), "{error:?}");
+        let response = end(&events);
+        assert_eq!(response.stop_reason, StopReason::EndTurn);
+        assert_eq!(response.text(), "Hi");
+        assert_eq!(response.usage.input_tokens, 10);
+        assert_eq!(response.usage.output_tokens, 0);
+        // A `message_delta` without a stop reason still does not end it.
+        let mut events = vec![message_start()];
+        events.push(json!({"type":"message_delta","delta":{"stop_reason":null},"usage":{"output_tokens":3}}));
+        let (_, error) = stream_events(&events).await;
+        assert!(matches!(error, Some(Error::StreamTruncated(_))), "{error:?}");
+    }
+
+    fn refusal_response(category: Value, content: Value, output_tokens: u64) -> GenerationResponse {
+        let response: super::AnthropicResponse = serde_json::from_value(json!({
+            "id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-5",
+            "content":content,"stop_reason":"refusal",
+            "stop_details":{"type":"refusal","category":category,"explanation":"Declined."},
+            "usage":{"input_tokens":412,"output_tokens":output_tokens}
+        }))
+        .unwrap();
+        AnthropicClient::generation_response(
+            response,
+            &Conversation::new(Model::anthropic_claude_sonnet_4_5()),
+            &GenerationConfig::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn refusals_before_output_are_billed_only_in_billed_categories() {
+        use crate::usage::BillingKind;
+        // https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback#how-refusals-are-billed
+        for (category, billed) in [
+            (json!("cyber"), false),
+            (json!("general_harms"), false),
+            (Value::Null, false),
+            (json!("bio"), true),
+            (json!("frontier_llm"), true),
+            (json!("reasoning_extraction"), true),
+        ] {
+            let usage = refusal_response(category.clone(), json!([]), 0).usage;
+            assert!(usage.total_cost > 0.0, "the estimate stays visible");
+            assert_eq!(usage.input_tokens, 412);
+            if billed {
+                assert_eq!(usage.billing, BillingKind::Metered, "{category}");
+                assert!(close(usage.billed(), usage.total_cost), "{category}");
+            } else {
+                assert_eq!(usage.billing, BillingKind::NotCharged, "{category}");
+                assert_eq!(usage.billed(), 0.0, "{category}");
+            }
+        }
+        // A mid-output refusal bills input and the output produced.
+        let usage = refusal_response(json!("cyber"), json!([{"type":"text","text":"partial"}]), 7).usage;
+        assert_eq!(usage.billing, BillingKind::Metered);
+        assert!(close(usage.billed(), usage.total_cost));
+
+        // Streaming: before any output...
+        let events = vec![
+            message_start(),
+            json!({"type":"message_delta","delta":{"stop_reason":"refusal",
+                "stop_details":{"type":"refusal","category":"cyber","explanation":"Declined."}},
+                "usage":{"output_tokens":0}}),
+        ];
+        let (events, error) = stream_events(&events).await;
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(end(&events).usage.billing, BillingKind::NotCharged);
+        assert_eq!(end(&events).usage.billed(), 0.0);
+        // ...and mid-stream, after partial output.
+        let mut events = vec![message_start()];
+        events.extend(text_block(0, "Hello.."));
+        events.push(message_delta(
+            "refusal",
+            json!({"type":"refusal","category":"cyber","explanation":"Declined."}),
+        ));
+        let (events, error) = stream_events(&events).await;
+        assert!(error.is_none(), "{error:?}");
+        let usage = &end(&events).usage;
+        assert_eq!(usage.billing, BillingKind::Metered);
+        assert!(usage.billed() > 0.0);
+    }
+
+    #[tokio::test]
+    async fn thinking_token_details_are_reported_as_reasoning_tokens() {
+        let reported: super::AnthropicUsage = serde_json::from_value(json!({
+            "input_tokens": 10, "output_tokens": 120,
+            "output_tokens_details": {"thinking_tokens": 90}
+        }))
+        .unwrap();
+        let usage = AnthropicClient::calculate_usage(&reported);
+        assert_eq!(usage.output_tokens, 120, "output_tokens stays the billed total");
+        assert_eq!(usage.reasoning_tokens, Some(90));
+        let reported: super::AnthropicUsage =
+            serde_json::from_value(json!({"input_tokens": 10, "output_tokens": 5})).unwrap();
+        assert_eq!(AnthropicClient::calculate_usage(&reported).reasoning_tokens, None);
+        // The final cumulative `message_delta` carries the breakdown.
+        let mut events = vec![message_start()];
+        events.extend(text_block(0, "Hi"));
+        events.push(json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},
+            "usage":{"output_tokens":50,"output_tokens_details":{"thinking_tokens":40}}}));
+        let (events, error) = stream_events(&events).await;
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(end(&events).usage.reasoning_tokens, Some(40));
     }
 }
 

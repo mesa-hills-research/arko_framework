@@ -149,6 +149,10 @@ pub enum BillingKind {
     Subscription,
     /// The provider reported the actual charge in [`UsageInfo::reported_cost`].
     ProviderReported,
+    /// The provider does not charge for this call, although it reports its
+    /// tokens (an Anthropic classifier refusal before any output in an
+    /// unbilled category). The estimate shows what it would have cost.
+    NotCharged,
     /// An aggregate of calls billed in different ways.
     Mixed,
 }
@@ -356,7 +360,7 @@ impl UsageInfo {
     fn update_billed_cost(&mut self) {
         self.billed_cost = match self.billing {
             BillingKind::Metered => Some(self.total_cost),
-            BillingKind::Subscription => Some(0.0),
+            BillingKind::Subscription | BillingKind::NotCharged => Some(0.0),
             BillingKind::ProviderReported => {
                 Some(self.reported_cost.unwrap_or(self.total_cost))
             }
