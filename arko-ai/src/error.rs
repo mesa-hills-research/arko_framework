@@ -72,6 +72,14 @@ const PERMANENT_CODES: &[&str] = &[
     "refusal",
     "data_residency_mismatch",
     "bio_policy",
+    // ChatGPT (Codex backend) `response.failed` codes that the official
+    // Codex client treats as fatal (codex-rs/codex-api/src/sse/responses_error.rs):
+    // quota/spend walls, a plan without API usage, and a policy block.
+    "credit_balance_exhausted",
+    "organization_spend_limit_exceeded",
+    "project_spend_limit_exceeded",
+    "usage_not_included",
+    "cyber_policy",
     "misalignment_policy_violation",
     "invalid_image",
     "invalid_image_format",
@@ -152,6 +160,25 @@ const CODE_STATUSES: &[(&str, u16)] = &[
     ("not_implemented", 501),
     ("bad_gateway", 502),
     ("gateway_timeout", 504),
+    ("not_acceptable", 406),
+    ("length_required", 411),
+    ("precondition_failed", 412),
+    ("uri_too_long", 414),
+    ("unsupported_media_type", 415),
+    ("range_not_satisfiable", 416),
+    ("expectation_failed", 417),
+    ("misdirected_request", 421),
+    ("locked", 423),
+    ("failed_dependency", 424),
+    ("too_early", 425),
+    ("upgrade_required", 426),
+    ("precondition_required", 428),
+    ("request_header_fields_too_large", 431),
+    ("unavailable_for_legal_reasons", 451),
+    ("client_closed_request", 499),
+    ("http_version_not_supported", 505),
+    ("insufficient_storage", 507),
+    ("network_authentication_required", 511),
     // Anthropic error types (`api_error` is shared with Gemini).
     ("invalid_request_error", 400),
     ("authentication_error", 401),
@@ -984,5 +1011,25 @@ mod tests {
             "Thu, 01 Jan 1970 00:00:00 GMT".parse().unwrap(),
         );
         assert_eq!(retry_after_from_headers(429, &headers), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn codex_backend_fatal_stream_codes_and_status_names_are_permanent() {
+        for code in [
+            "credit_balance_exhausted",
+            "organization_spend_limit_exceeded",
+            "project_spend_limit_exceeded",
+            "usage_not_included",
+            "cyber_policy",
+            "unsupported_media_type",
+            "uri_too_long",
+            "client_closed_request",
+        ] {
+            // The shape openai.rs passes for `response.failed` (the event's
+            // `response` object) and for wrapped `error` events.
+            let body = format!(r#"{{"error":{{"code":"{code}","message":"x"}}}}"#);
+            let error = Error::provider_error("stream", None, None, &body);
+            assert_eq!(error.retry_class(), RetryClass::Permanent, "{code}");
+        }
     }
 }
