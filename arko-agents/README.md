@@ -95,8 +95,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `run_task` returns the event receiver, the command sender, and a join handle that
 resolves to the task in its final state; `TaskStreamEnd` is the last event of a run. Keep
-the command sender alive for the whole run: when every sender has been dropped, the
-runtime returns the task as `Interrupted`. Tools only hold weak senders.
+receiving events until then: the channel holds 100 events and the runtime waits while it
+is full, and if the receiver is dropped, the run ends with `ArkoAgentsError::ChannelSend`
+instead of returning the task. Keep the command sender alive too: when every sender has
+been dropped, the runtime returns the task as `Interrupted`. Tools only hold weak senders.
 
 The task's working directory is the agent's workspace. File tools resolve relative paths
 against it, and paths outside it are rejected by default (see
@@ -113,8 +115,9 @@ cargo run -p arko-agents --example arko_agents_cli -- \
 
 Its options include `--tool-calling-mode native|output_based`, `--mcp-config PATH`,
 `--openai-auth-json PATH` (ChatGPT OAuth from a Codex `auth.json`), `--save-task-state
-PATH` (the final task as JSON), and `--user-command-timeout SECONDS`. Other credentials
-come from the environment or a `.env` file, as `LLMClient::from_env()` reads them.
+PATH` (the final task as JSON), and `--user-command-timeout SECONDS`. The example loads a
+`.env` file and then reads other credentials from the environment with
+`LLMClient::from_env()`.
 
 ## Agent configuration
 
@@ -171,6 +174,11 @@ registered tools named in `tool_config.available_tool_names`, and always
 `complete_task`, which ends the task as `Completed { summary }`. `ask_user` puts the task
 in `AwaitingUserResponse` until `UserCommand::SubmitUserResponse` answers it.
 
+The list controls what is offered, not what can run: in native mode, a call to any tool
+in the registry runs, whether or not the agent was offered it (output-based parsing only
+recognizes offered tools). Give an agent a registry that holds only its own tools when
+that matters.
+
 ### Tool calling modes
 
 `tool_config.tool_calling_mode` selects how calls are exchanged with the model:
@@ -184,9 +192,9 @@ in `AwaitingUserResponse` until `UserCommand::SubmitUserResponse` answers it.
 
 A tool allows batching when its definition sets `supports_batched_calls` and the
 configuration enables it: a per-tool `allow_batched_calls` override, or else
-`allow_batched_tool_calls` (default `false`). With `allow_batched_tool_calls` off, native requests also disable parallel
-tool calls on models that support that setting. Every response must call a tool; a
-response without one is handled as a failed model request.
+`allow_batched_tool_calls` (default `false`). With `allow_batched_tool_calls` off, native
+requests also disable parallel tool calls on models that support that setting. Every
+response must call a tool; a response without one is handled as a failed model request.
 
 Response text is streamed as it arrives in native mode. In output-based mode, a turn's
 text and tool events are emitted once the response has been parsed.
@@ -194,18 +202,21 @@ text and tool events are emitted once the response has been parsed.
 ### Approvals and workspace paths
 
 Tool calls wait for approval unless `default_auto_approve_tool_use` or a per-tool
-`auto_approve_tool_use` override is set. A single call emits `ToolCallAwaitingApproval`;
-several emit `BatchToolCallAwaitingApproval`. Answer with `ApproveToolUse`,
-`RejectToolUse`, or `SubmitBatchToolApprovals`, where a call without a decision is
-rejected. An approval can carry `custom_tool_output`, which is used instead of running
-the tool, and a `message_to_agent`.
+`auto_approve_tool_use` override is set. When a response holds one call that needs
+approval, the runtime emits `ToolCallAwaitingApproval`; when it holds several calls, it
+emits `BatchToolCallAwaitingApproval` listing those that need approval. Answer with
+`ApproveToolUse`, `RejectToolUse`, or `SubmitBatchToolApprovals`, where a call without a
+decision is rejected. An approval can carry `custom_tool_output`, which is used instead
+of running the tool, and a `message_to_agent`.
 
-Parameters marked `is_path` are resolved against the task's working directory. A path
+Parameters marked `is_path` are checked against the task's working directory. A path
 outside it is handled by `default_out_of_workspace_path_policy` or a per-tool override:
-`AutoReject` (the default) returns an error to the agent, `RequireApproval` asks for
-approval even for auto-approved tools, and `AutoApprove` allows it. The check is lexical:
-it expands `~` and environment variables and resolves `.` and `..`, but does not follow
-symbolic links.
+`AutoReject` (the default) rejects the call, `RequireApproval` asks for approval even for
+auto-approved tools, and `AutoApprove` allows it. A native call is rejected with an error
+result; an output-based call is rejected as a tool error, under `on_tool_execution_error`.
+The check is lexical and is not a sandbox: it resolves `.` and `..` without following
+symbolic links, and it expands `~` and environment variables, which the built-in file
+tools do not.
 
 ### Tool errors
 
@@ -276,11 +287,13 @@ command sender for the task, through which it can send `UserCommand::InjectConte
 
 End-user tools wrap a command without Rust code: a `ToolDefinition` whose
 `tool_type_details` is `EndUserDefined { command_template }`, loaded with
-`ToolRegistry::load_end_user_tool`. The template is shell-expanded and split on
-whitespace; string parameters without a `flag` follow as positional arguments in order,
-flagged string parameters as `flag value`, and a true boolean parameter as its flag. The
-command runs in the task's working directory without a shell, and its standard output is
-the result; a nonzero exit status is a tool error.
+`ToolRegistry::load_end_user_tool`. The template's `~` and environment variables are
+expanded and it is split on whitespace, without interpreting quotes. String parameters
+without a `flag` follow as positional arguments, in order, and then flagged string
+parameters as `flag value` and each true boolean parameter as its flag. The command runs
+in the task's working directory without a shell, and its standard output is the result;
+a nonzero exit status is a tool error. In output-based mode every value the model passes
+is a string, which a boolean parameter rejects, so boolean parameters suit native mode.
 
 ### Result interception and execution middleware
 
@@ -320,8 +333,9 @@ calling, and the workspace path policy cannot apply to them.
 
 ### Skills
 
-With `skills_config`, `SkillManager::load(&config, workspace_root)` reads skills from a
-`workspace_source` (relative to `workspace_root`) and any `global_sources`, each with
+`SkillManager::load(&skills_config, workspace_root)` reads the skills an agent's
+`SkillsConfig` names from a `workspace_source` (relative to `workspace_root`) and any
+`global_sources`, each with
 optional `include` and `exclude` name lists. A skill is a directory with a `SKILL.md`
 (other Markdown files in it, outside `scripts/`, become loadable resources), a `.skill` zip
 bundle of the same layout, or a single Markdown file other than `README.md`. Its YAML
@@ -329,10 +343,12 @@ front matter sets `name`, `description`, and `auto_load`. Identical skills are l
 once, and other name collisions get a numeric suffix. Invalid skills
 are skipped with a warning unless `on_invalid_skill` is `Error`.
 
-When there are on-demand skills, `SkillManager::setup` registers the `load_skill` tool and
-adds it to the agent's tools with auto-approval; it returns the `SkillPromptContext` to
-pass to `run_task`. Auto-loaded skills are placed in the system prompt; the others are
-listed there by name and description and loaded on demand.
+When there are on-demand skills, `SkillManager::setup`, given the tool registry and the
+`AgentConfig`, registers the `load_skill` tool and adds it to the agent's tools with
+auto-approval; call it before `Task::new`, which keeps its own copy of the
+configuration. It returns the `SkillPromptContext` to pass to `run_task`. Auto-loaded
+skills are placed in the system prompt; the others are listed there by name and
+description and loaded on demand.
 
 ### Interactive terminals
 
@@ -361,18 +377,21 @@ background and notify the agent of input requests and completion. See
 
 Besides answers to the waiting states, a running task accepts:
 
-- `InjectContext { content }`: queued and added as a user message at the next turn
-  boundary; a stream in progress is not changed.
+- `InjectContext { content }`: queued and added at the next turn boundary as a user
+  message headed `# Workflow context update`; a stream in progress is not changed.
 - `CancelTask`: the task ends as `Failed { reason: "Task cancelled by user." }`.
 - `SuspendTask`: the runtime stops and returns the task in its current state, for example
-  to save it.
+  to save it. It is ignored while a batch approval is pending.
 
 Tasks serialize to JSON (`Task::save_to_path`, `Task::load_from_path`). Running a
 returned task again continues it: a task that is pending, in progress, or interrupted
 makes its next model request, and a task awaiting a command waits for it.
 `prepare_for_resumption_with_user_response` answers a saved `AwaitingUserResponse` task
 before it runs, and `prepare_for_resumption_from_completed` adds a follow-up prompt to a
-completed one.
+completed one. A tool-approval wait that ends in `Interrupted` (a command timeout or a
+closed command channel) loses the pending approval; in native mode the turn's calls then
+stay in the conversation without results, which providers reject when the task runs
+again. `SuspendTask` keeps the awaiting state instead, outside a batch approval.
 
 `Task::total_usage()` sums the usage of every model call. `Task::total_usage_cost()` is
 what the account is billed: ChatGPT OAuth calls are covered by the subscription and add
@@ -444,7 +463,9 @@ reset the attempt limit and elapsed budget; the budget's clock stops while they 
 limits are waited out for at most `max_wait_ms` (15 minutes) in total per recovery
 episode. After that, or when a rate limit asks for a longer wait, the error is handled as
 a plan usage limit; a capacity error asking for a longer wait gets ordinary recovery.
-`rate_limit_retry: None` (JSON `null`) gives both ordinary recovery.
+`LLMRateLimitRetryConfig` sets the backoff (`initial_delay_ms`, `max_delay_ms`) and
+`max_wait_ms`; `rate_limit_retry: None` (JSON `null`) gives both kinds of error ordinary
+recovery.
 
 **Indefinite capacity waits.** `capacity_retry: Some(LLMCapacityRetryConfig::default())`
 retries capacity errors under either `RetryThen*` policy until the service recovers, with
@@ -517,19 +538,20 @@ A refusal is never retried unchanged. The runtime emits `RefusalReceived` with t
 be retried: the task pauses or is returned `Interrupted`, as the error policy decides.
 
 A model's own refusal (`RefusalSource::Model`, such as an OpenAI structured refusal) stays
-in history with its explanation as the assistant text, so the model can see what it
-declined. Its tool calls are not run (announced calls get `ToolRejected` with the reason
-`turn refused`), and in output-based mode only the explanation, or the text without its
-tool-call markup, is kept. Classifier and content-filter refusals are removed from
-history.
+in history, so the model can see what it declined. Its tool calls are not run (announced
+calls get `ToolRejected` with the reason `turn refused`) and are not kept. In native mode
+the refusal explanation becomes the turn's text when the turn has none; in output-based
+mode the explanation replaces the text, or without one, the text is kept without its
+tool-call markup. A turn left without text is not kept. Classifier and content-filter
+refusals are removed from history.
 
 **Changing the refused input.** `RefusedInput` lists the user messages after the last
 assistant turn, each a `RefusedMessage` with its `message_index`, `runtime` and
 `runtime_text` flags, `tool_results` (by provider call ID), and image count. It is also
 kept in `Task::refused_input` until the refusal is resolved, recovery is approved, or a
-later turn completes. Messages the runtime added (file-tree updates, error and recovery notes,
-requests to continue) are marked `runtime` and cannot be changed, and neither can a
-recovery note beside native tool results (`runtime_text`). While the task awaits
+later turn completes. Messages the runtime added (file-tree updates, error and recovery
+notes, requests to continue) are marked `runtime` and cannot be changed, and neither can
+a recovery note beside native tool results (`runtime_text`). While the task awaits
 recovery approval, `UserCommand::ResolveRefusal { changes }` applies a list of changes;
 for a task returned interrupted, call `Task::resolve_refusal(changes)` before running it
 again. The changes apply together or not at all: an invalid one emits `ErrorEncountered`
@@ -547,9 +569,9 @@ kept refused turn. The refused turn is removed, the changed input is sent as it 
 tools that track the conversation observe it from the start again. Change a task's input
 this way rather than with arko-ai's `Conversation` methods (`rephrase_last_user_turn`,
 `remove_last_user_turn`, `redact_tool_result`), which do not update the task's record of
-runtime messages or its refused input. `ApproveErrorRecovery` continues without a change,
-so if the model refuses again, the reported input is only the runtime's recovery note,
-which cannot be changed.
+runtime messages or its refused input. `ApproveErrorRecovery` continues without a change.
+After a model's own refusal, which stays in history, the next input is then usually only
+the runtime's recovery note, which cannot be changed if the model refuses again.
 
 **Fallback model.** The opt-in `AgentConfig::refusal_fallback` is an `AgentLLMConfig` on
 the configured model's provider; a fallback on another provider is rejected, since
@@ -577,8 +599,8 @@ configuration or task is loaded, a model the registry knows takes the registry's
 data (pricing and limits); an unknown ID keeps its saved copy, and an OpenRouter slug
 without a saved copy loads without catalog metadata. A hand-written configuration can
 therefore give only `provider` and `model_id` for a registry model or an OpenRouter slug.
-Fields added to `AgentConfig` and `Task` have serde defaults, so files saved without them
-still load.
+Optional fields of `AgentConfig` and `Task` have serde defaults, so files saved by older
+versions still load.
 
 ## Testing
 

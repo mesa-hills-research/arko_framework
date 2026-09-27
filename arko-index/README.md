@@ -18,8 +18,6 @@ arko-ai = { path = "../arko-ai" }
 tokio = { version = "1.37", features = ["full"] }
 ```
 
-The index runs its jobs as Tokio tasks, so use it inside a Tokio runtime.
-
 ## Build and search
 
 ```rust
@@ -65,8 +63,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 Each `start_build` creates a new index with its own ID and returns a `JobHandle` (`index`
-and `job` IDs). `events(job, after, limit)` streams a job's progress, and `search` keeps
-answering from the last complete generation while an update runs.
+and `job` IDs). `events(job, after, limit)` returns a job's progress events in pages, and
+`search` keeps answering from the last complete generation while an update runs.
 
 Credentials stay with the caller's `LLMClient`; the index database stores none. The client
 above uses ChatGPT OAuth; `LLMClient::new().with_openai_api_key(key)` uses an OpenAI API
@@ -100,7 +98,7 @@ the subscription (see [Usage and cost](../docs/arko-index-reference.md#usage-and
 - **Search.** Hybrid search combines SQLite FTS5 (BM25) and exact cosine-similarity
   rankings with reciprocal rank fusion; lexical and semantic modes use one of them. Path,
   literal-text and size filters apply before ranking, and results page with cursors.
-  `search_with_judge` has a model filter and rank a candidate pool. See
+  `search_with_judge` asks a model to filter and rank a candidate pool. See
   [Search](../docs/arko-index-reference.md#search) and
   [LLM judge](../docs/arko-index-reference.md#llm-judge).
 - **Usage and cost.** `status(job).usage` sums the token usage and cost of every
@@ -141,3 +139,7 @@ cargo test -p arko-index --locked
 ```
 
 CI runs them on Linux, macOS and Windows.
+
+## License
+
+MIT OR Apache-2.0
