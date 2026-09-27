@@ -168,14 +168,19 @@ impl ArkoIndex {
         let this = self.clone();
         let job = job.to_owned();
         tokio::spawn(async move {
-            let outcome = this.run(&job, &control).await;
-            if let Err(error) = outcome {
+            // On success, publish records "ready" and removes the control.
+            if let Err(error) = this.run(&job, &control).await {
                 let phase = match error {
                     Error::Paused => "paused",
                     Error::Cancelled => "cancelled",
                     Error::Blocked(_) | Error::Invalid(_) | Error::Provider { .. } => "blocked",
                     _ => "failed",
                 };
+                // The final phase and the control's removal are one step
+                // under the controls lock: once a caller sees the phase,
+                // `resume` can relaunch, and no relaunch can come between
+                // them (where this late write would overwrite its phase).
+                let mut controls = this.inner.controls.lock().await;
                 if let Err(e) = this
                     .inner
                     .db
@@ -184,8 +189,8 @@ impl ArkoIndex {
                 {
                     log::error!("failed to persist the status of job {job}: {e}");
                 }
+                controls.remove(&job);
             }
-            this.inner.controls.lock().await.remove(&job);
         });
         Ok(())
     }
@@ -853,6 +858,9 @@ impl ArkoIndex {
             .await?;
         let manifest = tokio::task::spawn_blocking(move || source::scan(&spec)).await??;
         let j = job.to_owned();
+        // "ready" becomes visible together with the control's removal, as the
+        // other final phases do in `launch`; pause and cancel wait for both.
+        let mut controls = self.inner.controls.lock().await;
         self.inner.db.call(move|c|{control.check()?;let tx=c.transaction()?;
             let old_hash:String=tx.query_row("SELECT manifest FROM jobs WHERE id=?1",[&j],|r|r.get(0))?;
             tx.execute("DELETE FROM chunk_fts WHERE job=?1",[&j])?;tx.execute("DELETE FROM chunks WHERE job=?1",[&j])?;
@@ -864,7 +872,9 @@ impl ArkoIndex {
             tx.execute("UPDATE jobs SET phase='ready',fresh=?2,problem=NULL WHERE id=?1",params![j,old_hash==manifest.hash])?;
             tx.execute("UPDATE indexes SET active=?1,config=(SELECT config FROM jobs WHERE id=?1) WHERE id=(SELECT index_id FROM jobs WHERE id=?1)",[&j])?;
             tx.execute("INSERT INTO events(job,kind,detail) VALUES(?1,'phase','{\"phase\":\"ready\"}')",[&j])?;
-            control.check()?;tx.commit()?;Ok(())}).await
+            control.check()?;tx.commit()?;Ok(())}).await?;
+        controls.remove(job);
+        Ok(())
     }
 }
 struct PreparedChunk {

@@ -1240,6 +1240,63 @@ async fn start_one_file(
         .unwrap();
     (index, job)
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_seen_paused_can_be_resumed_at_once() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    // Every chunk request waits an hour to retry, so the job only stops when paused.
+    let mut fake = Fake::new();
+    fake.rejection = Rejection::WrongCallRetryLater;
+    fake.delay = Duration::ZERO;
+    let fake = Arc::new(fake);
+    fake.rejected_chunks.store(usize::MAX, Ordering::SeqCst);
+    let (index, job) = start_one_file(&fake, &db.path().join("i.db"), root.path()).await;
+    for iteration in 0..500 {
+        index.pause(&job.job).await.unwrap();
+        // Resume the moment the pause shows, with no settling delay.
+        let phase = loop {
+            let phase = index.status(&job.job).await.unwrap().phase;
+            if matches!(
+                phase.as_str(),
+                "paused" | "blocked" | "failed" | "cancelled"
+            ) {
+                break phase;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert_eq!(phase, "paused", "iteration {iteration}");
+        if let Err(error) = index.resume(&job.job).await {
+            panic!("iteration {iteration}: resume after the pause showed: {error}");
+        }
+    }
+    index.cancel(&job.job).await.unwrap();
+    assert_eq!(settle(&index, &job.job).await.phase, "cancelled");
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_seen_ready_is_no_longer_running() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let mut fake = Fake::new();
+    fake.delay = Duration::ZERO;
+    let fake = Arc::new(fake);
+    let (index, first) = start_one_file(&fake, &db.path().join("i.db"), root.path()).await;
+    assert_eq!(settle(&index, &first.job).await.phase, "ready");
+    for iteration in 0..50 {
+        let update = index.start_update(&first.index).await.unwrap();
+        while index.status(&update.job).await.unwrap().phase != "ready" {
+            tokio::task::yield_now().await;
+        }
+        // Neither can reach the finished job's control any more.
+        assert!(
+            index.pause(&update.job).await.is_err(),
+            "iteration {iteration}"
+        );
+        assert!(
+            matches!(index.cancel(&update.job).await, Err(Error::Invalid(ref m)) if m.contains("completed")),
+            "iteration {iteration}"
+        );
+    }
+}
 #[tokio::test]
 async fn a_pause_during_a_retry_wait_counts_the_rejected_attempt_once() {
     let root = tempfile::tempdir().unwrap();
