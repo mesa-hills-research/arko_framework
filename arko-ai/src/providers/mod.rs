@@ -298,5 +298,17 @@ mod transport_tests {
     async fn tls_rejects_an_expired_certificate() {
         let error=default_http_client().get("https://expired.badssl.com/").send().await.unwrap_err();
         assert!(error.is_connect(),"{error:?}");
+        // The failure must be certificate validation, not DNS or a reset.
+        let mut source:Option<&(dyn std::error::Error+'static)>=Some(&error);
+        let mut expired=false;
+        while let Some(current)=source {
+            if matches!(current.downcast_ref::<rustls::Error>(),Some(rustls::Error::InvalidCertificate(rustls::CertificateError::Expired|rustls::CertificateError::ExpiredContext{..}))) {expired=true;break;}
+            // io::Error::source() skips its payload (the wrapped rustls error); descend into it instead.
+            source=match current.downcast_ref::<std::io::Error>().and_then(std::io::Error::get_ref) {
+                Some(inner)=>Some(inner as &(dyn std::error::Error+'static)),
+                None=>current.source(),
+            };
+        }
+        assert!(expired,"expected an expired-certificate error in the source chain: {error:?}");
     }
 }
