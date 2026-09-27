@@ -24,6 +24,11 @@ use std::sync::Arc;
 /// step 1 without refreshing, as Codex's unauthorized recovery re-reads
 /// `auth.json`: newer tokens are adopted and the request is sent once more.
 ///
+/// Whatever the store returns, the client never sends a refresh token that
+/// a refresh in this process already exchanged for a new one, and never
+/// adopts stored credentials holding one: that refresh fails with
+/// [`Error::AuthenticationFailed`].
+///
 /// The client holds the store's [`refresh_lock`](Self::refresh_lock) when it
 /// has one, and its own credential lock, across these calls, so neither
 /// clones of one client nor clients sharing the lock refresh concurrently.

@@ -805,11 +805,14 @@ async fn clients_made_separately_from_one_auth_file_refresh_it_once() {
 }
 
 /// The first client's rotated tokens can't be saved, so the file keeps the
-/// spent refresh token: other clients of the file are handed the rotated
-/// tokens instead of refreshing with it, and once the file can be written,
-/// the next refresh saves them first.
+/// spent refresh token: the other clients of the file, one made from it
+/// afterwards, and the first client too (it doesn't rotate its tokens again
+/// before they are saved) stop with an error naming the recovery file; no
+/// one is handed the unsaved tokens. Once the file can be written, the first
+/// client's next refresh saves them first (with their id_token) and
+/// refreshes them, and the others take the newest tokens from the file.
 #[tokio::test]
-async fn a_rotation_another_client_could_not_save_is_handed_over_instead_of_refreshing_again() {
+async fn a_rotation_another_client_could_not_save_stops_every_refresh_until_it_is_saved() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let with_id_token = reply(
             "/token",
@@ -832,38 +835,28 @@ async fn a_rotation_another_client_could_not_save_is_handed_over_instead_of_refr
         let spent = file_credentials(&path);
         assert_eq!(spent.refresh_token.as_deref(), Some("synthetic-refresh"));
 
-        // Saving still fails: the second client, and one made from the file
-        // afterwards, are handed the rotated tokens.
-        let result = second.refresh_oauth_token_once().await.unwrap();
-        assert_eq!(result.access_token, "synthetic-new-access");
-        assert_eq!(second.chatgpt_oauth_credentials().await.unwrap(), rotated);
         let third = served_by(file.openai_client().unwrap(), &server.url);
-        let result = third.refresh_oauth_token_once().await.unwrap();
-        assert_eq!(result.access_token, "synthetic-new-access");
+        for client in [&second, &third, &first] {
+            let error = client.refresh_oauth_token_once().await.unwrap_err();
+            assert!(error.to_string().contains(".recovered-"), "{error}");
+        }
+        assert_eq!(second.chatgpt_oauth_credentials().await.unwrap(), spent);
+        assert_eq!(first.chatgpt_oauth_credentials().await.unwrap(), rotated);
         assert_eq!(server.request_count(), 1);
         assert_eq!(file_credentials(&path), spent);
-        // The first client doesn't refresh them again while they can't be saved.
-        assert!(first.refresh_oauth_token_once().await.is_err());
-        assert_eq!(server.request_count(), 1);
 
-        // Once the file can be written, the next refresh saves them first
-        // (with their id_token), then refreshes them.
         std::fs::remove_dir(&backup).unwrap();
-        let result = second.refresh_oauth_token_once().await.unwrap();
+        let result = first.refresh_oauth_token_once().await.unwrap();
         assert_eq!(result.access_token, "second-access");
         let newest = stored("second-access", "second-refresh");
         assert_eq!(file_credentials(&path), newest);
         let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["tokens"]["id_token"], "synthetic-new-id");
-        // The clients still holding the rotated tokens, now spent, find the
-        // newest ones in the file.
-        for client in [&first, &third] {
+        for client in [&second, &third] {
             assert_eq!(client.refresh_oauth_token_once().await.unwrap().access_token, "second-access");
             assert_eq!(client.chatgpt_oauth_credentials().await.unwrap(), newest);
         }
-        let requests = server.requests.lock().unwrap().clone();
-        let sent: Vec<&Value> = requests.iter().map(|(_, body)| &body["refresh_token"]).collect();
-        assert_eq!(sent, ["synthetic-refresh", "synthetic-new-refresh"]);
+        assert_eq!(sent_refresh_tokens(&server), ["synthetic-refresh", "synthetic-new-refresh"]);
     })
     .await
     .unwrap();
@@ -1162,8 +1155,9 @@ async fn clients_take_the_credentials_of_a_new_sign_in_after_an_unsaved_rotation
 }
 
 /// A host that builds a client per run and drops it: the unsaved rotation
-/// outlives the clients, so the next client made from the file is handed it
-/// instead of refreshing with the spent token.
+/// outlives the clients, so the next client made from the file doesn't
+/// refresh the spent token, and takes the rotation once the file can be
+/// written.
 #[tokio::test]
 async fn an_unsaved_rotation_outlives_the_clients_of_the_file() {
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -1178,9 +1172,290 @@ async fn an_unsaved_rotation_outlives_the_clients_of_the_file() {
         }
         let file = crate::codex_auth::CodexAuthFile::load(&path).unwrap();
         let next_run = served_by(file.openai_client().unwrap(), &server.url);
+        let error = next_run.refresh_oauth_token_once().await.unwrap_err();
+        assert!(error.to_string().contains(".recovered-"), "{error}");
+        std::fs::remove_dir(&backup).unwrap();
         let result = next_run.refresh_oauth_token_once().await.unwrap();
         assert_eq!(result.access_token, "synthetic-new-access");
-        assert_eq!(server.request_count(), 1);
+        assert_eq!(sent_refresh_tokens(&server), ["synthetic-refresh"]);
+    })
+    .await
+    .unwrap();
+}
+
+/// Writes `auth.json` at `path` as Codex does, holding these tokens.
+fn write_auth(path: &std::path::Path, access_token: &str, refresh_token: &str, account_id: &str) {
+    let contents = serde_json::json!({
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "account_id": account_id,
+            "id_token": "synthetic-id",
+        },
+    });
+    std::fs::write(path, serde_json::to_vec_pretty(&contents).unwrap()).unwrap();
+}
+
+/// A token endpoint answer rotating to these tokens.
+fn rotates_to(access_token: &str, refresh_token: &str) -> Reply {
+    let body = serde_json::json!({"access_token": access_token, "refresh_token": refresh_token});
+    reply("/token", 200, &body.to_string())
+}
+
+/// The refresh tokens `server`'s token endpoint received, in order.
+fn sent_refresh_tokens(server: &TestServer) -> Vec<String> {
+    server
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(headers, _)| headers.starts_with("POST /token "))
+        .map(|(_, body)| body["refresh_token"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// B1: two clients of one `auth.json`. The first refreshes twice, and the
+/// second rotation can't be saved. The idle second client, whose tokens and
+/// the file's were both spent by those refreshes, gets an error naming the
+/// recovery file from its proactive refresh instead of taking the file's
+/// spent tokens and refreshing them; once the file can be written, it takes
+/// the rotation. No refresh token reaches the server twice.
+#[tokio::test]
+async fn an_idle_client_never_refreshes_tokens_another_client_spent() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        // Further refresh requests would be answered too.
+        let server = TestServer::start(
+            vec![
+                rotates_to(&jwt(1), "b1-refresh-1"),
+                rotates_to(&fresh_jwt(), "b1-refresh-2"),
+                rotates_to(&fresh_jwt(), "b1-refresh-3"),
+                rotates_to(&fresh_jwt(), "b1-refresh-4"),
+            ],
+            false,
+        )
+        .await;
+        let (dir, path) = auth_file(&jwt(1));
+        let file = crate::codex_auth::CodexAuthFile::load(&path).unwrap();
+        let first = served_by(file.openai_client().unwrap(), &server.url);
+        let idle = crate::LLMClient::new().with_openai_client(served_by(file.openai_client().unwrap(), &server.url));
+        let held = idle.openai_chatgpt_oauth_credentials().await.unwrap();
+        first.refresh_oauth_token_once().await.unwrap();
+        // A directory in place of that save's backup fails the next save.
+        let backup = dir.path().join("auth.json.bak");
+        std::fs::remove_file(&backup).unwrap();
+        std::fs::create_dir(&backup).unwrap();
+        assert!(first.refresh_oauth_token_once().await.is_err());
+        assert_eq!(file_credentials(&path).refresh_token.as_deref(), Some("b1-refresh-1"));
+
+        // The agent loop's proactive refresh.
+        let margin = Duration::from_secs(60);
+        let error = idle.refresh_openai_oauth_token_if_expiring(margin).await.unwrap_err();
+        assert!(error.to_string().contains(".recovered-"), "{error}");
+        assert!(!error.is_retryable());
+        assert_eq!(idle.openai_chatgpt_oauth_credentials().await.unwrap(), held);
+        assert_eq!(sent_refresh_tokens(&server), ["synthetic-refresh", "b1-refresh-1"]);
+
+        std::fs::remove_dir(&backup).unwrap();
+        let adopted = idle.refresh_openai_oauth_token_if_expiring(margin).await.unwrap().unwrap();
+        assert_eq!(adopted.refresh_token.as_deref(), Some("b1-refresh-2"));
+        assert_eq!(file_credentials(&path).refresh_token.as_deref(), Some("b1-refresh-2"));
+        assert_eq!(sent_refresh_tokens(&server), ["synthetic-refresh", "b1-refresh-1"]);
+    })
+    .await
+    .unwrap();
+}
+
+/// M1a: two unsaved rotations in a row. The first client's rotation can't be
+/// saved; the user signs in again; the second client takes the new sign-in,
+/// refreshes it, and can't save that either. The first client then neither
+/// takes the spent sign-in tokens nor refreshes them; once the file can be
+/// written, it takes the second rotation.
+#[tokio::test]
+async fn a_client_never_takes_a_sign_in_another_client_spent() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let server = TestServer::start(
+            vec![
+                rotates_to(&fresh_jwt(), "m1a-refresh-1"),
+                rotates_to(&fresh_jwt(), "m1a-refresh-2"),
+                rotates_to(&fresh_jwt(), "m1a-refresh-3"),
+                rotates_to(&fresh_jwt(), "m1a-refresh-4"),
+            ],
+            false,
+        )
+        .await;
+        let (dir, path) = auth_file(&fresh_jwt());
+        let file = crate::codex_auth::CodexAuthFile::load(&path).unwrap();
+        let first = served_by(file.openai_client().unwrap(), &server.url);
+        let second = served_by(file.openai_client().unwrap(), &server.url);
+        let backup = dir.path().join("auth.json.bak");
+        std::fs::create_dir(&backup).unwrap();
+        assert!(first.refresh_oauth_token_once().await.is_err());
+
+        write_auth(&path, &fresh_jwt(), "m1a-signed-in", "synthetic-account");
+        let adopted = second.refresh_oauth_token_once().await.unwrap();
+        assert_eq!(adopted.refresh_token.as_deref(), Some("m1a-signed-in"));
+        assert!(second.refresh_oauth_token_once().await.is_err());
+        assert_eq!(file_credentials(&path).refresh_token.as_deref(), Some("m1a-signed-in"));
+
+        let error = first.refresh_oauth_token_once().await.unwrap_err();
+        assert!(error.to_string().contains(".recovered-"), "{error}");
+        let held = first.chatgpt_oauth_credentials().await.unwrap();
+        assert_eq!(held.refresh_token.as_deref(), Some("m1a-refresh-1"));
+        assert_eq!(sent_refresh_tokens(&server), ["synthetic-refresh", "m1a-signed-in"]);
+
+        std::fs::remove_dir(&backup).unwrap();
+        let taken = first.refresh_oauth_token_once().await.unwrap();
+        assert_eq!(taken.refresh_token.as_deref(), Some("m1a-refresh-2"));
+        assert_eq!(file_credentials(&path).refresh_token.as_deref(), Some("m1a-refresh-2"));
+        assert_eq!(sent_refresh_tokens(&server), ["synthetic-refresh", "m1a-signed-in"]);
+    })
+    .await
+    .unwrap();
+}
+
+/// M1b: while the file holds another account, the unsaved rotation is kept
+/// (also once its client is dropped). When the file is put back to the
+/// spent tokens, a client made from it doesn't refresh them: it gets an
+/// error naming the recovery file, then the rotation once it can be saved.
+#[tokio::test]
+async fn an_unsaved_rotation_is_kept_while_the_file_holds_another_account() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let server = TestServer::start(
+            vec![
+                rotates_to(&fresh_jwt(), "m1b-refresh-1"),
+                rotates_to(&fresh_jwt(), "m1b-refresh-2"),
+                rotates_to(&fresh_jwt(), "m1b-refresh-3"),
+            ],
+            false,
+        )
+        .await;
+        let (dir, path) = auth_file(&fresh_jwt());
+        let original = std::fs::read(&path).unwrap();
+        let backup = dir.path().join("auth.json.bak");
+        std::fs::create_dir(&backup).unwrap();
+        let file = crate::codex_auth::CodexAuthFile::load(&path).unwrap();
+        let holder = served_by(file.openai_client().unwrap(), &server.url);
+        assert!(holder.refresh_oauth_token_once().await.is_err());
+
+        write_auth(&path, &fresh_jwt(), "m1b-other-refresh", "other-account");
+        let error = holder.refresh_oauth_token_once().await.unwrap_err().to_string();
+        assert!(error.contains("different ChatGPT account") && error.contains(".recovered-"), "{error}");
+        drop(holder);
+
+        std::fs::write(&path, &original).unwrap();
+        let file = crate::codex_auth::CodexAuthFile::load(&path).unwrap();
+        let later = served_by(file.openai_client().unwrap(), &server.url);
+        let error = later.refresh_oauth_token_once().await.unwrap_err();
+        assert!(error.to_string().contains(".recovered-"), "{error}");
+        assert_eq!(sent_refresh_tokens(&server), ["synthetic-refresh"]);
+
+        std::fs::remove_dir(&backup).unwrap();
+        let taken = later.refresh_oauth_token_once().await.unwrap();
+        assert_eq!(taken.refresh_token.as_deref(), Some("m1b-refresh-1"));
+        assert_eq!(file_credentials(&path).refresh_token.as_deref(), Some("m1b-refresh-1"));
+        assert_eq!(sent_refresh_tokens(&server), ["synthetic-refresh"]);
+    })
+    .await
+    .unwrap();
+}
+
+fn refused_as_spent(error: &Error) -> bool {
+    matches!(error, Error::AuthenticationFailed(message) if message.contains("already exchanged"))
+        && !error.is_retryable()
+}
+
+/// Once a refresh in this process exchanged a refresh token for a new one,
+/// no entry point sends it again or adopts stored credentials holding it:
+/// `refresh_chatgpt_oauth_token`, explicit refreshes (with and without
+/// rate-limit retries), the proactive refresh, the refresh after a
+/// `token_expired` 401, and the store reads before a refresh and after any
+/// other 401.
+#[tokio::test]
+async fn a_spent_refresh_token_is_never_sent_or_adopted_again() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        // Anything beyond these would get no answer (and time the test out).
+        let server = TestServer::start(vec![refreshed(), expired(), permission_denied()], false).await;
+        let token_url = format!("{}/token", server.url);
+        let http_client = crate::http_client_builder().no_proxy().build().unwrap();
+        let exchanged = crate::refresh_chatgpt_oauth_token(&http_client, "synthetic-refresh", None, Some(&token_url))
+            .await
+            .unwrap();
+        assert_eq!(exchanged.refresh_token.as_deref(), Some("synthetic-new-refresh"));
+
+        let error = crate::refresh_chatgpt_oauth_token(&http_client, "synthetic-refresh", None, Some(&token_url))
+            .await
+            .unwrap_err();
+        assert!(refused_as_spent(&error), "{error}");
+        // The unrelated endpoint's record doesn't apply here.
+        assert!(!spent_tokens::spent_at_endpoint("http://another-endpoint.invalid/token", "synthetic-refresh"));
+
+        let holding_spent = client(&server.url);
+        let before = holding_spent.chatgpt_oauth_credentials().await.unwrap();
+        for error in [
+            holding_spent.refresh_oauth_token().await.unwrap_err(),
+            holding_spent.refresh_oauth_token_once().await.unwrap_err(),
+            holding_spent.clone().with_oauth_rate_limit_retries(true).refresh_oauth_token().await.unwrap_err(),
+        ] {
+            assert!(refused_as_spent(&error), "{error}");
+        }
+        let expiring = served_by(
+            OpenAIClient::new_chatgpt_oauth(&jwt(1), Some("synthetic-refresh"), "synthetic-account"),
+            &server.url,
+        );
+        let error = expiring.refresh_oauth_token_if_expiring(Duration::from_secs(60)).await.unwrap_err();
+        assert!(refused_as_spent(&error), "{error}");
+        // A request rejected with `token_expired`.
+        let conversation = Conversation::new(Model::openai_gpt_6_astra());
+        let error = holding_spent.generate_text(&conversation, &GenerationConfig::default()).await.unwrap_err();
+        assert!(refused_as_spent(&error), "{error}");
+        assert_eq!(holding_spent.chatgpt_oauth_credentials().await.unwrap(), before);
+
+        // A store offering credentials holding the spent token.
+        let offered = stored(&fresh_jwt(), "synthetic-refresh");
+        let store = Arc::new(ScriptedStore::default());
+        store.reads.lock().unwrap().push_back(Ok(Some(offered.clone())));
+        let other = stored("other-access", "other-refresh");
+        let with_store_client = with_store(
+            served_by(OpenAIClient::new_chatgpt_oauth("other-access", Some("other-refresh"), "synthetic-account"), &server.url),
+            &store,
+        );
+        let error = with_store_client.refresh_oauth_token_once().await.unwrap_err();
+        assert!(refused_as_spent(&error), "{error}");
+        assert_eq!(with_store_client.chatgpt_oauth_credentials().await.unwrap(), other);
+        // After another 401, the store's credentials aren't taken either:
+        // the 401 stands and the request isn't sent again.
+        store.reads.lock().unwrap().push_back(Ok(Some(offered)));
+        let error = with_store_client.generate_text(&conversation, &GenerationConfig::default()).await.unwrap_err();
+        assert!(matches!(error, Error::ProviderError { status: Some(401), .. }), "{error}");
+        assert_eq!(with_store_client.chatgpt_oauth_credentials().await.unwrap(), other);
+
+        assert_eq!(sent_refresh_tokens(&server), ["synthetic-refresh"]);
+        assert_eq!(server.request_count(), 3, "one refresh and two Responses requests");
+    })
+    .await
+    .unwrap();
+}
+
+/// A refresh waiting out an HTTP 429 finds, on its next attempt, that
+/// another client (sharing neither its credentials nor a store) exchanged
+/// the same refresh token meanwhile: it isn't sent again. Real time, with a
+/// one-second Retry-After.
+#[tokio::test]
+async fn a_rate_limited_refresh_does_not_resend_a_token_spent_while_it_waited() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let limited = reply("/token", 429, r#"{"error":{"code":"rate_limit_exceeded"}}"#)
+            .with_header("Retry-After", "1");
+        let mut server = TestServer::start(vec![limited, refreshed()], false).await;
+        let waiting = quick_retries(client(&server.url), Duration::from_secs(1))
+            .with_oauth_rate_limit_retries(true);
+        let waiting = tokio::spawn(async move { waiting.refresh_oauth_token().await });
+        server.arrived.recv().await.unwrap();
+        client(&server.url).refresh_oauth_token_once().await.unwrap();
+        let error = waiting.await.unwrap().unwrap_err();
+        assert!(refused_as_spent(&error), "{error}");
+        assert_eq!(sent_refresh_tokens(&server), ["synthetic-refresh", "synthetic-refresh"]);
+        assert_eq!(server.request_count(), 2);
     })
     .await
     .unwrap();

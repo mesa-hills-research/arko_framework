@@ -50,6 +50,8 @@ pub use request_hook::OpenAIRequestHook;
 mod credential_store;
 pub use credential_store::ChatGptOAuthStore;
 
+pub(crate) mod spent_tokens;
+
 type StreamingRefusals = BTreeMap<(String, u64), String>;
 
 const CHATGPT_OAUTH_DEFAULT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -323,7 +325,11 @@ const OAUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(60);
 /// since this crate builds reqwest without one.
 ///
 /// The refresh token rotates: once this succeeds, the old one stops working,
-/// so store the returned tokens (see [`crate::CodexAuthFile`]).
+/// so store the returned tokens (see [`crate::CodexAuthFile`]). This process
+/// never sends it again: a later call with a refresh token that a refresh
+/// here already exchanged for a new one fails with
+/// [`Error::AuthenticationFailed`] without a request (a second use would
+/// sign the user out).
 pub async fn refresh_chatgpt_oauth_token(
     http_client: &reqwest::Client,
     refresh_token: &str,
@@ -345,6 +351,11 @@ async fn request_oauth_refresh(
 ) -> Result<OAuthRefreshResult, Error> {
     let resolved_client_id = client_id.unwrap_or(CHATGPT_OAUTH_DEFAULT_CLIENT_ID);
     let resolved_token_url = token_url.unwrap_or(CHATGPT_OAUTH_DEFAULT_TOKEN_URL);
+    // Every refresh request passes here: a token this process already spent
+    // is never sent again.
+    if spent_tokens::spent_at_endpoint(resolved_token_url, refresh_token) {
+        return Err(crate::codex_auth::spent_refresh_token_error(refresh_token));
+    }
 
     let body = serde_json::json!({
         "grant_type": "refresh_token",
@@ -384,11 +395,21 @@ async fn request_oauth_refresh(
         })?
         .to_string();
 
-    Ok(OAuthRefreshResult {
+    let result = OAuthRefreshResult {
         access_token,
         refresh_token: data["refresh_token"].as_str().map(String::from),
         id_token: data["id_token"].as_str().map(String::from),
-    })
+    };
+    // The server rotated the refresh token: the one sent is spent. (Without a
+    // new one in the answer, the old one stays in use.)
+    if result
+        .refresh_token
+        .as_deref()
+        .is_some_and(|new| new != refresh_token)
+    {
+        spent_tokens::record_at_endpoint(resolved_token_url, refresh_token);
+    }
+    Ok(result)
 }
 
 #[derive(Clone)]
@@ -647,6 +668,12 @@ impl OpenAIClient {
     /// The request times out after 60 seconds (a transient
     /// [`Error::HttpError`]), so a stalled token endpoint holds the
     /// credentials no longer than that.
+    ///
+    /// No refresh (here or on any other path) sends a refresh token that a
+    /// refresh in this process already exchanged for a new one, nor adopts
+    /// stored credentials holding one: that fails with
+    /// [`Error::AuthenticationFailed`] (a second use would sign the user
+    /// out).
     pub async fn refresh_oauth_token(&self) -> Result<OAuthRefreshResult, Error> {
         self.refresh_explicitly(self.retry_oauth_rate_limits).await
     }
@@ -900,6 +927,25 @@ impl OpenAIClient {
         Ok(Some(result))
     }
 
+    /// Whether this process already spent `refresh_token` at this client's
+    /// token endpoint: a refresh with it returned a new one.
+    fn spent(&self, refresh_token: &str) -> bool {
+        let token_url = self
+            .oauth_token_url
+            .as_deref()
+            .unwrap_or(CHATGPT_OAUTH_DEFAULT_TOKEN_URL);
+        spent_tokens::spent_at_endpoint(token_url, refresh_token)
+    }
+
+    /// Whether the refresh token in `credentials` is spent (see
+    /// [`spent`](Self::spent)).
+    pub(crate) fn refresh_token_spent(&self, credentials: &ChatGptOAuthCredentials) -> bool {
+        credentials
+            .refresh_token
+            .as_deref()
+            .is_some_and(|token| self.spent(token))
+    }
+
     fn result_for(credentials: &ChatGptOAuthCredentials) -> OAuthRefreshResult {
         OAuthRefreshResult {
             access_token: credentials.access_token.clone(),
@@ -919,6 +965,9 @@ impl OpenAIClient {
             return Err(Error::AuthenticationFailed(
                 "The credential store holds a different ChatGPT account; sign in again.".into(),
             ));
+        }
+        if let Some(spent) = stored.refresh_token.as_deref().filter(|token| self.spent(token)) {
+            return Err(crate::codex_auth::spent_refresh_token_error(spent));
         }
         let result = Self::result_for(&stored);
         self.install_auth(auth, OpenAIAuth::ChatGptOAuth(stored));
