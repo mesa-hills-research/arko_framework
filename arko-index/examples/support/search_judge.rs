@@ -1,4 +1,4 @@
-use super::{AnyResult, OAuthFile, clients};
+use super::{AnyResult, load_client};
 use arko_ai::{
     GenerationConfig, LLMClient, Model, OpenAIEffort, Provider, ReasoningConfig, model::ModelType,
 };
@@ -53,20 +53,6 @@ pub struct JudgeArgs {
     /// Append task-specific selection preferences from a UTF-8 text file.
     #[arg(long, requires = "judge")]
     judge_instructions_file: Option<PathBuf>,
-}
-
-pub struct JudgeSession {
-    pub judge: LlmSearchJudge,
-    client: LLMClient,
-    oauth: Option<OAuthFile>,
-}
-impl JudgeSession {
-    pub async fn persist(&mut self) -> AnyResult<()> {
-        if let Some(oauth) = &mut self.oauth {
-            oauth.sync(&self.client).await?;
-        }
-        Ok(())
-    }
 }
 
 fn generation_config(overrides: Option<Value>) -> AnyResult<GenerationConfig> {
@@ -149,11 +135,11 @@ impl JudgeArgs {
         Ok((model, config))
     }
 
-    pub fn session(
+    pub fn build_judge(
         &self,
         inherited: &LLMClient,
         inherited_path: Option<&Path>,
-    ) -> AnyResult<JudgeSession> {
+    ) -> AnyResult<LlmSearchJudge> {
         let (model, generation) = self.model_and_config()?;
         if self.judge_api_key_env.is_some() && self.judge_auth != JudgeAuth::ApiKey {
             return Err("--judge-api-key-env requires --judge-auth api-key".into());
@@ -161,12 +147,12 @@ impl JudgeArgs {
         if self.judge_oauth_file.is_some() && self.judge_auth != JudgeAuth::Oauth {
             return Err("--judge-oauth-file requires --judge-auth oauth".into());
         }
-        let (client, oauth) = match self.judge_auth {
+        let client = match self.judge_auth {
             JudgeAuth::Inherit => {
                 if model.provider != Provider::OpenAI {
                     return Err("the global client uses OpenAI authentication; select --judge-auth api-key for another provider".into());
                 }
-                (inherited.clone(), None)
+                inherited.clone()
             }
             JudgeAuth::ApiKey => {
                 let default_env = if model.provider == Provider::OpenAI {
@@ -180,12 +166,11 @@ impl JudgeArgs {
                 if key.trim().is_empty() {
                     return Err(format!("empty judge API-key environment variable: {name}").into());
                 }
-                let client = if model.provider == Provider::OpenAI {
+                if model.provider == Provider::OpenAI {
                     LLMClient::new().with_openai_api_key(&key)
                 } else {
                     LLMClient::new().with_anthropic_api_key(&key)
-                };
-                (client, None)
+                }
             }
             JudgeAuth::Oauth => {
                 if model.provider != Provider::OpenAI {
@@ -202,10 +187,11 @@ impl JudgeArgs {
                     })
                     .transpose()?
                     .unwrap_or(false);
+                // The global client already uses this file.
                 if same_file {
-                    (inherited.clone(), None)
+                    inherited.clone()
                 } else {
-                    clients(Some(path.to_owned()))?
+                    load_client(Some(path.to_owned()))?
                 }
             }
         };
@@ -215,14 +201,9 @@ impl JudgeArgs {
             .map(std::fs::read_to_string)
             .transpose()?
             .unwrap_or_default();
-        let judge = LlmSearchJudge::new(client.clone(), model)
+        Ok(LlmSearchJudge::new(client, model)
             .with_generation_config(generation)
-            .with_instructions(instructions);
-        Ok(JudgeSession {
-            judge,
-            client,
-            oauth,
-        })
+            .with_instructions(instructions))
     }
 }
 
@@ -289,14 +270,14 @@ mod tests {
             assert!(
                 parse(&flags)
                     .unwrap()
-                    .session(&LLMClient::new(), None)
+                    .build_judge(&LLMClient::new(), None)
                     .is_err()
             );
         }
         assert!(
             parse(&["--judge"])
                 .unwrap()
-                .session(&LLMClient::new(), None)
+                .build_judge(&LLMClient::new(), None)
                 .is_ok()
         );
     }

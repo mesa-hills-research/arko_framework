@@ -11,8 +11,9 @@ type AnyResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sy
 struct Args {
     #[arg(long)]
     database: PathBuf,
-    /// User-owned OAuth JSON, with access_token, refresh_token and account_id,
-    /// either at the top level or in a tokens object. Rotated tokens are saved here.
+    /// A Codex auth.json (access_token, refresh_token and account_id at the top
+    /// level or in a tokens object). Every token refresh reads it again first,
+    /// and rotated tokens are saved to it at once.
     #[arg(long)]
     oauth_file: Option<PathBuf>,
     #[arg(long, default_value_t = 6)]
@@ -69,30 +70,20 @@ enum Command {
         debounce_ms: u64,
     },
 }
-/// A Codex `auth.json`; rotated tokens are written back with `sync`.
-type OAuthFile = arko_ai::CodexAuthFile;
-/// Credentials from an OAuth file when given, else from the environment.
-fn clients(path: Option<PathBuf>) -> AnyResult<(LLMClient, Option<OAuthFile>)> {
-    if let Some(path) = path {
-        let file = OAuthFile::load(path)?;
-        return Ok((file.client()?, Some(file)));
+/// Credentials from an OAuth file when given, kept in step with the file,
+/// else from the environment.
+fn load_client(path: Option<PathBuf>) -> AnyResult<LLMClient> {
+    match path {
+        Some(path) => Ok(arko_ai::CodexAuthFile::load(path)?.client()?),
+        None => Ok(LLMClient::from_env()),
     }
-    Ok((LLMClient::from_env(), None))
 }
-async fn observe(
-    index: &ArkoIndex,
-    job: &str,
-    client: &LLMClient,
-    oauth: &mut Option<OAuthFile>,
-) -> AnyResult<()> {
+async fn observe(index: &ArkoIndex, job: &str) -> AnyResult<()> {
     let mut cursor = 0;
     loop {
         for event in index.events(job, cursor, 100).await? {
             cursor = event.sequence;
             println!("{}", serde_json::to_string(&event)?);
-        }
-        if let Some(oauth) = oauth {
-            oauth.sync(client).await?;
         }
         let status = index.status(job).await?;
         match status.phase.as_str() {
@@ -110,7 +101,7 @@ async fn observe(
 #[tokio::main]
 async fn main() -> AnyResult<()> {
     let args = Args::parse();
-    let (client, mut oauth) = clients(args.oauth_file.clone())?;
+    let client = load_client(args.oauth_file.clone())?;
     let embeddings = EmbeddingClient::from_env();
     let config = Config {
         batch_count: args.batch_count,
@@ -124,16 +115,16 @@ async fn main() -> AnyResult<()> {
         Command::Build { root, name } => {
             let job = index.start_build(BuildSpec::new(name, root)).await?;
             println!("{}", serde_json::to_string(&job)?);
-            observe(&index, &job.job, &client, &mut oauth).await?;
+            observe(&index, &job.job).await?;
         }
         Command::Update { index: id } => {
             let job = index.start_update(&id).await?;
             println!("{}", serde_json::to_string(&job)?);
-            observe(&index, &job.job, &client, &mut oauth).await?;
+            observe(&index, &job.job).await?;
         }
         Command::Resume { job } => {
             index.resume(&job).await?;
-            observe(&index, &job, &client, &mut oauth).await?;
+            observe(&index, &job).await?;
         }
         Command::Status { job } => println!(
             "{}",
@@ -164,19 +155,13 @@ async fn main() -> AnyResult<()> {
                 ..Default::default()
             };
             let result = if judging.judge {
-                let mut session = judging.session(&client, args.oauth_file.as_deref())?;
-                let result = index
-                    .search_with_judge(&id, &query, options, &session.judge, judging.options())
-                    .await;
-                // Preserve rotated credentials even when selection fails.
-                session.persist().await?;
-                result
+                let judge = judging.build_judge(&client, args.oauth_file.as_deref())?;
+                index
+                    .search_with_judge(&id, &query, options, &judge, judging.options())
+                    .await
             } else {
                 index.search(&id, &query, options).await
             };
-            if let Some(oauth) = &mut oauth {
-                oauth.sync(&client).await?;
-            }
             println!("{}", serde_json::to_string_pretty(&result?)?);
         }
         Command::Read {
@@ -198,14 +183,13 @@ async fn main() -> AnyResult<()> {
                     Duration::from_secs(30),
                 )
                 .await?;
-            loop {
-                tokio::select! {_=tokio::signal::ctrl_c()=>break,_=tokio::time::sleep(Duration::from_secs(1))=>{if let Some(oauth)=&mut oauth{oauth.sync(&client).await?;}}}
-            }
+            let _ = tokio::signal::ctrl_c().await;
             watcher.stop().await?;
         }
     }
-    if let Some(oauth) = &mut oauth {
-        oauth.sync(&client).await?;
-    }
+    // An update job can still be running (watch starts them); a token
+    // refresh in flight holds the credentials until its new tokens are
+    // saved, so wait for it before the runtime shuts down.
+    client.openai_chatgpt_oauth_credentials().await;
     Ok(())
 }

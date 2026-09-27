@@ -68,8 +68,10 @@ and `job` IDs). `events(job, after, limit)` returns a job's progress events in p
 
 Credentials stay with the caller's `LLMClient`; the index database stores none. The client
 above uses ChatGPT OAuth; `LLMClient::new().with_openai_api_key(key)` uses an OpenAI API
-key instead. With ChatGPT OAuth, keep a clone of the `LLMClient` and persist rotated
-credentials from `openai_chatgpt_oauth_credentials()`. ChatGPT OAuth calls are billed to
+key instead. ChatGPT OAuth credentials rotate on refresh, and this client keeps them in
+memory only: keep a clone of the `LLMClient` and persist them from
+`openai_chatgpt_oauth_credentials()`. A client built from a Codex `auth.json`
+(`arko_ai::CodexAuthFile`) saves them to the file itself. ChatGPT OAuth calls are billed to
 the subscription (see [Usage and cost](../docs/arko-index-reference.md#usage-and-cost)).
 
 ## Key concepts

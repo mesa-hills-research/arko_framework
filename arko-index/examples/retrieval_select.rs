@@ -8,16 +8,6 @@ use futures::{StreamExt, stream};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 type AnyResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-/// A Codex `auth.json`; rotated tokens are written back with `sync`.
-type OAuthFile = arko_ai::CodexAuthFile;
-/// Credentials from an OAuth file when given, else from the environment.
-fn clients(path: Option<PathBuf>) -> AnyResult<(LLMClient, Option<OAuthFile>)> {
-    if let Some(path) = path {
-        let file = OAuthFile::load(path)?;
-        return Ok((file.client()?, Some(file)));
-    }
-    Ok((LLMClient::from_env(), None))
-}
 
 async fn grade_request(
     client: &LLMClient,
@@ -72,7 +62,9 @@ async fn main() -> AnyResult<()> {
             "usage: retrieval_select OAUTH_FILE EVALUATION_DIRECTORY [compact|conservative] [max|high]".into(),
         );
     }
-    let (client, mut oauth) = clients(Some(PathBuf::from(&args[0])))?;
+    // A Codex auth.json: every token refresh reads it again first, and
+    // rotated tokens are saved to it at once.
+    let client = arko_ai::CodexAuthFile::load(&args[0])?.client()?;
     let base = PathBuf::from(&args[1]);
     let queries: Vec<Value> = serde_json::from_slice(&std::fs::read(base.join("queries.json"))?)?;
     let policy = args.get(2).map(String::as_str).unwrap_or("conservative");
@@ -165,9 +157,6 @@ async fn main() -> AnyResult<()> {
                 failures += 1;
                 eprintln!("{error}");
             }
-        }
-        if let Some(oauth) = &mut oauth {
-            oauth.sync(&client).await?;
         }
     }
     if failures > 0 {

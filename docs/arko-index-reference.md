@@ -467,10 +467,11 @@ only and `--semantic` vector retrieval only; otherwise search is hybrid.
 environment: `OPENAI_OAUTH_ACCESS_TOKEN` and `OPENAI_OAUTH_ACCOUNT_ID` (with an optional
 `OPENAI_OAUTH_REFRESH_TOKEN`) for ChatGPT OAuth, or `OPENAI_API_KEY`. The OAuth file uses
 the Codex `auth.json` layout, with `access_token`, `refresh_token` and `account_id` at the
-top level or under `tokens`. Rotated tokens are written back atomically (the previous
-contents are kept in `<file>.bak`), and credentials that another process wrote to the file
-are loaded rather than overwritten; give the example a file that no other application
-refreshes. Rotated tokens from environment credentials are not saved.
+top level or under `tokens`, and can be the one Codex uses: every token refresh reads the
+file again first, adopting tokens another process refreshed in the meantime, and rotated
+tokens are saved to it at once, atomically (the previous contents are kept in
+`<file>.bak`); see [ChatGPT OAuth credentials](../arko-ai/README.md#chatgpt-oauth-credentials).
+Rotated tokens from environment credentials are not saved.
 
 ### Judge options
 
@@ -496,7 +497,7 @@ attempts.
 | `--judge-auth inherit` | Default: reuse the global OpenAI client and its ChatGPT OAuth or API-key credentials. OpenAI judges only. |
 | `--judge-auth api-key` | Read `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, independently of the global credentials. |
 | `--judge-api-key-env NAME` | Read the API key from another environment variable; requires `--judge-auth api-key`. Keys are never passed as argument values. |
-| `--judge-auth oauth --judge-oauth-file PATH` | ChatGPT OAuth from `PATH`, or from `--oauth-file` when no judge file is given. Rotated tokens are saved even if selection fails; the same file as `--oauth-file` reuses the global client. |
+| `--judge-auth oauth --judge-oauth-file PATH` | ChatGPT OAuth from `PATH`, or from `--oauth-file` when no judge file is given, kept in step with the file like `--oauth-file`; the same file as `--oauth-file` reuses the global client. |
 | `--judge-config PATH` | JSON with `GenerationConfig` fields (from `arko-ai`); omitted fields keep their defaults. A `reasoning` field, even `null`, replaces the high-effort default and must match the judge's provider. Unknown fields and `tool_config` are rejected. |
 | `--judge-instructions-file PATH` | Append selection preferences from a UTF-8 text file; ID validation still applies. |
 
