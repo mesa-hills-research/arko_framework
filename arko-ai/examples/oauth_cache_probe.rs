@@ -12,16 +12,16 @@
 //! previous call's input was cached).
 //!
 //! Credentials come from `~/.codex/auth.json` (`$CODEX_HOME/auth.json`, or
-//! `--auth-file`) through arko-ai's [`CodexAuthFile`]. The access token is
-//! used as is while valid. Before it expires, the file is re-read, and
-//! tokens Codex refreshed in the meantime are adopted; otherwise it is
-//! refreshed. Every refresh (this one, or the provider's own after a 401) is
-//! written back at once, before any rate-limit wait: the previous contents go
-//! to `auth.json.bak` (one backup, replaced each time), the file is replaced
-//! atomically, and newer tokens written by Codex are never overwritten.
-//! Refreshed tokens that can't be written go to an owner-only
-//! `auth.json.recovered-<unix seconds>` next to it, and the run stops.
-//! Tokens and the account id are never printed.
+//! `--auth-file`), kept in step with the file by arko-ai's
+//! [`CodexAuthStore`]. The access token is used as is while valid. Before it
+//! expires, the file is re-read, and tokens Codex refreshed in the meantime
+//! are adopted; otherwise it is refreshed. Every refresh (this one, or the
+//! provider's own after a 401) is written back at once, before any
+//! rate-limit wait: the previous contents go to `auth.json.bak` (one backup,
+//! replaced each time), the file is replaced atomically, and newer tokens
+//! written by Codex are never overwritten. Refreshed tokens that can't be
+//! written go to an owner-only `auth.json.recovered-<unix seconds>` next to
+//! it, and the run stops. Tokens and the account id are never printed.
 //!
 //! By default requests go out exactly as the provider builds them (Codex
 //! parity: identity headers, turn state, verbatim output-item replay,
@@ -42,12 +42,13 @@
 //! attempt is traced. Plan limits, 401 and 403 stop every conversation.
 
 use arko_ai::{
-    ChatGptOAuthCredentials, CodexAuthFile, CodexAuthSync, Content, Error, GenerationConfig,
-    GenerationResponse, LLMClient, Model, OpenAIEffort, OpenAIRequestHook, Provider,
-    ReasoningConfig, RequestTrace, StreamEvent, ToolConfig, ToolDefinition, ToolResult,
+    ChatGptOAuthCredentials, ChatGptOAuthStore, CodexAuthFile, CodexAuthStore, Content, Error,
+    GenerationConfig, GenerationResponse, LLMClient, Model, OpenAIEffort, OpenAIRequestHook,
+    Provider, ReasoningConfig, RequestTrace, StreamEvent, ToolConfig, ToolDefinition, ToolResult,
+    providers::openai::OpenAIClient,
 };
 use clap::Parser;
-use futures::{StreamExt, future::BoxFuture};
+use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 use std::{
@@ -280,13 +281,12 @@ async fn run(args: Args) -> Result<(), String> {
         .clone()
         .or_else(CodexAuthFile::default_path)
         .ok_or("no home directory to find ~/.codex/auth.json in; pass --auth-file")?;
-    let tokens = Arc::new(TokenKeeper::load(&auth_path)?);
+    let tokens = TokenKeeper::load(&auth_path)?;
     fs::create_dir_all(&args.out).map_err(|e| e.to_string())?;
 
     let hook = Arc::new(ProbeHook { settings: settings.clone() });
     let client = tokens
-        .client()
-        .await?
+        .client()?
         .with_request_trace(RequestTrace::new(&args.out))
         .with_openai_request_hook(hook);
     tokens.ensure_fresh(&client).await?;
@@ -385,7 +385,7 @@ async fn run_conversation(
                 // stops the run: the account is being throttled.
                 if matches!(classify(&error), Failure::StopAll | Failure::RateLimited(_)) {
                     stop.store(true, Ordering::SeqCst);
-                    return format!("stopped all conversations after {turn} turns: {}", truncate(&text, 300));
+                    return format!("stopped all conversations after {turn} turns: {}", error_text(&error, 300));
                 }
                 consecutive_errors += 1;
                 eprintln!("conversation {index}: error on turn {}: {}", turn + 1, truncate(&text, 300));
@@ -411,15 +411,15 @@ async fn generate(
         index,
         client,
         tokens,
-        || generate_once(client, conversation, config, tokens),
+        || generate_once(client, conversation, config),
         tokio::time::sleep,
     )
     .await
 }
 
 /// Runs `attempt`, retrying short-term rate limits after `sleep`ing for
-/// their delay. Tokens the provider refreshed during an attempt are saved
-/// right after it, before any wait; a failure to save them stops the run.
+/// their delay. Tokens the provider refreshes during an attempt are saved
+/// as it refreshes, before any wait; a failure to save them stops the run.
 async fn retry_rate_limits<T, Attempt, Sleep>(
     index: usize,
     client: &LLMClient,
@@ -434,9 +434,9 @@ where
     let mut retries = 0;
     loop {
         let result = attempt().await;
-        // A 401 during the attempt makes the provider refresh, which
-        // rotates the refresh token: save it before anything else.
-        tokens.persist_if_rotated(client).await.map_err(Error::AuthenticationFailed)?;
+        // Tokens refreshed (by any conversation) that couldn't be saved stop
+        // the run.
+        tokens.check().map_err(Error::AuthenticationFailed)?;
         let error = match result {
             Ok(response) => return Ok(response),
             Err(error) => error,
@@ -463,13 +463,8 @@ async fn generate_once(
     client: &LLMClient,
     conversation: &arko_ai::Conversation,
     config: &GenerationConfig,
-    tokens: &TokenKeeper,
 ) -> Result<GenerationResponse, Error> {
-    let stream = client.generate_stream(conversation, config.clone()).await;
-    // The provider refreshes after a 401 before the stream starts: save
-    // rotated tokens now rather than after the whole response.
-    tokens.persist_if_rotated(client).await.map_err(Error::AuthenticationFailed)?;
-    let mut stream = stream?;
+    let mut stream = client.generate_stream(conversation, config.clone()).await?;
     while let Some(event) = stream.next().await {
         if let StreamEvent::End(response) = event? {
             return Ok(*response);
@@ -661,67 +656,58 @@ fn parse_effort(value: &str) -> Result<OpenAIEffort, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Credentials: ~/.codex/auth.json through arko-ai's `CodexAuthFile`.
+// Credentials: ~/.codex/auth.json through arko-ai's `CodexAuthStore`.
 //
 // ChatGPT refresh tokens rotate: once a refresh succeeds, the previous refresh
 // token no longer works, and Codex, which shares the file, is signed out
-// unless the new tokens reach it. So every refresh (proactive, or the
-// provider's own after a 401) is saved at once, before any wait; the file is
-// re-read before refreshing, since Codex may have refreshed already; and
-// refreshed tokens that can't be saved go to a private recovery file next to
-// auth.json, after which the run stops.
-
-/// Refreshes the client's ChatGPT OAuth tokens; replaced in tests.
-type Refresh = Arc<dyn Fn(LLMClient) -> BoxFuture<'static, Result<(), Error>> + Send + Sync>;
-
-fn refresh_once() -> Refresh {
-    Arc::new(|client| Box::pin(async move { client.refresh_openai_oauth_token_once().await.map(drop) }))
-}
+// unless the new tokens reach it. The client's credential store re-reads the
+// file before every refresh (the probe's own, or the provider's after a 401),
+// adopting tokens Codex refreshed in the meantime, and saves rotated tokens
+// as soon as the refresh succeeds, before any wait. Rotated tokens it can't
+// save go to a private recovery file next to auth.json, and the run stops.
 
 /// Refresh when the access token expires within this margin.
 const REFRESH_MARGIN: Duration = Duration::from_secs(300);
 
-/// Keeps auth.json in step with the client's ChatGPT OAuth credentials.
+/// The client's credential store: auth.json's [`CodexAuthStore`], noting
+/// each refresh for the summary and stopping the run after a failed save.
 struct TokenKeeper {
-    state: tokio::sync::Mutex<TokenState>,
-    refresh: Refresh,
-    refreshes: Mutex<Vec<String>>,
-}
-
-struct TokenState {
+    store: CodexAuthStore,
+    /// auth.json as loaded, for the client's first credentials.
     file: CodexAuthFile,
+    refreshes: Mutex<Vec<String>>,
     /// Set when rotated tokens could not be saved to the file: the run
-    /// stops, and the file is not written again.
-    unsaved: Option<Unsaved>,
-}
-
-struct Unsaved {
-    /// Names the recovery file; never holds a token.
-    message: String,
-    /// The credentials in the latest recovery file, if one was written.
-    recovered: Option<ChatGptOAuthCredentials>,
+    /// stops. Names the recovery file; never holds a token.
+    unsaved: Mutex<Option<String>>,
 }
 
 impl TokenKeeper {
-    fn load(path: &Path) -> Result<Self, String> {
+    fn load(path: &Path) -> Result<Arc<Self>, String> {
         let file = CodexAuthFile::load(path)
             .map_err(|e| format!("cannot use {}: {e}; sign in with Codex first", path.display()))?;
-        Ok(Self {
-            state: tokio::sync::Mutex::new(TokenState { file, unsaved: None }),
-            refresh: refresh_once(),
+        Ok(Arc::new(Self {
+            store: CodexAuthStore::new(file.clone()),
+            file,
             refreshes: Mutex::new(Vec::new()),
-        })
+            unsaved: Mutex::new(None),
+        }))
     }
 
-    #[cfg(test)]
-    fn with_refresh(mut self, refresh: Refresh) -> Self {
-        self.refresh = refresh;
-        self
+    /// An OpenAI client using the file's credentials, kept in step with the
+    /// file through this store.
+    fn openai_client(self: &Arc<Self>) -> Result<OpenAIClient, String> {
+        let credentials = self.file.credentials().map_err(|e| e.to_string())?;
+        let store: Arc<dyn ChatGptOAuthStore> = self.clone();
+        Ok(OpenAIClient::new_chatgpt_oauth(
+            &credentials.access_token,
+            credentials.refresh_token.as_deref(),
+            &credentials.account_id,
+        )
+        .with_credential_store(Some(store)))
     }
 
-    /// A client using the file's credentials.
-    async fn client(&self) -> Result<LLMClient, String> {
-        self.state.lock().await.file.client().map_err(|e| e.to_string())
+    fn client(self: &Arc<Self>) -> Result<LLMClient, String> {
+        Ok(LLMClient::new().with_openai_client(self.openai_client()?))
     }
 
     fn refreshes(&self) -> Vec<String> {
@@ -733,103 +719,70 @@ impl TokenKeeper {
         self.refreshes.lock().unwrap().push(outcome);
     }
 
+    /// Fails, naming the recovery file, once rotated tokens could not be
+    /// saved.
+    fn check(&self) -> Result<(), String> {
+        match &*self.unsaved.lock().unwrap() {
+            Some(message) => Err(message.clone()),
+            None => Ok(()),
+        }
+    }
+
     /// Refreshes when the access token expires within [`REFRESH_MARGIN`],
     /// unless auth.json holds newer tokens (written by Codex), which are
     /// adopted instead. Refreshed tokens are saved before this returns.
     async fn ensure_fresh(&self, client: &LLMClient) -> Result<(), String> {
-        let mut state = self.state.lock().await;
-        if state.unsaved.is_none() && !client.is_openai_token_expired(REFRESH_MARGIN).await {
-            return Ok(());
-        }
-        // Refreshing would rotate away tokens Codex may have written since:
-        // re-read the file first, and never refresh without reading it.
-        if let Some(problem) = self.reconcile(&mut state, client, "access token refreshed earlier").await? {
-            return Err(format!("not refreshing: {problem}"));
-        }
-        if !client.is_openai_token_expired(REFRESH_MARGIN).await {
-            return Ok(());
-        }
-        (self.refresh)(client.clone())
-            .await
-            .map_err(|e| format!("token refresh failed: {}", truncate(&e.to_string(), 200)))?;
-        // The previous refresh token no longer works: save the new ones now.
-        self.reconcile(&mut state, client, "access token refreshed").await?;
+        self.check()?;
+        let refreshed = client.refresh_openai_oauth_token_if_expiring(REFRESH_MARGIN).await;
+        // Also when this call only waited for another conversation's
+        // refresh: if that one's tokens couldn't be saved, stop here.
+        self.check()?;
+        refreshed.map_err(|error| format!("token refresh failed: {}", error_text(&error, 200)))?;
         Ok(())
-    }
-
-    /// Saves tokens the provider refreshed on its own after a 401, or adopts
-    /// newer tokens another process wrote.
-    async fn persist_if_rotated(&self, client: &LLMClient) -> Result<(), String> {
-        let mut state = self.state.lock().await;
-        self.reconcile(&mut state, client, "access token refreshed after a 401").await?;
-        Ok(())
-    }
-
-    /// Reconciles auth.json with the client (see [`CodexAuthFile::sync`]).
-    /// Fails, for good, when the client holds rotated tokens that can't be
-    /// saved; they then go to a recovery file. Returns the problem when the
-    /// file couldn't be read but nothing is at risk.
-    async fn reconcile(&self, state: &mut TokenState, client: &LLMClient, why: &str) -> Result<Option<String>, String> {
-        let live = client.openai_chatgpt_oauth_credentials().await;
-        if let Some(unsaved) = &mut state.unsaved {
-            // A request in flight at the stop can still refresh after a 401:
-            // keep the recovery file current.
-            if let Some(live) = live.filter(|live| unsaved.recovered.as_ref() != Some(live)) {
-                *unsaved = recover(&state.file, live, "the run already stopped after an unsaved refresh");
-                self.note(unsaved.message.clone());
-            }
-            return Err(unsaved.message.clone());
-        }
-        let path = state.file.path().display().to_string();
-        let error = match state.file.sync(client).await {
-            Ok(CodexAuthSync::Unchanged) => return Ok(None),
-            Ok(CodexAuthSync::Saved) => {
-                self.note(format!("{why}; new tokens written to {path} (previous contents in its .bak)"));
-                return Ok(None);
-            }
-            Ok(CodexAuthSync::Reloaded) => {
-                self.note(format!("adopted newer tokens another process wrote to {path}"));
-                return Ok(None);
-            }
-            Err(error) => error,
-        };
-        match live {
-            Some(live) if state.file.credentials().ok().as_ref() != Some(&live) => {
-                let unsaved = recover(&state.file, live, &error.to_string());
-                self.note(unsaved.message.clone());
-                let message = unsaved.message.clone();
-                state.unsaved = Some(unsaved);
-                Err(message)
-            }
-            _ => {
-                let problem = format!("cannot re-read {path}: {}", truncate(&error.to_string(), 200));
-                self.note(problem.clone());
-                Ok(Some(problem))
-            }
-        }
     }
 }
 
-/// Writes rotated credentials that couldn't be saved to a recovery file;
-/// the message names it (never a token).
-fn recover(file: &CodexAuthFile, live: ChatGptOAuthCredentials, reason: &str) -> Unsaved {
-    let path = file.path().display();
-    match file.write_recovery(&live) {
-        Ok(recovery) => Unsaved {
-            message: format!(
-                "refreshed tokens could not be saved to {path} ({reason}); they are in {} (owner-only): \
-                 put it in place of {path}, or sign in to Codex again, before Codex next refreshes; stopping",
-                recovery.display()
-            ),
-            recovered: Some(live),
-        },
-        Err(write_error) => Unsaved {
-            message: format!(
-                "refreshed tokens could not be saved to {path} ({reason}) nor to a recovery file \
-                 ({write_error}); sign in to Codex again; stopping"
-            ),
-            recovered: None,
-        },
+impl ChatGptOAuthStore for TokenKeeper {
+    fn before_refresh(
+        &self,
+        current: &ChatGptOAuthCredentials,
+    ) -> Result<Option<ChatGptOAuthCredentials>, Error> {
+        let path = self.file.path().display();
+        match self.store.before_refresh(current) {
+            Ok(newer) => {
+                if newer.is_some() {
+                    self.note(format!("adopted newer tokens another process wrote to {path}"));
+                }
+                Ok(newer)
+            }
+            Err(error) => {
+                self.note(format!("cannot use {path} for a refresh: {}", error_message(&error)));
+                Err(error)
+            }
+        }
+    }
+
+    fn save_refreshed(&self, refreshed: &ChatGptOAuthCredentials, id_token: Option<&str>) -> Result<(), Error> {
+        match self.store.save_refreshed(refreshed, id_token) {
+            Ok(()) => {
+                self.note(format!(
+                    "access token refreshed; new tokens written to {} (previous contents in its .bak)",
+                    self.file.path().display()
+                ));
+                Ok(())
+            }
+            Err(error) => {
+                // The error names the recovery file (never a token).
+                let message = format!("{}; stopping", error_message(&error));
+                self.note(message.clone());
+                *self.unsaved.lock().unwrap() = Some(message);
+                Err(error)
+            }
+        }
+    }
+
+    fn refresh_lock(&self) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        self.store.refresh_lock()
     }
 }
 
@@ -1006,6 +959,25 @@ fn percentile_i64(values: &[i64], p: usize) -> Value {
     if values.is_empty() { Value::Null } else { json!(values[(values.len() - 1) * p / 100]) }
 }
 
+/// An error's own text: an authentication failure without its
+/// "Authentication failed: " prefix.
+fn error_message(error: &Error) -> String {
+    match error {
+        Error::AuthenticationFailed(message) => message.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// An error's text, shortened to `max` characters unless it is an
+/// authentication failure: those are arko-ai's own messages, which name the
+/// recovery file of tokens that could not be saved.
+fn error_text(error: &Error, max: usize) -> String {
+    match error {
+        Error::AuthenticationFailed(_) => error.to_string(),
+        _ => truncate(&error.to_string(), max),
+    }
+}
+
 fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max { text.to_string() } else { text.chars().take(max).collect::<String>() + "…" }
 }
@@ -1131,7 +1103,10 @@ mod tests {
     }
 
     // Credential handling, on temporary copies of a Codex auth.json with
-    // fake tokens. No test refreshes over the network: `Refresh` is replaced.
+    // fake tokens. Refreshes go to a local server standing in for the token
+    // endpoint and the Responses API (the client uses the system proxy
+    // settings, so a proxy must exempt 127.0.0.1). Refresh tokens are unique
+    // per test: the process's record of spent tokens is shared by every test.
 
     fn now() -> u64 {
         SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
@@ -1176,116 +1151,178 @@ mod tests {
         names
     }
 
-    fn oauth(access: &str, refresh: &str) -> arko_ai::OpenAIAuth {
-        arko_ai::OpenAIAuth::ChatGptOAuth(arko_ai::ChatGptOAuthCredentials {
-            access_token: access.into(),
-            refresh_token: Some(refresh.into()),
-            account_id: "acct".into(),
-        })
-    }
-
-    /// A refresh that rotates the client's tokens to `access` / `refresh`
-    /// and counts its calls; `before` runs first (e.g. Codex writing the file).
-    fn fake_refresh(
-        access: String,
-        refresh: &str,
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-        before: impl Fn() + Send + Sync + 'static,
-    ) -> Refresh {
-        let refresh = refresh.to_string();
-        Arc::new(move |client| {
-            before();
-            calls.fetch_add(1, Ordering::SeqCst);
-            let auth = oauth(&access, &refresh);
-            Box::pin(async move { client.update_openai_auth(auth).await })
-        })
-    }
-
     fn counter() -> Arc<std::sync::atomic::AtomicUsize> {
         Arc::new(std::sync::atomic::AtomicUsize::new(0))
     }
 
+    /// The token endpoint's answer to a refresh.
+    fn rotated(access: &str, refresh: &str) -> (u16, String) {
+        (200, json!({"access_token": access, "refresh_token": refresh, "id_token": "id.new.sig"}).to_string())
+    }
+
+    /// A local HTTP server answering each request with `answer(path)`
+    /// (status and JSON body), one connection at a time.
+    struct Server {
+        url: String,
+        paths: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Server {
+        async fn start(answer: impl Fn(&str) -> (u16, String) + Send + 'static) -> Self {
+            use tokio::io::AsyncWriteExt;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let paths = Arc::new(Mutex::new(Vec::new()));
+            let seen = paths.clone();
+            tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let path = read_request(&mut socket).await;
+                    seen.lock().unwrap().push(path.clone());
+                    let (status, body) = answer(&path);
+                    let reply = format!(
+                        "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    socket.write_all(reply.as_bytes()).await.unwrap();
+                }
+            });
+            Self { url, paths }
+        }
+
+        /// How many requests went to `path`.
+        fn requests(&self, path: &str) -> usize {
+            self.paths.lock().unwrap().iter().filter(|seen| *seen == path).count()
+        }
+
+        /// The probe's client, sending its requests and refreshes here.
+        fn client(&self, tokens: &Arc<TokenKeeper>) -> LLMClient {
+            let openai = tokens
+                .openai_client()
+                .unwrap()
+                .with_base_url(&self.url)
+                .with_oauth_token_url(format!("{}/token", self.url));
+            LLMClient::new().with_openai_client(openai)
+        }
+    }
+
+    /// Reads one request, body included; returns its path.
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut bytes = Vec::new();
+        let mut chunk = [0; 4096];
+        loop {
+            let read = socket.read(&mut chunk).await.unwrap();
+            assert!(read > 0, "the connection closed mid-request");
+            bytes.extend_from_slice(&chunk[..read]);
+            let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let head = String::from_utf8_lossy(&bytes[..end]).into_owned();
+            let length: usize = head
+                .lines()
+                .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap()))
+                .unwrap_or(0);
+            if bytes.len() >= end + 4 + length {
+                return head.split_whitespace().nth(1).unwrap_or_default().to_string();
+            }
+        }
+    }
+
     #[tokio::test]
     async fn a_refresh_during_a_request_is_saved_before_the_rate_limit_wait() {
-        let (_dir, path) = auth_file(&jwt("a1", now() + 3_600), "rt_1");
-        let refreshes = counter();
-        let tokens = TokenKeeper::load(&path)
-            .unwrap()
-            .with_refresh(fake_refresh(jwt("unused", now() + 3_600), "rt_unused", refreshes.clone(), || {}));
-        let client = tokens.client().await.unwrap();
-        let rotated = jwt("a2", now() + 3_600);
-        let mut attempts = 0;
+        let (_dir, path) = auth_file(&jwt("a1", now() + 3_600), "rt_request_1");
+        let rotated_access = jwt("a2", now() + 3_600);
+        // The server rejects the first request's token as expired; the
+        // provider refreshes and resends it, and that is rate limited. The
+        // retry after the wait fails for good.
+        let server = {
+            let (access, responses) = (rotated_access.clone(), counter());
+            Server::start(move |path| match path {
+                "/token" => rotated(&access, "rt_request_2"),
+                _ => match responses.fetch_add(1, Ordering::SeqCst) {
+                    0 => (401, r#"{"error":{"code":"token_expired"}}"#.into()),
+                    1 => (429, r#"{"detail":"Rate limit exceeded"}"#.into()),
+                    _ => (500, r#"{"error":{"code":"server_error"}}"#.into()),
+                },
+            })
+            .await
+        };
+        let tokens = TokenKeeper::load(&path).unwrap();
+        let client = server.client(&tokens);
+        let mut conversation = client.new_conversation(Model::get(Provider::OpenAI, "gpt-6-astra").unwrap());
+        conversation.add_user_message("Start the audit.");
+        let config = GenerationConfig::default();
         let mut waits = Vec::new();
         let result = retry_rate_limits(
             0,
             &client,
             &tokens,
-            || {
-                attempts += 1;
-                let (first, client, rotated) = (attempts == 1, client.clone(), rotated.clone());
-                async move {
-                    if !first {
-                        return Ok("done");
-                    }
-                    // The provider refreshed after a 401 and resent the
-                    // request, which was then rate limited.
-                    client.update_openai_auth(oauth(&rotated, "rt_2")).await.unwrap();
-                    Err(provider_error(Some(429), r#"{"detail":"Rate limit exceeded"}"#, Some(Duration::from_secs(5))))
-                }
-            },
+            || generate_once(&client, &conversation, &config),
             |_delay| {
                 waits.push(on_disk(&path));
                 async {}
             },
         )
         .await;
-        assert_eq!(result.unwrap(), "done");
-        assert_eq!(waits, [(rotated, "rt_2".to_string())], "the rotated tokens were on disk during the wait");
-        assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+        assert!(matches!(result, Err(Error::ProviderError { status: Some(500), .. })), "{:?}", result.err());
+        assert_eq!(waits, [(rotated_access, "rt_request_2".to_string())], "the rotated tokens were on disk during the wait");
+        assert_eq!((server.requests("/token"), server.requests("/responses")), (1, 3));
+        assert_eq!(tokens.refreshes().len(), 1);
     }
 
     #[tokio::test]
     async fn newer_tokens_written_by_codex_are_adopted_instead_of_refreshing() {
-        let (_dir, path) = auth_file(&jwt("a1", now() - 60), "rt_1");
-        let refreshes = counter();
-        let tokens = TokenKeeper::load(&path)
-            .unwrap()
-            .with_refresh(fake_refresh(jwt("a2", now() + 3_600), "rt_2", refreshes.clone(), || {}));
-        let client = tokens.client().await.unwrap();
+        let (_dir, path) = auth_file(&jwt("a1", now() - 60), "rt_adopt_1");
+        let server = Server::start(|_| rotated(&jwt("a2", now() + 3_600), "rt_adopt_2")).await;
+        let tokens = TokenKeeper::load(&path).unwrap();
+        let client = server.client(&tokens);
         // Codex refreshed while the run was going.
         let newer = jwt("a3", now() + 3_600);
-        let codex = auth_json(&newer, "rt_3");
+        let codex = auth_json(&newer, "rt_adopt_3");
         fs::write(&path, &codex).unwrap();
 
         tokens.ensure_fresh(&client).await.unwrap();
-        assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+        assert_eq!(server.requests("/token"), 0);
         let live = client.openai_chatgpt_oauth_credentials().await.unwrap();
-        assert_eq!((live.access_token, live.refresh_token), (newer, Some("rt_3".into())));
+        assert_eq!((live.access_token, live.refresh_token), (newer, Some("rt_adopt_3".into())));
         assert_eq!(fs::read_to_string(&path).unwrap(), codex);
+        assert_eq!(tokens.refreshes().len(), 1);
     }
 
     #[tokio::test]
     async fn refreshed_tokens_that_cannot_be_saved_go_to_a_private_recovery_file_and_stop_the_run() {
-        let (dir, path) = auth_file(&jwt("a1", now() - 60), "rt_1");
+        let (dir, path) = auth_file(&jwt("a1", now() - 60), "rt_unsaved_1");
         // Codex also refreshes, and writes its tokens while this process
         // refreshes: ours must not overwrite them, so they can't be saved.
-        let codex = auth_json(&jwt("a3", now() + 3_600), "rt_3");
+        let codex = auth_json(&jwt("a3", now() + 3_600), "rt_unsaved_3");
         let ours = jwt("a2", now() + 3_600);
-        let (codex_path, codex_text) = (path.clone(), codex.clone());
-        let tokens = TokenKeeper::load(&path).unwrap().with_refresh(fake_refresh(ours.clone(), "rt_2", counter(), move || {
-            fs::write(&codex_path, &codex_text).unwrap();
-        }));
-        let client = tokens.client().await.unwrap();
+        let server = {
+            let (codex_path, codex_text, ours) = (path.clone(), codex.clone(), ours.clone());
+            Server::start(move |_| {
+                fs::write(&codex_path, &codex_text).unwrap();
+                rotated(&ours, "rt_unsaved_2")
+            })
+            .await
+        };
+        let tokens = TokenKeeper::load(&path).unwrap();
+        let client = server.client(&tokens);
 
-        let error = tokens.ensure_fresh(&client).await.unwrap_err();
+        // Two conversations check at once: the second waits for the first
+        // one's refresh, and stops too instead of sending another request.
+        let (first, second) = tokio::join!(tokens.ensure_fresh(&client), tokens.ensure_fresh(&client));
+        let error = first.unwrap_err();
+        assert_eq!(second, Err(error.clone()));
+        assert_eq!(server.requests("/token"), 1);
         assert_eq!(fs::read_to_string(&path).unwrap(), codex, "Codex's tokens are kept");
         let recovered: Vec<String> =
             file_names(dir.path()).into_iter().filter(|name| name.starts_with("auth.json.recovered-")).collect();
         assert_eq!(recovered.len(), 1, "{:?}", file_names(dir.path()));
         let recovery = dir.path().join(&recovered[0]);
-        assert_eq!(on_disk(&recovery), (ours.clone(), "rt_2".to_string()));
+        assert_eq!(on_disk(&recovery), (ours.clone(), "rt_unsaved_2".to_string()));
         assert!(error.contains(&recovery.display().to_string()), "{error}");
-        assert!(!error.contains("rt_2") && !error.contains(&ours), "no tokens in messages: {error}");
+        assert!(error.ends_with("; stopping"), "{error}");
+        assert!(!error.contains("rt_unsaved_2") && !error.contains(&ours), "no tokens in messages: {error}");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1293,58 +1330,61 @@ mod tests {
         }
 
         // The run is over: later checks fail the same way and write nothing.
-        assert!(tokens.persist_if_rotated(&client).await.is_err());
-        assert!(tokens.ensure_fresh(&client).await.is_err());
-        assert_eq!(file_names(dir.path()).len(), 2, "{:?}", file_names(dir.path()));
-        assert_eq!(fs::read_to_string(&path).unwrap(), codex);
+        assert_eq!(tokens.check(), Err(error.clone()));
+        assert_eq!(tokens.ensure_fresh(&client).await, Err(error.clone()));
         // A run stopped this way ends like any other authentication failure.
-        let stopped = retry_rate_limits(0, &client, &tokens, || async { Ok(()) }, |_| async {}).await;
-        assert_eq!(classify(&stopped.unwrap_err()), Failure::StopAll);
-
-        // A request in flight at the stop refreshed after a 401: the newer
-        // tokens get a recovery file of their own.
-        let later = jwt("a4", now() + 3_600);
-        client.update_openai_auth(oauth(&later, "rt_4")).await.unwrap();
-        let error = tokens.persist_if_rotated(&client).await.unwrap_err();
-        let recovered: Vec<String> =
-            file_names(dir.path()).into_iter().filter(|name| name.starts_with("auth.json.recovered-")).collect();
-        assert_eq!(recovered.len(), 2, "{recovered:?}");
-        let newest = recovered.iter().map(|name| dir.path().join(name)).find(|path| on_disk(path).1 == "rt_4");
-        assert!(error.contains(&newest.expect("a recovery file with the newer tokens").display().to_string()), "{error}");
+        let stopped = retry_rate_limits(0, &client, &tokens, || async { Ok(()) }, |_| async {}).await.unwrap_err();
+        assert_eq!(classify(&stopped), Failure::StopAll);
+        // Its outcome line names the recovery file in full.
+        let outcome = error_text(&stopped, 300);
+        assert_eq!(outcome, format!("Authentication failed: {error}"));
+        // A request in flight at the stop that refreshes after a 401 sends
+        // no refresh token again: the store hands it Codex's tokens.
+        let _ = client.refresh_openai_oauth_token_once().await;
+        assert_eq!(server.requests("/token"), 1);
+        assert_eq!(file_names(dir.path()).len(), 2, "{:?}", file_names(dir.path()));
         assert_eq!(fs::read_to_string(&path).unwrap(), codex);
     }
 
     #[tokio::test]
     async fn no_refresh_without_rereading_the_file_first() {
-        let (dir, path) = auth_file(&jwt("a1", now() - 60), "rt_1");
-        let refreshes = counter();
-        let tokens = TokenKeeper::load(&path)
-            .unwrap()
-            .with_refresh(fake_refresh(jwt("a2", now() + 3_600), "rt_2", refreshes.clone(), || {}));
-        let client = tokens.client().await.unwrap();
+        let (dir, path) = auth_file(&jwt("a1", now() - 60), "rt_reread_1");
+        let server = Server::start(|_| rotated(&jwt("a2", now() + 3_600), "rt_reread_2")).await;
+        let tokens = TokenKeeper::load(&path).unwrap();
+        let client = server.client(&tokens);
         fs::remove_file(&path).unwrap();
 
         // Nothing rotated, so nothing is at risk: requests go on.
-        tokens.persist_if_rotated(&client).await.unwrap();
+        tokens.check().unwrap();
         // But refreshing now could rotate away tokens Codex wrote.
         let error = tokens.ensure_fresh(&client).await.unwrap_err();
-        assert!(error.starts_with("not refreshing"), "{error}");
-        assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+        assert!(error.starts_with("token refresh failed"), "{error}");
+        assert!(tokens.refreshes()[0].starts_with("cannot use"), "{:?}", tokens.refreshes());
+        assert_eq!(server.requests("/token"), 0);
         assert!(file_names(dir.path()).is_empty());
     }
 
     #[tokio::test]
     async fn repeated_refreshes_keep_one_backup() {
-        let (dir, path) = auth_file(&jwt("a1", now() + 3_600), "rt_1");
+        let (dir, path) = auth_file(&jwt("a1", now() - 60), "rt_backup_1");
+        // Each refresh returns an access token expiring within the margin,
+        // so the next check refreshes again.
+        let server = {
+            let issued = counter();
+            Server::start(move |_| {
+                let n = issued.fetch_add(1, Ordering::SeqCst) + 2;
+                rotated(&jwt(&format!("a{n}"), now() + 60), &format!("rt_backup_{n}"))
+            })
+            .await
+        };
         let tokens = TokenKeeper::load(&path).unwrap();
-        let client = tokens.client().await.unwrap();
+        let client = server.client(&tokens);
         for n in 2..=3 {
-            client.update_openai_auth(oauth(&jwt(&format!("a{n}"), now() + 3_600), &format!("rt_{n}"))).await.unwrap();
-            tokens.persist_if_rotated(&client).await.unwrap();
-            assert_eq!(on_disk(&path).1, format!("rt_{n}"));
+            tokens.ensure_fresh(&client).await.unwrap();
+            assert_eq!(on_disk(&path).1, format!("rt_backup_{n}"));
         }
         assert_eq!(file_names(dir.path()), ["auth.json", "auth.json.bak"]);
-        assert_eq!(on_disk(&dir.path().join("auth.json.bak")).1, "rt_2");
+        assert_eq!(on_disk(&dir.path().join("auth.json.bak")).1, "rt_backup_2");
         assert_eq!(tokens.refreshes().len(), 2);
     }
 
