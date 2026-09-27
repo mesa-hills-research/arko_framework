@@ -1,5 +1,5 @@
-use crate::{Error, Result, error::invalid};
-use rusqlite::{Connection, params};
+use crate::{Error, JobUsage, Result, error::invalid};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
     path::Path,
@@ -106,6 +106,29 @@ pub(crate) fn decode<T: DeserializeOwned>(value: &str) -> Result<T> {
 pub(crate) fn required<T>(v: Option<T>, what: &str) -> Result<T> {
     v.ok_or_else(|| invalid(format!("unknown {what}")))
 }
+/// A job's usage totals. Jobs recorded before usage was tracked have none.
+pub(crate) fn job_usage(c: &Connection, job: &str) -> Result<JobUsage> {
+    let saved: Option<String> = c
+        .query_row("SELECT usage FROM job_usage WHERE job=?1", [job], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    saved.map_or_else(|| Ok(JobUsage::default()), |usage| decode(&usage))
+}
+/// Adds to a job's usage totals, in the caller's transaction.
+pub(crate) fn add_job_usage(
+    c: &Connection,
+    job: &str,
+    record: impl FnOnce(&mut JobUsage),
+) -> Result<()> {
+    let mut usage = job_usage(c, job)?;
+    record(&mut usage);
+    c.execute(
+        "INSERT INTO job_usage(job,usage) VALUES(?1,?2) ON CONFLICT(job) DO UPDATE SET usage=excluded.usage",
+        params![job, encode(&usage)?],
+    )?;
+    Ok(())
+}
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS indexes(id TEXT PRIMARY KEY,name TEXT NOT NULL,spec TEXT NOT NULL,active TEXT,config TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,index_id TEXT NOT NULL REFERENCES indexes(id) ON DELETE CASCADE,phase TEXT NOT NULL,config TEXT NOT NULL,manifest TEXT,excluded TEXT NOT NULL DEFAULT '[]',affected TEXT NOT NULL DEFAULT '[]',changes TEXT NOT NULL DEFAULT '[]',fresh INTEGER NOT NULL DEFAULT 1,problem TEXT);
@@ -119,5 +142,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(id UNINDEXED,job UNINDEX
 CREATE TABLE IF NOT EXISTS events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,job TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,kind TEXT NOT NULL,detail TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS events_job ON events(job,sequence);
 CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY AUTOINCREMENT,job TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,request TEXT NOT NULL,response TEXT,error TEXT);
+CREATE TABLE IF NOT EXISTS job_usage(job TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,usage TEXT NOT NULL);
 PRAGMA user_version=1;
 "#;

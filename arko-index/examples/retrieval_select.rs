@@ -54,6 +54,7 @@ async fn grade_request(
             return Ok(ModelReply {
                 value: call.arguments.clone(),
                 usage: serde_json::to_value(&response.model_call_usage)?,
+                usage_info: Some(response.usage.clone()),
             });
         }
     }

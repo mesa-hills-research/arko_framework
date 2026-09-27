@@ -91,6 +91,10 @@ If a semantic chunk exceeds Voyage's per-input token allowance, subdivision pref
 
 SQLite keeps snapshots, chunk ranges, vectors, checkpoints and request artifacts. Generations publish atomically. A failed update retains the previous complete generation. Boundary reuse requires both the same normalized source and the current chunking-policy identity; changing the prompt/structural policy triggers re-evaluation even for unchanged files. Renames reuse content/vector identities. Historical request and repair findings are recorded in [REPAIR_FINDINGS.md](REPAIR_FINDINGS.md).
 
+## Usage and cost
+
+`status(job).usage` (`JobUsage`) sums the token usage and cost (`arko_ai::UsageInfo`) of a job's completed chunk-model calls and embedding requests, across pauses, resumes and restarts, so a host can count index spend against a budget. `usage.billed()` is what the account was charged (zero for ChatGPT-subscription calls, whose `total_cost` still shows the list-price estimate); `usage.total()` sums both kinds of call. Each `request_finished`, `embedded` and `embedding_rejected` event carries that call's `usage`. Calls report usage when the backend returns a reply, including embedding replies whose vectors the index rejects; failed attempts (including chunk responses the backend rejects, such as refusals) and cancelled calls are not included although the provider may have billed them. Custom backends report usage in `ModelReply::usage_info` and `VectorReply::usage_info`; calls without it are counted in `unreported_calls`. Search query embeddings belong to no job. Jobs in databases from earlier versions show zero usage.
+
 ## Watching and rebuild notices
 
 Watchers debounce until a quiet period, then compare final normalized hashes. Repeated writes and atomic-save event sequences become one net modification. Create/delete pairs that leave no file disappear. A unique deleted/added content match becomes a move; ambiguous duplicates remain explicit additions/deletions. `changes(job)` returns the coalesced plan. Periodic scans recover missed events without bypassing an active debounce interval. Jobs are finite; edits during a build enter a later update.

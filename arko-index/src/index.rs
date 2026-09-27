@@ -4,7 +4,7 @@ use crate::{
     packing::{self, Payload},
     scheduler::{Control, Operation, Reply, Scheduler},
     source::{Snapshot, Structure},
-    storage::{Db, decode, encode, required},
+    storage::{Db, add_job_usage, decode, encode, job_usage, required},
     *,
 };
 use futures::{StreamExt, stream::FuturesUnordered};
@@ -37,6 +37,9 @@ pub struct JobStatus {
     #[serde(alias = "active_luna")]
     pub active_chunking: usize,
     pub active_embeddings: usize,
+    /// Token usage and cost of this job's completed provider calls so far.
+    #[serde(default)]
+    pub usage: JobUsage,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Event {
@@ -268,6 +271,7 @@ impl ArkoIndex {
                     .prepare("SELECT state FROM files WHERE job=?1")?
                     .query_map([&j], |r| r.get(0))?
                     .collect::<std::result::Result<_, _>>()?;
+                let usage = job_usage(c, &j)?;
                 let mut result = JobStatus {
                     job: j,
                     index,
@@ -279,6 +283,7 @@ impl ArkoIndex {
                     unchecked: 0,
                     active_chunking: 0,
                     active_embeddings: 0,
+                    usage,
                 };
                 for s in states {
                     let s: FileState = decode(&s)?;
@@ -428,28 +433,33 @@ impl ArkoIndex {
                 while let Ok(event)=progress_rx.try_recv() {
                     this.inner.db.event(&job,"request_attempt",json!({"artifact":id,"repair":repair.is_some(),"event":event})).await?;
                 }
-                let response = match &result {
-                    Ok(Reply::Chunk(r)) => Some(encode(r)?),
-                    _ => None,
+                let (response, usage) = match &result {
+                    Ok(Reply::Chunk(r)) => (Some(encode(r)?), Some(r.usage_info.clone())),
+                    _ => (None, None),
                 };
                 let error = result.as_ref().err().map(ToString::to_string);
+                let finished = encode(&json!({"artifact":id,"repair":repair.is_some(),"usage":usage.clone().flatten()}))?;
+                let j = job.clone();
+                // The saved reply, its share of the job's usage and the event
+                // are recorded together.
                 this.inner
                     .db
                     .call(move |c| {
-                        c.execute(
+                        let tx = c.transaction()?;
+                        tx.execute(
                             "UPDATE requests SET response=?2,error=?3 WHERE id=?1",
                             params![id, response, error],
                         )?;
+                        if let Some(usage) = &usage {
+                            add_job_usage(&tx, &j, |total| total.record_chunk(usage.as_ref()))?;
+                        }
+                        tx.execute(
+                            "INSERT INTO events(job,kind,detail) VALUES(?1,'request_finished',?2)",
+                            params![j, finished],
+                        )?;
+                        tx.commit()?;
                         Ok(())
                     })
-                    .await?;
-                this.inner
-                    .db
-                    .event(
-                        &job,
-                        "request_finished",
-                        json!({"artifact":id,"repair":repair.is_some()}),
-                    )
                     .await?;
                 match result? {
                     Reply::Chunk(r) => Ok(r),
@@ -692,25 +702,32 @@ impl ArkoIndex {
             };
             match result {
                 Ok(result) => {
-                    if result.vectors.len() != bin.len() {
-                        failure = Some(error::invalid("embedding count mismatch"));
-                        continue;
-                    }
-                    let normalized = result
-                        .vectors
-                        .into_iter()
-                        .map(|v| packing::normalize(v, self.inner.config.embedding.dimensions))
-                        .collect::<Result<Vec<_>>>();
-                    let vectors = match normalized {
+                    let vectors = if result.vectors.len() != bin.len() {
+                        Err(error::invalid("embedding count mismatch"))
+                    } else {
+                        result
+                            .vectors
+                            .into_iter()
+                            .map(|v| packing::normalize(v, self.inner.config.embedding.dimensions))
+                            .collect::<Result<Vec<_>>>()
+                    };
+                    let profile = encode(&self.inner.config.embedding)?;
+                    let estimated: usize = bin.iter().map(|p| p.tokens).sum();
+                    // The request was billed even when its vectors are unusable.
+                    let (kind, detail) = match &vectors {
+                        Ok(_) => ("embedded", json!({"billed_tokens":result.billed_tokens,"reserved_tokens":estimated,"usage":result.usage_info})),
+                        Err(e) => ("embedding_rejected", json!({"error":e.to_string(),"billed_tokens":result.billed_tokens,"usage":result.usage_info})),
+                    };
+                    let (j, usage, detail) = (job.to_owned(), result.usage_info, encode(&detail)?);
+                    let vectors = match vectors {
                         Ok(v) => v,
                         Err(e) => {
                             failure = Some(e);
-                            continue;
+                            vec![]
                         }
                     };
-                    let profile = encode(&self.inner.config.embedding)?;
-                    let usage = result.billed_tokens;
-                    let estimated: usize = bin.iter().map(|p| p.tokens).sum();
+                    // Vectors, the request's share of the job's usage and the
+                    // event are recorded together.
                     self.inner
                         .db
                         .call(move |c| {
@@ -723,17 +740,14 @@ impl ArkoIndex {
                                     params![p.id, profile, p.tokens, blob],
                                 )?;
                             }
+                            add_job_usage(&tx, &j, |total| total.record_embedding(usage.as_ref()))?;
+                            tx.execute(
+                                "INSERT INTO events(job,kind,detail) VALUES(?1,?2,?3)",
+                                params![j, kind, detail],
+                            )?;
                             tx.commit()?;
                             Ok(())
                         })
-                        .await?;
-                    self.inner
-                        .db
-                        .event(
-                            job,
-                            "embedded",
-                            json!({"billed_tokens":usage,"reserved_tokens":estimated}),
-                        )
                         .await?;
                 }
                 Err(e) => failure = Some(e),

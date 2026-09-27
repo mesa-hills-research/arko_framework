@@ -94,6 +94,7 @@ impl Backend for Fake {
         Ok(ModelReply {
             value: Value::Object(out),
             usage: json!({}),
+            usage_info: Some(chunk_usage()),
         })
     }
     async fn embed(&self, texts: Vec<String>, query: bool) -> Result<VectorReply> {
@@ -123,6 +124,7 @@ impl Backend for Fake {
                 })
                 .collect(),
             billed_tokens: 0,
+            usage_info: Some(arko_ai::UsageInfo::for_embedding(1_000, 0.06)),
         })
     }
     fn tokens(&self, text: &str) -> Result<usize> {
@@ -147,6 +149,14 @@ impl Backend for Fake {
             reasoning: json!("none"),
         })
     }
+}
+/// What each fake chunk call reports: a subscription call with a list-price estimate.
+fn chunk_usage() -> arko_ai::UsageInfo {
+    arko_ai::UsageInfo {
+        total_cost: 0.25,
+        ..arko_ai::UsageInfo::new(100, 10)
+    }
+    .with_billing(arko_ai::BillingKind::Subscription)
 }
 fn config(fake: &Fake) -> Config {
     Config {
@@ -957,10 +967,74 @@ async fn repair_is_local_and_accepted_work_survives_pause_and_restart() {
     index.resume(&h.job).await.unwrap();
     let done = settle(&index, &h.job).await;
     assert_eq!(done.phase, "ready", "{:?}", done.problem);
-    let calls = fake.calls.lock().unwrap();
+    let calls = fake.calls.lock().unwrap().clone();
     let repairs: Vec<_> = calls.iter().filter(|r| r.tool == "repair_cuts").collect();
     assert!(!repairs.is_empty());
     assert!(repairs.iter().all(|r| !r.prompt.contains("FILE f")));
+    // Usage adds up every completed call, before the pause and after the
+    // restart, and events carry each call's share.
+    let usage = &done.usage;
+    assert_eq!(usage.chunk_calls, calls.len());
+    let chunking = usage.chunking.as_ref().unwrap();
+    assert_eq!(chunking.input_tokens, 100 * calls.len());
+    assert_eq!(chunking.billing, arko_ai::BillingKind::Subscription);
+    assert_eq!(chunking.total_cost, 0.25 * calls.len() as f64);
+    let events = index.events(&h.job, 0, 10_000).await.unwrap();
+    // Requests the pause stopped before they reached the backend have none.
+    let finished: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == "request_finished" && !e.detail["usage"].is_null())
+        .collect();
+    assert_eq!(finished.len(), calls.len());
+    assert!(finished.iter().all(|e| e.detail["usage"]["input_tokens"] == 100));
+    let embedded = events.iter().filter(|e| e.kind == "embedded").count();
+    assert!(embedded > 0);
+    assert_eq!(usage.embedding_calls, embedded);
+    assert_eq!(usage.embedding.as_ref().unwrap().input_tokens, 1_000 * embedded);
+    assert_eq!(usage.unreported_calls, 0);
+    assert!((usage.billed() - 0.00006 * embedded as f64).abs() < 1e-12);
+}
+#[tokio::test]
+async fn usage_totals_load_from_databases_saved_before_usage_tracking() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let path = db.path().join("i.db");
+    std::fs::write(root.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+    let fake = Arc::new(Fake::new());
+    let index = ArkoIndex::open(&path, fake.clone(), config(&fake))
+        .await
+        .unwrap();
+    let job = index
+        .start_build(BuildSpec::new("test", root.path()))
+        .await
+        .unwrap();
+    assert_eq!(settle(&index, &job.job).await.phase, "ready");
+    drop(index);
+    // What an older version left: no usage table, replies without usage.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "DROP TABLE job_usage; UPDATE requests SET response=json_remove(response,'$.usage_info');",
+    )
+    .unwrap();
+    let saved: String = conn
+        .query_row("SELECT response FROM requests LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    let reply: ModelReply = serde_json::from_str(&saved).unwrap();
+    assert!(reply.usage_info.is_none());
+    drop(conn);
+    let index = ArkoIndex::open(&path, fake.clone(), config(&fake))
+        .await
+        .unwrap();
+    let old = index.status(&job.job).await.unwrap();
+    assert_eq!(old.phase, "ready");
+    assert_eq!(old.usage, JobUsage::default());
+    std::fs::write(root.path().join("a.txt"), "alpha\ngamma\n").unwrap();
+    let update = index.start_update(&job.index).await.unwrap();
+    let new = settle(&index, &update.job).await;
+    assert_eq!(new.phase, "ready", "{:?}", new.problem);
+    assert_eq!(new.usage.chunk_calls, 1);
+    assert_eq!(new.usage.embedding_calls, 1);
+    assert_eq!(index.status(&job.job).await.unwrap().usage, JobUsage::default());
 }
 #[tokio::test]
 async fn malformed_embeddings_do_not_replace_previous_generation() {
@@ -979,7 +1053,19 @@ async fn malformed_embeddings_do_not_replace_previous_generation() {
     std::fs::write(root.path().join("a.txt"), "alpha changed").unwrap();
     fake.invalid_embedding.store(1, Ordering::SeqCst);
     let update = index.start_update(&first.index).await.unwrap();
-    assert_eq!(settle(&index, &update.job).await.phase, "blocked");
+    let blocked = settle(&index, &update.job).await;
+    assert_eq!(blocked.phase, "blocked");
+    // The rejected request still counts toward the job's usage.
+    assert_eq!(blocked.usage.embedding_calls, 1);
+    assert_eq!(blocked.usage.embedding.unwrap().input_tokens, 1_000);
+    let events = index.events(&update.job, 0, 1000).await.unwrap();
+    let rejected: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == "embedding_rejected")
+        .collect();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0].detail["usage"]["input_tokens"], 1_000);
+    assert!(events.iter().all(|e| e.kind != "embedded"));
     let page = index
         .search(&first.index, "alpha", options(SearchMode::Lexical))
         .await
@@ -1512,4 +1598,5 @@ fn job_status_saved_with_the_former_field_name_still_loads() {
     }))
     .unwrap();
     assert_eq!(status.active_chunking, 2);
+    assert_eq!(status.usage, JobUsage::default());
 }

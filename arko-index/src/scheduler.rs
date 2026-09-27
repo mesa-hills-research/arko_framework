@@ -313,6 +313,7 @@ mod tests {
             Ok(ModelReply {
                 value: json!({}),
                 usage: json!({}),
+                usage_info: None,
             })
         }
         async fn embed(&self, _: Vec<String>, _: bool) -> Result<VectorReply> {

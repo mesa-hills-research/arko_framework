@@ -4,7 +4,7 @@ use arko_ai::{
     EmbeddingClient, EmbeddingConfig, EmbeddingModelDetails, EmbeddingProviderIdentifier,
     GenerationConfig, GenerationResponse, LLMClient, Model, OpenAIEffort, ReasoningConfig,
     StopReason, StreamEvent, TokenCounter, ToolCall, ToolChoice, ToolConfig, ToolDefinition,
-    Verbosity, VoyageInputType,
+    UsageInfo, Verbosity, VoyageInputType,
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -20,12 +20,23 @@ pub struct ModelRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelReply {
     pub value: Value,
+    /// The provider's call record, such as a serialized
+    /// [`arko_ai::ModelCallUsage`] (with the raw stop reason). The index
+    /// wraps it with the attempt history before saving it.
     pub usage: Value,
+    /// Token usage and cost of the call, when the backend reports them.
+    /// Summed into [`JobUsage`](crate::JobUsage); replies saved before this
+    /// field existed load as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_info: Option<UsageInfo>,
 }
 #[derive(Clone, Debug)]
 pub struct VectorReply {
     pub vectors: Vec<Vec<f32>>,
     pub billed_tokens: usize,
+    /// Token usage and cost of the request, when the backend reports them.
+    /// Summed into [`JobUsage`](crate::JobUsage).
+    pub usage_info: Option<UsageInfo>,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
@@ -227,6 +238,7 @@ impl Backend for ArkoBackend {
                     value: call.arguments.clone(),
                     // Keeps the provider's raw stop reason with the call record.
                     usage: serde_json::to_value(&response.model_call_usage)?,
+                    usage_info: Some(response.usage.clone()),
                 });
             }
         }
@@ -249,6 +261,7 @@ impl Backend for ArkoBackend {
         Ok(VectorReply {
             vectors: result.embeddings,
             billed_tokens: result.usage.input_tokens,
+            usage_info: Some(result.usage),
         })
     }
     fn tokens(&self, text: &str) -> Result<usize> {
@@ -273,7 +286,7 @@ impl Backend for ArkoBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arko_ai::{Message, ModelCallUsage, Refusal, RefusalSource, RetryClass, UsageInfo};
+    use arko_ai::{Message, ModelCallUsage, Refusal, RefusalSource, RetryClass};
     use serde_json::json;
 
     fn response(calls: &[&str], stop_reason: StopReason) -> GenerationResponse {
