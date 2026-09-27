@@ -37,6 +37,8 @@ directory contains runnable programs.
   of asynchronous tool calling and mid-turn steering.
 - [Arko Workflows API index](arko-workflows/INDEX.md): the complete arko-workflows
   API reference.
+- [Arko Index reference](docs/arko-index-reference.md): file selection, chunk
+  validation, jobs and events, search, usage accounting, and the example CLI.
 
 ## License
 
