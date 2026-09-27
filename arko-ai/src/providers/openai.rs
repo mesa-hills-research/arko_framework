@@ -1078,6 +1078,8 @@ impl OpenAIClient {
         let is_gpt5_5 = conversation.model.id.starts_with("gpt-5.5");
         let is_gpt5_6 = conversation.model.is_openai_gpt_5_6();
         let is_gpt6_astra = conversation.model.is_openai_gpt_6_astra();
+        let is_gpt6_sol_luna = conversation.model.is_openai_gpt_6_sol_or_luna();
+        let is_gpt6 = is_gpt6_astra || is_gpt6_sol_luna;
 
         let is_legacy_reasoning =
             conversation.model.id.starts_with("o3-")
@@ -1092,18 +1094,18 @@ impl OpenAIClient {
             || is_gpt5_6;
 
         if config.openai_reasoning_mode.is_some()
-            && !(is_gpt5_6 || is_gpt6_astra)
+            && !(is_gpt5_6 || is_gpt6)
         {
             return Err(Error::InvalidRequest(
-                "The OpenAI reasoning mode parameter is only supported for GPT-5.6 and GPT-6 Astra models."
+                "The OpenAI reasoning mode parameter is only supported for GPT-5.6 and GPT-6 models."
                     .to_string(),
             ));
         }
 
         if let Some(verbosity) = config.verbosity {
-            if !(is_gpt5_family || is_gpt6_astra) {
+            if !(is_gpt5_family || is_gpt6) {
                 return Err(Error::InvalidRequest(
-                    "The verbosity parameter is only supported for GPT-5 family and GPT-6 Astra models."
+                    "The verbosity parameter is only supported for GPT-5 family and GPT-6 models."
                         .to_string(),
                 ));
             }
@@ -1133,7 +1135,7 @@ impl OpenAIClient {
                         ],
                         "low, medium, high, xhigh, max",
                     )
-                } else if is_gpt5_6 {
+                } else if is_gpt5_6 || is_gpt6_sol_luna {
                     (
                         &[
                             OpenAIEffort::None,
@@ -1221,7 +1223,7 @@ impl OpenAIClient {
                     None
                 },
             });
-        } else if is_gpt5_family || is_gpt6_astra {
+        } else if is_gpt5_family || is_gpt6 {
             request.reasoning = Some(OpenAIReasoning {
                 mode: config.openai_reasoning_mode,
                 effort: OpenAIEffort::Medium,
@@ -2057,6 +2059,64 @@ mod tests {
     }
 
     #[test]
+    fn gpt_6_sol_and_luna_build_reasoning_verbosity_and_cache_requests() {
+        let client = OpenAIClient::new("test");
+
+        for id in ["gpt-6-sol", "gpt-6-luna"] {
+            let conversation = Conversation::new(Model::get(Provider::OpenAI, id).unwrap());
+
+            for effort in [
+                OpenAIEffort::None,
+                OpenAIEffort::Low,
+                OpenAIEffort::Medium,
+                OpenAIEffort::High,
+                OpenAIEffort::XHigh,
+                OpenAIEffort::Max,
+            ] {
+                let config = GenerationConfig::default()
+                    .with_verbosity(Verbosity::Low)
+                    .with_openai_reasoning_mode(OpenAIReasoningMode::Pro)
+                    .with_reasoning(ReasoningConfig::openai(effort, true));
+
+                for oauth in [false, true] {
+                    let request = client.build_request(&conversation, &config, oauth).unwrap();
+                    let value = serde_json::to_value(request).unwrap();
+
+                    assert_eq!(value["model"], id);
+                    assert_eq!(value["reasoning"]["mode"], "pro");
+                    assert_eq!(
+                        value["reasoning"]["effort"],
+                        serde_json::to_value(effort).unwrap()
+                    );
+                    assert_eq!(value["reasoning"]["summary"], "auto");
+                    assert_eq!(value["text"]["verbosity"], "low");
+                    assert_eq!(value["prompt_cache_key"], conversation.prompt_cache_key);
+                    assert!(value.get("temperature").is_none());
+                    if oauth {
+                        assert!(value.get("prompt_cache_options").is_none());
+                    } else {
+                        assert_eq!(value["prompt_cache_options"]["mode"], "implicit");
+                    }
+                }
+            }
+
+            let config = GenerationConfig::default()
+                .with_reasoning(ReasoningConfig::openai(OpenAIEffort::Minimal, false));
+            assert!(matches!(
+                client.build_request(&conversation, &config, false),
+                Err(Error::InvalidRequest(_))
+            ));
+
+            let request = client
+                .build_request(&conversation, &GenerationConfig::default(), false)
+                .unwrap();
+            let value = serde_json::to_value(request).unwrap();
+            assert_eq!(value["reasoning"]["effort"], "medium");
+            assert!(value["reasoning"].get("mode").is_none());
+        }
+    }
+
+    #[test]
     fn parses_retry_after_body_shapes() {
         assert_eq!(
             retry_after_from_body(r#"{"error":{"retry_after_ms":2500}}"#),
@@ -2367,7 +2427,7 @@ mod tests {
             Error::InvalidRequest(message) => {
                 assert_eq!(
                     message,
-                    "The OpenAI reasoning mode parameter is only supported for GPT-5.6 and GPT-6 Astra models."
+                    "The OpenAI reasoning mode parameter is only supported for GPT-5.6 and GPT-6 models."
                 );
             }
             other => panic!("Unexpected error: {other:?}"),

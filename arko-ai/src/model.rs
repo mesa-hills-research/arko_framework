@@ -82,6 +82,58 @@ impl Model {
         }
     }
 
+    /// Standard API pricing and limits checked 2026-09-27.
+    /// https://developers.openai.com/api/docs/models/gpt-6-sol
+    pub fn openai_gpt_6_sol() -> Self {
+        Self {
+            provider: Provider::OpenAI,
+            id: "gpt-6-sol".to_string(),
+            model_type: ModelType::Reasoning,
+            max_input_tokens: 922_000,
+            max_output_tokens: 128_000,
+            supports_image_input: true,
+            supports_cache: true,
+            pricing: ModelPricing {
+                input_cost_per_million: 2.00,
+                output_cost_per_million: 10.00,
+                cached_input_cost_per_million: Some(0.20),
+                cache_write_cost_per_million: Some(2.50),
+                large_input_threshold: Some(272_000),
+                large_input_cost_per_million: Some(4.00),
+                large_output_cost_per_million: Some(15.00),
+                large_cached_input_cost_per_million: Some(0.40),
+                large_cache_write_cost_per_million: Some(5.00),
+                reasoning_output_cost_per_million: None,
+            },
+        }
+    }
+
+    /// Standard API pricing and limits checked 2026-09-27.
+    /// https://developers.openai.com/api/docs/models/gpt-6-luna
+    pub fn openai_gpt_6_luna() -> Self {
+        Self {
+            provider: Provider::OpenAI,
+            id: "gpt-6-luna".to_string(),
+            model_type: ModelType::Reasoning,
+            max_input_tokens: 922_000,
+            max_output_tokens: 128_000,
+            supports_image_input: true,
+            supports_cache: true,
+            pricing: ModelPricing {
+                input_cost_per_million: 0.10,
+                output_cost_per_million: 0.50,
+                cached_input_cost_per_million: Some(0.01),
+                cache_write_cost_per_million: Some(0.125),
+                large_input_threshold: Some(272_000),
+                large_input_cost_per_million: Some(0.20),
+                large_output_cost_per_million: Some(0.75),
+                large_cached_input_cost_per_million: Some(0.02),
+                large_cache_write_cost_per_million: Some(0.25),
+                reasoning_output_cost_per_million: None,
+            },
+        }
+    }
+
     /// Standard API pricing verified September 6, 2026.
     /// Promotional pricing is available at least through November 21, 2026.
     /// https://developers.openai.com/api/docs/pricing
@@ -1260,6 +1312,8 @@ impl Model {
     pub(crate) fn list_openai_models() -> Vec<Self> {
         vec![
             Self::openai_gpt_6_astra(),
+            Self::openai_gpt_6_sol(),
+            Self::openai_gpt_6_luna(),
             Self::openai_gpt_5_6_sol(),
             Self::openai_gpt_5_6_terra(),
             Self::openai_gpt_5_6_luna(),
@@ -1343,6 +1397,11 @@ impl Model {
         self.id == "gpt-6-astra"
     }
 
+    /// GPT-6 Sol and Luna share GPT-5.6's reasoning controls; unlike Astra, they accept `none`.
+    pub fn is_openai_gpt_6_sol_or_luna(&self) -> bool {
+        matches!(self.id.as_str(), "gpt-6-sol" | "gpt-6-luna")
+    }
+
     pub fn is_openai_gpt_5_6(&self) -> bool {
         matches!(
             self.id.as_str(),
@@ -1352,7 +1411,9 @@ impl Model {
 
     pub fn supports_openai_prompt_cache_options(&self) -> bool {
         self.provider == Provider::OpenAI
-            && (self.is_openai_gpt_5_6() || self.is_openai_gpt_6_astra())
+            && (self.is_openai_gpt_5_6()
+                || self.is_openai_gpt_6_astra()
+                || self.is_openai_gpt_6_sol_or_luna())
     }
 
     pub fn is_fable_5_1(&self) -> bool {
