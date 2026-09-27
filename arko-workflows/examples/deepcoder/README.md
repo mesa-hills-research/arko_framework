@@ -1,35 +1,38 @@
 # DeepCoder example
 
-This is a generic, code-defined adaptation of the archived `deepcoder-v2` workflow. It demonstrates
-how the reusable `arko_workflows` primitives replace application-specific orchestration code:
+A sequential coding workflow built from `arko-workflows` primitives: an orchestrator
+splits a specification into small coder tasks, every coder completion is checked
+by verifier agents, and a final verifier gates the end of the run.
 
 ```text
 orchestrator
   -> run_workflow_agent(researcher)   (optional, bounded repository questions)
   -> run_workflow_agent(coder)
        -> correctness verifier
-       -> efficiency verifier (minor-only)
-  -> repeat for dependency-ordered slices
+       -> efficiency verifier (minor repairs only)
+  -> repeat for each dependency-ordered slice
   -> final verifier
   -> complete
 ```
 
-The orchestrator stays sequential intentionally. Decomposition keeps individual agent tasks small,
-and one accepted slice becomes the verified base for the next. The example does not add a graph or
-parallel scheduler.
+The orchestrator runs slices one at a time: each accepted slice becomes the
+verified base for the next, and small slices keep individual agent tasks
+manageable. The example uses no graph or parallel scheduler.
 
-Each gate starts with a fresh comprehensive verifier. If a later gate requests a repair, the same
-verifier conversation resumes with its prior verdict and a bounded tracked file/memory delta, so it
-can reuse unchanged evidence and run focused checks. The final release gate is automatic: workflow
-service target restrictions prevent the orchestrator from directly invoking verifier roles. Native
-mixed-tool batches are enabled only for verifier reads; any batch containing a tool not marked
-batch-safe is rejected without executing any call in that batch.
+Each verification gate starts with a fresh, comprehensive review. When a gate
+requests a repair, the same verifier conversation continues with its previous
+verdict and a bounded summary of the tracked file and memory changes, so it can
+reuse unchanged evidence and run focused checks. The final gate runs
+automatically: workflow-service target restrictions allow the orchestrator to call
+only the coder and the researcher, never a verifier. Verifiers may batch
+read-only tool calls; a batch that contains a tool not marked batch-safe is
+rejected without running any of its calls.
 
 ## Run
 
 The example uses OpenAI models only. Credentials are tried in this order:
 
-1. ChatGPT OAuth environment values (the refresh token is optional):
+1. ChatGPT OAuth environment variables (the refresh token is optional):
 
    ```bash
    export OPENAI_OAUTH_ACCESS_TOKEN=...
@@ -37,8 +40,9 @@ The example uses OpenAI models only. Credentials are tried in this order:
    export OPENAI_OAUTH_ACCOUNT_ID=...
    ```
 
-2. A Codex login at `$CODEX_HOME/auth.json` or `$HOME/.codex/auth.json`. Tokens the client
-   refreshes are saved back to that file every 30 seconds and once more at exit.
+2. A Codex login at `$CODEX_HOME/auth.json` or `~/.codex/auth.json`. Tokens the
+   client refreshes are written back to that file every 30 seconds and once more
+   at exit.
 3. An OpenAI API key:
 
    ```bash
@@ -53,50 +57,51 @@ cargo run -p arko-workflows --example deepcoder -- \
   --spec /absolute/path/to/specification.md
 ```
 
-Useful controls:
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--budget` | `50` | Workflow budget in dollars. |
+| `--max-minor-corrections` | `20` | Minor repairs the correctness verifier may request per coder task. |
+| `--max-efficiency-corrections` | `3` | Repairs the efficiency verifier may request per coder task. |
+| `--max-final-corrections` | `4` | Minor repairs the final verifier may request. |
+| `--shell-timeout-seconds` | `1800` | Default and maximum `run_shell` timeout. |
+| `--shell-output-bytes` | `65536` | Maximum `run_shell` output returned to an agent. |
+| `--state-dir PATH` | new directory | Run directory for checkpoints and logs; must be outside the workspace. |
+| `--resume PATH` | none | Resume from a checkpoint file or a run directory. |
+| `--ephemeral` | off | Disable checkpoints and run artifacts. Cannot be combined with `--resume`. |
 
-```text
---budget 50
---max-minor-corrections 20
---max-efficiency-corrections 3
---max-final-corrections 4
---shell-timeout-seconds 1800
---shell-output-bytes 65536
---state-dir /path/outside/the/workspace
---resume /run/directory/or/checkpoint.json
---ephemeral
-```
+Budgets count billed cost. ChatGPT OAuth calls are billed at $0, so `--budget`
+and the reported total cost only constrain API-key runs.
 
-Budgets count billed cost: ChatGPT OAuth calls bill $0, so `--budget` and the reported total cost
-apply only to API-key runs.
-
-With persistence enabled, the default run directory is a uniquely named sibling under
-`.arko-deepcoder-runs`. Resume accepts either a checkpoint or a run directory containing the
-`latest-checkpoint` pointer. A small input manifest binds the run to the canonical workspace and
-specification hash, preventing accidental resume against different inputs. Persistent state is
-rejected if it is inside the mutable workspace.
+With persistence enabled, each run gets a uniquely named directory under
+`.arko-deepcoder-runs` next to the workspace. `--resume` accepts either a
+checkpoint file or a run directory containing a `latest-checkpoint` pointer. A
+small input manifest records the canonical workspace path and the specification
+hash, so a run cannot be resumed against different inputs by accident. A state
+directory inside the workspace is rejected.
 
 ## Shared memory
 
-- `requirements`: immutable specification visible to every role.
-- `decisions`: orchestrator-owned durable architectural/product decisions.
-- `implementation_log`: coder-owned changed-file and check evidence.
-- `verification_notes`: verifier-owned shared findings.
+| Tier | Writer | Contents |
+| --- | --- | --- |
+| `requirements` | none (read-only) | The specification, visible to every role. |
+| `decisions` | orchestrator | Durable architecture and product decisions. |
+| `implementation_log` | coder | Changed files and the checks run. |
+| `verification_notes` | verifiers | Findings shared between verifiers. |
 
-Each tier has an explicit writer policy and size bound. Memory, agent tasks, verification records,
-messages, freshness state, event logs, and costs are checkpointed by the workflow library.
+Every tier has a size limit. The workflow library checkpoints memory, agent tasks,
+verification records, messages, freshness state, event logs, and costs.
 
-## Important boundary
+## Shell tool and isolation
 
-The example's `run_shell` tool is intentionally small and cooperative. It runs local commands in the
-workspace, caps returned output, applies a timeout, and is exposed only to coder/verifier roles. It
-removes common token/key/secret variables from child environments. It is not a hostile-code sandbox.
-Although role prompts require verifiers to remain read-only and coders to avoid
-deployment/publication, shell commands can technically access anything available to the host
-process.
+The example's `run_shell` tool runs local commands in the workspace with a
+timeout and a cap on returned output, and only the coder and verifier roles
+receive it. It removes common token, key, and secret variables from the child
+environment. It is not a sandbox for untrusted code: role prompts tell verifiers
+to stay read-only and coders to avoid deployment or publication, but shell
+commands can reach anything the host process can.
 
-Unlike the specialized archived harness, this example does not create VWS copies or perform
-rollback-protected merges. Run it in a disposable checkout or add an application-specific isolated
-workspace/merge layer when untrusted changes, concurrent coders, or transactional rollback are part
-of the threat model. Deterministic shell output is capped rather than LLM-distilled so verifier
-evidence is not silently rewritten.
+The example has no isolated workspace copies or rollback-protected merges. Run it
+in a disposable checkout, or add an application-specific isolation and merge layer
+when untrusted changes, concurrent coders, or transactional rollback matter. Shell
+output is truncated deterministically rather than distilled by a model, so
+verifier evidence is never rewritten.
