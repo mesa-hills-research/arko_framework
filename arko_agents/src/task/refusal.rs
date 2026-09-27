@@ -121,8 +121,9 @@ fn is_image_description(content: &[Content], index: usize) -> bool {
 }
 
 fn rephrase(message: &mut Message, text: &str, reminder: Option<&str>) {
-    let target = (0..message.content.len())
-        .find(|&index| message.content[index].as_text().is_some() && !is_image_description(&message.content, index));
+    let target = (0..message.content.len()).find(|&index| {
+        message.content[index].as_text().is_some() && !is_image_description(&message.content, index)
+    });
     match target {
         Some(index) => {
             let old = message.content[index].as_text().unwrap_or_default();
@@ -135,7 +136,9 @@ fn rephrase(message: &mut Message, text: &str, reminder: Option<&str>) {
                 .iter()
                 .rposition(|content| content.as_tool_result().is_some())
                 .map_or(0, |index| index + 1);
-            message.content.insert(after_results, Content::Text(text.to_string()));
+            message
+                .content
+                .insert(after_results, Content::Text(text.to_string()));
         }
     }
 }
@@ -145,7 +148,9 @@ fn remove_images(message: &mut Message) {
     message.content = content
         .iter()
         .enumerate()
-        .filter(|(index, part)| part.as_image().is_none() && !is_image_description(&content, *index))
+        .filter(|(index, part)| {
+            part.as_image().is_none() && !is_image_description(&content, *index)
+        })
         .map(|(_, part)| part.clone())
         .collect();
 }
@@ -211,30 +216,42 @@ impl Task {
     /// last input (followed only by the refused turn, if it was kept). Used
     /// by the runtime for `UserCommand::ResolveRefusal`; call it directly on
     /// a task that was returned interrupted, before running it again.
-    pub fn resolve_refusal(&mut self, changes: Vec<RefusalResolution>) -> Result<(), ArkoAgentsError> {
+    pub fn resolve_refusal(
+        &mut self,
+        changes: Vec<RefusalResolution>,
+    ) -> Result<(), ArkoAgentsError> {
         let invalid = |message: String| ArkoAgentsError::InvalidTaskState(message);
         let input = self
             .refused_input
             .clone()
             .ok_or_else(|| invalid("The task has no refused input to resolve.".into()))?;
         if input.messages.is_empty() {
-            return Err(invalid("The refused input holds no messages to change.".into()));
+            return Err(invalid(
+                "The refused input holds no messages to change.".into(),
+            ));
         }
         if changes.is_empty() {
-            return Err(invalid("Give at least one change to the refused input.".into()));
+            return Err(invalid(
+                "Give at least one change to the refused input.".into(),
+            ));
         }
         if self.current_refused_input() != Some(input.clone()) {
             return Err(invalid(
                 "The conversation changed since the refusal: the refused input is no longer its last input.".into(),
             ));
         }
-        let last = input.messages.last().map_or(0, |message| message.message_index);
+        let last = input
+            .messages
+            .last()
+            .map_or(0, |message| message.message_index);
         let find = |index: usize| {
             input
                 .messages
                 .iter()
                 .find(|message| message.message_index == index)
-                .ok_or_else(|| invalid(format!("Message {index} is not part of the refused input.")))
+                .ok_or_else(|| {
+                    invalid(format!("Message {index} is not part of the refused input."))
+                })
         };
         let mut removed = BTreeSet::new();
         let mut changed = BTreeSet::new();
@@ -331,7 +348,10 @@ impl Task {
         let mut initial_task_prompt = None;
         for change in &changes {
             match change {
-                RefusalResolution::RephraseUserMessage { message_index, text } => {
+                RefusalResolution::RephraseUserMessage {
+                    message_index,
+                    text,
+                } => {
                     if task_prompt == Some(*message_index) {
                         // As the prompt builder formats the task prompt.
                         let processed = if self.agent_config.is_native_tool_calling() {
@@ -339,7 +359,11 @@ impl Task {
                         } else {
                             crate::parsing::remove_output_based_only_markers(text)
                         };
-                        rephrase(&mut conversation.messages[*message_index], &processed, reminder);
+                        rephrase(
+                            &mut conversation.messages[*message_index],
+                            &processed,
+                            reminder,
+                        );
                         initial_task_prompt = Some(text.clone());
                     } else {
                         rephrase(&mut conversation.messages[*message_index], text, reminder);
@@ -348,7 +372,10 @@ impl Task {
                 RefusalResolution::RemoveImages { message_index } => {
                     remove_images(&mut conversation.messages[*message_index]);
                 }
-                RefusalResolution::RedactToolResults { call_ids, replacement } => {
+                RefusalResolution::RedactToolResults {
+                    call_ids,
+                    replacement,
+                } => {
                     for call_id in call_ids {
                         conversation
                             .redact_tool_result(call_id, replacement)
@@ -359,7 +386,11 @@ impl Task {
             }
         }
         let kept = |marks: &BTreeSet<usize>| -> BTreeSet<usize> {
-            marks.iter().copied().filter(|index| *index <= last).collect()
+            marks
+                .iter()
+                .copied()
+                .filter(|index| *index <= last)
+                .collect()
         };
         let mut runtime_messages = kept(&self.runtime_messages);
         let mut runtime_text_messages = kept(&self.runtime_text_messages);
@@ -452,15 +483,20 @@ mod tests {
         task.conversation.messages.push(turn);
         task.conversation.add_user_message_with_contents(vec![
             Content::ToolResult(ToolResult::from_tool_call(&call("call_1"), "secret output")),
-            Content::Text("Answer: yes\n\n# Current Environment Information (updated this turn)\ncwd: /work".into()),
+            Content::Text(
+                "Answer: yes\n\n# Current Environment Information (updated this turn)\ncwd: /work"
+                    .into(),
+            ),
             Content::Text("Image from tool screenshot, call call_1: the screen".into()),
             Content::Image(Image::new_url("https://example.com/screen.png")),
         ]);
-        task.conversation.add_user_message("Continue the task from where your previous response ended.");
+        task.conversation
+            .add_user_message("Continue the task from where your previous response ended.");
         task.mark_last_message_runtime();
         task.user_message_count = 3;
         task.refused_input = task.current_input();
-        task.conversation.add_assistant_message("I can't help with that.");
+        task.conversation
+            .add_assistant_message("I can't help with that.");
         task
     }
 
@@ -474,7 +510,10 @@ mod tests {
             .map(|message| (message.message_index, message.runtime))
             .collect();
         assert_eq!(indices, [(2, false), (3, true)]);
-        assert_eq!(input.messages[0].tool_results[0].call_id.as_deref(), Some("call_1"));
+        assert_eq!(
+            input.messages[0].tool_results[0].call_id.as_deref(),
+            Some("call_1")
+        );
         assert_eq!(input.messages[0].images, 1);
     }
 
@@ -492,7 +531,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             task.conversation.messages[0].content[0].as_text(),
-            Some("new task\n\n# Initial Environment Information\ncwd: /work\n\n# Reminder\nStay on task.")
+            Some(
+                "new task\n\n# Initial Environment Information\ncwd: /work\n\n# Reminder\nStay on task."
+            )
         );
         assert_eq!(task.initial_task_prompt, "new task");
     }
@@ -549,7 +590,10 @@ mod tests {
             vec![],
         ] {
             let mut task = original.clone();
-            assert!(task.resolve_refusal(changes.clone()).is_err(), "{changes:?}");
+            assert!(
+                task.resolve_refusal(changes.clone()).is_err(),
+                "{changes:?}"
+            );
             assert_eq!(
                 serde_json::to_value(&task.conversation).unwrap(),
                 serde_json::to_value(&original.conversation).unwrap()
@@ -566,7 +610,9 @@ mod tests {
             }])
             .is_err()
         );
-        let result = task.conversation.messages[2].content[0].as_tool_result().unwrap();
+        let result = task.conversation.messages[2].content[0]
+            .as_tool_result()
+            .unwrap();
         assert_eq!(result.output, "secret output");
     }
 
@@ -576,12 +622,15 @@ mod tests {
         task.conversation.add_user_message("first");
         task.conversation.add_assistant_message("ok");
         task.conversation.add_user_message("objectionable");
-        task.conversation.add_user_message("# File tree (max depth 3)\n...");
+        task.conversation
+            .add_user_message("# File tree (max depth 3)\n...");
         task.mark_last_message_runtime();
         task.user_message_count = 3;
         task.refused_input = task.current_input();
-        task.resolve_refusal(vec![RefusalResolution::RemoveUserMessage { message_index: 2 }])
-            .unwrap();
+        task.resolve_refusal(vec![RefusalResolution::RemoveUserMessage {
+            message_index: 2,
+        }])
+        .unwrap();
         assert_eq!(task.conversation.messages.len(), 3);
         assert_eq!(task.runtime_messages, BTreeSet::from([2]));
         assert_eq!(task.user_message_count, 2);
@@ -591,20 +640,27 @@ mod tests {
     fn the_task_prompt_stays_when_only_runtime_messages_would_remain() {
         let mut task = task();
         task.conversation.add_user_message("the task");
-        task.conversation.add_user_message("# File tree (max depth 3)\n...");
+        task.conversation
+            .add_user_message("# File tree (max depth 3)\n...");
         task.mark_last_message_runtime();
         task.refused_input = task.current_input();
         let error = task
-            .resolve_refusal(vec![RefusalResolution::RemoveUserMessage { message_index: 0 }])
+            .resolve_refusal(vec![RefusalResolution::RemoveUserMessage {
+                message_index: 0,
+            }])
             .unwrap_err();
-        assert!(error.to_string().contains("no user message from the host"), "{error}");
+        assert!(
+            error.to_string().contains("no user message from the host"),
+            "{error}"
+        );
         assert_eq!(task.conversation.messages.len(), 2);
     }
 
     #[test]
     fn rephrasing_needs_text_and_formats_the_task_prompt_like_the_prompt_builder() {
         let mut task = task();
-        task.agent_config.tool_config.tool_calling_mode = crate::agent_config::ToolCallingMode::Native;
+        task.agent_config.tool_config.tool_calling_mode =
+            crate::agent_config::ToolCallingMode::Native;
         task.conversation.add_user_message("old task");
         task.refused_input = task.current_input();
         assert!(
@@ -620,7 +676,10 @@ mod tests {
             text: text.into(),
         }])
         .unwrap();
-        assert_eq!(task.conversation.messages[0].content[0].as_text(), Some("Do the task."));
+        assert_eq!(
+            task.conversation.messages[0].content[0].as_text(),
+            Some("Do the task.")
+        );
         assert_eq!(task.initial_task_prompt, text);
     }
 
@@ -644,7 +703,10 @@ mod tests {
                 text: "x".into(),
             }])
             .unwrap_err();
-        assert!(error.to_string().contains("added by the runtime"), "{error}");
+        assert!(
+            error.to_string().contains("added by the runtime"),
+            "{error}"
+        );
         task.resolve_refusal(vec![RefusalResolution::RedactToolResults {
             call_ids: vec!["call_1".into()],
             replacement: "[removed]".into(),

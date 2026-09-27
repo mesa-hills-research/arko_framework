@@ -32,7 +32,9 @@ fn tls_config() -> rustls::ClientConfig {
         // Keep client construction infallible, as with the previous native
         // TLS backend: HTTPS requests then fail certificate verification.
         Err(error) => {
-            log::error!("arko_ai: system CA certificates are unavailable ({error}); HTTPS requests will fail");
+            log::error!(
+                "arko_ai: system CA certificates are unavailable ({error}); HTTPS requests will fail"
+            );
             versions()
                 .with_root_certificates(rustls::RootCertStore::empty())
                 .with_no_client_auth()
@@ -158,17 +160,22 @@ impl GenerationResponse {
 /// providers that can't send them.
 pub(crate) fn ensure_supported_inputs(conversation: &Conversation) -> Result<(), Error> {
     if conversation.model.provider != crate::model::Provider::OpenRouter
-        && conversation.messages.iter().any(Message::is_configuration_update)
+        && conversation
+            .messages
+            .iter()
+            .any(Message::is_configuration_update)
     {
         return Err(Error::UnsupportedFeature(format!(
             "Mid-conversation reasoning-effort updates are supported only for OpenRouter models, not {:?} model '{}'. Remove the update or change the request-level reasoning configuration.",
             conversation.model.provider, conversation.model.id
         )));
     }
-    let has_images = conversation
-        .messages
-        .iter()
-        .any(|message| message.content.iter().any(|content| content.as_image().is_some()));
+    let has_images = conversation.messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|content| content.as_image().is_some())
+    });
     if has_images && !conversation.model.supports_image_input {
         return Err(Error::UnsupportedFeature(format!(
             "Model '{}' does not accept image input.",
@@ -250,15 +257,28 @@ mod response_tests {
     use super::*;
     use crate::stop::RefusalSource;
 
-    fn response(calls: &[&str], stop_reason: StopReason, refusal: Option<Refusal>) -> GenerationResponse {
+    fn response(
+        calls: &[&str],
+        stop_reason: StopReason,
+        refusal: Option<Refusal>,
+    ) -> GenerationResponse {
         let mut message = Message::new_assistant("text");
         for name in calls {
-            message.tool_calls.push(ToolCall::from_argument_text(None, name.to_string(), "{}"));
+            message
+                .tool_calls
+                .push(ToolCall::from_argument_text(None, name.to_string(), "{}"));
         }
         GenerationResponse {
             message,
             usage: UsageInfo::new(0, 0),
-            model_call_usage: ModelCallUsage::new("id".into(), "test".into(), "test".into(), 0, 0, 0),
+            model_call_usage: ModelCallUsage::new(
+                "id".into(),
+                "test".into(),
+                "test".into(),
+                0,
+                0,
+                0,
+            ),
             stop_reason,
             refusal,
             openai_turn_state: None,
@@ -267,19 +287,34 @@ mod response_tests {
 
     #[test]
     fn single_tool_call_distinguishes_refusals_limits_and_wrong_calls() {
-        assert!(response(&["pick"], StopReason::ToolUse, None).single_tool_call("pick").is_ok());
+        assert!(
+            response(&["pick"], StopReason::ToolUse, None)
+                .single_tool_call("pick")
+                .is_ok()
+        );
         for (calls, stop) in [
             (vec![], StopReason::EndTurn),
             (vec!["other"], StopReason::ToolUse),
             (vec!["pick", "pick"], StopReason::ToolUse),
         ] {
-            let error = response(&calls, stop, None).single_tool_call("pick").unwrap_err();
+            let error = response(&calls, stop, None)
+                .single_tool_call("pick")
+                .unwrap_err();
             assert!(matches!(error, Error::UnexpectedToolCalls { .. }));
             assert!(error.is_retryable());
         }
-        let error = response(&[], StopReason::MaxTokens, None).single_tool_call("pick").unwrap_err();
-        assert!(!error.is_retryable(), "a token limit needs a configuration change");
-        let refused = response(&["pick"], StopReason::Refusal, Some(Refusal::new(RefusalSource::Model)));
+        let error = response(&[], StopReason::MaxTokens, None)
+            .single_tool_call("pick")
+            .unwrap_err();
+        assert!(
+            !error.is_retryable(),
+            "a token limit needs a configuration change"
+        );
+        let refused = response(
+            &["pick"],
+            StopReason::Refusal,
+            Some(Refusal::new(RefusalSource::Model)),
+        );
         let error = refused.single_tool_call("pick").unwrap_err();
         assert!(matches!(error, Error::Refusal(_)));
         assert!(!error.is_retryable());
@@ -299,48 +334,89 @@ mod response_tests {
 #[cfg(test)]
 mod transport_tests {
     use super::*;
-    use tokio::io::{AsyncReadExt,AsyncWriteExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     #[tokio::test]
     async fn connected_response_can_outlive_thirty_minutes() {
-        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address=listener.local_addr().unwrap();
-        let (release,ready)=tokio::sync::oneshot::channel();
-        let server=tokio::spawn(async move {
-            let(mut socket,_)=listener.accept().await.unwrap();let mut bytes=[0;4096];assert!(socket.read(&mut bytes).await.unwrap()>0);
-            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n").await.unwrap();
-            ready.await.unwrap();socket.write_all(b"ok").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, ready) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            assert!(socket.read(&mut bytes).await.unwrap() > 0);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            ready.await.unwrap();
+            socket.write_all(b"ok").await.unwrap();
         });
-        let response=default_http_client().get(format!("http://{address}/")).send().await.unwrap();
+        let response = default_http_client()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
         tokio::time::pause();
-        let body=tokio::spawn(response.text());tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_secs(1_801)).await;tokio::task::yield_now().await;
-        assert!(!body.is_finished(),"connected response was cut off by a total request deadline");
-        tokio::time::resume();release.send(()).unwrap();assert_eq!(body.await.unwrap().unwrap(),"ok");server.await.unwrap();
+        let body = tokio::spawn(response.text());
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1_801)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !body.is_finished(),
+            "connected response was cut off by a total request deadline"
+        );
+        tokio::time::resume();
+        release.send(()).unwrap();
+        assert_eq!(body.await.unwrap().unwrap(), "ok");
+        server.await.unwrap();
     }
     // Network checks for the TLS setup: `cargo test -p arko_ai -- --ignored tls_`.
     #[tokio::test]
     #[ignore = "requires network access"]
     async fn tls_verifies_public_certificates_over_http_1_1() {
-        let response=default_http_client().get("https://api.openai.com/v1/models").send().await.unwrap();
-        assert_eq!(response.status(),reqwest::StatusCode::UNAUTHORIZED);
-        assert_eq!(response.version(),reqwest::Version::HTTP_11);
+        let response = default_http_client()
+            .get("https://api.openai.com/v1/models")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(response.version(), reqwest::Version::HTTP_11);
     }
     #[tokio::test]
     #[ignore = "requires network access"]
     async fn tls_rejects_an_expired_certificate() {
-        let error=default_http_client().get("https://expired.badssl.com/").send().await.unwrap_err();
-        assert!(error.is_connect(),"{error:?}");
+        let error = default_http_client()
+            .get("https://expired.badssl.com/")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_connect(), "{error:?}");
         // The failure must be certificate validation, not DNS or a reset.
-        let mut source:Option<&(dyn std::error::Error+'static)>=Some(&error);
-        let mut expired=false;
-        while let Some(current)=source {
-            if matches!(current.downcast_ref::<rustls::Error>(),Some(rustls::Error::InvalidCertificate(rustls::CertificateError::Expired|rustls::CertificateError::ExpiredContext{..}))) {expired=true;break;}
+        let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+        let mut expired = false;
+        while let Some(current) = source {
+            if matches!(
+                current.downcast_ref::<rustls::Error>(),
+                Some(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::Expired
+                        | rustls::CertificateError::ExpiredContext { .. }
+                ))
+            ) {
+                expired = true;
+                break;
+            }
             // io::Error::source() skips its payload (the wrapped rustls error); descend into it instead.
-            source=match current.downcast_ref::<std::io::Error>().and_then(std::io::Error::get_ref) {
-                Some(inner)=>Some(inner as &(dyn std::error::Error+'static)),
-                None=>current.source(),
+            source = match current
+                .downcast_ref::<std::io::Error>()
+                .and_then(std::io::Error::get_ref)
+            {
+                Some(inner) => Some(inner as &(dyn std::error::Error + 'static)),
+                None => current.source(),
             };
         }
-        assert!(expired,"expected an expired-certificate error in the source chain: {error:?}");
+        assert!(
+            expired,
+            "expected an expired-certificate error in the source chain: {error:?}"
+        );
     }
 }

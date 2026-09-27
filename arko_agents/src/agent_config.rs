@@ -272,7 +272,10 @@ impl<'de> Deserialize<'de> for AgentLLMConfig {
         let snapshot = helper
             .model
             .filter(|model| model.provider == helper.provider && model.id == helper.model_id);
-        let model = match (LLMModel::get(helper.provider.clone(), &helper.model_id), snapshot) {
+        let model = match (
+            LLMModel::get(helper.provider.clone(), &helper.model_id),
+            snapshot,
+        ) {
             (Ok(model), _) => model,
             (Err(_), Some(snapshot)) => snapshot,
             // OpenRouter slugs are dynamic: a hand-written config without a
@@ -398,7 +401,8 @@ impl LLMRateLimitRetryConfig {
         {
             return Err(ArkoAgentsError::BuilderError {
                 struct_name: "LLMRateLimitRetryConfig".into(),
-                message: "Rate-limit retry delays must be positive, ordered, and representable.".into(),
+                message: "Rate-limit retry delays must be positive, ordered, and representable."
+                    .into(),
             });
         }
         Ok(())
@@ -488,7 +492,8 @@ impl LLMCapacityRetryConfig {
         {
             return Err(ArkoAgentsError::BuilderError {
                 struct_name: "LLMCapacityRetryConfig".into(),
-                message: "Capacity retry delays must be positive, ordered, and representable.".into(),
+                message: "Capacity retry delays must be positive, ordered, and representable."
+                    .into(),
             });
         }
         Ok(())
@@ -555,13 +560,18 @@ impl MonitoringConfig {
             if !(threshold.percent > 0.0 && threshold.percent <= 100.0) || !delay_ok {
                 return Err(ArkoAgentsError::BuilderError {
                     struct_name: "PlanUsageThreshold".into(),
-                    message: "percent must be in (0, 100] and a slow-down delay representable.".into(),
+                    message: "percent must be in (0, 100] and a slow-down delay representable."
+                        .into(),
                 });
             }
         }
         if let Some(cache) = &self.cache {
-            let fraction = |value: Option<f64>| value.is_none_or(|value| (0.0..=1.0).contains(&value));
-            if cache.window_calls == 0 || !fraction(cache.warn_below) || !fraction(cache.pause_below) {
+            let fraction =
+                |value: Option<f64>| value.is_none_or(|value| (0.0..=1.0).contains(&value));
+            if cache.window_calls == 0
+                || !fraction(cache.warn_below)
+                || !fraction(cache.pause_below)
+            {
                 return Err(ArkoAgentsError::BuilderError {
                     struct_name: "CacheMonitorConfig".into(),
                     message: "window_calls must be positive and thresholds between 0 and 1.".into(),
@@ -1029,7 +1039,10 @@ mod llm_config_serde_tests {
         // A snapshot with outdated data is ignored when the registry knows the id.
         saved["model"]["max_input_tokens"] = serde_json::json!(1);
         let loaded: AgentLLMConfig = serde_json::from_value(saved).unwrap();
-        assert_eq!(loaded.model.max_input_tokens, LLMModel::openai_gpt_6_astra().max_input_tokens);
+        assert_eq!(
+            loaded.model.max_input_tokens,
+            LLMModel::openai_gpt_6_astra().max_input_tokens
+        );
         assert_eq!(loaded.generation_config.max_tokens, Some(1234));
     }
 
@@ -1058,7 +1071,8 @@ mod llm_config_serde_tests {
         let loaded: AgentLLMConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(loaded.model.id, "claude-opus-5-5");
         assert!(loaded.generation_config.max_tokens.is_none());
-        let partial = "provider: OpenAI\nmodel_id: gpt-6-sol\ngeneration_config:\n  max_tokens: 900\n";
+        let partial =
+            "provider: OpenAI\nmodel_id: gpt-6-sol\ngeneration_config:\n  max_tokens: 900\n";
         let loaded: AgentLLMConfig = serde_yaml::from_str(partial).unwrap();
         assert_eq!(loaded.generation_config.max_tokens, Some(900));
     }
@@ -1075,7 +1089,12 @@ mod llm_config_serde_tests {
             Some(arko_ai::ReasoningConfig::OpenRouter(ref reasoning))
                 if reasoning.effort == Some(arko_ai::ReasoningEffort::High)
         ));
-        let zdr = loaded.generation_config.openrouter.as_ref().and_then(|o| o.provider.as_ref()).and_then(|p| p.zdr);
+        let zdr = loaded
+            .generation_config
+            .openrouter
+            .as_ref()
+            .and_then(|o| o.provider.as_ref())
+            .and_then(|p| p.zdr);
         assert_eq!(zdr, Some(true));
 
         // A saved snapshot keeps catalog metadata.
@@ -1085,7 +1104,8 @@ mod llm_config_serde_tests {
             model: model.clone(),
             generation_config: LLMGenerationConfig::default(),
         };
-        let loaded: AgentLLMConfig = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        let loaded: AgentLLMConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
         assert_eq!(loaded.model.max_input_tokens, 1_050_000);
     }
 }

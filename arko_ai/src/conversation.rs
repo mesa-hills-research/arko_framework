@@ -115,7 +115,10 @@ impl Conversation {
             .rposition(|message| message.role == Role::User && !has_tool_results(&message.content));
         let fingerprint = index.map(|index| {
             let serialized = serde_json::to_vec(&self.messages[index]).unwrap_or_default();
-            Sha256::digest(&serialized).iter().map(|byte| format!("{byte:02x}")).collect()
+            Sha256::digest(&serialized)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
         });
         (index, fingerprint)
     }
@@ -239,7 +242,9 @@ impl Conversation {
             Some(last) if last.is_configuration_update() => {
                 last.configuration_update = Some(update);
             }
-            _ => self.messages.push(Message::new_configuration_update(update)),
+            _ => self
+                .messages
+                .push(Message::new_configuration_update(update)),
         }
         self
     }
@@ -286,7 +291,8 @@ impl Conversation {
     /// [`add_assistant_message_from_response`]: Self::add_assistant_message_from_response
     pub fn add_tool_results(&mut self, results: Vec<ToolResult>) -> &mut Self {
         let contents = results.into_iter().map(Content::ToolResult).collect();
-        self.messages.push(Message::new_user_with_contents(contents));
+        self.messages
+            .push(Message::new_user_with_contents(contents));
         self
     }
 
@@ -303,7 +309,8 @@ impl Conversation {
     ) -> &mut Self {
         let mut contents: Vec<Content> = results.into_iter().map(Content::ToolResult).collect();
         contents.push(Content::Text(text.to_string()));
-        self.messages.push(Message::new_user_with_contents(contents));
+        self.messages
+            .push(Message::new_user_with_contents(contents));
         self
     }
 }
@@ -334,7 +341,9 @@ impl Conversation {
         })?;
         self.messages.truncate(index + 1);
         let message = &mut self.messages[index];
-        message.content.retain(|content| content.as_text().is_none());
+        message
+            .content
+            .retain(|content| content.as_text().is_none());
         message.content.insert(0, Content::Text(text.to_string()));
         Ok(())
     }
@@ -372,7 +381,9 @@ impl Conversation {
 }
 
 fn has_tool_results(content: &[Content]) -> bool {
-    content.iter().any(|content| content.as_tool_result().is_some())
+    content
+        .iter()
+        .any(|content| content.as_tool_result().is_some())
 }
 
 #[cfg(test)]
@@ -386,11 +397,22 @@ mod tests {
 
     fn response(token: Option<&str>) -> GenerationResponse {
         let mut message = Message::new_assistant("");
-        message.tool_calls.push(ToolCall::from_argument_text(Some("call_1".into()), "tool".into(), "{}"));
+        message.tool_calls.push(ToolCall::from_argument_text(
+            Some("call_1".into()),
+            "tool".into(),
+            "{}",
+        ));
         GenerationResponse {
             message,
             usage: UsageInfo::new(0, 0),
-            model_call_usage: ModelCallUsage::new("resp".into(), "openai".into(), "m".into(), 0, 0, 0),
+            model_call_usage: ModelCallUsage::new(
+                "resp".into(),
+                "openai".into(),
+                "m".into(),
+                0,
+                0,
+                0,
+            ),
             stop_reason: StopReason::ToolUse,
             refusal: None,
             openai_turn_state: token.map(String::from),
@@ -398,7 +420,10 @@ mod tests {
     }
 
     fn result() -> ToolResult {
-        ToolResult::from_tool_call(&ToolCall::from_argument_text(Some("call_1".into()), "tool".into(), "{}"), "ok")
+        ToolResult::from_tool_call(
+            &ToolCall::from_argument_text(Some("call_1".into()), "tool".into(), "{}"),
+            "ok",
+        )
     }
 
     #[test]
@@ -466,7 +491,10 @@ mod tests {
         assert_eq!(restored.current_openai_turn_state(), Some("t2"));
         // A state without a fingerprint is never echoed.
         let mut saved = serde_json::to_value(&conversation).unwrap();
-        saved["openai_turn_state"].as_object_mut().unwrap().remove("turn_start_fingerprint");
+        saved["openai_turn_state"]
+            .as_object_mut()
+            .unwrap()
+            .remove("turn_start_fingerprint");
         let restored: Conversation = serde_json::from_value(saved).unwrap();
         assert_eq!(restored.current_openai_turn_state(), None);
     }
@@ -491,7 +519,8 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&conversation).unwrap()).unwrap();
         assert_eq!(restored.current_openai_turn_state(), Some("t1"));
 
-        let mut saved = serde_json::to_value(Conversation::new(Model::openai_gpt_6_astra())).unwrap();
+        let mut saved =
+            serde_json::to_value(Conversation::new(Model::openai_gpt_6_astra())).unwrap();
         assert!(saved.get("openai_turn_state").is_none());
         saved.as_object_mut().unwrap().remove("prompt_cache_key");
         let restored: Conversation = serde_json::from_value(saved).unwrap();
@@ -520,20 +549,29 @@ mod tests {
             .iter()
             .filter_map(|message| message.configuration_update.as_ref())
             .collect();
-        assert_eq!(updates, [&ConfigurationUpdate::reasoning_effort(ReasoningEffort::Low)]);
+        assert_eq!(
+            updates,
+            [&ConfigurationUpdate::reasoning_effort(ReasoningEffort::Low)]
+        );
         assert!(conversation.messages[2].is_configuration_update());
         assert!(conversation.messages[2].content.is_empty());
 
         // Messages saved before updates existed still load.
         let mut saved = serde_json::to_value(&conversation).unwrap();
-        saved["messages"][0].as_object_mut().unwrap().remove("configuration_update");
+        saved["messages"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("configuration_update");
         let restored: Conversation = serde_json::from_value(saved).unwrap();
         assert!(!restored.messages[0].is_configuration_update());
         assert!(restored.messages[2].is_configuration_update());
 
         // Providers that can't send updates refuse rather than dropping them.
         let error = crate::providers::ensure_supported_inputs(&conversation).unwrap_err();
-        assert!(matches!(error, crate::error::Error::UnsupportedFeature(_)), "{error}");
+        assert!(
+            matches!(error, crate::error::Error::UnsupportedFeature(_)),
+            "{error}"
+        );
     }
 
     #[test]
@@ -550,7 +588,11 @@ mod tests {
 
         let mut rephrased = conversation.clone();
         rephrased.rephrase_last_user_turn("summarize this").unwrap();
-        assert_eq!(rephrased.messages.len(), 3, "the replies to the turn are removed");
+        assert_eq!(
+            rephrased.messages.len(),
+            3,
+            "the replies to the turn are removed"
+        );
         let turn = &rephrased.messages[2];
         assert_eq!(turn.content[0].as_text(), Some("summarize this"));
         assert!(turn.content[1].as_image().is_some(), "images are kept");
@@ -576,15 +618,31 @@ mod tests {
         conversation.add_assistant_message_from_response(response(None));
         conversation.add_tool_results(vec![result()]);
         conversation.add_assistant_message("I can't help with that.");
-        let index = conversation.redact_tool_result("call_1", "[removed]").unwrap();
+        let index = conversation
+            .redact_tool_result("call_1", "[removed]")
+            .unwrap();
         assert_eq!(index, 2);
-        let redacted = conversation.messages[2].content[0].as_tool_result().unwrap();
+        let redacted = conversation.messages[2].content[0]
+            .as_tool_result()
+            .unwrap();
         assert_eq!(
-            (redacted.call_id.as_deref(), redacted.name.as_str(), redacted.output.as_str()),
+            (
+                redacted.call_id.as_deref(),
+                redacted.name.as_str(),
+                redacted.output.as_str()
+            ),
             (Some("call_1"), "tool", "[removed]")
         );
-        assert_eq!(conversation.messages.len(), 4, "later messages are the caller's to drop");
-        assert!(conversation.redact_tool_result("call_unknown", "x").is_err());
+        assert_eq!(
+            conversation.messages.len(),
+            4,
+            "later messages are the caller's to drop"
+        );
+        assert!(
+            conversation
+                .redact_tool_result("call_unknown", "x")
+                .is_err()
+        );
     }
 
     #[test]

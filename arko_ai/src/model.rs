@@ -470,7 +470,10 @@ impl Model {
                 large_cached_input_cost_per_million: Some(0.50),
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
-                service_tiers: vec![TierPricing::fast(2.0).short_context_only(), TierPricing::flex(0.5)],
+                service_tiers: vec![
+                    TierPricing::fast(2.0).short_context_only(),
+                    TierPricing::flex(0.5),
+                ],
                 ..ModelPricing::default()
             },
         }
@@ -524,7 +527,10 @@ impl Model {
                 large_cached_input_cost_per_million: Some(1.00),
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
-                service_tiers: vec![TierPricing::fast(2.5).short_context_only(), TierPricing::flex(0.5)],
+                service_tiers: vec![
+                    TierPricing::fast(2.5).short_context_only(),
+                    TierPricing::flex(0.5),
+                ],
                 ..ModelPricing::default()
             },
         }
@@ -1697,7 +1703,10 @@ impl Model {
     /// https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash
     /// https://ai.google.dev/gemini-api/docs/thinking
     pub fn google_gemini_3_8_flash() -> Self {
-        Self::google_gemini_flash("gemini-3.8-flash", Self::google_gemini_3_6_to_3_8_flash_pricing())
+        Self::google_gemini_flash(
+            "gemini-3.8-flash",
+            Self::google_gemini_3_6_to_3_8_flash_pricing(),
+        )
     }
 
     /// GA 2026-08-13. Thinking levels low, medium (default) and high; `minimal`
@@ -1705,14 +1714,20 @@ impl Model {
     /// https://ai.google.dev/gemini-api/docs/models/gemini-3.7-flash
     /// https://ai.google.dev/gemini-api/docs/thinking
     pub fn google_gemini_3_7_flash() -> Self {
-        Self::google_gemini_flash("gemini-3.7-flash", Self::google_gemini_3_6_to_3_8_flash_pricing())
+        Self::google_gemini_flash(
+            "gemini-3.7-flash",
+            Self::google_gemini_3_6_to_3_8_flash_pricing(),
+        )
     }
 
     /// GA 2026-07-21. Thinking levels minimal through high; default medium.
     /// https://ai.google.dev/gemini-api/docs/models/gemini-3.6-flash
     /// https://ai.google.dev/gemini-api/docs/thinking
     pub fn google_gemini_3_6_flash() -> Self {
-        Self::google_gemini_flash("gemini-3.6-flash", Self::google_gemini_3_6_to_3_8_flash_pricing())
+        Self::google_gemini_flash(
+            "gemini-3.6-flash",
+            Self::google_gemini_3_6_to_3_8_flash_pricing(),
+        )
     }
 
     /// GA 2026-07-21. Thinking levels minimal (default) through high.
@@ -2305,7 +2320,11 @@ mod tests {
         for model in &all {
             assert_eq!(Model::find(&model.id).unwrap().provider, model.provider);
             assert!(Model::get(model.provider.clone(), &model.id).is_ok());
-            assert!(Model::list(model.provider.clone()).iter().any(|m| m.id == model.id));
+            assert!(
+                Model::list(model.provider.clone())
+                    .iter()
+                    .any(|m| m.id == model.id)
+            );
         }
         assert!(Model::find("not-a-model").is_none());
         assert!(Model::get(Provider::OpenAI, "claude-opus-5-5").is_err());
@@ -2319,25 +2338,46 @@ mod tests {
             assert!(model.max_output_tokens >= 8_192, "{id} output limit");
             let pricing = &model.pricing;
             assert!(pricing.input_cost_per_million > 0.0, "{id} input price");
-            assert!(pricing.output_cost_per_million >= pricing.input_cost_per_million, "{id} output price");
+            assert!(
+                pricing.output_cost_per_million >= pricing.input_cost_per_million,
+                "{id} output price"
+            );
             if let Some(cached) = pricing.cached_input_cost_per_million {
-                assert!(cached < pricing.input_cost_per_million, "{id} cache reads cost less");
+                assert!(
+                    cached < pricing.input_cost_per_million,
+                    "{id} cache reads cost less"
+                );
             }
             if let Some(write) = pricing.cache_write_cost_per_million {
-                assert!(write >= pricing.input_cost_per_million, "{id} cache writes cost more");
+                assert!(
+                    write >= pricing.input_cost_per_million,
+                    "{id} cache writes cost more"
+                );
             }
             if model.supports_cache && model.provider != Provider::Google {
-                assert!(pricing.cached_input_cost_per_million.is_some(), "{id} cache read price");
+                assert!(
+                    pricing.cached_input_cost_per_million.is_some(),
+                    "{id} cache read price"
+                );
             }
             if let Some(threshold) = pricing.large_input_threshold {
-                assert!(threshold < model.max_input_tokens, "{id} long-context threshold");
-                assert!(pricing.large_input_cost_per_million.is_some(), "{id} long-context price");
+                assert!(
+                    threshold < model.max_input_tokens,
+                    "{id} long-context threshold"
+                );
+                assert!(
+                    pricing.large_input_cost_per_million.is_some(),
+                    "{id} long-context price"
+                );
             }
             for period in &pricing.schedule {
                 assert!(period.effective_from_unix().is_some(), "{id} schedule date");
             }
             if model.provider == Provider::Anthropic {
-                assert!(pricing.cache_write_1h_cost_per_million.is_some(), "{id} 1h writes");
+                assert!(
+                    pricing.cache_write_1h_cost_per_million.is_some(),
+                    "{id} 1h writes"
+                );
             }
         }
     }
@@ -2372,7 +2412,11 @@ mod tests {
         }
         assert!(Model::google_gemini_3_1_flash_lite_stable().is_gemini_3_1_flash_lite());
 
-        for model in [Model::openai_gpt_5_5_pro(), Model::openai_gpt_5_2_pro(), Model::openai_gpt_5_pro()] {
+        for model in [
+            Model::openai_gpt_5_5_pro(),
+            Model::openai_gpt_5_2_pro(),
+            Model::openai_gpt_5_pro(),
+        ] {
             assert!(!model.supports_cache, "{}", model.id);
             assert!(model.pricing.cached_input_cost_per_million.is_none());
         }
@@ -2464,8 +2508,9 @@ mod tests {
         assert!(Model::anthropic_claude_sonnet_4_5().supports_forced_tool_choice(&default));
         assert!(!Model::anthropic_claude_sonnet_4_5().supports_forced_tool_choice(&manual));
         assert!(
-            Model::anthropic_claude_sonnet_4_5()
-                .supports_forced_tool_choice(&manual.clone().with_anthropic_thinking_enabled(false))
+            Model::anthropic_claude_sonnet_4_5().supports_forced_tool_choice(
+                &manual.clone().with_anthropic_thinking_enabled(false)
+            )
         );
         assert!(!Model::anthropic_claude_fable_5_1().supports_forced_tool_choice(&default));
         assert!(!Model::anthropic_claude_opus_5_5().supports_forced_tool_choice(&default));

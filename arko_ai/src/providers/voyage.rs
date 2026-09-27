@@ -90,16 +90,20 @@ impl EmbeddingProviderTrait for VoyageClient {
         } else {
             serde_json::to_value(texts)?
         };
-        
+
         let request_payload = api::VoyageEmbeddingRequest {
             input: input_value,
             model: &model_details.api_id,
-            input_type: config.voyage_input_type.as_ref().map(VoyageInputType::as_str),
+            input_type: config
+                .voyage_input_type
+                .as_ref()
+                .map(VoyageInputType::as_str),
             truncation: config.voyage_truncation.or(Some(false)), // Default to false if not specified
             output_dimension: config.output_dimensionality,
         };
 
-        let response = self.http_client
+        let response = self
+            .http_client
             .post(url)
             .bearer_auth(&self.api_key)
             .header("Content-Type", "application/json")
@@ -112,9 +116,14 @@ impl EmbeddingProviderTrait for VoyageClient {
         }
 
         let response_data: api::VoyageEmbeddingResponse = response.json().await?;
-        
-        let embeddings = ordered_embeddings(response_data.data, texts.len(),
-            config.output_dimensionality.unwrap_or(model_details.default_dimensions))?;
+
+        let embeddings = ordered_embeddings(
+            response_data.data,
+            texts.len(),
+            config
+                .output_dimensionality
+                .unwrap_or(model_details.default_dimensions),
+        )?;
 
         let usage = UsageInfo::for_embedding(
             response_data.usage.total_tokens,
@@ -124,15 +133,29 @@ impl EmbeddingProviderTrait for VoyageClient {
         Ok(ArkoEmbeddingResponse { embeddings, usage })
     }
 }
-fn ordered_embeddings(data: Vec<api::VoyageEmbeddingObject>, count: usize, dimensions: usize)
-    -> Result<Vec<Vec<f32>>, Error> {
-    let invalid = || Error::InvalidRequest("Malformed Voyage response: missing/duplicate index or invalid vector".into());
-    if data.len() != count { return Err(invalid()); }
+fn ordered_embeddings(
+    data: Vec<api::VoyageEmbeddingObject>,
+    count: usize,
+    dimensions: usize,
+) -> Result<Vec<Vec<f32>>, Error> {
+    let invalid = || {
+        Error::InvalidRequest(
+            "Malformed Voyage response: missing/duplicate index or invalid vector".into(),
+        )
+    };
+    if data.len() != count {
+        return Err(invalid());
+    }
     let mut ordered = vec![None; count];
     for item in data {
-        if item.index >= count || ordered[item.index].is_some() || item.embedding.len() != dimensions
+        if item.index >= count
+            || ordered[item.index].is_some()
+            || item.embedding.len() != dimensions
             || item.embedding.iter().any(|v| !v.is_finite())
-            || !item.embedding.iter().any(|&v| v != 0.0) { return Err(invalid()); }
+            || !item.embedding.iter().any(|&v| v != 0.0)
+        {
+            return Err(invalid());
+        }
         ordered[item.index] = Some(item.embedding);
     }
     ordered.into_iter().map(|v| v.ok_or_else(invalid)).collect()
@@ -140,16 +163,27 @@ fn ordered_embeddings(data: Vec<api::VoyageEmbeddingObject>, count: usize, dimen
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn item(index: usize, embedding: Vec<f32>) -> api::VoyageEmbeddingObject { api::VoyageEmbeddingObject { index, embedding } }
+    fn item(index: usize, embedding: Vec<f32>) -> api::VoyageEmbeddingObject {
+        api::VoyageEmbeddingObject { index, embedding }
+    }
     #[test]
     fn response_indexes_restore_input_order() {
-        assert_eq!(ordered_embeddings(vec![item(1,vec![2.0]),item(0,vec![1.0])],2,1).unwrap(),vec![vec![1.0],vec![2.0]]);
+        assert_eq!(
+            ordered_embeddings(vec![item(1, vec![2.0]), item(0, vec![1.0])], 2, 1).unwrap(),
+            vec![vec![1.0], vec![2.0]]
+        );
     }
     #[test]
     fn malformed_responses_are_rejected() {
-        for data in [vec![],vec![item(2,vec![1.0])],vec![item(0,vec![0.0])],vec![item(0,vec![f32::NAN])],vec![item(0,vec![1.0,2.0])]] {
-            assert!(ordered_embeddings(data,1,1).is_err());
+        for data in [
+            vec![],
+            vec![item(2, vec![1.0])],
+            vec![item(0, vec![0.0])],
+            vec![item(0, vec![f32::NAN])],
+            vec![item(0, vec![1.0, 2.0])],
+        ] {
+            assert!(ordered_embeddings(data, 1, 1).is_err());
         }
-        assert!(ordered_embeddings(vec![item(0,vec![1.0]),item(0,vec![2.0])],2,1).is_err());
+        assert!(ordered_embeddings(vec![item(0, vec![1.0]), item(0, vec![2.0])], 2, 1).is_err());
     }
 }

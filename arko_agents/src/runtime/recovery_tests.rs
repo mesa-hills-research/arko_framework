@@ -18,7 +18,13 @@ fn assistant_texts(task: &Task) -> Vec<String> {
         .messages
         .iter()
         .filter(|message| message.role == ai::Role::Assistant)
-        .map(|message| message.content.iter().filter_map(ai::Content::as_text).collect())
+        .map(|message| {
+            message
+                .content
+                .iter()
+                .filter_map(ai::Content::as_text)
+                .collect()
+        })
         .collect()
 }
 
@@ -73,7 +79,11 @@ async fn a_capacity_retry_after_partial_output_resends_the_request_unchanged() {
     let (mut agent, _events, _commands) = harness();
     agent.task.agent_config.llm_retry_config.capacity_retry = Some(Default::default());
     agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
-    agent.task.agent_config.tool_config.default_auto_approve_tool_use = true;
+    agent
+        .task
+        .agent_config
+        .tool_config
+        .default_auto_approve_tool_use = true;
     let scripted = agent.scripted_responses.get_mut().unwrap();
     scripted.push_back(Ok(futures::stream::iter([
         Ok(ai::StreamEvent::TextChunk("partial answer".into())),
@@ -88,7 +98,12 @@ async fn a_capacity_retry_after_partial_output_resends_the_request_unchanged() {
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
     assert_eq!(assistant_texts(&task), ["Finished after recovery."]);
     // The task prompt, the completed turn and its tool result.
-    let roles: Vec<_> = task.conversation.messages.iter().map(|m| m.role.clone()).collect();
+    let roles: Vec<_> = task
+        .conversation
+        .messages
+        .iter()
+        .map(|m| m.role.clone())
+        .collect();
     assert_eq!(roles, [ai::Role::User, ai::Role::Assistant, ai::Role::User]);
 }
 
@@ -98,7 +113,11 @@ async fn a_capacity_retry_after_partial_output_resends_the_request_unchanged() {
 async fn an_ordinary_retry_keeps_partial_output_followed_by_a_user_turn() {
     let (mut agent, _events, _commands) = harness();
     agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
-    agent.task.agent_config.tool_config.default_auto_approve_tool_use = true;
+    agent
+        .task
+        .agent_config
+        .tool_config
+        .default_auto_approve_tool_use = true;
     let scripted = agent.scripted_responses.get_mut().unwrap();
     scripted.push_back(Ok(futures::stream::iter([
         Ok(ai::StreamEvent::TextChunk("partial answer".into())),
@@ -111,7 +130,12 @@ async fn an_ordinary_retry_keeps_partial_output_followed_by_a_user_turn() {
         .unwrap()
         .unwrap();
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
-    let roles: Vec<_> = task.conversation.messages.iter().map(|m| m.role.clone()).collect();
+    let roles: Vec<_> = task
+        .conversation
+        .messages
+        .iter()
+        .map(|m| m.role.clone())
+        .collect();
     assert_eq!(
         roles,
         [
@@ -132,10 +156,17 @@ async fn an_ordinary_retry_keeps_partial_output_followed_by_a_user_turn() {
 async fn a_resumed_conversation_ending_on_assistant_text_gets_a_user_turn() {
     let (mut agent, _events, _commands) = harness();
     agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
-    agent.task.agent_config.tool_config.default_auto_approve_tool_use = true;
+    agent
+        .task
+        .agent_config
+        .tool_config
+        .default_auto_approve_tool_use = true;
     agent.task.conversation.system_message = Some("resumed".into());
     agent.task.conversation.add_user_message("task");
-    agent.task.conversation.add_assistant_message("interrupted output");
+    agent
+        .task
+        .conversation
+        .add_assistant_message("interrupted output");
     agent
         .scripted_responses
         .get_mut()
@@ -148,7 +179,11 @@ async fn a_resumed_conversation_ending_on_assistant_text_gets_a_user_turn() {
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
     let continuation = &task.conversation.messages[2];
     assert_eq!(continuation.role, ai::Role::User);
-    let text: String = continuation.content.iter().filter_map(ai::Content::as_text).collect();
+    let text: String = continuation
+        .content
+        .iter()
+        .filter_map(ai::Content::as_text)
+        .collect();
     assert!(text.contains("Continue the task"), "{text}");
 }
 
@@ -158,7 +193,11 @@ async fn a_resumed_conversation_ending_on_assistant_text_gets_a_user_turn() {
 async fn calls_announced_by_a_failed_stream_are_reported_as_rejected() {
     let (mut agent, mut events, _commands) = harness();
     agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
-    agent.task.agent_config.tool_config.default_auto_approve_tool_use = true;
+    agent
+        .task
+        .agent_config
+        .tool_config
+        .default_auto_approve_tool_use = true;
     let scripted = agent.scripted_responses.get_mut().unwrap();
     scripted.push_back(Ok(futures::stream::iter([
         Ok(ai::StreamEvent::ToolCallStart {
@@ -212,5 +251,8 @@ fn a_resumed_task_takes_current_model_data_from_the_registry() {
         restored.conversation.model.pricing.input_cost_per_million,
         current.pricing.input_cost_per_million
     );
-    assert_eq!(restored.conversation.model.max_input_tokens, current.max_input_tokens);
+    assert_eq!(
+        restored.conversation.model.max_input_tokens,
+        current.max_input_tokens
+    );
 }

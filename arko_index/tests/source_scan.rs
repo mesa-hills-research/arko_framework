@@ -5,7 +5,11 @@ fn authored_docs_in_build_directories_are_indexed_unless_explicitly_ignored() {
     let root = tempfile::tempdir().unwrap();
     let docs = root.path().join("workflows/build");
     std::fs::create_dir_all(&docs).unwrap();
-    std::fs::write(docs.join("index.mdx"), "# Build a workflow\n\nInstructions.\n").unwrap();
+    std::fs::write(
+        docs.join("index.mdx"),
+        "# Build a workflow\n\nInstructions.\n",
+    )
+    .unwrap();
 
     let spec = BuildSpec::new("docs", root.path());
     let manifest = scan(&spec).unwrap();
@@ -24,7 +28,12 @@ fn skipped_directory_names_are_configurable() {
         std::fs::write(root.path().join(dir).join("notes.md"), "# Notes\n").unwrap();
     }
     let paths = |spec: &BuildSpec| -> Vec<String> {
-        scan(spec).unwrap().files.into_iter().map(|f| f.path).collect()
+        scan(spec)
+            .unwrap()
+            .files
+            .into_iter()
+            .map(|f| f.path)
+            .collect()
     };
     // The default names are skipped at any depth without an ignore file.
     let spec = BuildSpec::new("docs", root.path());

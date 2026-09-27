@@ -81,10 +81,13 @@ fn describe_duration(duration: Duration) -> String {
 }
 
 /// `ToolRejected` reasons for calls a stream announced but never finished.
-const INTERRUPTED_CALL: &str = "The model's response was interrupted before this call finished; it was not run.";
-const FAILED_STREAM_CALL: &str = "The model's response failed before this call finished; it was not run.";
+const INTERRUPTED_CALL: &str =
+    "The model's response was interrupted before this call finished; it was not run.";
+const FAILED_STREAM_CALL: &str =
+    "The model's response failed before this call finished; it was not run.";
 const REFUSED_TURN_CALL: &str = "turn refused";
-const UNDELIVERED_CALL: &str = "The model's final response did not include this call; it was not run.";
+const UNDELIVERED_CALL: &str =
+    "The model's final response did not include this call; it was not run.";
 const UNREACHED_CALL: &str = "The turn ended before this call ran; it was not run.";
 /// Why a call awaiting approval was not run, when its wait ended without a
 /// decision; see [`AgentLoop::settle_interrupted_wait`]. For a task saved
@@ -652,7 +655,8 @@ impl AgentLoop {
         );
         match fallback {
             Some(fallback) => {
-                let config = self.generation_config_for(&fallback.model, &fallback.generation_config);
+                let config =
+                    self.generation_config_for(&fallback.model, &fallback.generation_config);
                 // The configured model's reasoning replays to the fallback
                 // under the same rule as the other way around.
                 if !openai_reasoning_replays(&conversation.model, &fallback.model) {
@@ -875,7 +879,9 @@ impl AgentLoop {
     fn add_text_tool_results_to_conversation(&mut self, text: &str) {
         let mut content = vec![ai::Content::Text(text.to_string())];
         content.extend(self.take_tool_image_content());
-        self.task.conversation.add_user_message_with_contents(content);
+        self.task
+            .conversation
+            .add_user_message_with_contents(content);
     }
 
     /// Records model call usage on the task (computing the input delta)
@@ -889,7 +895,8 @@ impl AgentLoop {
         self.emit_event(AgentEvent::ModelCallUsageReported(usage_with_delta))
             .await?;
         if let Some(plan_usage) = usage.plan_usage.clone() {
-            self.emit_event(AgentEvent::PlanUsageReported(plan_usage)).await?;
+            self.emit_event(AgentEvent::PlanUsageReported(plan_usage))
+                .await?;
         }
         if usage.served_model_changed() {
             let requested_model = usage.requested_model.clone().unwrap_or_else(|| {
@@ -916,7 +923,9 @@ impl AgentLoop {
         };
         // Calls to the refusal fallback model use another cache: they are
         // not judged, and later calls compare with the configured model's.
-        if self.task.fallback_calls.last() == Some(&(self.task.usage_history.len().saturating_sub(1))) {
+        if self.task.fallback_calls.last()
+            == Some(&(self.task.usage_history.len().saturating_sub(1)))
+        {
             return Ok(());
         }
         let configured: Vec<ai::UsageInfo> = self
@@ -939,7 +948,8 @@ impl AgentLoop {
         if efficiency.calls < config.window_calls {
             return Ok(());
         }
-        let low = |threshold: Option<f64>| threshold.filter(|threshold| efficiency.rolling < *threshold);
+        let low =
+            |threshold: Option<f64>| threshold.filter(|threshold| efficiency.rolling < *threshold);
         match low(config.warn_below) {
             Some(threshold) if !self.cache_warned => {
                 self.cache_warned = true;
@@ -1198,8 +1208,10 @@ impl AgentLoop {
 
                                     self.begin_tool_batch();
                                     if self.is_native_mode() {
-                                        if let Some(ai_call) =
-                                            self.task.pending_native_tool_calls.remove(&tool_call_id)
+                                        if let Some(ai_call) = self
+                                            .task
+                                            .pending_native_tool_calls
+                                            .remove(&tool_call_id)
                                         {
                                             let result = self
                                                 .execute_native_tool_for_approval(
@@ -1278,8 +1290,10 @@ impl AgentLoop {
                                     .await?;
 
                                     if self.is_native_mode() {
-                                        if let Some(ai_call) =
-                                            self.task.pending_native_tool_calls.remove(&tool_call_id)
+                                        if let Some(ai_call) = self
+                                            .task
+                                            .pending_native_tool_calls
+                                            .remove(&tool_call_id)
                                         {
                                             let reason_str =
                                                 reason.as_deref().unwrap_or("Rejected by user");
@@ -1346,7 +1360,8 @@ impl AgentLoop {
                                                     custom_tool_output,
                                                     message_to_agent,
                                                 }) => {
-                                                    if let Some(ai_call) = self.task
+                                                    if let Some(ai_call) = self
+                                                        .task
                                                         .pending_native_tool_calls
                                                         .remove(&pending_call_info.tool_call_id)
                                                     {
@@ -1363,7 +1378,9 @@ impl AgentLoop {
                                                             )
                                                             .await?;
                                                         if let Some(r) = result {
-                                                            self.task.pending_native_tool_results.push(r);
+                                                            self.task
+                                                                .pending_native_tool_results
+                                                                .push(r);
                                                         }
                                                     }
                                                 }
@@ -1377,7 +1394,8 @@ impl AgentLoop {
                                                         reason: (*reason).clone(),
                                                     })
                                                     .await?;
-                                                    if let Some(ai_call) = self.task
+                                                    if let Some(ai_call) = self
+                                                        .task
                                                         .pending_native_tool_calls
                                                         .remove(&pending_call_info.tool_call_id)
                                                     {
@@ -1392,7 +1410,8 @@ impl AgentLoop {
                                                     }
                                                 }
                                                 None => {
-                                                    if let Some(ai_call) = self.task
+                                                    if let Some(ai_call) = self
+                                                        .task
                                                         .pending_native_tool_calls
                                                         .remove(&pending_call_info.tool_call_id)
                                                     {
@@ -1585,8 +1604,14 @@ impl AgentLoop {
                                             // A monitor paused the task, not a
                                             // model error: nothing to report to
                                             // the model beyond the host's note.
-                                            match user_msg_on_recovery.as_deref().filter(|text| !text.is_empty()) {
-                                                Some(text) => next_user_message_from_command = text.to_string(),
+                                            match user_msg_on_recovery
+                                                .as_deref()
+                                                .filter(|text| !text.is_empty())
+                                            {
+                                                Some(text) => {
+                                                    next_user_message_from_command =
+                                                        text.to_string()
+                                                }
                                                 None => native_handled = true,
                                             }
                                         } else {
@@ -2141,7 +2166,8 @@ impl AgentLoop {
                         "LLM response for task {} did not contain a native tool call.",
                         self.task.id
                     );
-                    self.reject_announced_calls(&mut native_stream_call_ids, UNDELIVERED_CALL).await?;
+                    self.reject_announced_calls(&mut native_stream_call_ids, UNDELIVERED_CALL)
+                        .await?;
                     self.handle_llm_error(ai::Error::ApiError("Agent failed to produce a tool call. You MUST use one or more tools in every response, even if it is just 'complete_task'.".to_string()), None).await?;
                     if self.task.current_state.is_terminal() {
                         break 'main_loop;
@@ -2184,7 +2210,8 @@ impl AgentLoop {
                             reason: Some(reason.clone()),
                         })
                         .await?;
-                        self.task.pending_native_tool_results
+                        self.task
+                            .pending_native_tool_results
                             .push(ai::ToolResult::error_from_tool_call(ai_tool_call, reason));
                         continue;
                     }
@@ -2200,7 +2227,8 @@ impl AgentLoop {
                             reason: Some(reason.clone()),
                         })
                         .await?;
-                        self.task.pending_native_tool_results
+                        self.task
+                            .pending_native_tool_results
                             .push(ai::ToolResult::error_from_tool_call(ai_tool_call, &reason));
                         continue;
                     }
@@ -2258,7 +2286,8 @@ impl AgentLoop {
                         .should_auto_approve_tool(&ai_tool_call.name);
 
                     if force_approval || normal_approval_needed {
-                        self.task.pending_native_tool_calls
+                        self.task
+                            .pending_native_tool_calls
                             .insert(tool_call_id, ai_tool_call.clone());
                         calls_needing_approval.push(PendingToolCallInfo {
                             tool_call_id,
@@ -2317,7 +2346,8 @@ impl AgentLoop {
                 native_stream_call_ids.retain(|index, _| *index >= tool_calls.len());
                 self.reject_announced_calls(&mut unreached, &not_run)
                     .await?;
-                self.reject_announced_calls(&mut native_stream_call_ids, UNDELIVERED_CALL).await?;
+                self.reject_announced_calls(&mut native_stream_call_ids, UNDELIVERED_CALL)
+                    .await?;
 
                 if !calls_needing_approval.is_empty()
                     && matches!(self.task.current_state, TaskState::InProgress)
@@ -3518,7 +3548,8 @@ impl AgentLoop {
                 if let Some(ai::ReasoningArtifact::OpenAIOutputItems { items }) =
                     &mut message.reasoning_artifact
                 {
-                    items.retain(|item| item.get("type").and_then(Value::as_str) != Some("message"));
+                    items
+                        .retain(|item| item.get("type").and_then(Value::as_str) != Some("message"));
                 }
             } else if !has_text(&message)
                 && let Some(explanation) = refusal.explanation.as_deref()
@@ -3570,7 +3601,6 @@ impl AgentLoop {
             strip_openai_reasoning(&mut response.message);
         }
     }
-
 
     /// How recovery from `error` waits.
     fn recovery_wait(&self, error: &ai::Error) -> RecoveryWait {
@@ -3671,9 +3701,14 @@ impl AgentLoop {
     /// continue, since several providers reject a request that ends on an
     /// assistant turn (Claude 4.6 and later reject prefill).
     fn ensure_user_turn_before_request(&mut self) -> Result<(), ArkoAgentsError> {
-        let ends_on_assistant_text = self.task.conversation.messages.last().is_some_and(|message| {
-            message.role == ai::Role::Assistant && message.tool_calls.is_empty()
-        });
+        let ends_on_assistant_text =
+            self.task
+                .conversation
+                .messages
+                .last()
+                .is_some_and(|message| {
+                    message.role == ai::Role::Assistant && message.tool_calls.is_empty()
+                });
         if ends_on_assistant_text {
             self.append_error_recovery_user_message(
                 "Continue the task from where your previous response ended.",
@@ -3693,7 +3728,9 @@ impl AgentLoop {
             // fallback's attempts don't count against the configured
             // model's recovery.
             self.reset_llm_recovery();
-            return self.finish_llm_recovery(error.to_string(), tool_call_id).await;
+            return self
+                .finish_llm_recovery(error.to_string(), tool_call_id)
+                .await;
         }
         let mut config = self.task.agent_config.llm_retry_config.clone();
         let policy = self.task.agent_config.llm_error_policy.clone();
@@ -3747,8 +3784,14 @@ impl AgentLoop {
                 "LLM capacity error (attempt {attempt}; waiting until service recovers): {error}"
             ),
             RecoveryWait::RateLimit(_) => {
-                let kind = if error.is_capacity_error() { "capacity error" } else { "rate limit" };
-                format!("LLM {kind} (attempt {attempt}; retrying when the provider allows): {error}")
+                let kind = if error.is_capacity_error() {
+                    "capacity error"
+                } else {
+                    "rate limit"
+                };
+                format!(
+                    "LLM {kind} (attempt {attempt}; retrying when the provider allows): {error}"
+                )
             }
             RecoveryWait::Ordinary | RecoveryWait::UsageLimit => {
                 format!("LLM error (attempt {attempt}/{max_attempts}): {error}")
@@ -3779,7 +3822,8 @@ impl AgentLoop {
             ai::retry::random_sample(),
         );
         if !indefinite
-            && elapsed.saturating_add(delay) >= Duration::from_millis(config.max_elapsed_ms) {
+            && elapsed.saturating_add(delay) >= Duration::from_millis(config.max_elapsed_ms)
+        {
             return self
                 .finish_llm_recovery(
                     format!("Next retry cannot fit the elapsed recovery budget. {message}"),
@@ -3788,11 +3832,15 @@ impl AgentLoop {
                 .await;
         }
         let Some(retry_at) = tokio::time::Instant::now().checked_add(delay) else {
-            return self.finish_llm_recovery(
-                format!("Server retry delay cannot be represented safely. {message}"), tool_call_id,
-            ).await;
+            return self
+                .finish_llm_recovery(
+                    format!("Server retry delay cannot be represented safely. {message}"),
+                    tool_call_id,
+                )
+                .await;
         };
-        let counts_toward_budget = matches!(wait, RecoveryWait::RateLimit(_)) && error.is_rate_limit();
+        let counts_toward_budget =
+            matches!(wait, RecoveryWait::RateLimit(_)) && error.is_rate_limit();
         self.emit_event(AgentEvent::ErrorEncountered {
             error_message: message,
             requires_approval_to_retry: false,
@@ -3813,7 +3861,9 @@ impl AgentLoop {
         let waited = self.wait_before_retry(retry_at, tool_call_id).await;
         if counts_toward_budget {
             // The time actually waited: a command may have cut it short.
-            self.rate_limit_waited = self.rate_limit_waited.saturating_add(waiting_since.elapsed());
+            self.rate_limit_waited = self
+                .rate_limit_waited
+                .saturating_add(waiting_since.elapsed());
         }
         waited
     }
@@ -3829,15 +3879,16 @@ impl AgentLoop {
     ) -> Result<(), ArkoAgentsError> {
         let now_ms = unix_millis_now();
         let reset_in = error.retry_after();
-        let resets_at_unix_ms =
-            reset_in.map(|delay| now_ms.saturating_add(duration_millis(delay)));
+        let resets_at_unix_ms = reset_in.map(|delay| now_ms.saturating_add(duration_millis(delay)));
         let when = match reset_in {
             Some(delay) => format!("resets in about {}", describe_duration(delay)),
             None => "reset time not reported".to_string(),
         };
-        let retry_at = self
-            .usage_limit_wait(&error)
-            .and_then(|delay| tokio::time::Instant::now().checked_add(delay).map(|at| (delay, at)));
+        let retry_at = self.usage_limit_wait(&error).and_then(|delay| {
+            tokio::time::Instant::now()
+                .checked_add(delay)
+                .map(|at| (delay, at))
+        });
         let Some((delay, retry_at)) = retry_at else {
             self.emit_event(AgentEvent::UsageLimitReached {
                 resets_at_unix_ms,
@@ -3846,7 +3897,10 @@ impl AgentLoop {
             })
             .await?;
             return self
-                .finish_llm_recovery(format!("Usage limit reached ({when}). {error}"), tool_call_id)
+                .finish_llm_recovery(
+                    format!("Usage limit reached ({when}). {error}"),
+                    tool_call_id,
+                )
                 .await;
         };
         // Like the other unchanged retries, the wait doesn't count against
@@ -3937,7 +3991,10 @@ impl AgentLoop {
         // A report whose window has reset since (a task resumed later) is
         // no longer current.
         let now_seconds = unix_millis_now() / 1000;
-        if reached.resets_at.is_some_and(|resets_at| resets_at <= now_seconds) {
+        if reached
+            .resets_at
+            .is_some_and(|resets_at| resets_at <= now_seconds)
+        {
             return Ok(true);
         }
         let mark = PlanUsageWindowMark {
@@ -3951,7 +4008,9 @@ impl AgentLoop {
                 window: window.to_string(),
                 used_percent: reached.used_percent,
                 threshold_percent: threshold.percent,
-                resets_at_unix_ms: reached.resets_at.map(|seconds| seconds.saturating_mul(1000)),
+                resets_at_unix_ms: reached
+                    .resets_at
+                    .map(|seconds| seconds.saturating_mul(1000)),
                 action: threshold.action.clone(),
             })
             .await?;

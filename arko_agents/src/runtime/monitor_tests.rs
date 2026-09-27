@@ -37,7 +37,11 @@ fn cached(input: usize, cached: usize) -> ai::UsageInfo {
 
 fn script(agent: &mut AgentLoop, turns: Vec<ai::StreamEvent>) {
     agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
-    agent.task.agent_config.tool_config.default_auto_approve_tool_use = true;
+    agent
+        .task
+        .agent_config
+        .tool_config
+        .default_auto_approve_tool_use = true;
     for turn in turns {
         agent
             .scripted_responses
@@ -91,7 +95,11 @@ async fn calls_served_by_another_model_are_reported_as_reroutes() {
     assert_eq!(
         reroutes,
         [
-            ("openrouter".into(), "openrouter/auto".into(), "anthropic/claude-sonnet-4.5".into()),
+            (
+                "openrouter".into(),
+                "openrouter/auto".into(),
+                "anthropic/claude-sonnet-4.5".into()
+            ),
             // Without a requested model on the usage, the task's model.
             ("openai".into(), "gpt-5.6-luna".into(), "gpt-5.2".into()),
         ]
@@ -153,8 +161,14 @@ async fn the_cache_monitor_reports_warns_and_pauses_once_after_warm_up() {
             .await
             .unwrap()
             .unwrap();
-        if let AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { error_message }) = &event {
-            assert!(error_message.contains("Prompt cache efficiency fell to 36.7%"), "{error_message}");
+        if let AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
+            error_message,
+        }) = &event
+        {
+            assert!(
+                error_message.contains("Prompt cache efficiency fell to 36.7%"),
+                "{error_message}"
+            );
             commands
                 .send(UserCommand::ApproveErrorRecovery { message: None })
                 .await
@@ -191,15 +205,22 @@ async fn the_cache_monitor_reports_warns_and_pauses_once_after_warm_up() {
     assert_eq!(low, [false, true]);
     let pauses = received
         .iter()
-        .filter(|event| matches!(event, AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })))
+        .filter(|event| {
+            matches!(
+                event,
+                AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+            )
+        })
         .count();
     assert_eq!(pauses, 1);
     // Not a model error: approving adds no error note to the conversation.
-    assert!(!task.conversation.messages.iter().any(|message| message
-        .content
-        .iter()
-        .filter_map(ai::Content::as_text)
-        .any(|text| text.contains("resulted in an error"))));
+    assert!(!task.conversation.messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .filter_map(ai::Content::as_text)
+            .any(|text| text.contains("resulted in an error"))
+    }));
 }
 
 #[test]
@@ -208,11 +229,23 @@ fn cache_monitor_settings_load_with_defaults_and_are_validated() {
     assert_eq!(config.cache, Some(CacheMonitorConfig::default()));
     config.validate().unwrap();
     for invalid in [
-        CacheMonitorConfig { window_calls: 0, ..Default::default() },
-        CacheMonitorConfig { warn_below: Some(1.5), ..Default::default() },
-        CacheMonitorConfig { pause_below: Some(-0.1), ..Default::default() },
+        CacheMonitorConfig {
+            window_calls: 0,
+            ..Default::default()
+        },
+        CacheMonitorConfig {
+            warn_below: Some(1.5),
+            ..Default::default()
+        },
+        CacheMonitorConfig {
+            pause_below: Some(-0.1),
+            ..Default::default()
+        },
     ] {
-        let config = MonitoringConfig { cache: Some(invalid), ..Default::default() };
+        let config = MonitoringConfig {
+            cache: Some(invalid),
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
     }
 }
@@ -264,10 +297,16 @@ async fn the_cache_monitor_skips_fallback_calls() {
     let calls: Vec<f64> = received
         .iter()
         .filter_map(|event| match event {
-            AgentEvent::CacheEfficiencyReported { call_efficiency, .. } => Some(*call_efficiency),
+            AgentEvent::CacheEfficiencyReported {
+                call_efficiency, ..
+            } => Some(*call_efficiency),
             _ => None,
         })
         .collect();
     assert_eq!(calls, [0.9, 0.9]);
-    assert!(!received.iter().any(|event| matches!(event, AgentEvent::CacheEfficiencyLow { .. })));
+    assert!(
+        !received
+            .iter()
+            .any(|event| matches!(event, AgentEvent::CacheEfficiencyLow { .. }))
+    );
 }

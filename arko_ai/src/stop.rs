@@ -142,7 +142,10 @@ mod tests {
             let value = serde_json::to_value(&reason).unwrap();
             assert_eq!(serde_json::from_value::<StopReason>(value).unwrap(), reason);
         }
-        assert_eq!(serde_json::to_value(StopReason::ToolUse).unwrap(), "tool_use");
+        assert_eq!(
+            serde_json::to_value(StopReason::ToolUse).unwrap(),
+            "tool_use"
+        );
     }
 
     #[test]
@@ -150,7 +153,10 @@ mod tests {
         let mut refusal = Refusal::new(RefusalSource::SafetyClassifier);
         refusal.category = Some("cyber".into());
         refusal.explanation = Some("Declined.".into());
-        assert_eq!(refusal.to_string(), "refused by safety classifier (cyber): Declined.");
+        assert_eq!(
+            refusal.to_string(),
+            "refused by safety classifier (cyber): Declined."
+        );
         let value = serde_json::to_value(Refusal::new(RefusalSource::Model)).unwrap();
         assert_eq!(value, serde_json::json!({"source": "model"}));
         assert!(!RefusalSource::SafetyClassifier.keeps_turn());

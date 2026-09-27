@@ -1,18 +1,16 @@
 use super::{GenerationResponse, ProviderClient, StreamEvent, take_refused_output};
 use crate::{
     config::{GenerationConfig, OpenAIServiceTier},
-    pricing::ServiceTier,
-    trace::{RequestTrace, TraceCall},
     conversation::Conversation,
     error::Error,
     message::{Content, Image, Message, Role},
     model::{ModelType, Provider as ProviderType},
-    reasoning::{
-        OpenAIEffort, OpenAIReasoningMode, ReasoningArtifact,
-    },
+    pricing::ServiceTier,
+    reasoning::{OpenAIEffort, OpenAIReasoningMode, ReasoningArtifact},
     retry::BackoffPolicy,
     stop::{Refusal, RefusalSource, StopReason},
     tool::{ToolCall, ToolChoice},
+    trace::{RequestTrace, TraceCall},
     usage::{BillingKind, ModelCallUsage, UsageInfo},
 };
 use async_stream::try_stream;
@@ -264,7 +262,6 @@ fn response_error(
     Error::provider_error(label, Some(status.as_u16()), header_delay, body)
 }
 
-
 /// Retries of a rate-limited OAuth refresh when rate-limit retries are
 /// enabled: about an hour of backoff before the 429 is returned.
 const OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES: u32 = 8;
@@ -297,7 +294,13 @@ impl OAuthRefreshRetry {
 }
 
 fn is_rate_limited_refresh(error: &Error) -> bool {
-    matches!(error, Error::ProviderError { status: Some(429), .. })
+    matches!(
+        error,
+        Error::ProviderError {
+            status: Some(429),
+            ..
+        }
+    )
 }
 
 /// How long one OAuth refresh request may take, from connecting to the end
@@ -339,7 +342,15 @@ pub async fn refresh_chatgpt_oauth_token(
     token_url: Option<&str>,
 ) -> Result<OAuthRefreshResult, Error> {
     let timeout = Some(OAUTH_REFRESH_TIMEOUT);
-    request_oauth_refresh(http_client, refresh_token, None, client_id, token_url, timeout).await
+    request_oauth_refresh(
+        http_client,
+        refresh_token,
+        None,
+        client_id,
+        token_url,
+        timeout,
+    )
+    .await
 }
 
 /// [`refresh_chatgpt_oauth_token`] with the request timing out after
@@ -462,9 +473,7 @@ enum RefreshTarget {
 impl OpenAIClient {
     pub fn new(api_key: &str) -> Self {
         Self {
-            auth: Arc::new(RwLock::new(OpenAIAuth::ApiKey(
-                api_key.to_string(),
-            ))),
+            auth: Arc::new(RwLock::new(OpenAIAuth::ApiKey(api_key.to_string()))),
             http_client: super::default_http_client(),
             retry_oauth_rate_limits: false,
             base_url: None,
@@ -620,19 +629,14 @@ impl OpenAIClient {
     /// are installed and stored (see [`refresh_oauth_token`](Self::refresh_oauth_token)
     /// for awaiting this before a runtime shutdown). API-key clients return
     /// `None`.
-    pub async fn chatgpt_oauth_credentials(
-        &self,
-    ) -> Option<ChatGptOAuthCredentials> {
+    pub async fn chatgpt_oauth_credentials(&self) -> Option<ChatGptOAuthCredentials> {
         match &*self.auth.read().await {
             OpenAIAuth::ChatGptOAuth(credentials) => Some(credentials.clone()),
             OpenAIAuth::ApiKey(_) => None,
         }
     }
 
-    pub async fn is_oauth_token_expired(
-        &self,
-        margin: std::time::Duration,
-    ) -> bool {
+    pub async fn is_oauth_token_expired(&self, margin: std::time::Duration) -> bool {
         let auth = self.auth.read().await;
 
         match &*auth {
@@ -713,14 +717,21 @@ impl OpenAIClient {
         self.refresh(RefreshTarget::Expiring(margin), false).await
     }
 
-    async fn refresh_explicitly(&self, retry_rate_limits: bool) -> Result<OAuthRefreshResult, Error> {
+    async fn refresh_explicitly(
+        &self,
+        retry_rate_limits: bool,
+    ) -> Result<OAuthRefreshResult, Error> {
         // Read before waiting for the refresh locks: a refresh that is under
         // way now replaces the credentials, and its result is returned
         // instead of refreshing again.
         let since = self.auth_epoch.load(Ordering::SeqCst);
         self.refresh(RefreshTarget::Since(since), retry_rate_limits)
             .await?
-            .ok_or_else(|| Error::InvalidRequest("Cannot refresh OAuth token: client is using API key auth".into()))
+            .ok_or_else(|| {
+                Error::InvalidRequest(
+                    "Cannot refresh OAuth token: client is using API key auth".into(),
+                )
+            })
     }
 
     /// Refreshes the credentials a request was rejected with, unless another
@@ -737,7 +748,11 @@ impl OpenAIClient {
         };
         self.refresh(RefreshTarget::Rejected(rejected.clone()), retry_rate_limits)
             .await?
-            .ok_or_else(|| Error::InvalidRequest("Cannot refresh OAuth token: client is using API key auth".into()))
+            .ok_or_else(|| {
+                Error::InvalidRequest(
+                    "Cannot refresh OAuth token: client is using API key auth".into(),
+                )
+            })
     }
 
     /// After an HTTP 401 other than `token_expired`, as Codex's unauthorized
@@ -751,10 +766,15 @@ impl OpenAIClient {
         let OpenAIAuth::ChatGptOAuth(rejected) = rejected else {
             return false;
         };
-        match self.refresh(RefreshTarget::Reload(rejected.clone()), false).await {
+        match self
+            .refresh(RefreshTarget::Reload(rejected.clone()), false)
+            .await
+        {
             Ok(replaced) => replaced.is_some(),
             Err(error) => {
-                log::warn!("arko_ai: ChatGPT OAuth credentials were not reloaded after an HTTP 401: {error}");
+                log::warn!(
+                    "arko_ai: ChatGPT OAuth credentials were not reloaded after an HTTP 401: {error}"
+                );
                 false
             }
         }
@@ -812,7 +832,11 @@ impl OpenAIClient {
         target: RefreshTarget,
         rate_limit_retry_follows: bool,
     ) -> Result<Option<OAuthRefreshResult>, Error> {
-        let store_lock = match self.credential_store.as_ref().and_then(|store| store.refresh_lock()) {
+        let store_lock = match self
+            .credential_store
+            .as_ref()
+            .and_then(|store| store.refresh_lock())
+        {
             Some(lock) => Some(lock.lock_owned().await),
             None => None,
         };
@@ -820,7 +844,9 @@ impl OpenAIClient {
         let client = self.clone();
         let attempt = tokio::spawn(async move {
             let _store_lock = store_lock;
-            client.refresh_locked(auth, &target, rate_limit_retry_follows).await
+            client
+                .refresh_locked(auth, &target, rate_limit_retry_follows)
+                .await
         });
         match attempt.await {
             Ok(result) => result,
@@ -958,7 +984,9 @@ impl OpenAIClient {
             ));
         }
         if spent_tokens::credentials_spent(&stored) {
-            return Err(crate::codex_auth::spent_refresh_token_error(Some(&stored.account_id)));
+            return Err(crate::codex_auth::spent_refresh_token_error(Some(
+                &stored.account_id,
+            )));
         }
         let result = Self::result_for(&stored);
         self.install_auth(auth, OpenAIAuth::ChatGptOAuth(stored));
@@ -1000,8 +1028,12 @@ impl OpenAIClient {
                 .http_client
                 .post(url)
                 .header("Content-Type", "application/json");
-            let builder =
-                self.apply_request_headers(&auth, builder, conversation, request.stream == Some(true));
+            let builder = self.apply_request_headers(
+                &auth,
+                builder,
+                conversation,
+                request.stream == Some(true),
+            );
             let http_request = self.prepare_http_request(
                 Self::apply_auth_headers(&auth, builder).json(request),
                 conversation_key,
@@ -1037,8 +1069,9 @@ impl OpenAIClient {
             let expired = matches!(&error, Error::ProviderError {
                 status: Some(401), code: Some(code), ..
             } if code == "token_expired");
-            let recoverable =
-                attempt == 0 && status == reqwest::StatusCode::UNAUTHORIZED && auth.is_chatgpt_oauth();
+            let recoverable = attempt == 0
+                && status == reqwest::StatusCode::UNAUTHORIZED
+                && auth.is_chatgpt_oauth();
             let recovered = if recoverable && expired {
                 // A server can reject a token before its embedded expiry.
                 // Refresh once; transient failures return to the agent's bounded
@@ -1063,7 +1096,10 @@ impl OpenAIClient {
                 auth = updated;
             } else {
                 if let Some(trace) = trace.take() {
-                    trace.fail(&error.to_string(), serde_json::from_str(&body).ok().as_ref());
+                    trace.fail(
+                        &error.to_string(),
+                        serde_json::from_str(&body).ok().as_ref(),
+                    );
                 }
                 return Err(error);
             }
@@ -1080,12 +1116,16 @@ impl OpenAIClient {
     ) -> Result<reqwest::Request, Error> {
         let mut request = builder.build()?;
         if let Some(hook) = &self.request_hook {
-            let bytes = request.body().and_then(reqwest::Body::as_bytes).unwrap_or_default();
+            let bytes = request
+                .body()
+                .and_then(reqwest::Body::as_bytes)
+                .unwrap_or_default();
             let original: Value = serde_json::from_slice(bytes).map_err(Error::JsonError)?;
             let mut body = original.clone();
             hook.prepare(conversation_key, request.headers_mut(), &mut body);
             if body != original {
-                *request.body_mut() = Some(serde_json::to_vec(&body).map_err(Error::JsonError)?.into());
+                *request.body_mut() =
+                    Some(serde_json::to_vec(&body).map_err(Error::JsonError)?.into());
             }
         }
         Ok(request)
@@ -1099,7 +1139,12 @@ impl OpenAIClient {
     ) -> Option<TraceCall> {
         let trace = self.trace.as_ref()?;
         let body = serde_json::to_value(request).unwrap_or(Value::Null);
-        Some(trace.begin(&conversation.prompt_cache_key, &conversation.model.id, &body, stream))
+        Some(trace.begin(
+            &conversation.prompt_cache_key,
+            &conversation.model.id,
+            &body,
+            stream,
+        ))
     }
 
     fn responses_url(&self, auth: &OpenAIAuth) -> String {
@@ -1115,9 +1160,7 @@ impl OpenAIClient {
         builder: reqwest::RequestBuilder,
     ) -> reqwest::RequestBuilder {
         match auth {
-            OpenAIAuth::ApiKey(key) => {
-                builder.header("Authorization", format!("Bearer {}", key))
-            }
+            OpenAIAuth::ApiKey(key) => builder.header("Authorization", format!("Bearer {}", key)),
             OpenAIAuth::ChatGptOAuth(credentials) => builder
                 .header(
                     "Authorization",
@@ -1149,7 +1192,9 @@ impl OpenAIClient {
             match HeaderValue::from_str(value) {
                 Ok(value) => builder.header(name, value),
                 Err(_) => {
-                    log::warn!("arko_ai: not sending the {name} header: its value is not a valid header value");
+                    log::warn!(
+                        "arko_ai: not sending the {name} header: its value is not a valid header value"
+                    );
                     builder
                 }
             }
@@ -1190,12 +1235,9 @@ impl ProviderClient for OpenAIClient {
             ));
         }
 
-        if conversation.model.model_type == ModelType::Reasoning
-            && config.temperature_specified
-        {
+        if conversation.model.model_type == ModelType::Reasoning && config.temperature_specified {
             return Err(Error::InvalidRequest(
-                "OpenAI reasoning models do not support temperature configuration."
-                    .to_string(),
+                "OpenAI reasoning models do not support temperature configuration.".to_string(),
             ));
         }
 
@@ -1212,8 +1254,7 @@ impl ProviderClient for OpenAIClient {
                 "OpenAI stream ended before the response completed".to_string(),
             ));
         }
-        let request =
-            self.build_request(conversation, config, auth.is_chatgpt_oauth())?;
+        let request = self.build_request(conversation, config, auth.is_chatgpt_oauth())?;
 
         let mut trace = self.begin_trace(conversation, &request, false);
         let (response, auth) = self
@@ -1229,7 +1270,10 @@ impl ProviderClient for OpenAIClient {
                 let value: Value = match response.json().await {
                     Ok(value) => value,
                     Err(error) => {
-                        trace.fail(&format!("failed to read or parse the response: {error}"), None);
+                        trace.fail(
+                            &format!("failed to read or parse the response: {error}"),
+                            None,
+                        );
                         return Err(error.into());
                     }
                 };
@@ -1239,7 +1283,10 @@ impl ProviderClient for OpenAIClient {
                         response_data
                     }
                     Err(error) => {
-                        trace.fail(&format!("failed to parse the response: {error}"), Some(&value));
+                        trace.fail(
+                            &format!("failed to parse the response: {error}"),
+                            Some(&value),
+                        );
                         return Err(Error::JsonError(error));
                     }
                 }
@@ -1266,18 +1313,14 @@ impl ProviderClient for OpenAIClient {
             ));
         }
 
-        if conversation.model.model_type == ModelType::Reasoning
-            && config.temperature_specified
-        {
+        if conversation.model.model_type == ModelType::Reasoning && config.temperature_specified {
             return Err(Error::InvalidRequest(
-                "OpenAI reasoning models do not support temperature configuration."
-                    .to_string(),
+                "OpenAI reasoning models do not support temperature configuration.".to_string(),
             ));
         }
 
         let auth = self.snapshot_auth().await;
-        let mut request =
-            self.build_request(conversation, config, auth.is_chatgpt_oauth())?;
+        let mut request = self.build_request(conversation, config, auth.is_chatgpt_oauth())?;
         request.stream = Some(true);
 
         let mut trace = self.begin_trace(conversation, &request, true);
@@ -1313,7 +1356,10 @@ impl OpenAIClient {
         B: AsRef<[u8]> + Send + 'static,
         E: std::fmt::Display + Send + 'static,
     {
-        let head = ResponseHead { requested_model: model.id.clone(), ..ResponseHead::default() };
+        let head = ResponseHead {
+            requested_model: model.id.clone(),
+            ..ResponseHead::default()
+        };
         Self::stream_events_traced(bytes, model, config, is_chatgpt_oauth, head, None)
     }
 
@@ -1588,8 +1634,12 @@ impl OpenAIClient {
             response.usage.output_tokens,
             model.max_input_tokens,
         );
-        let model_call_usage =
-            Self::with_response_stop_metadata(model_call_usage, response, &output, &streamed.refusals);
+        let model_call_usage = Self::with_response_stop_metadata(
+            model_call_usage,
+            response,
+            &output,
+            &streamed.refusals,
+        );
         let (served_model, rerouted) =
             Self::served_model(head, response, streamed.created_model.as_deref());
         let model_call_usage = model_call_usage
@@ -1619,8 +1669,10 @@ impl OpenAIClient {
                 message.tool_calls.push(call.into_tool_call());
             }
         }
-        message.reasoning_artifact = (!replay_items.is_empty())
-            .then_some(ReasoningArtifact::OpenAIOutputItems { items: replay_items });
+        message.reasoning_artifact =
+            (!replay_items.is_empty()).then_some(ReasoningArtifact::OpenAIOutputItems {
+                items: replay_items,
+            });
 
         let (stop_reason, refusal) = Self::finish_turn(
             &mut message,
@@ -1648,11 +1700,12 @@ impl OpenAIClient {
         if streamed.is_empty() {
             return completed.to_vec();
         }
-        let same_item = |a: &Value, b: &Value| {
-            match (a.get("id").and_then(Value::as_str), b.get("id").and_then(Value::as_str)) {
-                (Some(a), Some(b)) => a == b,
-                _ => a == b,
-            }
+        let same_item = |a: &Value, b: &Value| match (
+            a.get("id").and_then(Value::as_str),
+            b.get("id").and_then(Value::as_str),
+        ) {
+            (Some(a), Some(b)) => a == b,
+            _ => a == b,
         };
         let mut output = streamed.to_vec();
         for (index, item) in completed.iter().enumerate() {
@@ -1681,11 +1734,18 @@ impl OpenAIClient {
             Some(response.model.as_str()),
             created_model,
         ];
-        let mut reported = reported.into_iter().flatten().filter(|model| !model.is_empty());
+        let mut reported = reported
+            .into_iter()
+            .flatten()
+            .filter(|model| !model.is_empty());
         let served = reported.clone().next().map(String::from);
         // Reported models are untrusted text: only ASCII ids are sliced.
         fn base(id: &str) -> &str {
-            if id.is_ascii() { OpenAIClient::strip_openai_snapshot_suffix(id) } else { id }
+            if id.is_ascii() {
+                OpenAIClient::strip_openai_snapshot_suffix(id)
+            } else {
+                id
+            }
         }
         let requested = base(&head.requested_model);
         let rerouted = !requested.is_empty()
@@ -1726,9 +1786,10 @@ impl OpenAIClient {
                 (StopReason::Refusal, Some(refusal))
             }
             ("incomplete", Some("max_output_tokens")) => (StopReason::MaxTokens, None),
-            ("incomplete", reason) => {
-                (StopReason::Other(reason.unwrap_or("incomplete").to_string()), None)
-            }
+            ("incomplete", reason) => (
+                StopReason::Other(reason.unwrap_or("incomplete").to_string()),
+                None,
+            ),
             ("completed", _) if !message.tool_calls.is_empty() => (StopReason::ToolUse, None),
             ("completed", _) => (StopReason::EndTurn, None),
             (status, _) => (StopReason::Other(status.to_string()), None),
@@ -1742,7 +1803,10 @@ impl OpenAIClient {
         );
         match event["type"].as_str() {
             Some("response.refusal.delta") => {
-                refusals.entry(key).or_default().push_str(event["delta"].as_str().unwrap_or(""));
+                refusals
+                    .entry(key)
+                    .or_default()
+                    .push_str(event["delta"].as_str().unwrap_or(""));
             }
             Some("response.refusal.done") => {
                 refusals.insert(key, event["refusal"].as_str().unwrap_or("").to_string());
@@ -1770,32 +1834,39 @@ impl OpenAIClient {
             }
         }
         if refusals.is_empty() {
-            refusals.extend(streamed.iter().map(|((id, index), text)| serde_json::json!({
-                "item_id": id, "content_index": index, "refusal": text,
-            })));
+            refusals.extend(streamed.iter().map(|((id, index), text)| {
+                serde_json::json!({
+                    "item_id": id, "content_index": index, "refusal": text,
+                })
+            }));
         }
         if !refusals.is_empty() {
-            return usage.with_stop_metadata(Some("refusal".into()), Some(serde_json::json!({
-                "source": "openai_structured_refusal", "response_status": response.status,
-                "refusals": refusals,
-            })));
+            return usage.with_stop_metadata(
+                Some("refusal".into()),
+                Some(serde_json::json!({
+                    "source": "openai_structured_refusal", "response_status": response.status,
+                    "refusals": refusals,
+                })),
+            );
         }
-        let reason = response.incomplete_details.as_ref()
-            .and_then(|details| details.get("reason")).and_then(Value::as_str)
-            .unwrap_or(&response.status).to_string();
-        let details = response.incomplete_details.as_ref().map(|details| serde_json::json!({
-            "response_status": response.status, "incomplete_details": details,
-        }));
+        let reason = response
+            .incomplete_details
+            .as_ref()
+            .and_then(|details| details.get("reason"))
+            .and_then(Value::as_str)
+            .unwrap_or(&response.status)
+            .to_string();
+        let details = response.incomplete_details.as_ref().map(|details| {
+            serde_json::json!({
+                "response_status": response.status, "incomplete_details": details,
+            })
+        });
         usage.with_stop_metadata(Some(reason), details)
     }
 
-    fn request_model_id(
-        model_id: &str,
-        is_chatgpt_oauth: bool,
-    ) -> String {
+    fn request_model_id(model_id: &str, is_chatgpt_oauth: bool) -> String {
         if !is_chatgpt_oauth
-            || !(model_id.starts_with("gpt-5.4")
-                || model_id.starts_with("gpt-5.5"))
+            || !(model_id.starts_with("gpt-5.4") || model_id.starts_with("gpt-5.5"))
         {
             return model_id.to_string();
         }
@@ -1851,9 +1922,7 @@ impl OpenAIClient {
                 ));
             }
             let priced = tier.pricing_tier();
-            if priced != ServiceTier::Standard
-                && !conversation.model.pricing.offers_tier(&priced)
-            {
+            if priced != ServiceTier::Standard && !conversation.model.pricing.offers_tier(&priced) {
                 return Err(Error::InvalidRequest(format!(
                     "{} does not offer the {:?} service tier.",
                     conversation.model.id, tier
@@ -1862,10 +1931,7 @@ impl OpenAIClient {
         }
 
         let mut request = OpenAIRequest {
-            model: Self::request_model_id(
-                &conversation.model.id,
-                is_chatgpt_oauth,
-            ),
+            model: Self::request_model_id(&conversation.model.id, is_chatgpt_oauth),
             store: false,
             instructions: conversation.system_message.clone(),
             reasoning: None,
@@ -1891,26 +1957,20 @@ impl OpenAIClient {
         };
 
         if conversation.model.supports_openai_prompt_cache_options() && !is_chatgpt_oauth {
-            let enabled = config
-                .prompt_caching
-                .unwrap_or(conversation.enable_cache);
+            let enabled = config.prompt_caching.unwrap_or(conversation.enable_cache);
 
-            request.prompt_cache_options =
-                Some(OpenAIPromptCacheOptions {
-                    mode: if enabled {
-                        OpenAIPromptCacheMode::Implicit
-                    } else {
-                        OpenAIPromptCacheMode::Explicit
-                    },
-                });
+            request.prompt_cache_options = Some(OpenAIPromptCacheOptions {
+                mode: if enabled {
+                    OpenAIPromptCacheMode::Implicit
+                } else {
+                    OpenAIPromptCacheMode::Explicit
+                },
+            });
         }
 
-        if config.reasoning.is_some()
-            && conversation.model.model_type != ModelType::Reasoning
-        {
+        if config.reasoning.is_some() && conversation.model.model_type != ModelType::Reasoning {
             return Err(Error::InvalidRequest(
-                "Reasoning configuration is only supported for reasoning models."
-                    .to_string(),
+                "Reasoning configuration is only supported for reasoning models.".to_string(),
             ));
         }
 
@@ -1923,8 +1983,7 @@ impl OpenAIClient {
         let is_gpt5_1 = conversation.model.id.starts_with("gpt-5.1");
         let is_gpt5_2 = conversation.model.id.starts_with("gpt-5.2");
         let is_gpt5_3 = conversation.model.id.starts_with("gpt-5.3");
-        let is_gpt5_4_pro =
-            conversation.model.id.starts_with("gpt-5.4-pro");
+        let is_gpt5_4_pro = conversation.model.id.starts_with("gpt-5.4-pro");
         let is_gpt5_4 = conversation.model.id.starts_with("gpt-5.4");
         let is_gpt5_5 = conversation.model.id.starts_with("gpt-5.5");
         let is_gpt5_6 = conversation.model.is_openai_gpt_5_6();
@@ -1933,20 +1992,12 @@ impl OpenAIClient {
         let is_gpt6 = is_gpt6_astra || is_gpt6_sol_luna;
 
         let is_legacy_reasoning =
-            conversation.model.id.starts_with("o3-")
-                || conversation.model.id.starts_with("o4-");
+            conversation.model.id.starts_with("o3-") || conversation.model.id.starts_with("o4-");
 
-        let is_gpt5_family = is_gpt5
-            || is_gpt5_1
-            || is_gpt5_2
-            || is_gpt5_3
-            || is_gpt5_4
-            || is_gpt5_5
-            || is_gpt5_6;
+        let is_gpt5_family =
+            is_gpt5 || is_gpt5_1 || is_gpt5_2 || is_gpt5_3 || is_gpt5_4 || is_gpt5_5 || is_gpt5_6;
 
-        if config.openai_reasoning_mode.is_some()
-            && !(is_gpt5_6 || is_gpt6)
-        {
+        if config.openai_reasoning_mode.is_some() && !(is_gpt5_6 || is_gpt6) {
             return Err(Error::InvalidRequest(
                 "The OpenAI reasoning mode parameter is only supported for GPT-5.6 and GPT-6 models."
                     .to_string(),
@@ -1965,8 +2016,7 @@ impl OpenAIClient {
         }
 
         if conversation.model.model_type == ModelType::Reasoning {
-            request.include =
-                Some(vec!["reasoning.encrypted_content".to_string()]);
+            request.include = Some(vec!["reasoning.encrypted_content".to_string()]);
         }
 
         // Render replayed reasoning from earlier turns too. The API documents
@@ -1984,101 +2034,96 @@ impl OpenAIClient {
             include_summaries,
         }) = &config.reasoning
         {
-            let (allowed, supported_label): (&[OpenAIEffort], &str) =
-                if is_gpt6_astra {
-                    (
-                        &[
-                            OpenAIEffort::Low,
-                            OpenAIEffort::Medium,
-                            OpenAIEffort::High,
-                            OpenAIEffort::XHigh,
-                            OpenAIEffort::Max,
-                        ],
-                        "low, medium, high, xhigh, max",
-                    )
-                } else if is_gpt5_6 || is_gpt6_sol_luna {
-                    (
-                        &[
-                            OpenAIEffort::None,
-                            OpenAIEffort::Low,
-                            OpenAIEffort::Medium,
-                            OpenAIEffort::High,
-                            OpenAIEffort::XHigh,
-                            OpenAIEffort::Max,
-                        ],
-                        "none, low, medium, high, xhigh, max",
-                    )
-                } else if is_gpt5_5_pro || is_gpt5_4_pro || is_gpt5_2_pro {
-                    (
-                        &[
-                            OpenAIEffort::Medium,
-                            OpenAIEffort::High,
-                            OpenAIEffort::XHigh,
-                        ],
-                        "medium, high, xhigh",
-                    )
-                } else if is_gpt5_pro {
-                    // gpt-5-pro defaults to, and only supports, high.
-                    // https://developers.openai.com/api/docs/models/gpt-5-pro
-                    (&[OpenAIEffort::High], "high")
-                } else if is_gpt5_1 {
-                    // xhigh arrived with GPT-5.2; GPT-5.1 supports none through high.
-                    // https://developers.openai.com/api/docs/models/gpt-5.1
-                    (
-                        &[
-                            OpenAIEffort::None,
-                            OpenAIEffort::Low,
-                            OpenAIEffort::Medium,
-                            OpenAIEffort::High,
-                        ],
-                        "none, low, medium, high",
-                    )
-                } else if is_gpt5_5 || is_gpt5_4 || is_gpt5_2 {
-                    (
-                        &[
-                            OpenAIEffort::None,
-                            OpenAIEffort::Low,
-                            OpenAIEffort::Medium,
-                            OpenAIEffort::High,
-                            OpenAIEffort::XHigh,
-                        ],
-                        "none, low, medium, high, xhigh",
-                    )
-                } else if is_gpt5_3 {
-                    (
-                        &[
-                            OpenAIEffort::Low,
-                            OpenAIEffort::Medium,
-                            OpenAIEffort::High,
-                            OpenAIEffort::XHigh,
-                        ],
-                        "low, medium, high, xhigh",
-                    )
-                } else if is_gpt5 {
-                    (
-                        &[
-                            OpenAIEffort::Minimal,
-                            OpenAIEffort::Low,
-                            OpenAIEffort::Medium,
-                            OpenAIEffort::High,
-                        ],
-                        "minimal, low, medium, high",
-                    )
-                } else if is_legacy_reasoning {
-                    (
-                        &[
-                            OpenAIEffort::Low,
-                            OpenAIEffort::Medium,
-                            OpenAIEffort::High,
-                        ],
-                        "low, medium, high",
-                    )
-                } else {
-                    return Err(Error::InvalidRequest(format!(
-                        "Reasoning effort configuration is not supported for model '{}'.",
-                        conversation.model.id
-                    )));
-                };
+            let (allowed, supported_label): (&[OpenAIEffort], &str) = if is_gpt6_astra {
+                (
+                    &[
+                        OpenAIEffort::Low,
+                        OpenAIEffort::Medium,
+                        OpenAIEffort::High,
+                        OpenAIEffort::XHigh,
+                        OpenAIEffort::Max,
+                    ],
+                    "low, medium, high, xhigh, max",
+                )
+            } else if is_gpt5_6 || is_gpt6_sol_luna {
+                (
+                    &[
+                        OpenAIEffort::None,
+                        OpenAIEffort::Low,
+                        OpenAIEffort::Medium,
+                        OpenAIEffort::High,
+                        OpenAIEffort::XHigh,
+                        OpenAIEffort::Max,
+                    ],
+                    "none, low, medium, high, xhigh, max",
+                )
+            } else if is_gpt5_5_pro || is_gpt5_4_pro || is_gpt5_2_pro {
+                (
+                    &[
+                        OpenAIEffort::Medium,
+                        OpenAIEffort::High,
+                        OpenAIEffort::XHigh,
+                    ],
+                    "medium, high, xhigh",
+                )
+            } else if is_gpt5_pro {
+                // gpt-5-pro defaults to, and only supports, high.
+                // https://developers.openai.com/api/docs/models/gpt-5-pro
+                (&[OpenAIEffort::High], "high")
+            } else if is_gpt5_1 {
+                // xhigh arrived with GPT-5.2; GPT-5.1 supports none through high.
+                // https://developers.openai.com/api/docs/models/gpt-5.1
+                (
+                    &[
+                        OpenAIEffort::None,
+                        OpenAIEffort::Low,
+                        OpenAIEffort::Medium,
+                        OpenAIEffort::High,
+                    ],
+                    "none, low, medium, high",
+                )
+            } else if is_gpt5_5 || is_gpt5_4 || is_gpt5_2 {
+                (
+                    &[
+                        OpenAIEffort::None,
+                        OpenAIEffort::Low,
+                        OpenAIEffort::Medium,
+                        OpenAIEffort::High,
+                        OpenAIEffort::XHigh,
+                    ],
+                    "none, low, medium, high, xhigh",
+                )
+            } else if is_gpt5_3 {
+                (
+                    &[
+                        OpenAIEffort::Low,
+                        OpenAIEffort::Medium,
+                        OpenAIEffort::High,
+                        OpenAIEffort::XHigh,
+                    ],
+                    "low, medium, high, xhigh",
+                )
+            } else if is_gpt5 {
+                (
+                    &[
+                        OpenAIEffort::Minimal,
+                        OpenAIEffort::Low,
+                        OpenAIEffort::Medium,
+                        OpenAIEffort::High,
+                    ],
+                    "minimal, low, medium, high",
+                )
+            } else if is_legacy_reasoning {
+                (
+                    &[OpenAIEffort::Low, OpenAIEffort::Medium, OpenAIEffort::High],
+                    "low, medium, high",
+                )
+            } else {
+                return Err(Error::InvalidRequest(format!(
+                    "Reasoning effort configuration is not supported for model '{}'.",
+                    conversation.model.id
+                )));
+            };
 
             if !allowed.contains(effort) {
                 return Err(Error::InvalidRequest(format!(
@@ -2133,15 +2178,9 @@ impl OpenAIClient {
 
             if let Some(choice) = &tool_config.tool_choice {
                 request.tool_choice = Some(match choice {
-                    ToolChoice::Auto => {
-                        OpenAIToolChoice::String("auto".to_string())
-                    }
-                    ToolChoice::Required => {
-                        OpenAIToolChoice::String("required".to_string())
-                    }
-                    ToolChoice::None => {
-                        OpenAIToolChoice::String("none".to_string())
-                    }
+                    ToolChoice::Auto => OpenAIToolChoice::String("auto".to_string()),
+                    ToolChoice::Required => OpenAIToolChoice::String("required".to_string()),
+                    ToolChoice::None => OpenAIToolChoice::String("none".to_string()),
                     ToolChoice::Specific(name) => {
                         OpenAIToolChoice::Object(OpenAIToolChoiceObject {
                             type_: "function".to_string(),
@@ -2151,8 +2190,7 @@ impl OpenAIClient {
                 });
             }
 
-            request.parallel_tool_calls =
-                tool_config.parallel_tool_calls;
+            request.parallel_tool_calls = tool_config.parallel_tool_calls;
         }
 
         for message in &conversation.messages {
@@ -2205,8 +2243,9 @@ impl OpenAIClient {
                     &message.reasoning_artifact
                 {
                     for item in items {
-                        request.input.push(OpenAIInputEntry::Reasoning(
-                            OpenAIInputReasoning {
+                        request
+                            .input
+                            .push(OpenAIInputEntry::Reasoning(OpenAIInputReasoning {
                                 type_: "reasoning".to_string(),
                                 encrypted_content: item.encrypted_content.clone(),
                                 summary: item.summaries.as_ref().map(|summaries| {
@@ -2219,8 +2258,7 @@ impl OpenAIClient {
                                         .collect()
                                 }),
                                 id: item.id.clone(),
-                            },
-                        ));
+                            }));
                     }
                 }
 
@@ -2248,41 +2286,30 @@ impl OpenAIClient {
                 if has_tool_results {
                     for content in &message.content {
                         if let Content::ToolResult(result) = content {
-                            request.input.push(
-                                OpenAIInputEntry::FunctionCallOutput(
-                                    OpenAIInputFunctionCallOutput {
-                                        type_: "function_call_output"
-                                            .to_string(),
-                                        call_id: result
-                                            .call_id
-                                            .clone()
-                                            .unwrap_or_default(),
-                                        output: result.output.clone(),
-                                    },
-                                ),
-                            );
+                            request.input.push(OpenAIInputEntry::FunctionCallOutput(
+                                OpenAIInputFunctionCallOutput {
+                                    type_: "function_call_output".to_string(),
+                                    call_id: result.call_id.clone().unwrap_or_default(),
+                                    output: result.output.clone(),
+                                },
+                            ));
                         }
                     }
 
                     let filtered: Vec<&Content> = message
                         .content
                         .iter()
-                        .filter(|content| {
-                            content.as_tool_result().is_none()
-                        })
+                        .filter(|content| content.as_tool_result().is_none())
                         .collect();
 
                     if !filtered.is_empty() {
-                        let message = self
-                            .convert_filtered_to_openai_message(
-                                "user",
-                                &filtered,
-                                message.id.as_deref(),
-                            )?;
+                        let message = self.convert_filtered_to_openai_message(
+                            "user",
+                            &filtered,
+                            message.id.as_deref(),
+                        )?;
 
-                        request
-                            .input
-                            .push(OpenAIInputEntry::Message(message));
+                        request.input.push(OpenAIInputEntry::Message(message));
                     }
 
                     continue;
@@ -2320,7 +2347,11 @@ impl OpenAIClient {
             input.push(OpenAIInputEntry::Item(item.clone()));
         }
         for tool_call in &message.tool_calls {
-            if !tool_call.id.as_deref().is_some_and(|id| replayed.contains(id)) {
+            if !tool_call
+                .id
+                .as_deref()
+                .is_some_and(|id| replayed.contains(id))
+            {
                 input.push(Self::function_call_entry(tool_call));
             }
         }
@@ -2330,8 +2361,9 @@ impl OpenAIClient {
         // Invalid arguments are replayed exactly as the model wrote them.
         let arguments = match &tool_call.invalid_arguments {
             Some(raw) => raw.clone(),
-            None => serde_json::to_string(&tool_call.arguments)
-                .unwrap_or_else(|_| "{}".to_string()),
+            None => {
+                serde_json::to_string(&tool_call.arguments).unwrap_or_else(|_| "{}".to_string())
+            }
         };
 
         OpenAIInputEntry::FunctionCall(OpenAIInputFunctionCall {
@@ -2359,8 +2391,7 @@ impl OpenAIClient {
         if contents.len() == 1 {
             match contents[0] {
                 Content::Text(text) => {
-                    input_message.content =
-                        Some(OpenAIContent::Text(text.clone()));
+                    input_message.content = Some(OpenAIContent::Text(text.clone()));
                 }
                 Content::Image(image) => {
                     input_message.content =
@@ -2384,33 +2415,26 @@ impl OpenAIClient {
                         content_items.push(OpenAIContentItem {
                             type_: "input_image".to_string(),
                             text: None,
-                            image_url: Some(
-                                self.convert_image_to_openai(image)?,
-                            ),
+                            image_url: Some(self.convert_image_to_openai(image)?),
                         });
                     }
                     Content::ToolResult(_) => {}
                 }
             }
 
-            input_message.content =
-                Some(OpenAIContent::Array(content_items));
+            input_message.content = Some(OpenAIContent::Array(content_items));
         }
 
         Ok(input_message)
     }
 
-    fn convert_message_to_openai(
-        &self,
-        message: &Message,
-    ) -> Result<OpenAIInputMessage, Error> {
+    fn convert_message_to_openai(&self, message: &Message) -> Result<OpenAIInputMessage, Error> {
         let role = match message.role {
             Role::User => "user",
             Role::Assistant => "assistant",
             Role::System => {
                 return Err(Error::InvalidRequest(
-                    "System messages should be set in the instructions field."
-                        .to_string(),
+                    "System messages should be set in the instructions field.".to_string(),
                 ));
             }
         };
@@ -2435,19 +2459,16 @@ impl OpenAIClient {
         if content.len() == 1 {
             if let Some(text) = content[0].as_text() {
                 if role == "assistant" {
-                    input_message.content =
-                        Some(OpenAIContent::Array(vec![OpenAIContentItem {
-                            type_: "output_text".to_string(),
-                            text: Some(text.to_string()),
-                            image_url: None,
-                        }]));
+                    input_message.content = Some(OpenAIContent::Array(vec![OpenAIContentItem {
+                        type_: "output_text".to_string(),
+                        text: Some(text.to_string()),
+                        image_url: None,
+                    }]));
                 } else {
-                    input_message.content =
-                        Some(OpenAIContent::Text(text.to_string()));
+                    input_message.content = Some(OpenAIContent::Text(text.to_string()));
                 }
             } else if let Some(image) = content[0].as_image() {
-                input_message.content =
-                    Some(OpenAIContent::Array(vec![self.image_item(image)?]));
+                input_message.content = Some(OpenAIContent::Array(vec![self.image_item(image)?]));
             }
         } else {
             let mut items = Vec::new();
@@ -2469,9 +2490,7 @@ impl OpenAIClient {
                         items.push(OpenAIContentItem {
                             type_: "input_image".to_string(),
                             text: None,
-                            image_url: Some(
-                                self.convert_image_to_openai(image)?,
-                            ),
+                            image_url: Some(self.convert_image_to_openai(image)?),
                         });
                     }
                     Content::ToolResult(_) => {}
@@ -2492,15 +2511,10 @@ impl OpenAIClient {
         })
     }
 
-    fn convert_image_to_openai(
-        &self,
-        image: &Image,
-    ) -> Result<String, Error> {
+    fn convert_image_to_openai(&self, image: &Image) -> Result<String, Error> {
         match image {
             Image::Url(url) => Ok(url.clone()),
-            Image::Base64 { data, mime_type } => {
-                Ok(format!("data:{};base64,{}", mime_type, data))
-            }
+            Image::Base64 { data, mime_type } => Ok(format!("data:{};base64,{}", mime_type, data)),
         }
     }
 
@@ -2585,7 +2599,10 @@ impl OpenAIClient {
                 .and_then(Value::as_str)
                 .is_some_and(|content| !content.is_empty()),
             "function_call" => {
-                matches!(item.get("status").and_then(Value::as_str), None | Some("completed"))
+                matches!(
+                    item.get("status").and_then(Value::as_str),
+                    None | Some("completed")
+                )
             }
             _ => false,
         };
@@ -2603,20 +2620,15 @@ impl OpenAIClient {
     /// Fast request was downgraded).
     /// https://developers.openai.com/api/docs/guides/prompt-caching
     fn calculate_usage(response: &OpenAIResponse) -> UsageInfo {
-        let mut usage = UsageInfo::new(
-            response.usage.input_tokens,
-            response.usage.output_tokens,
-        );
+        let mut usage = UsageInfo::new(response.usage.input_tokens, response.usage.output_tokens);
 
         if let Some(details) = &response.usage.input_tokens_details {
             if details.cached_tokens > 0 {
-                usage =
-                    usage.with_cached_tokens(details.cached_tokens);
+                usage = usage.with_cached_tokens(details.cached_tokens);
             }
 
             if details.cache_write_tokens > 0 {
-                usage = usage
-                    .with_cache_write_tokens(details.cache_write_tokens);
+                usage = usage.with_cache_write_tokens(details.cache_write_tokens);
             }
         }
 
@@ -2926,9 +2938,7 @@ mod tests {
         conversation::Conversation,
         error::Error,
         model::{Model, Provider},
-        reasoning::{
-            OpenAIEffort, OpenAIReasoningMode, ReasoningConfig,
-        },
+        reasoning::{OpenAIEffort, OpenAIReasoningMode, ReasoningConfig},
     };
     use std::time::Duration;
 
@@ -2936,23 +2946,62 @@ mod tests {
     fn tool_images_serialize_after_all_correlated_results_for_api_and_oauth() {
         use crate::{Content, Image, Message, ToolCall, ToolResult};
         let client = OpenAIClient::new("test");
-        let mut conversation = Conversation::new(Model::get(Provider::OpenAI, "gpt-6-astra").unwrap());
-        let calls = ["first", "second"].map(|id| ToolCall { id: Some(id.into()), name: "view_image".into(), arguments: serde_json::json!({"path":"fixture.png"}), thought_signature: None, provider_id: None, invalid_arguments: None });
-        let mut assistant = Message::new_assistant("Inspecting images."); assistant.tool_calls = calls.to_vec(); conversation.messages.push(assistant);
-        let mut content: Vec<_> = calls.iter().map(|call| Content::ToolResult(ToolResult::from_tool_call(call, "fixture.png, 12 × 8"))).collect();
-        content.extend([Content::Text("Image from first call: fixture.png".into()), Content::Image(Image::new_base64("cGl4ZWxz", "image/png"))]);
+        let mut conversation =
+            Conversation::new(Model::get(Provider::OpenAI, "gpt-6-astra").unwrap());
+        let calls = ["first", "second"].map(|id| ToolCall {
+            id: Some(id.into()),
+            name: "view_image".into(),
+            arguments: serde_json::json!({"path":"fixture.png"}),
+            thought_signature: None,
+            provider_id: None,
+            invalid_arguments: None,
+        });
+        let mut assistant = Message::new_assistant("Inspecting images.");
+        assistant.tool_calls = calls.to_vec();
+        conversation.messages.push(assistant);
+        let mut content: Vec<_> = calls
+            .iter()
+            .map(|call| {
+                Content::ToolResult(ToolResult::from_tool_call(call, "fixture.png, 12 × 8"))
+            })
+            .collect();
+        content.extend([
+            Content::Text("Image from first call: fixture.png".into()),
+            Content::Image(Image::new_base64("cGl4ZWxz", "image/png")),
+        ]);
         conversation.add_user_message_with_contents(content);
         let saved = serde_json::to_string(&conversation).unwrap();
         let conversation: Conversation = serde_json::from_str(&saved).unwrap();
         for oauth in [false, true] {
-            let value = serde_json::to_value(client.build_request(&conversation, &GenerationConfig::default(), oauth).unwrap()).unwrap();
+            let value = serde_json::to_value(
+                client
+                    .build_request(&conversation, &GenerationConfig::default(), oauth)
+                    .unwrap(),
+            )
+            .unwrap();
             let input = value["input"].as_array().unwrap();
-            let results: Vec<_> = input.iter().enumerate().filter(|(_, item)| item["type"] == "function_call_output").collect();
+            let results: Vec<_> = input
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| item["type"] == "function_call_output")
+                .collect();
             assert_eq!(results.len(), 2);
-            assert_eq!(results[0].1["call_id"], "first"); assert_eq!(results[1].1["call_id"], "second");
-            let (image_index, image_message) = input.iter().enumerate().find(|(_, item)| item["content"].as_array().is_some_and(|content| content.iter().any(|block| block["type"] == "input_image"))).unwrap();
+            assert_eq!(results[0].1["call_id"], "first");
+            assert_eq!(results[1].1["call_id"], "second");
+            let (image_index, image_message) = input
+                .iter()
+                .enumerate()
+                .find(|(_, item)| {
+                    item["content"].as_array().is_some_and(|content| {
+                        content.iter().any(|block| block["type"] == "input_image")
+                    })
+                })
+                .unwrap();
             assert!(image_index > results[1].0);
-            assert_eq!(image_message["content"][1]["image_url"], "data:image/png;base64,cGl4ZWxz");
+            assert_eq!(
+                image_message["content"][1]["image_url"],
+                "data:image/png;base64,cGl4ZWxz"
+            );
             assert_eq!(results[0].1["output"], "fixture.png, 12 × 8");
         }
     }
@@ -3035,7 +3084,10 @@ mod tests {
                 socket.write_all(response.as_bytes()).await.unwrap();
             }
         });
-        let client = crate::providers::http_client_builder().no_proxy().build().unwrap();
+        let client = crate::providers::http_client_builder()
+            .no_proxy()
+            .build()
+            .unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             let error = super::refresh_chatgpt_oauth_token(
                 &client,
@@ -3220,11 +3272,8 @@ mod tests {
 
     #[test]
     fn oauth_rate_limit_retries_are_opt_in() {
-        let client = OpenAIClient::new_chatgpt_oauth(
-            "access-token",
-            Some("refresh-token"),
-            "account-id",
-        );
+        let client =
+            OpenAIClient::new_chatgpt_oauth("access-token", Some("refresh-token"), "account-id");
         assert!(!client.retry_oauth_rate_limits);
 
         let client = client.with_oauth_rate_limit_retries(true);
@@ -3234,34 +3283,22 @@ mod tests {
     #[test]
     fn oauth_request_model_id_strips_gpt_5_4_snapshot_suffixes() {
         assert_eq!(
-            OpenAIClient::request_model_id(
-                "gpt-5.4-2026-03-05",
-                true
-            ),
+            OpenAIClient::request_model_id("gpt-5.4-2026-03-05", true),
             "gpt-5.4"
         );
 
         assert_eq!(
-            OpenAIClient::request_model_id(
-                "gpt-5.4-mini-2026-03-17",
-                true
-            ),
+            OpenAIClient::request_model_id("gpt-5.4-mini-2026-03-17", true),
             "gpt-5.4-mini"
         );
 
         assert_eq!(
-            OpenAIClient::request_model_id(
-                "gpt-5.4-nano-2026-03-17",
-                true
-            ),
+            OpenAIClient::request_model_id("gpt-5.4-nano-2026-03-17", true),
             "gpt-5.4-nano"
         );
 
         assert_eq!(
-            OpenAIClient::request_model_id(
-                "gpt-5.4-pro-2026-03-05",
-                true
-            ),
+            OpenAIClient::request_model_id("gpt-5.4-pro-2026-03-05", true),
             "gpt-5.4-pro"
         );
     }
@@ -3269,10 +3306,7 @@ mod tests {
     #[test]
     fn oauth_request_model_id_strips_gpt_5_5_snapshot_suffix() {
         assert_eq!(
-            OpenAIClient::request_model_id(
-                "gpt-5.5-2026-04-23",
-                true
-            ),
+            OpenAIClient::request_model_id("gpt-5.5-2026-04-23", true),
             "gpt-5.5"
         );
     }
@@ -3280,23 +3314,14 @@ mod tests {
     #[test]
     fn request_model_id_preserves_api_key_and_shorthand_ids() {
         assert_eq!(
-            OpenAIClient::request_model_id(
-                "gpt-5.5-2026-04-23",
-                false
-            ),
+            OpenAIClient::request_model_id("gpt-5.5-2026-04-23", false),
             "gpt-5.5-2026-04-23"
         );
 
-        assert_eq!(
-            OpenAIClient::request_model_id("gpt-5.5", true),
-            "gpt-5.5"
-        );
+        assert_eq!(OpenAIClient::request_model_id("gpt-5.5", true), "gpt-5.5");
 
         assert_eq!(
-            OpenAIClient::request_model_id(
-                "gpt-5.4-mini",
-                true
-            ),
+            OpenAIClient::request_model_id("gpt-5.4-mini", true),
             "gpt-5.4-mini"
         );
     }
@@ -3304,43 +3329,28 @@ mod tests {
     #[test]
     fn gpt_5_6_defaults_to_implicit_prompt_caching() {
         let client = OpenAIClient::new("test");
-        let conversation =
-            Conversation::new(Model::openai_gpt_5_6_sol());
+        let conversation = Conversation::new(Model::openai_gpt_5_6_sol());
         let config = GenerationConfig::default();
 
-        let request = client
-            .build_request(&conversation, &config, false)
-            .unwrap();
+        let request = client.build_request(&conversation, &config, false).unwrap();
 
         let value = serde_json::to_value(request).unwrap();
 
-        assert_eq!(
-            value["prompt_cache_options"]["mode"],
-            "implicit"
-        );
-        assert_eq!(
-            value["prompt_cache_key"],
-            conversation.prompt_cache_key
-        );
+        assert_eq!(value["prompt_cache_options"]["mode"], "implicit");
+        assert_eq!(value["prompt_cache_key"], conversation.prompt_cache_key);
     }
 
     #[test]
     fn gpt_5_6_oauth_sends_cache_key_without_cache_options() {
         let client = OpenAIClient::new("test");
-        let conversation =
-            Conversation::new(Model::openai_gpt_5_6_sol());
+        let conversation = Conversation::new(Model::openai_gpt_5_6_sol());
         let config = GenerationConfig::default();
 
-        let request = client
-            .build_request(&conversation, &config, true)
-            .unwrap();
+        let request = client.build_request(&conversation, &config, true).unwrap();
 
         let value = serde_json::to_value(request).unwrap();
 
-        assert_eq!(
-            value["prompt_cache_key"],
-            conversation.prompt_cache_key
-        );
+        assert_eq!(value["prompt_cache_key"], conversation.prompt_cache_key);
         assert!(value.get("prompt_cache_options").is_none());
     }
 
@@ -3352,59 +3362,40 @@ mod tests {
             Model::openai_gpt_5_6_terra(),
             Model::openai_gpt_5_6_luna(),
         ];
-        let config =
-            GenerationConfig::default().with_prompt_caching(true);
+        let config = GenerationConfig::default().with_prompt_caching(true);
 
         for model in models {
             let conversation = Conversation::new(model);
-            let request = client
-                .build_request(&conversation, &config, false)
-                .unwrap();
+            let request = client.build_request(&conversation, &config, false).unwrap();
             let value = serde_json::to_value(request).unwrap();
 
-            assert_eq!(
-                value["prompt_cache_key"],
-                conversation.prompt_cache_key
-            );
-            assert_eq!(
-                value["prompt_cache_options"]["mode"],
-                "implicit"
-            );
+            assert_eq!(value["prompt_cache_key"], conversation.prompt_cache_key);
+            assert_eq!(value["prompt_cache_options"]["mode"], "implicit");
         }
     }
 
     #[test]
     fn gpt_5_6_can_disable_prompt_caching() {
         let client = OpenAIClient::new("test");
-        let conversation =
-            Conversation::new(Model::openai_gpt_5_6_sol());
-        let config =
-            GenerationConfig::default().with_prompt_caching(false);
+        let conversation = Conversation::new(Model::openai_gpt_5_6_sol());
+        let config = GenerationConfig::default().with_prompt_caching(false);
 
-        let request = client
-            .build_request(&conversation, &config, false)
-            .unwrap();
+        let request = client.build_request(&conversation, &config, false).unwrap();
 
         let value = serde_json::to_value(request).unwrap();
 
-        assert_eq!(
-            value["prompt_cache_options"]["mode"],
-            "explicit"
-        );
+        assert_eq!(value["prompt_cache_options"]["mode"], "explicit");
     }
 
     #[test]
     fn older_openai_models_send_the_cache_key_without_cache_options() {
         let client = OpenAIClient::new("test");
-        let config =
-            GenerationConfig::default().with_prompt_caching(false);
+        let config = GenerationConfig::default().with_prompt_caching(false);
 
         for model in [Model::openai_gpt_5_5(), Model::openai_gpt_4_1()] {
             let conversation = Conversation::new(model);
             for oauth in [false, true] {
-                let request = client
-                    .build_request(&conversation, &config, oauth)
-                    .unwrap();
+                let request = client.build_request(&conversation, &config, oauth).unwrap();
 
                 let value = serde_json::to_value(request).unwrap();
 
@@ -3425,15 +3416,13 @@ mod tests {
             Model::openai_gpt_5_6_terra(),
             Model::openai_gpt_5_6_luna(),
         ];
-        let config = GenerationConfig::default()
-            .with_openai_reasoning_mode(OpenAIReasoningMode::Pro);
+        let config =
+            GenerationConfig::default().with_openai_reasoning_mode(OpenAIReasoningMode::Pro);
 
         for model in models {
             let conversation = Conversation::new(model);
 
-            let request = client
-                .build_request(&conversation, &config, false)
-                .unwrap();
+            let request = client.build_request(&conversation, &config, false).unwrap();
 
             let value = serde_json::to_value(request).unwrap();
 
@@ -3445,14 +3434,11 @@ mod tests {
     #[test]
     fn gpt_5_6_standard_mode_can_be_explicit() {
         let client = OpenAIClient::new("test");
-        let conversation =
-            Conversation::new(Model::openai_gpt_5_6_sol());
-        let config = GenerationConfig::default()
-            .with_openai_reasoning_mode(OpenAIReasoningMode::Standard);
+        let conversation = Conversation::new(Model::openai_gpt_5_6_sol());
+        let config =
+            GenerationConfig::default().with_openai_reasoning_mode(OpenAIReasoningMode::Standard);
 
-        let request = client
-            .build_request(&conversation, &config, false)
-            .unwrap();
+        let request = client.build_request(&conversation, &config, false).unwrap();
 
         let value = serde_json::to_value(request).unwrap();
 
@@ -3462,18 +3448,12 @@ mod tests {
     #[test]
     fn gpt_5_6_reasoning_mode_is_independent_of_effort() {
         let client = OpenAIClient::new("test");
-        let conversation =
-            Conversation::new(Model::openai_gpt_5_6_sol());
+        let conversation = Conversation::new(Model::openai_gpt_5_6_sol());
         let config = GenerationConfig::default()
             .with_openai_reasoning_mode(OpenAIReasoningMode::Pro)
-            .with_reasoning(ReasoningConfig::openai(
-                OpenAIEffort::Max,
-                true,
-            ));
+            .with_reasoning(ReasoningConfig::openai(OpenAIEffort::Max, true));
 
-        let request = client
-            .build_request(&conversation, &config, false)
-            .unwrap();
+        let request = client.build_request(&conversation, &config, false).unwrap();
 
         let value = serde_json::to_value(request).unwrap();
 
@@ -3485,13 +3465,10 @@ mod tests {
     #[test]
     fn gpt_5_6_omits_reasoning_mode_by_default() {
         let client = OpenAIClient::new("test");
-        let conversation =
-            Conversation::new(Model::openai_gpt_5_6_sol());
+        let conversation = Conversation::new(Model::openai_gpt_5_6_sol());
         let config = GenerationConfig::default();
 
-        let request = client
-            .build_request(&conversation, &config, false)
-            .unwrap();
+        let request = client.build_request(&conversation, &config, false).unwrap();
 
         let value = serde_json::to_value(request).unwrap();
 
@@ -3504,10 +3481,9 @@ mod tests {
     #[test]
     fn older_openai_models_reject_reasoning_mode() {
         let client = OpenAIClient::new("test");
-        let conversation =
-            Conversation::new(Model::openai_gpt_5_5());
-        let config = GenerationConfig::default()
-            .with_openai_reasoning_mode(OpenAIReasoningMode::Pro);
+        let conversation = Conversation::new(Model::openai_gpt_5_5());
+        let config =
+            GenerationConfig::default().with_openai_reasoning_mode(OpenAIReasoningMode::Pro);
 
         let error = client
             .build_request(&conversation, &config, false)
@@ -3532,7 +3508,12 @@ mod tests {
         let request = client
             .build_request(&conversation, &GenerationConfig::default(), false)
             .unwrap();
-        assert!(serde_json::to_value(request).unwrap().get("temperature").is_none());
+        assert!(
+            serde_json::to_value(request)
+                .unwrap()
+                .get("temperature")
+                .is_none()
+        );
 
         let request = client
             .build_request(&conversation, &GenerationConfig::new(0.3), false)
@@ -3566,7 +3547,12 @@ mod tests {
         let unset = client
             .build_request(&astra, &GenerationConfig::default(), false)
             .unwrap();
-        assert!(serde_json::to_value(unset).unwrap().get("service_tier").is_none());
+        assert!(
+            serde_json::to_value(unset)
+                .unwrap()
+                .get("service_tier")
+                .is_none()
+        );
         // gpt-4.1 has no Flex; gpt-5.4-nano has no Fast mode.
         for (model, tier) in [
             (Model::openai_gpt_4_1(), OpenAIServiceTier::Flex),
@@ -3618,12 +3604,18 @@ mod tests {
         let usage = priced(None, &standard, false);
         assert_eq!(usage.reasoning_tokens, Some(400_000));
         assert!(close(usage.total_cost, 51.0));
-        assert!(close(priced(Some("priority"), &standard, false).total_cost, 102.0));
+        assert!(close(
+            priced(Some("priority"), &standard, false).total_cost,
+            102.0
+        ));
         // The requested tier applies only when the response doesn't report one;
         // a Flex request served at the default tier is priced as standard.
         assert!(close(priced(None, &flex, false).total_cost, 25.5));
         let downgraded = priced(Some("default"), &flex, false);
-        assert_eq!(downgraded.service_tier, Some(crate::pricing::ServiceTier::Standard));
+        assert_eq!(
+            downgraded.service_tier,
+            Some(crate::pricing::ServiceTier::Standard)
+        );
         assert!(close(downgraded.total_cost, 51.0));
     }
 
@@ -3642,7 +3634,10 @@ mod tests {
             assert!(hinted >= Duration::from_secs(600) && hinted <= Duration::from_secs(615));
             // One wait honors at most 15 minutes of a hint (plus jitter),
             // even for the 30-day cap on parsed hints.
-            for hint in [Duration::from_secs(1200), crate::retry::MAX_SERVER_DELAY_HINT] {
+            for hint in [
+                Duration::from_secs(1200),
+                crate::retry::MAX_SERVER_DELAY_HINT,
+            ] {
                 let capped = retry.delay(Some(hint), 0, sample);
                 assert!(capped >= Duration::from_secs(900) && capped <= Duration::from_secs(915));
             }
@@ -3672,19 +3667,25 @@ mod model_rule_tests {
     use serde_json::Value;
 
     fn request(model: Model, config: &GenerationConfig) -> Result<Value, Error> {
-        let request = OpenAIClient::new("test").build_request(&Conversation::new(model), config, false)?;
+        let request =
+            OpenAIClient::new("test").build_request(&Conversation::new(model), config, false)?;
         Ok(serde_json::to_value(request).unwrap())
     }
 
     fn accepts(model: &Model, effort: OpenAIEffort) -> bool {
-        let config = GenerationConfig::default().with_reasoning(ReasoningConfig::openai(effort, false));
+        let config =
+            GenerationConfig::default().with_reasoning(ReasoningConfig::openai(effort, false));
         request(model.clone(), &config).is_ok()
     }
 
     #[test]
     fn pro_models_have_their_own_effort_rules() {
         use OpenAIEffort::{High, Low, Max, Medium, Minimal, XHigh};
-        for model in [Model::openai_gpt_5_5_pro(), Model::openai_gpt_5_2_pro(), Model::openai_gpt_5_4_pro()] {
+        for model in [
+            Model::openai_gpt_5_5_pro(),
+            Model::openai_gpt_5_2_pro(),
+            Model::openai_gpt_5_4_pro(),
+        ] {
             for effort in [Medium, High, XHigh] {
                 assert!(accepts(&model, effort), "{} {effort:?}", model.id);
             }
@@ -3724,7 +3725,10 @@ mod model_rule_tests {
             // GPT-5.6 still asks for reasoning from all turns (documented for
             // API keys); the others send no reasoning object at all.
             if model.is_openai_gpt_5_6() {
-                assert_eq!(value["reasoning"], serde_json::json!({"context": "all_turns"}));
+                assert_eq!(
+                    value["reasoning"],
+                    serde_json::json!({"context": "all_turns"})
+                );
             } else {
                 assert!(value.get("reasoning").is_none(), "{}", model.id);
             }
@@ -3736,7 +3740,10 @@ mod model_rule_tests {
     fn gpt_5_6_alias_shares_sol_data_and_rules() {
         let alias = Model::openai_gpt_5_6();
         let sol = Model::openai_gpt_5_6_sol();
-        assert_eq!(alias.pricing.input_cost_per_million, sol.pricing.input_cost_per_million);
+        assert_eq!(
+            alias.pricing.input_cost_per_million,
+            sol.pricing.input_cost_per_million
+        );
         assert!(alias.is_openai_gpt_5_6());
         assert!(accepts(&alias, OpenAIEffort::Max));
     }
@@ -3760,7 +3767,11 @@ mod input_capability_tests {
         let mut conversation = Conversation::new(model.clone());
         conversation.add_user_message_with_contents(image());
         let client = OpenAIClient::new("test");
-        assert!(client.build_request(&conversation, &GenerationConfig::default(), false).is_ok());
+        assert!(
+            client
+                .build_request(&conversation, &GenerationConfig::default(), false)
+                .is_ok()
+        );
 
         model.supports_image_input = false;
         let mut conversation = Conversation::new(model);

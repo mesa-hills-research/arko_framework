@@ -2358,12 +2358,20 @@ mod tests {
                 current_working_directory: &workflow.context().workspace,
             };
             let outcome = interceptor
-                .intercept("search", &"raw tool output ".repeat(10), &HashMap::new(), &task)
+                .intercept(
+                    "search",
+                    &"raw tool output ".repeat(10),
+                    &HashMap::new(),
+                    &task,
+                )
                 .await
                 .unwrap();
             assert!(matches!(outcome, InterceptedResult::Unchanged));
             assert_eq!(server.requests(), requests);
-            assert_eq!(workflow.context().distillation_records.read().len(), requests);
+            assert_eq!(
+                workflow.context().distillation_records.read().len(),
+                requests
+            );
         }
     }
 }

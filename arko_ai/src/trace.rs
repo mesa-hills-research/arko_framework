@@ -114,8 +114,14 @@ impl Conversations {
         }
         self.retained.push_back(key.to_string());
         while self.retained.len() > RETAINED_INPUTS {
-            let Some(evicted) = self.retained.pop_front() else { break };
-            if let Some(previous) = self.states.get_mut(&evicted).and_then(|state| state.previous.as_mut()) {
+            let Some(evicted) = self.retained.pop_front() else {
+                break;
+            };
+            if let Some(previous) = self
+                .states
+                .get_mut(&evicted)
+                .and_then(|state| state.previous.as_mut())
+            {
                 previous.input_json = None;
             }
         }
@@ -171,15 +177,27 @@ impl RequestTrace {
         let item_hashes: Vec<u128> = body
             .get("input")
             .and_then(Value::as_array)
-            .map(|items| items.iter().map(|item| hash128(item.to_string().as_bytes())).collect())
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| hash128(item.to_string().as_bytes()))
+                    .collect()
+            })
             .unwrap_or_default();
-        let input_json: Arc<str> = body.get("input").map(Value::to_string).unwrap_or_default().into();
+        let input_json: Arc<str> = body
+            .get("input")
+            .map(Value::to_string)
+            .unwrap_or_default()
+            .into();
         let instructions_hash = body.get("instructions").map(hash_value);
         let tools_hash = body.get("tools").map(hash_value);
 
         let (seq, previous) = {
             let mut conversations = lock(&self.inner.conversations);
-            let state = conversations.states.entry(conversation_key.to_string()).or_default();
+            let state = conversations
+                .states
+                .entry(conversation_key.to_string())
+                .or_default();
             state.next_seq += 1;
             let seq = state.next_seq;
             let previous = state.previous.replace(PreviousRequest {
@@ -230,11 +248,22 @@ impl RequestTrace {
 
     /// Makes `previous` the conversation's previous request again, if call
     /// `seq` (which failed) is still the latest.
-    fn restore_previous(&self, conversation_key: &str, seq: u64, previous: Option<PreviousRequest>) {
+    fn restore_previous(
+        &self,
+        conversation_key: &str,
+        seq: u64,
+        previous: Option<PreviousRequest>,
+    ) {
         let mut conversations = lock(&self.inner.conversations);
-        let retained = conversations.retained.iter().any(|key| key == conversation_key);
+        let retained = conversations
+            .retained
+            .iter()
+            .any(|key| key == conversation_key);
         if let Some(state) = conversations.states.get_mut(conversation_key)
-            && state.previous.as_ref().is_some_and(|latest| latest.seq == seq)
+            && state
+                .previous
+                .as_ref()
+                .is_some_and(|latest| latest.seq == seq)
         {
             state.previous = previous.map(|mut previous| {
                 // Evicted while the call ran: keep the bound.
@@ -328,7 +357,10 @@ impl TraceCall {
             .headers()
             .get("x-codex-turn-state")
             .map(|value| hex_sha256(value.as_bytes()));
-        let bytes = request.body().and_then(reqwest::Body::as_bytes).unwrap_or_default();
+        let bytes = request
+            .body()
+            .and_then(reqwest::Body::as_bytes)
+            .unwrap_or_default();
         let body: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
         let document = json!({
             "conversation": self.conversation_key,
@@ -397,7 +429,11 @@ impl TraceCall {
     fn complete(&mut self, status: &str, response: Option<&Value>, error: Option<&str>) {
         let completed_ms = self.started.elapsed().as_millis();
         let usage = response.and_then(|response| response.get("usage"));
-        let int = |pointer: &str| usage.and_then(|usage| usage.pointer(pointer)).and_then(Value::as_u64);
+        let int = |pointer: &str| {
+            usage
+                .and_then(|usage| usage.pointer(pointer))
+                .and_then(Value::as_u64)
+        };
         let input_tokens = int("/input_tokens");
         let cached_tokens = int("/input_tokens_details/cached_tokens");
         let completed_output: Vec<Value> = response
@@ -405,7 +441,9 @@ impl TraceCall {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let response_id = response.and_then(|response| response.get("id")).and_then(Value::as_str);
+        let response_id = response
+            .and_then(|response| response.get("id"))
+            .and_then(Value::as_str);
 
         if error.is_some() {
             self.trace
@@ -517,7 +555,10 @@ impl TraceCall {
             fs::write(&path, text)
         });
         if let Err(error) = result {
-            log::warn!("arko_ai request trace: failed to write {}: {error}", path.display());
+            log::warn!(
+                "arko_ai request trace: failed to write {}: {error}",
+                path.display()
+            );
         }
     }
 }
@@ -614,7 +655,12 @@ fn redacted_headers(headers: &reqwest::header::HeaderMap) -> Map<String, Value> 
 fn item_types(items: &[Value]) -> Vec<String> {
     items
         .iter()
-        .map(|item| item.get("type").and_then(Value::as_str).unwrap_or("?").to_string())
+        .map(|item| {
+            item.get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string()
+        })
         .collect()
 }
 
@@ -698,15 +744,22 @@ fn hash128(bytes: &[u8]) -> u128 {
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn unix_ms(time: SystemTime) -> u128 {
-    time.duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+    time.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
@@ -717,10 +770,16 @@ mod tests {
     #[test]
     fn credentials_are_redacted_and_other_headers_kept() {
         let mut headers = HeaderMap::new();
-        headers.insert("Authorization", HeaderValue::from_static("Bearer secret-token"));
+        headers.insert(
+            "Authorization",
+            HeaderValue::from_static("Bearer secret-token"),
+        );
         headers.insert("chatgpt-account-id", HeaderValue::from_static("acct-123"));
         headers.insert("x-api-key", HeaderValue::from_static("sk-secret"));
-        headers.insert("OpenAI-Beta", HeaderValue::from_static("responses=experimental"));
+        headers.insert(
+            "OpenAI-Beta",
+            HeaderValue::from_static("responses=experimental"),
+        );
         let map = redacted_headers(&headers);
         assert_eq!(map["authorization"], "[REDACTED]");
         assert_eq!(map["chatgpt-account-id"], "[REDACTED]");
@@ -756,23 +815,51 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-codex-turn-state", HeaderValue::from_static("turn-token"));
         let map = redacted_headers(&headers);
-        assert_eq!(map["x-codex-turn-state"], format!("sha256:{}", hex_sha256(b"turn-token")));
+        assert_eq!(
+            map["x-codex-turn-state"],
+            format!("sha256:{}", hex_sha256(b"turn-token"))
+        );
     }
 
     #[test]
     fn sanitized_names_stay_inside_the_trace_dir() {
         let dir = Path::new("traces");
-        for key in ["", ".", "..", "...", "../..", "../../etc", "a/../..", "..\\..", "C:\\x", "/abs", ".hidden", "trailing.", "CON", "nul.txt", "Lpt1"] {
+        for key in [
+            "",
+            ".",
+            "..",
+            "...",
+            "../..",
+            "../../etc",
+            "a/../..",
+            "..\\..",
+            "C:\\x",
+            "/abs",
+            ".hidden",
+            "trailing.",
+            "CON",
+            "nul.txt",
+            "Lpt1",
+        ] {
             let name = sanitize(key);
-            assert!(!name.is_empty() && name != "." && name != "..", "{key:?} -> {name:?}");
-            assert!(!name.starts_with('.') && !name.ends_with('.'), "{key:?} -> {name:?}");
+            assert!(
+                !name.is_empty() && name != "." && name != "..",
+                "{key:?} -> {name:?}"
+            );
+            assert!(
+                !name.starts_with('.') && !name.ends_with('.'),
+                "{key:?} -> {name:?}"
+            );
             assert!(!name.contains(['/', '\\', ':']), "{key:?} -> {name:?}");
             let joined = dir.join(&name);
             assert_eq!(joined.parent(), Some(dir), "{key:?} -> {name:?}");
             assert_eq!(joined.components().count(), 2, "{key:?} -> {name:?}");
         }
         // Ordinary keys keep their readable names; unusable ones stay distinct.
-        assert_eq!(sanitize("arko:conversation:x"), "arko_conversation_x-ed168f36ad25bfa2");
+        assert_eq!(
+            sanitize("arko:conversation:x"),
+            "arko_conversation_x-ed168f36ad25bfa2"
+        );
         assert_ne!(sanitize("."), sanitize(".."));
         assert_ne!(sanitize(""), sanitize("."));
         assert!(sanitize(&"k".repeat(1000)).len() < 128);
@@ -792,15 +879,27 @@ mod tests {
         assert_eq!(sanitize("TEAM_A"), "team_a-a44a58ae06e1266c");
         // A key that looks like a hashed name is hashed too, so it can't
         // take the directory of the key that hashes to it.
-        assert_eq!(sanitize("team_a-65f838a2fbff37d8"), "team_a-65f838a2fbff37d8-288075f2d9c64d12");
+        assert_eq!(
+            sanitize("team_a-65f838a2fbff37d8"),
+            "team_a-65f838a2fbff37d8-288075f2d9c64d12"
+        );
         assert_ne!(sanitize("team_a-65f838a2fbff37d8"), sanitize("team/a"));
-        for key in ["team_a-65f838a2fbff37d", "team_a-65f838a2fbff37dg", "team_a_65f838a2fbff37d8"] {
+        for key in [
+            "team_a-65f838a2fbff37d",
+            "team_a-65f838a2fbff37dg",
+            "team_a_65f838a2fbff37d8",
+        ] {
             assert_eq!(sanitize(key), key, "not a hashed name");
         }
         // Distinct even compared case-insensitively.
-        let keys = ["team_a", "team/a", "team:a", "team\\a", "Team_a", "TEAM_A", "team a", "tëam_a", "CON", "con", ".", ".."];
-        let names: std::collections::HashSet<String> =
-            keys.iter().map(|key| sanitize(key).to_ascii_lowercase()).collect();
+        let keys = [
+            "team_a", "team/a", "team:a", "team\\a", "Team_a", "TEAM_A", "team a", "tëam_a", "CON",
+            "con", ".", "..",
+        ];
+        let names: std::collections::HashSet<String> = keys
+            .iter()
+            .map(|key| sanitize(key).to_ascii_lowercase())
+            .collect();
         assert_eq!(names.len(), keys.len(), "{names:?}");
     }
 
@@ -809,20 +908,36 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("arko-trace-unit-{}", uuid::Uuid::new_v4()));
         let trace = RequestTrace::new(&dir);
         let item = json!({"role": "user", "content": "a"});
-        let usage = |input: u64, cached: u64| json!({"status": "completed",
-            "usage": {"input_tokens": input, "input_tokens_details": {"cached_tokens": cached}, "output_tokens": 1}});
-        trace.begin("k", "m", &body(std::slice::from_ref(&item), "s"), false)
+        let usage = |input: u64, cached: u64| {
+            json!({"status": "completed",
+            "usage": {"input_tokens": input, "input_tokens_details": {"cached_tokens": cached}, "output_tokens": 1}})
+        };
+        trace
+            .begin("k", "m", &body(std::slice::from_ref(&item), "s"), false)
             .finish(&usage(i64::MAX as u64, 0));
-        trace.begin("k", "m", &body(std::slice::from_ref(&item), "s"), false)
+        trace
+            .begin("k", "m", &body(std::slice::from_ref(&item), "s"), false)
             .finish(&usage(u64::MAX, u64::MAX));
-        trace.begin("k", "m", &body(std::slice::from_ref(&item), "s"), false)
+        trace
+            .begin("k", "m", &body(std::slice::from_ref(&item), "s"), false)
             .finish(&usage(0, 0));
-        let lines: Vec<Value> = fs::read_to_string(dir.join("calls.jsonl")).unwrap()
-            .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let lines: Vec<Value> = fs::read_to_string(dir.join("calls.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
         assert_eq!(lines[1]["previous_found"], true);
-        assert_eq!(lines[1]["shortfall_tokens"], i64::MIN, "i64::MAX - u64::MAX");
+        assert_eq!(
+            lines[1]["shortfall_tokens"],
+            i64::MIN,
+            "i64::MAX - u64::MAX"
+        );
         assert_eq!(lines[2]["previous_found"], false);
-        assert_eq!(lines[2]["shortfall_tokens"], i64::MAX, "u64::MAX - 0, clamped");
+        assert_eq!(
+            lines[2]["shortfall_tokens"],
+            i64::MAX,
+            "u64::MAX - 0, clamped"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -831,10 +946,23 @@ mod tests {
         let root = std::env::temp_dir().join(format!("arko-trace-unit-{}", uuid::Uuid::new_v4()));
         let dir = root.join("trace");
         let trace = RequestTrace::new(&dir);
-        trace.begin("..", "m", &body(&[json!({"role": "user", "content": "a"})], "s"), false)
+        trace
+            .begin(
+                "..",
+                "m",
+                &body(&[json!({"role": "user", "content": "a"})], "s"),
+                false,
+            )
             .finish(&json!({"status": "completed"}));
-        let outside: Vec<_> = fs::read_dir(&root).unwrap().map(|entry| entry.unwrap().file_name()).collect();
-        assert_eq!(outside, ["trace"], "nothing is written next to the trace dir");
+        let outside: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            outside,
+            ["trace"],
+            "nothing is written next to the trace dir"
+        );
         let conversation_dir = dir.join(sanitize(".."));
         assert!(conversation_dir.join("0001-response.json").exists());
         fs::remove_dir_all(&root).ok();
@@ -857,7 +985,12 @@ mod tests {
         std::mem::forget(first);
         trace.remember_input_tokens("k", seq1, Some(5000));
 
-        let second = trace.begin("k", "m", &body(&[a.clone(), b.clone(), c.clone()], "sys"), false);
+        let second = trace.begin(
+            "k",
+            "m",
+            &body(&[a.clone(), b.clone(), c.clone()], "sys"),
+            false,
+        );
         assert_eq!(second.prefix["previous_is_prefix"], true);
         assert_eq!(second.prefix["common_items"], 1);
         assert_eq!(second.prefix["instructions_changed"], false);
@@ -893,32 +1026,44 @@ mod tests {
         let (sys, sys2) = (hash_value(&json!("sys")), hash_value(&json!("sys2")));
         let tools = hash_value(&json!([{"name": "t"}]));
 
-        assert_eq!(prefix(std::slice::from_ref(&a), "sys"), json!({
-            "first_request": true, "items": 1, "input_bytes": 31,
-            "instructions_sha256": sys, "tools_sha256": tools,
-        }));
-        assert_eq!(prefix(&[a.clone(), b.clone(), c.clone()], "sys"), json!({
-            "first_request": false, "previous_is_prefix": true,
-            "common_items": 1, "previous_items": 1, "items": 3,
-            "common_input_bytes": 30, "previous_input_bytes": 31, "input_bytes": 96,
-            "instructions_sha256": sys, "tools_sha256": tools,
-            "instructions_changed": false, "tools_changed": false,
-        }));
+        assert_eq!(
+            prefix(std::slice::from_ref(&a), "sys"),
+            json!({
+                "first_request": true, "items": 1, "input_bytes": 31,
+                "instructions_sha256": sys, "tools_sha256": tools,
+            })
+        );
+        assert_eq!(
+            prefix(&[a.clone(), b.clone(), c.clone()], "sys"),
+            json!({
+                "first_request": false, "previous_is_prefix": true,
+                "common_items": 1, "previous_items": 1, "items": 3,
+                "common_input_bytes": 30, "previous_input_bytes": 31, "input_bytes": 96,
+                "instructions_sha256": sys, "tools_sha256": tools,
+                "instructions_changed": false, "tools_changed": false,
+            })
+        );
         let rewritten = json!({"role": "assistant", "content": "B"});
-        assert_eq!(prefix(&[a.clone(), rewritten, c.clone()], "sys2"), json!({
-            "first_request": false, "previous_is_prefix": false,
-            "common_items": 1, "previous_items": 3, "items": 3,
-            "common_input_bytes": 43, "previous_input_bytes": 96, "input_bytes": 96,
-            "instructions_sha256": sys2, "tools_sha256": tools,
-            "instructions_changed": true, "tools_changed": false,
-        }));
-        assert_eq!(prefix(std::slice::from_ref(&a), "sys2"), json!({
-            "first_request": false, "previous_is_prefix": false,
-            "common_items": 1, "previous_items": 3, "items": 1,
-            "common_input_bytes": 30, "previous_input_bytes": 96, "input_bytes": 31,
-            "instructions_sha256": sys2, "tools_sha256": tools,
-            "instructions_changed": false, "tools_changed": false,
-        }));
+        assert_eq!(
+            prefix(&[a.clone(), rewritten, c.clone()], "sys2"),
+            json!({
+                "first_request": false, "previous_is_prefix": false,
+                "common_items": 1, "previous_items": 3, "items": 3,
+                "common_input_bytes": 43, "previous_input_bytes": 96, "input_bytes": 96,
+                "instructions_sha256": sys2, "tools_sha256": tools,
+                "instructions_changed": true, "tools_changed": false,
+            })
+        );
+        assert_eq!(
+            prefix(std::slice::from_ref(&a), "sys2"),
+            json!({
+                "first_request": false, "previous_is_prefix": false,
+                "common_items": 1, "previous_items": 3, "items": 1,
+                "common_input_bytes": 30, "previous_input_bytes": 96, "input_bytes": 31,
+                "instructions_sha256": sys2, "tools_sha256": tools,
+                "instructions_changed": false, "tools_changed": false,
+            })
+        );
     }
 
     /// Only the most recently used conversations keep their serialized
@@ -928,7 +1073,8 @@ mod tests {
     fn retained_input_is_bounded() {
         let dir = std::env::temp_dir().join(format!("arko-trace-unit-{}", uuid::Uuid::new_v4()));
         let trace = RequestTrace::new(&dir);
-        let item = |n: usize| json!({"role": "user", "content": format!("{n}:{}", "x".repeat(1000))});
+        let item =
+            |n: usize| json!({"role": "user", "content": format!("{n}:{}", "x".repeat(1000))});
         let first = |key: &str| {
             let call = trace.begin(key, "m", &body(&[item(0)], "s"), false);
             std::mem::forget(call);
@@ -937,10 +1083,19 @@ mod tests {
             first(&format!("conversation-{n}"));
         }
         let one_input = json!([item(0)]).to_string().len();
-        assert!(trace.retained_input_bytes() <= RETAINED_INPUTS * one_input, "{}", trace.retained_input_bytes());
+        assert!(
+            trace.retained_input_bytes() <= RETAINED_INPUTS * one_input,
+            "{}",
+            trace.retained_input_bytes()
+        );
 
         // The oldest conversation lost its bytes but not its item hashes.
-        let next = trace.begin("conversation-0", "m", &body(&[item(0), item(1)], "s"), false);
+        let next = trace.begin(
+            "conversation-0",
+            "m",
+            &body(&[item(0), item(1)], "s"),
+            false,
+        );
         assert_eq!(next.prefix["previous_is_prefix"], true);
         assert_eq!(next.prefix["common_items"], 1);
         assert_eq!(next.prefix["previous_input_bytes"], one_input);
@@ -960,7 +1115,11 @@ mod tests {
             first(&format!("other-{n}"));
         }
         failing.fail("rate limited", None);
-        assert!(trace.retained_input_bytes() <= RETAINED_INPUTS * one_input, "{}", trace.retained_input_bytes());
+        assert!(
+            trace.retained_input_bytes() <= RETAINED_INPUTS * one_input,
+            "{}",
+            trace.retained_input_bytes()
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -970,18 +1129,37 @@ mod tests {
         let trace = RequestTrace::new(&dir);
         let item = json!({"role": "user", "content": "a"});
 
-        let first = trace.begin("arko:conversation:x", "gpt-6-astra", &body(std::slice::from_ref(&item), "s"), true);
+        let first = trace.begin(
+            "arko:conversation:x",
+            "gpt-6-astra",
+            &body(std::slice::from_ref(&item), "s"),
+            true,
+        );
         first.finish(&json!({"id": "resp_0123456789abcdef99", "status": "completed", "model": "gpt-6-astra",
             "output": [], "usage": {"input_tokens": 4000, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 10}}));
 
-        let mut second = trace.begin("arko:conversation:x", "gpt-6-astra", &body(&[item.clone(), item], "s"), true);
-        second.on_event("response.created", &json!({"response": {"model": "gpt-5.6-luna"}}));
-        second.on_event("response.output_item.done", &json!({"item": {"type": "reasoning", "encrypted_content": "e"}}));
+        let mut second = trace.begin(
+            "arko:conversation:x",
+            "gpt-6-astra",
+            &body(&[item.clone(), item], "s"),
+            true,
+        );
+        second.on_event(
+            "response.created",
+            &json!({"response": {"model": "gpt-5.6-luna"}}),
+        );
+        second.on_event(
+            "response.output_item.done",
+            &json!({"item": {"type": "reasoning", "encrypted_content": "e"}}),
+        );
         second.finish(&json!({"id": "resp_0123456789abcdef77", "status": "completed", "model": "gpt-5.6-luna",
             "output": [], "usage": {"input_tokens": 4500, "input_tokens_details": {"cached_tokens": 3968}, "output_tokens": 10}}));
 
-        let lines: Vec<Value> = fs::read_to_string(dir.join("calls.jsonl")).unwrap()
-            .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let lines: Vec<Value> = fs::read_to_string(dir.join("calls.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0]["cached_tokens"], 0);
         assert_eq!(lines[0]["cached_tokens_present"], true);
@@ -992,9 +1170,16 @@ mod tests {
         assert_eq!(lines[1]["streamed_reasoning_with_encrypted_content"], 1);
         assert_eq!(lines[1]["completed_output_count"], 0);
         assert_eq!(lines[1]["response_id_prefix"], "0123456789abcdef");
-        assert_eq!(lines[1]["conversation_dir"], "arko_conversation_x-ed168f36ad25bfa2");
+        assert_eq!(
+            lines[1]["conversation_dir"],
+            "arko_conversation_x-ed168f36ad25bfa2"
+        );
         let conversation_dir = lines[1]["conversation_dir"].as_str().unwrap();
-        assert!(dir.join(conversation_dir).join("0002-response.json").exists());
+        assert!(
+            dir.join(conversation_dir)
+                .join("0002-response.json")
+                .exists()
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -1002,20 +1187,32 @@ mod tests {
     fn a_retry_is_compared_with_the_call_before_the_failed_attempt() {
         let dir = std::env::temp_dir().join(format!("arko-trace-unit-{}", uuid::Uuid::new_v4()));
         let trace = RequestTrace::new(&dir);
-        let (a, b) = (json!({"role": "user", "content": "a"}), json!({"role": "user", "content": "b"}));
-        let usage = |input: u64, cached: u64| json!({"status": "completed",
-            "usage": {"input_tokens": input, "input_tokens_details": {"cached_tokens": cached}, "output_tokens": 1}});
+        let (a, b) = (
+            json!({"role": "user", "content": "a"}),
+            json!({"role": "user", "content": "b"}),
+        );
+        let usage = |input: u64, cached: u64| {
+            json!({"status": "completed",
+            "usage": {"input_tokens": input, "input_tokens_details": {"cached_tokens": cached}, "output_tokens": 1}})
+        };
 
-        trace.begin("k", "m", &body(std::slice::from_ref(&a), "s"), true).finish(&usage(4000, 0));
-        trace.begin("k", "m", &body(&[a.clone(), b.clone()], "s"), true).fail("rate limited", None);
+        trace
+            .begin("k", "m", &body(std::slice::from_ref(&a), "s"), true)
+            .finish(&usage(4000, 0));
+        trace
+            .begin("k", "m", &body(&[a.clone(), b.clone()], "s"), true)
+            .fail("rate limited", None);
         let retry = trace.begin("k", "m", &body(&[a.clone(), b.clone()], "s"), true);
         assert_eq!(retry.seq, 3);
         assert_eq!(retry.prefix["previous_items"], 1);
         assert_eq!(retry.previous_input_tokens, Some(4000));
         retry.finish(&usage(4500, 3968));
 
-        let lines: Vec<Value> = fs::read_to_string(dir.join("calls.jsonl")).unwrap()
-            .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let lines: Vec<Value> = fs::read_to_string(dir.join("calls.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
         assert_eq!(lines[1]["status"], "error");
         assert_eq!(lines[2]["previous_found"], true);
         assert_eq!(lines[2]["turn_state_sent"], false);

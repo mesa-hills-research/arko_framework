@@ -822,7 +822,11 @@ async fn classifier_refusals_are_not_kept_or_retried() {
             .any(|message| message.role == ai::Role::Assistant),
         "the refused turn must not be added to history"
     );
-    assert_eq!(task.usage_history.len(), 1, "refused calls are still accounted for");
+    assert_eq!(
+        task.usage_history.len(),
+        1,
+        "refused calls are still accounted for"
+    );
     let mut reported = 0;
     while let Ok(event) = events.try_recv() {
         assert!(!matches!(event, AgentEvent::RetryScheduled { .. }));
@@ -903,9 +907,16 @@ fn assert_model_refusal_reported(task: &Task, messages_before: usize, events: &[
         .filter(|message| message.role == ai::Role::Assistant)
         .collect();
     assert_eq!(added.len(), 1, "the refused turn is kept once");
-    let text: String = added[0].content.iter().filter_map(ai::Content::as_text).collect();
+    let text: String = added[0]
+        .content
+        .iter()
+        .filter_map(ai::Content::as_text)
+        .collect();
     assert_eq!(text, "I can't help with that.");
-    assert!(added[0].tool_calls.is_empty(), "calls of a refused turn are not kept");
+    assert!(
+        added[0].tool_calls.is_empty(),
+        "calls of a refused turn are not kept"
+    );
     assert_eq!(task.usage_history.len(), 1);
     let refusals: Vec<_> = events
         .iter()
@@ -957,7 +968,8 @@ async fn native_mode_model_refusals_are_kept_reported_and_not_retried() {
 #[tokio::test(start_paused = true)]
 async fn a_kept_openai_refusal_replays_its_items_without_the_dropped_calls() {
     use serde_json::json;
-    let reasoning = json!({"type":"reasoning", "id":"rs_1", "summary":[], "encrypted_content":"enc_1"});
+    let reasoning =
+        json!({"type":"reasoning", "id":"rs_1", "summary":[], "encrypted_content":"enc_1"});
     let refusal_message = json!({"type":"message", "id":"msg_1", "role":"assistant",
         "content":[{"type":"refusal", "refusal":"I can't help with that."}]});
     let call = json!({"type":"function_call", "id":"fc_1", "call_id":"refused-call",
@@ -981,11 +993,17 @@ async fn a_kept_openai_refusal_replays_its_items_without_the_dropped_calls() {
     response.openai_turn_state = Some("turn-1".into());
     let (task, messages_before, events) = run_refused_turn(
         ToolCallingMode::Native,
-        vec![ai::StreamEvent::Refusal(model_refusal()), ai::StreamEvent::End(response)],
+        vec![
+            ai::StreamEvent::Refusal(model_refusal()),
+            ai::StreamEvent::End(response),
+        ],
     )
     .await;
     assert_model_refusal_reported(&task, messages_before, &events);
-    assert_eq!(task.conversation.current_openai_turn_state(), Some("turn-1"));
+    assert_eq!(
+        task.conversation.current_openai_turn_state(),
+        Some("turn-1")
+    );
 
     // The trace records the next request before it is sent; nothing listens
     // on the port, so the call itself fails. Real sockets run on the real
@@ -1003,17 +1021,26 @@ async fn a_kept_openai_refusal_replays_its_items_without_the_dropped_calls() {
             ai::providers::openai::OpenAIClient::new("test")
                 .with_base_url(format!("http://127.0.0.1:{port}")),
         );
-    assert!(client.generate_text(&task.conversation, Default::default()).await.is_err());
+    assert!(
+        client
+            .generate_text(&task.conversation, Default::default())
+            .await
+            .is_err()
+    );
     let request_file = std::fs::read_dir(&dir)
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .find(|path| path.is_dir())
         .unwrap()
         .join("0001-request.json");
-    let request: Value = serde_json::from_str(&std::fs::read_to_string(request_file).unwrap()).unwrap();
+    let request: Value =
+        serde_json::from_str(&std::fs::read_to_string(request_file).unwrap()).unwrap();
     std::fs::remove_dir_all(&dir).ok();
     let input = request["body"]["input"].as_array().unwrap();
-    assert!(!input.iter().any(|item| item["type"] == "function_call"), "{input:?}");
+    assert!(
+        !input.iter().any(|item| item["type"] == "function_call"),
+        "{input:?}"
+    );
     let replayed: Vec<&Value> = input
         .iter()
         .filter(|item| item["type"] == "reasoning" || item["role"] == "assistant")
@@ -1047,11 +1074,25 @@ async fn a_streamed_model_refusal_without_a_final_response_is_still_a_refusal() 
         let kept: Vec<String> = task.conversation.messages[messages_before..]
             .iter()
             .filter(|message| message.role == ai::Role::Assistant)
-            .map(|message| message.content.iter().filter_map(ai::Content::as_text).collect())
+            .map(|message| {
+                message
+                    .content
+                    .iter()
+                    .filter_map(ai::Content::as_text)
+                    .collect()
+            })
             .collect();
         assert_eq!(kept, ["I can't help with that."]);
-        assert!(events.iter().any(|event| matches!(event, AgentEvent::RefusalReceived(_))));
-        assert!(!events.iter().any(|event| matches!(event, AgentEvent::RetryScheduled { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::RefusalReceived(_)))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::RetryScheduled { .. }))
+        );
     }
 }
 
@@ -1104,7 +1145,10 @@ async fn tool_calls_with_invalid_json_arguments_are_rejected_not_run() {
     let (mut rejected, mut results) = (0, 0);
     while let Ok(event) = events.try_recv() {
         match event {
-            AgentEvent::ToolRejected { reason: Some(reason), .. } => {
+            AgentEvent::ToolRejected {
+                reason: Some(reason),
+                ..
+            } => {
                 assert!(reason.contains("not valid JSON"), "{reason}");
                 rejected += 1;
             }
@@ -1115,9 +1159,9 @@ async fn tool_calls_with_invalid_json_arguments_are_rejected_not_run() {
     assert_eq!((rejected, results), (1, 1));
     assert!(task.conversation.messages.iter().any(|message| {
         message.content.iter().any(|content| {
-            content
-                .as_tool_result()
-                .is_some_and(|result| result.is_error && result.call_id.as_deref() == Some("broken"))
+            content.as_tool_result().is_some_and(|result| {
+                result.is_error && result.call_id.as_deref() == Some("broken")
+            })
         })
     }));
 }
@@ -1150,7 +1194,11 @@ async fn refusals_reported_as_errors_are_reported_and_drop_partial_text() {
             } else {
                 Err(blocked())
             };
-            agent.scripted_responses.get_mut().unwrap().push_back(response);
+            agent
+                .scripted_responses
+                .get_mut()
+                .unwrap()
+                .push_back(response);
             let task = timeout(Duration::from_secs(1), agent.run())
                 .await
                 .unwrap()

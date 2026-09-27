@@ -144,7 +144,10 @@ mod tests {
             // Hints parsed from responses are capped, so a caller can add the
             // delay to the current time (as arko_index's scheduler does).
             let delay = policy.delay(3, Some(MAX_SERVER_DELAY_HINT), sample);
-            assert!(delay <= MAX_SERVER_DELAY_HINT + Duration::from_secs(30), "{delay:?}");
+            assert!(
+                delay <= MAX_SERVER_DELAY_HINT + Duration::from_secs(30),
+                "{delay:?}"
+            );
             let _ = std::time::Instant::now() + delay;
         }
     }

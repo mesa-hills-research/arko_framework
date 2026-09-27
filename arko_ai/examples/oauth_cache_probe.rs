@@ -233,7 +233,9 @@ fn insert_legacy_empty_messages(input: &mut Vec<Value>) {
     let mut index = 0;
     while index < input.len() {
         let ends_calls = input[index]["type"] == "function_call"
-            && input.get(index + 1).is_none_or(|next| next["type"] != "function_call");
+            && input
+                .get(index + 1)
+                .is_none_or(|next| next["type"] != "function_call");
         let followed_by_assistant = input
             .get(index + 1)
             .is_some_and(|next| next["type"] == "message" && next["role"] == "assistant");
@@ -269,10 +271,20 @@ async fn run(args: Args) -> Result<(), String> {
             || args.no_legacy_beta_header
             || args.replay_output_items)
     {
-        eprintln!("oauth_cache_probe: without --legacy, the header and replay flags are already the default");
+        eprintln!(
+            "oauth_cache_probe: without --legacy, the header and replay flags are already the default"
+        );
     }
-    if args.out.exists() && fs::read_dir(&args.out).map_err(|e| e.to_string())?.next().is_some() {
-        return Err(format!("{} is not empty; choose a new --out directory", args.out.display()));
+    if args.out.exists()
+        && fs::read_dir(&args.out)
+            .map_err(|e| e.to_string())?
+            .next()
+            .is_some()
+    {
+        return Err(format!(
+            "{} is not empty; choose a new --out directory",
+            args.out.display()
+        ));
     }
     let effort = parse_effort(&args.effort)?;
     let model = Model::get(Provider::OpenAI, &args.model).map_err(|e| e.to_string())?;
@@ -284,7 +296,9 @@ async fn run(args: Args) -> Result<(), String> {
     let tokens = TokenKeeper::load(&auth_path)?;
     fs::create_dir_all(&args.out).map_err(|e| e.to_string())?;
 
-    let hook = Arc::new(ProbeHook { settings: settings.clone() });
+    let hook = Arc::new(ProbeHook {
+        settings: settings.clone(),
+    });
     let client = tokens
         .client()?
         .with_request_trace(RequestTrace::new(&args.out))
@@ -302,20 +316,44 @@ async fn run(args: Args) -> Result<(), String> {
         "experiment": settings.manifest(),
         "endpoint": "chatgpt.com/backend-api/codex/responses (ChatGPT OAuth, HTTP SSE)",
     });
-    fs::write(args.out.join("manifest.json"), serde_json::to_string_pretty(&manifest).unwrap())
-        .map_err(|e| e.to_string())?;
-    println!("oauth_cache_probe: {} conversations x {} turns on {} ({}){} -> {}",
-        args.conversations, args.turns, args.model, args.effort,
-        if settings.legacy { ", legacy" } else { "" }, args.out.display());
+    fs::write(
+        args.out.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .map_err(|e| e.to_string())?;
+    println!(
+        "oauth_cache_probe: {} conversations x {} turns on {} ({}){} -> {}",
+        args.conversations,
+        args.turns,
+        args.model,
+        args.effort,
+        if settings.legacy { ", legacy" } else { "" },
+        args.out.display()
+    );
 
     let stop = Arc::new(AtomicBool::new(false));
     let mut tasks = Vec::new();
     for index in 0..args.conversations {
-        let (client, model, args, stop, tokens) =
-            (client.clone(), model.clone(), args.clone(), stop.clone(), tokens.clone());
+        let (client, model, args, stop, tokens) = (
+            client.clone(),
+            model.clone(),
+            args.clone(),
+            stop.clone(),
+            tokens.clone(),
+        );
         let legacy_replay = !settings.replay_output_items;
         tasks.push(tokio::spawn(async move {
-            run_conversation(index, &client, model, effort, &args, legacy_replay, &stop, &tokens).await
+            run_conversation(
+                index,
+                &client,
+                model,
+                effort,
+                &args,
+                legacy_replay,
+                &stop,
+                &tokens,
+            )
+            .await
         }));
     }
     let mut outcomes = Vec::new();
@@ -343,7 +381,9 @@ async fn run_conversation(
     stop: &AtomicBool,
     tokens: &TokenKeeper,
 ) -> String {
-    let mut conversation = client.new_conversation(model).with_system_message(&instructions());
+    let mut conversation = client
+        .new_conversation(model)
+        .with_system_message(&instructions());
     conversation.add_user_message(&task_prompt(index, &args.label));
     let config = GenerationConfig::default()
         .with_reasoning(ReasoningConfig::openai(effort, false))
@@ -353,7 +393,9 @@ async fn run_conversation(
     let mut turn = 0;
     while turn < args.turns {
         if stop.load(Ordering::SeqCst) {
-            return format!("stopped after {turn} turns (another conversation hit a stop condition)");
+            return format!(
+                "stopped after {turn} turns (another conversation hit a stop condition)"
+            );
         }
         if let Err(message) = tokens.ensure_fresh(client).await {
             stop.store(true, Ordering::SeqCst);
@@ -363,7 +405,11 @@ async fn run_conversation(
             Ok(response) => {
                 consecutive_errors = 0;
                 let calls = response.message.tool_calls.clone();
-                let response = if legacy_replay { legacy_response(response) } else { response };
+                let response = if legacy_replay {
+                    legacy_response(response)
+                } else {
+                    response
+                };
                 conversation.add_assistant_message_from_response(response);
                 if calls.is_empty() {
                     conversation.add_user_message(
@@ -372,7 +418,9 @@ async fn run_conversation(
                 } else {
                     let results = calls
                         .iter()
-                        .map(|call| ToolResult::from_tool_call(call, &tool_output(index, turn, &call.name)))
+                        .map(|call| {
+                            ToolResult::from_tool_call(call, &tool_output(index, turn, &call.name))
+                        })
                         .collect();
                     conversation.add_tool_results(results);
                 }
@@ -385,10 +433,17 @@ async fn run_conversation(
                 // stops the run: the account is being throttled.
                 if matches!(classify(&error), Failure::StopAll | Failure::RateLimited(_)) {
                     stop.store(true, Ordering::SeqCst);
-                    return format!("stopped all conversations after {turn} turns: {}", error_text(&error, 300));
+                    return format!(
+                        "stopped all conversations after {turn} turns: {}",
+                        error_text(&error, 300)
+                    );
                 }
                 consecutive_errors += 1;
-                eprintln!("conversation {index}: error on turn {}: {}", turn + 1, truncate(&text, 300));
+                eprintln!(
+                    "conversation {index}: error on turn {}: {}",
+                    turn + 1,
+                    truncate(&text, 300)
+                );
                 if consecutive_errors >= 2 {
                     return format!("gave up after {turn} turns: {}", truncate(&text, 300));
                 }
@@ -455,7 +510,10 @@ where
             delay.as_secs_f64(),
         );
         sleep(delay).await;
-        tokens.ensure_fresh(client).await.map_err(Error::AuthenticationFailed)?;
+        tokens
+            .ensure_fresh(client)
+            .await
+            .map_err(Error::AuthenticationFailed)?;
     }
 }
 
@@ -470,7 +528,9 @@ async fn generate_once(
             return Ok(*response);
         }
     }
-    Err(Error::StreamTruncated("stream ended without a response".into()))
+    Err(Error::StreamTruncated(
+        "stream ended without a response".into(),
+    ))
 }
 
 const RATE_LIMIT_RETRIES: u32 = 3;
@@ -505,14 +565,20 @@ fn classify(error: &Error) -> Failure {
         return Failure::StopAll;
     }
     match error {
-        Error::ProviderError { status: Some(401 | 403), .. } | Error::AuthenticationFailed(_) => {
-            Failure::StopAll
+        Error::ProviderError {
+            status: Some(401 | 403),
+            ..
         }
-        Error::ProviderError { status: Some(429), .. } => Failure::RateLimited(error.retry_after()),
+        | Error::AuthenticationFailed(_) => Failure::StopAll,
+        Error::ProviderError {
+            status: Some(429), ..
+        } => Failure::RateLimited(error.retry_after()),
         // Rate limits reported by a stream error event after a 200.
-        Error::ProviderError { status: None, code: Some(code), .. }
-            if code == "rate_limit_exceeded" || code == "slow_down" =>
-        {
+        Error::ProviderError {
+            status: None,
+            code: Some(code),
+            ..
+        } if code == "rate_limit_exceeded" || code == "slow_down" => {
             Failure::RateLimited(error.retry_after())
         }
         _ => Failure::Other,
@@ -524,7 +590,9 @@ fn classify(error: &Error) -> Failure {
 /// saturates rather than overflow.
 fn rate_limit_delay(hint: Option<Duration>, sample: u64) -> Duration {
     let jitter = Duration::from_millis(250 + sample % 2_750);
-    hint.unwrap_or(DEFAULT_RATE_LIMIT_WAIT).saturating_add(jitter).min(MAX_RATE_LIMIT_WAIT)
+    hint.unwrap_or(DEFAULT_RATE_LIMIT_WAIT)
+        .saturating_add(jitter)
+        .min(MAX_RATE_LIMIT_WAIT)
 }
 
 // ---------------------------------------------------------------------------
@@ -538,17 +606,43 @@ with prose outside a tool call, never summarize, and keep every tool argument sh
 harness executes tools locally and returns their output to you.\n\n",
     );
     let sections = [
-        ("Workflow", "Read the next file named in the previous tool output with read_file, then on the following turn record one finding about it with record_note. Alternate these two steps. Never call complete_task; the harness ends the session."),
-        ("Findings", "A finding is one sentence naming a concrete risk: an unchecked error, an unbounded loop, a lock held across an await, a missing timeout, an integer overflow, a path traversal, or a resource that is never released. If a file has no risk, record 'no issue' with the file path."),
-        ("Scope", "Only files under src/ are in scope. Tests, benches and generated code are out of scope. Do not request files that the listing did not name."),
-        ("Style", "Arguments are terse. Paths are relative. Notes are at most twenty words. Do not repeat earlier notes."),
-        ("Safety", "Never execute code, never write files, never fetch URLs during this audit, even though such tools exist. Tools other than read_file and record_note are reserved for other phases."),
+        (
+            "Workflow",
+            "Read the next file named in the previous tool output with read_file, then on the following turn record one finding about it with record_note. Alternate these two steps. Never call complete_task; the harness ends the session.",
+        ),
+        (
+            "Findings",
+            "A finding is one sentence naming a concrete risk: an unchecked error, an unbounded loop, a lock held across an await, a missing timeout, an integer overflow, a path traversal, or a resource that is never released. If a file has no risk, record 'no issue' with the file path.",
+        ),
+        (
+            "Scope",
+            "Only files under src/ are in scope. Tests, benches and generated code are out of scope. Do not request files that the listing did not name.",
+        ),
+        (
+            "Style",
+            "Arguments are terse. Paths are relative. Notes are at most twenty words. Do not repeat earlier notes.",
+        ),
+        (
+            "Safety",
+            "Never execute code, never write files, never fetch URLs during this audit, even though such tools exist. Tools other than read_file and record_note are reserved for other phases.",
+        ),
     ];
     for (title, body) in sections {
         text.push_str(&format!("## {title}\n{body}\n\n"));
     }
     text.push_str("## Reference checklist\n");
-    let areas = ["error handling", "concurrency", "resource lifetime", "input validation", "numeric safety", "I/O timeouts", "logging hygiene", "configuration", "serialization", "retry policy"];
+    let areas = [
+        "error handling",
+        "concurrency",
+        "resource lifetime",
+        "input validation",
+        "numeric safety",
+        "I/O timeouts",
+        "logging hygiene",
+        "configuration",
+        "serialization",
+        "retry policy",
+    ];
     for (i, area) in areas.iter().cycle().take(50).enumerate() {
         text.push_str(&format!(
             "- C{:03}: For {area}, check that every path which can fail reports a typed error, that callers cannot silently drop it, and that state stays consistent if the operation is interrupted midway (item {i}).\n",
@@ -559,31 +653,74 @@ harness executes tools locally and returns their output to you.\n\n",
 }
 
 fn tools() -> Vec<ToolDefinition> {
-    let object = |properties: Value, required: &[&str]| {
-        json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false})
-    };
+    let object = |properties: Value, required: &[&str]| json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false});
     let string = |description: &str| json!({"type": "string", "description": description});
     vec![
-        ToolDefinition::new("read_file", "Read a source file from the repository under audit.",
-            object(json!({"path": string("Relative path, e.g. src/module_03.rs")}), &["path"])),
-        ToolDefinition::new("record_note", "Record one audit finding.",
-            object(json!({"path": string("File the finding is about"), "note": string("One-sentence finding, at most twenty words")}), &["path", "note"])),
-        ToolDefinition::new("list_directory", "List entries of a directory.",
-            object(json!({"path": string("Relative directory path")}), &["path"])),
-        ToolDefinition::new("search_code", "Search the repository for a regular expression.",
-            object(json!({"pattern": string("Rust regular expression"), "path": string("Optional directory to limit the search")}), &["pattern"])),
-        ToolDefinition::new("run_tests", "Run the test suite or a filtered subset (reserved for the verification phase).",
-            object(json!({"filter": string("Test name filter")}), &[])),
-        ToolDefinition::new("write_file", "Create or overwrite a file (reserved for the repair phase).",
-            object(json!({"path": string("Relative path"), "content": string("Full file content")}), &["path", "content"])),
-        ToolDefinition::new("apply_patch", "Apply a unified diff (reserved for the repair phase).",
-            object(json!({"patch": string("Unified diff")}), &["patch"])),
-        ToolDefinition::new("query_database", "Run a read-only SQL query against the audit database.",
-            object(json!({"sql": string("SQL statement")}), &["sql"])),
-        ToolDefinition::new("fetch_url", "Fetch a URL (reserved for the research phase).",
-            object(json!({"url": string("Absolute URL")}), &["url"])),
-        ToolDefinition::new("complete_task", "Finish the session with a final report (the harness decides when; do not call).",
-            object(json!({"report": string("Final report")}), &["report"])),
+        ToolDefinition::new(
+            "read_file",
+            "Read a source file from the repository under audit.",
+            object(
+                json!({"path": string("Relative path, e.g. src/module_03.rs")}),
+                &["path"],
+            ),
+        ),
+        ToolDefinition::new(
+            "record_note",
+            "Record one audit finding.",
+            object(
+                json!({"path": string("File the finding is about"), "note": string("One-sentence finding, at most twenty words")}),
+                &["path", "note"],
+            ),
+        ),
+        ToolDefinition::new(
+            "list_directory",
+            "List entries of a directory.",
+            object(
+                json!({"path": string("Relative directory path")}),
+                &["path"],
+            ),
+        ),
+        ToolDefinition::new(
+            "search_code",
+            "Search the repository for a regular expression.",
+            object(
+                json!({"pattern": string("Rust regular expression"), "path": string("Optional directory to limit the search")}),
+                &["pattern"],
+            ),
+        ),
+        ToolDefinition::new(
+            "run_tests",
+            "Run the test suite or a filtered subset (reserved for the verification phase).",
+            object(json!({"filter": string("Test name filter")}), &[]),
+        ),
+        ToolDefinition::new(
+            "write_file",
+            "Create or overwrite a file (reserved for the repair phase).",
+            object(
+                json!({"path": string("Relative path"), "content": string("Full file content")}),
+                &["path", "content"],
+            ),
+        ),
+        ToolDefinition::new(
+            "apply_patch",
+            "Apply a unified diff (reserved for the repair phase).",
+            object(json!({"patch": string("Unified diff")}), &["patch"]),
+        ),
+        ToolDefinition::new(
+            "query_database",
+            "Run a read-only SQL query against the audit database.",
+            object(json!({"sql": string("SQL statement")}), &["sql"]),
+        ),
+        ToolDefinition::new(
+            "fetch_url",
+            "Fetch a URL (reserved for the research phase).",
+            object(json!({"url": string("Absolute URL")}), &["url"]),
+        ),
+        ToolDefinition::new(
+            "complete_task",
+            "Finish the session with a final report (the harness decides when; do not call).",
+            object(json!({"report": string("Final report")}), &["report"]),
+        ),
     ]
 }
 
@@ -619,8 +756,19 @@ fn synthetic_source(conversation: usize, turn: usize, lines: usize) -> String {
         state ^= state << 17;
         state
     };
-    let idents = ["buffer", "handle", "config", "request", "session", "cursor", "payload", "limit", "retry", "offset", "window", "ledger"];
-    let types = ["u32", "usize", "String", "Vec<u8>", "Option<Duration>", "Arc<Mutex<State>>", "HashMap<String, u64>"];
+    let idents = [
+        "buffer", "handle", "config", "request", "session", "cursor", "payload", "limit", "retry",
+        "offset", "window", "ledger",
+    ];
+    let types = [
+        "u32",
+        "usize",
+        "String",
+        "Vec<u8>",
+        "Option<Duration>",
+        "Arc<Mutex<State>>",
+        "HashMap<String, u64>",
+    ];
     let mut text = String::new();
     for line in 0..lines {
         let a = idents[(next() % idents.len() as u64) as usize];
@@ -683,8 +831,12 @@ struct TokenKeeper {
 
 impl TokenKeeper {
     fn load(path: &Path) -> Result<Arc<Self>, String> {
-        let file = CodexAuthFile::load(path)
-            .map_err(|e| format!("cannot use {}: {e}; sign in with Codex first", path.display()))?;
+        let file = CodexAuthFile::load(path).map_err(|e| {
+            format!(
+                "cannot use {}: {e}; sign in with Codex first",
+                path.display()
+            )
+        })?;
         Ok(Arc::new(Self {
             store: CodexAuthStore::new(file.clone()),
             file,
@@ -733,7 +885,9 @@ impl TokenKeeper {
     /// adopted instead. Refreshed tokens are saved before this returns.
     async fn ensure_fresh(&self, client: &LLMClient) -> Result<(), String> {
         self.check()?;
-        let refreshed = client.refresh_openai_oauth_token_if_expiring(REFRESH_MARGIN).await;
+        let refreshed = client
+            .refresh_openai_oauth_token_if_expiring(REFRESH_MARGIN)
+            .await;
         // Also when this call only waited for another conversation's
         // refresh: if that one's tokens couldn't be saved, stop here.
         self.check()?;
@@ -751,18 +905,27 @@ impl ChatGptOAuthStore for TokenKeeper {
         match self.store.before_refresh(current) {
             Ok(newer) => {
                 if newer.is_some() {
-                    self.note(format!("adopted newer tokens another process wrote to {path}"));
+                    self.note(format!(
+                        "adopted newer tokens another process wrote to {path}"
+                    ));
                 }
                 Ok(newer)
             }
             Err(error) => {
-                self.note(format!("cannot use {path} for a refresh: {}", error_message(&error)));
+                self.note(format!(
+                    "cannot use {path} for a refresh: {}",
+                    error_message(&error)
+                ));
                 Err(error)
             }
         }
     }
 
-    fn save_refreshed(&self, refreshed: &ChatGptOAuthCredentials, id_token: Option<&str>) -> Result<(), Error> {
+    fn save_refreshed(
+        &self,
+        refreshed: &ChatGptOAuthCredentials,
+        id_token: Option<&str>,
+    ) -> Result<(), Error> {
         match self.store.save_refreshed(refreshed, id_token) {
             Ok(()) => {
                 self.note(format!(
@@ -792,7 +955,10 @@ impl ChatGptOAuthStore for TokenKeeper {
 fn summarize(out: &Path) -> Result<Value, String> {
     let text = fs::read_to_string(out.join("calls.jsonl"))
         .map_err(|e| format!("cannot read {}/calls.jsonl: {e}", out.display()))?;
-    let calls: Vec<Value> = text.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
+    let calls: Vec<Value> = text
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
     let mut by_conversation: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for call in &calls {
         by_conversation
@@ -804,8 +970,10 @@ fn summarize(out: &Path) -> Result<Value, String> {
     for (key, calls) in &by_conversation {
         let mut stats = stats(calls);
         stats["conversation"] = json!(key);
-        let prefixes: std::collections::BTreeSet<&str> =
-            calls.iter().filter_map(|c| c["response_id_prefix"].as_str()).collect();
+        let prefixes: std::collections::BTreeSet<&str> = calls
+            .iter()
+            .filter_map(|c| c["response_id_prefix"].as_str())
+            .collect();
         stats["distinct_response_id_prefixes"] = json!(prefixes.len());
         conversations.push(stats);
     }
@@ -818,16 +986,38 @@ fn summarize(out: &Path) -> Result<Value, String> {
 }
 
 fn stats(calls: &[Value]) -> Value {
-    let ok: Vec<&Value> = calls.iter().filter(|c| c["status"] != "error" && c["status"] != "abandoned").collect();
+    let ok: Vec<&Value> = calls
+        .iter()
+        .filter(|c| c["status"] != "error" && c["status"] != "abandoned")
+        .collect();
     let sum = |field: &str| ok.iter().filter_map(|c| c[field].as_u64()).sum::<u64>();
-    let (input, cached, output, reasoning) =
-        (sum("input_tokens"), sum("cached_tokens"), sum("output_tokens"), sum("reasoning_tokens"));
-    let warm: Vec<&&Value> = ok.iter().filter(|c| c["seq"].as_u64().unwrap_or(0) >= 3).collect();
+    let (input, cached, output, reasoning) = (
+        sum("input_tokens"),
+        sum("cached_tokens"),
+        sum("output_tokens"),
+        sum("reasoning_tokens"),
+    );
+    let warm: Vec<&&Value> = ok
+        .iter()
+        .filter(|c| c["seq"].as_u64().unwrap_or(0) >= 3)
+        .collect();
     let warm_input: u64 = warm.iter().filter_map(|c| c["input_tokens"].as_u64()).sum();
-    let warm_cached: u64 = warm.iter().filter_map(|c| c["cached_tokens"].as_u64()).sum();
-    let later: Vec<&&Value> = ok.iter().filter(|c| c["seq"].as_u64().unwrap_or(0) >= 2).collect();
-    let zero = later.iter().filter(|c| c["cached_tokens"].as_u64().unwrap_or(0) == 0).count();
-    let prev: Vec<bool> = later.iter().filter_map(|c| c["previous_found"].as_bool()).collect();
+    let warm_cached: u64 = warm
+        .iter()
+        .filter_map(|c| c["cached_tokens"].as_u64())
+        .sum();
+    let later: Vec<&&Value> = ok
+        .iter()
+        .filter(|c| c["seq"].as_u64().unwrap_or(0) >= 2)
+        .collect();
+    let zero = later
+        .iter()
+        .filter(|c| c["cached_tokens"].as_u64().unwrap_or(0) == 0)
+        .count();
+    let prev: Vec<bool> = later
+        .iter()
+        .filter_map(|c| c["previous_found"].as_bool())
+        .collect();
     let mut shortfalls: Vec<i64> = later
         .iter()
         .filter(|c| c["cached_tokens"].as_u64().unwrap_or(0) > 0)
@@ -837,22 +1027,45 @@ fn stats(calls: &[Value]) -> Value {
     let mut served: BTreeMap<String, u64> = BTreeMap::new();
     let mut reroutes = 0;
     for call in &ok {
-        let model = call["completed_model"].as_str().or(call["created_model"].as_str()).unwrap_or("?");
+        let model = call["completed_model"]
+            .as_str()
+            .or(call["created_model"].as_str())
+            .unwrap_or("?");
         *served.entry(model.to_string()).or_default() += 1;
         if call["requested_model"].as_str() != Some(model) {
             reroutes += 1;
         }
     }
-    let mut completed_ms: Vec<u64> = ok.iter().filter_map(|c| c["timings_ms"]["completed"].as_u64()).collect();
-    let mut first_ms: Vec<u64> = ok.iter().filter_map(|c| c["timings_ms"]["first_event"].as_u64()).collect();
+    let mut completed_ms: Vec<u64> = ok
+        .iter()
+        .filter_map(|c| c["timings_ms"]["completed"].as_u64())
+        .collect();
+    let mut first_ms: Vec<u64> = ok
+        .iter()
+        .filter_map(|c| c["timings_ms"]["first_event"].as_u64())
+        .collect();
     completed_ms.sort_unstable();
     first_ms.sort_unstable();
-    let empty_completed_output = ok.iter().filter(|c| c["completed_output_count"].as_u64() == Some(0)).count();
-    let streamed_reasoning: u64 =
-        ok.iter().filter_map(|c| c["streamed_reasoning_with_encrypted_content"].as_u64()).sum();
-    let not_prefix = ok.iter().filter(|c| c["prefix"]["previous_is_prefix"] == false).count();
+    let empty_completed_output = ok
+        .iter()
+        .filter(|c| c["completed_output_count"].as_u64() == Some(0))
+        .count();
+    let streamed_reasoning: u64 = ok
+        .iter()
+        .filter_map(|c| c["streamed_reasoning_with_encrypted_content"].as_u64())
+        .sum();
+    let not_prefix = ok
+        .iter()
+        .filter(|c| c["prefix"]["previous_is_prefix"] == false)
+        .count();
     let reuse = PrefixReuse::of(&ok);
-    let ratio = |a: u64, b: u64| if b == 0 { Value::Null } else { json!(round(a as f64 / b as f64)) };
+    let ratio = |a: u64, b: u64| {
+        if b == 0 {
+            Value::Null
+        } else {
+            json!(round(a as f64 / b as f64))
+        }
+    };
     json!({
         "calls": calls.len(),
         "successful_calls": ok.len(),
@@ -897,7 +1110,10 @@ impl PrefixReuse {
     fn of(calls: &[&Value]) -> Self {
         let mut by_conversation: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
         for call in calls {
-            by_conversation.entry(call["conversation"].as_str().unwrap_or("?")).or_default().push(call);
+            by_conversation
+                .entry(call["conversation"].as_str().unwrap_or("?"))
+                .or_default()
+                .push(call);
         }
         let mut reuse = Self::default();
         for calls in by_conversation.values_mut() {
@@ -916,22 +1132,43 @@ impl PrefixReuse {
 }
 
 fn write_summary(out: &Path, summary: &Value) -> Result<(), String> {
-    fs::write(out.join("summary.json"), serde_json::to_string_pretty(summary).unwrap()).map_err(|e| e.to_string())?;
+    fs::write(
+        out.join("summary.json"),
+        serde_json::to_string_pretty(summary).unwrap(),
+    )
+    .map_err(|e| e.to_string())?;
     let mut text = String::new();
     let line = |label: &str, s: &Value| {
         format!(
             "{label:<28} calls {:>3}  hit {:>6}  ceiling {:>6}  efficiency {:>6}  prev_input_cached {:>6}  prev_found {:>6}  warm {:>6}  zero {:>6}  shortfall_p50 {:>7}  input {:>8}  cached {:>8}  output {:>6}  served {}\n",
-            s["successful_calls"], fmt(&s["hit_rate"]), fmt(&s["ceiling"]), fmt(&s["efficiency"]),
-            fmt(&s["prev_input_cached"]), fmt(&s["prev_found_share"]), fmt(&s["warm_hit_rate_seq_ge_3"]),
+            s["successful_calls"],
+            fmt(&s["hit_rate"]),
+            fmt(&s["ceiling"]),
+            fmt(&s["efficiency"]),
+            fmt(&s["prev_input_cached"]),
+            fmt(&s["prev_found_share"]),
+            fmt(&s["warm_hit_rate_seq_ge_3"]),
             fmt(&s["zero_cache_share_seq_ge_2"]),
-            s["median_shortfall_on_hits"], s["input_tokens"], s["cached_tokens"], s["output_tokens"],
+            s["median_shortfall_on_hits"],
+            s["input_tokens"],
+            s["cached_tokens"],
+            s["output_tokens"],
             s["served_models"]
         )
     };
     text.push_str(&line("overall", &summary["overall"]));
     for conversation in summary["per_conversation"].as_array().into_iter().flatten() {
         let key = conversation["conversation"].as_str().unwrap_or("?");
-        text.push_str(&line(&key.chars().rev().take(12).collect::<String>().chars().rev().collect::<String>(), conversation));
+        text.push_str(&line(
+            &key.chars()
+                .rev()
+                .take(12)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>(),
+            conversation,
+        ));
     }
     let overall = &summary["overall"];
     text.push_str(&format!(
@@ -944,7 +1181,10 @@ fn write_summary(out: &Path, summary: &Value) -> Result<(), String> {
 }
 
 fn fmt(value: &Value) -> String {
-    value.as_f64().map(|v| format!("{:.1}%", v * 100.0)).unwrap_or_else(|| "-".into())
+    value
+        .as_f64()
+        .map(|v| format!("{:.1}%", v * 100.0))
+        .unwrap_or_else(|| "-".into())
 }
 
 fn round(value: f64) -> f64 {
@@ -952,11 +1192,19 @@ fn round(value: f64) -> f64 {
 }
 
 fn percentile(values: &[u64], p: usize) -> Value {
-    if values.is_empty() { Value::Null } else { json!(values[(values.len() - 1) * p / 100]) }
+    if values.is_empty() {
+        Value::Null
+    } else {
+        json!(values[(values.len() - 1) * p / 100])
+    }
 }
 
 fn percentile_i64(values: &[i64], p: usize) -> Value {
-    if values.is_empty() { Value::Null } else { json!(values[(values.len() - 1) * p / 100]) }
+    if values.is_empty() {
+        Value::Null
+    } else {
+        json!(values[(values.len() - 1) * p / 100])
+    }
 }
 
 /// An error's own text: an authentication failure without its
@@ -979,11 +1227,17 @@ fn error_text(error: &Error, max: usize) -> String {
 }
 
 fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max { text.to_string() } else { text.chars().take(max).collect::<String>() + "…" }
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        text.chars().take(max).collect::<String>() + "…"
+    }
 }
 
 fn unix_ms(time: SystemTime) -> u128 {
-    time.duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+    time.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -993,7 +1247,10 @@ mod tests {
     fn provider_error(status: Option<u16>, body: &str, retry_after: Option<Duration>) -> Error {
         let value: Value = serde_json::from_str(body).unwrap_or_default();
         let error = value.get("error").unwrap_or(&value);
-        let code = error.get("code").or_else(|| error.get("type")).and_then(Value::as_str);
+        let code = error
+            .get("code")
+            .or_else(|| error.get("type"))
+            .and_then(Value::as_str);
         Error::ProviderError {
             message: format!("OpenAI request failed: {body}"),
             status,
@@ -1005,11 +1262,26 @@ mod tests {
     #[test]
     fn short_term_rate_limits_are_retried_and_plan_limits_stop_the_run() {
         let seconds = Duration::from_secs;
-        let rate_limited = provider_error(Some(429), r#"{"detail":"Rate limit exceeded"}"#, Some(seconds(36)));
-        assert_eq!(classify(&rate_limited), Failure::RateLimited(Some(seconds(36))));
-        let unhinted = provider_error(Some(429), r#"{"error":{"code":"rate_limit_exceeded"}}"#, None);
+        let rate_limited = provider_error(
+            Some(429),
+            r#"{"detail":"Rate limit exceeded"}"#,
+            Some(seconds(36)),
+        );
+        assert_eq!(
+            classify(&rate_limited),
+            Failure::RateLimited(Some(seconds(36)))
+        );
+        let unhinted = provider_error(
+            Some(429),
+            r#"{"error":{"code":"rate_limit_exceeded"}}"#,
+            None,
+        );
         assert_eq!(classify(&unhinted), Failure::RateLimited(None));
-        let streamed = provider_error(None, r#"{"error":{"code":"rate_limit_exceeded","message":"slow down"}}"#, None);
+        let streamed = provider_error(
+            None,
+            r#"{"error":{"code":"rate_limit_exceeded","message":"slow down"}}"#,
+            None,
+        );
         assert_eq!(classify(&streamed), Failure::RateLimited(None));
 
         for body in [
@@ -1017,29 +1289,57 @@ mod tests {
             r#"{"error":{"type":"usage_not_included"}}"#,
             r#"{"error":{"code":"insufficient_quota"}}"#,
         ] {
-            assert_eq!(classify(&provider_error(Some(429), body, Some(seconds(3600)))), Failure::StopAll, "{body}");
+            assert_eq!(
+                classify(&provider_error(Some(429), body, Some(seconds(3600)))),
+                Failure::StopAll,
+                "{body}"
+            );
         }
         for status in [401, 403] {
-            assert_eq!(classify(&provider_error(Some(status), "{}", None)), Failure::StopAll);
+            assert_eq!(
+                classify(&provider_error(Some(status), "{}", None)),
+                Failure::StopAll
+            );
         }
-        assert_eq!(classify(&Error::AuthenticationFailed("refresh failed".into())), Failure::StopAll);
-        assert_eq!(classify(&provider_error(Some(500), r#"{"error":{"code":"server_error"}}"#, None)), Failure::Other);
-        assert_eq!(classify(&Error::StreamTruncated("eof".into())), Failure::Other);
+        assert_eq!(
+            classify(&Error::AuthenticationFailed("refresh failed".into())),
+            Failure::StopAll
+        );
+        assert_eq!(
+            classify(&provider_error(
+                Some(500),
+                r#"{"error":{"code":"server_error"}}"#,
+                None
+            )),
+            Failure::Other
+        );
+        assert_eq!(
+            classify(&Error::StreamTruncated("eof".into())),
+            Failure::Other
+        );
 
         for sample in [0, 1, 2_749, u64::MAX] {
             let delay = rate_limit_delay(Some(seconds(36)), sample);
-            assert!(delay >= seconds(36) && delay <= Duration::from_millis(39_000), "{delay:?}");
+            assert!(
+                delay >= seconds(36) && delay <= Duration::from_millis(39_000),
+                "{delay:?}"
+            );
             assert!(rate_limit_delay(None, sample) >= DEFAULT_RATE_LIMIT_WAIT);
-            assert_eq!(rate_limit_delay(Some(seconds(600)), sample), MAX_RATE_LIMIT_WAIT);
+            assert_eq!(
+                rate_limit_delay(Some(seconds(600)), sample),
+                MAX_RATE_LIMIT_WAIT
+            );
         }
     }
 
     #[test]
     fn ceiling_and_efficiency_use_the_previous_successful_call() {
-        let call = |conversation: &str, seq: u64, input: u64, cached: u64, status: &str| json!({
-            "conversation": conversation, "seq": seq, "status": status,
-            "input_tokens": input, "cached_tokens": cached,
-        });
+        let call = |conversation: &str, seq: u64, input: u64, cached: u64, status: &str| {
+            json!({
+                "conversation": conversation, "seq": seq, "status": status,
+                "input_tokens": input, "cached_tokens": cached,
+            })
+        };
         let calls = [
             call("a", 1, 4_000, 0, "completed"),
             call("a", 2, 0, 0, "error"),
@@ -1052,7 +1352,10 @@ mod tests {
         // conversation's first call have no previous.
         assert_eq!(summary["ceiling"], json!(round(8_500.0 / 15_500.0)));
         assert_eq!(summary["efficiency"], json!(round(8_500.0 / 8_500.0)));
-        assert_eq!(summary["prev_input_cached"], json!(round(7_500.0 / 9_000.0)));
+        assert_eq!(
+            summary["prev_input_cached"],
+            json!(round(7_500.0 / 9_000.0))
+        );
         assert_eq!(summary["hit_rate"], json!(round(8_500.0 / 15_500.0)));
     }
 
@@ -1062,12 +1365,32 @@ mod tests {
         let call = |id: &str| json!({"type": "function_call", "call_id": id});
         let output = |id: &str| json!({"type": "function_call_output", "call_id": id});
         let empty = json!({"role": "assistant", "type": "message", "content": [{"type": "output_text", "text": ""}]});
-        let mut input = vec![user.clone(), call("a"), output("a"), call("b"), call("c"), output("b"), output("c"), empty.clone()];
+        let mut input = vec![
+            user.clone(),
+            call("a"),
+            output("a"),
+            call("b"),
+            call("c"),
+            output("b"),
+            output("c"),
+            empty.clone(),
+        ];
         insert_legacy_empty_messages(&mut input);
-        assert_eq!(input, [
-            user, call("a"), empty.clone(), output("a"), call("b"), call("c"), empty.clone(),
-            output("b"), output("c"), empty,
-        ]);
+        assert_eq!(
+            input,
+            [
+                user,
+                call("a"),
+                empty.clone(),
+                output("a"),
+                call("b"),
+                call("c"),
+                empty.clone(),
+                output("b"),
+                output("c"),
+                empty,
+            ]
+        );
     }
 
     #[test]
@@ -1078,12 +1401,21 @@ mod tests {
             Settings::new(&Args::parse_from(argv))
         };
         let current = parse(&[]);
-        assert!(current.session_id_header && current.turn_state && current.replay_output_items && current.accept_header);
+        assert!(
+            current.session_id_header
+                && current.turn_state
+                && current.replay_output_items
+                && current.accept_header
+        );
         assert!(!current.legacy_beta_header);
         assert_eq!(current.reasoning_context, None);
 
         let legacy = parse(&["--legacy"]);
-        assert!(!legacy.session_id_header && !legacy.thread_id_header && !legacy.client_request_id_header);
+        assert!(
+            !legacy.session_id_header
+                && !legacy.thread_id_header
+                && !legacy.client_request_id_header
+        );
         assert!(!legacy.turn_state && !legacy.replay_output_items && !legacy.accept_header);
         assert!(legacy.legacy_beta_header);
         assert_eq!(legacy.reasoning_context.as_deref(), Some("omit"));
@@ -1091,14 +1423,25 @@ mod tests {
         let arm = parse(&["--legacy", "--session-id-header", "--replay-output-items"]);
         assert!(arm.session_id_header && arm.replay_output_items && !arm.thread_id_header);
         assert_eq!(parse(&["--replay-output-items"]), current);
-        assert_eq!(parse(&["--reasoning-context", "current_turn"]).reasoning_context.as_deref(), Some("current_turn"));
+        assert_eq!(
+            parse(&["--reasoning-context", "current_turn"])
+                .reasoning_context
+                .as_deref(),
+            Some("current_turn")
+        );
     }
 
     #[test]
     fn huge_rate_limit_hints_are_capped_without_overflow() {
         for sample in [0, 2_749, u64::MAX] {
-            assert_eq!(rate_limit_delay(Some(Duration::from_secs(u64::MAX)), sample), MAX_RATE_LIMIT_WAIT);
-            assert_eq!(rate_limit_delay(Some(Duration::MAX), sample), MAX_RATE_LIMIT_WAIT);
+            assert_eq!(
+                rate_limit_delay(Some(Duration::from_secs(u64::MAX)), sample),
+                MAX_RATE_LIMIT_WAIT
+            );
+            assert_eq!(
+                rate_limit_delay(Some(Duration::MAX), sample),
+                MAX_RATE_LIMIT_WAIT
+            );
         }
     }
 
@@ -1109,7 +1452,10 @@ mod tests {
     // per test: the process's record of spent tokens is shared by every test.
 
     fn now() -> u64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
     }
 
     /// A JWT-shaped fake access token expiring at `exp`.
@@ -1145,8 +1491,10 @@ mod tests {
     }
 
     fn file_names(dir: &Path) -> Vec<String> {
-        let mut names: Vec<String> =
-            fs::read_dir(dir).unwrap().map(|entry| entry.unwrap().file_name().into_string().unwrap()).collect();
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
         names.sort();
         names
     }
@@ -1157,7 +1505,11 @@ mod tests {
 
     /// The token endpoint's answer to a refresh.
     fn rotated(access: &str, refresh: &str) -> (u16, String) {
-        (200, json!({"access_token": access, "refresh_token": refresh, "id_token": "id.new.sig"}).to_string())
+        (
+            200,
+            json!({"access_token": access, "refresh_token": refresh, "id_token": "id.new.sig"})
+                .to_string(),
+        )
     }
 
     /// A local HTTP server answering each request with `answer(path)`
@@ -1192,7 +1544,12 @@ mod tests {
 
         /// How many requests went to `path`.
         fn requests(&self, path: &str) -> usize {
-            self.paths.lock().unwrap().iter().filter(|seen| *seen == path).count()
+            self.paths
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|seen| *seen == path)
+                .count()
         }
 
         /// The probe's client, sending its requests and refreshes here.
@@ -1221,10 +1578,18 @@ mod tests {
             let head = String::from_utf8_lossy(&bytes[..end]).into_owned();
             let length: usize = head
                 .lines()
-                .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap()))
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|v| v.trim().parse().unwrap())
+                })
                 .unwrap_or(0);
             if bytes.len() >= end + 4 + length {
-                return head.split_whitespace().nth(1).unwrap_or_default().to_string();
+                return head
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_string();
             }
         }
     }
@@ -1250,7 +1615,8 @@ mod tests {
         };
         let tokens = TokenKeeper::load(&path).unwrap();
         let client = server.client(&tokens);
-        let mut conversation = client.new_conversation(Model::get(Provider::OpenAI, "gpt-6-astra").unwrap());
+        let mut conversation =
+            client.new_conversation(Model::get(Provider::OpenAI, "gpt-6-astra").unwrap());
         conversation.add_user_message("Start the audit.");
         let config = GenerationConfig::default();
         let mut waits = Vec::new();
@@ -1265,9 +1631,26 @@ mod tests {
             },
         )
         .await;
-        assert!(matches!(result, Err(Error::ProviderError { status: Some(500), .. })), "{:?}", result.err());
-        assert_eq!(waits, [(rotated_access, "rt_request_2".to_string())], "the rotated tokens were on disk during the wait");
-        assert_eq!((server.requests("/token"), server.requests("/responses")), (1, 3));
+        assert!(
+            matches!(
+                result,
+                Err(Error::ProviderError {
+                    status: Some(500),
+                    ..
+                })
+            ),
+            "{:?}",
+            result.err()
+        );
+        assert_eq!(
+            waits,
+            [(rotated_access, "rt_request_2".to_string())],
+            "the rotated tokens were on disk during the wait"
+        );
+        assert_eq!(
+            (server.requests("/token"), server.requests("/responses")),
+            (1, 3)
+        );
         assert_eq!(tokens.refreshes().len(), 1);
     }
 
@@ -1285,13 +1668,17 @@ mod tests {
         tokens.ensure_fresh(&client).await.unwrap();
         assert_eq!(server.requests("/token"), 0);
         let live = client.openai_chatgpt_oauth_credentials().await.unwrap();
-        assert_eq!((live.access_token, live.refresh_token), (newer, Some("rt_adopt_3".into())));
+        assert_eq!(
+            (live.access_token, live.refresh_token),
+            (newer, Some("rt_adopt_3".into()))
+        );
         assert_eq!(fs::read_to_string(&path).unwrap(), codex);
         assert_eq!(tokens.refreshes().len(), 1);
     }
 
     #[tokio::test]
-    async fn refreshed_tokens_that_cannot_be_saved_go_to_a_private_recovery_file_and_stop_the_run() {
+    async fn refreshed_tokens_that_cannot_be_saved_go_to_a_private_recovery_file_and_stop_the_run()
+    {
         let (dir, path) = auth_file(&jwt("a1", now() - 60), "rt_unsaved_1");
         // Codex also refreshes, and writes its tokens while this process
         // refreshes: ours must not overwrite them, so they can't be saved.
@@ -1310,30 +1697,48 @@ mod tests {
 
         // Two conversations check at once: the second waits for the first
         // one's refresh, and stops too instead of sending another request.
-        let (first, second) = tokio::join!(tokens.ensure_fresh(&client), tokens.ensure_fresh(&client));
+        let (first, second) =
+            tokio::join!(tokens.ensure_fresh(&client), tokens.ensure_fresh(&client));
         let error = first.unwrap_err();
         assert_eq!(second, Err(error.clone()));
         assert_eq!(server.requests("/token"), 1);
-        assert_eq!(fs::read_to_string(&path).unwrap(), codex, "Codex's tokens are kept");
-        let recovered: Vec<String> =
-            file_names(dir.path()).into_iter().filter(|name| name.starts_with("auth.json.recovered-")).collect();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            codex,
+            "Codex's tokens are kept"
+        );
+        let recovered: Vec<String> = file_names(dir.path())
+            .into_iter()
+            .filter(|name| name.starts_with("auth.json.recovered-"))
+            .collect();
         assert_eq!(recovered.len(), 1, "{:?}", file_names(dir.path()));
         let recovery = dir.path().join(&recovered[0]);
-        assert_eq!(on_disk(&recovery), (ours.clone(), "rt_unsaved_2".to_string()));
+        assert_eq!(
+            on_disk(&recovery),
+            (ours.clone(), "rt_unsaved_2".to_string())
+        );
         assert!(error.contains(&recovery.display().to_string()), "{error}");
         assert!(error.ends_with("; stopping"), "{error}");
-        assert!(!error.contains("rt_unsaved_2") && !error.contains(&ours), "no tokens in messages: {error}");
+        assert!(
+            !error.contains("rt_unsaved_2") && !error.contains(&ours),
+            "no tokens in messages: {error}"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(&recovery).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(&recovery).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
 
         // The run is over: later checks fail the same way and write nothing.
         assert_eq!(tokens.check(), Err(error.clone()));
         assert_eq!(tokens.ensure_fresh(&client).await, Err(error.clone()));
         // A run stopped this way ends like any other authentication failure.
-        let stopped = retry_rate_limits(0, &client, &tokens, || async { Ok(()) }, |_| async {}).await.unwrap_err();
+        let stopped = retry_rate_limits(0, &client, &tokens, || async { Ok(()) }, |_| async {})
+            .await
+            .unwrap_err();
         assert_eq!(classify(&stopped), Failure::StopAll);
         // Its outcome line names the recovery file in full.
         let outcome = error_text(&stopped, 300);
@@ -1342,7 +1747,12 @@ mod tests {
         // no refresh token again: the store hands it Codex's tokens.
         let _ = client.refresh_openai_oauth_token_once().await;
         assert_eq!(server.requests("/token"), 1);
-        assert_eq!(file_names(dir.path()).len(), 2, "{:?}", file_names(dir.path()));
+        assert_eq!(
+            file_names(dir.path()).len(),
+            2,
+            "{:?}",
+            file_names(dir.path())
+        );
         assert_eq!(fs::read_to_string(&path).unwrap(), codex);
     }
 
@@ -1359,7 +1769,11 @@ mod tests {
         // But refreshing now could rotate away tokens Codex wrote.
         let error = tokens.ensure_fresh(&client).await.unwrap_err();
         assert!(error.starts_with("token refresh failed"), "{error}");
-        assert!(tokens.refreshes()[0].starts_with("cannot use"), "{:?}", tokens.refreshes());
+        assert!(
+            tokens.refreshes()[0].starts_with("cannot use"),
+            "{:?}",
+            tokens.refreshes()
+        );
         assert_eq!(server.requests("/token"), 0);
         assert!(file_names(dir.path()).is_empty());
     }
@@ -1373,7 +1787,10 @@ mod tests {
             let issued = counter();
             Server::start(move |_| {
                 let n = issued.fetch_add(1, Ordering::SeqCst) + 2;
-                rotated(&jwt(&format!("a{n}"), now() + 60), &format!("rt_backup_{n}"))
+                rotated(
+                    &jwt(&format!("a{n}"), now() + 60),
+                    &format!("rt_backup_{n}"),
+                )
             })
             .await
         };
@@ -1390,8 +1807,14 @@ mod tests {
 
     #[test]
     fn workload_is_deterministic_and_sized() {
-        assert_eq!(tool_output(1, 4, "read_file"), tool_output(1, 4, "read_file"));
-        assert_ne!(tool_output(0, 4, "read_file"), tool_output(1, 4, "read_file"));
+        assert_eq!(
+            tool_output(1, 4, "read_file"),
+            tool_output(1, 4, "read_file")
+        );
+        assert_ne!(
+            tool_output(0, 4, "read_file"),
+            tool_output(1, 4, "read_file")
+        );
         let chars = tool_output(0, 3, "read_file").len();
         assert!((7_000..14_000).contains(&chars), "{chars}");
         let instructions = instructions().len();

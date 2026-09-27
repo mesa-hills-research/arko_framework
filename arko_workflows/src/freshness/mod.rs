@@ -454,15 +454,24 @@ mod tests {
             other => panic!("unexpected resource {other:?}"),
         };
         assert_eq!(file("src/./lib.rs"), PathBuf::from("/workspace/src/lib.rs"));
-        assert_eq!(file("src/../Cargo.toml"), PathBuf::from("/workspace/Cargo.toml"));
+        assert_eq!(
+            file("src/../Cargo.toml"),
+            PathBuf::from("/workspace/Cargo.toml")
+        );
         assert_eq!(file("/other/./a/../b"), PathBuf::from("/other/b"));
         assert_eq!(file("../../../../etc/hosts"), PathBuf::from("/etc/hosts"));
         // The tools trim the path first.
-        assert_eq!(file(" src/lib.rs\n"), PathBuf::from("/workspace/src/lib.rs"));
+        assert_eq!(
+            file(" src/lib.rs\n"),
+            PathBuf::from("/workspace/src/lib.rs")
+        );
         for tool in ["write_file", "apply_diff"] {
             assert_eq!(
                 key(tool, "path", "\tsrc/lib.rs "),
-                (ResourceId::File(PathBuf::from("/workspace/src/lib.rs")), true)
+                (
+                    ResourceId::File(PathBuf::from("/workspace/src/lib.rs")),
+                    true
+                )
             );
         }
         // No shell expansion: the tools open the path as given.
@@ -477,11 +486,20 @@ mod tests {
             (ResourceId::DirectoryTree(path), false) => path,
             other => panic!("unexpected resource {other:?}"),
         };
-        assert_eq!(directory(" src/core/ "), PathBuf::from("/workspace/src/core"));
-        assert_eq!(directory("src/core//"), PathBuf::from("/workspace/src/core"));
+        assert_eq!(
+            directory(" src/core/ "),
+            PathBuf::from("/workspace/src/core")
+        );
+        assert_eq!(
+            directory("src/core//"),
+            PathBuf::from("/workspace/src/core")
+        );
         assert_eq!(directory("."), PathBuf::from("/workspace"));
         // `\` is an ordinary character on Unix, as for the tools.
-        assert_eq!(directory(r"src\core"), PathBuf::from(r"/workspace/src\core"));
+        assert_eq!(
+            directory(r"src\core"),
+            PathBuf::from(r"/workspace/src\core")
+        );
         assert!(resources_overlap_for_write(
             &ResourceId::DirectoryTree(directory("src/core")),
             &key("write_file", "path", "src/core/mod.rs").0,

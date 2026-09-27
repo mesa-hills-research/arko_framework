@@ -312,7 +312,9 @@ pub enum Error {
     StreamTruncated(String),
 
     /// A response expected to contain exactly one call to `expected` did not.
-    #[error("Expected one call to `{expected}`; the response stopped with {stop_reason:?} and called {found:?}")]
+    #[error(
+        "Expected one call to `{expected}`; the response stopped with {stop_reason:?} and called {found:?}"
+    )]
     UnexpectedToolCalls {
         expected: String,
         stop_reason: StopReason,
@@ -676,20 +678,14 @@ pub(crate) fn retry_after_from_value(value: &Value) -> Option<Duration> {
 }
 
 fn body_delay(value: &Value) -> Option<Duration> {
-    if let Some(milliseconds) =
-        find_numeric_field(value, &["retry_after_ms", "retryAfterMs"])
-    {
+    if let Some(milliseconds) = find_numeric_field(value, &["retry_after_ms", "retryAfterMs"]) {
         return Some(Duration::from_millis(milliseconds.ceil() as u64));
     }
-    if let Some(seconds) = find_numeric_field(value, &["retry_after", "retryAfter"])
-    {
+    if let Some(seconds) = find_numeric_field(value, &["retry_after", "retryAfter"]) {
         return Some(Duration::from_millis((seconds * 1_000_f64).ceil() as u64));
     }
-    let reset_at = find_numeric_field(
-        value,
-        &["resets_at", "reset_at", "resetsAt", "resetAt"],
-    )
-    .or_else(|| openrouter_rate_limit_reset(value))?;
+    let reset_at = find_numeric_field(value, &["resets_at", "reset_at", "resetsAt", "resetAt"])
+        .or_else(|| openrouter_rate_limit_reset(value))?;
     let reset_millis = if reset_at >= 10_000_000_000_f64 {
         reset_at
     } else {
@@ -723,7 +719,8 @@ fn openrouter_rate_limit_reset(value: &Value) -> Option<f64> {
 /// [`MAX_SERVER_DELAY_HINT`](crate::retry::MAX_SERVER_DELAY_HINT).
 fn retry_delay_from_message(message: &str) -> Option<Duration> {
     const PHRASE: &str = "try again in";
-    let digits = |text: &str| text.len() - text.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let digits =
+        |text: &str| text.len() - text.trim_start_matches(|c: char| c.is_ascii_digit()).len();
     // ASCII lowercasing keeps byte offsets.
     let lowercase = message.to_ascii_lowercase();
     let mut rest = lowercase.as_str();
@@ -864,13 +861,25 @@ mod tests {
             None,
             r#"{"error":{"code":429,"message":"Rate limit exceeded"}}"#,
         );
-        assert!(matches!(error, Error::ProviderError { status: Some(429), .. }));
+        assert!(matches!(
+            error,
+            Error::ProviderError {
+                status: Some(429),
+                ..
+            }
+        ));
         assert_eq!(error.retry_class(), RetryClass::Transient);
         let error = Error::provider_error("stream", None, None, r#"{"error":{"code":400}}"#);
         assert_eq!(error.retry_class(), RetryClass::Permanent);
         // A real HTTP status is not replaced by the body code.
         let error = Error::provider_error("http", Some(503), None, r#"{"error":{"code":400}}"#);
-        assert!(matches!(error, Error::ProviderError { status: Some(503), .. }));
+        assert!(matches!(
+            error,
+            Error::ProviderError {
+                status: Some(503),
+                ..
+            }
+        ));
         // gRPC-style small codes are not statuses.
         let error = Error::provider_error("grpc", None, None, r#"{"error":{"code":8}}"#);
         assert!(matches!(error, Error::ProviderError { status: None, .. }));
@@ -916,9 +925,12 @@ mod tests {
 
     #[test]
     fn google_status_names_classify_overload_as_capacity() {
-        let unavailable = r#"{"error":{"code":503,"message":"The model is overloaded.","status":"UNAVAILABLE"}}"#;
+        let unavailable =
+            r#"{"error":{"code":503,"message":"The model is overloaded.","status":"UNAVAILABLE"}}"#;
         let error = Error::provider_error("google", None, None, unavailable);
-        assert!(matches!(&error, Error::ProviderError { status: Some(503), code: Some(code), .. } if code == "UNAVAILABLE"));
+        assert!(
+            matches!(&error, Error::ProviderError { status: Some(503), code: Some(code), .. } if code == "UNAVAILABLE")
+        );
         assert!(error.is_capacity_error());
         let exhausted = r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}"#;
         assert_eq!(
@@ -970,9 +982,8 @@ mod tests {
             // ...but a missing signature is in the request history.
             ("missing_thought_signature", Permanent),
         ] {
-            let event = format!(
-                r#"{{"event_type":"error","error":{{"code":"{code}","message":"m"}}}}"#
-            );
+            let event =
+                format!(r#"{{"event_type":"error","error":{{"code":"{code}","message":"m"}}}}"#);
             let error = Error::provider_error("google stream", None, None, &event);
             assert_eq!(error.retry_class(), class, "{code}");
         }
@@ -1021,7 +1032,14 @@ mod tests {
         // is the event name, not an error type.
         let event = r#"{"type":"error","code":null,"message":"An error occurred while processing your request.","param":null,"sequence_number":4}"#;
         let error = Error::provider_error("OpenAI stream error", None, None, event);
-        assert!(matches!(&error, Error::ProviderError { status: None, code: None, .. }));
+        assert!(matches!(
+            &error,
+            Error::ProviderError {
+                status: None,
+                code: None,
+                ..
+            }
+        ));
         assert_eq!(error.retry_class(), RetryClass::Transient);
         for (code, class) in [
             ("server_error", RetryClass::Transient),
@@ -1039,7 +1057,8 @@ mod tests {
             );
         }
         // `response.failed` carries the error inside the response object.
-        let failed = r#"{"id":"resp_1","status":"failed","error":{"code":"invalid_image","message":"m"}}"#;
+        let failed =
+            r#"{"id":"resp_1","status":"failed","error":{"code":"invalid_image","message":"m"}}"#;
         assert_eq!(
             Error::provider_error("OpenAI stream error", None, None, failed).retry_class(),
             RetryClass::Permanent
@@ -1080,7 +1099,10 @@ mod tests {
 
     #[test]
     fn retry_classes_cover_non_provider_errors() {
-        assert_eq!(Error::ApiError("x".into()).retry_class(), RetryClass::Transient);
+        assert_eq!(
+            Error::ApiError("x".into()).retry_class(),
+            RetryClass::Transient
+        );
         assert_eq!(
             Error::StreamTruncated("x".into()).retry_class(),
             RetryClass::Transient
@@ -1136,8 +1158,14 @@ mod tests {
         );
         // Retry-After wins on any status.
         headers.insert(reqwest::header::RETRY_AFTER, "3".parse().unwrap());
-        assert_eq!(retry_after_from_headers(429, &headers), Some(Duration::from_secs(3)));
-        assert_eq!(retry_after_from_headers(503, &headers), Some(Duration::from_secs(3)));
+        assert_eq!(
+            retry_after_from_headers(429, &headers),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(
+            retry_after_from_headers(503, &headers),
+            Some(Duration::from_secs(3))
+        );
     }
 
     #[test]
@@ -1163,14 +1191,20 @@ mod tests {
             reqwest::header::RETRY_AFTER,
             "Thu, 01 Jan 1970 00:00:00 GMT".parse().unwrap(),
         );
-        assert_eq!(retry_after_from_headers(429, &headers), Some(Duration::ZERO));
+        assert_eq!(
+            retry_after_from_headers(429, &headers),
+            Some(Duration::ZERO)
+        );
     }
 
     #[test]
     fn huge_server_delay_hints_are_capped() {
         let cap = crate::retry::MAX_SERVER_DELAY_HINT;
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(reqwest::header::RETRY_AFTER, u64::MAX.to_string().parse().unwrap());
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            u64::MAX.to_string().parse().unwrap(),
+        );
         assert_eq!(retry_after_from_headers(429, &headers), Some(cap));
         headers.insert(
             reqwest::header::RETRY_AFTER,
@@ -1178,7 +1212,10 @@ mod tests {
         );
         assert_eq!(retry_after_from_headers(429, &headers), Some(cap));
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("x-ratelimit-reset-requests", "99999999999999999999h".parse().unwrap());
+        headers.insert(
+            "x-ratelimit-reset-requests",
+            "99999999999999999999h".parse().unwrap(),
+        );
         assert_eq!(retry_after_from_headers(429, &headers), Some(cap));
         for body in [
             r#"{"retry_after_ms":1e300}"#,
@@ -1212,9 +1249,18 @@ mod tests {
 
         for (status, body) in [
             (Some(429), r#"{"error":{"message":"Rate limit exceeded"}}"#),
-            (Some(503), r#"{"error":{"code":"slow_down","message":"Slow down"}}"#),
-            (None, r#"{"error":{"code":"rate_limit_exceeded","message":"Try again in 11s"}}"#),
-            (None, r#"{"type":"error","error":{"type":"rate_limit_error"}}"#),
+            (
+                Some(503),
+                r#"{"error":{"code":"slow_down","message":"Slow down"}}"#,
+            ),
+            (
+                None,
+                r#"{"error":{"code":"rate_limit_exceeded","message":"Try again in 11s"}}"#,
+            ),
+            (
+                None,
+                r#"{"type":"error","error":{"type":"rate_limit_error"}}"#,
+            ),
         ] {
             let error = Error::provider_error("test", status, Some(Duration::from_secs(36)), body);
             assert!(error.is_rate_limit(), "{body}");
@@ -1228,7 +1274,10 @@ mod tests {
             (Some(503), "{}"),
             (Some(400), r#"{"error":{"code":"rate_limit_exceeded"}}"#),
         ] {
-            assert!(!Error::provider_error("test", status, None, body).is_rate_limit(), "{body}");
+            assert!(
+                !Error::provider_error("test", status, None, body).is_rate_limit(),
+                "{body}"
+            );
         }
     }
 
@@ -1240,7 +1289,11 @@ mod tests {
         ] {
             for status in [Some(429), None] {
                 let error = Error::provider_error("OpenAI request failed", status, None, body);
-                assert_eq!(error.retry_class(), RetryClass::Permanent, "{body} {status:?}");
+                assert_eq!(
+                    error.retry_class(),
+                    RetryClass::Permanent,
+                    "{body} {status:?}"
+                );
                 assert!(!error.is_rate_limit(), "{body}");
             }
         }
@@ -1295,13 +1348,24 @@ mod tests {
             ("TRY AGAIN IN 1 second.", Duration::from_secs(1)),
             ("try again in7s", Duration::from_secs(7)),
             // The first phrase without a number does not stop the search.
-            ("You can try again in a moment; try again in 3s", Duration::from_secs(3)),
+            (
+                "You can try again in a moment; try again in 3s",
+                Duration::from_secs(3),
+            ),
         ] {
             let message = serde_json::to_string(message).unwrap();
             // An OpenAI stream error event, a `response.failed` error and a 429.
             for (status, body) in [
-                (None, format!(r#"{{"type":"error","code":"rate_limit_exceeded","message":{message},"param":null,"sequence_number":3}}"#)),
-                (None, format!(r#"{{"error":{{"code":"slow_down","message":{message}}}}}"#)),
+                (
+                    None,
+                    format!(
+                        r#"{{"type":"error","code":"rate_limit_exceeded","message":{message},"param":null,"sequence_number":3}}"#
+                    ),
+                ),
+                (
+                    None,
+                    format!(r#"{{"error":{{"code":"slow_down","message":{message}}}}}"#),
+                ),
                 (Some(429), format!(r#"{{"error":{{"message":{message}}}}}"#)),
             ] {
                 let error = Error::provider_error("test", status, None, &body);
@@ -1316,22 +1380,49 @@ mod tests {
             Some(Duration::from_millis(800))
         );
         assert_eq!(
-            Error::provider_error("test", Some(429), Some(Duration::from_secs(9)), body).retry_after(),
+            Error::provider_error("test", Some(429), Some(Duration::from_secs(9)), body)
+                .retry_after(),
             Some(Duration::from_secs(9))
         );
         // Only rate limits read their message.
         for (status, body) in [
-            (Some(503), r#"{"error":{"message":"Please try again in 5s"}}"#),
-            (None, r#"{"error":{"code":"server_error","message":"Please try again in 5s"}}"#),
-            (Some(429), r#"{"error":{"code":"insufficient_quota","message":"try again in 5s"}}"#),
-            (Some(400), r#"{"error":{"code":"rate_limit_exceeded","message":"try again in 5s"}}"#),
+            (
+                Some(503),
+                r#"{"error":{"message":"Please try again in 5s"}}"#,
+            ),
+            (
+                None,
+                r#"{"error":{"code":"server_error","message":"Please try again in 5s"}}"#,
+            ),
+            (
+                Some(429),
+                r#"{"error":{"code":"insufficient_quota","message":"try again in 5s"}}"#,
+            ),
+            (
+                Some(400),
+                r#"{"error":{"code":"rate_limit_exceeded","message":"try again in 5s"}}"#,
+            ),
         ] {
-            assert_eq!(Error::provider_error("test", status, None, body).retry_after(), None, "{body}");
+            assert_eq!(
+                Error::provider_error("test", status, None, body).retry_after(),
+                None,
+                "{body}"
+            );
         }
         // No number or unit: no hint. A huge one is capped.
-        for message in ["try again in a moment", "try again in 5 minutes", "try again in .5s", "try again in 5"] {
-            let body = format!(r#"{{"error":{{"code":"rate_limit_exceeded","message":"{message}"}}}}"#);
-            assert_eq!(Error::provider_error("test", None, None, &body).retry_after(), None, "{message}");
+        for message in [
+            "try again in a moment",
+            "try again in 5 minutes",
+            "try again in .5s",
+            "try again in 5",
+        ] {
+            let body =
+                format!(r#"{{"error":{{"code":"rate_limit_exceeded","message":"{message}"}}}}"#);
+            assert_eq!(
+                Error::provider_error("test", None, None, &body).retry_after(),
+                None,
+                "{message}"
+            );
         }
         let body = format!(
             r#"{{"error":{{"code":"rate_limit_exceeded","message":"try again in 1{}s"}}}}"#,

@@ -53,7 +53,9 @@ async fn rate_limits_follow_the_server_delay_by_default_outside_the_recovery_lim
     let started = tokio::time::Instant::now();
     for _ in 0..12 {
         agent
-            .run_llm_attempt::<()>(async { Err(provider_failure(429, Some(Duration::from_secs(36)))) })
+            .run_llm_attempt::<()>(async {
+                Err(provider_failure(429, Some(Duration::from_secs(36))))
+            })
             .await
             .unwrap();
         assert!(matches!(agent.task.current_state, TaskState::InProgress));
@@ -71,11 +73,17 @@ async fn rate_limits_follow_the_server_delay_by_default_outside_the_recovery_lim
     let events = events_of(&mut events);
     let delays = retry_delays(&events);
     assert_eq!(delays.len(), 13);
-    assert!(delays[..12].iter().all(|delay| *delay == 36_000), "{delays:?}");
+    assert!(
+        delays[..12].iter().all(|delay| *delay == 36_000),
+        "{delays:?}"
+    );
     assert_eq!(delays[12], 250);
     assert!(!events.iter().any(|event| matches!(
         event,
-        AgentEvent::ErrorEncountered { requires_approval_to_retry: true, .. }
+        AgentEvent::ErrorEncountered {
+            requires_approval_to_retry: true,
+            ..
+        }
     )));
 }
 
@@ -116,7 +124,10 @@ async fn usage_limits_pause_by_default_and_report_the_reset() {
         let (mut agent, mut events, _commands) = harness();
         let before = unix_millis_now();
         let started = tokio::time::Instant::now();
-        agent.run_llm_attempt::<()>(async { Err(error) }).await.unwrap();
+        agent
+            .run_llm_attempt::<()>(async { Err(error) })
+            .await
+            .unwrap();
         assert_eq!(started.elapsed(), Duration::ZERO);
         assert!(paused(&agent));
         let events = events_of(&mut events);
@@ -174,7 +185,11 @@ async fn usage_limits_can_wait_until_the_reset() {
         })
         .unwrap();
     assert!(waiting_until >= before + (3 * 3600 + 1) * 1000);
-    assert_eq!(agent.ordinary_attempts(), 1, "the wait is not an ordinary attempt");
+    assert_eq!(
+        agent.ordinary_attempts(),
+        1,
+        "the wait is not an ordinary attempt"
+    );
 
     // A reset further off than max_wait, or none reported, pauses.
     for reset_in in [Some(Duration::from_secs(7 * 3600)), None] {
@@ -241,8 +256,15 @@ fn turn_with_plan_window(used_percent: f64, resets_at: Option<u64>) -> ai::Strea
     ai::StreamEvent::End(Box::new(ai::GenerationResponse {
         message,
         usage: ai::UsageInfo::new(0, 0),
-        model_call_usage: ai::ModelCallUsage::new("plan".into(), "openai".into(), "m".into(), 0, 0, 1000)
-            .with_plan_usage(Some(usage)),
+        model_call_usage: ai::ModelCallUsage::new(
+            "plan".into(),
+            "openai".into(),
+            "m".into(),
+            0,
+            0,
+            1000,
+        )
+        .with_plan_usage(Some(usage)),
         stop_reason: ai::StopReason::ToolUse,
         refusal: None,
         openai_turn_state: None,
@@ -251,7 +273,11 @@ fn turn_with_plan_window(used_percent: f64, resets_at: Option<u64>) -> ai::Strea
 
 fn script(agent: &mut AgentLoop, turns: Vec<ai::StreamEvent>) {
     agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
-    agent.task.agent_config.tool_config.default_auto_approve_tool_use = true;
+    agent
+        .task
+        .agent_config
+        .tool_config
+        .default_auto_approve_tool_use = true;
     for turn in turns {
         agent
             .scripted_responses
@@ -264,7 +290,10 @@ fn script(agent: &mut AgentLoop, turns: Vec<ai::StreamEvent>) {
 #[tokio::test(start_paused = true)]
 async fn plan_usage_is_reported_and_nothing_acts_on_it_by_default() {
     let (mut agent, mut events, _commands) = harness();
-    script(&mut agent, vec![turn_with_plan_usage(99.0), complete_response()]);
+    script(
+        &mut agent,
+        vec![turn_with_plan_usage(99.0), complete_response()],
+    );
     let task = timeout(Duration::from_secs(60), agent.run())
         .await
         .unwrap()
@@ -274,12 +303,18 @@ async fn plan_usage_is_reported_and_nothing_acts_on_it_by_default() {
     let reported: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
-            AgentEvent::PlanUsageReported(usage) => Some(usage.primary.as_ref().unwrap().used_percent),
+            AgentEvent::PlanUsageReported(usage) => {
+                Some(usage.primary.as_ref().unwrap().used_percent)
+            }
             _ => None,
         })
         .collect();
     assert_eq!(reported, [99.0]);
-    assert!(!events.iter().any(|event| matches!(event, AgentEvent::PlanUsageThresholdReached { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::PlanUsageThresholdReached { .. }))
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -294,22 +329,38 @@ async fn a_plan_usage_threshold_pauses_once_per_window() {
     };
     script(
         &mut agent,
-        vec![turn_with_plan_usage(95.0), turn_with_plan_usage(96.0), complete_response()],
+        vec![
+            turn_with_plan_usage(95.0),
+            turn_with_plan_usage(96.0),
+            complete_response(),
+        ],
     );
     let runner = tokio::spawn(agent.run());
     let mut paused = 0;
     loop {
-        match timeout(Duration::from_secs(60), events.recv()).await.unwrap().unwrap() {
+        match timeout(Duration::from_secs(60), events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
             AgentEvent::PlanUsageThresholdReached {
                 window,
                 used_percent,
                 threshold_percent,
                 ..
             } => {
-                assert_eq!((window.as_str(), used_percent, threshold_percent), ("primary", 95.0, 90.0));
+                assert_eq!(
+                    (window.as_str(), used_percent, threshold_percent),
+                    ("primary", 95.0, 90.0)
+                );
             }
-            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { error_message }) => {
-                assert!(error_message.contains("Plan usage reached 95.0%"), "{error_message}");
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
+                error_message,
+            }) => {
+                assert!(
+                    error_message.contains("Plan usage reached 95.0%"),
+                    "{error_message}"
+                );
                 paused += 1;
                 commands
                     .send(UserCommand::ApproveErrorRecovery { message: None })
@@ -325,11 +376,13 @@ async fn a_plan_usage_threshold_pauses_once_per_window() {
     assert_eq!(paused, 1, "the same window and reset pause once");
     // A monitor pause is not a model error: approving it tells the model
     // nothing about one.
-    assert!(!task.conversation.messages.iter().any(|message| message
-        .content
-        .iter()
-        .filter_map(ai::Content::as_text)
-        .any(|text| text.contains("resulted in an error"))));
+    assert!(!task.conversation.messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .filter_map(ai::Content::as_text)
+            .any(|text| text.contains("resulted in an error"))
+    }));
     assert!(!task.monitor_pause);
 }
 
@@ -346,14 +399,18 @@ async fn a_plan_usage_threshold_pause_is_not_repeated_after_a_resume() {
     };
     let (mut agent, _events, _commands) = harness();
     agent.task.agent_config.monitoring = threshold.clone();
-    agent.task.agent_config.llm_error_policy = LLMErrorPolicy::RetryThenInformAgent { max_attempts: 3 };
+    agent.task.agent_config.llm_error_policy =
+        LLMErrorPolicy::RetryThenInformAgent { max_attempts: 3 };
     script(&mut agent, vec![turn_with_plan_usage(95.0)]);
     let task = timeout(Duration::from_secs(60), agent.run())
         .await
         .unwrap()
         .unwrap();
     assert!(matches!(task.current_state, TaskState::Interrupted { .. }));
-    assert_eq!(task.plan_usage_threshold_reported.as_ref().unwrap().window, "primary");
+    assert_eq!(
+        task.plan_usage_threshold_reported.as_ref().unwrap().window,
+        "primary"
+    );
     let task: Task = serde_json::from_str(&serde_json::to_string(&task).unwrap()).unwrap();
 
     let (mut agent, mut events, _commands) = harness();
@@ -365,18 +422,32 @@ async fn a_plan_usage_threshold_pause_is_not_repeated_after_a_resume() {
         .unwrap();
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
     let received = events_of(&mut events);
-    assert!(!received.iter().any(|event| matches!(event, AgentEvent::PlanUsageThresholdReached { .. })));
+    assert!(
+        !received
+            .iter()
+            .any(|event| matches!(event, AgentEvent::PlanUsageThresholdReached { .. }))
+    );
 
     // A window that has already reset doesn't count.
     let (mut agent, mut events, _commands) = harness();
     agent.task.agent_config.monitoring = threshold;
-    script(&mut agent, vec![turn_with_plan_window(99.0, Some(1_000)), complete_response()]);
+    script(
+        &mut agent,
+        vec![
+            turn_with_plan_window(99.0, Some(1_000)),
+            complete_response(),
+        ],
+    );
     let task = timeout(Duration::from_secs(60), agent.run())
         .await
         .unwrap()
         .unwrap();
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
-    assert!(!events_of(&mut events).iter().any(|event| matches!(event, AgentEvent::PlanUsageThresholdReached { .. })));
+    assert!(
+        !events_of(&mut events)
+            .iter()
+            .any(|event| matches!(event, AgentEvent::PlanUsageThresholdReached { .. }))
+    );
 }
 
 /// Rate limits without a delay are waited out with backoff, but not forever:
@@ -396,10 +467,17 @@ async fn rate_limits_without_a_delay_hand_over_to_the_usage_limit_policy() {
     }
     assert!(paused(&agent));
     let waited = started.elapsed();
-    assert!(waited >= Duration::from_secs(15 * 60) && waited < Duration::from_secs(17 * 60), "{waited:?}");
+    assert!(
+        waited >= Duration::from_secs(15 * 60) && waited < Duration::from_secs(17 * 60),
+        "{waited:?}"
+    );
     assert!(events_of(&mut events).iter().any(|event| matches!(
         event,
-        AgentEvent::UsageLimitReached { resets_at_unix_ms: None, waiting_until_unix_ms: None, .. }
+        AgentEvent::UsageLimitReached {
+            resets_at_unix_ms: None,
+            waiting_until_unix_ms: None,
+            ..
+        }
     )));
 }
 
@@ -407,7 +485,9 @@ async fn rate_limits_without_a_delay_hand_over_to_the_usage_limit_policy() {
 async fn a_usage_limit_wait_must_fit_max_wait_with_its_margin_and_jitter() {
     let (mut agent, _events, _commands) = harness();
     agent.task.agent_config.llm_retry_config.usage_limit_policy =
-        UsageLimitPolicy::WaitUntilReset { max_wait_ms: 3600 * 1000 };
+        UsageLimitPolicy::WaitUntilReset {
+            max_wait_ms: 3600 * 1000,
+        };
     // The reset fits, but the margin and jitter after it might not.
     agent
         .run_llm_attempt::<()>(async { Err(usage_limit(Some(Duration::from_secs(3600 - 10)))) })
@@ -428,7 +508,11 @@ async fn a_plan_usage_threshold_can_slow_requests_down_instead() {
     };
     script(
         &mut agent,
-        vec![turn_with_plan_usage(95.0), turn_with_plan_usage(96.0), complete_response()],
+        vec![
+            turn_with_plan_usage(95.0),
+            turn_with_plan_usage(96.0),
+            complete_response(),
+        ],
     );
     let started = tokio::time::Instant::now();
     let task = timeout(Duration::from_secs(60), agent.run())
@@ -449,11 +533,17 @@ async fn a_plan_usage_threshold_can_slow_requests_down_instead() {
 fn new_retry_and_monitoring_settings_default_on_load_and_round_trip() {
     // Configs saved before these settings existed.
     let old: LLMRetryConfig = serde_json::from_str(r#"{"max_elapsed_ms":60000}"#).unwrap();
-    assert_eq!(old.rate_limit_retry, Some(LLMRateLimitRetryConfig::default()));
+    assert_eq!(
+        old.rate_limit_retry,
+        Some(LLMRateLimitRetryConfig::default())
+    );
     assert_eq!(old.usage_limit_policy, UsageLimitPolicy::Pause);
     let (agent, _events, _commands) = harness();
     let mut saved = serde_json::to_value(&agent.task.agent_config).unwrap();
-    assert!(saved.get("monitoring").is_none(), "nothing to save by default");
+    assert!(
+        saved.get("monitoring").is_none(),
+        "nothing to save by default"
+    );
     saved["llm_retry_config"]
         .as_object_mut()
         .unwrap()
@@ -470,7 +560,9 @@ fn new_retry_and_monitoring_settings_default_on_load_and_round_trip() {
     assert_eq!(custom.rate_limit_retry, None);
     assert_eq!(
         custom.usage_limit_policy,
-        UsageLimitPolicy::WaitUntilReset { max_wait_ms: 3_600_000 }
+        UsageLimitPolicy::WaitUntilReset {
+            max_wait_ms: 3_600_000
+        }
     );
     assert_eq!(
         serde_json::from_value::<LLMRetryConfig>(serde_json::to_value(&custom).unwrap()).unwrap(),
@@ -478,11 +570,17 @@ fn new_retry_and_monitoring_settings_default_on_load_and_round_trip() {
     );
     let monitoring: MonitoringConfig =
         serde_json::from_str(r#"{"plan_usage":{"percent":90}}"#).unwrap();
-    assert_eq!(monitoring.plan_usage.as_ref().unwrap().action, PlanUsageAction::Pause);
+    assert_eq!(
+        monitoring.plan_usage.as_ref().unwrap().action,
+        PlanUsageAction::Pause
+    );
     monitoring.validate().unwrap();
     for percent in [0.0, 100.5, f64::NAN] {
         let invalid = MonitoringConfig {
-            plan_usage: Some(PlanUsageThreshold { percent, action: PlanUsageAction::Pause }),
+            plan_usage: Some(PlanUsageThreshold {
+                percent,
+                action: PlanUsageAction::Pause,
+            }),
             ..Default::default()
         };
         assert!(invalid.validate().is_err(), "{percent}");
@@ -505,7 +603,9 @@ async fn repeated_short_rate_limit_delays_also_hand_over_to_the_usage_limit_poli
     let started = tokio::time::Instant::now();
     for _ in 0..100 {
         agent
-            .run_llm_attempt::<()>(async { Err(provider_failure(429, Some(Duration::from_secs(60)))) })
+            .run_llm_attempt::<()>(async {
+                Err(provider_failure(429, Some(Duration::from_secs(60))))
+            })
             .await
             .unwrap();
         if paused(&agent) {
@@ -515,9 +615,11 @@ async fn repeated_short_rate_limit_delays_also_hand_over_to_the_usage_limit_poli
     assert!(paused(&agent));
     // Fifteen minutes of 60-second waits, then the usage-limit policy.
     assert_eq!(started.elapsed(), Duration::from_secs(15 * 60));
-    assert!(events_of(&mut events)
-        .iter()
-        .any(|event| matches!(event, AgentEvent::UsageLimitReached { .. })));
+    assert!(
+        events_of(&mut events)
+            .iter()
+            .any(|event| matches!(event, AgentEvent::UsageLimitReached { .. }))
+    );
 }
 
 /// The budget counts the time actually waited: a wait cut short by a

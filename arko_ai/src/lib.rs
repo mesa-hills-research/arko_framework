@@ -5,8 +5,8 @@ pub mod conversation;
 pub mod error;
 pub mod message;
 pub mod model;
-pub mod providers;
 pub mod pricing;
+pub mod providers;
 pub mod reasoning;
 pub mod retry;
 pub mod stop;
@@ -32,16 +32,17 @@ pub use model::{Model, ModelPricing, Provider};
 pub use pricing::{ResidencyPricing, ScheduledPricing, ServiceTier, TierPricing};
 pub use providers::{GenerationResponse, StreamEvent, http_client, http_client_builder};
 pub use reasoning::{
-    AnthropicReasoningEffort, GeminiThinkingLevel, OpenAIEffort,
-    OpenAIReasoningItem, OpenAIReasoningMode, OpenRouterReasoning, ReasoningArtifact,
-    ReasoningConfig, ReasoningContext, ReasoningEffort, ReasoningSummary,
+    AnthropicReasoningEffort, GeminiThinkingLevel, OpenAIEffort, OpenAIReasoningItem,
+    OpenAIReasoningMode, OpenRouterReasoning, ReasoningArtifact, ReasoningConfig, ReasoningContext,
+    ReasoningEffort, ReasoningSummary,
 };
+pub use retry::BackoffPolicy;
 pub use stop::{Refusal, RefusalSource, StopReason};
 pub use tool::{ToolCall, ToolChoice, ToolConfig, ToolDefinition, ToolResult};
-pub use retry::BackoffPolicy;
 pub use trace::RequestTrace;
 pub use usage::{
-    BillingKind, ContextEvent, ContextEventType, ModelCallUsage, PlanUsage, PlanUsageWindow, UsageInfo,
+    BillingKind, ContextEvent, ContextEventType, ModelCallUsage, PlanUsage, PlanUsageWindow,
+    UsageInfo,
 };
 
 pub use embedding_client::EmbeddingClient;

@@ -64,7 +64,12 @@ mod tests {
         assert!(huge >= Duration::from_secs(u64::MAX));
         assert!(tokio::time::Instant::now().checked_add(huge).is_none());
         // Hints parsed from responses are capped and schedule normally.
-        let capped = retry_delay(&config, 3, Some(arko_ai::retry::MAX_SERVER_DELAY_HINT), u64::MAX);
+        let capped = retry_delay(
+            &config,
+            3,
+            Some(arko_ai::retry::MAX_SERVER_DELAY_HINT),
+            u64::MAX,
+        );
         assert!(tokio::time::Instant::now().checked_add(capped).is_some());
     }
 }

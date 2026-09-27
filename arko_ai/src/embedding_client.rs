@@ -56,18 +56,21 @@ impl EmbeddingClient {
         config: &EmbeddingConfig,
     ) -> Result<EmbeddingResponse, Error> {
         if texts.is_empty() {
-            return Err(Error::InvalidRequest("Input texts cannot be empty.".to_string()));
+            return Err(Error::InvalidRequest(
+                "Input texts cannot be empty.".to_string(),
+            ));
         }
 
         let model_details = self.get_model_details(config).await?;
 
         if let Some(dim) = config.output_dimensionality
-            && !model_details.supported_dimensions.contains(&dim) {
-                return Err(Error::InvalidDimension(format!(
-                    "Dimension {} not supported by model {}. Supported: {:?}.",
-                    dim, model_details.id, model_details.supported_dimensions
-                )));
-            }
+            && !model_details.supported_dimensions.contains(&dim)
+        {
+            return Err(Error::InvalidDimension(format!(
+                "Dimension {} not supported by model {}. Supported: {:?}.",
+                dim, model_details.id, model_details.supported_dimensions
+            )));
+        }
 
         let tokenizer_id = model_details.tokenizer_id.clone();
         let hf_token = config.hf_token.clone();
@@ -75,11 +78,16 @@ impl EmbeddingClient {
         let requires_hf_token = model_details.requires_hf_token;
         let (texts, counts) = tokio::task::spawn_blocking(move || {
             let counts = token_utils::count_tokens_with_revision(
-                &tokenizer_id, texts.iter(), hf_token.as_deref(), requires_hf_token,
+                &tokenizer_id,
+                texts.iter(),
+                hf_token.as_deref(),
+                requires_hf_token,
                 revision.as_deref(),
             )?;
             Ok::<_, Error>((texts, counts))
-        }).await.map_err(|e| Error::TokenizerError(format!("tokenizer worker failed: {e}")))??;
+        })
+        .await
+        .map_err(|e| Error::TokenizerError(format!("tokenizer worker failed: {e}")))??;
         let mut total_tokens_for_batch = 0;
         for (i, &token_count) in counts.iter().enumerate() {
             if token_count > model_details.max_input_tokens_per_item {
@@ -92,19 +100,22 @@ impl EmbeddingClient {
         }
 
         if let Some(max_batch_tokens) = model_details.max_batch_total_tokens
-            && total_tokens_for_batch > max_batch_tokens {
-                return Err(Error::TokenLimitExceeded(format!(
-                    "Total tokens in batch ({} tokens) exceed model's batch limit of {}.",
-                    total_tokens_for_batch, max_batch_tokens
-                )));
-            }
+            && total_tokens_for_batch > max_batch_tokens
+        {
+            return Err(Error::TokenLimitExceeded(format!(
+                "Total tokens in batch ({} tokens) exceed model's batch limit of {}.",
+                total_tokens_for_batch, max_batch_tokens
+            )));
+        }
         if let Some(max_batch_size) = model_details.max_batch_size
-            && texts.len() > max_batch_size {
-                return Err(Error::BatchSizeLimitExceeded(format!(
-                    "Number of texts in batch ({}) exceeds model's batch size limit of {}.",
-                    texts.len(), max_batch_size
-                )));
-            }
+            && texts.len() > max_batch_size
+        {
+            return Err(Error::BatchSizeLimitExceeded(format!(
+                "Number of texts in batch ({}) exceeds model's batch size limit of {}.",
+                texts.len(),
+                max_batch_size
+            )));
+        }
 
         match config.provider {
             EmbeddingProviderIdentifier::Voyage => {
@@ -120,16 +131,23 @@ impl EmbeddingClient {
     /// Loads the model's tokenizer on a blocking worker, honoring the configured revision
     /// and Hugging Face token. The counter shares the tokenizer [`embed`](Self::embed)
     /// uses for the same configuration, so repeated counts need no further loading.
-    pub async fn token_counter(&self, config: &EmbeddingConfig) -> Result<token_utils::TokenCounter, Error> {
+    pub async fn token_counter(
+        &self,
+        config: &EmbeddingConfig,
+    ) -> Result<token_utils::TokenCounter, Error> {
         let model_details = self.get_model_details(config).await?;
         let hf_token = config.hf_token.clone();
         let revision = config.tokenizer_revision.clone();
         let tokenizer = tokio::task::spawn_blocking(move || {
             token_utils::load_tokenizer(
-                &model_details.tokenizer_id, revision.as_deref(), hf_token.as_deref(),
+                &model_details.tokenizer_id,
+                revision.as_deref(),
+                hf_token.as_deref(),
                 model_details.requires_hf_token,
             )
-        }).await.map_err(|e| Error::TokenizerError(format!("tokenizer worker failed: {e}")))??;
+        })
+        .await
+        .map_err(|e| Error::TokenizerError(format!("tokenizer worker failed: {e}")))??;
         Ok(token_utils::TokenCounter::new(tokenizer))
     }
 
@@ -137,11 +155,7 @@ impl EmbeddingClient {
     /// Uses the batch-aware tokenizer helper so tokenizer initialization can be shared if callers
     /// move to batch-counting. For a single text this is functionally equivalent but avoids
     /// duplicating two different tokenization code paths.
-    pub fn count_tokens(
-        &self,
-        text: &str,
-        config: &EmbeddingConfig,
-    ) -> Result<usize, Error> {
+    pub fn count_tokens(&self, text: &str, config: &EmbeddingConfig) -> Result<usize, Error> {
         let model_details = EmbeddingModelDetails::get(config.provider, &config.model_id)?;
         let counts = token_utils::count_tokens_with_revision(
             &model_details.tokenizer_id,
@@ -178,7 +192,8 @@ impl EmbeddingClient {
         )?;
         let total_tokens: usize = counts.iter().sum();
 
-        let cost = (total_tokens as f64 / 1_000_000.0) * model_details.cost_per_million_input_tokens;
+        let cost =
+            (total_tokens as f64 / 1_000_000.0) * model_details.cost_per_million_input_tokens;
         Ok(cost)
     }
 
@@ -198,7 +213,8 @@ impl EmbeddingClient {
             return Ok(0.0);
         }
 
-        let cost = (total_tokens as f64 / 1_000_000.0) * model_details.cost_per_million_input_tokens;
+        let cost =
+            (total_tokens as f64 / 1_000_000.0) * model_details.cost_per_million_input_tokens;
         Ok(cost)
     }
 }
@@ -222,8 +238,13 @@ mod tests {
         let counter = EmbeddingClient::new().token_counter(&config).await.unwrap();
         let text = "fn main() { println!(\"Grüße, 世界\"); }";
         let expected = token_utils::count_tokens_with_revision(
-            "voyageai/voyage-4", [text], None, false, Some(revision),
-        ).unwrap()[0];
+            "voyageai/voyage-4",
+            [text],
+            None,
+            false,
+            Some(revision),
+        )
+        .unwrap()[0];
         assert!(expected > 0);
         assert_eq!(counter.count(text).unwrap(), expected);
     }

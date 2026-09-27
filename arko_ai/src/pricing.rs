@@ -176,7 +176,9 @@ impl ModelPricing {
 
     /// Whether requests may select `tier` for this model.
     pub fn offers_tier(&self, tier: &ServiceTier) -> bool {
-        self.service_tiers.iter().any(|pricing| &pricing.tier == tier)
+        self.service_tiers
+            .iter()
+            .any(|pricing| &pricing.tier == tier)
     }
 
     /// Multiplier for a reported residency region; other regions (such as
@@ -232,7 +234,13 @@ mod tests {
         assert_eq!(parse_utc_date("1970-01-01"), Some(0));
         assert_eq!(parse_utc_date("2027-01-01"), Some(1_798_761_600));
         assert_eq!(parse_utc_date("2024-02-29"), Some(1_709_164_800));
-        for bad in ["2027-13-01", "2027-01", "2027-01-01-01", "soon", "2027-01-32"] {
+        for bad in [
+            "2027-13-01",
+            "2027-01",
+            "2027-01-01-01",
+            "soon",
+            "2027-01-32",
+        ] {
             assert_eq!(parse_utc_date(bad), None, "{bad}");
         }
     }
@@ -254,8 +262,14 @@ mod tests {
         };
         let before = at_date("2027-01-01") - Duration::from_secs(1);
         assert_eq!(pricing.at(before).input_cost_per_million, 0.75);
-        assert_eq!(pricing.at(at_date("2027-01-01")).input_cost_per_million, 1.50);
-        assert_eq!(pricing.at(at_date("2030-06-01")).output_cost_per_million, 7.50);
+        assert_eq!(
+            pricing.at(at_date("2027-01-01")).input_cost_per_million,
+            1.50
+        );
+        assert_eq!(
+            pricing.at(at_date("2030-06-01")).output_cost_per_million,
+            7.50
+        );
     }
 
     #[test]

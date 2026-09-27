@@ -100,11 +100,7 @@ impl BudgetManager {
         }
     }
 
-    pub fn from_ledger(
-        limit: Option<f64>,
-        warning: Option<f64>,
-        ledger: CostLedger,
-    ) -> Self {
+    pub fn from_ledger(limit: Option<f64>, warning: Option<f64>, ledger: CostLedger) -> Self {
         let total = ledger.total().max(0.0);
         let warning_scaled = warning.map(|value| (value * COST_SCALE) as u64);
         let spent = (total * COST_SCALE) as u64;

@@ -111,17 +111,18 @@ impl PlanUsage {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
         };
-        let number = |name: &str| text(name).and_then(|value| value.parse::<f64>().ok()).filter(|n| n.is_finite());
-        let whole = |name: &str| {
-            number(name)
-                .filter(|n| *n >= 0.0)
-                .map(|n| n as u64)
+        let number = |name: &str| {
+            text(name)
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|n| n.is_finite())
         };
+        let whole = |name: &str| number(name).filter(|n| *n >= 0.0).map(|n| n as u64);
         let window = |prefix: &str| {
             let used_percent = number(&format!("x-codex-{prefix}-used-percent"))?;
             let window = PlanUsageWindow {
                 used_percent,
-                window_minutes: whole(&format!("x-codex-{prefix}-window-minutes")).filter(|m| *m > 0),
+                window_minutes: whole(&format!("x-codex-{prefix}-window-minutes"))
+                    .filter(|m| *m > 0),
                 resets_at: whole(&format!("x-codex-{prefix}-reset-at")).filter(|t| *t > 0),
                 reset_after_seconds: whole(&format!("x-codex-{prefix}-reset-after-seconds")),
             };
@@ -142,10 +143,13 @@ impl PlanUsage {
     /// The window with the highest used percentage, named `"primary"` or
     /// `"secondary"`.
     pub fn most_used_window(&self) -> Option<(&'static str, &PlanUsageWindow)> {
-        [("primary", self.primary.as_ref()), ("secondary", self.secondary.as_ref())]
-            .into_iter()
-            .filter_map(|(name, window)| Some((name, window?)))
-            .max_by(|a, b| a.1.used_percent.total_cmp(&b.1.used_percent))
+        [
+            ("primary", self.primary.as_ref()),
+            ("secondary", self.secondary.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(|(name, window)| Some((name, window?)))
+        .max_by(|a, b| a.1.used_percent.total_cmp(&b.1.used_percent))
     }
 }
 
@@ -432,7 +436,11 @@ impl UsageInfo {
                     || config.and_then(|c| c.long_context).unwrap_or(false))
         });
         let pick = |large: Option<f64>, standard: Option<f64>| {
-            if long_context { large.or(standard) } else { standard }
+            if long_context {
+                large.or(standard)
+            } else {
+                standard
+            }
         };
 
         if self.service_tier.is_none() && model.provider == crate::model::Provider::OpenAI {
@@ -440,8 +448,16 @@ impl UsageInfo {
                 .and_then(|c| c.openai_service_tier)
                 .map(|tier| tier.pricing_tier());
         }
-        let tiers = if pricing.service_tiers.is_empty() { base } else { pricing };
-        let residency = if pricing.residency.is_empty() { base } else { pricing };
+        let tiers = if pricing.service_tiers.is_empty() {
+            base
+        } else {
+            pricing
+        };
+        let residency = if pricing.residency.is_empty() {
+            base
+        } else {
+            pricing
+        };
         let multiplier = tiers.tier_multiplier(self.service_tier.as_ref(), long_context)
             * residency.residency_multiplier(self.inference_geo.as_deref());
 
@@ -456,7 +472,10 @@ impl UsageInfo {
         let cached = self.cached_tokens.unwrap_or(0);
         let written = self.cache_write_tokens.unwrap_or(0);
         let written_1h = self.cache_write_1h_tokens.unwrap_or(0).min(written);
-        let uncached = self.input_tokens.saturating_sub(cached).saturating_sub(written);
+        let uncached = self
+            .input_tokens
+            .saturating_sub(cached)
+            .saturating_sub(written);
 
         self.input_cost = cost(uncached, input_rate * multiplier);
         self.cache_read_cost = self.cached_tokens.map(|tokens| {
@@ -525,8 +544,7 @@ impl UsageInfo {
     }
 
     pub fn for_embedding(input_tokens: usize, model_cost_per_million_input_tokens: f64) -> Self {
-        let input_cost =
-            (input_tokens as f64 / 1_000_000.0) * model_cost_per_million_input_tokens;
+        let input_cost = (input_tokens as f64 / 1_000_000.0) * model_cost_per_million_input_tokens;
 
         Self {
             input_tokens,
@@ -639,7 +657,10 @@ mod tests {
         };
         let mut total = huge.clone();
         total += &huge;
-        assert_eq!((total.input_tokens, total.output_tokens), (usize::MAX, usize::MAX));
+        assert_eq!(
+            (total.input_tokens, total.output_tokens),
+            (usize::MAX, usize::MAX)
+        );
         assert_eq!(total.cached_tokens, Some(usize::MAX));
         assert_eq!(total.cache_write_tokens, Some(usize::MAX));
         assert_eq!(total.cache_write_1h_tokens, Some(usize::MAX));
@@ -680,7 +701,10 @@ mod tests {
         );
         assert_eq!(usage.secondary, None);
         assert_eq!(usage.most_used_window().unwrap().0, "primary");
-        assert_eq!(PlanUsage::from_codex_headers(&reqwest::header::HeaderMap::new()), None);
+        assert_eq!(
+            PlanUsage::from_codex_headers(&reqwest::header::HeaderMap::new()),
+            None
+        );
 
         let call = ModelCallUsage::new("c".into(), "openai".into(), "m".into(), 1, 1, 10)
             .with_plan_usage(Some(usage.clone()));
@@ -688,7 +712,8 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&call).unwrap()).unwrap();
         assert_eq!(round_trip.plan_usage, Some(usage));
         // Records saved before plan usage existed load without it.
-        let old = r#"{"call_id":"c","provider":"openai","model":"m","input_tokens":1,"output_tokens":1}"#;
+        let old =
+            r#"{"call_id":"c","provider":"openai","model":"m","input_tokens":1,"output_tokens":1}"#;
         let old: ModelCallUsage = serde_json::from_str(old).unwrap();
         assert_eq!(old.plan_usage, None);
         assert!(!serde_json::to_string(&old).unwrap().contains("plan_usage"));
@@ -770,7 +795,10 @@ mod tests {
             long_context: Some(true),
             ..GenerationConfig::default()
         };
-        assert!(close(priced(&model, usage(), Some(&long)).total_cost, 0.25 * 6.0));
+        assert!(close(
+            priced(&model, usage(), Some(&long)).total_cost,
+            0.25 * 6.0
+        ));
     }
 
     #[test]
@@ -827,8 +855,11 @@ mod tests {
     #[test]
     fn sums_keep_billed_amounts_and_mark_mixed_billing() {
         let model = Model::openai_gpt_6_luna();
-        let mut metered =
-            priced(&model, UsageInfo::new(1_000_000, 0).with_cached_tokens(10), None);
+        let mut metered = priced(
+            &model,
+            UsageInfo::new(1_000_000, 0).with_cached_tokens(10),
+            None,
+        );
         metered.reasoning_tokens = Some(7);
         metered.service_tier = Some(ServiceTier::Standard);
         let subscription = priced(
@@ -842,7 +873,10 @@ mod tests {
         assert_eq!(total.reasoning_tokens, Some(7));
         assert_eq!(total.service_tier, None);
         assert_eq!(total.billing, BillingKind::Mixed);
-        assert!(close(total.total_cost, metered.total_cost + subscription.total_cost));
+        assert!(close(
+            total.total_cost,
+            metered.total_cost + subscription.total_cost
+        ));
         assert!(close(total.billed(), metered.total_cost));
         let mut added = metered.clone();
         added += &metered;

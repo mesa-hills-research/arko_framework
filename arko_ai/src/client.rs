@@ -54,9 +54,10 @@ impl LLMClient {
     fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
         let var = |name: &str| lookup(name).filter(|value| !value.trim().is_empty());
         let mut client = Self::new();
-        if let (Some(access_token), Some(account_id)) =
-            (var("OPENAI_OAUTH_ACCESS_TOKEN"), var("OPENAI_OAUTH_ACCOUNT_ID"))
-        {
+        if let (Some(access_token), Some(account_id)) = (
+            var("OPENAI_OAUTH_ACCESS_TOKEN"),
+            var("OPENAI_OAUTH_ACCOUNT_ID"),
+        ) {
             let refresh_token = var("OPENAI_OAUTH_REFRESH_TOKEN");
             client = client.with_openai_chatgpt_oauth(
                 &access_token,
@@ -89,7 +90,10 @@ impl LLMClient {
     /// the OpenAI provider whether configured before or after this call.
     pub fn with_openai_originator(mut self, originator: impl Into<String>) -> Self {
         self.openai_originator = Some(originator.into());
-        self.openai_client = self.openai_client.take().map(|client| self.configure_openai(client));
+        self.openai_client = self
+            .openai_client
+            .take()
+            .map(|client| self.configure_openai(client));
         self
     }
 
@@ -98,7 +102,10 @@ impl LLMClient {
     /// before or after this call.
     pub fn with_openai_user_agent(mut self, user_agent: impl Into<String>) -> Self {
         self.openai_user_agent = Some(user_agent.into());
-        self.openai_client = self.openai_client.take().map(|client| self.configure_openai(client));
+        self.openai_client = self
+            .openai_client
+            .take()
+            .map(|client| self.configure_openai(client));
         self
     }
 
@@ -107,7 +114,10 @@ impl LLMClient {
     /// this call. Currently implemented for the OpenAI provider.
     pub fn with_request_trace(mut self, trace: RequestTrace) -> Self {
         self.request_trace = Some(trace);
-        self.openai_client = self.openai_client.take().map(|client| self.configure_openai(client));
+        self.openai_client = self
+            .openai_client
+            .take()
+            .map(|client| self.configure_openai(client));
         self
     }
 
@@ -118,7 +128,10 @@ impl LLMClient {
         hook: Arc<dyn providers::openai::OpenAIRequestHook>,
     ) -> Self {
         self.openai_request_hook = Some(hook);
-        self.openai_client = self.openai_client.take().map(|client| self.configure_openai(client));
+        self.openai_client = self
+            .openai_client
+            .take()
+            .map(|client| self.configure_openai(client));
         self
     }
 
@@ -196,14 +209,16 @@ impl LLMClient {
         account_id: &str,
         retry_rate_limits: bool,
     ) -> Self {
-        self.openai_client = Some(self.configure_openai(
-            providers::openai::OpenAIClient::new_chatgpt_oauth(
-                access_token,
-                refresh_token,
-                account_id,
-            )
-            .with_oauth_rate_limit_retries(retry_rate_limits),
-        ));
+        self.openai_client = Some(
+            self.configure_openai(
+                providers::openai::OpenAIClient::new_chatgpt_oauth(
+                    access_token,
+                    refresh_token,
+                    account_id,
+                )
+                .with_oauth_rate_limit_retries(retry_rate_limits),
+            ),
+        );
         self
     }
 
@@ -226,7 +241,8 @@ impl LLMClient {
     ///
     /// [`OpenAIAuth`]: crate::providers::openai::OpenAIAuth
     pub fn with_openai_auth(mut self, auth: providers::openai::OpenAIAuth) -> Self {
-        self.openai_client = Some(self.configure_openai(providers::openai::OpenAIClient::with_auth(auth)));
+        self.openai_client =
+            Some(self.configure_openai(providers::openai::OpenAIClient::with_auth(auth)));
         self
     }
 
@@ -433,10 +449,7 @@ impl LLMClient {
     }
 
     /// Installs a preconfigured Anthropic client.
-    pub fn with_anthropic_client(
-        mut self,
-        client: providers::anthropic::AnthropicClient,
-    ) -> Self {
+    pub fn with_anthropic_client(mut self, client: providers::anthropic::AnthropicClient) -> Self {
         self.anthropic_client = Some(client);
         self
     }
@@ -507,15 +520,22 @@ mod tests {
     use std::collections::HashMap;
 
     fn client(vars: &[(&str, &str)]) -> LLMClient {
-        let vars: HashMap<String, String> =
-            vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let vars: HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         LLMClient::from_lookup(|name| vars.get(name).cloned())
     }
 
     #[tokio::test]
     async fn from_env_configures_the_providers_it_finds() {
         let empty = client(&[]);
-        for provider in [Provider::OpenAI, Provider::Anthropic, Provider::Google, Provider::OpenRouter] {
+        for provider in [
+            Provider::OpenAI,
+            Provider::Anthropic,
+            Provider::Google,
+            Provider::OpenRouter,
+        ] {
             assert!(!empty.has_provider(&provider));
         }
 
@@ -542,10 +562,16 @@ mod tests {
         let credentials = oauth.openai_chatgpt_oauth_credentials().await.unwrap();
         assert_eq!(credentials.account_id, "account");
         assert!(credentials.refresh_token.is_none());
-        assert!(!oauth.has_provider(&Provider::Anthropic), "blank values are ignored");
+        assert!(
+            !oauth.has_provider(&Provider::Anthropic),
+            "blank values are ignored"
+        );
 
         // An incomplete OAuth pair falls back to the API key.
-        let partial = client(&[("OPENAI_OAUTH_ACCESS_TOKEN", "access"), ("OPENAI_API_KEY", "sk")]);
+        let partial = client(&[
+            ("OPENAI_OAUTH_ACCESS_TOKEN", "access"),
+            ("OPENAI_API_KEY", "sk"),
+        ]);
         assert!(!partial.is_openai_chatgpt_oauth().await);
         assert!(partial.has_provider(&Provider::OpenAI));
     }

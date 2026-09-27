@@ -430,7 +430,9 @@ impl CodexAuthFile {
         let rotation = shared
             .unsaved(&in_client.account_id)
             .filter(|rotation| rotation.credentials == in_client);
-        let id_token = rotation.as_ref().and_then(|rotation| rotation.id_token.as_deref());
+        let id_token = rotation
+            .as_ref()
+            .and_then(|rotation| rotation.id_token.as_deref());
         match self.reconcile(&in_client, id_token)? {
             Reconciled::Unchanged => Ok(CodexAuthSync::Unchanged),
             Reconciled::Saved => {
@@ -539,7 +541,9 @@ struct UnsavedRotation {
 impl SharedFile {
     fn unsaved_slot(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, UnsavedRotation>> {
         // Each update inserts or removes a whole entry: valid after any panic.
-        self.unsaved.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.unsaved
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// The unsaved rotation of `account_id`, if any.
@@ -596,7 +600,9 @@ struct SharedEntry {
 fn shared_files() -> std::sync::MutexGuard<'static, Vec<SharedEntry>> {
     // The list is valid after any panic: it only ever gains or drops whole
     // entries, or sets a field.
-    SHARED_FILES.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    SHARED_FILES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// The shared state of the `auth.json` files with a [`CodexAuthStore`] in
@@ -689,7 +695,9 @@ impl CodexAuthStore {
     fn lock(&self) -> std::sync::MutexGuard<'_, CodexAuthFile> {
         // Every update leaves the file state consistent, so a holder that
         // panicked leaves nothing half-done.
-        self.file.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.file
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -916,7 +924,11 @@ fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
 /// Replaces the backup `path` with `bytes`. The previous backup is removed
 /// rather than rewritten, since a file's creation mode applies only to new
 /// files.
-fn write_backup(path: &Path, bytes: &[u8], permissions: &std::fs::Permissions) -> Result<(), Error> {
+fn write_backup(
+    path: &Path,
+    bytes: &[u8],
+    permissions: &std::fs::Permissions,
+) -> Result<(), Error> {
     match std::fs::remove_file(path) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
         _ => {}
@@ -1166,7 +1178,10 @@ mod tests {
             let name = recovery.file_name().unwrap().to_string_lossy();
             assert!(name.starts_with("auth.json.recovered-"), "{name}");
             assert_eq!(
-                CodexAuthFile::load(recovery).unwrap().credentials().unwrap(),
+                CodexAuthFile::load(recovery)
+                    .unwrap()
+                    .credentials()
+                    .unwrap(),
                 rotated()
             );
             let saved: Value = serde_json::from_slice(&std::fs::read(recovery).unwrap()).unwrap();
@@ -1311,7 +1326,10 @@ mod tests {
         })));
         let result = file.persist_tokens(&rotated(), Some("id-2"));
         set_before_rename(None);
-        assert!(matches!(result, Err(Error::AuthenticationFailed(_))), "{result:?}");
+        assert!(
+            matches!(result, Err(Error::AuthenticationFailed(_))),
+            "{result:?}"
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), external);
         assert_eq!(temporary_files(dir.path()), 0);
     }
@@ -1356,7 +1374,10 @@ mod tests {
         // Codex signed in to another account: the client keeps its own.
         std::fs::write(&path, other_account()).unwrap();
         let error = file.sync(&client).await.unwrap_err();
-        assert!(error.to_string().contains("different ChatGPT account"), "{error}");
+        assert!(
+            error.to_string().contains("different ChatGPT account"),
+            "{error}"
+        );
         let credentials = client.openai_chatgpt_oauth_credentials().await.unwrap();
         assert_eq!(credentials.account_id, "account-1");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), other_account());
@@ -1422,7 +1443,13 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), external);
-        for secret in ["access-3", "refresh-3", "id-3", "account-1", "refresh-codex"] {
+        for secret in [
+            "access-3",
+            "refresh-3",
+            "id-3",
+            "account-1",
+            "refresh-codex",
+        ] {
             assert!(!error.contains(secret), "{error}");
         }
         let recovery = std::fs::read_dir(dir.path())
@@ -1432,11 +1459,17 @@ mod tests {
             .unwrap();
         assert!(error.contains(&recovery.display().to_string()), "{error}");
         assert_eq!(
-            CodexAuthFile::load(&recovery).unwrap().credentials().unwrap(),
+            CodexAuthFile::load(&recovery)
+                .unwrap()
+                .credentials()
+                .unwrap(),
             refreshed
         );
         let debug = format!("{store:?}");
-        assert!(debug.contains("auth.json") && !debug.contains("refresh"), "{debug}");
+        assert!(
+            debug.contains("auth.json") && !debug.contains("refresh"),
+            "{debug}"
+        );
     }
 
     #[test]
@@ -1444,8 +1477,9 @@ mod tests {
         let (dir, path) = temp_file(NESTED);
         let first = CodexAuthStore::new(CodexAuthFile::load(&path).unwrap());
         // Another spelling of the same path.
-        let second =
-            CodexAuthStore::new(CodexAuthFile::load(dir.path().join(".").join("auth.json")).unwrap());
+        let second = CodexAuthStore::new(
+            CodexAuthFile::load(dir.path().join(".").join("auth.json")).unwrap(),
+        );
         let lock = first.refresh_lock().unwrap();
         assert!(Arc::ptr_eq(&lock, &second.refresh_lock().unwrap()));
         assert!(Arc::ptr_eq(&first.shared, &second.shared));
@@ -1456,7 +1490,11 @@ mod tests {
         // An entry goes once no store uses it.
         let registered = |path: &Path| {
             let key = std::fs::canonicalize(path).unwrap();
-            SHARED_FILES.lock().unwrap().iter().any(|entry| entry.key == key)
+            SHARED_FILES
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|entry| entry.key == key)
         };
         assert!(registered(&other_path));
         drop(other);
@@ -1495,7 +1533,10 @@ mod tests {
                 let result = file.persist_tokens(&rotated(), None);
                 set_before_read(None);
                 assert_eq!(result.unwrap(), CodexAuthSync::Saved);
-                assert_eq!(CodexAuthFile::load(&path).unwrap().credentials().unwrap(), rotated());
+                assert_eq!(
+                    CodexAuthFile::load(&path).unwrap().credentials().unwrap(),
+                    rotated()
+                );
             } else {
                 let result = store.before_refresh(&loaded);
                 set_before_read(None);
@@ -1547,7 +1588,11 @@ mod tests {
         let saving_error = fail_save(&first, &path).to_string();
         assert!(saving_error.contains(".recovered-"), "{saving_error}");
 
-        for (store, held) in [(&second, &loaded), (&first, &rotated()), (&second, &rotated())] {
+        for (store, held) in [
+            (&second, &loaded),
+            (&first, &rotated()),
+            (&second, &rotated()),
+        ] {
             let error = store.before_refresh(held).unwrap_err().to_string();
             assert!(error.contains(".recovered-"), "{error}");
         }
@@ -1557,7 +1602,10 @@ mod tests {
             ..loaded.clone()
         };
         let error = second.before_refresh(&other).unwrap_err().to_string();
-        assert!(error.contains("different ChatGPT account") && !error.contains(".recovered-"), "{error}");
+        assert!(
+            error.contains("different ChatGPT account") && !error.contains(".recovered-"),
+            "{error}"
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), NESTED);
 
         std::fs::remove_dir(with_suffix(&path, ".bak")).unwrap();
@@ -1596,7 +1644,10 @@ mod tests {
         let adopted = holder.before_refresh(&rotated()).unwrap().unwrap();
         assert_eq!(adopted.refresh_token.as_deref(), Some("refresh-signin"));
         assert!(holder.shared.unsaved_slot().is_empty());
-        assert_eq!(other.before_refresh(&loaded).unwrap(), Some(adopted.clone()));
+        assert_eq!(
+            other.before_refresh(&loaded).unwrap(),
+            Some(adopted.clone())
+        );
         assert_eq!(holder.before_refresh(&adopted).unwrap(), None);
 
         // Another account signed in is refused, and the rotation is kept.
@@ -1605,7 +1656,10 @@ mod tests {
         fail_save(&holder, &path);
         std::fs::write(&path, other_account()).unwrap();
         let error = holder.before_refresh(&rotated()).unwrap_err().to_string();
-        assert!(error.contains("different ChatGPT account") && error.contains(".recovered-"), "{error}");
+        assert!(
+            error.contains("different ChatGPT account") && error.contains(".recovered-"),
+            "{error}"
+        );
         assert!(!error.contains("put it in place"), "{error}");
         assert!(!holder.shared.unsaved_slot().is_empty());
     }
@@ -1626,7 +1680,10 @@ mod tests {
         assert!(error.contains(".recovered-"), "{error}");
         std::fs::remove_dir(with_suffix(&path, ".bak")).unwrap();
         assert_eq!(later.before_refresh(&loaded).unwrap(), Some(rotated()));
-        assert_eq!(CodexAuthFile::load(&path).unwrap().credentials().unwrap(), rotated());
+        assert_eq!(
+            CodexAuthFile::load(&path).unwrap().credentials().unwrap(),
+            rotated()
+        );
         // Once saved, the state is no longer kept.
         let kept = SHARED_FILES
             .lock()
@@ -1648,7 +1705,10 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         for (store, held) in [(&second, &loaded), (&first, &rotated())] {
             let error = store.before_refresh(held).unwrap_err().to_string();
-            assert!(error.contains(".recovered-") && !error.contains("put it in place"), "{error}");
+            assert!(
+                error.contains(".recovered-") && !error.contains("put it in place"),
+                "{error}"
+            );
         }
         assert!(!first.shared.unsaved_slot().is_empty());
         std::fs::write(&path, signed_in_again()).unwrap();
@@ -1681,7 +1741,10 @@ mod tests {
         for _ in 0..2 {
             assert_eq!(store.before_refresh(&host).unwrap(), Some(rotated()));
         }
-        assert_eq!(CodexAuthFile::load(&path).unwrap().credentials().unwrap(), rotated());
+        assert_eq!(
+            CodexAuthFile::load(&path).unwrap().credentials().unwrap(),
+            rotated()
+        );
     }
 
     /// B1: a client holding credentials older than the file's, both spent by
@@ -1703,13 +1766,19 @@ mod tests {
         std::fs::remove_file(with_suffix(&path, ".bak")).unwrap();
         std::fs::create_dir(with_suffix(&path, ".bak")).unwrap();
         assert!(first.save_refreshed(&third, None).is_err());
-        assert_eq!(CodexAuthFile::load(&path).unwrap().credentials().unwrap(), rotated());
+        assert_eq!(
+            CodexAuthFile::load(&path).unwrap().credentials().unwrap(),
+            rotated()
+        );
 
         let error = idle.before_refresh(&loaded).unwrap_err().to_string();
         assert!(error.contains(".recovered-"), "{error}");
         std::fs::remove_dir(with_suffix(&path, ".bak")).unwrap();
         assert_eq!(idle.before_refresh(&loaded).unwrap(), Some(third.clone()));
-        assert_eq!(CodexAuthFile::load(&path).unwrap().credentials().unwrap(), third);
+        assert_eq!(
+            CodexAuthFile::load(&path).unwrap().credentials().unwrap(),
+            third
+        );
     }
 
     /// A file put back to spent credentials (an old backup restored, say)
@@ -1733,7 +1802,10 @@ mod tests {
         }
         assert_eq!(std::fs::read_to_string(&path).unwrap(), NESTED);
         assert_eq!(store.before_refresh(&rotated()).unwrap(), None);
-        assert_eq!(CodexAuthFile::load(&path).unwrap().credentials().unwrap(), rotated());
+        assert_eq!(
+            CodexAuthFile::load(&path).unwrap().credentials().unwrap(),
+            rotated()
+        );
         assert_eq!(other.before_refresh(&loaded).unwrap(), Some(rotated()));
     }
 
@@ -1763,7 +1835,10 @@ mod tests {
             unsaved["account-1"].recovery.clone().unwrap()
         };
         let error = holder.before_refresh(&rotated()).unwrap_err().to_string();
-        assert!(error.contains(&format!("{} (", first_recovery.display())), "{error}");
+        assert!(
+            error.contains(&format!("{} (", first_recovery.display())),
+            "{error}"
+        );
 
         // The file is back to the first account's spent credentials: its
         // rotation is saved and taken; the other account's is still kept.
@@ -1790,7 +1865,10 @@ mod tests {
         assert_eq!(store.before_refresh(&host).unwrap(), Some(loaded.clone()));
         spent_tokens::record("refresh-1");
         assert_eq!(store.before_refresh(&host).unwrap(), None);
-        assert_eq!(CodexAuthFile::load(&path).unwrap().credentials().unwrap(), host);
+        assert_eq!(
+            CodexAuthFile::load(&path).unwrap().credentials().unwrap(),
+            host
+        );
         // A client whose own credentials are spent too stops.
         std::fs::write(&path, NESTED).unwrap();
         let error = store.before_refresh(&loaded).unwrap_err();
@@ -1868,7 +1946,10 @@ mod tests {
             .filter(|entry| entry.key == key && entry.kept.is_some())
             .collect();
         assert_eq!(kept.len(), 1);
-        assert!(std::ptr::eq(kept[0].shared.as_ptr(), Arc::as_ptr(&store.shared)));
+        assert!(std::ptr::eq(
+            kept[0].shared.as_ptr(),
+            Arc::as_ptr(&store.shared)
+        ));
     }
 
     /// `sync` never loads or saves credentials holding a refresh token this
@@ -1889,8 +1970,11 @@ mod tests {
         // A client holding spent credentials: they are not saved.
         let (_dir, path) = temp_file(NESTED);
         let mut file = CodexAuthFile::load(&path).unwrap();
-        let client =
-            LLMClient::new().with_openai_chatgpt_oauth("access-9", Some("sync-spent-refresh"), "account-1");
+        let client = LLMClient::new().with_openai_chatgpt_oauth(
+            "access-9",
+            Some("sync-spent-refresh"),
+            "account-1",
+        );
         spent_tokens::record("sync-spent-refresh");
         let error = file.sync(&client).await.unwrap_err();
         assert!(error.to_string().contains("can't be used again"), "{error}");
@@ -1917,7 +2001,10 @@ mod tests {
         let created = dir.path().join("created");
         drop(create_private(&created).unwrap());
         assert_eq!(mode(&created), 0o600);
-        assert!(create_private(&created).is_err(), "never opens an existing file");
+        assert!(
+            create_private(&created).is_err(),
+            "never opens an existing file"
+        );
     }
 
     #[tokio::test]

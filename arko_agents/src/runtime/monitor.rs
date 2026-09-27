@@ -75,7 +75,10 @@ mod tests {
         // min(2000, 3000) = 2000 could have been cached; 1500 was.
         history.push(call(3000, Some(1500)));
         let efficiency = cache_efficiency(&history, &config).unwrap();
-        assert_eq!((efficiency.call, efficiency.rolling, efficiency.calls), (0.75, 0.75, 1));
+        assert_eq!(
+            (efficiency.call, efficiency.rolling, efficiency.calls),
+            (0.75, 0.75, 1)
+        );
         // A shrinking context caps the ceiling at the smaller input.
         history.push(call(1000, Some(1000)));
         let efficiency = cache_efficiency(&history, &config).unwrap();
@@ -88,6 +91,9 @@ mod tests {
         history.push(call(1600, Some(1400)));
         let efficiency = cache_efficiency(&history, &config).unwrap();
         assert_eq!(efficiency.calls, 3);
-        assert_eq!(efficiency.rolling, (1000.0 + 0.0 + 1400.0) / (1000.0 + 1200.0 + 1400.0));
+        assert_eq!(
+            efficiency.rolling,
+            (1000.0 + 0.0 + 1400.0) / (1000.0 + 1200.0 + 1400.0)
+        );
     }
 }

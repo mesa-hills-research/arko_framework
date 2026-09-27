@@ -761,8 +761,11 @@ impl GoogleClient {
                     thinking_budget,
                     include_summaries,
                 }) => Ok((
-                    Self::budget_level_without_thinking_levels(&conversation.model, *thinking_budget)?
-                        .map(|level| Self::thinking_level_request_value(level).to_string()),
+                    Self::budget_level_without_thinking_levels(
+                        &conversation.model,
+                        *thinking_budget,
+                    )?
+                    .map(|level| Self::thinking_level_request_value(level).to_string()),
                     summaries_value(*include_summaries),
                 )),
                 // Gemini 2.5 on the Interactions API takes LOW, MEDIUM and HIGH.
@@ -1083,8 +1086,11 @@ impl GoogleClient {
     fn calculate_usage(usage: &InteractionUsage) -> UsageInfo {
         let count = |tokens: u64| usize::try_from(tokens).unwrap_or(usize::MAX);
         let input_tokens = count(usage.total_input_tokens);
-        let output_tokens =
-            count(usage.total_output_tokens.saturating_add(usage.total_thought_tokens));
+        let output_tokens = count(
+            usage
+                .total_output_tokens
+                .saturating_add(usage.total_thought_tokens),
+        );
 
         let mut info = UsageInfo::new(input_tokens, output_tokens);
         info.reasoning_tokens =
@@ -1124,7 +1130,10 @@ fn blocked_generation(error: &Value) -> Option<Refusal> {
     GENERATION_BLOCKED_CODES.contains(&code).then(|| {
         let mut refusal = Refusal::new(RefusalSource::ContentFilter);
         refusal.category = Some(code.to_string());
-        refusal.explanation = error.get("message").and_then(Value::as_str).map(str::to_owned);
+        refusal.explanation = error
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         refusal.provider_details = error.clone();
         refusal
     })
@@ -1156,7 +1165,12 @@ fn interaction_error(label: &str, error: Option<&Value>, partial_output: &str) -
         return Error::Refusal(Box::new(refusal));
     }
     if error.get("code").is_some() || error.get("status").is_some() {
-        Error::provider_error(label, None, None, &serde_json::json!({ "error": error }).to_string())
+        Error::provider_error(
+            label,
+            None,
+            None,
+            &serde_json::json!({ "error": error }).to_string(),
+        )
     } else {
         Error::ApiError(format!("{label}: {error}"))
     }
@@ -1359,7 +1373,10 @@ mod tests {
     use serde_json::json;
 
     async fn stream_events(events: &[Value]) -> (Vec<StreamEvent>, Option<Error>) {
-        let body: String = events.iter().map(|event| format!("data: {event}\n\n")).collect();
+        let body: String = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect();
         stream_body(body).await
     }
 
@@ -1487,15 +1504,32 @@ mod tests {
         };
         assert_eq!(refusal.source, RefusalSource::ContentFilter);
         assert_eq!(refusal.category.as_deref(), Some("recitation"));
-        assert_eq!(refusal.explanation.as_deref(), Some("Blocked for recitation."));
+        assert_eq!(
+            refusal.explanation.as_deref(),
+            Some("Blocked for recitation.")
+        );
         assert_eq!(refusal.partial_output.as_deref(), Some("Once upon"));
         assert!(!Error::Refusal(refusal).is_retryable());
         // The same codes in an HTTP error body.
-        let error = http_error(400, None, r#"{"error":{"code":"prohibited_content","message":"m"}}"#);
+        let error = http_error(
+            400,
+            None,
+            r#"{"error":{"code":"prohibited_content","message":"m"}}"#,
+        );
         assert!(matches!(&error, Error::Refusal(refusal)
             if refusal.category.as_deref() == Some("prohibited_content") && refusal.partial_output.is_none()));
-        let error = http_error(429, None, r#"{"error":{"code":"rate_limit_exceeded","message":"m"}}"#);
-        assert!(matches!(error, Error::ProviderError { status: Some(429), .. }));
+        let error = http_error(
+            429,
+            None,
+            r#"{"error":{"code":"rate_limit_exceeded","message":"m"}}"#,
+        );
+        assert!(matches!(
+            error,
+            Error::ProviderError {
+                status: Some(429),
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -1504,7 +1538,11 @@ mod tests {
         events.push(json!({"event_type":"interaction.completed",
             "interaction":{"id":"int_1","status":"failed"}}));
         let (events, error) = stream_events(&events).await;
-        assert!(!events.iter().any(|event| matches!(event, StreamEvent::End(_))));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::End(_)))
+        );
         assert!(matches!(error, Some(Error::ApiError(_))), "{error:?}");
         let mut events = text_step().to_vec();
         events.push(json!({"event_type":"interaction.completed",
@@ -1516,17 +1554,28 @@ mod tests {
 
     #[test]
     fn failed_non_streaming_interactions_read_the_errors_list() {
-        let failed = |body: Value| serde_json::from_value::<InteractionResponse>(body).unwrap().failure();
+        let failed = |body: Value| {
+            serde_json::from_value::<InteractionResponse>(body)
+                .unwrap()
+                .failure()
+        };
         let error = failed(json!({"id":"int_1","status":"failed","steps":[],
             "errors":[{"code":"service_unavailable","message":"The service is temporarily overloaded."}]}));
         assert!(error.is_capacity_error(), "{error:?}");
         let error = failed(json!({"id":"int_1","status":"failed",
             "errors":[{"code":"safety","message":"Blocked."},{"code":"api_error","message":"x"}]}));
-        assert!(matches!(&error, Error::Refusal(refusal) if refusal.category.as_deref() == Some("safety")));
+        assert!(
+            matches!(&error, Error::Refusal(refusal) if refusal.category.as_deref() == Some("safety"))
+        );
         // The single-error form still works; no details stays a generic error.
-        let error = failed(json!({"id":"int_1","status":"failed","error":{"code":"invalid_request","message":"m"}}));
+        let error = failed(
+            json!({"id":"int_1","status":"failed","error":{"code":"invalid_request","message":"m"}}),
+        );
         assert_eq!(error.retry_class(), crate::RetryClass::Permanent);
-        assert!(matches!(failed(json!({"id":"int_1","status":"failed"})), Error::ApiError(_)));
+        assert!(matches!(
+            failed(json!({"id":"int_1","status":"failed"})),
+            Error::ApiError(_)
+        ));
     }
 
     #[tokio::test]
@@ -1542,7 +1591,10 @@ mod tests {
             json!({"index":1,"event_type":"step.stop"}),
             completed("completed"),
         ];
-        let body: String = events.iter().map(|event| format!("data: {event}\n\n")).collect();
+        let body: String = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect();
         let config = GenerationConfig {
             reasoning: Some(ReasoningConfig::Gemini {
                 thinking_level: GeminiThinkingLevel::High,
@@ -1570,7 +1622,9 @@ mod tests {
         assert_eq!(text, "Based on the clues provided, here is the answer.");
         assert_eq!(response.text(), text);
         assert_eq!(reasoning, "**Evaluating the clues** further");
-        let Some(ReasoningArtifact::GoogleReasoning { fragments }) = &response.message.reasoning_artifact else {
+        let Some(ReasoningArtifact::GoogleReasoning { fragments }) =
+            &response.message.reasoning_artifact
+        else {
             panic!("expected Google reasoning");
         };
         assert_eq!(fragments[0].summary, "**Evaluating the clues** further");
@@ -1586,7 +1640,10 @@ mod tests {
         let response = end(&events);
         assert_eq!(response.text(), "hi");
         assert_eq!(response.stop_reason, StopReason::EndTurn);
-        assert_eq!(response.model_call_usage.stop_reason.as_deref(), Some("completed"));
+        assert_eq!(
+            response.model_call_usage.stop_reason.as_deref(),
+            Some("completed")
+        );
     }
 
     #[tokio::test]
@@ -1597,7 +1654,10 @@ mod tests {
         let response = end(&events);
         assert_eq!(response.stop_reason, StopReason::ToolUse);
         assert_eq!(response.message.tool_calls[0].arguments, json!({"n":1}));
-        assert_eq!(response.model_call_usage.stop_reason.as_deref(), Some("requires_action"));
+        assert_eq!(
+            response.model_call_usage.stop_reason.as_deref(),
+            Some("requires_action")
+        );
     }
 
     #[tokio::test]
@@ -1608,24 +1668,41 @@ mod tests {
         let (events, _) = stream_events(&events).await;
         let response = end(&events);
         assert_eq!(response.stop_reason, StopReason::MaxTokens);
-        let ids: Vec<_> = response.message.tool_calls.iter().map(|call| call.id.as_deref().unwrap()).collect();
+        let ids: Vec<_> = response
+            .message
+            .tool_calls
+            .iter()
+            .map(|call| call.id.as_deref().unwrap())
+            .collect();
         assert_eq!(ids, ["call_a"]);
 
         let mut events = call_step(0, "call_a", "{\"n\":1}", true);
         events.extend(call_step(1, "call_b", "{\"n\":", false));
         events.push(completed("incomplete"));
         let (events, _) = stream_events(&events).await;
-        let ids: Vec<_> = end(&events).message.tool_calls.iter().map(|call| call.id.as_deref().unwrap()).collect();
+        let ids: Vec<_> = end(&events)
+            .message
+            .tool_calls
+            .iter()
+            .map(|call| call.id.as_deref().unwrap())
+            .collect();
         assert_eq!(ids, ["call_a"]);
     }
 
     #[tokio::test]
     async fn streams_without_a_terminal_status_are_truncated() {
         let (events, error) = stream_events(&text_step()).await;
-        assert!(!events.iter().any(|event| matches!(event, StreamEvent::End(_))));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::End(_)))
+        );
         assert!(matches!(error, Some(Error::StreamTruncated(_))));
 
-        let body: String = text_step().iter().map(|event| format!("data: {event}\n\n")).collect();
+        let body: String = text_step()
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect();
         let (_, error) = stream_body(body + "data: [DONE]\n\n").await;
         assert!(matches!(error, Some(Error::StreamTruncated(_))));
     }
@@ -1647,7 +1724,9 @@ mod tests {
             ("cancelled", StopReason::Other("cancelled".into())),
         ] {
             let response = GoogleClient::generation_response(
-                GoogleClient::parse_steps(&[json!({"type":"model_output","content":[{"type":"text","text":"x"}]})]),
+                GoogleClient::parse_steps(&[
+                    json!({"type":"model_output","content":[{"type":"text","text":"x"}]}),
+                ]),
                 status,
                 false,
                 &InteractionUsage::default(),
@@ -1656,7 +1735,10 @@ mod tests {
                 &GenerationConfig::default(),
             );
             assert_eq!(response.stop_reason, expected);
-            assert_eq!(response.model_call_usage.stop_reason.as_deref(), Some(status));
+            assert_eq!(
+                response.model_call_usage.stop_reason.as_deref(),
+                Some(status)
+            );
         }
     }
 
@@ -1666,14 +1748,20 @@ mod tests {
         conversation.add_user_message("go");
         let mut message = Message::new_assistant("");
         message.reasoning_artifact = Some(ReasoningArtifact::new_google_reasoning(vec![
-            GoogleReasoningFragment { summary: "thought".into(), signature: String::new() },
+            GoogleReasoningFragment {
+                summary: "thought".into(),
+                signature: String::new(),
+            },
         ]));
-        let mut call = ToolCall::from_argument_text(Some("call_a".into()), "fixture_tool".into(), "{}");
+        let mut call =
+            ToolCall::from_argument_text(Some("call_a".into()), "fixture_tool".into(), "{}");
         call.thought_signature = Some(String::new());
         message.tool_calls.push(call);
         conversation.messages.push(message);
         let steps = serde_json::to_value(
-            GoogleClient::new("test").convert_messages(&conversation).unwrap(),
+            GoogleClient::new("test")
+                .convert_messages(&conversation)
+                .unwrap(),
         )
         .unwrap();
         for step in steps.as_array().unwrap() {
@@ -1684,13 +1772,17 @@ mod tests {
     #[test]
     fn budget_mapped_levels_are_validated_for_the_model() {
         let conversation = Conversation::new(Model::google_gemini_3_0_pro());
-        let config = GenerationConfig::default().with_reasoning(ReasoningConfig::google(10_000, false));
+        let config =
+            GenerationConfig::default().with_reasoning(ReasoningConfig::google(10_000, false));
         assert!(matches!(
             GoogleClient::new("test").build_request(&conversation, &config, false),
             Err(Error::InvalidRequest(_))
         ));
-        let config = GenerationConfig::default().with_reasoning(ReasoningConfig::google(20_000, false));
-        let request = GoogleClient::new("test").build_request(&conversation, &config, false).unwrap();
+        let config =
+            GenerationConfig::default().with_reasoning(ReasoningConfig::google(20_000, false));
+        let request = GoogleClient::new("test")
+            .build_request(&conversation, &config, false)
+            .unwrap();
         assert_eq!(
             serde_json::to_value(request).unwrap()["generation_config"]["thinking_level"],
             "high"
@@ -1709,7 +1801,10 @@ mod tests {
     fn gemini_2_5_budgets_never_map_to_minimal() {
         let client = GoogleClient::new("test");
         let zero = GenerationConfig::default().with_reasoning(ReasoningConfig::google(0, false));
-        for model in [Model::google_gemini_2_5_pro(), Model::google_gemini_2_5_flash()] {
+        for model in [
+            Model::google_gemini_2_5_pro(),
+            Model::google_gemini_2_5_flash(),
+        ] {
             let conversation = Conversation::new(model);
             assert!(matches!(
                 client.build_request(&conversation, &zero, false),
@@ -1719,10 +1814,15 @@ mod tests {
 
         let conversation = Conversation::new(Model::google_gemini_2_5_flash_lite());
         let request = client.build_request(&conversation, &zero, false).unwrap();
-        assert!(serde_json::to_value(request).unwrap()["generation_config"].get("thinking_level").is_none());
+        assert!(
+            serde_json::to_value(request).unwrap()["generation_config"]
+                .get("thinking_level")
+                .is_none()
+        );
 
         let conversation = Conversation::new(Model::google_gemini_2_5_pro());
-        let config = GenerationConfig::default().with_reasoning(ReasoningConfig::google(2_000, false));
+        let config =
+            GenerationConfig::default().with_reasoning(ReasoningConfig::google(2_000, false));
         let request = client.build_request(&conversation, &config, false).unwrap();
         assert_eq!(
             serde_json::to_value(request).unwrap()["generation_config"]["thinking_level"],
@@ -1741,7 +1841,11 @@ mod tests {
         let request = client
             .build_request(&conversation, &GenerationConfig::default(), false)
             .unwrap();
-        assert!(serde_json::to_value(request).unwrap()["generation_config"].get("temperature").is_none());
+        assert!(
+            serde_json::to_value(request).unwrap()["generation_config"]
+                .get("temperature")
+                .is_none()
+        );
     }
 }
 
@@ -1756,7 +1860,10 @@ mod model_rule_tests {
         reasoning::{GeminiThinkingLevel, ReasoningConfig},
     };
 
-    fn thinking(model: Model, config: &GenerationConfig) -> Result<(Option<String>, Option<String>), Error> {
+    fn thinking(
+        model: Model,
+        config: &GenerationConfig,
+    ) -> Result<(Option<String>, Option<String>), Error> {
         GoogleClient::new("test").resolve_thinking(&Conversation::new(model), config)
     }
 
@@ -1782,43 +1889,75 @@ mod model_rule_tests {
         ] {
             assert_eq!(level(model, &default).as_deref(), Some("minimal"));
         }
-        assert_eq!(level(Model::google_gemini_3_1_pro(), &default).as_deref(), Some("high"));
+        assert_eq!(
+            level(Model::google_gemini_3_1_pro(), &default).as_deref(),
+            Some("high")
+        );
     }
 
     #[test]
     fn gemini_3_7_and_3_8_flash_reject_minimal_explicitly_and_from_a_zero_budget() {
-        let minimal =
-            GenerationConfig::default().with_reasoning(ReasoningConfig::gemini(GeminiThinkingLevel::Minimal, false));
-        let zero_budget = GenerationConfig::default().with_reasoning(ReasoningConfig::google(0, false));
-        for model in [Model::google_gemini_3_7_flash(), Model::google_gemini_3_8_flash()] {
-            assert!(matches!(thinking(model.clone(), &minimal), Err(Error::InvalidRequest(_))));
-            assert!(matches!(thinking(model.clone(), &zero_budget), Err(Error::InvalidRequest(_))));
+        let minimal = GenerationConfig::default()
+            .with_reasoning(ReasoningConfig::gemini(GeminiThinkingLevel::Minimal, false));
+        let zero_budget =
+            GenerationConfig::default().with_reasoning(ReasoningConfig::google(0, false));
+        for model in [
+            Model::google_gemini_3_7_flash(),
+            Model::google_gemini_3_8_flash(),
+        ] {
+            assert!(matches!(
+                thinking(model.clone(), &minimal),
+                Err(Error::InvalidRequest(_))
+            ));
+            assert!(matches!(
+                thinking(model.clone(), &zero_budget),
+                Err(Error::InvalidRequest(_))
+            ));
             let low = GenerationConfig::default()
                 .with_reasoning(ReasoningConfig::gemini(GeminiThinkingLevel::Low, true));
-            assert_eq!(thinking(model, &low).unwrap(), (Some("low".into()), Some("auto".into())));
+            assert_eq!(
+                thinking(model, &low).unwrap(),
+                (Some("low".into()), Some("auto".into()))
+            );
         }
         // 3.6 Flash accepts minimal.
-        assert_eq!(level(Model::google_gemini_3_6_flash(), &minimal).as_deref(), Some("minimal"));
+        assert_eq!(
+            level(Model::google_gemini_3_6_flash(), &minimal).as_deref(),
+            Some("minimal")
+        );
     }
 
     #[test]
     fn gemini_2_5_takes_levels_but_not_minimal_and_2_0_has_no_thinking() {
         let medium = GenerationConfig::default()
             .with_reasoning(ReasoningConfig::gemini(GeminiThinkingLevel::Medium, false));
-        assert_eq!(level(Model::google_gemini_2_5_flash(), &medium).as_deref(), Some("medium"));
+        assert_eq!(
+            level(Model::google_gemini_2_5_flash(), &medium).as_deref(),
+            Some("medium")
+        );
         let minimal = GenerationConfig::default()
             .with_reasoning(ReasoningConfig::gemini(GeminiThinkingLevel::Minimal, false));
         assert!(matches!(
             thinking(Model::google_gemini_2_5_pro(), &minimal),
             Err(Error::InvalidRequest(_))
         ));
-        for config in [medium, GenerationConfig::default().with_reasoning(ReasoningConfig::google(2048, false))] {
+        for config in [
+            medium,
+            GenerationConfig::default().with_reasoning(ReasoningConfig::google(2048, false)),
+        ] {
             assert!(matches!(
                 thinking(Model::google_gemini_2_0_flash(), &config),
                 Err(Error::InvalidRequest(_))
             ));
         }
-        assert_eq!(thinking(Model::google_gemini_2_0_flash(), &GenerationConfig::default()).unwrap(), (None, None));
+        assert_eq!(
+            thinking(
+                Model::google_gemini_2_0_flash(),
+                &GenerationConfig::default()
+            )
+            .unwrap(),
+            (None, None)
+        );
     }
 
     #[test]

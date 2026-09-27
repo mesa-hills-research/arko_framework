@@ -22,10 +22,10 @@
 //! library when the request is built.
 
 use arko_ai::{
-    reasoning::{AnthropicReasoningFragment, OpenAIEffort},
     AnthropicReasoningEffort, CodexAuthFile, Content, Error, GeminiThinkingLevel, GenerationConfig,
     GenerationResponse, Image, LLMClient, Model, OpenAIReasoningMode, OpenRouterReasoning,
     Provider, ReasoningArtifact, ReasoningConfig, ReasoningEffort, StreamEvent, UsageInfo,
+    reasoning::{AnthropicReasoningFragment, OpenAIEffort},
 };
 use clap::{Args, Parser, Subcommand};
 use dotenv::dotenv;
@@ -201,7 +201,10 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
                             print!("{}", t);
                             io::stdout().flush().map_err(Error::IoError)?;
                         }
-                        Ok(StreamEvent::ToolCallStart { .. } | StreamEvent::ToolCallArgumentsDelta { .. }) => {}
+                        Ok(
+                            StreamEvent::ToolCallStart { .. }
+                            | StreamEvent::ToolCallArgumentsDelta { .. },
+                        ) => {}
                         Ok(StreamEvent::Refusal(refusal)) => {
                             println!("\n\nThe response was {refusal}");
                         }
@@ -302,7 +305,10 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
                             print!("{}", t);
                             io::stdout().flush().map_err(Error::IoError)?;
                         }
-                        Ok(StreamEvent::ToolCallStart { .. } | StreamEvent::ToolCallArgumentsDelta { .. }) => {}
+                        Ok(
+                            StreamEvent::ToolCallStart { .. }
+                            | StreamEvent::ToolCallArgumentsDelta { .. },
+                        ) => {}
                         Ok(StreamEvent::Refusal(refusal)) => {
                             println!("\n  (The response was {refusal})");
                         }
@@ -323,7 +329,11 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
                 if let Some(resp) = final_response_for_turn {
                     // A refused turn that can't stay in history is removed
                     // together with the prompt that triggered it.
-                    if resp.refusal.as_ref().is_some_and(|refusal| !refusal.source.keeps_turn()) {
+                    if resp
+                        .refusal
+                        .as_ref()
+                        .is_some_and(|refusal| !refusal.source.keeps_turn())
+                    {
                         conversation.messages.pop();
                     } else {
                         conversation.add_assistant_message_from_response(resp.clone());
@@ -339,7 +349,10 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
                 }
                 println!("---");
             }
-            print!("Chat ended. Final accumulated billed cost: ${:.6}", total_billed);
+            print!(
+                "Chat ended. Final accumulated billed cost: ${:.6}",
+                total_billed
+            );
             if total_estimate > 0.0 {
                 print!(" (estimate at list prices: ${:.6})", total_estimate);
             }
@@ -378,7 +391,13 @@ fn undated(id: &str) -> &str {
             && bytes[id.len() - date_len..]
                 .iter()
                 .enumerate()
-                .all(|(i, b)| if pattern.contains(&i) { *b == b'-' } else { b.is_ascii_digit() })
+                .all(|(i, b)| {
+                    if pattern.contains(&i) {
+                        *b == b'-'
+                    } else {
+                        b.is_ascii_digit()
+                    }
+                })
     };
     if dated(10, &[4, 7]) {
         &id[..id.len() - 11]
@@ -403,8 +422,13 @@ fn aliases() -> HashMap<String, Vec<Model>> {
             let dotted: String = short
                 .char_indices()
                 .map(|(i, c)| {
-                    let digit_at = |j: usize| short.as_bytes().get(j).is_some_and(u8::is_ascii_digit);
-                    if c == '-' && i > 0 && digit_at(i - 1) && digit_at(i + 1) { '.' } else { c }
+                    let digit_at =
+                        |j: usize| short.as_bytes().get(j).is_some_and(u8::is_ascii_digit);
+                    if c == '-' && i > 0 && digit_at(i - 1) && digit_at(i + 1) {
+                        '.'
+                    } else {
+                        c
+                    }
                 })
                 .collect();
             names.push(dotted);
@@ -432,7 +456,11 @@ fn get_model(name: &str) -> Result<Model, Error> {
         Some([model]) => Ok(model.clone()),
         Some(models) => Err(Error::ModelNotSupported(format!(
             "'{name}' names several models; use one of: {}",
-            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>().join(", ")
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ))),
         None => Err(Error::ModelNotSupported(format!(
             "Unknown model '{name}'. Run the `models` command for registered ids and their aliases, or pass an OpenRouter slug (author/model)."
@@ -494,7 +522,9 @@ fn build_config(model: &Model, args: &GenerationArgs) -> Result<GenerationConfig
         Some("standard") => Some(OpenAIReasoningMode::Standard),
         Some("pro") => Some(OpenAIReasoningMode::Pro),
         Some(other) => {
-            return Err(invalid(format!("Reasoning mode must be 'standard' or 'pro', not '{other}'.")));
+            return Err(invalid(format!(
+                "Reasoning mode must be 'standard' or 'pro', not '{other}'."
+            )));
         }
     };
     match (mode, &model.provider) {
@@ -604,7 +634,9 @@ fn reasoning_config(
                 Some("xhigh") => OpenRouterReasoning::effort(ReasoningEffort::XHigh),
                 Some("max") => OpenRouterReasoning::effort(ReasoningEffort::Max),
                 Some(budget) => OpenRouterReasoning::max_tokens(budget.parse().map_err(|_| {
-                    invalid("OpenRouter reasoning takes an effort (none..max) or a token budget".into())
+                    invalid(
+                        "OpenRouter reasoning takes an effort (none..max) or a token budget".into(),
+                    )
                 })?),
             };
             if let Some(mode) = mode {
@@ -687,7 +719,10 @@ fn print_reasoning_artifact(artifact: Option<&ReasoningArtifact>) {
                     .filter_map(|summary| summary["text"].as_str())
                     .collect();
                 if summaries.is_empty() {
-                    println!("\nOpenAI Output Items: {} (no reasoning summaries)", items.len());
+                    println!(
+                        "\nOpenAI Output Items: {} (no reasoning summaries)",
+                        items.len()
+                    );
                 } else {
                     println!("\nReasoning Summaries:");
                     for summary in summaries {
@@ -699,7 +734,10 @@ fn print_reasoning_artifact(artifact: Option<&ReasoningArtifact>) {
                 println!("\nAnthropic Reasoning Artifact:");
                 for fragment in fragments {
                     match fragment {
-                        AnthropicReasoningFragment::Thinking { thinking, signature } => {
+                        AnthropicReasoningFragment::Thinking {
+                            thinking,
+                            signature,
+                        } => {
                             println!("- Thinking (sig: {}): {} bytes", signature, thinking.len());
                         }
                         AnthropicReasoningFragment::RedactedThinking { data } => {
@@ -717,8 +755,14 @@ fn print_reasoning_artifact(artifact: Option<&ReasoningArtifact>) {
             ReasoningArtifact::OpenRouter { details } => {
                 println!("\nOpenRouter Reasoning Details:");
                 for detail in details {
-                    let kind = detail.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    let format = detail.get("format").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    let kind = detail
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let format = detail
+                        .get("format")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
                     println!("- {kind} ({format})");
                 }
             }
@@ -790,7 +834,10 @@ fn print_usage_info(
         println!("  Reported Cost: ${:<10.6}", reported_cost);
     }
     if let Some(upstream_cost) = usage.upstream_cost {
-        println!("  Upstream Cost (your provider key): ${:<10.6}", upstream_cost);
+        println!(
+            "  Upstream Cost (your provider key): ${:<10.6}",
+            upstream_cost
+        );
     }
     if usage.billing != arko_ai::BillingKind::Metered {
         println!("  Billed ({:?}): ${:<10.6}", usage.billing, usage.billed());

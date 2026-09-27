@@ -62,7 +62,11 @@ async fn write_reply(socket: &mut tokio::net::TcpStream, reply: &Reply) {
         .iter()
         .map(|(name, value)| format!("{name}: {value}\r\n"))
         .collect();
-    if !reply.headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("retry-after")) {
+    if !reply
+        .headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+    {
         extra.push_str("Retry-After: 60\r\n");
     }
     let response = format!(
@@ -76,7 +80,9 @@ async fn write_reply(socket: &mut tokio::net::TcpStream, reply: &Reply) {
     socket.write_all(response.as_bytes()).await.unwrap();
 }
 
-pub(super) async fn server(replies: Vec<Reply>) -> (String, tokio::task::JoinHandle<Vec<(String, Value)>>) {
+pub(super) async fn server(
+    replies: Vec<Reply>,
+) -> (String, tokio::task::JoinHandle<Vec<(String, Value)>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
@@ -111,14 +117,20 @@ impl TestServer {
         let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
         let (arrivals, arrived) = tokio::sync::mpsc::unbounded_channel();
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
-        let replies = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(replies)));
+        let replies = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+            replies,
+        )));
         let recorded = requests.clone();
         let permits = gate.clone();
         tokio::spawn(async move {
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
-                let (recorded, arrivals, permits, replies) =
-                    (recorded.clone(), arrivals.clone(), permits.clone(), replies.clone());
+                let (recorded, arrivals, permits, replies) = (
+                    recorded.clone(),
+                    arrivals.clone(),
+                    permits.clone(),
+                    replies.clone(),
+                );
                 tokio::spawn(async move {
                     let (headers, body) = read_request(&mut socket).await;
                     let reply = replies.lock().unwrap().pop_front();
@@ -153,7 +165,10 @@ fn served_by(mut client: OpenAIClient, url: &str) -> OpenAIClient {
     client = client
         .with_base_url(url)
         .with_oauth_token_url(format!("{url}/token"));
-    client.http_client = crate::providers::http_client_builder().no_proxy().build().unwrap();
+    client.http_client = crate::providers::http_client_builder()
+        .no_proxy()
+        .build()
+        .unwrap();
     client
 }
 
@@ -170,7 +185,11 @@ fn fresh_jwt() -> String {
 
 pub(super) fn client(url: &str) -> OpenAIClient {
     served_by(
-        OpenAIClient::new_chatgpt_oauth(&fresh_jwt(), Some("synthetic-refresh"), "synthetic-account"),
+        OpenAIClient::new_chatgpt_oauth(
+            &fresh_jwt(),
+            Some("synthetic-refresh"),
+            "synthetic-account",
+        ),
         url,
     )
 }
@@ -221,7 +240,11 @@ async fn oauth_recovery_handles_server_expiry_for_text_and_stream_without_an_out
             // One refresh token per round: the first round's is spent.
             let refresh_token = format!("server-expiry-{streaming}");
             let client = served_by(
-                OpenAIClient::new_chatgpt_oauth(&fresh_jwt(), Some(&refresh_token), "synthetic-account"),
+                OpenAIClient::new_chatgpt_oauth(
+                    &fresh_jwt(),
+                    Some(&refresh_token),
+                    "synthetic-account",
+                ),
                 &url,
             );
             assert!(!client.is_oauth_token_expired(Duration::from_secs(60)).await);
@@ -440,7 +463,9 @@ fn credential_debug_output_redacts_tokens() {
 /// in order (then `None`), and saved credentials are recorded.
 #[derive(Default)]
 struct ScriptedStore {
-    reads: std::sync::Mutex<std::collections::VecDeque<Result<Option<ChatGptOAuthCredentials>, Error>>>,
+    reads: std::sync::Mutex<
+        std::collections::VecDeque<Result<Option<ChatGptOAuthCredentials>, Error>>,
+    >,
     seen: std::sync::Mutex<Vec<ChatGptOAuthCredentials>>,
     saved: std::sync::Mutex<Vec<(ChatGptOAuthCredentials, Option<String>)>>,
     fail_saves: bool,
@@ -527,7 +552,11 @@ async fn a_store_is_read_before_each_refresh_and_receives_the_rotated_tokens() {
 async fn tokens_another_program_refreshed_are_used_without_a_refresh_request() {
     tokio::time::timeout(Duration::from_secs(5), async {
         // No /token reply: a refresh request would fail the test.
-        let (url, server) = server(vec![expired(), reply("/responses", 200, &completed_stream())]).await;
+        let (url, server) = server(vec![
+            expired(),
+            reply("/responses", 200, &completed_stream()),
+        ])
+        .await;
         let store = Arc::new(ScriptedStore::default());
         store
             .reads
@@ -536,17 +565,28 @@ async fn tokens_another_program_refreshed_are_used_without_a_refresh_request() {
             .push_back(Ok(Some(stored("access-from-codex", "refresh-from-codex"))));
         let client = with_store(client(&url), &store);
         client
-            .generate_text(&Conversation::new(Model::openai_gpt_6_astra()), &GenerationConfig::default())
+            .generate_text(
+                &Conversation::new(Model::openai_gpt_6_astra()),
+                &GenerationConfig::default(),
+            )
             .await
             .unwrap();
         let calls = server.await.unwrap();
         assert_eq!(calls.len(), 2);
-        assert!(calls[1].0.to_lowercase().contains("authorization: bearer access-from-codex"));
+        assert!(
+            calls[1]
+                .0
+                .to_lowercase()
+                .contains("authorization: bearer access-from-codex")
+        );
         assert_eq!(
             client.chatgpt_oauth_credentials().await.unwrap(),
             stored("access-from-codex", "refresh-from-codex")
         );
-        assert!(store.saved.lock().unwrap().is_empty(), "nothing was refreshed");
+        assert!(
+            store.saved.lock().unwrap().is_empty(),
+            "nothing was refreshed"
+        );
     })
     .await
     .unwrap();
@@ -556,7 +596,9 @@ async fn tokens_another_program_refreshed_are_used_without_a_refresh_request() {
 async fn an_unreadable_store_or_another_account_stops_the_refresh() {
     tokio::time::timeout(Duration::from_secs(5), async {
         for read in [
-            Err(Error::AuthenticationFailed("the store holds another account".into())),
+            Err(Error::AuthenticationFailed(
+                "the store holds another account".into(),
+            )),
             Ok(Some(ChatGptOAuthCredentials {
                 account_id: "another-account".into(),
                 ..stored("a", "r")
@@ -567,7 +609,10 @@ async fn an_unreadable_store_or_another_account_stops_the_refresh() {
             store.reads.lock().unwrap().push_back(read);
             let client = with_store(client(&url), &store);
             let error = client
-                .generate_text(&Conversation::new(Model::openai_gpt_6_astra()), &GenerationConfig::default())
+                .generate_text(
+                    &Conversation::new(Model::openai_gpt_6_astra()),
+                    &GenerationConfig::default(),
+                )
                 .await
                 .unwrap_err();
             assert!(matches!(error, Error::AuthenticationFailed(_)), "{error}");
@@ -575,7 +620,10 @@ async fn an_unreadable_store_or_another_account_stops_the_refresh() {
             assert_eq!(server.await.unwrap().len(), 1, "no refresh request");
             let credentials = client.chatgpt_oauth_credentials().await.unwrap();
             assert_eq!(credentials.account_id, "synthetic-account");
-            assert_eq!(credentials.refresh_token.as_deref(), Some("synthetic-refresh"));
+            assert_eq!(
+                credentials.refresh_token.as_deref(),
+                Some("synthetic-refresh")
+            );
         }
     })
     .await
@@ -650,28 +698,47 @@ fn quick_retries(mut client: OpenAIClient, max_server_hint: Duration) -> OpenAIC
 async fn rate_limited_refreshes_retry_a_bounded_number_of_times() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let limited = || reply("/token", 429, r#"{"error":{"code":"rate_limit_exceeded"}}"#);
-        let (url, server) =
-            server((0..=OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES).map(|_| limited()).collect()).await;
+        let (url, server) = server(
+            (0..=OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES)
+                .map(|_| limited())
+                .collect(),
+        )
+        .await;
         let store = Arc::new(ScriptedStore::default());
         // The server's Retry-After: 60 is honored up to 20 ms here.
         let client = quick_retries(client(&url), Duration::from_millis(20));
         let client = with_store(client, &store).with_oauth_rate_limit_retries(true);
         let started = std::time::Instant::now();
         let error = client.refresh_oauth_token().await.unwrap_err();
-        assert!(matches!(error, Error::ProviderError { status: Some(429), .. }), "{error}");
+        assert!(
+            matches!(
+                error,
+                Error::ProviderError {
+                    status: Some(429),
+                    ..
+                }
+            ),
+            "{error}"
+        );
         let requests = server.await.unwrap().len() as u32;
         assert_eq!(requests, OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES + 1);
         // One read before each request, plus one after the last failure.
         assert_eq!(store.seen.lock().unwrap().len() as u32, requests + 1);
         // Every wait honored the (capped) server hint.
-        assert!(started.elapsed() >= Duration::from_millis(20) * OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES);
+        assert!(
+            started.elapsed() >= Duration::from_millis(20) * OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES
+        );
     })
     .await
     .unwrap();
 }
 
 fn permission_denied() -> Reply {
-    reply("/responses", 401, r#"{"error":{"code":"permission_denied"}}"#)
+    reply(
+        "/responses",
+        401,
+        r#"{"error":{"code":"permission_denied"}}"#,
+    )
 }
 
 /// Like Codex's unauthorized recovery: any 401 first re-reads the store, and
@@ -696,21 +763,41 @@ async fn any_401_adopts_newer_stored_tokens_and_sends_again_once() {
                 .push_back(Ok(Some(stored("access-from-codex", "refresh-from-codex"))));
             let client = with_store(client(&url), &store);
             let result = client
-                .generate_text(&Conversation::new(Model::openai_gpt_6_astra()), &GenerationConfig::default())
+                .generate_text(
+                    &Conversation::new(Model::openai_gpt_6_astra()),
+                    &GenerationConfig::default(),
+                )
                 .await;
             let calls = server.await.unwrap();
             assert_eq!(calls.len(), 2);
             assert_eq!(calls[0].1, calls[1].1, "the same request is sent again");
-            assert!(calls[1].0.to_lowercase().contains("authorization: bearer access-from-codex"));
+            assert!(
+                calls[1]
+                    .0
+                    .to_lowercase()
+                    .contains("authorization: bearer access-from-codex")
+            );
             if second_reply_ok {
                 result.unwrap();
             } else {
                 // A second rejection is returned; nothing loops.
                 let error = result.unwrap_err();
-                assert!(matches!(error, Error::ProviderError { status: Some(401), .. }), "{error}");
+                assert!(
+                    matches!(
+                        error,
+                        Error::ProviderError {
+                            status: Some(401),
+                            ..
+                        }
+                    ),
+                    "{error}"
+                );
             }
             assert_eq!(store.seen.lock().unwrap().len(), 1, "read once");
-            assert!(store.saved.lock().unwrap().is_empty(), "nothing was refreshed");
+            assert!(
+                store.saved.lock().unwrap().is_empty(),
+                "nothing was refreshed"
+            );
             assert_eq!(
                 client.chatgpt_oauth_credentials().await.unwrap(),
                 stored("access-from-codex", "refresh-from-codex")
@@ -775,7 +862,10 @@ fn auth_file(access_token: &str) -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 fn file_credentials(path: &std::path::Path) -> ChatGptOAuthCredentials {
-    crate::codex_auth::CodexAuthFile::load(path).unwrap().credentials().unwrap()
+    crate::codex_auth::CodexAuthFile::load(path)
+        .unwrap()
+        .credentials()
+        .unwrap()
 }
 
 fn second_refresh() -> Reply {
@@ -926,7 +1016,10 @@ async fn a_client_waiting_for_another_clients_refresh_keeps_serving_requests() {
         // refresh lock until the token endpoint answers.
         tokens.arrived.recv().await.unwrap();
         let conversation = Conversation::new(Model::openai_gpt_6_astra());
-        second.generate_text(&conversation, &GenerationConfig::default()).await.unwrap();
+        second
+            .generate_text(&conversation, &GenerationConfig::default())
+            .await
+            .unwrap();
         // The second client's refresh waits for the file's lock without
         // holding the second client's credentials.
         let waiting = second.refresh_oauth_token_once();
@@ -934,14 +1027,24 @@ async fn a_client_waiting_for_another_clients_refresh_keeps_serving_requests() {
         assert!(futures::poll!(&mut waiting).is_pending());
         let held = second.chatgpt_oauth_credentials().await.unwrap();
         assert_eq!(held.refresh_token.as_deref(), Some("synthetic-refresh"));
-        second.generate_text(&conversation, &GenerationConfig::default()).await.unwrap();
+        second
+            .generate_text(&conversation, &GenerationConfig::default())
+            .await
+            .unwrap();
         assert!(futures::poll!(&mut waiting).is_pending());
         assert_eq!(responses.request_count(), 2);
 
         tokens.gate.add_permits(1);
-        assert_eq!(refreshing.await.unwrap().unwrap().access_token, "synthetic-new-access");
+        assert_eq!(
+            refreshing.await.unwrap().unwrap().access_token,
+            "synthetic-new-access"
+        );
         assert_eq!(waiting.await.unwrap().access_token, "synthetic-new-access");
-        assert_eq!(tokens.request_count(), 1, "the second client adopted, not refreshed");
+        assert_eq!(
+            tokens.request_count(),
+            1,
+            "the second client adopted, not refreshed"
+        );
         let new = stored("synthetic-new-access", "synthetic-new-refresh");
         for client in [&first, &second] {
             assert_eq!(client.chatgpt_oauth_credentials().await.unwrap(), new);
@@ -966,16 +1069,25 @@ async fn a_stalled_token_endpoint_times_out_with_a_transient_error() {
         client.oauth_refresh_timeout = Some(Duration::from_millis(300));
         let before = client.chatgpt_oauth_credentials().await.unwrap();
         let error = client
-            .generate_text(&Conversation::new(Model::openai_gpt_6_astra()), &GenerationConfig::default())
+            .generate_text(
+                &Conversation::new(Model::openai_gpt_6_astra()),
+                &GenerationConfig::default(),
+            )
             .await
             .unwrap_err();
-        assert!(matches!(&error, Error::HttpError(error) if error.is_timeout()), "{error}");
+        assert!(
+            matches!(&error, Error::HttpError(error) if error.is_timeout()),
+            "{error}"
+        );
         assert_eq!(error.retry_class(), crate::RetryClass::Transient);
         assert_eq!(server.request_count(), 2, "the refresh request was sent");
         assert_eq!(client.chatgpt_oauth_credentials().await.unwrap(), before);
 
         let error = client.refresh_oauth_token_once().await.unwrap_err();
-        assert!(matches!(&error, Error::HttpError(error) if error.is_timeout()), "{error}");
+        assert!(
+            matches!(&error, Error::HttpError(error) if error.is_timeout()),
+            "{error}"
+        );
         assert!(error.is_retryable());
         assert_eq!(server.request_count(), 3);
         assert_eq!(client.chatgpt_oauth_credentials().await.unwrap(), before);
@@ -1034,7 +1146,10 @@ async fn an_explicit_refresh_that_waits_for_another_returns_its_tokens() {
         tokio::pin!(second);
         assert!(futures::poll!(&mut second).is_pending());
         server.gate.add_permits(2);
-        assert_eq!(first.await.unwrap().unwrap().access_token, "synthetic-new-access");
+        assert_eq!(
+            first.await.unwrap().unwrap().access_token,
+            "synthetic-new-access"
+        );
         assert_eq!(second.await.unwrap().access_token, "synthetic-new-access");
         assert_eq!(server.request_count(), 1);
     })
@@ -1099,22 +1214,46 @@ async fn an_expiry_check_adopts_stored_tokens_and_refreshes_them_only_if_they_ex
         for (stored_access, refreshes) in [(fresh_jwt(), false), (jwt(1), true)] {
             let store = Arc::new(ScriptedStore::default());
             let from_codex = stored(&stored_access, "refresh-from-codex");
-            store.reads.lock().unwrap().push_back(Ok(Some(from_codex.clone())));
-            let expired = OpenAIClient::new_chatgpt_oauth(&jwt(1), Some("synthetic-refresh"), "synthetic-account");
+            store
+                .reads
+                .lock()
+                .unwrap()
+                .push_back(Ok(Some(from_codex.clone())));
+            let expired = OpenAIClient::new_chatgpt_oauth(
+                &jwt(1),
+                Some("synthetic-refresh"),
+                "synthetic-account",
+            );
             let client = with_store(served_by(expired, &server.url), &store);
-            let result = client.refresh_oauth_token_if_expiring(margin).await.unwrap().unwrap();
+            let result = client
+                .refresh_oauth_token_if_expiring(margin)
+                .await
+                .unwrap()
+                .unwrap();
             let saved = store.saved.lock().unwrap().clone();
             if refreshes {
                 assert_eq!(result.access_token, "synthetic-new-access");
                 assert_eq!(server.request_count(), 1);
                 // The stored refresh token was used, not the client's old one.
-                assert_eq!(server.requests.lock().unwrap()[0].1["refresh_token"], "refresh-from-codex");
-                assert_eq!(saved, [(stored("synthetic-new-access", "synthetic-new-refresh"), None)]);
+                assert_eq!(
+                    server.requests.lock().unwrap()[0].1["refresh_token"],
+                    "refresh-from-codex"
+                );
+                assert_eq!(
+                    saved,
+                    [(
+                        stored("synthetic-new-access", "synthetic-new-refresh"),
+                        None
+                    )]
+                );
             } else {
                 assert_eq!(result.access_token, stored_access);
                 assert_eq!(server.request_count(), 0);
                 assert!(saved.is_empty());
-                assert_eq!(client.chatgpt_oauth_credentials().await.unwrap(), from_codex);
+                assert_eq!(
+                    client.chatgpt_oauth_credentials().await.unwrap(),
+                    from_codex
+                );
             }
         }
     })
@@ -1153,9 +1292,16 @@ async fn clients_take_the_credentials_of_a_new_sign_in_after_an_unsaved_rotation
         for client in [&first, &second] {
             client.refresh_oauth_token_once().await.unwrap();
             let credentials = client.chatgpt_oauth_credentials().await.unwrap();
-            assert_eq!(credentials.refresh_token.as_deref(), Some("signed-in-refresh"));
+            assert_eq!(
+                credentials.refresh_token.as_deref(),
+                Some("signed-in-refresh")
+            );
         }
-        assert_eq!(server.request_count(), 1, "only the first, failed-to-save refresh");
+        assert_eq!(
+            server.request_count(),
+            1,
+            "only the first, failed-to-save refresh"
+        );
     })
     .await
     .unwrap();
@@ -1245,7 +1391,8 @@ async fn an_idle_client_never_refreshes_tokens_another_client_spent() {
         let (dir, path) = auth_file(&jwt(1));
         let file = crate::codex_auth::CodexAuthFile::load(&path).unwrap();
         let first = served_by(file.openai_client().unwrap(), &server.url);
-        let idle = crate::LLMClient::new().with_openai_client(served_by(file.openai_client().unwrap(), &server.url));
+        let idle = crate::LLMClient::new()
+            .with_openai_client(served_by(file.openai_client().unwrap(), &server.url));
         let held = idle.openai_chatgpt_oauth_credentials().await.unwrap();
         first.refresh_oauth_token_once().await.unwrap();
         // A directory in place of that save's backup fails the next save.
@@ -1253,21 +1400,40 @@ async fn an_idle_client_never_refreshes_tokens_another_client_spent() {
         std::fs::remove_file(&backup).unwrap();
         std::fs::create_dir(&backup).unwrap();
         assert!(first.refresh_oauth_token_once().await.is_err());
-        assert_eq!(file_credentials(&path).refresh_token.as_deref(), Some("b1-refresh-1"));
+        assert_eq!(
+            file_credentials(&path).refresh_token.as_deref(),
+            Some("b1-refresh-1")
+        );
 
         // The agent loop's proactive refresh.
         let margin = Duration::from_secs(60);
-        let error = idle.refresh_openai_oauth_token_if_expiring(margin).await.unwrap_err();
+        let error = idle
+            .refresh_openai_oauth_token_if_expiring(margin)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains(".recovered-"), "{error}");
         assert!(!error.is_retryable());
         assert_eq!(idle.openai_chatgpt_oauth_credentials().await.unwrap(), held);
-        assert_eq!(sent_refresh_tokens(&server), ["synthetic-refresh", "b1-refresh-1"]);
+        assert_eq!(
+            sent_refresh_tokens(&server),
+            ["synthetic-refresh", "b1-refresh-1"]
+        );
 
         std::fs::remove_dir(&backup).unwrap();
-        let adopted = idle.refresh_openai_oauth_token_if_expiring(margin).await.unwrap().unwrap();
+        let adopted = idle
+            .refresh_openai_oauth_token_if_expiring(margin)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(adopted.refresh_token.as_deref(), Some("b1-refresh-2"));
-        assert_eq!(file_credentials(&path).refresh_token.as_deref(), Some("b1-refresh-2"));
-        assert_eq!(sent_refresh_tokens(&server), ["synthetic-refresh", "b1-refresh-1"]);
+        assert_eq!(
+            file_credentials(&path).refresh_token.as_deref(),
+            Some("b1-refresh-2")
+        );
+        assert_eq!(
+            sent_refresh_tokens(&server),
+            ["synthetic-refresh", "b1-refresh-1"]
+        );
     })
     .await
     .unwrap();
@@ -1303,19 +1469,31 @@ async fn a_client_never_takes_a_sign_in_another_client_spent() {
         let adopted = second.refresh_oauth_token_once().await.unwrap();
         assert_eq!(adopted.refresh_token.as_deref(), Some("m1a-signed-in"));
         assert!(second.refresh_oauth_token_once().await.is_err());
-        assert_eq!(file_credentials(&path).refresh_token.as_deref(), Some("m1a-signed-in"));
+        assert_eq!(
+            file_credentials(&path).refresh_token.as_deref(),
+            Some("m1a-signed-in")
+        );
 
         let error = first.refresh_oauth_token_once().await.unwrap_err();
         assert!(error.to_string().contains(".recovered-"), "{error}");
         let held = first.chatgpt_oauth_credentials().await.unwrap();
         assert_eq!(held.refresh_token.as_deref(), Some("m1a-refresh-1"));
-        assert_eq!(sent_refresh_tokens(&server), ["synthetic-refresh", "m1a-signed-in"]);
+        assert_eq!(
+            sent_refresh_tokens(&server),
+            ["synthetic-refresh", "m1a-signed-in"]
+        );
 
         std::fs::remove_dir(&backup).unwrap();
         let taken = first.refresh_oauth_token_once().await.unwrap();
         assert_eq!(taken.refresh_token.as_deref(), Some("m1a-refresh-2"));
-        assert_eq!(file_credentials(&path).refresh_token.as_deref(), Some("m1a-refresh-2"));
-        assert_eq!(sent_refresh_tokens(&server), ["synthetic-refresh", "m1a-signed-in"]);
+        assert_eq!(
+            file_credentials(&path).refresh_token.as_deref(),
+            Some("m1a-refresh-2")
+        );
+        assert_eq!(
+            sent_refresh_tokens(&server),
+            ["synthetic-refresh", "m1a-signed-in"]
+        );
     })
     .await
     .unwrap();
@@ -1346,8 +1524,15 @@ async fn an_unsaved_rotation_is_kept_while_the_file_holds_another_account() {
         assert!(holder.refresh_oauth_token_once().await.is_err());
 
         write_auth(&path, &fresh_jwt(), "m1b-other-refresh", "other-account");
-        let error = holder.refresh_oauth_token_once().await.unwrap_err().to_string();
-        assert!(error.contains("different ChatGPT account") && error.contains(".recovered-"), "{error}");
+        let error = holder
+            .refresh_oauth_token_once()
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("different ChatGPT account") && error.contains(".recovered-"),
+            "{error}"
+        );
         drop(holder);
 
         std::fs::write(&path, &original).unwrap();
@@ -1360,7 +1545,10 @@ async fn an_unsaved_rotation_is_kept_while_the_file_holds_another_account() {
         std::fs::remove_dir(&backup).unwrap();
         let taken = later.refresh_oauth_token_once().await.unwrap();
         assert_eq!(taken.refresh_token.as_deref(), Some("m1b-refresh-1"));
-        assert_eq!(file_credentials(&path).refresh_token.as_deref(), Some("m1b-refresh-1"));
+        assert_eq!(
+            file_credentials(&path).refresh_token.as_deref(),
+            Some("m1b-refresh-1")
+        );
         assert_eq!(sent_refresh_tokens(&server), ["synthetic-refresh"]);
     })
     .await
@@ -1382,21 +1570,38 @@ fn refused_as_spent(error: &Error) -> bool {
 async fn a_spent_refresh_token_is_never_sent_or_adopted_again() {
     tokio::time::timeout(Duration::from_secs(5), async {
         // Anything beyond these would get no answer (and time the test out).
-        let server = TestServer::start(vec![refreshed(), expired(), permission_denied()], false).await;
+        let server =
+            TestServer::start(vec![refreshed(), expired(), permission_denied()], false).await;
         let token_url = format!("{}/token", server.url);
         let http_client = crate::http_client_builder().no_proxy().build().unwrap();
-        let exchanged = crate::refresh_chatgpt_oauth_token(&http_client, "synthetic-refresh", None, Some(&token_url))
-            .await
-            .unwrap();
-        assert_eq!(exchanged.refresh_token.as_deref(), Some("synthetic-new-refresh"));
+        let exchanged = crate::refresh_chatgpt_oauth_token(
+            &http_client,
+            "synthetic-refresh",
+            None,
+            Some(&token_url),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            exchanged.refresh_token.as_deref(),
+            Some("synthetic-new-refresh")
+        );
 
-        let error = crate::refresh_chatgpt_oauth_token(&http_client, "synthetic-refresh", None, Some(&token_url))
-            .await
-            .unwrap_err();
+        let error = crate::refresh_chatgpt_oauth_token(
+            &http_client,
+            "synthetic-refresh",
+            None,
+            Some(&token_url),
+        )
+        .await
+        .unwrap_err();
         assert!(refused_as_spent(&error), "{error}");
         // Refresh tokens are unique: not sent to another token URL either.
         let elsewhere = TestServer::start(Vec::new(), false).await;
-        let error = client(&elsewhere.url).refresh_oauth_token_once().await.unwrap_err();
+        let error = client(&elsewhere.url)
+            .refresh_oauth_token_once()
+            .await
+            .unwrap_err();
         assert!(refused_as_spent(&error), "{error}");
         assert_eq!(elsewhere.request_count(), 0);
 
@@ -1405,43 +1610,97 @@ async fn a_spent_refresh_token_is_never_sent_or_adopted_again() {
         for error in [
             holding_spent.refresh_oauth_token().await.unwrap_err(),
             holding_spent.refresh_oauth_token_once().await.unwrap_err(),
-            holding_spent.clone().with_oauth_rate_limit_retries(true).refresh_oauth_token().await.unwrap_err(),
+            holding_spent
+                .clone()
+                .with_oauth_rate_limit_retries(true)
+                .refresh_oauth_token()
+                .await
+                .unwrap_err(),
         ] {
             assert!(refused_as_spent(&error), "{error}");
         }
         let expiring = served_by(
-            OpenAIClient::new_chatgpt_oauth(&jwt(1), Some("synthetic-refresh"), "synthetic-account"),
+            OpenAIClient::new_chatgpt_oauth(
+                &jwt(1),
+                Some("synthetic-refresh"),
+                "synthetic-account",
+            ),
             &server.url,
         );
-        let error = expiring.refresh_oauth_token_if_expiring(Duration::from_secs(60)).await.unwrap_err();
+        let error = expiring
+            .refresh_oauth_token_if_expiring(Duration::from_secs(60))
+            .await
+            .unwrap_err();
         assert!(refused_as_spent(&error), "{error}");
         // A request rejected with `token_expired`.
         let conversation = Conversation::new(Model::openai_gpt_6_astra());
-        let error = holding_spent.generate_text(&conversation, &GenerationConfig::default()).await.unwrap_err();
+        let error = holding_spent
+            .generate_text(&conversation, &GenerationConfig::default())
+            .await
+            .unwrap_err();
         assert!(refused_as_spent(&error), "{error}");
-        assert_eq!(holding_spent.chatgpt_oauth_credentials().await.unwrap(), before);
+        assert_eq!(
+            holding_spent.chatgpt_oauth_credentials().await.unwrap(),
+            before
+        );
 
         // A store offering credentials holding the spent token.
         let offered = stored(&fresh_jwt(), "synthetic-refresh");
         let store = Arc::new(ScriptedStore::default());
-        store.reads.lock().unwrap().push_back(Ok(Some(offered.clone())));
+        store
+            .reads
+            .lock()
+            .unwrap()
+            .push_back(Ok(Some(offered.clone())));
         let other = stored("other-access", "other-refresh");
         let with_store_client = with_store(
-            served_by(OpenAIClient::new_chatgpt_oauth("other-access", Some("other-refresh"), "synthetic-account"), &server.url),
+            served_by(
+                OpenAIClient::new_chatgpt_oauth(
+                    "other-access",
+                    Some("other-refresh"),
+                    "synthetic-account",
+                ),
+                &server.url,
+            ),
             &store,
         );
-        let error = with_store_client.refresh_oauth_token_once().await.unwrap_err();
+        let error = with_store_client
+            .refresh_oauth_token_once()
+            .await
+            .unwrap_err();
         assert!(refused_as_spent(&error), "{error}");
-        assert_eq!(with_store_client.chatgpt_oauth_credentials().await.unwrap(), other);
+        assert_eq!(
+            with_store_client.chatgpt_oauth_credentials().await.unwrap(),
+            other
+        );
         // After another 401, the store's credentials aren't taken either:
         // the 401 stands and the request isn't sent again.
         store.reads.lock().unwrap().push_back(Ok(Some(offered)));
-        let error = with_store_client.generate_text(&conversation, &GenerationConfig::default()).await.unwrap_err();
-        assert!(matches!(error, Error::ProviderError { status: Some(401), .. }), "{error}");
-        assert_eq!(with_store_client.chatgpt_oauth_credentials().await.unwrap(), other);
+        let error = with_store_client
+            .generate_text(&conversation, &GenerationConfig::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::ProviderError {
+                    status: Some(401),
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert_eq!(
+            with_store_client.chatgpt_oauth_credentials().await.unwrap(),
+            other
+        );
 
         assert_eq!(sent_refresh_tokens(&server), ["synthetic-refresh"]);
-        assert_eq!(server.request_count(), 3, "one refresh and two Responses requests");
+        assert_eq!(
+            server.request_count(),
+            3,
+            "one refresh and two Responses requests"
+        );
     })
     .await
     .unwrap();
@@ -1461,10 +1720,16 @@ async fn a_rate_limited_refresh_does_not_resend_a_token_spent_while_it_waited() 
             .with_oauth_rate_limit_retries(true);
         let waiting = tokio::spawn(async move { waiting.refresh_oauth_token().await });
         server.arrived.recv().await.unwrap();
-        client(&server.url).refresh_oauth_token_once().await.unwrap();
+        client(&server.url)
+            .refresh_oauth_token_once()
+            .await
+            .unwrap();
         let error = waiting.await.unwrap().unwrap_err();
         assert!(refused_as_spent(&error), "{error}");
-        assert_eq!(sent_refresh_tokens(&server), ["synthetic-refresh", "synthetic-refresh"]);
+        assert_eq!(
+            sent_refresh_tokens(&server),
+            ["synthetic-refresh", "synthetic-refresh"]
+        );
         assert_eq!(server.request_count(), 2);
     })
     .await
@@ -1478,25 +1743,39 @@ async fn a_rate_limited_refresh_does_not_resend_a_token_spent_while_it_waited() 
 #[tokio::test]
 async fn credentials_a_host_refreshed_itself_replace_the_spent_ones_in_the_file() {
     tokio::time::timeout(Duration::from_secs(5), async {
-        let server = TestServer::start(vec![refreshed(), second_refresh(), refreshed()], false).await;
+        let server =
+            TestServer::start(vec![refreshed(), second_refresh(), refreshed()], false).await;
         let (_dir, path) = auth_file(&fresh_jwt());
         let file = crate::codex_auth::CodexAuthFile::load(&path).unwrap();
         let client = served_by(file.openai_client().unwrap(), &server.url);
         let http_client = crate::http_client_builder().no_proxy().build().unwrap();
         let token_url = format!("{}/token", server.url);
-        let result = crate::refresh_chatgpt_oauth_token(&http_client, "synthetic-refresh", None, Some(&token_url))
-            .await
-            .unwrap();
+        let result = crate::refresh_chatgpt_oauth_token(
+            &http_client,
+            "synthetic-refresh",
+            None,
+            Some(&token_url),
+        )
+        .await
+        .unwrap();
         let installed = ChatGptOAuthCredentials {
             access_token: result.access_token,
             refresh_token: result.refresh_token,
             account_id: "synthetic-account".into(),
         };
-        client.update_auth(OpenAIAuth::ChatGptOAuth(installed)).await;
+        client
+            .update_auth(OpenAIAuth::ChatGptOAuth(installed))
+            .await;
         let refreshed_now = client.refresh_oauth_token_once().await.unwrap();
         assert_eq!(refreshed_now.access_token, "second-access");
-        assert_eq!(file_credentials(&path), stored("second-access", "second-refresh"));
-        assert_eq!(sent_refresh_tokens(&server), ["synthetic-refresh", "synthetic-new-refresh"]);
+        assert_eq!(
+            file_credentials(&path),
+            stored("second-access", "second-refresh")
+        );
+        assert_eq!(
+            sent_refresh_tokens(&server),
+            ["synthetic-refresh", "synthetic-new-refresh"]
+        );
     })
     .await
     .unwrap();
@@ -1516,7 +1795,11 @@ async fn a_token_spent_at_one_token_url_is_not_sent_to_another() {
         with_store.refresh_oauth_token_once().await.unwrap();
         let old = file.credentials().unwrap();
         let storeless = served_by(
-            OpenAIClient::new_chatgpt_oauth(&old.access_token, old.refresh_token.as_deref(), &old.account_id),
+            OpenAIClient::new_chatgpt_oauth(
+                &old.access_token,
+                old.refresh_token.as_deref(),
+                &old.account_id,
+            ),
             &second.url,
         );
         let error = storeless.refresh_oauth_token_once().await.unwrap_err();
@@ -1535,18 +1818,41 @@ async fn a_token_spent_at_one_token_url_is_not_sent_to_another() {
 async fn a_token_the_server_refused_for_good_is_not_sent_again() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let margin = Duration::from_secs(60);
-        for code in ["refresh_token_reused", "refresh_token_expired", "refresh_token_invalidated"] {
-            let refusal = reply("/token", 401, &serde_json::json!({"error": {"code": code}}).to_string());
+        for code in [
+            "refresh_token_reused",
+            "refresh_token_expired",
+            "refresh_token_invalidated",
+        ] {
+            let refusal = reply(
+                "/token",
+                401,
+                &serde_json::json!({"error": {"code": code}}).to_string(),
+            );
             let server = TestServer::start(vec![refusal, refreshed()], false).await;
             let refresh_token = format!("refused-{code}");
             let expiring = served_by(
                 OpenAIClient::new_chatgpt_oauth(&jwt(1), Some(&refresh_token), "synthetic-account"),
                 &server.url,
             );
-            let error = expiring.refresh_oauth_token_if_expiring(margin).await.unwrap_err();
-            assert!(matches!(error, Error::ProviderError { status: Some(401), .. }), "{error}");
+            let error = expiring
+                .refresh_oauth_token_if_expiring(margin)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    Error::ProviderError {
+                        status: Some(401),
+                        ..
+                    }
+                ),
+                "{error}"
+            );
             for _ in 0..2 {
-                let error = expiring.refresh_oauth_token_if_expiring(margin).await.unwrap_err();
+                let error = expiring
+                    .refresh_oauth_token_if_expiring(margin)
+                    .await
+                    .unwrap_err();
                 assert!(refused_as_spent(&error), "{error}");
             }
             assert_eq!(server.request_count(), 1, "{code}");
@@ -1555,11 +1861,23 @@ async fn a_token_the_server_refused_for_good_is_not_sent_again() {
         let busy = reply("/token", 500, r#"{"error":{"code":"server_error"}}"#);
         let server = TestServer::start(vec![busy, refreshed()], false).await;
         let expiring = served_by(
-            OpenAIClient::new_chatgpt_oauth(&jwt(1), Some("refused-server-error"), "synthetic-account"),
+            OpenAIClient::new_chatgpt_oauth(
+                &jwt(1),
+                Some("refused-server-error"),
+                "synthetic-account",
+            ),
             &server.url,
         );
-        assert!(expiring.refresh_oauth_token_if_expiring(margin).await.is_err());
-        expiring.refresh_oauth_token_if_expiring(margin).await.unwrap();
+        assert!(
+            expiring
+                .refresh_oauth_token_if_expiring(margin)
+                .await
+                .is_err()
+        );
+        expiring
+            .refresh_oauth_token_if_expiring(margin)
+            .await
+            .unwrap();
         assert_eq!(server.request_count(), 2);
     })
     .await

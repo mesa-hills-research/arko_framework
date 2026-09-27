@@ -161,7 +161,11 @@ pub(crate) mod tests {
                 true,
             ),
             (
-                response("Partial summary", StopReason::Other("cancelled".into()), None),
+                response(
+                    "Partial summary",
+                    StopReason::Other("cancelled".into()),
+                    None,
+                ),
                 "summary incomplete",
                 true,
             ),
@@ -178,7 +182,11 @@ pub(crate) mod tests {
                 "summary incomplete",
                 true,
             ),
-            (response("  \n", StopReason::EndTurn, None), "returned no text", true),
+            (
+                response("  \n", StopReason::EndTurn, None),
+                "returned no text",
+                true,
+            ),
             // A model refusal keeps the turn, so text can accompany it.
             (
                 response(
@@ -220,8 +228,14 @@ pub(crate) mod tests {
         ];
         for (response, reason, retryable) in rejected {
             let rejection = complete_summary(&response).unwrap_err();
-            assert!(rejection.reason.contains(reason), "{rejection:?} for {response:?}");
-            assert_eq!(rejection.retryable, retryable, "{rejection:?} for {response:?}");
+            assert!(
+                rejection.reason.contains(reason),
+                "{rejection:?} for {response:?}"
+            );
+            assert_eq!(
+                rejection.retryable, retryable,
+                "{rejection:?} for {response:?}"
+            );
         }
     }
 
@@ -300,7 +314,11 @@ pub(crate) mod tests {
                     socket.write_all(response.as_bytes()).await.unwrap();
                 }
             });
-            Self { url, requests, task }
+            Self {
+                url,
+                requests,
+                task,
+            }
         }
 
         pub fn requests(&self) -> usize {
@@ -372,13 +390,19 @@ pub(crate) mod tests {
             current_working_directory: &workflow.context().workspace,
         };
         let outcome = interceptor
-            .intercept("search", &"raw tool output ".repeat(10), &HashMap::new(), &task)
+            .intercept(
+                "search",
+                &"raw tool output ".repeat(10),
+                &HashMap::new(),
+                &task,
+            )
             .await;
         (outcome, workflow.context().clone())
     }
 
     #[tokio::test]
-    async fn truncated_and_refused_summaries_keep_the_tool_output_without_a_retry_but_are_charged() {
+    async fn truncated_and_refused_summaries_keep_the_tool_output_without_a_retry_but_are_charged()
+    {
         for (reply, reason, output_chars) in [
             (
                 anthropic_reply("The failing test is in", "max_tokens"),
@@ -394,8 +418,11 @@ pub(crate) mod tests {
             ),
         ] {
             let server = MockServer::start(reply).await;
-            let (outcome, context) =
-                distill(server.anthropic_client(), Model::anthropic_claude_opus_5_5()).await;
+            let (outcome, context) = distill(
+                server.anthropic_client(),
+                Model::anthropic_claude_opus_5_5(),
+            )
+            .await;
             assert!(
                 matches!(outcome, Ok(InterceptedResult::Unchanged)),
                 "a {reason} summary keeps the tool output and is not retried"
@@ -415,11 +442,17 @@ pub(crate) mod tests {
     async fn an_incomplete_or_empty_summary_is_a_retryable_error_and_charged() {
         for (reply, reason) in [
             (anthropic_reply("", "end_turn"), "returned no text"),
-            (anthropic_reply("Summary", "pause_turn"), "summary incomplete (stop reason PauseTurn)"),
+            (
+                anthropic_reply("Summary", "pause_turn"),
+                "summary incomplete (stop reason PauseTurn)",
+            ),
         ] {
             let server = MockServer::start(reply).await;
-            let (outcome, context) =
-                distill(server.anthropic_client(), Model::anthropic_claude_opus_5_5()).await;
+            let (outcome, context) = distill(
+                server.anthropic_client(),
+                Model::anthropic_claude_opus_5_5(),
+            )
+            .await;
             let Err(ToolError::ExecutionFailed(error)) = outcome else {
                 panic!("a {reason} summary is an interceptor error");
             };
@@ -485,9 +518,13 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_finished_summary_replaces_the_tool_output() {
-        let server = MockServer::start(anthropic_reply("The failing test is x.rs:12.", "end_turn")).await;
-        let (outcome, context) =
-            distill(server.anthropic_client(), Model::anthropic_claude_opus_5_5()).await;
+        let server =
+            MockServer::start(anthropic_reply("The failing test is x.rs:12.", "end_turn")).await;
+        let (outcome, context) = distill(
+            server.anthropic_client(),
+            Model::anthropic_claude_opus_5_5(),
+        )
+        .await;
         let Ok(InterceptedResult::Replaced(summary)) = outcome else {
             panic!("a complete summary replaces the output");
         };

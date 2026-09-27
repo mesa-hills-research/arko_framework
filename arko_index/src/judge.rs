@@ -156,11 +156,13 @@ impl SearchJudge for LlmSearchJudge {
         ])
         // Some models (and Anthropic manual thinking) cannot force a tool. The
         // completed response must still pass the same tool/ID validation.
-        .with_tool_choice(if self.model.supports_forced_tool_choice(&self.generation) {
-            ToolChoice::Specific("select_results".into())
-        } else {
-            ToolChoice::Auto
-        });
+        .with_tool_choice(
+            if self.model.supports_forced_tool_choice(&self.generation) {
+                ToolChoice::Specific("select_results".into())
+            } else {
+                ToolChoice::Auto
+            },
+        );
         if self.model.supports_disabling_parallel_tool_calls() {
             tools = tools.with_parallel_tool_calls(false);
         }
@@ -338,7 +340,10 @@ mod tests {
             let mut reply = valid.clone();
             reply.stop_reason = reason;
             // Invalid selections, which search_with_judge retries.
-            assert!(matches!(parse_selection(&reply, &[]), Err(Error::Invalid(_))));
+            assert!(matches!(
+                parse_selection(&reply, &[]),
+                Err(Error::Invalid(_))
+            ));
         }
         let mut reply = valid.clone();
         reply.refusal = Some(arko_ai::Refusal::new(arko_ai::RefusalSource::Model));

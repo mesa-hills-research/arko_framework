@@ -341,7 +341,9 @@ impl ReasoningConfig {
                     OpenRouterReasoning::disabled()
                 }
             }
-            ReasoningConfig::Anthropic { effort: Some(_), .. } => {
+            ReasoningConfig::Anthropic {
+                effort: Some(_), ..
+            } => {
                 return invalid(
                     "OpenRouter reasoning takes either an effort or a token budget, not both; use OpenRouterReasoning::effort or ::max_tokens.",
                 );
@@ -383,10 +385,7 @@ impl ReasoningConfig {
         }
     }
 
-    pub fn anthropic_with_effort(
-        budget_tokens: usize,
-        effort: AnthropicReasoningEffort,
-    ) -> Self {
+    pub fn anthropic_with_effort(budget_tokens: usize, effort: AnthropicReasoningEffort) -> Self {
         ReasoningConfig::Anthropic {
             budget_tokens,
             effort: Some(effort),
@@ -430,8 +429,7 @@ impl ReasoningConfig {
             } => *thinking_budget != 0,
             ReasoningConfig::Gemini { .. } => true,
             ReasoningConfig::OpenRouter(reasoning) => {
-                reasoning.enabled != Some(false)
-                    && reasoning.effort != Some(ReasoningEffort::None)
+                reasoning.enabled != Some(false) && reasoning.effort != Some(ReasoningEffort::None)
             }
         }
     }
@@ -450,13 +448,8 @@ impl ReasoningConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AnthropicReasoningFragment {
-    Thinking {
-        thinking: String,
-        signature: String,
-    },
-    RedactedThinking {
-        data: String,
-    },
+    Thinking { thinking: String, signature: String },
+    RedactedThinking { data: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -483,9 +476,7 @@ pub enum ReasoningArtifact {
     /// [`OpenAIOutputItems`](Self::OpenAIOutputItems). Conversations saved
     /// with this form still replay as before: the reasoning items, then the
     /// message's function calls, then its text.
-    OpenAIEncryptedReasoning {
-        items: Vec<OpenAIReasoningItem>,
-    },
+    OpenAIEncryptedReasoning { items: Vec<OpenAIReasoningItem> },
     /// The replayable output items of one OpenAI Responses call, in output
     /// order and exactly as the provider returned them, minus `status`:
     /// `reasoning` items that carry `encrypted_content`, `message` items
@@ -500,9 +491,7 @@ pub enum ReasoningArtifact {
     /// `call_id`), so every replayed call has an output. When the items hold
     /// no `message`, the message's own text (for example the explanation an
     /// agent keeps for a refused turn) is replayed after them.
-    OpenAIOutputItems {
-        items: Vec<Value>,
-    },
+    OpenAIOutputItems { items: Vec<Value> },
     AnthropicReasoning {
         fragments: Vec<AnthropicReasoningFragment>,
     },
@@ -514,9 +503,7 @@ pub enum ReasoningArtifact {
     /// signatures and encrypted reasoning that Claude, Gemini and OpenAI models
     /// need to continue after tool calls. Items are opaque JSON; encrypted
     /// items (`reasoning.encrypted`) hold no readable text.
-    OpenRouter {
-        details: Vec<serde_json::Value>,
-    },
+    OpenRouter { details: Vec<serde_json::Value> },
 }
 
 // Conversations saved before multiple OpenAI reasoning items were kept hold
@@ -653,7 +640,9 @@ mod tests {
         };
         let round_trip: ReasoningArtifact =
             serde_json::from_value(serde_json::to_value(&artifact).unwrap()).unwrap();
-        assert!(matches!(round_trip, ReasoningArtifact::OpenAIEncryptedReasoning { items } if items.len() == 2));
+        assert!(
+            matches!(round_trip, ReasoningArtifact::OpenAIEncryptedReasoning { items } if items.len() == 2)
+        );
 
         let items = serde_json::json!([
             {"type": "reasoning", "id": "rs_1", "encrypted_content": "enc", "summary": []},
@@ -664,7 +653,9 @@ mod tests {
         };
         let round_trip: ReasoningArtifact =
             serde_json::from_value(serde_json::to_value(&artifact).unwrap()).unwrap();
-        assert!(matches!(&round_trip, ReasoningArtifact::OpenAIOutputItems { items: kept } if Value::from(kept.clone()) == items));
+        assert!(
+            matches!(&round_trip, ReasoningArtifact::OpenAIOutputItems { items: kept } if Value::from(kept.clone()) == items)
+        );
         assert_eq!(round_trip.provider(), Provider::OpenAI);
 
         let anthropic = ReasoningArtifact::new_anthropic_redacted("data");
@@ -691,17 +682,26 @@ mod tests {
         let samples = [
             ReasoningArtifact::new_openai_encrypted("enc", Some(vec!["s".into()])),
             ReasoningArtifact::OpenAIOutputItems {
-                items: vec![serde_json::json!({"type": "reasoning", "id": "rs_1", "encrypted_content": "enc", "summary": []})],
+                items: vec![
+                    serde_json::json!({"type": "reasoning", "id": "rs_1", "encrypted_content": "enc", "summary": []}),
+                ],
             },
             ReasoningArtifact::new_anthropic_mixed(vec![
-                AnthropicReasoningFragment::Thinking { thinking: "t".into(), signature: "sig".into() },
-                AnthropicReasoningFragment::RedactedThinking { data: "data".into() },
+                AnthropicReasoningFragment::Thinking {
+                    thinking: "t".into(),
+                    signature: "sig".into(),
+                },
+                AnthropicReasoningFragment::RedactedThinking {
+                    data: "data".into(),
+                },
             ]),
             ReasoningArtifact::new_google_reasoning(vec![GoogleReasoningFragment {
                 summary: "s".into(),
                 signature: "sig".into(),
             }]),
-            ReasoningArtifact::new_openrouter(vec![serde_json::json!({"type": "reasoning.encrypted", "data": "enc"})]),
+            ReasoningArtifact::new_openrouter(vec![
+                serde_json::json!({"type": "reasoning.encrypted", "data": "enc"}),
+            ]),
         ];
         let tags: std::collections::BTreeSet<_> = samples.iter().map(tag).collect();
         assert_eq!(tags.len(), samples.len(), "one sample per variant");

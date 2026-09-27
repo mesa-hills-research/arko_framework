@@ -95,7 +95,10 @@ mod tests {
         let config = EmbeddingConfig::new(EmbeddingProviderIdentifier::Voyage, "voyage-4")
             .with_hf_token("hf_synthetic_secret".into());
         let debug = format!("{config:?}");
-        assert!(debug.contains("voyage-4") && debug.contains("<redacted>"), "{debug}");
+        assert!(
+            debug.contains("voyage-4") && debug.contains("<redacted>"),
+            "{debug}"
+        );
         assert!(!debug.contains("hf_synthetic_secret"), "{debug}");
     }
 }

@@ -244,10 +244,7 @@ impl GenerationConfig {
         self
     }
 
-    pub fn with_openai_reasoning_mode(
-        mut self,
-        mode: OpenAIReasoningMode,
-    ) -> Self {
+    pub fn with_openai_reasoning_mode(mut self, mode: OpenAIReasoningMode) -> Self {
         self.openai_reasoning_mode = Some(mode);
         self
     }

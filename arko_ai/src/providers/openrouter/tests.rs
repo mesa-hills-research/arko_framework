@@ -1161,7 +1161,10 @@ fn forced_tool_choice_follows_anthropic_rules_for_claude_slugs() {
     assert!(!forced("anthropic/claude-opus-5.5:nitro", &default));
     // A preset suffix doesn't hide the model's rules.
     assert!(!forced("anthropic/claude-opus-5.5@preset/agents", &default));
-    assert!(!forced("anthropic/claude-fable-5.1:floor@preset/agents", &default));
+    assert!(!forced(
+        "anthropic/claude-fable-5.1:floor@preset/agents",
+        &default
+    ));
     // Adaptive models: only a manual budget blocks it, on models that take
     // budgets (Sonnet 5 doesn't, so a budget becomes an effort there).
     assert!(forced("anthropic/claude-sonnet-4.6", &effort));

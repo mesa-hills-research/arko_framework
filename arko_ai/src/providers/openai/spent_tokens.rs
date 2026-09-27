@@ -41,7 +41,9 @@ static SPENT: Mutex<BTreeSet<TokenDigest>> = Mutex::new(BTreeSet::new());
 
 fn spent() -> MutexGuard<'static, BTreeSet<TokenDigest>> {
     // Only whole digests are ever inserted: valid after any panic.
-    SPENT.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    SPENT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]

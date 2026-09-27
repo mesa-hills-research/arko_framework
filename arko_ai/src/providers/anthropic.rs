@@ -5,12 +5,12 @@ use crate::{
     error::Error,
     message::{Content, Image, Message, Role},
     model::Provider as ProviderType,
+    pricing::ServiceTier,
     reasoning::{
         AnthropicReasoningEffort, AnthropicReasoningFragment, ReasoningArtifact, ReasoningConfig,
     },
     stop::{Refusal, RefusalSource, StopReason},
     tool::{ToolCall, ToolChoice},
-    pricing::ServiceTier,
     usage::{BillingKind, ModelCallUsage, UsageInfo},
 };
 use async_stream::try_stream;
@@ -225,7 +225,10 @@ impl AnthropicClient {
         }
 
         let forced_tool_choice = matches!(
-            config.tool_config.as_ref().and_then(|tools| tools.tool_choice.as_ref()),
+            config
+                .tool_config
+                .as_ref()
+                .and_then(|tools| tools.tool_choice.as_ref()),
             Some(ToolChoice::Required | ToolChoice::Specific(_))
         );
 
@@ -414,7 +417,10 @@ impl AnthropicClient {
 
     fn with_stream_stop_metadata(usage: ModelCallUsage, delta: &Value) -> ModelCallUsage {
         usage.with_stop_metadata(
-            delta.get("stop_reason").and_then(Value::as_str).map(str::to_owned),
+            delta
+                .get("stop_reason")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             delta.get("stop_details").cloned(),
         )
     }
@@ -435,7 +441,8 @@ impl AnthropicClient {
             usage.input_tokens,
             usage.output_tokens,
             conversation.model.max_input_tokens,
-        ).with_stop_metadata(
+        )
+        .with_stop_metadata(
             response_data.stop_reason.clone(),
             response_data.stop_details.clone(),
         );
@@ -573,7 +580,11 @@ impl ProviderClient for AnthropicClient {
         }
 
         let response_data: AnthropicResponse = response.json().await?;
-        Ok(Self::generation_response(response_data, conversation, config))
+        Ok(Self::generation_response(
+            response_data,
+            conversation,
+            config,
+        ))
     }
 
     async fn generate_stream(
@@ -918,7 +929,9 @@ impl AnthropicClient {
         // Summarized thinking text must be requested where the model defaults to
         // omitted text; elsewhere it is already the default.
         let display = (config.anthropic_summarized_thinking == Some(true)
-            && conversation.model.supports_anthropic_summarized_thinking_display())
+            && conversation
+                .model
+                .supports_anthropic_summarized_thinking_display())
         .then(|| "summarized".to_string());
         let max_tokens = request.max_tokens;
 
@@ -950,11 +963,8 @@ impl AnthropicClient {
                     // budget_tokens must be below max_tokens unless interleaved
                     // thinking lets thinking span tool calls.
                     // https://platform.claude.com/docs/en/build-with-claude/extended-thinking
-                    let interleaved = Self::is_interleaved_thinking_active(
-                        config,
-                        false,
-                        &conversation.model,
-                    );
+                    let interleaved =
+                        Self::is_interleaved_thinking_active(config, false, &conversation.model);
                     if !interleaved && *budget_tokens >= max_tokens {
                         return Err(Error::InvalidRequest(format!(
                             "Anthropic reasoning budget ({budget_tokens}) must be less than max_tokens ({max_tokens}) unless interleaved thinking is enabled."
@@ -1558,19 +1568,45 @@ mod tests {
     fn tool_images_serialize_after_all_correlated_results_with_base64_source() {
         use crate::{Content, Image, Message, ToolCall, ToolResult};
         let client = AnthropicClient::new("test");
-        let mut conversation = Conversation::new(Model::get(Provider::Anthropic, "claude-fable-5-1").unwrap());
-        let calls = ["first", "second"].map(|id| ToolCall { id: Some(id.into()), name: "view_image".into(), arguments: serde_json::json!({"path":"fixture.png"}), thought_signature: None, provider_id: None, invalid_arguments: None });
-        let mut assistant = Message::new_assistant("Inspecting images."); assistant.tool_calls = calls.to_vec(); conversation.messages.push(assistant);
-        let mut content: Vec<_> = calls.iter().map(|call| Content::ToolResult(ToolResult::from_tool_call(call, "fixture.png, 12 × 8"))).collect();
-        content.extend([Content::Text("Image from first call: fixture.png".into()), Content::Image(Image::new_base64("cGl4ZWxz", "image/png"))]);
+        let mut conversation =
+            Conversation::new(Model::get(Provider::Anthropic, "claude-fable-5-1").unwrap());
+        let calls = ["first", "second"].map(|id| ToolCall {
+            id: Some(id.into()),
+            name: "view_image".into(),
+            arguments: serde_json::json!({"path":"fixture.png"}),
+            thought_signature: None,
+            provider_id: None,
+            invalid_arguments: None,
+        });
+        let mut assistant = Message::new_assistant("Inspecting images.");
+        assistant.tool_calls = calls.to_vec();
+        conversation.messages.push(assistant);
+        let mut content: Vec<_> = calls
+            .iter()
+            .map(|call| {
+                Content::ToolResult(ToolResult::from_tool_call(call, "fixture.png, 12 × 8"))
+            })
+            .collect();
+        content.extend([
+            Content::Text("Image from first call: fixture.png".into()),
+            Content::Image(Image::new_base64("cGl4ZWxz", "image/png")),
+        ]);
         conversation.add_user_message_with_contents(content);
         let saved = serde_json::to_string(&conversation).unwrap();
         let conversation: Conversation = serde_json::from_str(&saved).unwrap();
-        let value = serde_json::to_value(client.build_request(&conversation, &GenerationConfig::default()).unwrap()).unwrap();
+        let value = serde_json::to_value(
+            client
+                .build_request(&conversation, &GenerationConfig::default())
+                .unwrap(),
+        )
+        .unwrap();
         let blocks = value["messages"][1]["content"].as_array().unwrap();
-        assert_eq!(blocks[0]["type"], "tool_result"); assert_eq!(blocks[0]["tool_use_id"], "first");
-        assert_eq!(blocks[1]["type"], "tool_result"); assert_eq!(blocks[1]["tool_use_id"], "second");
-        assert_eq!(blocks[2]["type"], "text"); assert_eq!(blocks[3]["type"], "image");
+        assert_eq!(blocks[0]["type"], "tool_result");
+        assert_eq!(blocks[0]["tool_use_id"], "first");
+        assert_eq!(blocks[1]["type"], "tool_result");
+        assert_eq!(blocks[1]["tool_use_id"], "second");
+        assert_eq!(blocks[2]["type"], "text");
+        assert_eq!(blocks[3]["type"], "image");
         assert_eq!(blocks[3]["source"]["type"], "base64");
         assert_eq!(blocks[3]["source"]["media_type"], "image/png");
         assert_eq!(blocks[3]["source"]["data"], "cGl4ZWxz");
@@ -1588,11 +1624,17 @@ mod tests {
             "usage": {"output_tokens": 17}
         });
         let usage = crate::usage::ModelCallUsage::new(
-            "msg_test".into(), "anthropic".into(), "test-model".into(), 42, 17, 200000,
+            "msg_test".into(),
+            "anthropic".into(),
+            "test-model".into(),
+            42,
+            17,
+            200000,
         );
-        let saved = serde_json::to_value(AnthropicClient::with_stream_stop_metadata(
-            usage, &event["delta"],
-        ).with_input_delta(3)).unwrap();
+        let saved = serde_json::to_value(
+            AnthropicClient::with_stream_stop_metadata(usage, &event["delta"]).with_input_delta(3),
+        )
+        .unwrap();
         assert_eq!(saved["stop_reason"], "refusal");
         assert_eq!(saved["stop_details"], event["delta"]["stop_details"]);
         assert_eq!(saved["output_tokens"], 17);
@@ -1601,7 +1643,13 @@ mod tests {
 
     #[test]
     fn non_streaming_response_preserves_stop_details_and_normal_stops() {
-        for reason in ["end_turn", "tool_use", "max_tokens", "refusal", "future_reason"] {
+        for reason in [
+            "end_turn",
+            "tool_use",
+            "max_tokens",
+            "refusal",
+            "future_reason",
+        ] {
             let response: super::AnthropicResponse = serde_json::from_value(serde_json::json!({
                 "id": "msg_test", "type": "message", "role": "assistant", "model": "test-model",
                 "content": [], "stop_reason": reason, "stop_sequence": null,
@@ -1609,10 +1657,19 @@ mod tests {
                 "usage": {"input_tokens": 42, "output_tokens": 17}
             })).unwrap();
             let usage = crate::usage::ModelCallUsage::new(
-                response.id, "anthropic".into(), response.model, 42, 17, 200000,
-            ).with_stop_metadata(response.stop_reason, response.stop_details);
+                response.id,
+                "anthropic".into(),
+                response.model,
+                42,
+                17,
+                200000,
+            )
+            .with_stop_metadata(response.stop_reason, response.stop_details);
             assert_eq!(usage.stop_reason.as_deref(), Some(reason));
-            assert_eq!(usage.stop_details.unwrap()["explanation"], "Fixture explanation");
+            assert_eq!(
+                usage.stop_details.unwrap()["explanation"],
+                "Fixture explanation"
+            );
         }
     }
 
@@ -1626,7 +1683,8 @@ mod tests {
         assert!(usage.stop_reason.is_none());
         assert!(usage.stop_details.is_none());
         let usage = AnthropicClient::with_stream_stop_metadata(
-            usage, &serde_json::json!({"stop_reason": "end_turn", "stop_details": null}),
+            usage,
+            &serde_json::json!({"stop_reason": "end_turn", "stop_details": null}),
         );
         let saved = serde_json::to_value(usage).unwrap();
         assert_eq!(saved["stop_reason"], "end_turn");
@@ -1723,7 +1781,10 @@ mod tests {
     use serde_json::{Value, json};
 
     fn sse(events: &[Value]) -> String {
-        events.iter().map(|event| format!("data: {event}\n\n")).collect()
+        events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect()
     }
 
     async fn stream_events(events: &[Value]) -> (Vec<StreamEvent>, Option<Error>) {
@@ -1799,7 +1860,10 @@ mod tests {
         assert_eq!(refusal.partial_output.as_deref(), Some("Hello.."));
         assert_eq!(response.text(), "");
         assert!(response.message.tool_calls.is_empty());
-        assert_eq!(response.model_call_usage.stop_reason.as_deref(), Some("refusal"));
+        assert_eq!(
+            response.model_call_usage.stop_reason.as_deref(),
+            Some("refusal")
+        );
 
         // Such a turn is not added to the conversation.
         let mut conversation = Conversation::new(Model::anthropic_claude_sonnet_4_5());
@@ -1815,7 +1879,8 @@ mod tests {
             "content":[{"type":"text","text":"partial"}],"stop_reason":"refusal",
             "stop_details":{"type":"refusal","category":null,"explanation":null},
             "usage":{"input_tokens":1,"output_tokens":1}
-        })).unwrap();
+        }))
+        .unwrap();
         let response = AnthropicClient::generation_response(
             response,
             &Conversation::new(Model::anthropic_claude_sonnet_4_5()),
@@ -1841,7 +1906,12 @@ mod tests {
         let (events, _) = stream_events(&events).await;
         let response = end(&events);
         assert_eq!(response.stop_reason, StopReason::MaxTokens);
-        let ids: Vec<_> = response.message.tool_calls.iter().map(|call| call.id.as_deref().unwrap()).collect();
+        let ids: Vec<_> = response
+            .message
+            .tool_calls
+            .iter()
+            .map(|call| call.id.as_deref().unwrap())
+            .collect();
         assert_eq!(ids, ["toolu_a"]);
 
         // An unfinished block was never added; earlier calls stay.
@@ -1850,7 +1920,12 @@ mod tests {
         events.extend(tool_block(1, "toolu_b", "{\"n\":", false));
         events.push(message_delta("max_tokens", Value::Null));
         let (events, _) = stream_events(&events).await;
-        let ids: Vec<_> = end(&events).message.tool_calls.iter().map(|call| call.id.as_deref().unwrap()).collect();
+        let ids: Vec<_> = end(&events)
+            .message
+            .tool_calls
+            .iter()
+            .map(|call| call.id.as_deref().unwrap())
+            .collect();
         assert_eq!(ids, ["toolu_a"]);
 
         // Normal tool use keeps every call.
@@ -1883,7 +1958,11 @@ mod tests {
             message_delta("end_turn", Value::Null),
         ];
         let (events, _) = stream_events(&events).await;
-        assert!(!events.iter().any(|event| matches!(event, StreamEvent::ReasoningChunk(_))));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::ReasoningChunk(_)))
+        );
         let response = end(&events);
         assert_eq!(response.stop_reason, StopReason::EndTurn);
         assert!(matches!(
@@ -1910,7 +1989,8 @@ mod tests {
                 {"type":"text","text":"ok"}
             ],
             "stop_reason":"compaction","usage":{"input_tokens":1,"output_tokens":1}
-        })).unwrap();
+        }))
+        .unwrap();
         let response = AnthropicClient::generation_response(
             response,
             &Conversation::new(Model::anthropic_claude_sonnet_4_5()),
@@ -1925,16 +2005,30 @@ mod tests {
         let client = AnthropicClient::new("test");
         let conversation = Conversation::new(Model::anthropic_claude_sonnet_4_5());
 
-        let request = client.build_request(&conversation, &GenerationConfig::default()).unwrap();
-        assert!(serde_json::to_value(request).unwrap().get("temperature").is_none());
+        let request = client
+            .build_request(&conversation, &GenerationConfig::default())
+            .unwrap();
+        assert!(
+            serde_json::to_value(request)
+                .unwrap()
+                .get("temperature")
+                .is_none()
+        );
 
-        let request = client.build_request(&conversation, &GenerationConfig::new(0.2)).unwrap();
+        let request = client
+            .build_request(&conversation, &GenerationConfig::new(0.2))
+            .unwrap();
         assert_eq!(serde_json::to_value(request).unwrap()["temperature"], 0.2);
 
         // Thinking no longer forces an explicit temperature.
         let config = GenerationConfig::default().with_reasoning(ReasoningConfig::anthropic(2048));
         let request = client.build_request(&conversation, &config).unwrap();
-        assert!(serde_json::to_value(request).unwrap().get("temperature").is_none());
+        assert!(
+            serde_json::to_value(request)
+                .unwrap()
+                .get("temperature")
+                .is_none()
+        );
     }
 
     fn close(actual: f64, expected: f64) -> bool {
@@ -1966,7 +2060,10 @@ mod tests {
         assert_eq!(usage.cached_tokens, Some(1000));
         assert_eq!(usage.cache_write_tokens, Some(200));
         assert_eq!(usage.cache_write_1h_tokens, Some(150));
-        assert_eq!(usage.service_tier, Some(crate::pricing::ServiceTier::Standard));
+        assert_eq!(
+            usage.service_tier,
+            Some(crate::pricing::ServiceTier::Standard)
+        );
         // Opus 4.6: $5 input, $0.50 reads, $6.25 5m writes, $10 1h writes, $25 output.
         assert!(close(usage.input_cost, 100.0 * 5.0 / 1e6));
         assert!(close(usage.cache_read_cost.unwrap(), 1000.0 * 0.5 / 1e6));
@@ -1982,8 +2079,10 @@ mod tests {
     async fn streamed_usage_uses_the_final_cumulative_counts() {
         let mut events = vec![message_start()];
         events.extend(text_block(0, "Hi"));
-        events.push(json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},
-            "usage":{"input_tokens":12,"cache_read_input_tokens":100,"output_tokens":50}}));
+        events.push(
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},
+            "usage":{"input_tokens":12,"cache_read_input_tokens":100,"output_tokens":50}}),
+        );
         let (events, error) = stream_events(&events).await;
         assert!(error.is_none(), "{error:?}");
         let response = end(&events);
@@ -2019,7 +2118,9 @@ mod tests {
         // `message_start` counts stand.
         let mut events = vec![message_start()];
         events.extend(text_block(0, "Hi"));
-        events.push(json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}));
+        events.push(
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}),
+        );
         events.push(json!({"type":"message_stop"}));
         let (events, error) = stream_events(&events).await;
         assert!(error.is_none(), "{error:?}");
@@ -2032,7 +2133,10 @@ mod tests {
         let mut events = vec![message_start()];
         events.push(json!({"type":"message_delta","delta":{"stop_reason":null},"usage":{"output_tokens":3}}));
         let (_, error) = stream_events(&events).await;
-        assert!(matches!(error, Some(Error::StreamTruncated(_))), "{error:?}");
+        assert!(
+            matches!(error, Some(Error::StreamTruncated(_))),
+            "{error:?}"
+        );
     }
 
     fn refusal_response(category: Value, content: Value, output_tokens: u64) -> GenerationResponse {
@@ -2074,7 +2178,8 @@ mod tests {
             }
         }
         // A mid-output refusal bills input and the output produced.
-        let usage = refusal_response(json!("cyber"), json!([{"type":"text","text":"partial"}]), 7).usage;
+        let usage =
+            refusal_response(json!("cyber"), json!([{"type":"text","text":"partial"}]), 7).usage;
         assert_eq!(usage.billing, BillingKind::Metered);
         assert!(close(usage.billed(), usage.total_cost));
 
@@ -2123,16 +2228,24 @@ mod tests {
         }))
         .unwrap();
         let usage = AnthropicClient::calculate_usage(&reported);
-        assert_eq!(usage.output_tokens, 120, "output_tokens stays the billed total");
+        assert_eq!(
+            usage.output_tokens, 120,
+            "output_tokens stays the billed total"
+        );
         assert_eq!(usage.reasoning_tokens, Some(90));
         let reported: super::AnthropicUsage =
             serde_json::from_value(json!({"input_tokens": 10, "output_tokens": 5})).unwrap();
-        assert_eq!(AnthropicClient::calculate_usage(&reported).reasoning_tokens, None);
+        assert_eq!(
+            AnthropicClient::calculate_usage(&reported).reasoning_tokens,
+            None
+        );
         // The final cumulative `message_delta` carries the breakdown.
         let mut events = vec![message_start()];
         events.extend(text_block(0, "Hi"));
-        events.push(json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},
-            "usage":{"output_tokens":50,"output_tokens_details":{"thinking_tokens":40}}}));
+        events.push(
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},
+            "usage":{"output_tokens":50,"output_tokens_details":{"thinking_tokens":40}}}),
+        );
         let (events, error) = stream_events(&events).await;
         assert!(error.is_none(), "{error:?}");
         assert_eq!(end(&events).usage.reasoning_tokens, Some(40));
@@ -2183,7 +2296,10 @@ mod model_rule_tests {
     fn opus_5_5_is_always_adaptive_and_rejects_forced_tools_and_manual_budgets() {
         let model = Model::anthropic_claude_opus_5_5();
         let value = request(model.clone(), &GenerationConfig::default()).unwrap();
-        assert!(value.get("thinking").is_none(), "adaptive is the server default");
+        assert!(
+            value.get("thinking").is_none(),
+            "adaptive is the server default"
+        );
         assert!(betas(model.clone(), &GenerationConfig::default()).is_none());
 
         let summarized = GenerationConfig::default().with_anthropic_summarized_thinking(true);
@@ -2191,7 +2307,10 @@ mod model_rule_tests {
         assert_eq!(value["thinking"]["type"], "adaptive");
         assert_eq!(value["thinking"]["display"], "summarized");
 
-        for effort in [AnthropicReasoningEffort::XHigh, AnthropicReasoningEffort::Max] {
+        for effort in [
+            AnthropicReasoningEffort::XHigh,
+            AnthropicReasoningEffort::Max,
+        ] {
             let config = GenerationConfig::default()
                 .with_reasoning(ReasoningConfig::anthropic_adaptive_with_effort(effort));
             request(model.clone(), &config).unwrap();
@@ -2215,13 +2334,19 @@ mod model_rule_tests {
     #[test]
     fn retired_sonnet_long_context_beta_is_rejected_and_never_sent() {
         let config = GenerationConfig::default().with_long_context(true);
-        for model in [Model::anthropic_claude_sonnet_4_5(), Model::anthropic_claude_sonnet_4()] {
+        for model in [
+            Model::anthropic_claude_sonnet_4_5(),
+            Model::anthropic_claude_sonnet_4(),
+        ] {
             let message = invalid(request(model.clone(), &config));
             assert!(message.contains("2026-04-30"), "{message}");
             assert!(betas(model.clone(), &config).is_none());
             assert!(model.pricing.large_input_threshold.is_none());
         }
-        for model in [Model::anthropic_claude_sonnet_4_6(), Model::anthropic_claude_opus_4_6()] {
+        for model in [
+            Model::anthropic_claude_sonnet_4_6(),
+            Model::anthropic_claude_opus_4_6(),
+        ] {
             request(model.clone(), &config).unwrap();
             assert!(betas(model, &config).is_none());
         }
@@ -2240,11 +2365,17 @@ mod model_rule_tests {
     #[test]
     fn forced_tool_choice_is_rejected_with_manual_thinking_on_any_model() {
         let manual = GenerationConfig::default().with_reasoning(ReasoningConfig::anthropic(4096));
-        let message = invalid(request(Model::anthropic_claude_sonnet_4_5(), &forced(manual)));
+        let message = invalid(request(
+            Model::anthropic_claude_sonnet_4_5(),
+            &forced(manual),
+        ));
         assert!(message.contains("manual extended thinking"), "{message}");
         // Without manual thinking the same model may force a tool.
-        request(Model::anthropic_claude_sonnet_4_5(), &forced(GenerationConfig::default()))
-            .unwrap();
+        request(
+            Model::anthropic_claude_sonnet_4_5(),
+            &forced(GenerationConfig::default()),
+        )
+        .unwrap();
         // Fable 5.1 rejects forced tools regardless.
         invalid(request(
             Model::anthropic_claude_fable_5_1(),
@@ -2260,7 +2391,11 @@ mod model_rule_tests {
             .with_reasoning(ReasoningConfig::anthropic(8_000));
         let message = invalid(request(model.clone(), &config));
         assert!(message.contains("less than max_tokens"), "{message}");
-        request(model.clone(), &config.clone().with_interleaved_thinking(true)).unwrap();
+        request(
+            model.clone(),
+            &config.clone().with_interleaved_thinking(true),
+        )
+        .unwrap();
         request(
             model,
             &GenerationConfig::default()
@@ -2330,11 +2465,17 @@ mod model_rule_tests {
             assert_eq!(value["speed"], "fast");
             assert_eq!(betas(model, &fast).as_deref(), Some("fast-mode-2026-02-01"));
         }
-        for model in [Model::anthropic_claude_opus_4_7(), Model::anthropic_claude_opus_4_6()] {
+        for model in [
+            Model::anthropic_claude_opus_4_7(),
+            Model::anthropic_claude_opus_4_6(),
+        ] {
             invalid(request(model, &fast));
         }
-        let value =
-            request(Model::anthropic_claude_opus_5_5(), &GenerationConfig::default()).unwrap();
+        let value = request(
+            Model::anthropic_claude_opus_5_5(),
+            &GenerationConfig::default(),
+        )
+        .unwrap();
         assert!(value.get("speed").is_none());
         let off = GenerationConfig::default().with_anthropic_fast_mode(false);
         let value = request(Model::anthropic_claude_opus_4_7(), &off).unwrap();
@@ -2348,8 +2489,8 @@ mod model_rule_tests {
             GenerationConfig::default().with_anthropic_inference_geo(AnthropicInferenceGeo::Us);
         let value = request(Model::anthropic_claude_opus_5_5(), &us).unwrap();
         assert_eq!(value["inference_geo"], "us");
-        let global = GenerationConfig::default()
-            .with_anthropic_inference_geo(AnthropicInferenceGeo::Global);
+        let global =
+            GenerationConfig::default().with_anthropic_inference_geo(AnthropicInferenceGeo::Global);
         let value = request(Model::anthropic_claude_sonnet_4_6(), &global).unwrap();
         assert_eq!(value["inference_geo"], "global");
         for model in [
@@ -2359,8 +2500,11 @@ mod model_rule_tests {
         ] {
             invalid(request(model, &us));
         }
-        let value =
-            request(Model::anthropic_claude_opus_5_5(), &GenerationConfig::default()).unwrap();
+        let value = request(
+            Model::anthropic_claude_opus_5_5(),
+            &GenerationConfig::default(),
+        )
+        .unwrap();
         assert!(value.get("inference_geo").is_none());
     }
 
@@ -2370,18 +2514,29 @@ mod model_rule_tests {
         let value = request(model.clone(), &GenerationConfig::default()).unwrap();
         assert_eq!(value["cache_control"], json!({"type": "ephemeral"}));
 
-        let hour =
-            GenerationConfig::default().with_anthropic_cache_ttl(AnthropicCacheTtl::OneHour);
+        let hour = GenerationConfig::default().with_anthropic_cache_ttl(AnthropicCacheTtl::OneHour);
         let value = request(model.clone(), &hour).unwrap();
-        assert_eq!(value["cache_control"], json!({"type": "ephemeral", "ttl": "1h"}));
+        assert_eq!(
+            value["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
 
         let five =
             GenerationConfig::default().with_anthropic_cache_ttl(AnthropicCacheTtl::FiveMinutes);
-        assert_eq!(request(model.clone(), &five).unwrap()["cache_control"]["ttl"], "5m");
+        assert_eq!(
+            request(model.clone(), &five).unwrap()["cache_control"]["ttl"],
+            "5m"
+        );
 
-        invalid(request(model.clone(), &hour.clone().with_prompt_caching(false)));
-        let value =
-            request(model, &GenerationConfig::default().with_prompt_caching(false)).unwrap();
+        invalid(request(
+            model.clone(),
+            &hour.clone().with_prompt_caching(false),
+        ));
+        let value = request(
+            model,
+            &GenerationConfig::default().with_prompt_caching(false),
+        )
+        .unwrap();
         assert!(value.get("cache_control").is_none());
     }
 
@@ -2398,7 +2553,11 @@ mod model_rule_tests {
         usage.calculate_cost(&Model::anthropic_claude_opus_5_5(), None);
         // $4 input + $20 output + $8 1-hour writes; fast 2x and US-only 1.1x stack.
         let expected = (4.0 + 20.0 + 8.0) * 2.0 * 1.1;
-        assert!((usage.total_cost - expected).abs() < 1e-6, "{}", usage.total_cost);
+        assert!(
+            (usage.total_cost - expected).abs() < 1e-6,
+            "{}",
+            usage.total_cost
+        );
 
         // The response, not the request, decides: standard speed, global inference.
         let standard: super::AnthropicUsage = serde_json::from_value(json!({
@@ -2408,7 +2567,11 @@ mod model_rule_tests {
         .unwrap();
         let mut usage = AnthropicClient::calculate_usage(&standard);
         usage.calculate_cost(&Model::anthropic_claude_opus_5_5(), None);
-        assert!((usage.total_cost - 4.0).abs() < 1e-6, "{}", usage.total_cost);
+        assert!(
+            (usage.total_cost - 4.0).abs() < 1e-6,
+            "{}",
+            usage.total_cost
+        );
     }
 }
 
@@ -2416,7 +2579,10 @@ mod model_rule_tests {
 mod base_url_tests {
     use super::AnthropicClient;
     use crate::{
-        client::LLMClient, config::GenerationConfig, conversation::Conversation, model::Model,
+        client::LLMClient,
+        config::GenerationConfig,
+        conversation::Conversation,
+        model::Model,
         providers::{google::GoogleClient, openai::OpenAIClient, voyage::VoyageClient},
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2428,11 +2594,15 @@ mod base_url_tests {
             "https://api.anthropic.com/v1/messages"
         );
         assert_eq!(
-            AnthropicClient::new("k").with_base_url("http://proxy.local/").messages_url(),
+            AnthropicClient::new("k")
+                .with_base_url("http://proxy.local/")
+                .messages_url(),
             "http://proxy.local/v1/messages"
         );
         assert_eq!(
-            GoogleClient::new("k").with_base_url("http://proxy.local/v1").interactions_url(),
+            GoogleClient::new("k")
+                .with_base_url("http://proxy.local/v1")
+                .interactions_url(),
             "http://proxy.local/v1/interactions"
         );
         // OpenAI and Voyage are covered by their own request tests; construction
@@ -2472,8 +2642,12 @@ mod base_url_tests {
             String::from_utf8_lossy(&request).into_owned()
         });
 
-        let mut anthropic = AnthropicClient::new("test-key").with_base_url(format!("http://{address}"));
-        anthropic.http_client = crate::providers::http_client_builder().no_proxy().build().unwrap();
+        let mut anthropic =
+            AnthropicClient::new("test-key").with_base_url(format!("http://{address}"));
+        anthropic.http_client = crate::providers::http_client_builder()
+            .no_proxy()
+            .build()
+            .unwrap();
         let client = LLMClient::new().with_anthropic_client(anthropic);
         let mut conversation = Conversation::new(Model::anthropic_claude_opus_5_5());
         conversation.add_user_message("hi");
@@ -2483,7 +2657,10 @@ mod base_url_tests {
             .unwrap();
         assert_eq!(response.text(), "ok");
         let request = server.await.unwrap();
-        assert!(request.starts_with("POST /v1/messages HTTP/1.1"), "{request}");
+        assert!(
+            request.starts_with("POST /v1/messages HTTP/1.1"),
+            "{request}"
+        );
         assert!(request.to_lowercase().contains("x-api-key: test-key"));
     }
 }

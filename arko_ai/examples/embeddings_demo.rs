@@ -1,6 +1,5 @@
 use arko_ai::{
-    EmbeddingClient, EmbeddingConfig, EmbeddingProviderIdentifier, Error,
-    VoyageInputType,
+    EmbeddingClient, EmbeddingConfig, EmbeddingProviderIdentifier, Error, VoyageInputType,
 };
 
 #[tokio::main]
@@ -8,8 +7,7 @@ async fn main() -> Result<(), Error> {
     dotenv::dotenv().ok();
     let voyage_api_key = std::env::var("VOYAGE_API_KEY").unwrap_or_default();
 
-    let client = EmbeddingClient::new()
-        .with_voyage_api_key(&voyage_api_key);
+    let client = EmbeddingClient::new().with_voyage_api_key(&voyage_api_key);
 
     let texts_to_embed = vec![
         "Hello world!".to_string(),

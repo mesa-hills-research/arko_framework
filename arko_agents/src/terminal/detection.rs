@@ -27,9 +27,11 @@ impl Detector {
         let text = String::from_utf8_lossy(output);
         // ConPTY renders runs of spaces as cursor-forward (CSI n C). Restore
         // them so rules match trailing spaces as other platforms print them.
-        let text = self.cursor_forward.replace_all(&text, |c: &regex::Captures| {
-            " ".repeat(c[1].parse::<usize>().unwrap_or(1).clamp(1, 256))
-        });
+        let text = self
+            .cursor_forward
+            .replace_all(&text, |c: &regex::Captures| {
+                " ".repeat(c[1].parse::<usize>().unwrap_or(1).clamp(1, 256))
+            });
         let text = self.escapes.replace_all(&text, "");
         let text = text.trim_end_matches(['\r', '\n']);
         let line = text.rsplit(['\n', '\r']).next().unwrap_or("");
@@ -83,7 +85,9 @@ mod tests {
             Some(("region".into(), "Pick a region: ".into()))
         );
         assert_eq!(
-            detector.detect(b"Pick a region:\x1b[C").map(|(_, line)| line),
+            detector
+                .detect(b"Pick a region:\x1b[C")
+                .map(|(_, line)| line),
             Some("Pick a region: ".into())
         );
         assert_eq!(detector.detect(b"Pick a region:\x1b[1K"), None);

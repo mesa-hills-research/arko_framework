@@ -39,8 +39,10 @@ impl Debug for ToolImage {
             arko_ai::Image::Base64 { mime_type, .. } => mime_type.as_str(),
             arko_ai::Image::Url(_) => "URL",
         };
-        f.debug_struct("ToolImage").field("description", &self.description)
-            .field("kind", &kind).finish_non_exhaustive()
+        f.debug_struct("ToolImage")
+            .field("description", &self.description)
+            .field("kind", &kind)
+            .finish_non_exhaustive()
     }
 }
 
