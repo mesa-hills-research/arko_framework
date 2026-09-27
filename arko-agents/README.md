@@ -102,7 +102,8 @@ been dropped, the runtime returns the task as `Interrupted`. Tools only hold wea
 
 The task's working directory is the agent's workspace. File tools resolve relative paths
 against it, and paths outside it are rejected by default (see
-[Approvals and workspace paths](#approvals-and-workspace-paths)). Pass an absolute path.
+[Approvals and workspace paths](#approvals-and-workspace-paths)). A relative working
+directory is resolved against the process's current directory.
 
 The `arko_agents_cli` example runs one agent from a JSON configuration, with interactive
 approvals, answers, and error recovery:
@@ -154,7 +155,7 @@ runtime validates them again when a task starts. The quick start's agent as JSON
 | `skills_config` | None | Skill sources; see [Skills](#skills). |
 | `monitoring` | Nothing monitored | Plan-usage and prompt-cache monitors; see [Monitoring](#monitoring). |
 | `refusal_fallback` | None | A model that answers a refused turn once; see [Refusals](#refusals). |
-| `complete_task_summary_prompt_override` | None | Replaces the description of `complete_task`'s `summary` parameter in output-based mode. |
+| `complete_task_summary_prompt_override` | None | Replaces the description of `complete_task`'s `summary` parameter. |
 | `parsing_config_override` | Default tags | Tag syntax for output-based tool calls. |
 
 In `role_description` and `instructions`, text between `{{#output_based_only}}` and
@@ -174,10 +175,11 @@ registered tools named in `tool_config.available_tool_names`, and always
 `complete_task`, which ends the task as `Completed { summary }`. `ask_user` puts the task
 in `AwaitingUserResponse` until `UserCommand::SubmitUserResponse` answers it.
 
-The list controls what is offered, not what can run: in native mode, a call to any tool
-in the registry runs, whether or not the agent was offered it (output-based parsing only
-recognizes offered tools). Give an agent a registry that holds only its own tools when
-that matters.
+The runtime runs only the tools the agent is offered, in either tool calling mode. A call
+to any other tool, registered or not, gets an error result and emits
+`UnavailableToolAttempted`, and output-based parsing recognizes only offered tools.
+`run_task` binds the offered tools to the task with `Tool::bind_runtime`. A saved task
+is offered the tools its own configuration names.
 
 ### Tool calling modes
 
@@ -185,7 +187,8 @@ that matters.
 
 - `OutputBased` (the default): the system prompt describes each tool with an XML-like
   example, and the runtime parses calls from the response text. A response holds one call
-  or one batch of calls to the same tool. Every parameter value arrives as a JSON string.
+  or one batch of calls to the same tool. Every parameter value arrives as a JSON string,
+  except that `true` or `false` (in any case) for a `bool` parameter becomes a boolean.
 - `Native`: tools are sent through the provider's tool-calling API. A response can call
   several different tools, but only when every tool in it allows batching; otherwise none
   of the calls runs and each gets an error result explaining why.
@@ -213,10 +216,15 @@ Parameters marked `is_path` are checked against the task's working directory. A 
 outside it is handled by `default_out_of_workspace_path_policy` or a per-tool override:
 `AutoReject` (the default) rejects the call, `RequireApproval` asks for approval even for
 auto-approved tools, and `AutoApprove` allows it. A native call is rejected with an error
-result; an output-based call is rejected as a tool error, under `on_tool_execution_error`.
-The check is lexical and is not a sandbox: it resolves `.` and `..` without following
-symbolic links, and it expands `~` and environment variables, which the built-in file
-tools do not.
+result and `ToolRejected`; an output-based call is rejected as a tool error, under
+`on_tool_execution_error`. A path that cannot be resolved, such as one holding a NUL
+byte, is rejected this way under every policy.
+
+The check and the built-in file tools resolve a path the same way, with
+`arko_agents::utils::resolve_path`: surrounding whitespace is trimmed, `~` and `$VAR` are
+not expanded (`~/notes` names a directory called `~`), a relative path is joined to the
+working directory, and `.` and `..` are resolved lexically. The check is not a sandbox:
+symbolic links are not followed, so a link inside the workspace can lead outside it.
 
 ### Tool errors
 
@@ -292,8 +300,8 @@ expanded and it is split on whitespace, without interpreting quotes. String para
 without a `flag` follow as positional arguments, in order, and then flagged string
 parameters as `flag value` and each true boolean parameter as its flag. The command runs
 in the task's working directory without a shell, and its standard output is the result;
-a nonzero exit status is a tool error. In output-based mode every value the model passes
-is a string, which a boolean parameter rejects, so boolean parameters suit native mode.
+a nonzero exit status is a tool error. A boolean parameter takes a JSON boolean or the
+text `true` or `false`, so it works in both tool calling modes.
 
 ### Result interception and execution middleware
 
@@ -381,17 +389,20 @@ Besides answers to the waiting states, a running task accepts:
   message headed `# Workflow context update`; a stream in progress is not changed.
 - `CancelTask`: the task ends as `Failed { reason: "Task cancelled by user." }`.
 - `SuspendTask`: the runtime stops and returns the task in its current state, for example
-  to save it. It is ignored while a batch approval is pending.
+  to save it. A task suspended while it awaits a command, in any awaiting state, keeps
+  its pending calls and results and waits for that command when it runs again.
 
 Tasks serialize to JSON (`Task::save_to_path`, `Task::load_from_path`). Running a
 returned task again continues it: a task that is pending, in progress, or interrupted
 makes its next model request, and a task awaiting a command waits for it.
 `prepare_for_resumption_with_user_response` answers a saved `AwaitingUserResponse` task
 before it runs, and `prepare_for_resumption_from_completed` adds a follow-up prompt to a
-completed one. A tool-approval wait that ends in `Interrupted` (a command timeout or a
-closed command channel) loses the pending approval; in native mode the turn's calls then
-stay in the conversation without results, which providers reject when the task runs
-again. `SuspendTask` keeps the awaiting state instead, outside a batch approval.
+completed one. A wait that ends in `Interrupted` (a command timeout or a closed command
+channel) does not keep the awaiting state. In native mode, calls still awaiting approval
+are then rejected with an error result and `ToolRejected`, and the turn's results are
+added to the conversation, so every call keeps its result and the task can run again; in
+output-based mode, the task's next request asks the model to continue. `SuspendTask`
+keeps the awaiting state instead.
 
 `Task::total_usage()` sums the usage of every model call. `Task::total_usage_cost()` is
 what the account is billed: ChatGPT OAuth calls are covered by the subscription and add
