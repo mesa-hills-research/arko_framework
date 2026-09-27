@@ -262,7 +262,7 @@ fn total_input_tokens(&self) -> usize;
 fn total_output_tokens(&self) -> usize;
 ```
 
-These return task-wide usage totals, including earlier conversation segments after continuation. Workflow cost also includes manual charges and can exclude agents explicitly marked OAuth-exempt; summing task costs need not match the workflow ledger.
+These return task-wide usage totals, including earlier conversation segments after continuation; `total_cost` is the billed amount (`UsageInfo::billed()`, zero for subscription calls such as ChatGPT OAuth). Workflow cost also includes manual charges; summing task costs need not match the workflow ledger.
 
 ## Hooks and human input
 
@@ -393,7 +393,7 @@ Source: [context/mod.rs](src/context/mod.rs). `context::SharedContext` is access
 | `workflow_name` | `String` | Workflow name. |
 | `workflow_metadata` | `WorkflowMetadata` | Discovery metadata. |
 | `workspace` | `PathBuf` | Shared working directory. |
-| `budget` | `BudgetManager` | Ledger, limits, exemptions. |
+| `budget` | `BudgetManager` | Ledger and limits. |
 | `durable_store` | `Option<Arc<durable::DurableStore>>` | Present when persistence is configured. |
 | `memory` | `memory::MemoryStore` | Shared tier store. |
 | `messages` | `messaging::MessageBus` | Queued and live messaging. |
@@ -738,7 +738,7 @@ Register `DistillationConfig` through `WorkflowBuilder::distiller` to replace su
 
 There is no `Default` implementation. Build validates token limit and reasoning/provider compatibility; it does not validate target agent/tool names. Model errors and empty generated text produce interceptor errors handled by the workflow's interception failure policy. Non-empty output replaces the result even if it is longer than its input; `max_output_tokens` is a generation cap, not a guaranteed compression ratio.
 
-Distillation charges `response.usage.total_cost` as a **manual workflow cost**, with description `distillation: <name>` and agent/task/tool metadata. It therefore affects the workflow budget, including when the target agent is OAuth-exempt, and does not add to the agent's own LLM-spend counter. Warning/exceeded hooks run when indicated; normal managed execution enforces the exceeded workflow budget. Charges are recorded after validating non-empty response text, and the distillation record is appended after the budget hooks succeed.
+Distillation charges the billed amount `response.usage.billed()` (zero for subscription calls such as ChatGPT OAuth) as a **manual workflow cost**, with description `distillation: <name>` and agent/task/tool metadata. It therefore affects the workflow budget and does not add to the agent's own LLM-spend counter. Warning/exceeded hooks run when indicated; normal managed execution enforces the exceeded workflow budget. Charges are recorded after validating non-empty response text, and the distillation record is appended after the budget hooks succeed.
 
 ### `DistillationRecord`
 
@@ -761,16 +761,13 @@ Public fields identify the target task/agent/tool and configuration, UTC timesta
 
 ### `BudgetManager`
 
-Thread-safe accumulated workflow cost, per-agent LLM spend/limits, OAuth-exempt agent names, and a detailed ledger. Fields are private; there is no `Default` implementation. The manager records accounting and returns threshold flags; it does not itself cancel agents or fire workflow hooks. Managed workflow execution supplies that behavior.
+Thread-safe accumulated workflow cost, per-agent LLM spend/limits, and a detailed ledger. Fields are private; there is no `Default` implementation. The manager records accounting and returns threshold flags; it does not itself cancel agents or fire workflow hooks. Managed workflow execution supplies that behavior.
 
 | Exact signature | Parameters, return, and behavior |
 | --- | --- |
-| `pub fn new(limit: Option<f64>, warning: Option<f64>) -> Self` | Start at zero with an empty ledger/exempt set and no agent limits. `None` disables its respective workflow threshold. |
-| `pub fn from_ledger(limit: Option<f64>, warning: Option<f64>, ledger: CostLedger, oauth_exempt: HashSet<String>) -> Self` | Restore accounting from entries plus exempt names; rebuild per-agent spend from `CostSource::Agent`. Already-reached warning is marked fired. Agent limits start empty and must be set again. |
-| `pub fn oauth_exempt_snapshot(&self) -> HashSet<String>` | Clone currently exempt names. |
-| `pub fn mark_oauth_exempt(&self, agent_name: &str)` | Mark a registration name as not billed per token by managed workflow execution. |
-| `pub fn is_oauth_exempt(&self, agent_name: &str) -> bool` | Query the exemption set. |
-| `pub fn add_agent_cost(&self, agent_name: &str, usage: &arko_ai::UsageInfo) -> AddCostResult` | Append an agent entry using `usage.total_cost`, cloned usage details, current time, and no metadata; update workflow and agent spend. Direct calls still record OAuth-exempt names. |
+| `pub fn new(limit: Option<f64>, warning: Option<f64>) -> Self` | Start at zero with an empty ledger and no agent limits. `None` disables its respective workflow threshold. |
+| `pub fn from_ledger(limit: Option<f64>, warning: Option<f64>, ledger: CostLedger) -> Self` | Restore accounting from entries; rebuild per-agent spend from `CostSource::Agent`. Already-reached warning is marked fired. Agent limits start empty and must be set again. |
+| `pub fn add_agent_cost(&self, agent_name: &str, usage: &arko_ai::UsageInfo) -> AddCostResult` | Append an agent entry whose amount is `usage.billed()` (zero for subscription calls such as ChatGPT OAuth, whose estimate stays in the stored usage), with cloned usage details, current time, and no metadata; update workflow and agent spend. |
 | `pub fn set_agent_limit(&self, agent_name: impl Into<String>, limit: f64)` | Set/replace that agent's dollar limit. |
 | `pub fn agent_limit(&self, agent_name: &str) -> Option<f64>` | Return configured per-agent limit, or None. |
 | `pub fn agent_spent(&self, agent_name: &str) -> f64` | Return recorded agent LLM cost, or zero for an unseen name. |
@@ -791,12 +788,12 @@ Recording methods retain the cost even if it exceeds the budget and consume a ne
 
 ```rust
 pub enum CostSource {
-    Agent { agent_name: String, usage: arko_ai::UsageInfo },
+    Agent { agent_name: String, usage: Box<arko_ai::UsageInfo> },
     Manual { description: String },
 }
 ```
 
-`Agent` retains the registered agent name and full usage breakdown. `Manual` retains a free-form description, including charges from distillation.
+`Agent` retains the registered agent name and full usage breakdown, including the per-token estimate of subscription calls whose billed `amount` is zero. `Manual` retains a free-form description, including charges from distillation.
 
 `CostEntry` is cloneable and Serde serializable/deserializable, with public fields:
 
@@ -968,7 +965,7 @@ impl PersistenceManager {
 
 These operations return filesystem/serialization failures as `WorkflowError`. Persistence stores snapshots, task/event history, and the separate durable journal; checkpoints do not persist live running futures or ballots.
 
-On `resume_from`, the builder restores memory tiers/history, pending messages, the cost ledger and exemptions, finalized agent results, and verification/distillation records. Saved memory replaces any newly supplied `MemoryConfig`. Freshness state is restored only when tracking is enabled again. Supply agents, client, tools, hooks, policies, budget limits, and metadata through the new builder; they are not reconstructed from the checkpoint. Pause state, active channels, ballots, and transient verification counters/baselines start fresh. The builder does not automatically continue agents or replay workflow control flow. Accounting is rebuilt from `cost_ledger`; legacy `budget_spent` and `completed_agents` do not substitute for a missing ledger or full results.
+On `resume_from`, the builder restores memory tiers/history, pending messages, the cost ledger, finalized agent results, and verification/distillation records. Saved memory replaces any newly supplied `MemoryConfig`. Freshness state is restored only when tracking is enabled again. Supply agents, client, tools, hooks, policies, budget limits, and metadata through the new builder; they are not reconstructed from the checkpoint. Pause state, active channels, ballots, and transient verification counters/baselines start fresh. The builder does not automatically continue agents or replay workflow control flow. Accounting is rebuilt from `cost_ledger`; legacy `budget_spent` and `completed_agents` do not substitute for a missing ledger or full results.
 
 ### Checkpoint payloads
 
@@ -985,12 +982,13 @@ On `resume_from`, the builder restores memory tiers/history, pending messages, t
 | `message_queues` | `std::collections::HashMap<String, Vec<crate::messaging::AgentMessage>>` | Pending messages per agent; required. |
 | `budget_spent` | `f64` | Total recorded spend; required. |
 | `cost_ledger` | `crate::budget::CostLedger` | Complete accounting history; empty/default ledger if absent. |
-| `oauth_exempt_agents` | `std::collections::HashSet<String>` | Agents exempted from monetary budget accounting; empty if absent. |
 | `freshness_snapshot` | `Option<crate::freshness::FreshnessSnapshot>` | Resource version/read tracking state; `None` if absent. |
 | `agent_results` | `Vec<crate::workflow::result::AgentResult>` | Full finalized results, including failures and input suspensions; empty if absent. |
 | `verification_records` | `Vec<crate::verification::VerificationRecord>` | Completion-verification history; empty if absent. |
 | `distillation_records` | `Vec<crate::distillation::DistillationRecord>` | Distillation history; empty if absent. |
 | `completed_agents` | `Vec<SerializableAgentResult>` | Legacy/lightweight agent result summaries; empty if absent. |
+
+Checkpoints written by older versions may contain an `oauth_exempt_agents` field. It is ignored when they are loaded: budget accounting now records `UsageInfo::billed()`, which is zero for subscription calls, so no exemption list is kept (the removed `BudgetManager::mark_oauth_exempt`, `is_oauth_exempt` and `oauth_exempt_snapshot` have no replacement). Ledger entries already in such a checkpoint keep their recorded amounts.
 
 `SerializableAgentResult` has public `agent_name: String` and `summary: String` fields. It supports Serde, `Clone`, and `Default` (both strings empty).
 

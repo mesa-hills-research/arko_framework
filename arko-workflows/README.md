@@ -262,10 +262,9 @@ let result = workflow.result();
 println!("Total spent: ${:.6}", result.total_cost);
 ```
 
-Agents using OpenAI OAuth can be marked exempt:
-```rust
-workflow.context().budget.mark_oauth_exempt("agent-name");
-```
+Agent costs count what the account is billed (`UsageInfo::billed()`): calls on a subscription such as ChatGPT OAuth record zero against the budget while their per-token estimate stays in the ledger entry's `UsageInfo`. No per-agent exemption is needed.
+
+> **Changed:** `BudgetManager::mark_oauth_exempt`, `is_oauth_exempt` and `oauth_exempt_snapshot` were removed, and `BudgetManager::from_ledger` no longer takes an exemption set (`from_ledger(limit, warning, ledger)`). The `oauth_exempt_agents` field of checkpoints written by older versions is ignored when they are loaded; ledger entries already in those checkpoints keep their recorded amounts.
 
 ### Inter-Agent Messaging
 
@@ -333,7 +332,7 @@ let workflow = Workflow::builder()
 workflow.checkpoint().await?;
 ```
 
-Checkpoints serialize the workflow/run identity, metadata, complete memory state, pending messages, cost ledger and exemptions, freshness versions, full agent tasks/results, verification records, and distillation records. Agent tasks and a JSONL event log are also stored separately. Writes use temporary files, sync, and rename; `.resume_from(path)` restores operational state rather than only displaying summaries.
+Checkpoints serialize the workflow/run identity, metadata, complete memory state, pending messages, cost ledger, freshness versions, full agent tasks/results, verification records, and distillation records. Agent tasks and a JSONL event log are also stored separately. Writes use temporary files, sync, and rename; `.resume_from(path)` restores operational state rather than only displaying summaries.
 
 ### BYOT (Bring Your Own Tool)
 

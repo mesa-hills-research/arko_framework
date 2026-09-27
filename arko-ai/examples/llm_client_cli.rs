@@ -188,7 +188,7 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
                         Ok(StreamEvent::End(boxed_resp)) => {
                             let resp = *boxed_resp;
                             println!("\n");
-                            print_usage_info(&resp.usage, None, 0.0);
+                            print_usage_info(&resp.usage, None, 0.0, 0.0);
                             break;
                         }
                         Err(e) => return Err(Box::new(e)),
@@ -203,7 +203,7 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
                 }
 
                 print_reasoning_artifact(response.message.reasoning_artifact.as_ref());
-                print_usage_info(&response.usage, None, 0.0);
+                print_usage_info(&response.usage, None, 0.0, 0.0);
             }
         }
 
@@ -242,7 +242,10 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
             }
             println!("---");
 
-            let mut total_cost: f64 = 0.0;
+            // Billed amount (zero for subscription calls) and the estimate
+            // at API list prices, accumulated separately.
+            let mut total_billed: f64 = 0.0;
+            let mut total_estimate: f64 = 0.0;
             let mut last_input_tokens: Option<usize> = None;
 
             loop {
@@ -319,8 +322,9 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
                     } else {
                         conversation.add_assistant_message_from_response(resp.clone());
                     }
-                    total_cost += resp.usage.total_cost;
-                    print_usage_info(&resp.usage, last_input_tokens, total_cost);
+                    total_billed += resp.usage.billed();
+                    total_estimate += resp.usage.total_cost;
+                    print_usage_info(&resp.usage, last_input_tokens, total_billed, total_estimate);
                     last_input_tokens = Some(resp.usage.input_tokens);
                 } else {
                     conversation.messages.pop();
@@ -328,7 +332,10 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
                 }
                 println!("---");
             }
-            println!("Chat ended. Final accumulated cost: ${:.6}", total_cost);
+            println!(
+                "Chat ended. Final accumulated billed cost: ${:.6} (estimate at list prices: ${:.6})",
+                total_billed, total_estimate
+            );
         }
     }
 
@@ -627,7 +634,12 @@ fn print_reasoning_artifact(artifact: Option<&ReasoningArtifact>) {
     }
 }
 
-fn print_usage_info(usage: &UsageInfo, last_input_tokens: Option<usize>, accumulated_cost: f64) {
+fn print_usage_info(
+    usage: &UsageInfo,
+    last_input_tokens: Option<usize>,
+    accumulated_billed: f64,
+    accumulated_estimate: f64,
+) {
     println!("\nUsage Info (This Turn):");
 
     if let Some(last_tokens) = last_input_tokens {
@@ -662,12 +674,15 @@ fn print_usage_info(usage: &UsageInfo, last_input_tokens: Option<usize>, accumul
     }
 
     println!("-----------------------------");
-    println!("  Total Turn Cost: ${:<10.6}", usage.total_cost);
+    println!("  Total Turn Cost (estimate): ${:<10.6}", usage.total_cost);
     if usage.billing != arko_ai::BillingKind::Metered {
         println!("  Billed ({:?}): ${:<10.6}", usage.billing, usage.billed());
     }
 
-    if accumulated_cost > 0.0 {
-        println!("  Accumulated Cost: ${:<10.6}", accumulated_cost);
+    if accumulated_billed > 0.0 || accumulated_estimate > 0.0 {
+        println!("  Accumulated Billed: ${:<10.6}", accumulated_billed);
+        if accumulated_estimate != accumulated_billed {
+            println!("  Accumulated Estimate: ${:<10.6}", accumulated_estimate);
+        }
     }
 }
