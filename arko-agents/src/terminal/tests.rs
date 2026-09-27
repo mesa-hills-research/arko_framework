@@ -503,41 +503,59 @@ async fn stdout_cannot_forge_program_declarations_and_runtime_binding_is_idempot
 #[tokio::test]
 async fn agent_runtime_automatically_binds_terminal_tools_to_its_command_channel() {
     let f = Fixture::new(|_| {});
-    let config = crate::AgentConfig::builder(
-        "terminal-test".into(),
-        "Tester".into(),
-        crate::AgentLLMConfig {
-            model: arko_ai::Model::openai_gpt_5_6_luna(),
-            generation_config: Default::default(),
-        },
-    )
-    .role_description("test".into())
-    .instructions("test".into())
-    .build()
-    .unwrap();
-    let mut task = crate::Task::new(config, "test".into(), f.root.clone(), None);
-    task.set_state(crate::TaskState::AwaitingUserResponse {
-        questions: "pending".into(),
-    });
-    let id = task.id;
-    let mut registry = ToolRegistry::new();
-    f.manager.register_tools(&mut registry);
+    let task = |offered: bool| {
+        let mut builder = crate::AgentConfig::builder(
+            "terminal-test".into(),
+            "Tester".into(),
+            crate::AgentLLMConfig {
+                model: arko_ai::Model::openai_gpt_5_6_luna(),
+                generation_config: Default::default(),
+            },
+        )
+        .role_description("test".into())
+        .instructions("test".into());
+        if offered {
+            builder = builder.tool_config(crate::AgentToolConfig {
+                available_tool_names: TerminalTool::NAMES.map(String::from).to_vec(),
+                ..Default::default()
+            });
+        }
+        let mut task = crate::Task::new(
+            builder.build().unwrap(),
+            "test".into(),
+            f.root.clone(),
+            None,
+        );
+        task.set_state(crate::TaskState::AwaitingUserResponse {
+            questions: "pending".into(),
+        });
+        task
+    };
     let runtime = crate::AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()));
-    let (_events, commands, handle) =
-        runtime.run_task(task, Arc::new(registry), None, false, None, None, None);
-    assert!(
-        f.manager.runtimes.lock().unwrap()[&id]
-            .sender
-            .upgrade()
+    for offered in [true, false] {
+        let task = task(offered);
+        let id = task.id;
+        let mut registry = ToolRegistry::new();
+        f.manager.register_tools(&mut registry);
+        let (_events, commands, handle) =
+            runtime.run_task(task, Arc::new(registry), None, false, None, None, None);
+        // Only the tools a task is offered are bound to it.
+        let binding = f.manager.runtimes.lock().unwrap().get(&id).cloned();
+        assert_eq!(
+            binding.is_some_and(|binding| binding
+                .sender
+                .upgrade()
+                .unwrap()
+                .same_channel(&commands)),
+            offered
+        );
+        commands.send(UserCommand::SuspendTask).await.unwrap();
+        timeout(Duration::from_secs(1), handle)
+            .await
             .unwrap()
-            .same_channel(&commands)
-    );
-    commands.send(UserCommand::SuspendTask).await.unwrap();
-    timeout(Duration::from_secs(1), handle)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+            .unwrap()
+            .unwrap();
+    }
 }
 
 #[tokio::test]

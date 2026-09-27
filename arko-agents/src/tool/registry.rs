@@ -72,6 +72,18 @@ impl ToolRegistry {
         self.tools.get(name).cloned()
     }
 
+    /// A registry with only the tools of this one that `names` lists; names
+    /// not registered here are skipped. The runtime runs a task with the
+    /// tools its configuration offers
+    /// ([`AgentToolConfig::offered_tool_names`](crate::agent_config::AgentToolConfig::offered_tool_names)).
+    pub fn restricted_to<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Self {
+        let tools = names
+            .into_iter()
+            .filter_map(|name| Some((name.to_string(), self.tools.get(name)?.clone())))
+            .collect();
+        Self { tools }
+    }
+
     /// Loads and registers an end-user defined tool from its definition.
     pub fn load_end_user_tool(&mut self, definition: ToolDefinition) -> Result<(), ToolError> {
         let tool_name = definition.name.clone();

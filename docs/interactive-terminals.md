@@ -30,8 +30,8 @@ for tool in TerminalTool::all(manager.clone()) {
 }
 ```
 
-`AgentRuntime::run_task` binds the tools to the task's context channel through
-`Tool::bind_runtime`. Custom hosts call `manager.bind_runtime(task_id,
+`AgentRuntime::run_task` binds the tools the agent is offered to the task's context
+channel through `Tool::bind_runtime`. Custom hosts call `manager.bind_runtime(task_id,
 sender.downgrade())` themselves. Jobs belong to the task that started them;
 another task cannot inspect, answer, or cancel them through these tools. The
 runtime's approval and middleware path applies to terminal tools as to any other

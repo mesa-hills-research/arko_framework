@@ -20,7 +20,7 @@ use crate::tool::{
 use arko_ai::{self as ai};
 use futures::TryStreamExt;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -270,6 +270,11 @@ impl AgentLoop {
         let parsing_config = task.agent_config.get_tool_parsing_config();
         let throttle_ms = event_throttle_ms.unwrap_or(0);
         let now = Instant::now();
+        // The tools offered are the only tools that run: a call to any other
+        // one is answered as unavailable, in either tool calling mode.
+        let offered = task.agent_config.tool_config.offered_tool_names();
+        let tool_registry =
+            Arc::new(tool_registry.restricted_to(offered.iter().map(String::as_str)));
 
         for name in tool_registry.list_tool_names() {
             if let Some(tool) = tool_registry.get(&name) {
@@ -314,6 +319,16 @@ impl AgentLoop {
             tool_context_cursor: 0,
             file_tree_baseline: None,
             file_tree_error: None,
+        }
+    }
+
+    /// Binds the task's tools to its command channel
+    /// ([`Tool::bind_runtime`](crate::tool::Tool::bind_runtime)).
+    pub(super) fn bind_tools(&self, sender: &mpsc::Sender<UserCommand>) {
+        for name in self.tool_registry.list_tool_names() {
+            if let Some(tool) = self.tool_registry.get(&name) {
+                tool.bind_runtime(self.task.id, sender.downgrade());
+            }
         }
     }
 
@@ -1766,19 +1781,9 @@ impl AgentLoop {
             };
 
             let mut raw_events_for_turn: Vec<RawParserEvent> = Vec::new();
-            let mut available_tool_names_hs: HashSet<String> = self
-                .task
-                .agent_config
-                .tool_config
-                .available_tool_names
-                .iter()
-                .cloned()
-                .collect();
-            available_tool_names_hs.insert(COMPLETE_TASK_TOOL_NAME.to_string());
-
             let mut parser = if !self.is_native_mode() {
                 Some(ToolCallParser::new(
-                    available_tool_names_hs,
+                    self.task.agent_config.tool_config.offered_tool_names(),
                     self.parsing_config.clone(),
                 ))
             } else {
@@ -2048,16 +2053,8 @@ impl AgentLoop {
                     let tool_arc = match self.tool_registry.get(&ai_tool_call.name) {
                         Some(t) => t,
                         None => {
-                            self.emit_event(AgentEvent::UnavailableToolAttempted {
-                                tool_name: ai_tool_call.name.clone(),
-                            })
-                            .await?;
-                            self.task.pending_native_tool_results.push(
-                                ai::ToolResult::error_from_tool_call(
-                                    ai_tool_call,
-                                    &format!("Tool '{}' is not available.", ai_tool_call.name),
-                                ),
-                            );
+                            let result = self.unavailable_native_tool(ai_tool_call).await?;
+                            self.task.pending_native_tool_results.push(result);
                             continue;
                         }
                     };
@@ -2910,6 +2907,22 @@ impl AgentLoop {
         }
     }
 
+    /// The error result of a native call to a tool the task is not offered
+    /// (or that isn't registered), reported with `UnavailableToolAttempted`.
+    async fn unavailable_native_tool(
+        &self,
+        ai_call: &ai::ToolCall,
+    ) -> Result<ai::ToolResult, ArkoAgentsError> {
+        self.emit_event(AgentEvent::UnavailableToolAttempted {
+            tool_name: ai_call.name.clone(),
+        })
+        .await?;
+        Ok(ai::ToolResult::error_from_tool_call(
+            ai_call,
+            &format!("Tool '{}' is not available.", ai_call.name),
+        ))
+    }
+
     async fn execute_native_tool_for_approval(
         &mut self,
         ai_call: &ai::ToolCall,
@@ -2935,6 +2948,11 @@ impl AgentLoop {
             .await?;
             output
         } else {
+            // A call saved awaiting approval whose tool this run does not
+            // offer is answered like any unavailable tool.
+            let Some(tool_arc) = self.tool_registry.get(tool_name) else {
+                return self.unavailable_native_tool(ai_call).await.map(Some);
+            };
             match self
                 .before_tool_execution(internal_id, tool_name, &parameters)
                 .await?
@@ -2969,11 +2987,6 @@ impl AgentLoop {
                     return Ok(Some(ai::ToolResult::error_from_tool_call(ai_call, &reason)));
                 }
             }
-
-            let tool_arc = self
-                .tool_registry
-                .get(tool_name)
-                .ok_or_else(|| ArkoAgentsError::ToolNotFound(tool_name.to_string()))?;
 
             let task_context = self.task_context();
 

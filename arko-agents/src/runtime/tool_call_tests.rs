@@ -266,3 +266,110 @@ async fn native_paths_outside_the_workspace_are_judged_as_the_tools_open_them() 
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+// Only the tools the agent is offered run.
+
+#[tokio::test]
+async fn native_calls_to_registered_tools_the_agent_is_not_offered_do_not_run() {
+    let workspace = workspace();
+    std::fs::write(workspace.join("secret.txt"), "SECRET-CONTENTS").unwrap();
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(Counter(Arc::clone(&runs))));
+    // read_file, write_file and counter are registered, not offered.
+    let (mut agent, mut events, _commands) = agent(
+        config(ToolCallingMode::Native, &["list_files"]),
+        registry,
+        &workspace,
+    );
+    let offered: Vec<_> = agent
+        .build_native_tool_config(&agent.task.conversation.model)
+        .tools
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert_eq!(offered, ["list_files", "complete_task"]);
+    agent.scripted_responses.get_mut().unwrap().extend([
+        turn(vec![native_call(
+            "read",
+            "read_file",
+            serde_json::json!({"path": "secret.txt"}),
+        )]),
+        turn(vec![native_call(
+            "write",
+            "write_file",
+            serde_json::json!({"path": "new.txt", "content": "x"}),
+        )]),
+        turn(vec![native_call("count", "counter", serde_json::json!({}))]),
+        turn(vec![native_call(
+            "list",
+            "list_files",
+            serde_json::json!({"directory": "."}),
+        )]),
+        complete(),
+    ]);
+    let task = timeout(Duration::from_secs(5), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+    assert!(!workspace.join("new.txt").exists());
+    for id in ["read", "write", "count"] {
+        let results = result_for(&task.conversation, id);
+        assert_eq!(results.len(), 1, "{id}");
+        assert!(results[0].is_error && results[0].output.contains("is not available"));
+    }
+    assert!(!result_for(&task.conversation, "list")[0].is_error);
+    assert!(
+        !serde_json::to_string(&task.conversation)
+            .unwrap()
+            .contains("SECRET-CONTENTS")
+    );
+    assert_calls_paired(&task.conversation);
+    let events = drain(&mut events);
+    let unavailable: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::UnavailableToolAttempted { tool_name } => Some(tool_name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(unavailable, ["read_file", "write_file", "counter"]);
+    let ran: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolResult { tool_name, .. } => Some(tool_name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ran, ["list_files", "complete_task"]);
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[tokio::test]
+async fn an_approved_call_to_a_tool_the_run_does_not_offer_is_answered_as_unavailable() {
+    // A call saved awaiting approval (by an older version, or with another
+    // configuration) whose tool this run does not offer.
+    let workspace = workspace();
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(Counter(Arc::clone(&runs))));
+    let (mut agent, _events, _commands) =
+        agent(config(ToolCallingMode::Native, &[]), registry, &workspace);
+    let result = agent
+        .execute_native_tool_for_approval(
+            &call("saved", "counter"),
+            Uuid::new_v4(),
+            "counter",
+            HashMap::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.is_error && result.output.contains("is not available"));
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+    std::fs::remove_dir_all(workspace).unwrap();
+}

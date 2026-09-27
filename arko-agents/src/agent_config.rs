@@ -6,7 +6,7 @@ use arko_ai::{
     GenerationConfig as LLMGenerationConfig, Model as LLMModel, Provider as LLMProvider,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -175,6 +175,10 @@ pub enum ToolCallingMode {
 /// Configuration for agent tool usage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentToolConfig {
+    /// The tools the agent is offered, besides `complete_task`, which is
+    /// always offered. The runtime offers and runs only these (those the
+    /// task's registry holds): a call to any other tool gets an error result
+    /// and `AgentEvent::UnavailableToolAttempted`.
     pub available_tool_names: Vec<String>,
     #[serde(default)]
     pub allow_batched_tool_calls: bool,
@@ -192,6 +196,18 @@ pub struct AgentToolConfig {
 
 fn default_auto_approve_tool_use_false() -> bool {
     false
+}
+
+impl AgentToolConfig {
+    /// The names of the tools the agent is offered and can run:
+    /// `available_tool_names` and `complete_task`.
+    pub fn offered_tool_names(&self) -> HashSet<String> {
+        self.available_tool_names
+            .iter()
+            .cloned()
+            .chain([crate::tool::builtins::COMPLETE_TASK_TOOL_NAME.to_string()])
+            .collect()
+    }
 }
 
 impl Default for AgentToolConfig {

@@ -46,6 +46,11 @@ impl AgentRuntime {
 
     /// Runs a task with the given agent configuration and tool registry.
     ///
+    /// The task runs only the registry's tools its configuration offers
+    /// ([`AgentToolConfig::offered_tool_names`](crate::agent_config::AgentToolConfig::offered_tool_names));
+    /// those tools are bound to the task's command channel
+    /// ([`Tool::bind_runtime`](crate::tool::Tool::bind_runtime)).
+    ///
     /// An optional `InterceptorConfig` enables tool result interception,
     /// allowing results to be transformed (e.g., distilled) before they
     /// enter the agent's conversation. `complete_task` results are never
@@ -68,12 +73,6 @@ impl AgentRuntime {
         let (event_sender, event_receiver) = mpsc::channel(DEFAULT_EVENT_CHANNEL_SIZE);
         let (command_sender, command_receiver) = mpsc::channel(DEFAULT_COMMAND_CHANNEL_SIZE);
 
-        for name in tool_registry.list_tool_names() {
-            if let Some(tool) = tool_registry.get(&name) {
-                tool.bind_runtime(task.id, command_sender.downgrade());
-            }
-        }
-
         let mut agent_loop = AgentLoop::new(
             task,
             Arc::clone(&self.llm_client),
@@ -87,6 +86,7 @@ impl AgentRuntime {
             execution_middleware,
         );
         agent_loop.turn_context = self.turn_context.clone();
+        agent_loop.bind_tools(&command_sender);
 
         let task_join_handle = tokio::spawn(async move { agent_loop.run().await });
 
