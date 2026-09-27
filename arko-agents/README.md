@@ -144,8 +144,29 @@ normalized to one attempt.
   `arko_ai::Refusal`, then the refusal follows the permanent-error path above.
   A model's own refusal (`RefusalSource::Model`, such as OpenAI structured
   refusals) stays in history with its explanation as the assistant text, so the
-  model can see what it declined; its tool calls are not run. Classifier and
-  content-filter refusals are removed from history.
+  model can see what it declined; its tool calls are not run (announced calls
+  get `ToolRejected("turn refused")`), and in output-based mode only the
+  explanation (or the text without unrun tool-call markup) is kept. Classifier
+  and content-filter refusals are removed from history.
+- Refusal recovery: a `RefusedInput` event (after `RefusalReceived`) names the
+  input the refused turn answered, `UserMessage { message_index }` or
+  `ToolResults { message_index, results }` with the provider call ids; it is
+  also kept in `Task::refused_input`. While the task awaits recovery approval,
+  `UserCommand::ResolveRefusal { resolution }` changes it and continues:
+  `RephraseUserMessage { text }`, `RemoveUserMessage` (not the task prompt when
+  it is the only user message) or `RedactToolResults { call_ids, replacement }`
+  (calls stay paired with their results). The refused turn is removed and the
+  changed input is sent as is; an invalid resolution is reported with
+  `ErrorEncountered` and the task keeps waiting. For a task returned
+  interrupted, call `Task::resolve_refusal` before running it again. The edits
+  are arko-ai `Conversation` operations (`rephrase_last_user_turn`,
+  `remove_last_user_turn`, `redact_tool_result`), usable directly.
+  `ApproveErrorRecovery` still continues without a change.
+- Opt-in `AgentConfig::refusal_fallback` (an `AgentLLMConfig`): a refusal from
+  the configured model sends the same input once to the fallback model
+  (`RefusalFallback` event; the refused turn is not kept), whose response
+  continues the task; later turns use the configured model. A refusal from the
+  fallback stops the task as above.
 - Waits that don't count against the ordinary limits (rate limits, opt-in
   `capacity_retry`, usage-limit waits)
   neither reset nor consume them: ordinary attempts keep counting across

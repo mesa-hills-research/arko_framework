@@ -1,4 +1,5 @@
 use crate::{
+    error::Error,
     message::{ConfigurationUpdate, Content, Message, Role},
     model::Model,
     providers::GenerationResponse,
@@ -305,6 +306,69 @@ impl Conversation {
     }
 }
 
+/// Editing the input of a refused turn (or any earlier input) before sending
+/// it again. A provider that refused a request refuses it again unchanged, so
+/// the input has to change: rephrase or remove the user's message, or redact
+/// a tool result the model or a filter objected to. Edits that end a turn's
+/// history early also remove the messages after the edited one (the refused
+/// turn and anything after it); tool calls and their results always stay
+/// paired. A ChatGPT turn-state token tied to an edited turn start is no
+/// longer echoed (see [`openai_turn_state`](Self::openai_turn_state)).
+impl Conversation {
+    /// Index of the last user turn: the last user message holding no tool
+    /// results.
+    pub fn last_user_turn(&self) -> Option<usize> {
+        self.messages
+            .iter()
+            .rposition(|message| message.role == Role::User && !has_tool_results(&message.content))
+    }
+
+    /// Replaces the text of the last user turn with `text` (images it holds
+    /// are kept, after the text) and removes every message after it, so the
+    /// turn can be sent again.
+    pub fn rephrase_last_user_turn(&mut self, text: &str) -> Result<(), Error> {
+        let index = self.last_user_turn().ok_or_else(|| {
+            Error::InvalidRequest("The conversation has no user message to rephrase.".into())
+        })?;
+        self.messages.truncate(index + 1);
+        let message = &mut self.messages[index];
+        message.content.retain(|content| content.as_text().is_none());
+        message.content.insert(0, Content::Text(text.to_string()));
+        Ok(())
+    }
+
+    /// Removes the last user turn and every message after it, returning the
+    /// removed user message. The conversation then ends where it did before
+    /// that message was added.
+    pub fn remove_last_user_turn(&mut self) -> Result<Message, Error> {
+        let index = self.last_user_turn().ok_or_else(|| {
+            Error::InvalidRequest("The conversation has no user message to remove.".into())
+        })?;
+        self.messages.truncate(index + 1);
+        Ok(self.messages.remove(index))
+    }
+
+    /// Replaces the output of the tool result for `call_id` with
+    /// `replacement`, keeping its call id, name and error flag, so the call
+    /// and its result stay paired. Returns the index of the message holding
+    /// it. Messages after it are kept; truncate `messages` to drop them.
+    pub fn redact_tool_result(&mut self, call_id: &str, replacement: &str) -> Result<usize, Error> {
+        for (index, message) in self.messages.iter_mut().enumerate().rev() {
+            for content in &mut message.content {
+                if let Content::ToolResult(result) = content
+                    && result.call_id.as_deref() == Some(call_id)
+                {
+                    result.output = replacement.to_string();
+                    return Ok(index);
+                }
+            }
+        }
+        Err(Error::InvalidRequest(format!(
+            "The conversation has no tool result for call {call_id}."
+        )))
+    }
+}
+
 fn has_tool_results(content: &[Content]) -> bool {
     content.iter().any(|content| content.as_tool_result().is_some())
 }
@@ -468,6 +532,57 @@ mod tests {
         // Providers that can't send updates refuse rather than dropping them.
         let error = crate::providers::ensure_supported_inputs(&conversation).unwrap_err();
         assert!(matches!(error, crate::error::Error::UnsupportedFeature(_)), "{error}");
+    }
+
+    #[test]
+    fn a_refused_user_turn_can_be_rephrased_or_removed() {
+        let image = crate::message::Image::new_url("https://example.com/a.png");
+        let mut conversation = Conversation::new(Model::openai_gpt_6_astra());
+        conversation.add_user_message("first");
+        conversation.add_assistant_message("ok");
+        conversation.add_user_message_with_image("describe this", image);
+        conversation.add_assistant_message_from_response(response(Some("t1")));
+        conversation.add_tool_results(vec![result()]);
+        conversation.add_assistant_message("I can't help with that.");
+        assert_eq!(conversation.last_user_turn(), Some(2));
+
+        let mut rephrased = conversation.clone();
+        rephrased.rephrase_last_user_turn("summarize this").unwrap();
+        assert_eq!(rephrased.messages.len(), 3, "the replies to the turn are removed");
+        let turn = &rephrased.messages[2];
+        assert_eq!(turn.content[0].as_text(), Some("summarize this"));
+        assert!(turn.content[1].as_image().is_some(), "images are kept");
+        assert_eq!(turn.content.len(), 2);
+        // The turn's routing token belonged to the old text.
+        assert_eq!(rephrased.current_openai_turn_state(), None);
+
+        let mut removed = conversation.clone();
+        let message = removed.remove_last_user_turn().unwrap();
+        assert_eq!(message.content[0].as_text(), Some("describe this"));
+        assert_eq!(removed.messages.len(), 2);
+        assert_eq!(removed.messages[1].role, Role::Assistant);
+
+        let mut empty = Conversation::new(Model::openai_gpt_6_astra());
+        assert!(empty.rephrase_last_user_turn("x").is_err());
+        assert!(empty.remove_last_user_turn().is_err());
+    }
+
+    #[test]
+    fn a_tool_result_can_be_redacted_without_breaking_the_pairing() {
+        let mut conversation = Conversation::new(Model::openai_gpt_6_astra());
+        conversation.add_user_message("start");
+        conversation.add_assistant_message_from_response(response(None));
+        conversation.add_tool_results(vec![result()]);
+        conversation.add_assistant_message("I can't help with that.");
+        let index = conversation.redact_tool_result("call_1", "[removed]").unwrap();
+        assert_eq!(index, 2);
+        let redacted = conversation.messages[2].content[0].as_tool_result().unwrap();
+        assert_eq!(
+            (redacted.call_id.as_deref(), redacted.name.as_str(), redacted.output.as_str()),
+            (Some("call_1"), "tool", "[removed]")
+        );
+        assert_eq!(conversation.messages.len(), 4, "later messages are the caller's to drop");
+        assert!(conversation.redact_tool_result("call_unknown", "x").is_err());
     }
 
     #[test]

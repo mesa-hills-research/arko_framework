@@ -1,5 +1,5 @@
 use crate::agent_config::PlanUsageAction;
-use crate::task::{PendingToolCallInfo, TaskState};
+use crate::task::{PendingToolCallInfo, RefusedInput, TaskState};
 use arko_ai::{ModelCallUsage, PlanUsage, Refusal, UsageInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -99,8 +99,18 @@ pub enum AgentEvent {
     /// event and task state change follow). For a model's own refusal
     /// ([`arko_ai::RefusalSource::Model`]) the turn stays in history with the
     /// refusal explanation as its text; classifier and content-filter
-    /// refusals are removed from history.
+    /// refusals are removed from history. With the opt-in refusal fallback,
+    /// `RefusalFallback` follows instead and the task continues.
     RefusalReceived(Refusal),
+    /// The input the refused turn answered (follows `RefusalReceived` when
+    /// the task stops for the refusal). The host can change it with
+    /// `UserCommand::ResolveRefusal` (or [`Task::resolve_refusal`](crate::task::Task::resolve_refusal)
+    /// on a returned task) and continue.
+    RefusedInput(RefusedInput),
+    /// The refused turn is sent again, once, to the opt-in fallback model
+    /// ([`AgentConfig::refusal_fallback`](crate::agent_config::AgentConfig::refusal_fallback)).
+    /// Follows `RefusalReceived`; the refused turn is not kept.
+    RefusalFallback { model_id: String },
     /// A retry is scheduled; delay includes any provider minimum.
     RetryScheduled {
         attempt: u32,

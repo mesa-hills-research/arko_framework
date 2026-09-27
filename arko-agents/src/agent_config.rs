@@ -623,6 +623,12 @@ pub struct AgentConfig {
     /// Opt-in monitors of model calls; see [`MonitoringConfig`].
     #[serde(default, skip_serializing_if = "MonitoringConfig::is_empty")]
     pub monitoring: MonitoringConfig,
+    /// Opt-in: a model (with its generation settings) that a refused turn is
+    /// sent to once, unchanged, before the refusal stops the task. The
+    /// refused turn is not kept; the fallback's response continues the task,
+    /// and later turns use `llm_config` again. Off by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_fallback: Option<AgentLLMConfig>,
 }
 
 impl AgentConfig {
@@ -724,6 +730,7 @@ pub struct AgentConfigBuilder {
     user_reminder: Option<UserReminder>,
     skills_config: Option<SkillsConfig>,
     monitoring: Option<MonitoringConfig>,
+    refusal_fallback: Option<AgentLLMConfig>,
 }
 
 impl AgentConfigBuilder {
@@ -815,6 +822,13 @@ impl AgentConfigBuilder {
         self
     }
 
+    /// Sets the opt-in model a refused turn is sent to once; see
+    /// [`AgentConfig::refusal_fallback`].
+    pub fn refusal_fallback(mut self, config: AgentLLMConfig) -> Self {
+        self.refusal_fallback = Some(config);
+        self
+    }
+
     /// Builds the `AgentConfig`, returning an error if required fields are missing.
     pub fn build(self) -> Result<AgentConfig, ArkoAgentsError> {
         let llm_retry_config = self.llm_retry_config.unwrap_or_default();
@@ -859,6 +873,7 @@ impl AgentConfigBuilder {
             user_reminder: self.user_reminder,
             skills_config: self.skills_config,
             monitoring,
+            refusal_fallback: self.refusal_fallback,
         })
     }
 }

@@ -62,6 +62,16 @@ pub enum UserCommand {
     /// Reject recovery after an error, potentially leading to task failure.
     RejectErrorRecovery { message: Option<String> },
 
+    /// Change the input of a refused turn (reported with
+    /// `AgentEvent::RefusedInput`) and continue: the refused turn is removed
+    /// and the changed input is sent. Accepted while the refusal awaits
+    /// error-recovery approval; see [`crate::task::Task::resolve_refusal`].
+    /// An invalid resolution is reported with `ErrorEncountered` and the task
+    /// keeps waiting.
+    ResolveRefusal {
+        resolution: crate::task::RefusalResolution,
+    },
+
     /// Request to gracefully cancel the currently running task.
     CancelTask,
 

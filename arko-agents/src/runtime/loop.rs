@@ -10,7 +10,7 @@ use crate::parsing::{
     ToolParsingConfig, assemble_tool_calls,
 };
 use crate::skill::SkillPromptContext;
-use crate::task::{PendingToolCallInfo, Task, TaskState};
+use crate::task::{PendingToolCallInfo, RefusedInput, RefusedToolResult, Task, TaskState};
 use crate::tool::{
     InterceptedResult, InterceptionFailurePolicy, InterceptorConfig, TaskContext, ToolCallContext,
     ToolDefinition, ToolExecutionContext, ToolExecutionDecision, ToolExecutionMiddleware,
@@ -81,6 +81,18 @@ fn describe_duration(duration: Duration) -> String {
 /// `ToolRejected` reasons for calls a stream announced but never finished.
 const INTERRUPTED_CALL: &str = "The model's response was interrupted before this call finished; it was not run.";
 const FAILED_STREAM_CALL: &str = "The model's response failed before this call finished; it was not run.";
+const REFUSED_TURN_CALL: &str = "turn refused";
+
+/// The text of an output-based turn without its tool-call markup.
+fn parsed_plain_text(events: &[RawParserEvent]) -> String {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            RawParserEvent::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
 
 async fn wait_for_recovery_deadline(deadline: Option<tokio::time::Instant>) {
     match deadline {
@@ -155,9 +167,17 @@ pub struct AgentLoop {
     /// The plan usage window (and its reset) last reported over the
     /// threshold, so it is reported once.
     plan_usage_threshold_reported: Option<(String, Option<u64>)>,
+    /// The next request goes to the refusal fallback model; see
+    /// [`AgentConfig::refusal_fallback`]. Cleared by a completed turn.
+    fallback_pending: bool,
+    /// The request in flight (or last made) went to the fallback model.
+    current_request_is_fallback: bool,
     stop_requested: bool,
     #[cfg(test)]
     scripted_responses: std::sync::Mutex<VecDeque<ScriptedStreamResult>>,
+    /// The model of every request made, in order.
+    #[cfg(test)]
+    requested_models: Arc<std::sync::Mutex<Vec<String>>>,
 
     skill_prompt_context: Option<SkillPromptContext>,
 
@@ -214,9 +234,13 @@ impl AgentLoop {
             indefinite_interactions: 0,
             paused_recovery_elapsed: None,
             plan_usage_threshold_reported: None,
+            fallback_pending: false,
+            current_request_is_fallback: false,
             stop_requested: false,
             #[cfg(test)]
             scripted_responses: std::sync::Mutex::new(VecDeque::new()),
+            #[cfg(test)]
+            requested_models: Arc::default(),
             skill_prompt_context,
             interceptor_config,
             execution_middleware,
@@ -389,7 +413,7 @@ impl AgentLoop {
         self.task.agent_config.tool_config.tool_calling_mode == ToolCallingMode::Native
     }
 
-    fn build_native_tool_config(&self) -> ai::ToolConfig {
+    fn build_native_tool_config(&self, model: &ai::Model) -> ai::ToolConfig {
         let mut ai_tools = Vec::new();
         for name in &self.task.agent_config.tool_config.available_tool_names {
             if let Some(tool) = self.tool_registry.get(name) {
@@ -411,11 +435,7 @@ impl AgentLoop {
         let mut config = ai::ToolConfig::new(ai_tools);
 
         if !self.task.agent_config.tool_config.allow_batched_tool_calls
-            && self
-                .task
-                .conversation
-                .model
-                .supports_disabling_parallel_tool_calls()
+            && model.supports_disabling_parallel_tool_calls()
         {
             config = config.with_parallel_tool_calls(false);
         }
@@ -424,11 +444,51 @@ impl AgentLoop {
     }
 
     fn build_generation_config(&self) -> ai::GenerationConfig {
-        let mut config = self.task.agent_config.llm_config.generation_config.clone();
+        self.generation_config_for(
+            &self.task.conversation.model,
+            &self.task.agent_config.llm_config.generation_config,
+        )
+    }
+
+    fn generation_config_for(
+        &self,
+        model: &ai::Model,
+        generation_config: &ai::GenerationConfig,
+    ) -> ai::GenerationConfig {
+        let mut config = generation_config.clone();
         if self.is_native_mode() {
-            config = config.with_tool_config(self.build_native_tool_config());
+            config = config.with_tool_config(self.build_native_tool_config(model));
         }
         config
+    }
+
+    /// The conversation and settings of the next request: the task's, or
+    /// after a refusal with [`AgentConfig::refusal_fallback`] set, the same
+    /// conversation sent to the fallback model.
+    fn next_request(&mut self) -> (ai::Conversation, ai::GenerationConfig) {
+        let fallback = self
+            .task
+            .agent_config
+            .refusal_fallback
+            .clone()
+            .filter(|_| self.fallback_pending);
+        self.current_request_is_fallback = fallback.is_some();
+        let mut conversation = self.task.conversation.clone();
+        #[cfg(test)]
+        self.requested_models.lock().unwrap().push(
+            fallback
+                .as_ref()
+                .map_or(&conversation.model.id, |fallback| &fallback.model.id)
+                .clone(),
+        );
+        match fallback {
+            Some(fallback) => {
+                let config = self.generation_config_for(&fallback.model, &fallback.generation_config);
+                conversation.model = fallback.model;
+                (conversation, config)
+            }
+            None => (conversation, self.build_generation_config()),
+        }
     }
 
     fn tool_call_args_to_map(tc: &ai::ToolCall) -> HashMap<String, Value> {
@@ -538,7 +598,7 @@ impl AgentLoop {
                     return match result {
                         Ok(value) => Ok(Some(value)),
                         Err(ai::Error::Refusal(refusal)) => {
-                            self.handle_refusal(*refusal, ai::Message::new_assistant("")).await?;
+                            self.handle_refusal(*refusal, ai::Message::new_assistant(""), None).await?;
                             Ok(None)
                         }
                         Err(error) => { self.handle_llm_error(error, None).await?; Ok(None) }
@@ -1236,8 +1296,36 @@ impl AgentLoop {
                                         } else {
                                             next_user_message_from_command = recovery_prompt;
                                         }
+                                        // Continuing without a change leaves no refused
+                                        // input to resolve.
+                                        self.task.refused_input = None;
                                         self.task.set_state(TaskState::InProgress);
                                         self.reset_llm_recovery();
+                                    }
+                                    UserCommand::ResolveRefusal { ref resolution } => {
+                                        match self.task.resolve_refusal(resolution.clone()) {
+                                            Ok(()) => {
+                                                log::info!(
+                                                    "Task {}: Refused input changed; continuing.",
+                                                    self.task.id
+                                                );
+                                                self.task.set_state(TaskState::InProgress);
+                                                self.reset_llm_recovery();
+                                                // The changed input is sent as it is.
+                                                native_handled = true;
+                                            }
+                                            Err(error) => {
+                                                self.emit_event(AgentEvent::ErrorEncountered {
+                                                    error_message: format!(
+                                                        "Could not resolve the refusal: {error}"
+                                                    ),
+                                                    requires_approval_to_retry: true,
+                                                    tool_call_id: None,
+                                                })
+                                                .await?;
+                                                continue 'main_loop;
+                                            }
+                                        }
                                     }
                                     UserCommand::RejectErrorRecovery { message: _ } => {
                                         log::info!(
@@ -1454,8 +1542,7 @@ impl AgentLoop {
             self.observe_committed_tool_context();
 
             let llm_client = Arc::clone(&self.llm_client);
-            let conversation = self.task.conversation.clone();
-            let gen_config = self.build_generation_config();
+            let (conversation, gen_config) = self.next_request();
             #[cfg(test)]
             let scripted_response = self.scripted_responses.get_mut().unwrap().pop_front();
             let request = async move {
@@ -1604,10 +1691,14 @@ impl AgentLoop {
                                     if let Some(ref mut p) = parser {
                                         raw_events_for_turn.extend(p.finalize());
                                     }
-                                    self.handle_refusal(refusal, generation_response.message).await?;
+                                    let plain_text = parser.is_some().then(|| parsed_plain_text(&raw_events_for_turn));
+                                    self.reject_announced_calls(&mut native_stream_call_ids, REFUSED_TURN_CALL).await?;
+                                    self.handle_refusal(refusal, generation_response.message, plain_text).await?;
                                     had_stream_error = true;
                                     break;
                                 }
+                                // A completed turn ends any fallback after a refusal.
+                                self.fallback_pending = false;
                                 self.task.conversation.add_assistant_message_from_response(generation_response.clone());
                                 final_generation_response = Some(generation_response);
                                 if let Some(ref mut p) = parser {
@@ -1621,7 +1712,9 @@ impl AgentLoop {
                                 }
                                 if let Some(refusal) = streamed_refusal.take() {
                                     let partial = ai::Message::new_assistant(&current_assistant_response_text_for_conv);
-                                    self.handle_refusal(refusal, partial).await?;
+                                    let plain_text = parser.is_some().then(|| parsed_plain_text(&raw_events_for_turn));
+                                    self.reject_announced_calls(&mut native_stream_call_ids, REFUSED_TURN_CALL).await?;
+                                    self.handle_refusal(refusal, partial, plain_text).await?;
                                     had_stream_error = true;
                                     break;
                                 }
@@ -1640,7 +1733,8 @@ impl AgentLoop {
                             // generation-blocked codes): its partial text is
                             // not kept.
                             Err(ai::Error::Refusal(refusal)) => {
-                                self.handle_refusal(*refusal, ai::Message::new_assistant("")).await?;
+                                self.reject_announced_calls(&mut native_stream_call_ids, REFUSED_TURN_CALL).await?;
+                                self.handle_refusal(*refusal, ai::Message::new_assistant(""), None).await?;
                                 had_stream_error = true;
                                 break;
                             }
@@ -2782,22 +2876,69 @@ impl AgentLoop {
         .await
     }
 
+    /// The input a refused turn answered: the last user message.
+    fn refused_input_now(&self) -> Option<RefusedInput> {
+        let messages = &self.task.conversation.messages;
+        let message_index = messages
+            .iter()
+            .rposition(|message| message.role == ai::Role::User)?;
+        let results: Vec<RefusedToolResult> = messages[message_index]
+            .content
+            .iter()
+            .filter_map(ai::Content::as_tool_result)
+            .map(|result| RefusedToolResult {
+                call_id: result.call_id.clone(),
+                tool_name: result.name.clone(),
+            })
+            .collect();
+        Some(if results.is_empty() {
+            RefusedInput::UserMessage { message_index }
+        } else {
+            RefusedInput::ToolResults {
+                message_index,
+                results,
+            }
+        })
+    }
+
     /// Reports a refusal and stops recovery: the same input is expected to be
-    /// refused again, so it is never retried unchanged. A model's own refusal
-    /// ([`ai::RefusalSource::keeps_turn`]) stays in history so the model can
-    /// see what it declined, with the refusal explanation as its text when the
-    /// turn has none. Its tool calls are not run, so they are not kept either
-    /// (a call without a result would invalidate the history; OpenAI output
-    /// items stored with the turn replay only the calls it still holds), and
-    /// a turn with no text at all is not kept. Classifier and content-filter
-    /// refusals are removed from history.
+    /// refused again, so it is never retried unchanged. With the opt-in
+    /// [`AgentConfig::refusal_fallback`], a refusal from the configured model
+    /// instead sends the same input to the fallback model once.
+    ///
+    /// A model's own refusal ([`ai::RefusalSource::keeps_turn`]) stays in
+    /// history so the model can see what it declined, with the refusal
+    /// explanation as its text when the turn has none. Its tool calls are not
+    /// run, so they are not kept either (a call without a result would
+    /// invalidate the history; OpenAI output items stored with the turn
+    /// replay only the calls it still holds), and a turn with no text at all
+    /// is not kept. In output-based tool mode the turn's text holds tool-call
+    /// markup that was never run: `plain_text` is the text without it, and
+    /// only the refusal explanation (or else that plain text) is kept.
+    /// Classifier and content-filter refusals are removed from history.
+    ///
+    /// The refused input is recorded in [`Task::refused_input`] and reported
+    /// with `AgentEvent::RefusedInput`, for `UserCommand::ResolveRefusal`.
     async fn handle_refusal(
         &mut self,
         refusal: ai::Refusal,
         mut message: ai::Message,
+        plain_text: Option<String>,
     ) -> Result<(), ArkoAgentsError> {
         self.flush_throttled_reasoning().await?;
         self.flush_throttled_text().await?;
+        let from_fallback = std::mem::take(&mut self.current_request_is_fallback);
+        self.fallback_pending = false;
+        if !from_fallback && let Some(fallback) = self.task.agent_config.refusal_fallback.clone() {
+            self.emit_event(AgentEvent::RefusalReceived(refusal)).await?;
+            self.emit_event(AgentEvent::RefusalFallback {
+                model_id: fallback.model.id,
+            })
+            .await?;
+            self.fallback_pending = true;
+            return Ok(());
+        }
+        let input = self.refused_input_now();
         if refusal.source.keeps_turn() {
             message.tool_calls.clear();
             let has_text = |message: &ai::Message| {
@@ -2807,7 +2948,26 @@ impl AgentLoop {
                     .filter_map(ai::Content::as_text)
                     .any(|text| !text.trim().is_empty())
             };
-            if !has_text(&message)
+            if let Some(plain_text) = plain_text {
+                let text = refusal
+                    .explanation
+                    .clone()
+                    .filter(|explanation| !explanation.trim().is_empty())
+                    .unwrap_or(plain_text);
+                message
+                    .content
+                    .retain(|content| content.as_text().is_none());
+                if !text.trim().is_empty() {
+                    message.content.insert(0, ai::Content::Text(text));
+                }
+                // OpenAI message items would replay the original text,
+                // markup included; the message's own text replaces them.
+                if let Some(ai::ReasoningArtifact::OpenAIOutputItems { items }) =
+                    &mut message.reasoning_artifact
+                {
+                    items.retain(|item| item.get("type").and_then(Value::as_str) != Some("message"));
+                }
+            } else if !has_text(&message)
                 && let Some(explanation) = refusal.explanation.as_deref()
             {
                 message
@@ -2821,11 +2981,16 @@ impl AgentLoop {
                 self.task.conversation.messages.push(message);
             }
         }
+        self.task.refused_input = input.clone();
         self.emit_event(AgentEvent::RefusalReceived(refusal.clone()))
             .await?;
+        if let Some(input) = input {
+            self.emit_event(AgentEvent::RefusedInput(input)).await?;
+        }
         self.handle_llm_error(ai::Error::Refusal(Box::new(refusal)), None)
             .await
     }
+
 
     /// How recovery from `error` waits.
     fn recovery_wait(&self, error: &ai::Error) -> RecoveryWait {
@@ -3512,6 +3677,10 @@ mod recovery_tests;
 #[cfg(test)]
 #[path = "long_run_tests.rs"]
 mod long_run_tests;
+
+#[cfg(test)]
+#[path = "refusal_tests.rs"]
+mod refusal_tests;
 
 #[cfg(test)]
 #[path = "image_tests.rs"]

@@ -34,7 +34,9 @@ pub use skill::{
     AutoLoadedSkillContent, InvalidSkillPolicy, LOAD_SKILL_TOOL_NAME, LoadSkillTool, SkillManager,
     SkillPromptContext, SkillSource, SkillSummary, SkillsConfig,
 };
-pub use task::{PendingToolCallInfo, Task, TaskState};
+pub use task::{
+    PendingToolCallInfo, RefusalResolution, RefusedInput, RefusedToolResult, Task, TaskState,
+};
 pub use tool::{
     InterceptedResult, InterceptionFailurePolicy, InterceptorConfig, TaskContext, Tool,
     ToolCallContext, ToolDefinition, ToolError, ToolExecutionContext, ToolExecutionDecision,
