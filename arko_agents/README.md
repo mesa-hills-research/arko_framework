@@ -378,8 +378,15 @@ discovers its tools, named `mcp__<server>__<tool>`:
 ```
 
 `register_tools` adds them to a registry and `tool_names` returns the names to add to
-`available_tool_names`; `shutdown` stops the servers. MCP tools require native tool
-calling, and the workspace path policy cannot apply to them.
+`available_tool_names`; `shutdown` closes each connection and gives the server three
+seconds to exit before killing it, and dropping the manager kills the servers. MCP tools
+require native tool calling, and the workspace path policy cannot apply to them.
+
+A server's stderr goes to the log (the `log` crate) at info level, a line at a time,
+tagged with the server's name (`MCP server 'filesystem' stderr: ...`); it is not printed
+to the host's stderr. A server that exits while the manager still uses it is reported
+once, with a warning giving its exit status and last stderr lines; its tools then fail
+with a tool error, which the tool-error policy handles.
 
 ### Skills
 
