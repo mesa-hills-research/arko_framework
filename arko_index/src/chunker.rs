@@ -88,6 +88,7 @@ pub fn request(files: &[(String, &Snapshot, &Window)]) -> ModelRequest {
     ModelRequest {
         system: initial_prompt(),
         prompt,
+        cache_key: None,
         tool: "submit_cuts".into(),
         schema: json!({"type":"object","properties":properties,"required":files.iter().map(|(id,_,_)|id).collect::<Vec<_>>(),"additionalProperties":false}),
     }
@@ -284,6 +285,7 @@ pub fn repair(s: &Snapshot, guard: &Structure, w: &Window, cuts: &[Cut]) -> Resu
     let request = ModelRequest {
         system: format!("{GROUPING_GUIDANCE}\n{REPAIR_PROMPT}"),
         prompt,
+        cache_key: None,
         tool: "repair_cuts".into(),
         schema: json!({"type":"object","properties":properties,"required":regions.keys().collect::<Vec<_>>(),"additionalProperties":false}),
     };

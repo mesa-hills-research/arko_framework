@@ -3527,3 +3527,37 @@ async fn embedding_request_limits_can_only_be_lowered() {
         ));
     }
 }
+
+#[tokio::test]
+async fn every_request_of_a_job_shares_the_jobs_cache_key() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    for n in 0..8 {
+        std::fs::write(
+            root.path().join(format!("{n}.txt")),
+            format!("alpha {n}\nbeta\n"),
+        )
+        .unwrap();
+    }
+    std::fs::write(root.path().join("bad.txt"), "alpha\n".repeat(50)).unwrap();
+    let fake = Arc::new(Fake::new());
+    *fake.fail_file.lock().unwrap() = Some("bad.txt".into());
+    let (index, build, status) =
+        build_spec(&fake, db.path(), BuildSpec::new("test", root.path())).await;
+    assert_eq!(status.phase, "ready", "{:?}", status.problem);
+    let calls = fake.calls.lock().unwrap().clone();
+    // Two initial requests and a repair.
+    assert!(calls.len() >= 3);
+    assert!(calls.iter().any(|r| r.tool == "repair_cuts"));
+    assert!(
+        calls
+            .iter()
+            .all(|r| r.cache_key.as_deref() == Some(build.job.as_str()))
+    );
+    // Another job has its own key.
+    std::fs::write(root.path().join("0.txt"), "alpha changed\nbeta\n").unwrap();
+    let update = index.start_update(&build.index).await.unwrap();
+    assert_eq!(settle(&index, &update.job).await.phase, "ready");
+    let last = fake.calls.lock().unwrap().last().unwrap().clone();
+    assert_eq!(last.cache_key.as_deref(), Some(update.job.as_str()));
+}

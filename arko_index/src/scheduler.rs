@@ -545,6 +545,7 @@ mod tests {
             s.call(
                 Operation::Chunk(ModelRequest {
                     system: String::new(),
+                    cache_key: None,
                     prompt: id.to_string(),
                     tool: "test".into(),
                     schema: json!({}),
@@ -681,6 +682,7 @@ mod tests {
         let (progress, mut events) = mpsc::unbounded_channel();
         let request = Operation::Chunk(ModelRequest {
             system: String::new(),
+            cache_key: None,
             prompt: "0".into(),
             tool: "test".into(),
             schema: json!({}),
@@ -755,6 +757,7 @@ mod tests {
     fn chunk_request() -> Operation {
         Operation::Chunk(ModelRequest {
             system: String::new(),
+            cache_key: None,
             prompt: "0".into(),
             tool: "test".into(),
             schema: json!({}),
@@ -922,6 +925,7 @@ mod tests {
                 };
                 let operation = Operation::Chunk(ModelRequest {
                     system: String::new(),
+                    cache_key: None,
                     prompt: "2".into(),
                     tool: "test".into(),
                     schema: json!({}),

@@ -42,6 +42,12 @@ tool in a completed turn (`StopReason::EndTurn` or `StopReason::ToolUse`):
 - A refusal, or a reply stopped by a token or context limit, fails the request.
 - A missing, extra or malformed tool call is retried as a transient failure.
 
+Every request of a job, initial requests and repairs, before and after a resume, carries
+the job's ID as its prompt-cache key (`ModelRequest::cache_key`), and puts the shared
+instructions first, so the provider can reuse their cached prefix across the job. Over
+ChatGPT OAuth the key is also the `session-id` header the backend routes cache affinity
+by. Caching follows the model's provider; see the `arko_ai` README.
+
 Each job's `snapshot` event records the chunk `model` and `reasoning`. Boundaries are
 validated against the source in the same way for every model, so after a model change an
 update still reuses the boundaries of unchanged files. To re-chunk everything with the new

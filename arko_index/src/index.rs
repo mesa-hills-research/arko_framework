@@ -526,13 +526,16 @@ impl ArkoIndex {
     fn dispatch(
         &self,
         job: &str,
-        request: ModelRequest,
+        mut request: ModelRequest,
         keys: Vec<(usize, usize)>,
         repair: Option<chunker::Repair>,
         control: Control,
     ) -> futures::future::BoxFuture<'static, DispatchResult> {
         let this = self.clone();
         let job = job.to_owned();
+        // One prompt-cache key per job: its initial requests and repairs
+        // share the instructions prefix, before and after a resume.
+        request.cache_key = Some(job.clone());
         Box::pin(async move {
             let outcome = async {
                 let (j, r) = (job.clone(), encode(&request)?);

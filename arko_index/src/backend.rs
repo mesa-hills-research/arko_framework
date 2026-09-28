@@ -16,6 +16,13 @@ pub struct ModelRequest {
     pub prompt: String,
     pub tool: String,
     pub schema: Value,
+    /// The prompt-cache key of the job the request belongs to: the same for
+    /// all of a job's requests, so they reach one cache. [`ArkoBackend`] uses
+    /// it as the conversation's `prompt_cache_key`, which ChatGPT OAuth
+    /// requests also send as the `session-id` header the backend routes
+    /// cache affinity by. `None` gives each request a new key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelReply {
@@ -256,40 +263,54 @@ impl ArkoBackend {
         self
     }
 }
+/// Sends `request` to `model` and returns its boundary tool call. The
+/// shared instructions go first (the system message), then the files, so
+/// requests of one job share their prompt prefix; the job's cache key routes
+/// them to one cache.
+async fn chunk_with(
+    llm: &LLMClient,
+    model: &Model,
+    chunk_config: &GenerationConfig,
+    request: ModelRequest,
+) -> Result<ModelReply> {
+    if !model.reports_stop_reason() {
+        return Err(invalid(format!(
+            "chunk model '{}' does not report completion metadata, which boundary validation requires",
+            model.id
+        )));
+    }
+    let config = chunk_generation_config(model, chunk_config, &request);
+    let mut conversation = llm
+        .new_conversation(model.clone())
+        .with_system_message(&request.system);
+    if let Some(key) = &request.cache_key {
+        conversation = conversation.with_prompt_cache_key(key);
+    }
+    conversation.add_user_message(&request.prompt);
+    let mut stream = llm.generate_stream(&conversation, config).await?;
+    while let Some(event) = stream.next().await {
+        if let StreamEvent::End(response) = event? {
+            // Refusals and token limits are permanent failures; a missing,
+            // extra or malformed call is resampled as a transient failure.
+            // Either way the response was billed, so its usage goes along.
+            let call = completed_tool_call(&response, &request.tool)
+                .map_err(|error| Error::from(error).with_usage(response.usage.clone()))?;
+            return Ok(ModelReply {
+                value: call.arguments.clone(),
+                // Keeps the provider's raw stop reason with the call record.
+                usage: serde_json::to_value(&response.model_call_usage)?,
+                usage_info: Some(response.usage.clone()),
+            });
+        }
+    }
+    Err(invalid(
+        "chunk model stream ended without a completed response",
+    ))
+}
 #[async_trait::async_trait]
 impl Backend for ArkoBackend {
     async fn chunk(&self, request: ModelRequest) -> Result<ModelReply> {
-        if !self.chunk_model.reports_stop_reason() {
-            return Err(invalid(format!(
-                "chunk model '{}' does not report completion metadata, which boundary validation requires",
-                self.chunk_model.id
-            )));
-        }
-        let config = chunk_generation_config(&self.chunk_model, &self.chunk_config, &request);
-        let mut conversation = self
-            .llm
-            .new_conversation(self.chunk_model.clone())
-            .with_system_message(&request.system);
-        conversation.add_user_message(&request.prompt);
-        let mut stream = self.llm.generate_stream(&conversation, config).await?;
-        while let Some(event) = stream.next().await {
-            if let StreamEvent::End(response) = event? {
-                // Refusals and token limits are permanent failures; a missing,
-                // extra or malformed call is resampled as a transient failure.
-                // Either way the response was billed, so its usage goes along.
-                let call = completed_tool_call(&response, &request.tool)
-                    .map_err(|error| Error::from(error).with_usage(response.usage.clone()))?;
-                return Ok(ModelReply {
-                    value: call.arguments.clone(),
-                    // Keeps the provider's raw stop reason with the call record.
-                    usage: serde_json::to_value(&response.model_call_usage)?,
-                    usage_info: Some(response.usage.clone()),
-                });
-            }
-        }
-        Err(invalid(
-            "chunk model stream ended without a completed response",
-        ))
+        chunk_with(&self.llm, &self.chunk_model, &self.chunk_config, request).await
     }
     fn chunk_model_info(&self) -> Option<ChunkModelInfo> {
         Some(ChunkModelInfo::new(&self.chunk_model, &self.chunk_config))
@@ -387,7 +408,97 @@ mod tests {
             prompt: "prompt".into(),
             tool: "submit_cuts".into(),
             schema: json!({"type": "object"}),
+            cache_key: None,
         }
+    }
+
+    /// Answers `count` requests with an error, recording each request's head.
+    async fn recording_server(count: usize) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let mut heads = vec![];
+            for _ in 0..count {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut received = vec![];
+                let mut buffer = [0u8; 4096];
+                let head_end = loop {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    received.extend_from_slice(&buffer[..read]);
+                    if let Some(at) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break at + 4;
+                    }
+                };
+                let head = String::from_utf8_lossy(&received[..head_end]).to_string();
+                let length: usize = head
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse().ok())?
+                    })
+                    .unwrap_or(0);
+                while received.len() < head_end + length {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    received.extend_from_slice(&buffer[..read]);
+                }
+                let body = r#"{"error":{"message":"rejected by the test server","type":"invalid_request_error","code":"invalid_request_error"}}"#;
+                let reply = format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(reply.as_bytes()).await.unwrap();
+                heads.push(head);
+            }
+            heads
+        });
+        (url, task)
+    }
+
+    fn header(head: &str, name: &str) -> Option<String> {
+        head.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.trim()
+                .eq_ignore_ascii_case(name)
+                .then(|| value.trim().to_owned())
+        })
+    }
+
+    #[tokio::test]
+    async fn the_job_cache_key_is_the_chatgpt_oauth_session_id() {
+        let (url, server) = recording_server(3).await;
+        // An access token that expires in 2100.
+        let token = "header.eyJleHAiOjQxMDI0NDQ4MDB9.signature";
+        let llm = LLMClient::new().with_openai_client(
+            arko_ai::providers::openai::OpenAIClient::new_chatgpt_oauth(
+                token,
+                Some("refresh"),
+                "account",
+            )
+            .with_base_url(url),
+        );
+        let luna = Model::openai_gpt_5_6_luna();
+        for key in [Some("job-key"), Some("job-key"), None] {
+            let request = ModelRequest {
+                cache_key: key.map(Into::into),
+                ..request()
+            };
+            // The test server rejects every request; only its head matters.
+            assert!(
+                chunk_with(&llm, &luna, &default_chunk_config(), request)
+                    .await
+                    .is_err()
+            );
+        }
+        let heads = server.await.unwrap();
+        let sessions: Vec<_> = heads
+            .iter()
+            .map(|head| header(head, "session-id").unwrap())
+            .collect();
+        assert_eq!(sessions[0], "job-key");
+        assert_eq!(sessions[1], "job-key");
+        assert_ne!(sessions[2], "job-key");
     }
 
     #[test]
