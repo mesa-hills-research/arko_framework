@@ -246,10 +246,12 @@ system prompt asks for one call per response, and a response that still holds se
 `parallel_tool_calls: Some(false)` in the model's `tool_config` means the same. In
 output-based mode the switch turns batching off.
 
-Configurations saved with the former `allow_batched_tool_calls` still load; the field is
-ignored, and `false` logs a warning once. A per-tool `allow_batched_calls` loads as that
-tool's `parallel_safe`, and a saved tool definition's `supports_batched_calls` as its
-`parallel_safe`.
+Configurations saved with the former batching settings still load, and none of them makes
+calls run at the same time: those settings let a response hold several calls, which ran
+one after another. `allow_batched_tool_calls` is ignored (`false` logs a warning once); a
+per-tool `allow_batched_calls: false` loads as `parallel_safe: Some(false)` and `true` is
+ignored; a saved tool definition's `supports_batched_calls` is ignored, so it loads as
+not parallel-safe.
 
 ### Tool time limit
 

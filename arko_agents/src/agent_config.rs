@@ -156,19 +156,18 @@ pub enum PathSafetyPolicy {
 
 /// Per-tool configuration overrides.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(from = "PerToolConfigOverrideRepr")]
 pub struct PerToolConfigOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_approve_tool_use: Option<bool>,
     /// Whether this tool's calls may run at the same time as other
     /// parallel-safe calls of a response, instead of the tool's own
     /// [`ToolDefinition::parallel_safe`](crate::tool::ToolDefinition::parallel_safe);
-    /// see [`AgentToolConfig`]. Configurations saved with the former
-    /// `allow_batched_calls` load it here.
-    #[serde(
-        default,
-        alias = "allow_batched_calls",
-        skip_serializing_if = "Option::is_none"
-    )]
+    /// see [`AgentToolConfig`]. A configuration saved with the former
+    /// `allow_batched_calls` (which let a tool's calls share a response,
+    /// run one after another) loads `false` here and ignores `true`, so no
+    /// old setting makes calls run at the same time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallel_safe: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub out_of_workspace_path_policy: Option<PathSafetyPolicy>,
@@ -177,12 +176,37 @@ pub struct PerToolConfigOverride {
     /// `Some(None)` (JSON `null`) for none. It applies to the tools that are
     /// otherwise exempt, such as the terminal tools, too. `None` (the field
     /// left out) uses the agent's setting.
-    #[serde(
-        default,
-        deserialize_with = "deserialize_explicit_option",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_timeout_seconds: Option<Option<u64>>,
+}
+
+/// The serialized form of [`PerToolConfigOverride`], which also reads a
+/// setting of older versions.
+#[derive(Deserialize)]
+struct PerToolConfigOverrideRepr {
+    #[serde(default)]
+    auto_approve_tool_use: Option<bool>,
+    #[serde(default)]
+    parallel_safe: Option<bool>,
+    #[serde(default)]
+    allow_batched_calls: Option<bool>,
+    #[serde(default)]
+    out_of_workspace_path_policy: Option<PathSafetyPolicy>,
+    #[serde(default, deserialize_with = "deserialize_explicit_option")]
+    tool_timeout_seconds: Option<Option<u64>>,
+}
+
+impl From<PerToolConfigOverrideRepr> for PerToolConfigOverride {
+    fn from(repr: PerToolConfigOverrideRepr) -> Self {
+        Self {
+            auto_approve_tool_use: repr.auto_approve_tool_use,
+            parallel_safe: repr
+                .parallel_safe
+                .or(repr.allow_batched_calls.filter(|allowed| !allowed)),
+            out_of_workspace_path_policy: repr.out_of_workspace_path_policy,
+            tool_timeout_seconds: repr.tool_timeout_seconds,
+        }
+    }
 }
 
 /// A field that can be left out (`None`), set to `null` (`Some(None)`), or

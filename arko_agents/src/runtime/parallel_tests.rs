@@ -683,30 +683,40 @@ async fn cancelling_stops_a_running_output_based_call() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
-/// Configurations saved with the removed batching settings still load:
-/// `allow_batched_tool_calls` is ignored, and a tool's
-/// `allow_batched_calls` is its parallel-safety override. Tool time limits
-/// round-trip, `null` included.
+/// Configurations saved with the removed batching settings still load, and
+/// none of them makes calls run at the same time: `allow_batched_tool_calls`
+/// is ignored, a tool's `allow_batched_calls: false` keeps it one at a time
+/// and `true` is ignored. Tool time limits round-trip, `null` included.
 #[test]
 fn old_batching_settings_load_and_time_limits_round_trip() {
     let json = serde_json::json!({
         "available_tool_names": ["read_file", "write_file"],
         "allow_batched_tool_calls": false,
-        "tool_specific_configs": {"write_file": {"allow_batched_calls": true}},
+        "tool_specific_configs": {
+            "write_file": {"allow_batched_calls": true, "auto_approve_tool_use": true},
+            "read_file": {"allow_batched_calls": false}
+        },
         "tool_calling_mode": "Native"
     });
     let loaded: crate::agent_config::AgentToolConfig = serde_json::from_value(json).unwrap();
     assert!(!loaded.one_tool_call_per_turn);
     assert_eq!(loaded.tool_timeout_seconds, Some(20 * 60));
+    let write = &loaded.tool_specific_configs["write_file"];
+    assert_eq!(write.parallel_safe, None);
+    assert_eq!(write.auto_approve_tool_use, Some(true));
     assert_eq!(
-        loaded.tool_specific_configs["write_file"].parallel_safe,
-        Some(true)
+        loaded.tool_specific_configs["read_file"].parallel_safe,
+        Some(false)
     );
     let saved = serde_json::to_value(&loaded).unwrap();
     assert!(saved.get("allow_batched_tool_calls").is_none(), "{saved}");
     assert_eq!(
         saved["tool_specific_configs"]["write_file"],
-        serde_json::json!({"parallel_safe": true})
+        serde_json::json!({"auto_approve_tool_use": true})
+    );
+    assert_eq!(
+        saved["tool_specific_configs"]["read_file"],
+        serde_json::json!({"parallel_safe": false})
     );
     assert_eq!(saved["tool_timeout_seconds"], 1200);
 
@@ -738,13 +748,13 @@ fn old_batching_settings_load_and_time_limits_round_trip() {
         Some(Duration::from_secs(90))
     );
 
-    // Saved tool definitions keep their batching flag as parallel safety.
+    // A saved tool definition's batching flag doesn't make it parallel-safe.
     let definition: ToolDefinition = serde_json::from_value(serde_json::json!({
         "name": "old", "description": "d", "parameters": [],
         "supports_batched_calls": true, "tool_type_details": "DeveloperDefined"
     }))
     .unwrap();
-    assert!(definition.parallel_safe);
+    assert!(!definition.parallel_safe);
 
     // A zero time limit is rejected.
     let mut config = super::tests::test_config();

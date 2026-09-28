@@ -61,9 +61,11 @@ pub struct ToolDefinition {
     /// calls don't affect each other, such as reads; calls that write, or
     /// whose order matters, run one at a time in the order the model made
     /// them. An agent's configuration can override it per tool; see
-    /// [`AgentToolConfig`](crate::agent_config::AgentToolConfig). Definitions
-    /// saved with the former `supports_batched_calls` load it here.
-    #[serde(default, alias = "supports_batched_calls")]
+    /// [`AgentToolConfig`](crate::agent_config::AgentToolConfig). The former
+    /// `supports_batched_calls` of saved definitions (which let calls share a
+    /// response, run one after another) is ignored: they load as not
+    /// parallel-safe.
+    #[serde(default)]
     pub parallel_safe: bool,
     pub tool_type_details: ToolTypeDetails,
     /// When set, `to_json_schema()` and `to_arko_ai_tool_definition()` use
