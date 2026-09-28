@@ -440,7 +440,7 @@ async fn a_retried_request_past_the_elapsed_budget_still_completes() {
         .unwrap();
     assert!(matches!(
         agent.task.current_state,
-        TaskState::AwaitingErrorRecoveryApproval { ref error_message }
+        TaskState::AwaitingErrorRecoveryApproval { ref error_message, .. }
             if error_message.contains("elapsed recovery budget")
     ));
 }

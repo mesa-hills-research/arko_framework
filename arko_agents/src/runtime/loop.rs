@@ -12,7 +12,8 @@ use crate::parsing::{
 };
 use crate::skill::SkillPromptContext;
 use crate::task::{
-    CANCELLED_BY_USER, DeferredToolError, PendingToolCallInfo, PlanUsageWindowMark, Task, TaskState,
+    ApprovalReason, CANCELLED_BY_USER, DeferredToolError, ErrorRecoveryCause, PendingToolCallInfo,
+    PlanUsageWindowMark, Task, TaskState,
 };
 // Names the test modules (`use super::*`) rely on.
 #[cfg(test)]
@@ -1746,7 +1747,7 @@ impl AgentLoop {
                                 tool_call_id,
                                 tool_name,
                                 parameters,
-                                tool_description: _,
+                                ..
                             } => match cmd {
                                 UserCommand::ApproveToolUse {
                                     tool_call_id: cmd_tool_id,
@@ -2136,8 +2137,51 @@ impl AgentLoop {
                                     continue 'main_loop;
                                 }
                             },
-                            TaskState::AwaitingErrorRecoveryApproval { ref error_message } => {
+                            TaskState::AwaitingErrorRecoveryApproval {
+                                ref error_message, ..
+                            } => {
                                 match cmd {
+                                    UserCommand::ContinueAfterError { ref note } => {
+                                        log::info!(
+                                            "Task {}: Continuing after an error-recovery pause.",
+                                            self.task.id
+                                        );
+                                        self.task.monitor_pause = false;
+                                        let note = note.as_deref().filter(|text| !text.is_empty());
+                                        if self.is_native_mode() {
+                                            // Calls an older version left
+                                            // without results get them now.
+                                            self.answer_open_native_calls(
+                                                UNREACHED_CALL,
+                                                UNREACHED_CALL,
+                                            )
+                                            .await?;
+                                        }
+                                        if self.is_native_mode()
+                                            && !self.task.pending_native_tool_results.is_empty()
+                                        {
+                                            self.flush_native_results_to_conversation(note)?;
+                                            if note.is_some() {
+                                                // The note beside the results is the runtime's.
+                                                self.task.mark_last_message_runtime_text();
+                                            }
+                                            native_handled = true;
+                                        } else if let Some(note) = note {
+                                            next_user_message_from_command = note.to_string();
+                                            next_message_is_runtime = true;
+                                        } else if self.is_native_mode()
+                                            || self.task.pending_text_tool_results.is_empty()
+                                        {
+                                            // The failed request is sent again
+                                            // as it was.
+                                            native_handled = true;
+                                        }
+                                        // Otherwise the output-based results the
+                                        // pause left waiting are the next message.
+                                        self.task.refused_input = None;
+                                        self.task.set_state(TaskState::InProgress);
+                                        self.reset_llm_recovery();
+                                    }
                                     UserCommand::ApproveErrorRecovery {
                                         message: ref user_msg_on_recovery,
                                     } => {
@@ -2775,7 +2819,8 @@ impl AgentLoop {
                     };
                     let tool_definition = tool_arc.definition();
 
-                    let mut force_approval = false;
+                    // The path parameter that forces an approval.
+                    let mut outside_workspace = None;
                     let path_rejection = match self
                         .check_path_parameters(&tool_definition, &params_map)
                     {
@@ -2791,7 +2836,7 @@ impl AgentLoop {
                                     "Path for parameter '{param_name}' is outside the workspace."
                                 )),
                                 PathSafetyPolicy::RequireApproval => {
-                                    force_approval = true;
+                                    outside_workspace = Some(param_name);
                                     None
                                 }
                                 PathSafetyPolicy::AutoApprove => None,
@@ -2816,7 +2861,7 @@ impl AgentLoop {
                         .agent_config
                         .should_auto_approve_tool(&ai_tool_call.name);
 
-                    if force_approval || normal_approval_needed {
+                    if outside_workspace.is_some() || normal_approval_needed {
                         waiting_any = true;
                         waiting_exclusive |= !self.runs_in_parallel(&tool_definition);
                         self.task
@@ -2829,6 +2874,10 @@ impl AgentLoop {
                                 tool_name: ai_tool_call.name.clone(),
                                 parameters: params_map,
                                 tool_description: tool_definition.description.clone(),
+                                approval_reason: ApprovalReason {
+                                    tool_not_auto_approved: normal_approval_needed,
+                                    path_outside_workspace: outside_workspace,
+                                },
                             },
                         ));
                     } else {
@@ -2985,6 +3034,7 @@ impl AgentLoop {
                             tool_name: single_pending.tool_name.clone(),
                             parameters: single_pending.parameters.clone(),
                             tool_description: single_pending.tool_description.clone(),
+                            approval_reason: single_pending.approval_reason.clone(),
                         });
                         self.emit_event(AgentEvent::TaskStateChanged(
                             self.task.current_state.clone(),
@@ -2995,6 +3045,7 @@ impl AgentLoop {
                             tool_name: single_pending.tool_name,
                             parameters: single_pending.parameters,
                             tool_description: single_pending.tool_description,
+                            approval_reason: single_pending.approval_reason,
                         })
                         .await?;
                     } else {
@@ -3241,7 +3292,8 @@ impl AgentLoop {
                                     };
                                 let tool_definition = tool_arc.definition();
 
-                                let mut force_approval = false;
+                                // The path parameter that forces an approval.
+                                let mut outside_workspace = None;
                                 let path_rejection = match self.check_path_parameters(
                                     &tool_definition,
                                     &parsed_tool_call_ref.parameters,
@@ -3266,7 +3318,7 @@ impl AgentLoop {
                                             })
                                         }
                                         PathSafetyPolicy::RequireApproval => {
-                                            force_approval = true;
+                                            outside_workspace = Some(param_name);
                                             None
                                         }
                                         PathSafetyPolicy::AutoApprove => None,
@@ -3293,12 +3345,16 @@ impl AgentLoop {
                                     .agent_config
                                     .should_auto_approve_tool(&parsed_tool_call_ref.name);
 
-                                if force_approval || normal_approval_needed {
+                                if outside_workspace.is_some() || normal_approval_needed {
                                     calls_needing_approval.push(PendingToolCallInfo {
                                         tool_call_id,
                                         tool_name: parsed_tool_call_ref.name.clone(),
                                         parameters: parsed_tool_call_ref.parameters.clone(),
                                         tool_description: tool_definition.description.clone(),
+                                        approval_reason: ApprovalReason {
+                                            tool_not_auto_approved: normal_approval_needed,
+                                            path_outside_workspace: outside_workspace,
+                                        },
                                     });
                                 } else {
                                     match self
@@ -3351,6 +3407,7 @@ impl AgentLoop {
                                         tool_name: single_pending.tool_name.clone(),
                                         parameters: single_pending.parameters.clone(),
                                         tool_description: single_pending.tool_description.clone(),
+                                        approval_reason: single_pending.approval_reason.clone(),
                                     });
                                     self.emit_event(AgentEvent::TaskStateChanged(
                                         self.task.current_state.clone(),
@@ -3361,6 +3418,7 @@ impl AgentLoop {
                                         tool_name: single_pending.tool_name,
                                         parameters: single_pending.parameters,
                                         tool_description: single_pending.tool_description,
+                                        approval_reason: single_pending.approval_reason,
                                     })
                                     .await?;
                                 } else {
@@ -3603,6 +3661,7 @@ impl AgentLoop {
         self.task
             .set_state(TaskState::AwaitingErrorRecoveryApproval {
                 error_message: error_message.clone(),
+                cause: ErrorRecoveryCause::ToolError,
             });
         self.emit_event(AgentEvent::TaskStateChanged(
             self.task.current_state.clone(),
@@ -3961,20 +4020,26 @@ impl AgentLoop {
         Ok(())
     }
 
+    /// Ends recovery: the task pauses for error-recovery approval, with
+    /// `cause`, under the pausing error policies, or is interrupted.
     async fn finish_llm_recovery(
         &mut self,
         message: String,
         tool_call_id: Option<Uuid>,
+        cause: ErrorRecoveryCause,
     ) -> Result<(), ArkoAgentsError> {
         // A fallback request that ends here doesn't carry over: the refusal
         // it was to answer stands, and approving recovery resends to the
         // configured model.
-        let message = match self.task.fallback_for.take() {
-            Some(refusal) if self.current_request_is_fallback => format!(
-                "{}. The fallback model could not answer instead: {message}",
-                ai::Error::Refusal(Box::new(refusal))
+        let (message, cause) = match self.task.fallback_for.take() {
+            Some(refusal) if self.current_request_is_fallback => (
+                format!(
+                    "{}. The fallback model could not answer instead: {message}",
+                    ai::Error::Refusal(Box::new(refusal))
+                ),
+                ErrorRecoveryCause::Refusal,
             ),
-            _ => message,
+            _ => (message, cause),
         };
         self.task.monitor_pause = false;
         let pause = matches!(
@@ -3986,6 +4051,7 @@ impl AgentLoop {
             self.task
                 .set_state(TaskState::AwaitingErrorRecoveryApproval {
                     error_message: message.clone(),
+                    cause,
                 });
         } else {
             // Exhaustion must return control to the host rather than starting
@@ -4254,7 +4320,7 @@ impl AgentLoop {
             // model's recovery.
             self.reset_llm_recovery();
             return self
-                .finish_llm_recovery(error.to_string(), tool_call_id)
+                .finish_llm_recovery(error.to_string(), tool_call_id, ErrorRecoveryCause::Refusal)
                 .await;
         }
         let mut config = self.task.agent_config.llm_retry_config.clone();
@@ -4338,16 +4404,30 @@ impl AgentLoop {
                 None => format!("LLM error (attempt {attempt}/{max_attempts}): {error}"),
             },
         };
-        let stop_reason = if !error.is_retryable() {
-            Some("Failure requires a request, credential, or configuration change")
+        let stop = if !error.is_retryable() {
+            Some((
+                "Failure requires a request, credential, or configuration change",
+                if matches!(error, ai::Error::Refusal(_)) {
+                    ErrorRecoveryCause::Refusal
+                } else {
+                    ErrorRecoveryCause::NonRetryable
+                },
+            ))
         } else if !indefinite && attempt >= max_attempts {
-            Some("Retry attempt limit exhausted")
+            Some((
+                "Retry attempt limit exhausted",
+                if model_output {
+                    ErrorRecoveryCause::UnusableResponses
+                } else {
+                    ErrorRecoveryCause::RetriesExhausted
+                },
+            ))
         } else {
             None
         };
-        if let Some(reason) = stop_reason {
+        if let Some((reason, cause)) = stop {
             return self
-                .finish_llm_recovery(format!("{reason}. {message}"), tool_call_id)
+                .finish_llm_recovery(format!("{reason}. {message}"), tool_call_id, cause)
                 .await;
         }
         // A rate limit's own delay is followed as given (plus jitter) rather
@@ -4374,6 +4454,7 @@ impl AgentLoop {
                 .finish_llm_recovery(
                     format!("Next retry cannot fit the elapsed recovery budget. {message}"),
                     tool_call_id,
+                    ErrorRecoveryCause::RetriesExhausted,
                 )
                 .await;
         }
@@ -4382,6 +4463,7 @@ impl AgentLoop {
                 .finish_llm_recovery(
                     format!("Server retry delay cannot be represented safely. {message}"),
                     tool_call_id,
+                    ErrorRecoveryCause::RetriesExhausted,
                 )
                 .await;
         };
@@ -4448,6 +4530,7 @@ impl AgentLoop {
                 .finish_llm_recovery(
                     format!("Usage limit reached ({when}). {error}"),
                     tool_call_id,
+                    ErrorRecoveryCause::UsageLimit { resets_at_unix_ms },
                 )
                 .await;
         };
@@ -4489,7 +4572,7 @@ impl AgentLoop {
             tokio::select! {
                 biased;
                 _ = wait_for_recovery_deadline(deadline) => {
-                    return self.finish_llm_recovery("Elapsed model recovery budget exhausted during backoff.".into(), tool_call_id).await;
+                    return self.finish_llm_recovery("Elapsed model recovery budget exhausted during backoff.".into(), tool_call_id, ErrorRecoveryCause::RetriesExhausted).await;
                 }
                 command = self.command_receiver.recv() => {
                     if self.handle_recovery_command(command).await? { return Ok(()); }
@@ -4507,7 +4590,8 @@ impl AgentLoop {
     async fn finish_monitor_pause(&mut self, message: String) -> Result<(), ArkoAgentsError> {
         // A fallback still to be made survives the pause.
         let fallback_for = self.task.fallback_for.clone();
-        self.finish_llm_recovery(message, None).await?;
+        self.finish_llm_recovery(message, None, ErrorRecoveryCause::Monitor)
+            .await?;
         self.task.fallback_for = fallback_for;
         self.task.monitor_pause = matches!(
             self.task.current_state,
@@ -4650,6 +4734,7 @@ impl AgentLoop {
                 self.task
                     .set_state(TaskState::AwaitingErrorRecoveryApproval {
                         error_message: error_message_for_event.clone(),
+                        cause: ErrorRecoveryCause::ToolError,
                     });
                 self.emit_event(AgentEvent::TaskStateChanged(
                     self.task.current_state.clone(),

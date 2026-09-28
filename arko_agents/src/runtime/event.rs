@@ -1,5 +1,5 @@
 use crate::agent_config::PlanUsageAction;
-use crate::task::{PendingToolCallInfo, RefusedInput, TaskState};
+use crate::task::{ApprovalReason, PendingToolCallInfo, RefusedInput, TaskState};
 use arko_ai::{ModelCallUsage, PlanUsage, Refusal, UsageInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -49,6 +49,10 @@ pub enum AgentEvent {
         tool_name: String,
         parameters: HashMap<String, Value>,
         tool_description: String,
+        /// Why the call awaits approval (not recorded in events saved by an
+        /// older version).
+        #[serde(default, skip_serializing_if = "ApprovalReason::is_unrecorded")]
+        approval_reason: ApprovalReason,
     },
     /// A batch of tool calls is awaiting user approval.
     BatchToolCallAwaitingApproval {

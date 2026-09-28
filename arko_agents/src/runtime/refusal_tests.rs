@@ -569,6 +569,7 @@ async fn a_failed_fallback_request_leaves_the_refusal_resolvable() {
         {
             AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
                 error_message,
+                ..
             }) => {
                 assert!(error_message.contains("refused"), "{error_message}");
                 assert!(
@@ -1093,6 +1094,7 @@ async fn a_monitor_pause_before_the_fallback_keeps_it() {
         {
             AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
                 error_message,
+                ..
             }) => {
                 assert!(error_message.contains("Plan usage"), "{error_message}");
                 commands

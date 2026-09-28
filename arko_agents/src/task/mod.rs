@@ -19,6 +19,87 @@ pub struct PendingToolCallInfo {
     pub tool_name: String,
     pub parameters: HashMap<String, Value>,
     pub tool_description: String,
+    /// Why the call awaits approval (not recorded for a call saved by an
+    /// older version).
+    #[serde(default, skip_serializing_if = "ApprovalReason::is_unrecorded")]
+    pub approval_reason: ApprovalReason,
+}
+
+/// Why a tool call awaits approval: the agent's configuration doesn't
+/// auto-approve the tool, a path it names is outside the workspace under
+/// [`PathSafetyPolicy::RequireApproval`](crate::agent_config::PathSafetyPolicy::RequireApproval),
+/// or both. Both unset: not recorded (a call saved by an older version).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalReason {
+    /// The agent's tool configuration doesn't auto-approve the tool
+    /// (`default_auto_approve_tool_use` and the tool's
+    /// `auto_approve_tool_use` override).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tool_not_auto_approved: bool,
+    /// The path parameter whose value is outside the workspace, when the
+    /// tool's path-safety policy requires approval for that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_outside_workspace: Option<String>,
+}
+
+impl ApprovalReason {
+    /// Neither reason is recorded.
+    pub fn is_unrecorded(&self) -> bool {
+        !self.tool_not_auto_approved && self.path_outside_workspace.is_none()
+    }
+
+    /// A short description, such as "the agent's configuration requires
+    /// approval for this tool" or "parameter 'path' is outside the
+    /// workspace".
+    pub fn describe(&self) -> String {
+        let mut reasons = Vec::new();
+        if self.tool_not_auto_approved {
+            reasons.push("the agent's configuration requires approval for this tool".to_string());
+        }
+        if let Some(parameter) = &self.path_outside_workspace {
+            reasons.push(format!("parameter '{parameter}' is outside the workspace"));
+        }
+        if reasons.is_empty() {
+            return "approval required (reason not recorded)".to_string();
+        }
+        reasons.join("; ")
+    }
+}
+
+/// Why a task awaits error-recovery approval
+/// ([`TaskState::AwaitingErrorRecoveryApproval`]), so a host can decide
+/// without reading the error message.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorRecoveryCause {
+    /// Not recorded: a task saved by an older version.
+    #[default]
+    Unknown,
+    /// A request that may succeed later (a network, server, capacity or
+    /// rate-limit error) kept failing until recovery ended: its attempts or
+    /// its elapsed budget ran out. Approving starts a new recovery.
+    RetriesExhausted,
+    /// A failure retrying unchanged can't fix: the request, a credential or
+    /// the configuration must change (for example an authentication or
+    /// invalid-request error).
+    NonRetryable,
+    /// Responses the runtime couldn't use (a native-mode turn without a
+    /// tool call, or output-based tool calls it couldn't read) up to the
+    /// attempt limit.
+    UnusableResponses,
+    /// A plan usage limit was reached; when it resets, in Unix
+    /// milliseconds, when the provider said.
+    UsageLimit { resets_at_unix_ms: Option<u64> },
+    /// The model or a filter around it refused the turn, after the opt-in
+    /// refusal fallback, if configured, could not answer. The input is in
+    /// [`Task::refused_input`].
+    Refusal,
+    /// Tool calls failed under `ToolErrorPolicy::PauseAndAwaitApproval`;
+    /// their results report the errors.
+    ToolError,
+    /// An opt-in monitor paused the task before a request: the plan usage
+    /// threshold or the cache-efficiency monitor.
+    Monitor,
 }
 
 /// The reason a task stopped by [`UserCommand::CancelTask`](crate::runtime::command::UserCommand::CancelTask) records.
@@ -40,6 +121,10 @@ pub enum TaskState {
         tool_name: String,
         parameters: HashMap<String, Value>,
         tool_description: String,
+        /// Why the call awaits approval (not recorded in a task saved by an
+        /// older version).
+        #[serde(default, skip_serializing_if = "ApprovalReason::is_unrecorded")]
+        approval_reason: ApprovalReason,
     },
     /// Awaiting approval for a batch where one or more calls require approval.
     AwaitingBatchToolApproval {
@@ -55,6 +140,10 @@ pub enum TaskState {
     },
     AwaitingErrorRecoveryApproval {
         error_message: String,
+        /// What caused the pause (`Unknown` in a task saved by an older
+        /// version).
+        #[serde(default)]
+        cause: ErrorRecoveryCause,
     },
     Interrupted {
         reason: String,
@@ -84,6 +173,8 @@ enum TaskStateRepr {
         tool_name: String,
         parameters: HashMap<String, Value>,
         tool_description: String,
+        #[serde(default)]
+        approval_reason: ApprovalReason,
     },
     AwaitingBatchToolApproval {
         batch_id: Uuid,
@@ -94,6 +185,8 @@ enum TaskStateRepr {
     },
     AwaitingErrorRecoveryApproval {
         error_message: String,
+        #[serde(default)]
+        cause: ErrorRecoveryCause,
     },
     Interrupted {
         reason: String,
@@ -119,11 +212,13 @@ impl From<TaskStateRepr> for TaskState {
                 tool_name,
                 parameters,
                 tool_description,
+                approval_reason,
             } => TaskState::AwaitingToolApproval {
                 tool_call_id,
                 tool_name,
                 parameters,
                 tool_description,
+                approval_reason,
             },
             TaskStateRepr::AwaitingBatchToolApproval {
                 batch_id,
@@ -135,9 +230,13 @@ impl From<TaskStateRepr> for TaskState {
             TaskStateRepr::AwaitingUserResponse { questions } => {
                 TaskState::AwaitingUserResponse { questions }
             }
-            TaskStateRepr::AwaitingErrorRecoveryApproval { error_message } => {
-                TaskState::AwaitingErrorRecoveryApproval { error_message }
-            }
+            TaskStateRepr::AwaitingErrorRecoveryApproval {
+                error_message,
+                cause,
+            } => TaskState::AwaitingErrorRecoveryApproval {
+                error_message,
+                cause,
+            },
             TaskStateRepr::Interrupted { reason } => TaskState::Interrupted { reason },
             TaskStateRepr::Completed { summary } => TaskState::Completed { summary },
             // Saved before cancellation had its own state.
@@ -576,6 +675,10 @@ mod tests {
                 tool_name: "write_file".into(),
                 parameters: HashMap::from([("path".into(), serde_json::json!("a.txt"))]),
                 tool_description: "Writes".into(),
+                approval_reason: ApprovalReason {
+                    tool_not_auto_approved: true,
+                    path_outside_workspace: Some("path".into()),
+                },
             },
             TaskState::AwaitingBatchToolApproval {
                 batch_id: Uuid::new_v4(),
@@ -584,6 +687,10 @@ mod tests {
                     tool_name: "read_file".into(),
                     parameters: HashMap::new(),
                     tool_description: "Reads".into(),
+                    approval_reason: ApprovalReason {
+                        tool_not_auto_approved: true,
+                        path_outside_workspace: None,
+                    },
                 }],
             },
             TaskState::AwaitingUserResponse {
@@ -591,6 +698,9 @@ mod tests {
             },
             TaskState::AwaitingErrorRecoveryApproval {
                 error_message: "boom".into(),
+                cause: ErrorRecoveryCause::UsageLimit {
+                    resets_at_unix_ms: Some(1_790_000_000_000),
+                },
             },
             TaskState::Interrupted {
                 reason: "network".into(),
@@ -636,6 +746,46 @@ mod tests {
             }
             .is_terminal()
         );
+    }
+
+    /// Approval and error-recovery states saved before their reasons and
+    /// causes were recorded load with them unrecorded.
+    #[test]
+    fn awaiting_states_saved_without_reasons_load() {
+        let call = Uuid::new_v4();
+        assert_eq!(
+            state(serde_json::json!({"AwaitingToolApproval": {
+                "tool_call_id": call, "tool_name": "write_file",
+                "parameters": {}, "tool_description": "Writes"
+            }})),
+            TaskState::AwaitingToolApproval {
+                tool_call_id: call,
+                tool_name: "write_file".into(),
+                parameters: HashMap::new(),
+                tool_description: "Writes".into(),
+                approval_reason: ApprovalReason::default(),
+            }
+        );
+        let TaskState::AwaitingBatchToolApproval { pending_calls, .. } =
+            state(serde_json::json!({"AwaitingBatchToolApproval": {
+                "batch_id": Uuid::new_v4(),
+                "pending_calls": [{"tool_call_id": call, "tool_name": "read_file",
+                    "parameters": {}, "tool_description": "Reads"}]
+            }}))
+        else {
+            panic!("a batch approval state");
+        };
+        assert!(pending_calls[0].approval_reason.is_unrecorded());
+        assert_eq!(
+            state(serde_json::json!({"AwaitingErrorRecoveryApproval": {"error_message": "boom"}})),
+            TaskState::AwaitingErrorRecoveryApproval {
+                error_message: "boom".into(),
+                cause: ErrorRecoveryCause::Unknown,
+            }
+        );
+        // An unrecorded reason is left out when saved.
+        let saved = serde_json::to_value(&pending_calls[0]).unwrap();
+        assert!(saved.get("approval_reason").is_none());
     }
 
     /// Context taken but not yet added is saved only when there is some, in

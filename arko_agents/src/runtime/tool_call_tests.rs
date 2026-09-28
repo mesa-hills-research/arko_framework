@@ -461,6 +461,7 @@ async fn suspend_returns_the_task_from_every_awaiting_state() {
         tool_name: name.into(),
         parameters: HashMap::new(),
         tool_description: String::new(),
+        approval_reason: Default::default(),
     };
     let single = pending("read_file");
     for mode in [ToolCallingMode::Native, ToolCallingMode::OutputBased] {
@@ -470,6 +471,7 @@ async fn suspend_returns_the_task_from_every_awaiting_state() {
                 tool_name: single.tool_name.clone(),
                 parameters: HashMap::new(),
                 tool_description: String::new(),
+                approval_reason: Default::default(),
             },
             TaskState::AwaitingBatchToolApproval {
                 batch_id: Uuid::new_v4(),
@@ -480,6 +482,7 @@ async fn suspend_returns_the_task_from_every_awaiting_state() {
             },
             TaskState::AwaitingErrorRecoveryApproval {
                 error_message: "failed".into(),
+                cause: Default::default(),
             },
         ] {
             let mut config = config(mode.clone(), &["read_file", "list_files"]);
@@ -1010,14 +1013,16 @@ async fn under_pause_a_native_batch_finishes_before_pausing_once() {
                 })
                 .await
                 .unwrap();
-            let error = wait_for(&mut events, &mut seen, |event| match event {
+            let (error, cause) = wait_for(&mut events, &mut seen, |event| match event {
                 AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
                     error_message,
-                }) => Some(error_message.clone()),
+                    cause,
+                }) => Some((error_message.clone(), cause.clone())),
                 _ => None,
             })
             .await;
             assert!(error.contains("read_file"), "{error}");
+            assert_eq!(cause, crate::task::ErrorRecoveryCause::ToolError);
             // write_file ran before the pause.
             assert!(workspace.join("b.txt").exists());
             commands
@@ -1445,6 +1450,7 @@ async fn recovery_approval_answers_calls_an_older_version_stranded() {
         .insert(Uuid::new_v4(), stranded);
     task.set_state(TaskState::AwaitingErrorRecoveryApproval {
         error_message: "Tool 'read_file' execution failed: not found".into(),
+        cause: crate::task::ErrorRecoveryCause::ToolError,
     });
     let saved = serde_json::to_value(&agent.task).unwrap();
     agent.task = serde_json::from_value(saved).unwrap();
@@ -1912,6 +1918,104 @@ fn the_summary_override_applies_in_both_tool_calling_modes() {
             described.contains("List every file changed."),
             "{mode:?}: {described}"
         );
+    }
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+/// A call awaiting approval says why: the agent's configuration doesn't
+/// auto-approve the tool, a path it names is outside the workspace under
+/// `PathSafetyPolicy::RequireApproval`, or both.
+#[tokio::test]
+async fn calls_awaiting_approval_say_why() {
+    let workspace = workspace();
+    let registry = || {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(Counter(Arc::new(AtomicUsize::new(0)))));
+        registry
+    };
+    let inside = || native_call("in", "counter", serde_json::json!({"path": "a.txt"}));
+    let outside = || {
+        native_call(
+            "out",
+            "counter",
+            serde_json::json!({"path": "../outside.txt"}),
+        )
+    };
+    for auto_approved in [true, false] {
+        let mut config = config(ToolCallingMode::Native, &["counter"]);
+        config.tool_config.default_auto_approve_tool_use = auto_approved;
+        config.tool_config.default_out_of_workspace_path_policy = PathSafetyPolicy::RequireApproval;
+        let (mut agent, mut events, commands) = agent(config, registry(), &workspace);
+        let calls = if auto_approved {
+            vec![outside()]
+        } else {
+            vec![inside(), outside()]
+        };
+        agent
+            .scripted_responses
+            .get_mut()
+            .unwrap()
+            .push_back(turn(calls));
+        let run = tokio::spawn(agent.run());
+        let mut seen = Vec::new();
+        let reasons = wait_for(&mut events, &mut seen, |event| match event {
+            AgentEvent::ToolCallAwaitingApproval {
+                approval_reason, ..
+            } => Some(vec![approval_reason.clone()]),
+            AgentEvent::BatchToolCallAwaitingApproval { pending_calls, .. } => Some(
+                pending_calls
+                    .iter()
+                    .map(|pending| pending.approval_reason.clone())
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .await;
+        let outside_reason = ApprovalReason {
+            tool_not_auto_approved: !auto_approved,
+            path_outside_workspace: Some("path".into()),
+        };
+        if auto_approved {
+            assert_eq!(reasons, [outside_reason]);
+        } else {
+            assert_eq!(
+                reasons,
+                [
+                    ApprovalReason {
+                        tool_not_auto_approved: true,
+                        path_outside_workspace: None,
+                    },
+                    outside_reason,
+                ]
+            );
+        }
+        assert!(
+            reasons
+                .last()
+                .unwrap()
+                .describe()
+                .contains("parameter 'path' is outside the workspace")
+        );
+        commands.send(UserCommand::SuspendTask).await.unwrap();
+        let task = timeout(Duration::from_secs(10), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        // The awaiting state keeps the reasons.
+        match &task.current_state {
+            TaskState::AwaitingToolApproval {
+                approval_reason, ..
+            } => assert_eq!(approval_reason, &reasons[0]),
+            TaskState::AwaitingBatchToolApproval { pending_calls, .. } => assert_eq!(
+                pending_calls
+                    .iter()
+                    .map(|pending| pending.approval_reason.clone())
+                    .collect::<Vec<_>>(),
+                reasons
+            ),
+            state => panic!("{state:?}"),
+        }
     }
     std::fs::remove_dir_all(workspace).unwrap();
 }

@@ -555,6 +555,7 @@ async fn context_taken_in_an_awaiting_state_is_saved_with_the_suspended_task() {
         tool_name: name.into(),
         parameters: HashMap::new(),
         tool_description: String::new(),
+        approval_reason: Default::default(),
     };
     for mode in [ToolCallingMode::Native, ToolCallingMode::OutputBased] {
         for state in [
@@ -563,6 +564,7 @@ async fn context_taken_in_an_awaiting_state_is_saved_with_the_suspended_task() {
                 tool_name: "read_file".into(),
                 parameters: HashMap::new(),
                 tool_description: String::new(),
+                approval_reason: Default::default(),
             },
             TaskState::AwaitingBatchToolApproval {
                 batch_id: Uuid::new_v4(),
@@ -573,6 +575,7 @@ async fn context_taken_in_an_awaiting_state_is_saved_with_the_suspended_task() {
             },
             TaskState::AwaitingErrorRecoveryApproval {
                 error_message: "failed".into(),
+                cause: Default::default(),
             },
         ] {
             let mut config = config(mode.clone(), &["read_file", "list_files"]);

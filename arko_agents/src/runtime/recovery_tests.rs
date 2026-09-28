@@ -56,7 +56,7 @@ async fn alternating_capacity_and_ordinary_failures_still_exhaust_the_attempt_li
     }
     assert!(matches!(
         agent.task.current_state,
-        TaskState::AwaitingErrorRecoveryApproval { ref error_message }
+        TaskState::AwaitingErrorRecoveryApproval { ref error_message, .. }
             if error_message.contains("attempt limit exhausted")
     ));
     let delays: Vec<u64> = events_of(&mut events)
@@ -453,4 +453,167 @@ async fn streams_that_fail_at_once_stay_bounded_without_an_attempt_limit() {
         .filter(|event| matches!(event, AgentEvent::RetryScheduled { .. }))
         .count();
     assert!(retries < 15, "{retries} retries");
+}
+
+/// Each pause for error-recovery approval records what caused it, so a host
+/// such as a workflow can decide without reading the error message.
+#[tokio::test(start_paused = true)]
+async fn error_recovery_pauses_record_their_cause() {
+    let usage_limit = ai::Error::ProviderError {
+        message: "The usage limit has been reached".into(),
+        status: Some(429),
+        code: Some("usage_limit_reached".into()),
+        retry_after: Some(Duration::from_secs(3600)),
+    };
+    type Expected = fn(&ErrorRecoveryCause) -> bool;
+    let cases: [(ai::Error, Expected); 4] = [
+        (provider_failure(401, None), |cause| {
+            *cause == ErrorRecoveryCause::NonRetryable
+        }),
+        (
+            ai::Error::Refusal(Box::new(super::retry_tests::model_refusal())),
+            |cause| *cause == ErrorRecoveryCause::Refusal,
+        ),
+        (usage_limit, |cause| {
+            matches!(
+                cause,
+                ErrorRecoveryCause::UsageLimit {
+                    resets_at_unix_ms: Some(_)
+                }
+            )
+        }),
+        (provider_failure(503, None), |cause| {
+            *cause == ErrorRecoveryCause::RetriesExhausted
+        }),
+    ];
+    for (error, expected) in cases {
+        let (mut agent, _events, _commands) = harness();
+        agent.task.agent_config.llm_error_policy =
+            LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts: 1 };
+        let message = error.to_string();
+        agent
+            .run_llm_attempt::<()>(async { Err(error) })
+            .await
+            .unwrap();
+        let TaskState::AwaitingErrorRecoveryApproval { cause, .. } = &agent.task.current_state
+        else {
+            panic!("{message}: {:?}", agent.task.current_state);
+        };
+        assert!(expected(cause), "{message}: {cause:?}");
+    }
+    // Responses the runtime can't use, up to the attempt limit.
+    let (mut agent, _events, _commands) = harness();
+    agent.task.agent_config.llm_error_policy =
+        LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts: 1 };
+    agent
+        .handle_model_output_failure("Call a tool.".into())
+        .await
+        .unwrap();
+    assert!(matches!(
+        agent.task.current_state,
+        TaskState::AwaitingErrorRecoveryApproval {
+            cause: ErrorRecoveryCause::UnusableResponses,
+            ..
+        }
+    ));
+}
+
+/// Runs `agent`, answering its error-recovery pause with `command`; returns
+/// the task and the pause's cause.
+async fn run_answering_the_pause(
+    agent: AgentLoop,
+    mut events: mpsc::Receiver<AgentEvent>,
+    commands: mpsc::Sender<UserCommand>,
+    command: UserCommand,
+) -> (Task, ErrorRecoveryCause) {
+    let runner = tokio::spawn(agent.run());
+    let mut cause = None;
+    loop {
+        match timeout(Duration::from_secs(60), events.recv())
+            .await
+            .unwrap()
+        {
+            Some(AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
+                cause: paused,
+                ..
+            })) => {
+                cause = Some(paused);
+                commands.send(command.clone()).await.unwrap();
+            }
+            Some(AgentEvent::TaskStreamEnd) | None => break,
+            _ => {}
+        }
+    }
+    (
+        runner.await.unwrap().unwrap(),
+        cause.expect("the task paused"),
+    )
+}
+
+/// Continuing after an error-recovery pause as the host's own decision
+/// sends the failed request again unchanged, with no note that a user
+/// approved; a note, when given, is added as the runtime's text. Approving
+/// the recovery adds the user-approval note.
+#[tokio::test(start_paused = true)]
+async fn continuing_after_an_error_sends_the_request_again_unchanged_or_with_the_note() {
+    let note = "Continuing after the provider outage.";
+    for (command, added) in [
+        (UserCommand::ContinueAfterError { note: None }, None),
+        (
+            UserCommand::ContinueAfterError {
+                note: Some(note.into()),
+            },
+            Some(note),
+        ),
+        (
+            UserCommand::ApproveErrorRecovery { message: None },
+            Some("The user has approved to continue."),
+        ),
+    ] {
+        let (mut agent, events, commands) = harness();
+        agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
+        agent
+            .task
+            .agent_config
+            .tool_config
+            .default_auto_approve_tool_use = true;
+        agent.task.agent_config.llm_error_policy =
+            LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts: 1 };
+        let scripted = agent.scripted_responses.get_mut().unwrap();
+        scripted.push_back(Err(provider_failure(503, None)));
+        scripted.push_back(Ok(futures::stream::iter([Ok(complete_response())]).boxed()));
+        let (task, cause) = run_answering_the_pause(agent, events, commands, command).await;
+        assert_eq!(cause, ErrorRecoveryCause::RetriesExhausted);
+        assert!(matches!(task.current_state, TaskState::Completed { .. }));
+        let user_texts: Vec<String> = task
+            .conversation
+            .messages
+            .iter()
+            .filter(|message| message.role == ai::Role::User)
+            .map(|message| {
+                message
+                    .content
+                    .iter()
+                    .filter_map(ai::Content::as_text)
+                    .collect::<String>()
+            })
+            // complete_task's result.
+            .filter(|text| !text.is_empty())
+            .collect();
+        match added {
+            // The task prompt only: the request was sent again as it was.
+            None => assert_eq!(user_texts.len(), 1, "{user_texts:?}"),
+            Some(text) => {
+                assert_eq!(user_texts.len(), 2, "{user_texts:?}");
+                assert!(user_texts[1].contains(text), "{user_texts:?}");
+            }
+        }
+        let approved = user_texts
+            .iter()
+            .any(|text| text.contains("The user has approved"));
+        assert_eq!(
+            approved,
+            matches!(added, Some(text) if text.contains("approved"))
+        );
+    }
 }

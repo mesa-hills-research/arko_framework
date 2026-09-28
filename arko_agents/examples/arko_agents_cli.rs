@@ -321,10 +321,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tool_name,
                 parameters,
                 tool_description,
+                approval_reason,
             } => {
                 close_active_blocks(&mut in_reasoning_block, &mut in_assistant_response_block)?;
                 println!("\n--- TOOL APPROVAL REQUIRED ---");
                 println!("Tool: {}", tool_name);
+                println!("Reason: {}", approval_reason.describe());
                 println!("Description: {}", tool_description);
                 println!("Parameters: {}", serde_json::to_string_pretty(&parameters)?);
 

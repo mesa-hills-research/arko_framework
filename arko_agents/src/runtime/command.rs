@@ -57,7 +57,18 @@ pub enum UserCommand {
     },
 
     /// Approve recovery after an error (e.g., retry a failed tool execution or LLM call).
+    /// The model is told that the previous attempt resulted in the error and
+    /// that the user approved continuing, followed by `message` when given.
     ApproveErrorRecovery { message: Option<String> },
+
+    /// Continue after an error-recovery pause as the host's own decision,
+    /// without the user-approval note of
+    /// [`ApproveErrorRecovery`](Self::ApproveErrorRecovery): with no `note`
+    /// the failed request is sent again unchanged (with the tool results the
+    /// pause left waiting, which report their errors); with a `note`, it is
+    /// added as the runtime's text before the next request. Like an
+    /// approval, it starts a new recovery and clears a refused input.
+    ContinueAfterError { note: Option<String> },
 
     /// Reject recovery after an error, potentially leading to task failure.
     RejectErrorRecovery { message: Option<String> },

@@ -720,6 +720,7 @@ mod tests {
                 tool_name: "wait_for_message".into(),
                 parameters: Default::default(),
                 tool_description: String::new(),
+                approval_reason: Default::default(),
             }),
         );
         registry.set_awaiting_message(run, true);

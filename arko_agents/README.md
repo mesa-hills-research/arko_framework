@@ -295,7 +295,11 @@ Tool calls wait for approval unless `default_auto_approve_tool_use` or a per-too
 question already waits for an answer, unless its own override sets `auto_approve_tool_use:
 Some(false)`. When a response holds one call that needs
 approval, the runtime emits `ToolCallAwaitingApproval`; when it holds several calls, it
-emits `BatchToolCallAwaitingApproval` listing those that need approval. Answer with
+emits `BatchToolCallAwaitingApproval` listing those that need approval. Each call carries
+an `approval_reason` (`ApprovalReason`, also kept in the awaiting state): whether the
+agent's configuration doesn't auto-approve the tool (`tool_not_auto_approved`), and the
+path parameter that is outside the workspace under `RequireApproval`
+(`path_outside_workspace`); `describe()` puts it in words. Answer with
 `ApproveToolUse`, `RejectToolUse`, or `SubmitBatchToolApprovals`, where a call without a
 decision is rejected. An approval can carry `custom_tool_output`, which is used instead
 of running the tool, and a `message_to_agent`. Approvals keep call order: a call awaiting
@@ -536,7 +540,14 @@ background and notify the agent of input requests and completion. See
 `TaskState` is one of `Pending`, `InProgress`, `AwaitingToolApproval`,
 `AwaitingBatchToolApproval`, `AwaitingUserResponse`, `AwaitingErrorRecoveryApproval`,
 `Interrupted`, `Completed`, `Failed`, or `Cancelled { reason }`; `Completed`, `Failed`,
-and `Cancelled` are terminal.
+and `Cancelled` are terminal. `AwaitingErrorRecoveryApproval { error_message, cause }`
+says why the task paused, as an `ErrorRecoveryCause`: `RetriesExhausted` (a request that
+may succeed later kept failing until recovery ended), `NonRetryable` (the request, a
+credential, or the configuration must change), `UnusableResponses` (responses the runtime
+couldn't use, up to the attempt limit), `UsageLimit { resets_at_unix_ms }`, `Refusal`
+(after the opt-in refusal fallback, if configured, could not answer), `ToolError` (under
+`PauseAndAwaitApproval`), or `Monitor` (an opt-in monitor paused it). A task saved before
+causes were recorded loads with `Unknown`.
 
 | Events | Meaning |
 | --- | --- |
@@ -643,9 +654,13 @@ without one, or output-based calls that cannot be read. Such a retry is not an o
 is made at once, without backoff, and bounded by the attempt limit (10 under
 `InformAgentAndContinue`, which has none), not by the elapsed budget. Any completed
 response ends the elapsed budget a failed request started. From a pause,
-`ApproveErrorRecovery { message }` adds a note about the error (with the message) and
-starts a new recovery episode, and `RejectErrorRecovery` fails the task. An interrupted
-task starts a new episode when it is run again.
+`ApproveErrorRecovery { message }` adds a note that the previous attempt resulted in the
+error and that the user approved continuing (with the message) and starts a new recovery
+episode, and `RejectErrorRecovery` fails the task. `ContinueAfterError { note }` is the
+host's own decision to go on, for an unattended host: without a note the failed request
+is sent again unchanged (with any tool results the pause left waiting, which report their
+errors), and a note is added as the runtime's text instead of the user-approval note; it
+also starts a new episode. An interrupted task starts a new episode when it is run again.
 
 Errors are classified by arko_ai's `Error::retry_class()`. HTTP 408, 409, 429, and 5xx
 responses, connection failures and timeouts, truncated streams, errors reported after a

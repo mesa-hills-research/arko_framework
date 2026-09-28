@@ -163,12 +163,14 @@ async fn the_cache_monitor_reports_warns_and_pauses_once_after_warm_up() {
             .unwrap();
         if let AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
             error_message,
+            cause,
         }) = &event
         {
             assert!(
                 error_message.contains("Prompt cache efficiency fell to 36.7%"),
                 "{error_message}"
             );
+            assert_eq!(*cause, crate::task::ErrorRecoveryCause::Monitor);
             commands
                 .send(UserCommand::ApproveErrorRecovery { message: None })
                 .await
