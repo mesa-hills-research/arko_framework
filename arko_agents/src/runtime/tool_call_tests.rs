@@ -48,7 +48,7 @@ impl Tool for Counter {
 
 /// A new directory under the canonical temporary directory (on macOS,
 /// `/private/var/...` rather than the `/var/...` link).
-fn workspace() -> PathBuf {
+pub(super) fn workspace() -> PathBuf {
     let path = std::fs::canonicalize(std::env::temp_dir())
         .unwrap()
         .join(format!("arko-tool-calls-{}", Uuid::new_v4()));
@@ -58,7 +58,7 @@ fn workspace() -> PathBuf {
 
 /// An auto-approving agent offered `tools` (and `complete_task`, which stays
 /// auto-approved when the default changes).
-fn config(mode: ToolCallingMode, tools: &[&str]) -> AgentConfig {
+pub(super) fn config(mode: ToolCallingMode, tools: &[&str]) -> AgentConfig {
     let mut config = super::tests::test_config();
     config.tool_config.tool_calling_mode = mode;
     config.tool_config.default_auto_approve_tool_use = true;
@@ -73,7 +73,7 @@ fn config(mode: ToolCallingMode, tools: &[&str]) -> AgentConfig {
     config
 }
 
-fn agent_for(
+pub(super) fn agent_for(
     mut task: Task,
     registry: ToolRegistry,
     client: Arc<ai::LLMClient>,
@@ -102,7 +102,7 @@ fn agent_for(
     (agent, receiver, sender)
 }
 
-fn agent(
+pub(super) fn agent(
     config: AgentConfig,
     registry: ToolRegistry,
     workspace: &std::path::Path,
@@ -115,20 +115,20 @@ fn agent(
     agent_for(task, registry, Arc::new(ai::LLMClient::new()))
 }
 
-fn native_call(id: &str, name: &str, arguments: Value) -> ai::ToolCall {
+pub(super) fn native_call(id: &str, name: &str, arguments: Value) -> ai::ToolCall {
     ai::ToolCall {
         arguments,
         ..call(id, name)
     }
 }
 
-fn turn(calls: Vec<ai::ToolCall>) -> ScriptedStreamResult {
+pub(super) fn turn(calls: Vec<ai::ToolCall>) -> ScriptedStreamResult {
     let mut message = ai::Message::new_assistant("");
     message.tool_calls = calls;
     response(message)
 }
 
-fn complete() -> ScriptedStreamResult {
+pub(super) fn complete() -> ScriptedStreamResult {
     turn(vec![native_call(
         "done",
         "complete_task",
@@ -148,7 +148,7 @@ fn text_turn(text: &str) -> ScriptedStreamResult {
     )
 }
 
-fn drain(events: &mut mpsc::Receiver<AgentEvent>) -> Vec<AgentEvent> {
+pub(super) fn drain(events: &mut mpsc::Receiver<AgentEvent>) -> Vec<AgentEvent> {
     let mut received = Vec::new();
     while let Ok(event) = events.try_recv() {
         received.push(event);
@@ -158,7 +158,7 @@ fn drain(events: &mut mpsc::Receiver<AgentEvent>) -> Vec<AgentEvent> {
 
 /// Each assistant turn's calls are answered, one result per call, by the
 /// message that follows it, as providers require of a request.
-fn assert_calls_paired(conversation: &ai::Conversation) {
+pub(super) fn assert_calls_paired(conversation: &ai::Conversation) {
     for (index, message) in conversation.messages.iter().enumerate() {
         if message.role != ai::Role::Assistant || message.tool_calls.is_empty() {
             continue;
@@ -185,7 +185,10 @@ fn assert_calls_paired(conversation: &ai::Conversation) {
     }
 }
 
-fn result_for<'a>(conversation: &'a ai::Conversation, call_id: &str) -> Vec<&'a ai::ToolResult> {
+pub(super) fn result_for<'a>(
+    conversation: &'a ai::Conversation,
+    call_id: &str,
+) -> Vec<&'a ai::ToolResult> {
     conversation
         .messages
         .iter()
@@ -790,7 +793,7 @@ async fn next_event<T>(
 
 /// Waits for the first event `pick` accepts, keeping every event seen in
 /// `seen`.
-async fn wait_for<T>(
+pub(super) async fn wait_for<T>(
     events: &mut mpsc::Receiver<AgentEvent>,
     seen: &mut Vec<AgentEvent>,
     mut pick: impl FnMut(&AgentEvent) -> Option<T>,

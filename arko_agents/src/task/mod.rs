@@ -261,6 +261,17 @@ pub struct Task {
     /// rather than an error; approving it adds no error note.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub monitor_pause: bool,
+    /// Context the runtime has taken from its command channel
+    /// ([`UserCommand::InjectContext`](crate::runtime::command::UserCommand::InjectContext))
+    /// and not yet added to the conversation, in the order it was sent. It
+    /// is added, as one workflow context update, at the next safe turn
+    /// boundary, before any context sent later. A task that stops keeps here
+    /// what could not be added before it stopped: in an awaiting state (a
+    /// user message must not come between a call and its result), while a
+    /// refusal fallback holds context back, and once completed (the model
+    /// has not read it). Saved so a task that runs again still gets it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_context_injections: Vec<String>,
 }
 
 /// A failed tool call the task will pause on; see
@@ -320,6 +331,7 @@ impl Task {
             fallback_calls: Vec::new(),
             plan_usage_threshold_reported: None,
             monitor_pause: false,
+            pending_context_injections: Vec::new(),
         }
     }
 
@@ -607,6 +619,38 @@ mod tests {
             }
             .is_terminal()
         );
+    }
+
+    /// Context taken but not yet added is saved only when there is some, in
+    /// order, and a task saved before the field existed loads without it.
+    #[test]
+    fn context_taken_but_not_added_is_saved_with_the_task() {
+        let config = AgentConfig::builder(
+            "saved".into(),
+            "Saved".into(),
+            AgentLLMConfig {
+                model: arko_ai::Model::openai_gpt_5_6_luna(),
+                generation_config: Default::default(),
+            },
+        )
+        .role_description("test".into())
+        .instructions("test".into())
+        .build()
+        .unwrap();
+        let task = Task::new(config, "prompt".into(), PathBuf::from("/workspace"), None);
+        let json = serde_json::to_value(&task).unwrap();
+        assert!(json.get("pending_context_injections").is_none());
+        let mut loaded: Task = serde_json::from_value(json).unwrap();
+        assert!(loaded.pending_context_injections.is_empty());
+
+        loaded.pending_context_injections = vec!["First.".into(), "Second.".into()];
+        let json = serde_json::to_value(&loaded).unwrap();
+        assert_eq!(
+            json["pending_context_injections"],
+            serde_json::json!(["First.", "Second."])
+        );
+        let loaded: Task = serde_json::from_str(&json.to_string()).unwrap();
+        assert_eq!(loaded.pending_context_injections, ["First.", "Second."]);
     }
 
     #[test]

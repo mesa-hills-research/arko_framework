@@ -286,7 +286,6 @@ pub struct AgentLoop {
 
     interceptor_config: Option<InterceptorConfig>,
     execution_middleware: Option<Arc<dyn ToolExecutionMiddleware>>,
-    pending_context_injections: Vec<String>,
     /// Asked for context at each safe turn boundary.
     pub(super) turn_context: Option<Arc<dyn super::TurnContextSource>>,
     tool_context_cursor: usize,
@@ -358,7 +357,6 @@ impl AgentLoop {
             skill_prompt_context,
             interceptor_config,
             execution_middleware,
-            pending_context_injections: Vec::new(),
             turn_context: None,
             tool_context_cursor: 0,
             file_tree_baseline: None,
@@ -376,9 +374,12 @@ impl AgentLoop {
         }
     }
 
+    /// Keeps context taken from the command channel with the task
+    /// ([`Task::pending_context_injections`]) until it is added to the
+    /// conversation, so a task that stops first never loses it.
     fn queue_context_injection(&mut self, content: String) {
         if !content.trim().is_empty() {
-            self.pending_context_injections.push(content);
+            self.task.pending_context_injections.push(content);
         }
     }
 
@@ -450,6 +451,9 @@ impl AgentLoop {
         }
     }
 
+    /// At a safe turn boundary before a model request: the turn context
+    /// source's context joins the context taken from the channel, and all of
+    /// it goes into the conversation.
     fn flush_context_injections(&mut self) -> Result<(), ArkoAgentsError> {
         if let Some(content) = self
             .turn_context
@@ -458,15 +462,19 @@ impl AgentLoop {
         {
             self.queue_context_injection(content);
         }
-        if self.pending_context_injections.is_empty() {
+        self.add_taken_context()
+    }
+
+    /// Adds the context taken from the command channel
+    /// ([`Task::pending_context_injections`]) to the conversation as one
+    /// user message headed `# Workflow context update`, in the order it was
+    /// sent. Only where a user message can go now; see
+    /// [`context_can_be_added_now`](Self::context_can_be_added_now).
+    fn add_taken_context(&mut self) -> Result<(), ArkoAgentsError> {
+        if self.task.pending_context_injections.is_empty() {
             return Ok(());
         }
-
-        let content = self
-            .pending_context_injections
-            .drain(..)
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let content = self.task.pending_context_injections.join("\n\n");
         let prompt_builder =
             PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None);
         let next_message_number = self.task.user_message_count + 1;
@@ -477,7 +485,55 @@ impl AgentLoop {
         )?;
         self.task.conversation.add_user_message(&message);
         self.task.increment_user_message_count();
+        self.task.pending_context_injections.clear();
         Ok(())
+    }
+
+    /// Whether a user message can join the conversation now: no native call
+    /// waits for its result (a user message between a call and its result
+    /// breaks the next request for every provider), no command is awaited
+    /// (whose answer, such as tool results, comes first), and no refusal
+    /// fallback holds context back (it answers exactly the refused input).
+    fn context_can_be_added_now(&self) -> bool {
+        !self.results_pending() && self.task.fallback_for.is_none()
+    }
+
+    /// Whether the last turn's results are not all in the conversation yet:
+    /// the task awaits a command (an approval, an answer, or a recovery
+    /// decision), results wait with it, or the conversation ends on a native
+    /// turn whose calls have none.
+    fn results_pending(&self) -> bool {
+        let open_turn = self
+            .task
+            .conversation
+            .messages
+            .last()
+            .is_some_and(|message| {
+                message.role == ai::Role::Assistant && !message.tool_calls.is_empty()
+            });
+        open_turn
+            || self.task.current_state.is_awaiting_approval()
+            || !self.task.pending_native_tool_calls.is_empty()
+            || !self.task.pending_native_tool_results.is_empty()
+            || !self.task.pending_text_tool_results.is_empty()
+    }
+
+    /// As the loop stops, for any reason: context taken from the command
+    /// channel goes into the conversation where it can
+    /// ([`context_can_be_added_now`](Self::context_can_be_added_now)), so the
+    /// saved transcript holds everything the host sent. Otherwise it stays in
+    /// [`Task::pending_context_injections`], saved with the task, and is
+    /// added at the first safe boundary after the task runs again. A
+    /// completed task keeps it there too: no request followed it, and hosts
+    /// such as arko_workflows take context in a completed task's
+    /// conversation as read.
+    fn keep_taken_context(&mut self) -> Result<(), ArkoAgentsError> {
+        if matches!(self.task.current_state, TaskState::Completed { .. })
+            || !self.context_can_be_added_now()
+        {
+            return Ok(());
+        }
+        self.add_taken_context()
     }
 
     fn task_context(&self) -> TaskContext<'_> {
@@ -760,6 +816,69 @@ impl AgentLoop {
             .await?;
         }
         Ok(self.stop_requested)
+    }
+
+    /// Takes every command queued at a turn boundary without waiting:
+    /// context joins the next request, and `CancelTask`, `SuspendTask`, or a
+    /// closed channel stops the loop at once (returns true, with
+    /// `TaskStateChanged`). Context taken before a stop is not lost; see
+    /// [`keep_taken_context`](Self::keep_taken_context).
+    async fn take_queued_commands(&mut self) -> Result<bool, ArkoAgentsError> {
+        loop {
+            match self.command_receiver.try_recv() {
+                Ok(UserCommand::InjectContext { content }) => {
+                    self.queue_context_injection(content);
+                }
+                Ok(UserCommand::CancelTask) => {
+                    self.task.set_state(TaskState::Cancelled {
+                        reason: CANCELLED_BY_USER.to_string(),
+                    });
+                    break;
+                }
+                Ok(UserCommand::SuspendTask) => break,
+                Err(mpsc::error::TryRecvError::Empty) => return Ok(false),
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    // No call waits for its result at a boundary, so the
+                    // context taken goes into the conversation of the
+                    // interrupted task (unless a refusal fallback holds it).
+                    debug_assert!(
+                        !self.results_pending(),
+                        "a turn boundary with results pending"
+                    );
+                    let reason = "Command channel disconnected.".to_string();
+                    log::error!("Task {}: {}", self.task.id, reason);
+                    self.task.set_state(TaskState::Interrupted {
+                        reason: reason.clone(),
+                    });
+                    self.emit_event(AgentEvent::TaskStateChanged(
+                        self.task.current_state.clone(),
+                    ))
+                    .await?;
+                    self.emit_event(AgentEvent::ErrorEncountered {
+                        error_message: reason,
+                        requires_approval_to_retry: false,
+                        tool_call_id: None,
+                    })
+                    .await?;
+                    self.stop_requested = true;
+                    return Ok(true);
+                }
+                Ok(other_cmd) => {
+                    log::warn!(
+                        "Task {}: Unexpected command {:?} received outside of an approval state. Ignoring.",
+                        self.task.id,
+                        other_cmd
+                    );
+                }
+            }
+        }
+        // Cancelled, or suspended in its current state.
+        self.emit_event(AgentEvent::TaskStateChanged(
+            self.task.current_state.clone(),
+        ))
+        .await?;
+        self.stop_requested = true;
+        Ok(true)
     }
 
     /// Refresh and model stream initialization share one attempt and deadline.
@@ -1866,63 +1985,11 @@ impl AgentLoop {
             }
             // Every command queued by now, also after an approved call ran,
             // so all context sent before this boundary (for example while a
-            // tool call ran) reaches the next request together. A terminal
-            // state (set by the approved call) keeps its reason.
-            if !self.task.current_state.is_terminal() {
-                loop {
-                    match self.command_receiver.try_recv() {
-                        Ok(UserCommand::CancelTask) => {
-                            self.task.set_state(TaskState::Cancelled {
-                                reason: CANCELLED_BY_USER.to_string(),
-                            });
-                            self.emit_event(AgentEvent::TaskStateChanged(
-                                self.task.current_state.clone(),
-                            ))
-                            .await?;
-                            break 'main_loop;
-                        }
-                        Ok(UserCommand::SuspendTask) => {
-                            // Context taken from the channel here would
-                            // otherwise be lost with the loop: the suspended
-                            // task keeps it.
-                            if !self.pending_context_injections.is_empty()
-                                && self.task.fallback_for.is_none()
-                            {
-                                self.flush_context_injections()?;
-                            }
-                            break 'main_loop;
-                        }
-                        Ok(UserCommand::InjectContext { content }) => {
-                            self.queue_context_injection(content);
-                        }
-                        Err(mpsc::error::TryRecvError::Empty) => break,
-                        Err(mpsc::error::TryRecvError::Disconnected) => {
-                            let reason = "Command channel disconnected.".to_string();
-                            log::error!("Task {}: {}", self.task.id, reason);
-                            self.task.set_state(TaskState::Interrupted {
-                                reason: reason.clone(),
-                            });
-                            self.emit_event(AgentEvent::TaskStateChanged(
-                                self.task.current_state.clone(),
-                            ))
-                            .await?;
-                            self.emit_event(AgentEvent::ErrorEncountered {
-                                error_message: reason,
-                                requires_approval_to_retry: false,
-                                tool_call_id: None,
-                            })
-                            .await?;
-                            break 'main_loop;
-                        }
-                        Ok(other_cmd) => {
-                            log::warn!(
-                                "Task {}: Unexpected command {:?} received outside of an approval state. Ignoring.",
-                                self.task.id,
-                                other_cmd
-                            );
-                        }
-                    }
-                }
+            // tool call ran) reaches the next request together. The task is
+            // not terminal here: a command or call that ended it broke out
+            // of the loop above.
+            if self.take_queued_commands().await? {
+                break 'main_loop;
             }
 
             if !matches!(self.task.current_state, TaskState::InProgress) {
@@ -2019,6 +2086,7 @@ impl AgentLoop {
                                     self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
                                 }
                                 self.reject_announced_calls(&mut native_stream_call_ids, INTERRUPTED_CALL).await?;
+                                self.emit_event(AgentEvent::TaskStateChanged(self.task.current_state.clone())).await?;
                                 self.stop_requested = true;
                                 had_stream_error = true;
                                 break;
@@ -2861,6 +2929,8 @@ impl AgentLoop {
             }
         }
 
+        // Whatever stopped the loop, context it took is not lost.
+        self.keep_taken_context()?;
         self.flush_throttled_text().await?;
         self.flush_throttled_reasoning().await?;
         self.emit_event(AgentEvent::TaskStreamEnd)
@@ -4054,9 +4124,19 @@ impl AgentLoop {
                         command = self.command_receiver.recv() => {
                             if self.handle_recovery_command(command).await? { return Ok(false); }
                         }
-                        _ = &mut sleep => return Ok(true),
+                        _ = &mut sleep => break,
                     }
                 }
+                // The wait came after the boundary: commands sent meanwhile
+                // are taken as there, and context sent meanwhile joins this
+                // request rather than the next.
+                if self.take_queued_commands().await? {
+                    return Ok(false);
+                }
+                if self.task.fallback_for.is_none() {
+                    self.add_taken_context()?;
+                }
+                Ok(true)
             }
         }
     }
@@ -4637,3 +4717,7 @@ mod context_tests;
 #[cfg(test)]
 #[path = "tool_call_tests.rs"]
 mod tool_call_tests;
+
+#[cfg(test)]
+#[path = "injection_tests.rs"]
+mod injection_tests;

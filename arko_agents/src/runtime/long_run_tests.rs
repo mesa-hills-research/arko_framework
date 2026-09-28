@@ -229,7 +229,7 @@ async fn a_usage_limit_wait_can_be_suspended() {
 
 /// A native turn calling a tool the registry doesn't have, so the task
 /// continues, reporting `used_percent` of the primary window.
-fn turn_with_plan_usage(used_percent: f64) -> ai::StreamEvent {
+pub(super) fn turn_with_plan_usage(used_percent: f64) -> ai::StreamEvent {
     turn_with_plan_window(used_percent, Some(4_102_444_800))
 }
 
