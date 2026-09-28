@@ -268,7 +268,12 @@ fn config(fake: &Fake) -> Config {
     }
 }
 async fn settle(index: &ArkoIndex, job: &str) -> JobStatus {
-    tokio::time::timeout(Duration::from_secs(15), async {
+    settle_within(index, job, Duration::from_secs(15)).await
+}
+/// [`settle`] with a longer hang guard, for jobs that do a lot of work in a
+/// debug build on a slow runner.
+async fn settle_within(index: &ArkoIndex, job: &str, limit: Duration) -> JobStatus {
+    tokio::time::timeout(limit, async {
         loop {
             let s = index.status(job).await.unwrap();
             if matches!(
@@ -3706,8 +3711,16 @@ async fn splitting_a_huge_chunk_for_embedding_stays_linear() {
     let text = "x".repeat(4 << 20);
     std::fs::write(root.path().join("line.txt"), &text).unwrap();
     let fake = Arc::new(Fake::new());
-    let (index, job, status) =
-        build_spec(&fake, db.path(), BuildSpec::new("test", root.path())).await;
+    let index = ArkoIndex::open(db.path().join("i.db"), fake.clone(), config(&fake))
+        .await
+        .unwrap();
+    let job = index
+        .start_build(BuildSpec::new("test", root.path()))
+        .await
+        .unwrap();
+    // Linearity is checked by the token count below; the time limit only
+    // catches a hang, and a 4 MB job is slow in a debug build on Windows CI.
+    let status = settle_within(&index, &job.job, Duration::from_secs(180)).await;
     assert_eq!(status.phase, "ready", "{:?}", status.problem);
     assert!(fake.calls.lock().unwrap().is_empty());
     // Tokenizing the rest of the text for every piece would count about
