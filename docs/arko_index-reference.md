@@ -143,9 +143,10 @@ them; the fixed instructions and tool schema (under 1,000 tokens) come on top.
   backend, is assumed to accept 128,000 tokens (`budget::FALLBACK_MAX_INPUT_TOKENS`), so
   its default is 51,200 bytes; the job logs a warning. A custom `Backend` reports its
   model's tokenizer and input limit with `Backend::chunk_input`.
-- **Explicit limits.** `max_request_tokens` sets the token limit (for models measured in
-  bytes, it applies as 4 bytes per token), and `max_request_bytes` a byte limit; when both
-  are set, both apply.
+- **Explicit limits.** `max_request_tokens` sets the token limit, and `max_request_bytes`
+  a byte limit. For models measured in tokens, both apply when both are set; for models
+  measured in bytes, `max_request_bytes` is the limit, and without it `max_request_tokens`
+  applies as 4 bytes per token.
 - **Batches.** Initial requests are filled with up to `batch_count` files as long as their
   combined size fits the budget.
 - **Resumes.** A job resolves its budget when it scans the source, records it as
@@ -224,7 +225,7 @@ build or update of the index is running, paused or blocked.
 
 | `Config` field | Default | Meaning |
 |---|---|---|
-| `batch_count` | 6 | Most files per initial chunk-model request, within the request budget. |
+| `batch_count` | 6 | Most files per initial chunk-model request (each window of a split file counts as one), within the request budget. |
 | `concurrency` | 2 | Chunk-model requests in flight, shared by all jobs of the `ArkoIndex`. |
 | `embedding_concurrency` | 2 | Embedding requests in flight, including search query embeddings. |
 | `embedding` | `voyage-4`, 1,024 dimensions | Embedding profile; see [Embeddings](#embeddings). |

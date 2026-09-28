@@ -31,8 +31,9 @@ use uuid::Uuid;
 pub enum ApprovalPolicy {
     /// **The default: approve every call**, whatever the agent's
     /// configuration asks, so a workflow runs without human input. The first
-    /// call each agent makes to each tool for each reason is logged as a
-    /// warning.
+    /// such call of each agent is logged as a warning, which says that the
+    /// agent's other calls that need approval are approved without further
+    /// warnings.
     #[default]
     ApproveAll,
     /// Honor the agent's configuration: a call it marks for approval pauses

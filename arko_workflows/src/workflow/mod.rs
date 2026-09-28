@@ -1001,8 +1001,8 @@ impl WorkflowBuilder {
     /// approves every call**, including calls an agent's configuration marks
     /// for approval and paths outside the workspace under
     /// `PathSafetyPolicy::RequireApproval`, so the workflow runs without
-    /// human input (the first such call per agent, tool and reason is logged
-    /// as a warning). `RespectAgentConfig` pauses the agent for the caller;
+    /// human input (the first such call of each agent is logged as a
+    /// warning). `RespectAgentConfig` pauses the agent for the caller;
     /// `Handler` decides each call in-process.
     pub fn approval_policy(mut self, policy: crate::policy::ApprovalPolicy) -> Self {
         self.approval_policy = policy;

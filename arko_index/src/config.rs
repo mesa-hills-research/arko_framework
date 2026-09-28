@@ -254,7 +254,9 @@ pub struct ChunkingOptions {
     pub max_request_tokens: Option<usize>,
     /// The most bytes one request may hold. `None` uses the default for
     /// models measured in bytes, and no byte limit for models measured in
-    /// tokens. When both limits are set, both apply.
+    /// tokens. For models measured in tokens, both limits apply when both
+    /// are set; for models measured in bytes, this one replaces
+    /// `max_request_tokens`.
     pub max_request_bytes: Option<usize>,
     /// What happens to a file that doesn't fit in one request.
     pub oversize: OversizePolicy,
