@@ -111,7 +111,9 @@ impl LLMClient {
 
     /// Writes every model request and response to `trace` for debugging;
     /// see [`RequestTrace`]. Applies to providers configured before or after
-    /// this call. Currently implemented for the OpenAI provider.
+    /// this call. Currently implemented for the OpenAI provider only: the
+    /// first request to another provider logs a warning (once per provider)
+    /// that it is not traced.
     pub fn with_request_trace(mut self, trace: RequestTrace) -> Self {
         self.request_trace = Some(trace);
         self.openai_client = self
@@ -501,12 +503,25 @@ impl LLMClient {
         }
     }
 
+    /// Request tracing covers the OpenAI provider only; says so, once per
+    /// provider, when a traced client sends to another.
+    fn note_untraced(&self, provider: &Provider) {
+        if self.request_trace.is_some() && *provider != Provider::OpenAI {
+            crate::notice::warn_once(&format!("trace:{provider:?}"), || {
+                format!(
+                    "arko_ai: request tracing covers OpenAI requests only; {provider:?} requests are not traced."
+                )
+            });
+        }
+    }
+
     pub async fn generate_text(
         &self,
         conversation: &Conversation,
         config: GenerationConfig,
     ) -> Result<GenerationResponse, Error> {
         let provider = self.get_provider(&conversation.model.provider)?;
+        self.note_untraced(&conversation.model.provider);
         provider.generate_text(conversation, &config).await
     }
 
@@ -521,6 +536,7 @@ impl LLMClient {
         config: GenerationConfig,
     ) -> Result<BoxStream<'static, Result<StreamEvent, Error>>, Error> {
         let provider = self.get_provider(&conversation.model.provider)?;
+        self.note_untraced(&conversation.model.provider);
         provider.generate_stream(conversation, &config).await
     }
 }
@@ -590,6 +606,78 @@ mod tests {
         ]);
         assert!(!partial.is_openai_chatgpt_oauth().await);
         assert!(partial.has_provider(&Provider::OpenAI));
+    }
+
+    /// Only OpenAI requests are traced; a traced request to another provider
+    /// says so once per provider.
+    #[tokio::test]
+    async fn traced_requests_to_other_providers_warn_that_they_are_not_traced() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = tempfile::tempdir().unwrap();
+        // A local server that answers every request with a 500, so the
+        // requests fail at once.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let failing = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut chunk = [0; 8192];
+                    while let Ok(n @ 1..) = socket.read(&mut chunk).await {
+                        request.extend_from_slice(&chunk[..n]);
+                        let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                            continue;
+                        };
+                        let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                        let length: usize = head
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .map_or(0, |value| value.trim().parse().unwrap_or(0));
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                        .await;
+                });
+            }
+        });
+        let untraced = LLMClient::new()
+            .with_anthropic_client(
+                providers::anthropic::AnthropicClient::new("test").with_base_url(&failing),
+            )
+            .with_openai_client(
+                providers::openai::OpenAIClient::new("test").with_base_url(&failing),
+            );
+        let mut claude = Conversation::new(Model::anthropic_claude_opus_5_5());
+        claude.add_user_message("Hi.");
+        let mut gpt = Conversation::new(Model::openai_gpt_6_astra());
+        gpt.add_user_message("Hi.");
+
+        assert!(
+            untraced
+                .generate_text(&claude, GenerationConfig::default())
+                .await
+                .is_err()
+        );
+        assert!(!crate::notice::warned("trace:Anthropic"));
+
+        let traced = untraced.with_request_trace(RequestTrace::new(dir.path()));
+        assert!(
+            traced
+                .generate_text(&gpt, GenerationConfig::default())
+                .await
+                .is_err()
+        );
+        assert!(!crate::notice::warned("trace:OpenAI"));
+        assert!(
+            traced
+                .generate_stream(&claude, GenerationConfig::default())
+                .await
+                .is_err()
+        );
+        assert!(crate::notice::warned("trace:Anthropic"));
     }
 
     /// The client's OpenAI auth decides whether turning caching off

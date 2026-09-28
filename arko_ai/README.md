@@ -87,8 +87,9 @@ Gemini requests use Google's Interactions API. OpenAI requests carry no `origina
 `User-Agent` header unless the application sets one with `with_openai_originator` or
 `with_openai_user_agent`; use your own application's name. `with_request_trace` writes
 every OpenAI request and response to a directory for diagnosing prompt caching
-(`RequestTrace`), and `with_openai_request_hook` can adjust OpenAI requests before they
-are sent.
+(`RequestTrace`); requests to other providers are not traced, and the first one to each
+provider logs a warning saying so. `with_openai_request_hook` can adjust OpenAI requests
+before they are sent.
 
 ## Models
 
