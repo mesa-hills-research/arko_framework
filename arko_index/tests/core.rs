@@ -3191,3 +3191,35 @@ fn capacity_waits_are_bounded_by_default() {
     let unbounded: Config = serde_json::from_value(json!({"max_capacity_wait_ms": null})).unwrap();
     assert_eq!(unbounded.max_capacity_wait_ms, None);
 }
+
+#[tokio::test]
+async fn a_failed_rescan_at_publish_marks_the_generation_not_fresh() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("source");
+    std::fs::create_dir(&root).unwrap();
+    let db = tempfile::tempdir().unwrap();
+    std::fs::write(root.join("a.txt"), "alpha\nbeta\n").unwrap();
+    let mut fake = Fake::new();
+    fake.delay = Duration::from_millis(300);
+    let fake = Arc::new(fake);
+    let index = ArkoIndex::open(db.path().join("i.db"), fake.clone(), config(&fake))
+        .await
+        .unwrap();
+    let job = index
+        .start_build(BuildSpec::new("test", &root))
+        .await
+        .unwrap();
+    while fake.active.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    // The source moves away while the chunk request runs.
+    std::fs::rename(&root, parent.path().join("moved")).unwrap();
+    let done = settle(&index, &job.job).await;
+    assert_eq!(done.phase, "ready", "{:?}", done.problem);
+    let page = index
+        .search(&job.index, "alpha", options(SearchMode::Lexical))
+        .await
+        .unwrap();
+    assert!(!page.fresh_at_publication);
+    assert_eq!(page.hits.len(), 1);
+}

@@ -1037,7 +1037,15 @@ impl ArkoIndex {
                 decode(&s)
             })
             .await?;
-        let manifest = tokio::task::spawn_blocking(move || source::scan(&spec)).await??;
+        // Whether the source still matches the snapshot; a scan that fails
+        // (the root was moved, say) says it may not, and publishes anyway.
+        let scanned = match tokio::task::spawn_blocking(move || source::scan(&spec)).await? {
+            Ok(manifest) => Some(manifest.hash),
+            Err(error) => {
+                log::warn!("job {job}: could not rescan the source at publish: {error}");
+                None
+            }
+        };
         let j = job.to_owned();
         // "ready" becomes visible together with the control's removal, as the
         // other final phases do in `launch`; pause and cancel wait for both.
@@ -1051,7 +1059,7 @@ impl ArkoIndex {
                 chunk.id=source::hash(serde_json::to_vec(&(&j,&chunk.id))?);
                 tx.execute("INSERT INTO chunks(id,job,path,hash,start,end,first_line,last_line,payload,structure,text_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![chunk.id,j,chunk.path,chunk.hash,chunk.start,chunk.end,chunk.first_line,chunk.last_line,chunk.payload,chunk.structure,text])?;
             }
-            tx.execute("UPDATE jobs SET phase='ready',fresh=?2,problem=NULL WHERE id=?1",params![j,old_hash==manifest.hash])?;
+            tx.execute("UPDATE jobs SET phase='ready',fresh=?2,problem=NULL WHERE id=?1",params![j,scanned.as_ref()==Some(&old_hash)])?;
             tx.execute("UPDATE indexes SET active=?1,config=(SELECT config FROM jobs WHERE id=?1) WHERE id=(SELECT index_id FROM jobs WHERE id=?1)",[&j])?;
             tx.execute("INSERT INTO events(job,kind,detail) VALUES(?1,'phase','{\"phase\":\"ready\"}')",[&j])?;
             control.check()?;tx.commit()?;Ok(())}).await?;

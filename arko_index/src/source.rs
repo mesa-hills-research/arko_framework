@@ -168,6 +168,34 @@ fn recognized(path: &Path) -> bool {
             | "tf"
     )
 }
+/// `path` relative to `root` with `/` separators (lossy for names that are
+/// not UTF-8); paths outside `root` as they are.
+fn relative_path(path: &Path, root: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
+}
+/// The path a walk error is about, when it names one.
+fn walk_error_path(error: &ignore::Error) -> Option<&Path> {
+    match error {
+        ignore::Error::WithPath { path, .. } => Some(path),
+        ignore::Error::Loop { child, .. } => Some(child),
+        ignore::Error::WithDepth { err, .. } | ignore::Error::WithLineNumber { err, .. } => {
+            walk_error_path(err)
+        }
+        ignore::Error::Partial(errors) => errors.iter().find_map(walk_error_path),
+        _ => None,
+    }
+}
+/// The exclusion reason of an entry that couldn't be read.
+fn unreadable(io: Option<&std::io::Error>, error: &dyn std::fmt::Display) -> String {
+    match io.map(std::io::Error::kind) {
+        Some(std::io::ErrorKind::PermissionDenied) => "unreadable: permission denied".into(),
+        Some(std::io::ErrorKind::NotFound) => "removed during the scan".into(),
+        _ => format!("unreadable: {error}"),
+    }
+}
 /// The exclusion reason of a file over [`BuildSpec::max_file_bytes`].
 pub const TOO_LARGE_TO_READ: &str = "too large (over max_file_bytes)";
 /// The exclusion reason of a file left out under
@@ -206,7 +234,21 @@ pub fn scan(spec: &BuildSpec) -> Result<Manifest> {
     let mut excluded = vec![];
     let mut directories = vec![];
     for entry in walker {
-        let entry = entry.map_err(|e| invalid(format!("source enumeration: {e}")))?;
+        // An entry the walk can't read (a directory without permission, a
+        // file that vanished, an ignore file with invalid rules) is reported
+        // and the scan continues.
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                excluded.push(Exclusion {
+                    path: walk_error_path(&error)
+                        .map(|path| relative_path(path, &root))
+                        .unwrap_or_default(),
+                    reason: unreadable(error.io_error(), &error),
+                });
+                continue;
+            }
+        };
         if entry.file_type().is_some_and(|t| t.is_dir()) {
             if let Ok(relative) = entry.path().strip_prefix(&root) {
                 directories.push(
@@ -217,14 +259,11 @@ pub fn scan(spec: &BuildSpec) -> Result<Manifest> {
             }
             continue;
         }
-        let relative = entry
+        let path = relative_path(entry.path(), &root);
+        let valid_name = entry
             .path()
             .strip_prefix(&root)
-            .map_err(|_| invalid("source outside root"))?;
-        let path = relative
-            .to_str()
-            .ok_or_else(|| invalid("non-UTF-8 source path is unsupported"))?
-            .replace(std::path::MAIN_SEPARATOR, "/");
+            .is_ok_and(|relative| relative.to_str().is_some());
         let reason = if entry.file_type().is_some_and(|t| t.is_symlink()) {
             Some("symlink")
         } else if excludes.iter().any(|p| p.matches(&path)) {
@@ -238,6 +277,8 @@ pub fn scan(spec: &BuildSpec) -> Result<Manifest> {
             .is_ok_and(|metadata| metadata.len() > spec.max_file_bytes)
         {
             Some(TOO_LARGE_TO_READ)
+        } else if !valid_name {
+            Some("path is not valid UTF-8")
         } else {
             None
         };
@@ -248,7 +289,16 @@ pub fn scan(spec: &BuildSpec) -> Result<Manifest> {
             });
             continue;
         }
-        let bytes = std::fs::read(entry.path())?;
+        let bytes = match std::fs::read(entry.path()) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                excluded.push(Exclusion {
+                    path,
+                    reason: unreadable(Some(&error), &error),
+                });
+                continue;
+            }
+        };
         match Snapshot::new(&path, &bytes) {
             Ok(file) => files.push(file),
             Err(error) => excluded.push(Exclusion {

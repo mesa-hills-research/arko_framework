@@ -85,10 +85,14 @@ indexed when its name is `Dockerfile`, `Makefile`, `CMakeLists.txt`, `Justfile`,
 
 Files larger than `BuildSpec::max_file_bytes` (default 16 MiB, `DEFAULT_MAX_FILE_BYTES`)
 are skipped without being read, with the reason "too large (over max_file_bytes)". Files
-that are not valid UTF-8 or that contain NUL bytes are skipped; a path that is not
-valid UTF-8 stops the scan with an error. `source::scan` reports symbolic links and
-skipped files with a reason in `Manifest::excluded`, and each job's `snapshot` event
-counts them; skipped directories are not reported. The spec is saved with the index, so
+that are not valid UTF-8 or that contain NUL bytes are skipped. An entry the scan can't
+read does not stop it: a directory or file without read permission ("unreadable:
+permission denied"), a file removed while the scan runs ("removed during the scan"), an
+ignore file with invalid rules, and a file whose path is not valid UTF-8 ("path is not
+valid UTF-8", reported with the invalid bytes replaced) are skipped with that reason.
+`source::scan` reports symbolic links and skipped files with a reason in
+`Manifest::excluded`, and each job's `snapshot` event counts them; directories skipped by
+name or by ignore rules are not reported. The spec is saved with the index, so
 updates and the watcher scan with the same settings.
 
 ## Chunking and validation
@@ -301,7 +305,8 @@ active generation and the `ready` phase are committed in one transaction. Search
 active generation, and an update that fails, pauses or is cancelled leaves the previous
 one in place. `IndexInfo::generation` names the active generation, and
 `SearchPage::fresh_at_publication` tells whether the source still matched the snapshot
-when the generation was published.
+when the generation was published; it is false when that rescan failed, which doesn't
+stop the publication.
 
 `start_update(index)` rescans the source with the saved spec and reuses earlier work:
 
