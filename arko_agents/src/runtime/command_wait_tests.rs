@@ -247,3 +247,20 @@ async fn a_wait_the_host_is_deciding_is_not_timed() {
     );
     std::fs::remove_dir_all(workspace).unwrap();
 }
+
+/// A saved task holding a zero timeout (which ended every wait at once,
+/// before validation rejected it) still loads; running it fails at start
+/// with the validation error, until the value is changed.
+#[tokio::test(start_paused = true)]
+async fn a_saved_task_with_a_zero_timeout_loads_but_does_not_start() {
+    let (mut agent, _events, _commands, workspace) = waiting_for_recovery(false);
+    let mut saved = serde_json::to_value(&agent.task).unwrap();
+    saved["agent_config"]["user_command_timeout_seconds"] = serde_json::json!(0);
+    agent.task = serde_json::from_value(saved).unwrap();
+    let error = agent.run().await.unwrap_err().to_string();
+    assert!(
+        error.contains("user_command_timeout_seconds must be at least 1"),
+        "{error}"
+    );
+    std::fs::remove_dir_all(workspace).unwrap();
+}

@@ -931,7 +931,9 @@ pub enum ReminderInjectionFrequency {
     InitialTaskPromptOnly,
     /// Inject the reminder into every user message.
     EveryUserMessage,
-    /// Inject the reminder every N user messages after the initial task prompt.
+    /// Inject the reminder into the initial task prompt and every Nth user
+    /// message after it. N is at least 1 ([`AgentConfig::validate`]); to
+    /// turn the reminder off, leave [`AgentConfig::user_reminder`] unset.
     EveryNUserMessages(usize),
 }
 
@@ -1003,7 +1005,8 @@ pub struct AgentConfig {
     /// Opt-in (default `None`, no limit): a task awaiting a command (an
     /// approval, an answer, or error recovery) that has no decision this
     /// many seconds after the wait started is returned `Interrupted`, and
-    /// calls awaiting approval get a result saying so. The deadline is set
+    /// calls awaiting approval get a result saying so. At least 1
+    /// ([`validate`](Self::validate)). The deadline is set
     /// once per wait: `InjectContext` and commands the wait ignores don't
     /// move it, and a decision ends the wait (the next wait gets its own).
     /// A wait the host says it is deciding
@@ -1177,14 +1180,30 @@ impl AgentConfig {
         self.tool_config.tool_calling_mode == ToolCallingMode::Native
     }
 
-    /// Checks the settings the builder checks: retry timing, monitors, and
-    /// a refusal fallback on the configured model's provider. The runtime
-    /// checks them again when a task starts, since configs can be built or
-    /// loaded without the builder.
+    /// Checks the settings the builder checks: retry timing, monitors, a
+    /// command timeout and reminder frequency of at least 1, and a refusal
+    /// fallback on the configured model's provider. The runtime checks them
+    /// again when a task starts, since configs can be built or loaded
+    /// without the builder (a saved task holding a rejected value loads,
+    /// and running it fails with this error until the value is changed).
     pub fn validate(&self) -> Result<(), ArkoAgentsError> {
         self.llm_retry_config.validate()?;
         self.monitoring.validate()?;
         self.tool_config.validate()?;
+        if self.user_command_timeout_seconds == Some(0) {
+            return Err(ArkoAgentsError::BuilderError {
+                struct_name: "AgentConfig".into(),
+                message: "user_command_timeout_seconds must be at least 1 (a timeout of 0 ends every wait at once); leave it unset (None) to wait for commands without a limit.".into(),
+            });
+        }
+        if let Some(reminder) = &self.user_reminder
+            && reminder.frequency == ReminderInjectionFrequency::EveryNUserMessages(0)
+        {
+            return Err(ArkoAgentsError::BuilderError {
+                struct_name: "UserReminder".into(),
+                message: "EveryNUserMessages needs n of at least 1 (with 0 the reminder is never injected); to turn the reminder off, leave user_reminder unset (None).".into(),
+            });
+        }
         if let Some(fallback) = &self.refusal_fallback
             && fallback.model.provider != self.llm_config.model.provider
         {
@@ -1456,5 +1475,95 @@ mod llm_config_serde_tests {
         let loaded: AgentLLMConfig =
             serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
         assert_eq!(loaded.model.max_input_tokens, 1_050_000);
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    fn config(model: LLMModel, generation_config: LLMGenerationConfig) -> AgentConfig {
+        AgentConfig::builder(
+            "validation-test".into(),
+            "Validation test".into(),
+            AgentLLMConfig {
+                model,
+                generation_config,
+            },
+        )
+        .role_description("r".into())
+        .instructions("i".into())
+        .build()
+        .unwrap()
+    }
+
+    fn luna() -> AgentConfig {
+        config(
+            LLMModel::openai_gpt_5_6_luna(),
+            LLMGenerationConfig::default(),
+        )
+    }
+
+    /// A zero command timeout (which ended every wait at once) is rejected,
+    /// by the builder too; a saved task holding one still loads.
+    #[test]
+    fn a_zero_command_timeout_is_rejected() {
+        let mut config = luna();
+        config.user_command_timeout_seconds = Some(0);
+        let error = config.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("user_command_timeout_seconds must be at least 1")
+                && error.contains("unset (None)"),
+            "{error}"
+        );
+        config.user_command_timeout_seconds = Some(1);
+        assert!(config.validate().is_ok());
+        let built = AgentConfig::builder(
+            "x".into(),
+            "x".into(),
+            AgentLLMConfig {
+                model: LLMModel::openai_gpt_5_6_luna(),
+                generation_config: LLMGenerationConfig::default(),
+            },
+        )
+        .role_description("r".into())
+        .instructions("i".into())
+        .user_command_timeout_seconds(Some(0))
+        .build();
+        assert!(built.is_err());
+
+        let mut saved =
+            serde_json::to_value(Task::new(luna(), "Do it.".into(), ".".into(), None)).unwrap();
+        saved["agent_config"]["user_command_timeout_seconds"] = serde_json::json!(0);
+        let task: Task = serde_json::from_value(saved).unwrap();
+        assert_eq!(task.agent_config.user_command_timeout_seconds, Some(0));
+        assert!(task.agent_config.validate().is_err());
+    }
+
+    /// A reminder every zero messages (which was never injected, not even
+    /// into the task prompt) is rejected, pointing at unsetting the
+    /// reminder; a saved task holding one still loads.
+    #[test]
+    fn a_reminder_every_zero_messages_is_rejected() {
+        let mut config = luna();
+        config.user_reminder = Some(UserReminder::every_n_messages("Mind the tests.".into(), 0));
+        let error = config.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("EveryNUserMessages needs n of at least 1")
+                && error.contains("leave user_reminder unset"),
+            "{error}"
+        );
+        config.user_reminder = Some(UserReminder::every_n_messages("Mind the tests.".into(), 1));
+        assert!(config.validate().is_ok());
+
+        let mut saved =
+            serde_json::to_value(Task::new(luna(), "Do it.".into(), ".".into(), None)).unwrap();
+        saved["agent_config"]["user_reminder"] = serde_json::json!({"content": "Mind the tests.", "frequency": {"EveryNUserMessages": 0}});
+        let task: Task = serde_json::from_value(saved).unwrap();
+        assert_eq!(
+            task.agent_config.user_reminder.as_ref().unwrap().frequency,
+            ReminderInjectionFrequency::EveryNUserMessages(0)
+        );
+        assert!(task.agent_config.validate().is_err());
     }
 }

@@ -157,8 +157,8 @@ runtime validates them again when a task starts. The quick start's agent as JSON
 | `environment_details_config` | Nothing included | Working directory, file tree, date and time, and operating system, each placed in the system prompt, the task prompt, or every user message. |
 | `error_recovery_config` | `InformAgentAndContinue` | What a failed tool execution does. |
 | `llm_error_policy`, `llm_retry_config` | 10 attempts over up to 5 minutes, then pause | What a failed model request does; see [Model-call recovery](#model-call-recovery). |
-| `user_command_timeout_seconds` | None (waits indefinitely) | Opt-in: how long an awaiting task waits for a decision before it is returned `Interrupted`, counted from when the wait starts: `InjectContext` and commands the wait ignores don't restart it, and a wait the host is deciding (`HostDeciding`) isn't timed. |
-| `user_reminder` | None | Text appended as `# Reminder` to the task prompt, every user message, or every Nth message. |
+| `user_command_timeout_seconds` | None (waits indefinitely) | Opt-in: how long an awaiting task waits for a decision before it is returned `Interrupted`, counted from when the wait starts: `InjectContext` and commands the wait ignores don't restart it, and a wait the host is deciding (`HostDeciding`) isn't timed. At least 1. |
+| `user_reminder` | None | Text appended as `# Reminder` to the task prompt, every user message, or every Nth message (N at least 1). |
 | `skills_config` | None | Skill sources; see [Skills](#skills). |
 | `monitoring` | Nothing monitored | Plan-usage and prompt-cache monitors; see [Monitoring](#monitoring). |
 | `refusal_fallback` | None | A model that answers a refused turn once; see [Refusals](#refusals). |

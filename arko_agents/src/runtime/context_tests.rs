@@ -786,3 +786,20 @@ async fn a_context_update_after_a_continuation_prompt_carries_the_details() {
         .expect("the update was added");
     assert!(update.contains("Build:\ngreen"), "{update}");
 }
+
+/// A saved task holding a reminder every zero messages (never injected,
+/// before validation rejected it) still loads; running it fails at start
+/// with the validation error, until the reminder is changed or unset.
+#[tokio::test(start_paused = true)]
+async fn a_saved_task_with_a_reminder_every_zero_messages_does_not_start() {
+    let (mut agent, _events, _commands) = harness(ToolCallingMode::Native);
+    let mut saved = serde_json::to_value(&agent.task).unwrap();
+    saved["agent_config"]["user_reminder"] =
+        serde_json::json!({"content": "Stay in scope.", "frequency": {"EveryNUserMessages": 0}});
+    agent.task = serde_json::from_value(saved).unwrap();
+    let error = agent.run().await.unwrap_err().to_string();
+    assert!(
+        error.contains("EveryNUserMessages needs n of at least 1"),
+        "{error}"
+    );
+}
