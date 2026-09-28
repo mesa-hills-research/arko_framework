@@ -27,7 +27,7 @@ async fn main() -> Result<(), arko_ai::Error> {
     // Configures every provider whose credentials are in the environment.
     let client = LLMClient::from_env()?;
     let mut conversation = client
-        .new_conversation(Model::anthropic_claude_sonnet_5())
+        .new_conversation(Model::anthropic_claude_opus_5_5())
         .with_system_message("Answer in one short paragraph.");
     conversation.add_user_message("What does a borrow checker do?");
 
@@ -101,7 +101,7 @@ before they are sent.
 and prices. The registry covers the OpenAI, Anthropic, and Google models arko_ai
 supports: `Model::list(provider)`, `Model::all()`, `Model::find(id)`, and
 `Model::get(provider, id)` look models up, and constructors such as
-`Model::anthropic_claude_sonnet_5()` or `Model::openai_gpt_6_sol()` name them directly.
+`Model::anthropic_claude_opus_5_5()` or `Model::openai_gpt_6_sol()` name them directly.
 The example CLI lists the registered IDs and the aliases it accepts:
 
 ```bash
@@ -626,7 +626,7 @@ compatibility APIs.
 use arko_ai::{GenerationConfig, LLMClient, Model, ReasoningConfig, ReasoningEffort};
 
 let client = LLMClient::from_env()?; // reads OPENROUTER_API_KEY among others
-let mut conversation = client.new_conversation(Model::openrouter("anthropic/claude-sonnet-5"));
+let mut conversation = client.new_conversation(Model::openrouter("anthropic/claude-opus-5.5"));
 conversation.add_user_message("Hello");
 let config = GenerationConfig::default()
     .with_max_tokens(4096)
@@ -640,7 +640,7 @@ hostname, proxy or test server.
 
 ### Models and the catalog
 
-`Model::openrouter(slug)` accepts any slug (`anthropic/claude-sonnet-5`,
+`Model::openrouter(slug)` accepts any slug (`anthropic/claude-opus-5.5`,
 `openrouter/auto`, `~anthropic/claude-sonnet-latest`, `openai/gpt-6-luna:floor`,
 `@preset/name`) without a network call. Such a model has unknown limits (0) and prices
 (0: costs come from OpenRouter's reported `usage.cost`), and requests pass through
@@ -895,10 +895,14 @@ file). `--codex-auth` takes the OpenAI credentials from the Codex `auth.json` in
 
 ```bash
 cargo run -p arko_ai --example llm_client_cli -- --help
-cargo run -p arko_ai --example llm_client_cli -- text -m claude-sonnet-5 -p "Hello"
+cargo run -p arko_ai --example llm_client_cli -- text -m claude-opus-5-5 -p "Hello"
 cargo run -p arko_ai --example llm_client_cli -- text -m gpt-6-astra -p "Hello" --codex-auth
-cargo run -p arko_ai --example llm_client_cli -- chat -m anthropic/claude-sonnet-5 --reasoning-level high
+cargo run -p arko_ai --example llm_client_cli -- chat -m anthropic/claude-opus-5.5 --reasoning-level high
 ```
+
+`--reasoning` turns reasoning on at the model's defaults: no effort or level is sent, and
+Claude models that need a manual thinking budget get 16,000 tokens (at most half of
+`--max-tokens`). `--reasoning-level` and `--reasoning-effort` set one explicitly.
 
 `embeddings_demo` requests Voyage embeddings with `VOYAGE_API_KEY`, and
 `oauth_cache_probe` measures prompt-cache hits on the ChatGPT OAuth path with the

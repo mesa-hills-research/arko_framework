@@ -43,6 +43,8 @@ tempfile.workspace = true
 
 [[example]]
 name = "llm_client_cli"
+# Its unit tests run with `cargo test`.
+test = true
 
 [[example]]
 name = "embeddings_demo"

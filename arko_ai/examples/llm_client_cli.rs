@@ -13,7 +13,8 @@
 //! cargo run -p arko_ai --example llm_client_cli -- models
 //! cargo run -p arko_ai --example llm_client_cli -- text -m gpt-5.5 -p "Hello"
 //! cargo run -p arko_ai --example llm_client_cli -- text -m gpt-6-astra -p "Hello" --codex-auth
-//! cargo run -p arko_ai --example llm_client_cli -- chat -m anthropic/claude-sonnet-5 --reasoning-level high
+//! cargo run -p arko_ai --example llm_client_cli -- text -m claude-opus-5-5 -p "Hello" --reasoning
+//! cargo run -p arko_ai --example llm_client_cli -- chat -m anthropic/claude-opus-5.5 --reasoning-level high
 //! ```
 //!
 //! A model is a registered id (see `models`), an alias of one, or an
@@ -25,6 +26,7 @@ use arko_ai::{
     AnthropicReasoningEffort, CodexAuthFile, Content, Error, GeminiThinkingLevel, GenerationConfig,
     GenerationResponse, Image, LLMClient, Model, OpenAIReasoningMode, OpenRouterReasoning,
     Provider, ReasoningArtifact, ReasoningConfig, ReasoningEffort, StreamEvent, UsageInfo,
+    model::ModelType,
     reasoning::{AnthropicReasoningFragment, OpenAIEffort},
 };
 use clap::{Args, Parser, Subcommand};
@@ -93,7 +95,7 @@ enum Commands {
 #[derive(Args)]
 struct GenerationArgs {
     /// A registered model id or alias (see `models`), or an OpenRouter slug
-    /// such as anthropic/claude-sonnet-5, openrouter/auto or @preset/name
+    /// such as anthropic/claude-opus-5.5, openrouter/auto or @preset/name
     #[arg(short, long)]
     model: String,
 
@@ -109,8 +111,11 @@ struct GenerationArgs {
     #[arg(short = 'n', long)]
     max_tokens: Option<usize>,
 
-    /// Enable reasoning with the model's defaults (implied by the other
-    /// reasoning options)
+    /// Turn reasoning on at the model's defaults: no effort or level is
+    /// sent, so OpenAI, OpenRouter and Claude adaptive thinking use the
+    /// model's default effort and Gemini thinks at its default level; Claude
+    /// models that need a manual thinking budget get 16,000 tokens (at most
+    /// half of --max-tokens). Implied by the other reasoning options
     #[arg(short, long)]
     reasoning: bool,
 
@@ -541,20 +546,27 @@ fn build_config(model: &Model, args: &GenerationArgs) -> Result<GenerationConfig
         || args.reasoning_level.is_some()
         || args.reasoning_effort.is_some()
         || (mode.is_some() && model.provider == Provider::OpenRouter);
-    if reasoning {
-        config = config.with_reasoning(reasoning_config(model, args, mode)?);
+    if reasoning && let Some(reasoning) = reasoning_config(model, args, mode)? {
+        config = config.with_reasoning(reasoning);
     }
     Ok(config)
 }
 
-/// The reasoning configuration the flags ask for. Unset options keep the
-/// model's defaults where the provider has them; OpenAI and OpenRouter
-/// default to a medium effort so reasoning summaries are requested.
+/// The thinking budget `--reasoning` gives Claude models that need a manual
+/// one: 16,000 tokens, at most half of the output limit so the answer has
+/// room, and at least the API's minimum of 1,024.
+fn default_claude_budget(model: &Model, max_tokens: Option<usize>) -> usize {
+    let limit = max_tokens.unwrap_or(model.max_output_tokens);
+    (limit / 2).clamp(1024, 16_000)
+}
+
+/// The reasoning configuration the flags ask for, or `None` where the
+/// model's defaults need none: unset options keep the model's defaults.
 fn reasoning_config(
     model: &Model,
     args: &GenerationArgs,
     mode: Option<OpenAIReasoningMode>,
-) -> Result<ReasoningConfig, Error> {
+) -> Result<Option<ReasoningConfig>, Error> {
     let level = args.reasoning_level.as_deref();
     let effort = args.reasoning_effort.as_deref();
     // Outside a Claude token budget, the two flags name the same setting.
@@ -564,9 +576,17 @@ fn reasoning_config(
         ))),
         (level, effort) => Ok(level.or(effort)),
     };
-    Ok(match model.provider {
+    Ok(Some(match model.provider {
         Provider::OpenAI => {
-            let effort = match setting()?.unwrap_or("medium") {
+            let Some(effort) = setting()? else {
+                // Reasoning models reason at their default effort without a
+                // configuration; others can't reason.
+                if model.model_type != ModelType::Reasoning {
+                    return Err(invalid(format!("{} is not a reasoning model.", model.id)));
+                }
+                return Ok(None);
+            };
+            let effort = match effort {
                 "none" => OpenAIEffort::None,
                 "minimal" => OpenAIEffort::Minimal,
                 "low" => OpenAIEffort::Low,
@@ -593,11 +613,12 @@ fn reasoning_config(
                 }
             } else {
                 let effort = setting()?.map(anthropic_effort).transpose()?;
+                let budget = default_claude_budget(model, args.max_tokens);
                 match (model.supports_anthropic_adaptive_thinking(), effort) {
                     (true, Some(effort)) => ReasoningConfig::anthropic_adaptive_with_effort(effort),
                     (true, None) => ReasoningConfig::anthropic_adaptive(),
-                    (false, Some(effort)) => ReasoningConfig::anthropic_with_effort(1024, effort),
-                    (false, None) => ReasoningConfig::anthropic(1024),
+                    (false, Some(effort)) => ReasoningConfig::anthropic_with_effort(budget, effort),
+                    (false, None) => ReasoningConfig::anthropic(budget),
                 }
             }
         }
@@ -626,7 +647,9 @@ fn reasoning_config(
             // An effort name, or a number as a reasoning token budget.
             let mut reasoning = match setting()? {
                 None if !args.reasoning => OpenRouterReasoning::default(),
-                None | Some("medium") => OpenRouterReasoning::effort(ReasoningEffort::Medium),
+                // On, at the model's default effort.
+                None => OpenRouterReasoning::enabled(),
+                Some("medium") => OpenRouterReasoning::effort(ReasoningEffort::Medium),
                 Some("none") => OpenRouterReasoning::effort(ReasoningEffort::None),
                 Some("minimal") => OpenRouterReasoning::effort(ReasoningEffort::Minimal),
                 Some("low") => OpenRouterReasoning::effort(ReasoningEffort::Low),
@@ -644,7 +667,7 @@ fn reasoning_config(
             }
             ReasoningConfig::openrouter(reasoning)
         }
-    })
+    }))
 }
 
 fn anthropic_effort(name: &str) -> Result<AnthropicReasoningEffort, Error> {
@@ -848,5 +871,74 @@ fn print_usage_info(
         if accumulated_estimate > 0.0 && accumulated_estimate != accumulated_billed {
             println!("  Accumulated Estimate: ${:<10.6}", accumulated_estimate);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(args: &[&str]) -> Result<GenerationConfig, Error> {
+        let cli = Cli::try_parse_from(
+            ["llm_client_cli", "text", "-p", "hi"]
+                .into_iter()
+                .chain(args.iter().copied()),
+        )
+        .unwrap();
+        let Commands::Text { generation, .. } = cli.command else {
+            unreachable!()
+        };
+        build_config(&get_model(&generation.model)?, &generation)
+    }
+
+    fn reasoning(args: &[&str]) -> Option<ReasoningConfig> {
+        config(args).unwrap().reasoning
+    }
+
+    /// `--reasoning` sends no effort or level: each model's default applies.
+    #[test]
+    fn reasoning_alone_uses_the_model_defaults() {
+        assert!(reasoning(&["-m", "gpt-6-astra", "--reasoning"]).is_none());
+        assert!(config(&["-m", "gpt-4.1", "--reasoning"]).is_err());
+        assert!(matches!(
+            reasoning(&["-m", "claude-opus-5-5", "--reasoning"]),
+            Some(ReasoningConfig::AnthropicAdaptive { effort: None })
+        ));
+        assert!(matches!(
+            reasoning(&["-m", "gemini-3.5-flash", "--reasoning"]),
+            Some(ReasoningConfig::Google {
+                thinking_budget: -1,
+                ..
+            })
+        ));
+        match reasoning(&["-m", "anthropic/claude-opus-5.5", "--reasoning"]) {
+            Some(ReasoningConfig::OpenRouter(reasoning)) => {
+                assert_eq!(reasoning.enabled, Some(true));
+                assert!(reasoning.effort.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+        // A level still sets one.
+        assert!(matches!(
+            reasoning(&["-m", "gpt-6-astra", "--reasoning-level", "high"]),
+            Some(ReasoningConfig::OpenAI {
+                effort: OpenAIEffort::High,
+                ..
+            })
+        ));
+    }
+
+    /// Claude models on manual thinking need a budget: 16,000 tokens, at most
+    /// half the output limit, at least 1,024.
+    #[test]
+    fn manual_thinking_claude_models_get_a_useful_budget() {
+        let budget = |args: &[&str]| match reasoning(args) {
+            Some(ReasoningConfig::Anthropic { budget_tokens, .. }) => budget_tokens,
+            other => panic!("{other:?}"),
+        };
+        let model = ["-m", "claude-haiku-4-5", "--reasoning"];
+        assert_eq!(budget(&model), 16_000);
+        assert_eq!(budget(&[&model[..], &["-n", "8000"]].concat()), 4_000);
+        assert_eq!(budget(&[&model[..], &["-n", "1500"]].concat()), 1_024);
     }
 }
