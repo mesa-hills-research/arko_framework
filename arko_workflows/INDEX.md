@@ -130,6 +130,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 - a completion verifier without a target (`completion verifier '<name>' has no target`), or a distiller without a target agent or a target tool;
 - two memory tiers with the same name;
 - a fixed `wait_for_message` limit of zero or more than 24 hours, for the workflow or an agent;
+- `max_parallel_agents(0)`;
 - a distiller whose `max_output_tokens` is zero or whose `reasoning` configuration is for a different provider than its model;
 - `resume_from` without `persistence`, a checkpoint for a different workflow name, or a checkpoint run ID that differs from the persistence directory's.
 
