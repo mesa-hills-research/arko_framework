@@ -2189,6 +2189,14 @@ impl AgentLoop {
                                 self.task.usage_history.push(generation_response.usage.clone());
                                 self.emit_event(AgentEvent::UsageReported(generation_response.usage.clone())).await?;
                                 self.record_and_emit_model_call_usage(generation_response.model_call_usage.clone()).await?;
+                                if generation_response.stop_reason == ai::StopReason::MaxTokens {
+                                    let usage = &generation_response.model_call_usage;
+                                    log::warn!("Task {}: the response of {} ended at its output-token limit.", self.task.id, usage.model);
+                                    self.emit_event(AgentEvent::OutputTokenLimitReached {
+                                        model: usage.served_model.clone().unwrap_or_else(|| usage.model.clone()),
+                                        output_tokens: generation_response.usage.output_tokens,
+                                    }).await?;
+                                }
                                 // A refused turn is reported, never retried
                                 // unchanged, and never treated as a turn that
                                 // failed to call a tool.

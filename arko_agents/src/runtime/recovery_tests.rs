@@ -290,3 +290,46 @@ fn a_resumed_task_takes_current_model_data_from_the_registry() {
         current.max_input_tokens
     );
 }
+
+/// A response that ends at the output-token limit is reported, so a host
+/// can tell the user; the turn is then handled as usual.
+#[tokio::test(start_paused = true)]
+async fn a_response_cut_at_the_output_limit_is_reported() {
+    let (mut agent, mut events, _commands) = harness();
+    agent
+        .task
+        .agent_config
+        .tool_config
+        .default_auto_approve_tool_use = true;
+    let cut = ai::StreamEvent::End(Box::new(ai::GenerationResponse {
+        message: ai::Message::new_assistant("Here is the first half of the fi"),
+        usage: ai::UsageInfo::new(0, 128_000),
+        model_call_usage: ai::ModelCallUsage::new(
+            "cut".into(),
+            "test".into(),
+            "test".into(),
+            0,
+            128_000,
+            1000,
+        ),
+        stop_reason: ai::StopReason::MaxTokens,
+        refusal: None,
+        openai_turn_state: None,
+    }));
+    let scripted = agent.scripted_responses.get_mut().unwrap();
+    scripted.push_back(Ok(futures::stream::iter([Ok(cut)]).boxed()));
+    scripted.push_back(Ok(futures::stream::iter([Ok(complete_response())]).boxed()));
+    let task = timeout(Duration::from_secs(60), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let reported: Vec<_> = events_of(&mut events)
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::OutputTokenLimitReached { output_tokens, .. } => Some(output_tokens),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reported, [128_000]);
+}

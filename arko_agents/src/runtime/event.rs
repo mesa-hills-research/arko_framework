@@ -181,6 +181,20 @@ pub enum AgentEvent {
         threshold: f64,
         pausing: bool,
     },
+    /// A model response ended at its output-token limit
+    /// ([`arko_ai::StopReason::MaxTokens`]): its text may be cut short, and a
+    /// tool call still being written when the limit was reached was dropped.
+    /// Emitted after the call's usage events; the response is then handled
+    /// as usual (a turn without a tool call gets the runtime's note). A host
+    /// can tell the user, who can ask the agent to continue. `max_tokens` in
+    /// the model's generation settings raises the limit where the model
+    /// allows.
+    OutputTokenLimitReached {
+        /// The model that answered, as the provider reported it.
+        model: String,
+        /// Output tokens the response used, as the provider reported them.
+        output_tokens: usize,
+    },
     /// A plan usage limit was reached (ChatGPT `usage_limit_reached`, or a
     /// rate limit whose reset is further off than
     /// [`LLMRateLimitRetryConfig::max_wait_ms`](crate::agent_config::LLMRateLimitRetryConfig::max_wait_ms)).
