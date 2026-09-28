@@ -29,6 +29,8 @@ directory contains runnable programs.
 
 ## Guides
 
+- [Defaults reference](docs/defaults-reference.md): every setting's default across the
+  four crates, the opt-ins, and the behaviours to know before configuring them.
 - [Context management](docs/context-efficiency.md): versioned memory reads,
   file-tree change notices, tool-result distillation, and background shell jobs.
 - [Interactive terminals](docs/interactive-terminals.md): PTY and pipe terminal

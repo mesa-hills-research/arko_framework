@@ -8,7 +8,9 @@ persistence, and your code decides which agents run and in what order. There is 
 graph or pipeline definition to write.
 
 The [API index](INDEX.md) lists every public type, signature, default, and
-agent-tool contract.
+agent-tool contract; the
+[defaults reference](../docs/defaults-reference.md#arko_workflows) summarizes the
+defaults of all four crates.
 
 ## Installation
 

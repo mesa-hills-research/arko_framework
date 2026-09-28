@@ -7,6 +7,9 @@ streams `AgentEvent`s, and accepts `UserCommand`s for approvals, answers, error 
 context updates, cancellation, and suspension. [arko_workflows](../arko_workflows/README.md)
 builds multi-agent orchestration on this crate.
 
+The [defaults reference](../docs/defaults-reference.md#arko_agents) lists every setting's
+default.
+
 ## Installation
 
 ```toml

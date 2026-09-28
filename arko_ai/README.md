@@ -6,6 +6,9 @@ Google Gemini, and [OpenRouter](#openrouter), and for Voyage text embeddings. On
 response: text and reasoning, tool calls, stop reasons and refusals, token usage, and
 cost.
 
+The [defaults reference](../docs/defaults-reference.md#arko_ai) lists every setting's
+default.
+
 ## Installation
 
 ```toml
