@@ -575,10 +575,18 @@ impl OpenRouterClient {
             None => matches!(vendor(slug), Some("anthropic" | "openai")),
         };
         // With caching off, OpenAI models that bill cache writes (GPT-5.6 and
-        // later, known from the catalog) still write cache entries unless
-        // explicit mode leaves the request without breakpoints.
+        // later) still write cache entries unless explicit mode leaves the
+        // request without breakpoints. The catalog says which models bill
+        // writes; without one, the registry's model of the same id does.
+        let takes_cache_options = match info {
+            Some(_) => paid_cache_writes,
+            None => base_slug(slug)
+                .strip_prefix("openai/")
+                .and_then(|id| Model::get(Provider::OpenAI, id).ok())
+                .is_some_and(|model| model.supports_openai_prompt_cache_options()),
+        };
         let prompt_cache_options =
-            (!caching && info.is_some() && vendor(slug) == Some("openai") && paid_cache_writes)
+            (!caching && vendor(slug) == Some("openai") && takes_cache_options)
                 .then(|| json!({"mode": "explicit"}));
 
         let provider =

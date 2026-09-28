@@ -242,12 +242,17 @@ fn session_id_is_always_sent_and_caching_adds_the_cache_key_and_claude_cache_con
     )
     .unwrap();
     assert!(on.get("prompt_cache_options").is_none());
-    assert!(
-        body("openai/gpt-6-astra", &off)
-            .get("prompt_cache_options")
-            .is_none(),
-        "unknown without a catalog"
+    // Without a catalog, the registry's model of the same id decides.
+    assert_eq!(
+        body("openai/gpt-6-astra", &off)["prompt_cache_options"],
+        json!({"mode": "explicit"})
     );
+    for automatic in ["openai/gpt-4.1", "openai/gpt-future"] {
+        assert!(
+            body(automatic, &off).get("prompt_cache_options").is_none(),
+            "{automatic}"
+        );
+    }
     let (claude_off, _) = prepare(&catalog, &conversation(CLAUDE), &off).unwrap();
     assert!(claude_off.get("prompt_cache_options").is_none());
 

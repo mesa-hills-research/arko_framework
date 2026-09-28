@@ -151,6 +151,22 @@ the request can turn it off (Anthropic, Claude on OpenRouter, GPT-5.6 and later 
 API key): `Disabled`. The `prompt_cache` module has the constants and the providers'
 documentation links.
 
+`with_prompt_caching(false)`, or `Conversation::with_cache_disabled()`, turns caching off
+where the provider has a switch. Where caching is implicit it stays on:
+
+| Provider | Caching | With caching turned off |
+| --- | --- | --- |
+| Anthropic, and Claude on OpenRouter | only through the `cache_control` arko sends while caching is on | nothing is cached |
+| OpenAI GPT-5.6 and GPT-6, API key | `prompt_cache_options.mode: "implicit"` | `"explicit"` with no breakpoints: nothing is cached |
+| OpenAI before GPT-5.6, API key | automatic | still cached; it can't be turned off |
+| ChatGPT OAuth, every model | implicit, managed by the backend | still cached; ignored, with a warning logged once |
+| Gemini | implicit, managed by Google | still cached; it can't be turned off |
+| OpenRouter, other models | `prompt_cache_key` sent | no key is sent; OpenAI GPT-5.6 and later get explicit mode as above, other upstreams keep caching implicitly |
+
+Every OpenAI request carries the conversation's `prompt_cache_key` either way, and every
+OpenRouter request its `session_id`; the key routes requests but doesn't turn caching on
+by itself.
+
 Native tool calls use JSON Schema definitions (built here with `serde_json`), continuing
 the quick start's conversation:
 
@@ -274,7 +290,11 @@ function calls, then the text.
 the conversation's identity, like Codex: `session-id`, `thread-id` and
 `x-client-request-id`, all set to the conversation's `prompt_cache_key`. The backend
 derives prompt-cache affinity from `session-id`, so give each agent its own conversation.
-No `OpenAI-Beta` header is sent on either path.
+No `OpenAI-Beta` header is sent on either path. The backend rejects `max_output_tokens`
+("Unsupported parameter"), so `GenerationConfig::max_tokens` is never sent over ChatGPT
+OAuth and the model's own output limit applies; a set limit is ignored with a warning
+logged once. The backend also caches implicitly and takes no cache options, so turning
+prompt caching off has no effect there (also warned about once).
 
 **Turn state.** The backend returns an `x-codex-turn-state` routing token.
 `GenerationResponse::openai_turn_state` carries it, and
@@ -628,7 +648,7 @@ defaults. In particular no attribution or metadata headers are sent by default.
 | `session_id` | always: `Conversation::prompt_cache_key` (at most 256 characters) | sticky routing keyed on the opening messages |
 | `prompt_cache_key` | prompt caching is enabled | |
 | `cache_control` (top level, `ttl` from `anthropic_cache_ttl`) | caching is enabled and the model is `anthropic/…` (Claude is cached only on request) | |
-| `prompt_cache_options: {mode: "explicit"}` | caching is disabled on an OpenAI model the catalog shows billing cache writes (GPT-5.6 and later) | automatic caching |
+| `prompt_cache_options: {mode: "explicit"}` | caching is disabled on an OpenAI model that bills cache writes (GPT-5.6 and later): known from the catalog, or without one from the registry model of the same id | automatic caching |
 | `max_tokens` | `GenerationConfig::max_tokens` is set | provider default (sending it also limits routing to endpoints that allow it) |
 | `temperature` | set explicitly | provider default |
 | `reasoning` | `ReasoningConfig::OpenRouter` is set | the model's default (`reasoning.default_enabled` / `default_effort` in the catalog) |

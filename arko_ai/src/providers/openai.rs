@@ -1908,6 +1908,11 @@ impl OpenAIClient {
         super::ensure_supported_inputs(conversation)?;
         let sanitized = super::without_foreign_settings(&conversation.model, config);
         let config: &GenerationConfig = &sanitized;
+        if is_chatgpt_oauth {
+            Self::warn_oauth_ignored_settings(conversation, config);
+        }
+        // The ChatGPT backend rejects `max_output_tokens` ("Unsupported
+        // parameter"), and Codex never sends it (openai/codex#7100).
         let resolved_max_tokens = if is_chatgpt_oauth {
             None
         } else {
@@ -2340,6 +2345,25 @@ impl OpenAIClient {
             config,
             is_chatgpt_oauth,
         )?)?)
+    }
+
+    /// ChatGPT OAuth requests can't carry an output limit or turn caching off:
+    /// the backend rejects `max_output_tokens`, and caches implicitly with no
+    /// option to disable it. A set limit and caching turned off are ignored,
+    /// with a warning logged once each.
+    fn warn_oauth_ignored_settings(conversation: &Conversation, config: &GenerationConfig) {
+        if let Some(max_tokens) = config.max_tokens {
+            crate::notice::warn_once("openai-oauth:max_tokens", || {
+                format!(
+                    "arko_ai: the ChatGPT OAuth backend rejects max_output_tokens, so GenerationConfig::max_tokens ({max_tokens}) is not sent on ChatGPT OAuth requests; the model's own output limit applies."
+                )
+            });
+        }
+        if !config.prompt_caching.unwrap_or(conversation.enable_cache) {
+            crate::notice::warn_once("openai-oauth:prompt_caching", || {
+                "arko_ai: the ChatGPT OAuth backend caches prompts implicitly and can't turn caching off, so disabled prompt caching has no effect on ChatGPT OAuth requests.".to_string()
+            });
+        }
     }
 
     /// Replays a response's stored output items verbatim and in order (see
@@ -3370,6 +3394,53 @@ mod tests {
 
         assert_eq!(value["prompt_cache_key"], conversation.prompt_cache_key);
         assert!(value.get("prompt_cache_options").is_none());
+    }
+
+    /// The ChatGPT backend rejects `max_output_tokens` and caches implicitly:
+    /// an explicit limit and caching turned off are dropped, each with a
+    /// warning logged once.
+    #[test]
+    fn oauth_drops_an_output_limit_and_caching_off_with_a_warning() {
+        let client = OpenAIClient::new("test");
+        let conversation = Conversation::new(Model::openai_gpt_6_astra());
+        let config = GenerationConfig::default()
+            .with_max_tokens(16_000)
+            .with_prompt_caching(false);
+        let api =
+            serde_json::to_value(client.build_request(&conversation, &config, false).unwrap())
+                .unwrap();
+        assert_eq!(api["max_output_tokens"], 16_000);
+        assert_eq!(api["prompt_cache_options"]["mode"], "explicit");
+        assert!(!crate::notice::warned("openai-oauth:max_tokens"));
+        assert!(!crate::notice::warned("openai-oauth:prompt_caching"));
+
+        let oauth =
+            serde_json::to_value(client.build_request(&conversation, &config, true).unwrap())
+                .unwrap();
+        assert!(oauth.get("max_output_tokens").is_none(), "{oauth}");
+        assert!(oauth.get("prompt_cache_options").is_none(), "{oauth}");
+        assert!(crate::notice::warned("openai-oauth:max_tokens"));
+        assert!(crate::notice::warned("openai-oauth:prompt_caching"));
+    }
+
+    #[test]
+    fn oauth_defaults_warn_about_nothing() {
+        let client = OpenAIClient::new("test");
+        let conversation = Conversation::new(Model::openai_gpt_6_astra());
+        client
+            .build_request(&conversation, &GenerationConfig::default(), true)
+            .unwrap();
+        assert!(!crate::notice::warned("openai-oauth:max_tokens"));
+        assert!(!crate::notice::warned("openai-oauth:prompt_caching"));
+        // A conversation with caching disabled is caching turned off too.
+        client
+            .build_request(
+                &conversation.clone().with_cache_disabled(),
+                &GenerationConfig::default(),
+                true,
+            )
+            .unwrap();
+        assert!(crate::notice::warned("openai-oauth:prompt_caching"));
     }
 
     #[test]

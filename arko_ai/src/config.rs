@@ -33,6 +33,12 @@ pub struct GenerationConfig {
     /// later, Sonnet 5) drop it, with a warning logged once per model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+    /// Output token limit. `None` (the default) lets the model produce up to
+    /// its maximum: OpenAI (API key), Anthropic and Gemini requests send the
+    /// model's registered maximum, since Anthropic requires a value; OpenRouter
+    /// requests send none. ChatGPT OAuth requests never send one, because the
+    /// backend rejects `max_output_tokens`: a set limit is ignored there, with
+    /// a warning logged once.
     pub max_tokens: Option<usize>,
     pub verbosity: Option<Verbosity>,
     pub reasoning: Option<ReasoningConfig>,
@@ -50,26 +56,34 @@ pub struct GenerationConfig {
     /// rejected for models such as Claude Fable 5 where adaptive thinking is
     /// always enabled.
     pub anthropic_thinking_enabled: Option<bool>,
-    /// Controls prompt caching when the provider exposes a convenient
-    /// request-level mechanism.
+    /// Turns provider prompt caching on or off for this request. `None`
+    /// inherits [`Conversation::enable_cache`], which defaults to enabled.
     ///
-    /// `None` inherits [`Conversation::enable_cache`], which defaults to
-    /// enabled.
+    /// Caching is on by default. Turning it off takes effect where the
+    /// provider offers a switch; where caching is implicit it stays on:
     ///
-    /// For Anthropic, the resolved value controls ephemeral prompt caching.
+    /// - **Anthropic**, and Claude models on OpenRouter: caching happens only
+    ///   through the `cache_control` this client sends while caching is
+    ///   enabled, so turning it off stops caching.
+    /// - **OpenAI GPT-5.6 and GPT-6 with an API key**: enabled sends
+    ///   `prompt_cache_options.mode: "implicit"`, disabled `"explicit"` with
+    ///   no breakpoints, so nothing is read from or written to the cache.
+    /// - **OpenAI models before GPT-5.6**: caching is automatic and can't be
+    ///   turned off.
+    /// - **ChatGPT OAuth** (any model): the backend caches implicitly and
+    ///   takes no cache options; disabled caching is ignored, with a warning
+    ///   logged once.
+    /// - **Gemini**: implicit caching, managed by Google; it can't be turned
+    ///   off.
+    /// - **OpenRouter**: enabled sends `prompt_cache_key` and, on Claude
+    ///   models, a top-level `cache_control`; disabled sends neither, and on
+    ///   OpenAI models that bill cache writes (GPT-5.6 and later) also
+    ///   `prompt_cache_options.mode: "explicit"`. Other upstreams that cache
+    ///   implicitly (Gemini, earlier OpenAI models and others) keep caching.
     ///
-    /// For GPT-5.6 models, enabled selects implicit prompt caching and disabled
-    /// selects explicit-only mode without breakpoints, preventing prompt-cache
-    /// reads and writes. Older OpenAI models retain their automatic provider
-    /// behavior because they do not accept GPT-5.6 prompt-cache options.
-    ///
-    /// Gemini implicit caching remains provider-managed and cannot be disabled
-    /// through this setting.
-    ///
-    /// For OpenRouter, enabled sends `prompt_cache_key` and, on Claude models,
-    /// a top-level `cache_control`; disabled sends neither, and on OpenAI
-    /// models the catalog shows billing cache writes it also sends
-    /// `prompt_cache_options.mode: "explicit"`.
+    /// Every OpenAI request, and every OpenRouter request as `session_id`,
+    /// carries the conversation's `prompt_cache_key` either way; it routes
+    /// requests but doesn't enable caching by itself.
     ///
     /// [`Conversation::enable_cache`]: crate::conversation::Conversation::enable_cache
     pub prompt_caching: Option<bool>,

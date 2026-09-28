@@ -35,6 +35,13 @@ pub struct Conversation {
     #[serde(deserialize_with = "registry_model")]
     pub model: Model,
     pub system_message: Option<String>,
+    /// Whether requests use provider prompt caching, unless a request's
+    /// [`GenerationConfig::prompt_caching`] says otherwise. On by default
+    /// ([`with_cache_disabled`](Self::with_cache_disabled) turns it off).
+    /// Some providers cache implicitly and can't turn caching off; see
+    /// [`GenerationConfig::prompt_caching`] for each provider.
+    ///
+    /// [`GenerationConfig::prompt_caching`]: crate::config::GenerationConfig::prompt_caching
     pub enable_cache: bool,
     /// Stable request-routing key for providers with prefix prompt caches.
     ///
@@ -161,6 +168,8 @@ impl Conversation {
         self
     }
 
+    /// Turns provider prompt caching off for this conversation's requests
+    /// where the provider allows it; see [`enable_cache`](Self::enable_cache).
     pub fn with_cache_disabled(mut self) -> Self {
         self.enable_cache = false;
         self
