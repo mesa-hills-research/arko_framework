@@ -332,20 +332,16 @@ fn build_client() -> ExampleResult<LLMClient> {
         std::env::var("OPENAI_OAUTH_ACCOUNT_ID"),
     ) {
         let refresh_token = std::env::var("OPENAI_OAUTH_REFRESH_TOKEN").ok();
-        return Ok(
-            LLMClient::new().with_openai_chatgpt_oauth_rate_limit_retries(
-                &access_token,
-                refresh_token.as_deref(),
-                &account_id,
-                true,
-            ),
-        );
+        return Ok(LLMClient::new().with_openai_chatgpt_oauth(
+            &access_token,
+            refresh_token.as_deref(),
+            &account_id,
+        ));
     }
     if let Some(path) = CodexAuthFile::default_path().filter(|path| path.is_file()) {
         match CodexAuthFile::load(&path) {
             Ok(auth) => {
-                let client = auth.openai_client()?.with_oauth_rate_limit_retries(true);
-                return Ok(LLMClient::new().with_openai_client(client));
+                return Ok(LLMClient::new().with_openai_client(auth.openai_client()?));
             }
             Err(error) => eprintln!("ignoring {}: {error}", path.display()),
         }

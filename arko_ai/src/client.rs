@@ -335,9 +335,14 @@ impl LLMClient {
     /// Configures ChatGPT OAuth with an explicit OAuth rate-limit policy.
     ///
     /// When `retry_rate_limits` is true, HTTP 429 responses from the OAuth
-    /// token endpoint wait for the advertised reset when available and
-    /// otherwise use bounded exponential backoff, for up to 8 retries; see
+    /// token endpoint to an explicit
+    /// [`refresh_openai_oauth_token`](Self::refresh_openai_oauth_token) call
+    /// wait for the advertised reset when available and otherwise use
+    /// bounded exponential backoff, for up to 8 retries; see
     /// [`OpenAIClient::with_oauth_rate_limit_retries`](providers::openai::OpenAIClient::with_oauth_rate_limit_retries).
+    /// The refreshes requests make on their own, including those of the
+    /// arko_agents runtime, never wait: their 429 goes to the agent's own
+    /// rate-limit recovery.
     pub fn with_openai_chatgpt_oauth_rate_limit_retries(
         mut self,
         access_token: &str,

@@ -562,16 +562,23 @@ impl OpenAIClient {
         self
     }
 
-    /// Configures whether [`refresh_oauth_token`](Self::refresh_oauth_token)
-    /// retries HTTP 429 responses (off by default): up to 8 retries, waiting
-    /// for the advertised reset (at most 15 minutes per wait) when available
-    /// and otherwise backing off from 30 seconds to 15 minutes, before the
-    /// 429 is returned. No lock is held while waiting: other callers keep
-    /// using and refreshing the credentials, and a retry finding them
-    /// replaced returns them instead of refreshing. Refreshes made for a
-    /// request the server rejected, [`refresh_oauth_token_once`](Self::refresh_oauth_token_once)
-    /// and [`refresh_oauth_token_if_expiring`](Self::refresh_oauth_token_if_expiring)
-    /// never wait.
+    /// Configures whether an explicit
+    /// [`refresh_oauth_token`](Self::refresh_oauth_token) call retries HTTP
+    /// 429 responses (off by default): up to 8 retries, waiting for the
+    /// advertised reset (at most 15 minutes per wait) when available and
+    /// otherwise backing off from 30 seconds to 15 minutes, before the 429
+    /// is returned. No lock is held while waiting: other callers keep using
+    /// and refreshing the credentials, and a retry finding them replaced
+    /// returns them instead of refreshing.
+    ///
+    /// It affects nothing else. The refreshes requests make on their own
+    /// (after a request rejected as expired, and
+    /// [`refresh_oauth_token_if_expiring`](Self::refresh_oauth_token_if_expiring),
+    /// which the arko_agents runtime calls before each request) and
+    /// [`refresh_oauth_token_once`](Self::refresh_oauth_token_once) never
+    /// wait: a 429 from them is returned as the request's error, which an
+    /// agent's own rate-limit recovery then handles. So turning this on for
+    /// a client that only runs agents changes nothing.
     pub fn with_oauth_rate_limit_retries(mut self, enabled: bool) -> Self {
         self.retry_oauth_rate_limits = enabled;
         self

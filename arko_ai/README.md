@@ -548,7 +548,11 @@ returns those instead of refreshing again. The opt-in OAuth rate-limit retries o
 `refresh_openai_oauth_token` (`with_openai_chatgpt_oauth_rate_limit_retries`, or
 `OpenAIClient::with_oauth_rate_limit_retries`) stop after 8 retries and honor at most 15
 minutes of a server hint per wait; no lock is held while waiting, and a retry that finds
-the credentials replaced returns them.
+the credentials replaced returns them. They apply only to explicit
+`refresh_openai_oauth_token` calls: the refreshes requests make on their own (after a 401
+`token_expired`, and `refresh_openai_oauth_token_if_expiring`, which the arko_agents
+runtime calls before each request) never wait, and a 429 from them is the request's
+error, which the agent's own rate-limit recovery handles.
 
 ## Usage and cost
 
