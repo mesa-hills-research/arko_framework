@@ -177,7 +177,10 @@ impl TaskState {
 pub struct Task {
     pub id: Uuid,
     pub agent_config_id: String,
-    /// The config this task was started with.
+    /// The config this task was started with. It is saved with its tool
+    /// calling mode; a task saved without one ran output-based and keeps
+    /// that mode (see [`ToolCallingMode`](crate::agent_config::ToolCallingMode)).
+    #[serde(deserialize_with = "crate::agent_config::deserialize_task_agent_config")]
     pub agent_config: AgentConfig,
     pub initial_task_prompt: String,
     pub conversation: arko_ai::Conversation,
@@ -654,6 +657,66 @@ mod tests {
         );
         let loaded: Task = serde_json::from_str(&json.to_string()).unwrap();
         assert_eq!(loaded.pending_context_injections, ["First.", "Second."]);
+    }
+
+    /// A new configuration without a tool calling mode gets native; a saved
+    /// task records its mode, and one saved without it (by a version whose
+    /// default was output-based) keeps output-based.
+    #[test]
+    fn saved_tasks_keep_their_tool_calling_mode_and_new_configs_default_to_native() {
+        use crate::agent_config::ToolCallingMode;
+        let config = serde_json::json!({
+            "id": "a", "name": "A", "role_description": "r", "instructions": "i",
+            "llm_config": {"provider": "OpenAI", "model_id": "gpt-5.6-luna"},
+            "tool_config": {"available_tool_names": ["read_file"]}
+        });
+        let loaded: AgentConfig = serde_json::from_value(config.clone()).unwrap();
+        assert_eq!(
+            loaded.tool_config.tool_calling_mode,
+            ToolCallingMode::Native
+        );
+        let mut bare = config.clone();
+        bare.as_object_mut().unwrap().remove("tool_config");
+        let loaded: AgentConfig = serde_json::from_value(bare.clone()).unwrap();
+        assert_eq!(
+            loaded.tool_config.tool_calling_mode,
+            ToolCallingMode::Native
+        );
+        let yaml = "id: a\nname: A\nrole_description: r\ninstructions: i\nllm_config:\n  provider: OpenAI\n  model_id: gpt-5.6-luna\n";
+        let loaded: AgentConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            loaded.tool_config.tool_calling_mode,
+            ToolCallingMode::Native
+        );
+
+        let task = Task::new(loaded, "prompt".into(), PathBuf::from("/workspace"), None);
+        let mut saved = serde_json::to_value(&task).unwrap();
+        assert_eq!(
+            saved["agent_config"]["tool_config"]["tool_calling_mode"],
+            "Native"
+        );
+        assert_eq!(
+            serde_json::from_value::<Task>(saved.clone())
+                .unwrap()
+                .agent_config
+                .tool_config
+                .tool_calling_mode,
+            ToolCallingMode::Native
+        );
+        for old_config in [config, bare] {
+            saved["agent_config"] = old_config;
+            let old: Task = serde_json::from_value(saved.clone()).unwrap();
+            assert_eq!(
+                old.agent_config.tool_config.tool_calling_mode,
+                ToolCallingMode::OutputBased
+            );
+        }
+        // Loading a task doesn't change what a configuration loaded next gets.
+        let after: AgentConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(after.tool_config.tool_calling_mode, ToolCallingMode::Native);
+        assert!(serde_json::from_value::<Task>(serde_json::json!({"agent_config": {}})).is_err());
+        let after: AgentConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(after.tool_config.tool_calling_mode, ToolCallingMode::Native);
     }
 
     #[test]

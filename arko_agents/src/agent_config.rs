@@ -167,30 +167,78 @@ pub struct PerToolConfigOverride {
 
 /// Specifies how tool calls are communicated between the agent and the LLM.
 ///
-/// # Output-Based (default)
-///
-/// The model outputs tool calls as XML-like structured text which the framework
-/// parses. This is the traditional approach and works with all models.
-///
-/// # Native
+/// # Native (default)
 ///
 /// Tool definitions are sent via the LLM API's native tool calling feature.
-/// The model responds with structured tool call objects rather than text markup.
-/// Recommended for newer models (GPT-5+, Claude Opus 4+, Gemini 2.5+) whose
-/// training is centered around native tool use.
+/// The model responds with structured tool call objects rather than text
+/// markup, which is what current models are trained for.
 ///
-/// Key behavioral differences in native mode:
-/// - Parallel tool calls may involve *different* tools (output-based restricts
-///   batches to the same tool).
+/// Key behavioral differences from output-based mode:
+/// - One response can call several *different* tools (output-based mode
+///   restricts batches to the same tool).
 /// - XML usage examples are not sent to the model; only the tool description
 ///   and JSON Schema parameters are provided.
 /// - Content wrapped in `{{#output_based_only}}...{{/output_based_only}}`
 ///   markers in `instructions` or `role_description` is stripped.
+///
+/// # Output-based (legacy)
+///
+/// The model outputs tool calls as XML-like structured text which the
+/// framework parses. It works with models without native tool calling.
+///
+/// A configuration that doesn't name a mode gets `Native`. The configuration
+/// snapshot saved with a [`Task`] always names its mode; one saved before
+/// the mode was recorded ran output-based, and loads that way.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum ToolCallingMode {
-    #[default]
     OutputBased,
+    #[default]
     Native,
+}
+
+thread_local! {
+    /// Set while a task's configuration snapshot is deserialized; see
+    /// [`deserialize_task_agent_config`].
+    static LOADING_TASK_SNAPSHOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The tool calling mode of a configuration loaded without one: `Native`,
+/// or `OutputBased` in a saved task's snapshot, which older versions (whose
+/// default it was) wrote without the mode.
+fn loaded_tool_calling_mode() -> ToolCallingMode {
+    if LOADING_TASK_SNAPSHOT.with(std::cell::Cell::get) {
+        ToolCallingMode::OutputBased
+    } else {
+        ToolCallingMode::Native
+    }
+}
+
+/// The tool configuration of a configuration loaded without one; see
+/// [`loaded_tool_calling_mode`].
+fn loaded_tool_config() -> AgentToolConfig {
+    AgentToolConfig {
+        tool_calling_mode: loaded_tool_calling_mode(),
+        ..AgentToolConfig::default()
+    }
+}
+
+/// Deserializes [`Task::agent_config`]: a snapshot without a tool calling
+/// mode ran in output-based mode, the default when it was saved, and keeps
+/// it.
+pub(crate) fn deserialize_task_agent_config<'de, D>(
+    deserializer: D,
+) -> Result<AgentConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LOADING_TASK_SNAPSHOT.with(|loading| loading.set(self.0));
+        }
+    }
+    let _restore = Restore(LOADING_TASK_SNAPSHOT.with(|loading| loading.replace(true)));
+    AgentConfig::deserialize(deserializer)
 }
 
 /// Configuration for agent tool usage.
@@ -214,9 +262,9 @@ pub struct AgentToolConfig {
     pub default_out_of_workspace_path_policy: PathSafetyPolicy,
     #[serde(default)]
     pub tool_specific_configs: HashMap<String, PerToolConfigOverride>,
-    /// How tool calls are communicated with the LLM.
-    /// Defaults to `OutputBased` (XML-like syntax parsed from model output).
-    #[serde(default)]
+    /// How tool calls are communicated with the LLM. Defaults to `Native`;
+    /// see [`ToolCallingMode`].
+    #[serde(default = "loaded_tool_calling_mode")]
     pub tool_calling_mode: ToolCallingMode,
 }
 
@@ -695,7 +743,7 @@ pub struct AgentConfig {
     pub role_description: String,
     pub instructions: String,
     pub llm_config: AgentLLMConfig,
-    #[serde(default)]
+    #[serde(default = "loaded_tool_config")]
     pub tool_config: AgentToolConfig,
     #[serde(default)]
     pub environment_details_config: EnvironmentDetailsConfig,

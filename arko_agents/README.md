@@ -150,7 +150,7 @@ runtime validates them again when a task starts. The quick start's agent as JSON
 | `id`, `name` | Required | Identifier and display name; the name heads the system prompt and is the `agent_name` tools receive. |
 | `role_description`, `instructions` | Required | The system prompt's role and instructions sections. |
 | `llm_config` | Required | Model and `GenerationConfig`; see [Saved tasks and configurations](#saved-tasks-and-configurations). |
-| `tool_config` | `complete_task` only | Available tools, tool calling mode, approvals, batching, and workspace path policy. |
+| `tool_config` | `complete_task` only, native tool calling | Available tools, tool calling mode, approvals, batching, and workspace path policy. |
 | `environment_details_config` | Nothing included | Working directory, file tree, date and time, and operating system, each placed in the system prompt, the task prompt, or every user message. |
 | `error_recovery_config` | `InformAgentAndContinue` | What a failed tool execution does. |
 | `llm_error_policy`, `llm_retry_config` | 3 attempts, then pause | What a failed model request does; see [Model-call recovery](#model-call-recovery). |
@@ -197,13 +197,16 @@ so other markup stays response text. `run_task` binds the offered tools to the t
 
 `tool_config.tool_calling_mode` selects how calls are exchanged with the model:
 
-- `OutputBased` (the default): the system prompt describes each tool with an XML-like
-  example, and the runtime parses calls from the response text. A response holds one call
-  or one batch of calls to the same tool. Every parameter value arrives as a JSON string,
-  except that `true` or `false` (in any case) for a `bool` parameter becomes a boolean.
-- `Native`: tools are sent through the provider's tool-calling API. A response can call
-  several different tools, but only when every tool in it allows batching; otherwise none
-  of the calls runs and each gets an error result explaining why.
+- `Native` (the default): tools are sent through the provider's tool-calling API. A
+  response can call several different tools, but only when every tool in it allows
+  batching; otherwise none of the calls runs and each gets an error result explaining why.
+- `OutputBased` (legacy): the system prompt describes each tool with an XML-like example,
+  and the runtime parses calls from the response text. A response holds one call or one
+  batch of calls to the same tool. Every parameter value arrives as a JSON string, except
+  that `true` or `false` (in any case) for a `bool` parameter becomes a boolean.
+
+A configuration that does not name a mode gets `Native`. A saved task records the mode it
+ran with; a task saved by an older version without it ran output-based and loads that way.
 
 A tool allows batching when its definition sets `supports_batched_calls` and the
 configuration enables it: a per-tool `allow_batched_calls` override, or else
