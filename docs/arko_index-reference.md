@@ -130,9 +130,12 @@ strictly increasing order, and the cut does not fall inside a guarded unit:
 
 ### Request budget and large files
 
-`BuildSpec::chunking` (`ChunkingOptions`) sizes chunk-model requests. A request's size is
-its rendered file content, each file's header line and numbered rows as the model sees
-them; the fixed instructions and tool schema (under 1,000 tokens) come on top.
+`BuildSpec::chunking` (`ChunkingOptions`) sizes chunk-model requests. The budget counts
+only a request's rendered file content, each file's header line and numbered rows as the
+model sees them. The fixed instructions and tool schema (under 1,000 tokens), and in a
+repair request its lists of disputed cuts and legal boundary IDs, come on top, so a
+request sent is somewhat larger than its budget (seen live: 27,570 tokens against a
+27,200-token budget).
 
 - **What is measured.** Chunk models of the OpenAI provider are measured in `o200k_base`
   tokens, the encoding GPT-4o and later, GPT-5.x and GPT-6 use. It is built into the
