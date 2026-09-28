@@ -539,7 +539,7 @@ let judge = LlmSearchJudge::new(client.clone(), Model::openai_gpt_5_6_luna())
     .with_instructions("Prefer practical implementation examples.");
 let page = index.search_with_judge(&index_id, "how do I retry a failed workflow step?",
     SearchOptions { top_k: Some(10), min_chunk_bytes: 40, ..Default::default() },
-    &judge, JudgeOptions { candidate_limit: 20, max_attempts: 2 },
+    &judge, JudgeOptions { candidate_limit: 20, max_attempts: 2, ..Default::default() },
 ).await?;
 ```
 
@@ -555,26 +555,33 @@ let page = index.search_with_judge(&index_id, "how do I retry a failed workflow 
   exclude metadata or import-only, navigation-only and unexpanded include-only passages,
   and to keep useful alternatives and supporting evidence.
 - The judge gets up to `max_attempts` attempts (default 2) to return a valid selection; a
-  refused or incomplete reply counts as invalid. Provider errors are returned at once.
-  When the attempts run out, the search returns the error rather than unjudged results.
+  refused or incomplete reply counts as invalid. Transient provider failures (rate limits,
+  server errors, capacity) are retried with the index's backoff, never sooner than a
+  delay the provider asks for, until `max_transient_attempts` (default 3) have failed.
+  Other provider errors, plan usage limits included, are returned at once. When the
+  attempts run out, the search returns the error rather than unjudged results.
 - Candidates are sent in full, so choose a model and `candidate_limit` whose context
   window fits them. The judge applies no timeout of its own.
 
-`page.judge` is a `JudgeReport` with the judge's name, the attempts used, the examined and
-unexamined candidate counts, the number selected and the number selected beyond `top_k`,
-and every exclusion with its reason. `candidate_count` still counts every eligible result,
+`page.judge` is a `JudgeReport` with the judge's name, the attempts used (judge calls,
+retries included), the summed `usage` of the judge's responses (rejected replies included,
+when the judge reports usage), the examined and unexamined candidate counts, the number
+selected and the number selected beyond `top_k`, and every exclusion with its reason. The
+judge's usage is not part of any job's usage. `candidate_count` still counts every eligible result,
 and `omitted_hits` every one missing from the response. Judged searches neither
 accept nor return cursors, because each judgment covers one candidate pool; use `search`
 for paging.
 
 `LlmSearchJudge::new(client, model)` accepts any `arko_ai` model and uses its default
 generation settings; set reasoning and other settings with `with_generation_config`, and
-add selection preferences with `with_instructions`. Like the chunk model, the judge owns
+add selection preferences with `with_instructions` (appended to the built-in instructions
+under "Additional retrieval preferences"; nothing is appended without them). Like the chunk model, the judge owns
 the tool configuration: where a model cannot be forced to call the tool (for example,
 Anthropic models with manual extended thinking), it uses automatic tool choice and
 validates the reply in the same way. Credentials and generation settings stay with the
 client and the judge, never in the index database. To use another provider, transport or
-selection policy, implement the `SearchJudge` trait.
+selection policy, implement the `SearchJudge` trait; implement
+`SearchJudge::select_with_usage` as well to report usage.
 
 ## Example CLI
 
@@ -646,7 +653,7 @@ attempts.
 | `--judge-model ID` | Model ID; defaults to `gpt-5.6-luna` for OpenAI and is required for Anthropic. |
 | `--judge-effort LEVEL` | OpenAI reasoning effort: `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. Requires an OpenAI reasoning model and overrides `reasoning` in `--judge-config`. |
 | `--judge-candidates N` | Candidate pool size (default 20); must be at least `--top-k`. |
-| `--judge-attempts N` | Attempts for invalid selections (default 2). |
+| `--judge-attempts N` | Attempts for invalid selections (default 2); transient provider errors are retried separately, up to three failures. |
 | `--judge-auth inherit` | Default: reuse the global OpenAI client and its ChatGPT OAuth or API-key credentials. OpenAI judges only. |
 | `--judge-auth api-key` | Read `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, independently of the global credentials. |
 | `--judge-api-key-env NAME` | Read the API key from another environment variable; requires `--judge-auth api-key`. Keys are never passed as argument values. |

@@ -21,14 +21,20 @@ const INSTRUCTIONS: &str = "You select documentation passages for a coding agent
 pub struct JudgeOptions {
     /// Explicitly bound the retrieved candidate pool sent to the judge.
     pub candidate_limit: usize,
-    /// Attempts for invalid model selections. Provider errors are returned directly.
+    /// Attempts for invalid model selections: 2 by default.
     pub max_attempts: usize,
+    /// Transient provider failures (rate limits, server errors, capacity)
+    /// allowed before the search fails with the last one: 3 by default, so
+    /// up to two retries, after the index's backoff. Other provider errors,
+    /// usage limits included, are returned at once.
+    pub max_transient_attempts: usize,
 }
 impl Default for JudgeOptions {
     fn default() -> Self {
         Self {
             candidate_limit: 20,
             max_attempts: 2,
+            max_transient_attempts: 3,
         }
     }
 }
@@ -75,12 +81,33 @@ impl JudgeSelection {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JudgeReport {
     pub name: String,
+    /// Judge calls made, retries included.
     pub attempts: usize,
+    /// Summed token usage and cost of the judge's responses, rejected ones
+    /// included, when the judge reports it ([`SearchJudge::select_with_usage`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<arko_ai::UsageInfo>,
     pub examined_candidates: usize,
     pub unexamined_candidates: usize,
     pub selected_count: usize,
     pub selected_beyond_limit: usize,
     pub excluded: Vec<JudgeExclusion>,
+}
+
+/// One judge call: its selection, or why it failed, and the usage of the
+/// response when there was one.
+#[derive(Debug)]
+pub struct JudgeAttempt {
+    pub result: Result<JudgeSelection>,
+    pub usage: Option<arko_ai::UsageInfo>,
+}
+impl From<Result<JudgeSelection>> for JudgeAttempt {
+    fn from(result: Result<JudgeSelection>) -> Self {
+        Self {
+            result,
+            usage: None,
+        }
+    }
 }
 
 /// Implement this trait to use another judge, transport, or deterministic selector.
@@ -90,6 +117,22 @@ pub trait SearchJudge: Send + Sync {
         "custom".into()
     }
     async fn select(&self, query: &str, candidates: &[SearchHit]) -> Result<JudgeSelection>;
+    /// [`select`](Self::select) with the usage of the response, for
+    /// [`JudgeReport::usage`]. The default reports none; judges that call a
+    /// model implement it to report usage, rejected responses included.
+    async fn select_with_usage(&self, query: &str, candidates: &[SearchHit]) -> JudgeAttempt {
+        self.select(query, candidates).await.into()
+    }
+}
+
+/// The judge's system prompt: the built-in instructions, and the caller's
+/// preferences when there are any.
+fn system_prompt(instructions: &str) -> String {
+    if instructions.trim().is_empty() {
+        INSTRUCTIONS.to_owned()
+    } else {
+        format!("{INSTRUCTIONS}\nAdditional retrieval preferences:\n{instructions}")
+    }
 }
 
 /// A tool-calling judge using an OpenAI or Anthropic arko_ai client/model.
@@ -127,12 +170,29 @@ impl SearchJudge for LlmSearchJudge {
         self.model.id.clone()
     }
     async fn select(&self, query: &str, candidates: &[SearchHit]) -> Result<JudgeSelection> {
+        self.select_with_usage(query, candidates).await.result
+    }
+    async fn select_with_usage(&self, query: &str, candidates: &[SearchHit]) -> JudgeAttempt {
         if candidates.is_empty() {
             return Ok(JudgeSelection {
                 ordered_ids: vec![],
                 excluded: vec![],
-            });
+            })
+            .into();
         }
+        match self.respond(query, candidates).await {
+            Ok(response) => JudgeAttempt {
+                result: parse_selection(&response, candidates),
+                usage: Some(response.usage.clone()),
+            },
+            Err(error) => Err(error).into(),
+        }
+    }
+}
+
+impl LlmSearchJudge {
+    /// The model's completed response for `candidates`.
+    async fn respond(&self, query: &str, candidates: &[SearchHit]) -> Result<GenerationResponse> {
         if !self.model.reports_stop_reason() {
             return Err(invalid(format!(
                 "the built-in judge requires completion metadata, which '{}' does not report; use a custom SearchJudge",
@@ -167,10 +227,7 @@ impl SearchJudge for LlmSearchJudge {
             tools = tools.with_parallel_tool_calls(false);
         }
         let config = self.generation.clone().with_tool_config(tools);
-        let system = format!(
-            "{INSTRUCTIONS}\nAdditional retrieval preferences:\n{}",
-            self.instructions
-        );
+        let system = system_prompt(&self.instructions);
         let mut conversation = self
             .client
             .new_conversation(self.model.clone())
@@ -184,7 +241,7 @@ impl SearchJudge for LlmSearchJudge {
         let mut stream = self.client.generate_stream(&conversation, config).await?;
         while let Some(event) = stream.next().await {
             if let StreamEvent::End(response) = event? {
-                return parse_selection(&response, candidates);
+                return Ok(*response);
             }
         }
         Err(invalid("judge stream ended without a completed response"))
@@ -222,9 +279,12 @@ impl ArkoIndex {
                 "judged search does not accept cursors; use normal search for paging",
             ));
         }
-        if judging.candidate_limit == 0 || judging.max_attempts == 0 {
+        if judging.candidate_limit == 0
+            || judging.max_attempts == 0
+            || judging.max_transient_attempts == 0
+        {
             return Err(invalid(
-                "judge candidate_limit and max_attempts must be positive",
+                "judge candidate_limit, max_attempts and max_transient_attempts must be positive",
             ));
         }
         let final_limit = options.top_k;
@@ -237,6 +297,8 @@ impl ArkoIndex {
         let mut page = self.search(index, query, options).await?;
         let examined = page.hits.len();
         let mut attempts = 0;
+        let (mut invalid_replies, mut transient_failures) = (0, 0);
+        let mut usage: Option<arko_ai::UsageInfo> = None;
         let selection = if examined == 0 {
             JudgeSelection {
                 ordered_ids: vec![],
@@ -245,16 +307,42 @@ impl ArkoIndex {
         } else {
             loop {
                 attempts += 1;
-                let result = judge.select(query, &page.hits).await.and_then(|s| {
+                let attempt = judge.select_with_usage(query, &page.hits).await;
+                if let Some(call) = attempt.usage.as_ref().map(crate::usage::finite) {
+                    usage = Some(match usage {
+                        Some(total) => [total, call].iter().sum(),
+                        None => call,
+                    });
+                }
+                let result = attempt.result.and_then(|s| {
                     s.validate(&page.hits)?;
                     Ok(s)
                 });
-                match result {
+                let error = match result {
                     Ok(s) => break s,
-                    Err(Error::Invalid(_) | Error::Json(_)) if attempts < judging.max_attempts => {
-                        continue;
+                    Err(error) => error,
+                };
+                match &error {
+                    Error::Invalid(_) | Error::Json(_) => {
+                        invalid_replies += 1;
+                        if invalid_replies >= judging.max_attempts {
+                            return Err(error);
+                        }
                     }
-                    Err(e) => return Err(e),
+                    Error::Provider {
+                        transient: true,
+                        retry_after,
+                        ..
+                    } if error.retry_class() != Some(arko_ai::RetryClass::UsageLimit) => {
+                        transient_failures += 1;
+                        if transient_failures >= judging.max_transient_attempts {
+                            return Err(error);
+                        }
+                        let attempt = u32::try_from(transient_failures).unwrap_or(u32::MAX);
+                        tokio::time::sleep(crate::scheduler::retry_delay(attempt, *retry_after))
+                            .await;
+                    }
+                    _ => return Err(error),
                 }
             }
         };
@@ -283,6 +371,7 @@ impl ArkoIndex {
         page.judge = Some(JudgeReport {
             name: judge.name(),
             attempts,
+            usage,
             examined_candidates: examined,
             unexamined_candidates: page.candidate_count.saturating_sub(examined),
             selected_count,
@@ -324,6 +413,17 @@ mod tests {
             refusal: None,
             openai_turn_state: None,
         }
+    }
+
+    #[test]
+    fn preferences_are_sent_only_when_given() {
+        assert_eq!(system_prompt(""), INSTRUCTIONS);
+        assert_eq!(system_prompt("  \n"), INSTRUCTIONS);
+        assert!(!system_prompt("").contains("Additional retrieval preferences"));
+        assert_eq!(
+            system_prompt("Prefer examples."),
+            format!("{INSTRUCTIONS}\nAdditional retrieval preferences:\nPrefer examples.")
+        );
     }
 
     #[test]

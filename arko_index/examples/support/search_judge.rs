@@ -35,7 +35,8 @@ pub struct JudgeArgs {
     /// Number of retrieval candidates to judge before applying --top-k.
     #[arg(long, default_value_t = 20, requires = "judge")]
     judge_candidates: usize,
-    /// Attempts for invalid tool selections; provider errors are returned directly.
+    /// Attempts for invalid tool selections. Transient provider errors are
+    /// retried up to three times in all; other provider errors are returned.
     #[arg(long, default_value_t = 2, requires = "judge")]
     judge_attempts: usize,
     /// Inherit the global OpenAI client, use a provider API key, or use an OAuth file.
@@ -90,6 +91,7 @@ impl JudgeArgs {
         JudgeOptions {
             candidate_limit: self.judge_candidates,
             max_attempts: self.judge_attempts,
+            ..Default::default()
         }
     }
 

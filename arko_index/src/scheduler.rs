@@ -27,7 +27,7 @@ const RETRY_BACKOFF: arko_ai::BackoffPolicy =
 
 /// Delay before retry `attempt`. A backend's hint is capped like the hints
 /// arko_ai parses from responses, so the retry deadline stays representable.
-fn retry_delay(attempt: u32, hint: Option<Duration>) -> Duration {
+pub(crate) fn retry_delay(attempt: u32, hint: Option<Duration>) -> Duration {
     let hint = hint.map(|hint| hint.min(MAX_SERVER_DELAY_HINT));
     RETRY_BACKOFF.next_delay(attempt, hint)
 }

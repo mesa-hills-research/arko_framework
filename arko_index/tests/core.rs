@@ -430,6 +430,7 @@ async fn judged_search_rejects_invalid_partitions_and_never_hides_provider_error
     let judging = JudgeOptions {
         candidate_limit: 3,
         max_attempts: 2,
+        ..Default::default()
     };
     for failure in [
         "unknown",
@@ -488,25 +489,153 @@ async fn judged_search_rejects_invalid_partitions_and_never_hides_provider_error
         .unwrap();
     assert_eq!(page.judge.unwrap().attempts, 2);
     assert_eq!(page.hits.len(), 3);
+    // A permanent provider error is returned at once.
     let provider_failure = TestJudge::new(|_, _: &[SearchHit]| {
         Err(Error::Provider {
-            message: "rate limit".into(),
-            transient: true,
-            retry_after: Some(Duration::from_secs(2)),
+            message: "invalid key".into(),
+            transient: false,
+            retry_after: None,
             source: None,
             usage: None,
         })
     });
     assert!(matches!(
         index
-            .search_with_judge(&job.index, "alpha", opts, &provider_failure, judging)
+            .search_with_judge(
+                &job.index,
+                "alpha",
+                opts.clone(),
+                &provider_failure,
+                judging.clone()
+            )
+            .await,
+        Err(Error::Provider {
+            transient: false,
+            ..
+        })
+    ));
+    assert_eq!(provider_failure.calls.load(Ordering::SeqCst), 1);
+    // Transient failures are retried after a backoff, up to the limit.
+    let rate_limited = |failures: usize| {
+        TestJudge::new(move |attempt, hits: &[SearchHit]| {
+            if attempt < failures {
+                return Err(Error::Provider {
+                    message: "rate limit".into(),
+                    transient: true,
+                    retry_after: None,
+                    source: None,
+                    usage: None,
+                });
+            }
+            Ok(JudgeSelection {
+                ordered_ids: hits.iter().map(|h| h.id.clone()).collect(),
+                excluded: vec![],
+            })
+        })
+    };
+    let recovering = rate_limited(1);
+    let page = index
+        .search_with_judge(
+            &job.index,
+            "alpha",
+            opts.clone(),
+            &recovering,
+            judging.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.judge.unwrap().attempts, 2);
+    let failing = rate_limited(usize::MAX);
+    let limited = JudgeOptions {
+        max_transient_attempts: 2,
+        ..judging
+    };
+    assert!(matches!(
+        index
+            .search_with_judge(&job.index, "alpha", opts, &failing, limited)
             .await,
         Err(Error::Provider {
             transient: true,
             ..
         })
     ));
-    assert_eq!(provider_failure.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(failing.calls.load(Ordering::SeqCst), 2);
+}
+
+/// A judge that reports usage: its first reply is invalid, its second
+/// selects every candidate.
+struct MeteredJudge {
+    calls: AtomicUsize,
+}
+#[async_trait::async_trait]
+impl SearchJudge for MeteredJudge {
+    async fn select(&self, _: &str, _: &[SearchHit]) -> Result<JudgeSelection> {
+        unreachable!("search_with_judge asks for usage")
+    }
+    async fn select_with_usage(&self, _: &str, hits: &[SearchHit]) -> JudgeAttempt {
+        let result = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(Error::Invalid("unknown candidate".into()))
+        } else {
+            Ok(JudgeSelection {
+                ordered_ids: hits.iter().map(|h| h.id.clone()).collect(),
+                excluded: vec![],
+            })
+        };
+        JudgeAttempt {
+            result,
+            usage: Some(arko_ai::UsageInfo {
+                total_cost: 0.5,
+                ..arko_ai::UsageInfo::new(1_000, 100)
+            }),
+        }
+    }
+}
+#[tokio::test]
+async fn judge_reports_report_the_usage_of_every_reply() {
+    let (_root, _db, index, job, _) = judge_fixture().await;
+    let judge = MeteredJudge {
+        calls: AtomicUsize::new(0),
+    };
+    let page = index
+        .search_with_judge(
+            &job.index,
+            "alpha",
+            options(SearchMode::Lexical),
+            &judge,
+            JudgeOptions::default(),
+        )
+        .await
+        .unwrap();
+    let report = page.judge.unwrap();
+    assert_eq!(report.attempts, 2);
+    let usage = report.usage.unwrap();
+    assert_eq!((usage.input_tokens, usage.output_tokens), (2_000, 200));
+    assert_eq!(usage.total_cost, 1.0);
+    // Judges that report none leave it out.
+    let plain = TestJudge::new(|_, hits: &[SearchHit]| {
+        Ok(JudgeSelection {
+            ordered_ids: hits.iter().map(|h| h.id.clone()).collect(),
+            excluded: vec![],
+        })
+    });
+    let page = index
+        .search_with_judge(
+            &job.index,
+            "alpha",
+            options(SearchMode::Lexical),
+            &plain,
+            JudgeOptions::default(),
+        )
+        .await
+        .unwrap();
+    let report = page.judge.unwrap();
+    assert!(report.usage.is_none());
+    assert!(
+        serde_json::to_value(&report)
+            .unwrap()
+            .get("usage")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -574,7 +703,8 @@ async fn judged_search_handles_empty_results_filters_and_invalid_options() {
                     &reject,
                     JudgeOptions {
                         candidate_limit,
-                        max_attempts
+                        max_attempts,
+                        ..Default::default()
                     }
                 )
                 .await,
