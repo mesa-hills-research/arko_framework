@@ -1206,6 +1206,24 @@ impl AgentLoop {
     /// Runs the agent loop to completion.
     pub async fn run(mut self) -> Result<Task, ArkoAgentsError> {
         self.task.agent_config.validate()?;
+        // Every developer environment detail the run can show needs content:
+        // details placed in every user message on every turn, and the others
+        // while the system prompt and task prompt are still to be written.
+        let writing_prompts = self.task.conversation.system_message.is_none();
+        if let Some(error) = self
+            .task
+            .developer_env_details
+            .iter()
+            .flatten()
+            .filter(|detail| {
+                writing_prompts
+                    || detail.placement
+                        == crate::agent_config::EnvironmentDetailPlacement::EachUserMessage
+            })
+            .find_map(|detail| detail.missing_content_error())
+        {
+            return Err(ArkoAgentsError::Configuration(error));
+        }
         log::info!(
             "Agent loop starting for task ID: {} (mode: {:?})",
             self.task.id,

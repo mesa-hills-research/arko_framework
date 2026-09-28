@@ -388,3 +388,90 @@ async fn text_model_boundary_includes_file_changes_and_observes_the_exact_result
     assert!(trees[1].contains("Added to tree: \"created.txt\""));
     assert!(!trees[1].contains("original.txt"));
 }
+
+/// A dynamic environment detail whose provider was not set again (a saved
+/// task) stops the task at its start with an error naming the detail and
+/// its provider, instead of sending the model an error string.
+#[tokio::test]
+async fn a_dynamic_detail_without_its_provider_fails_the_task_at_start() {
+    use crate::agent_config::DeveloperDefinableEnvironmentDetail;
+    let detail = |placement| {
+        DeveloperDefinableEnvironmentDetail::new_dynamic_placeholder(
+            "Build status".into(),
+            "ci_status".into(),
+            placement,
+        )
+    };
+    let (mut agent, _events, _commands) = harness(ToolCallingMode::Native);
+    agent.task.developer_env_details = Some(vec![detail(EnvironmentDetailPlacement::SystemPrompt)]);
+    let error = agent.run().await.unwrap_err().to_string();
+    assert!(
+        error.contains("'Build status'") && error.contains("'ci_status'"),
+        "{error}"
+    );
+
+    // Once the prompts are written, only details sent with every user
+    // message are still needed.
+    let (mut agent, _events, _commands) = harness(ToolCallingMode::Native);
+    agent.task.conversation.system_message = Some("Written at the start.".into());
+    agent
+        .task
+        .conversation
+        .add_user_message("Inspect fixture image");
+    agent.task.developer_env_details = Some(vec![detail(EnvironmentDetailPlacement::SystemPrompt)]);
+    let mut done = ai::Message::new_assistant("");
+    done.tool_calls.push(ai::ToolCall {
+        arguments: serde_json::json!({"summary": "done"}),
+        ..call("done", "complete_task")
+    });
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(response(done));
+    let task = timeout(Duration::from_secs(5), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+
+    let (mut agent, _events, _commands) = harness(ToolCallingMode::Native);
+    agent.task.conversation.system_message = Some("Written at the start.".into());
+    agent.task.developer_env_details =
+        Some(vec![detail(EnvironmentDetailPlacement::EachUserMessage)]);
+    assert!(agent.run().await.is_err());
+}
+
+/// The date and time in the system prompt is labelled as the task's start;
+/// elsewhere it is the current one.
+#[test]
+fn the_system_prompt_datetime_is_labelled_as_the_task_start() {
+    for (placement, label) in [
+        (
+            EnvironmentDetailPlacement::SystemPrompt,
+            "Task Start Datetime (UTC):",
+        ),
+        (
+            EnvironmentDetailPlacement::InitialTaskPrompt,
+            "Current Datetime (UTC):",
+        ),
+    ] {
+        let mut config = super::tests::test_config();
+        config.environment_details_config.current_datetime =
+            crate::agent_config::BuiltInEnvironmentDetail {
+                include: true,
+                placement: placement.clone(),
+                depth: None,
+            };
+        let task = Task::new(config.clone(), "task".into(), std::env::temp_dir(), None);
+        let parsing = config.get_tool_parsing_config();
+        let builder = PromptBuilder::new(&config, vec![], &parsing, None);
+        let prompt = if placement == EnvironmentDetailPlacement::SystemPrompt {
+            builder.build_system_prompt(&task).unwrap()
+        } else {
+            builder.format_initial_task_prompt(&task, "task").unwrap()
+        };
+        assert!(prompt.contains(label), "{prompt}");
+        assert_eq!(prompt.matches("Datetime (UTC)").count(), 1, "{prompt}");
+    }
+}

@@ -335,9 +335,15 @@ impl<'a> PromptBuilder<'a> {
             )?;
         }
 
+        // The system prompt is written once, when the task starts.
+        let datetime_label = if placement == EnvironmentDetailPlacement::SystemPrompt {
+            "Task Start Datetime (UTC)"
+        } else {
+            "Current Datetime (UTC)"
+        };
         append_built_in_if_match(
             &mut details_str,
-            "Current Datetime (UTC)",
+            datetime_label,
             Ok(utils::get_current_datetime_utc()),
             &config.current_datetime,
         )?;
@@ -364,29 +370,14 @@ impl<'a> PromptBuilder<'a> {
                                 detail_config.name, e
                             ))
                         }),
-                        None => {
-                            if let Some(static_content) = &detail_config.static_content_for_serde {
-                                Ok(static_content.clone())
-                            } else if let Some(provider_name) =
-                                &detail_config.dynamic_provider_name_for_serde
-                            {
-                                log::warn!(
-                                    "Dynamic developer environment detail '{}' (provider '{}') was not rehydrated by application.",
-                                    detail_config.name,
-                                    provider_name
-                                );
-                                Ok(format!(
-                                    "[Error: Dynamic provider '{}' not available]",
-                                    provider_name
-                                ))
-                            } else {
-                                log::warn!(
-                                    "Developer environment detail '{}' has no content source.",
-                                    detail_config.name
-                                );
-                                Ok("[Error: No content source]".to_string())
+                        None => match &detail_config.static_content_for_serde {
+                            Some(static_content) => Ok(static_content.clone()),
+                            None => {
+                                return Err(ArkoAgentsError::Configuration(
+                                    detail_config.missing_content_error().unwrap_or_default(),
+                                ));
                             }
-                        }
+                        },
                     };
                     match content_result {
                         Ok(raw_content_val) if !raw_content_val.is_empty() => {

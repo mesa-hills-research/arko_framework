@@ -105,6 +105,27 @@ impl DeveloperDefinableEnvironmentDetail {
         }
     }
 
+    /// Why this detail has no content to give, if it has none: a dynamic
+    /// detail loaded from a saved task or configuration whose provider was
+    /// not set again (providers are not saved), or a detail with neither
+    /// content nor a provider. The runtime refuses to start a task with such
+    /// a detail.
+    pub fn missing_content_error(&self) -> Option<String> {
+        if self.content_provider.is_some() || self.static_content_for_serde.is_some() {
+            return None;
+        }
+        Some(match &self.dynamic_provider_name_for_serde {
+            Some(provider) => format!(
+                "Environment detail '{}' needs its dynamic content provider '{}', which was not set: providers are not saved with a task or configuration, so set `content_provider` again before running the task.",
+                self.name, provider
+            ),
+            None => format!(
+                "Environment detail '{}' has no content: give it static content or a content provider.",
+                self.name
+            ),
+        })
+    }
+
     /// Creates a placeholder for a dynamic environment detail that will be rehydrated by the application.
     pub fn new_dynamic_placeholder(
         name: String,

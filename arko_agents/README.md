@@ -166,8 +166,16 @@ In `role_description` and `instructions`, text between `{{#output_based_only}}` 
 `{{/output_based_only}}` is kept, without the markers, in output-based mode and removed
 in native mode, so one configuration can carry tool-call examples for text-parsed calls.
 
+The system prompt is written once, when a task starts, so a date and time placed there
+is labelled `Task Start Datetime (UTC)`; placed in a user message it is labelled
+`Current Datetime (UTC)`.
+
 Developer-defined environment details are passed to `Task::new`; each has static content
-or a `Fn(&Task)` provider, which is not serialized. File-tree details default to a full
+or a `Fn(&Task)` provider, which is not serialized. A task loaded from JSON needs its
+dynamic providers set again: a task that starts with a detail it will show (every
+`EachUserMessage` detail, and the others until the system prompt is written) that has no
+content fails at once with `ArkoAgentsError::Configuration` naming the detail and its
+provider. File-tree details default to a full
 first snapshot followed by changes at model-call boundaries; see
 [context management](../docs/context-efficiency.md#file-tree-context).
 
