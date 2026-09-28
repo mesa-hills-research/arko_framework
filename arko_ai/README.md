@@ -261,8 +261,15 @@ the results: the other content is folded into the message's last `function_resul
 Google advises ("append any extra instructions to the end of the function response text
 separated by two newlines"). Each text is appended to that result's output text after a
 blank line, and each image, with the text just before it as its label, follows the
-result's own images; order is kept. Gemini 2.x and the other providers keep the text in a
-separate user turn after the results, which every provider accepts.
+result's own images; order is kept. User messages of only text and images that come
+directly after the tool-result message, before the next assistant message (such as the
+context updates an agent runtime adds as separate messages: a file-tree change, or a
+message from another workflow agent), are folded into the same `function_result` the same
+way, after the message's own content and in order; an image's label is taken only from
+its own message. A user message after an assistant message is a new input and is sent as
+a `user_input` step. Gemini 2.x and the other providers keep the text in a separate user
+turn after the results, which every provider accepts; requests without text or images
+after their results are unchanged.
 
 Empty texts (an empty output with images, an empty label) are left out of the result. A
 result without images is sent exactly as before result images existed, and conversations

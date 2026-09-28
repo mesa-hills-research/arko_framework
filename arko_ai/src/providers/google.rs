@@ -879,7 +879,8 @@ impl GoogleClient {
         let mut steps = Vec::new();
         let inline = conversation.model.accepts_tool_result_images();
 
-        for message in &conversation.messages {
+        let mut messages = conversation.messages.iter().peekable();
+        while let Some(message) = messages.next() {
             match message.role {
                 Role::System => {
                     return Err(Error::InvalidRequest(
@@ -888,7 +889,17 @@ impl GoogleClient {
                     ));
                 }
                 Role::User if inline && has_tool_results(message) => {
-                    steps.extend(self.results_with_the_rest_folded_in(message)?);
+                    // User messages of text and images that follow the
+                    // results before the model's next turn (runtime context
+                    // updates, such as a file-tree change or a message from
+                    // another agent) are folded in as well.
+                    let mut following = Vec::new();
+                    while let Some(next) =
+                        messages.next_if(|next| next.role == Role::User && !has_tool_results(next))
+                    {
+                        following.push(next);
+                    }
+                    steps.extend(self.results_with_the_rest_folded_in(message, &following)?);
                 }
                 Role::User => {
                     let mut blocks = Vec::new();
@@ -1058,38 +1069,48 @@ impl GoogleClient {
     /// is appended to the last result's output text after a blank line. Each
     /// image, with the text just before it as its label, follows the last
     /// result's own images. Texts and images keep their order.
+    ///
+    /// `following` are the user messages of text and images that come
+    /// directly after the results message, before the model's next turn (an
+    /// agent runtime adds context updates that way). Their content is folded
+    /// in after the message's own by the same rule, in order, so it doesn't
+    /// become a `user_input` step after the results either.
     fn results_with_the_rest_folded_in(
         &self,
         message: &Message,
+        following: &[&Message],
     ) -> Result<Vec<InteractionInputStep>, Error> {
         let results: Vec<_> = message
             .content
             .iter()
             .filter_map(Content::as_tool_result)
             .collect();
-        let rest: Vec<&Content> = message
-            .content
-            .iter()
-            .filter(|content| content.as_tool_result().is_none())
-            .collect();
         let mut texts = Vec::new();
         let mut images = Vec::new();
-        let mut index = 0;
-        while index < rest.len() {
-            match (rest[index], rest.get(index + 1)) {
-                (Content::Text(label), Some(Content::Image(image))) => {
-                    images.push(InteractionContentBlock::Text {
-                        text: label.clone(),
-                    });
-                    images.push(self.convert_image_block(image)?);
-                    index += 2;
-                    continue;
+        // An image's label is the text just before it in the same message.
+        for message in std::iter::once(message).chain(following.iter().copied()) {
+            let rest: Vec<&Content> = message
+                .content
+                .iter()
+                .filter(|content| content.as_tool_result().is_none())
+                .collect();
+            let mut index = 0;
+            while index < rest.len() {
+                match (rest[index], rest.get(index + 1)) {
+                    (Content::Text(label), Some(Content::Image(image))) => {
+                        images.push(InteractionContentBlock::Text {
+                            text: label.clone(),
+                        });
+                        images.push(self.convert_image_block(image)?);
+                        index += 2;
+                        continue;
+                    }
+                    (Content::Text(text), _) => texts.push(text.as_str()),
+                    (Content::Image(image), _) => images.push(self.convert_image_block(image)?),
+                    (Content::ToolResult(_), _) => {}
                 }
-                (Content::Text(text), _) => texts.push(text.as_str()),
-                (Content::Image(image), _) => images.push(self.convert_image_block(image)?),
-                (Content::ToolResult(_), _) => {}
+                index += 1;
             }
-            index += 1;
         }
         let last = results.len() - 1;
         let mut steps = Vec::with_capacity(results.len());

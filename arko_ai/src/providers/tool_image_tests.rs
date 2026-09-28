@@ -469,10 +469,12 @@ mod gemini_3_fold {
     }
 
     /// Gemini 2.x, and every other provider, keep the text after the results
-    /// (the pinned bodies show it); messages without results are unchanged.
+    /// (the pinned bodies show it), in the results message and in the
+    /// messages after it.
     #[test]
-    fn other_models_and_plain_messages_are_not_folded() {
+    fn other_models_are_not_folded() {
         let mut gemini_2_5 = results_message(vec![Content::Text("note".into())], 1);
+        gemini_2_5.add_user_message("# Workflow context update\n\nfile changed");
         gemini_2_5.model = gemini_2();
         let steps = after_calls(&gemini_2_5);
         assert_eq!(steps[0]["result"], json!([text("out call_0")]));
@@ -480,12 +482,72 @@ mod gemini_3_fold {
             steps[1],
             json!({"type": "user_input", "content": [text("note")]})
         );
-
-        let mut plain = results_message(Vec::new(), 1);
-        plain.add_user_message("Next task.");
-        let steps = after_calls(&plain);
         assert_eq!(
-            steps[1],
+            steps[2],
+            json!({"type": "user_input", "content": [text("# Workflow context update\n\nfile changed")]})
+        );
+    }
+
+    /// A user message of text after the results message, before the model's
+    /// next turn (a runtime context update), is folded into the last result
+    /// after the message's own text, each after a blank line.
+    #[test]
+    fn text_messages_after_the_results_are_folded_in_order() {
+        let mut one = results_message(vec![Content::Text("answer".into())], 2);
+        one.add_user_message("# Workflow context update\n\nsrc/lib.rs changed");
+        assert_eq!(
+            results_of(&after_calls(&one)),
+            [
+                json!([text("out call_0")]),
+                json!([text(
+                    "out call_1\n\nanswer\n\n# Workflow context update\n\nsrc/lib.rs changed"
+                )]),
+            ]
+        );
+
+        let mut two = results_message(Vec::new(), 1);
+        two.add_user_message("first update");
+        two.add_user_message("second update");
+        assert_eq!(
+            results_of(&after_calls(&two)),
+            [json!([text("out call_0\n\nfirst update\n\nsecond update")])]
+        );
+    }
+
+    /// An image message after the results joins the last result's images,
+    /// with the text before it in its own message as its label; a text at
+    /// the end of the results message doesn't label it.
+    #[test]
+    fn an_image_message_after_the_results_is_folded_with_its_label() {
+        let mut conversation = results_message(vec![Content::Text("note".into())], 1);
+        conversation.add_user_message_with_contents(vec![Content::Image(pixels())]);
+        conversation.add_user_message_with_contents(vec![
+            Content::Text("screenshot".into()),
+            Content::Image(pixels()),
+        ]);
+        assert_eq!(
+            results_of(&after_calls(&conversation)),
+            [json!([
+                text("out call_0\n\nnote"),
+                image(),
+                text("screenshot"),
+                image(),
+            ])]
+        );
+    }
+
+    /// A user message after the model's turn is a new input, not folded;
+    /// neither is a later results message.
+    #[test]
+    fn a_user_message_after_an_assistant_message_is_not_folded() {
+        let mut conversation = results_message(Vec::new(), 1);
+        conversation.add_assistant_message("Done.");
+        conversation.add_user_message("Next task.");
+        let steps = after_calls(&conversation);
+        assert_eq!(steps[0]["result"], json!([text("out call_0")]));
+        assert_eq!(steps[1]["type"], "model_output");
+        assert_eq!(
+            steps[2],
             json!({"type": "user_input", "content": [text("Next task.")]})
         );
     }
