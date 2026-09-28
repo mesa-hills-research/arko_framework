@@ -1348,3 +1348,112 @@ async fn refusals_reported_as_errors_are_reported_and_drop_partial_text() {
         }
     }
 }
+
+fn events_of(events: &mut mpsc::Receiver<AgentEvent>) -> Vec<AgentEvent> {
+    let mut received = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        received.push(event);
+    }
+    received
+}
+
+fn retries_scheduled(events: &mut mpsc::Receiver<AgentEvent>) -> Vec<(u32, u64, u64)> {
+    events_of(events)
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::RetryScheduled {
+                attempt,
+                delay_ms,
+                elapsed_ms,
+                ..
+            } => Some((attempt, delay_ms, elapsed_ms)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 503, 503, a completed response without a tool call, 503, done: a
+/// completed response ends the elapsed budget the failures before it
+/// started, even one the runtime can't use, so the retry after the last 503
+/// starts a new episode (its `elapsed_ms` is 0, not the 2 s of waits
+/// before). (de4a25e)
+#[tokio::test(start_paused = true)]
+async fn a_completed_unusable_response_ends_the_elapsed_budget() {
+    use futures::StreamExt;
+    let (mut agent, mut events, _commands) = harness();
+    agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
+    agent
+        .task
+        .agent_config
+        .tool_config
+        .default_auto_approve_tool_use = true;
+    let retry = &mut agent.task.agent_config.llm_retry_config;
+    retry.initial_delay_ms = 1_000;
+    retry.max_delay_ms = 1_000;
+    retry.max_elapsed_ms = 100_000;
+    let scripted = agent.scripted_responses.get_mut().unwrap();
+    scripted.push_back(Err(provider_failure(503, None)));
+    scripted.push_back(Err(provider_failure(503, None)));
+    scripted.push_back(super::image_tests::response(ai::Message::new_assistant(
+        "Thinking out loud.",
+    )));
+    scripted.push_back(Err(provider_failure(503, None)));
+    scripted.push_back(Ok(futures::stream::iter([Ok(complete_response())]).boxed()));
+    let task = timeout(Duration::from_secs(600), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    let scheduled = retries_scheduled(&mut events);
+    assert_eq!(scheduled.len(), 4, "{scheduled:?}");
+    // The note retry after the unusable response, then the retry after the
+    // last 503, which is a new episode.
+    assert_eq!(scheduled[1].2, 1_000, "{scheduled:?}");
+    assert_eq!((scheduled[2].1, scheduled[2].2), (0, 0), "{scheduled:?}");
+    assert_eq!(scheduled[3].2, 0, "{scheduled:?}");
+}
+
+/// A response the runtime can't use is asked again at once, even when the
+/// elapsed budget is already spent (a request accepted after it ran out,
+/// whose stream then ended without its final response): the note retry
+/// doesn't resume the budget or wait on its deadline. (7cb1970)
+#[tokio::test(start_paused = true)]
+async fn a_note_retry_goes_ahead_when_the_elapsed_budget_is_spent() {
+    use futures::StreamExt;
+    let (mut agent, mut events, _commands) = harness();
+    agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
+    agent
+        .task
+        .agent_config
+        .tool_config
+        .default_auto_approve_tool_use = true;
+    agent.task.conversation.system_message = Some("system".into());
+    agent.task.conversation.add_user_message("Do the task");
+    let budget = agent.task.agent_config.llm_retry_config.max_elapsed_ms;
+    // Earlier failures used more than the budget before the request was
+    // accepted (the clock stops while a response runs).
+    agent.paused_recovery_elapsed = Some(Duration::from_millis(budget + 60_000));
+    let scripted = agent.scripted_responses.get_mut().unwrap();
+    // Text, then the stream ends without its final response.
+    scripted.push_back(Ok(futures::stream::iter([Ok(ai::StreamEvent::TextChunk(
+        "Thinking out loud.".into(),
+    ))])
+    .boxed()));
+    scripted.push_back(Ok(futures::stream::iter([Ok(complete_response())]).boxed()));
+    let started = tokio::time::Instant::now();
+    let task = timeout(Duration::from_secs(600), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert_eq!(started.elapsed(), Duration::ZERO);
+    assert_eq!(retries_scheduled(&mut events), [(1, 0, 0)]);
+}

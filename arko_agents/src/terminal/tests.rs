@@ -406,6 +406,19 @@ async fn terminal_tools_accept_native_and_text_parameters_and_expose_job_state()
     );
 }
 
+/// The terminal tools keep their own deadlines (jobs run in the background
+/// with theirs, and waits end after at most 30 seconds), so the host tool
+/// time limit doesn't apply to them (AG-2).
+#[tokio::test]
+async fn terminal_tools_are_exempt_from_the_host_tool_time_limit() {
+    let f = Fixture::new(|_| {});
+    let tools = TerminalTool::all(f.manager.clone());
+    assert_eq!(tools.len(), TerminalTool::NAMES.len());
+    for tool in &tools {
+        assert!(!tool.uses_host_timeout(), "{}", tool.definition().name);
+    }
+}
+
 #[tokio::test]
 async fn records_survive_restart_as_interrupted_without_relaunching_commands() {
     let root = std::env::temp_dir().join(format!("arko-terminal-restart-{}", Uuid::new_v4()));
