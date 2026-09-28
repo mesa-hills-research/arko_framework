@@ -80,6 +80,12 @@ fn describe_duration(duration: Duration) -> String {
     }
 }
 
+/// The runtime's notes on a response it can't use, added to the
+/// conversation before it asks again; see
+/// [`AgentLoop::handle_model_output_failure`].
+const NO_NATIVE_TOOL_CALL: &str = "Your response did not call a tool, so the task is still open. Continue with your tools, or call complete_task with a summary if the task is finished.";
+const NO_TEXT_TOOL_CALL: &str = "Your response did not contain a tool call. Use one of your tools in the format the system prompt describes, or complete_task if the task is finished.";
+
 /// `ToolRejected` reasons for calls a stream announced but never finished.
 const INTERRUPTED_CALL: &str =
     "The model's response was interrupted before this call finished; it was not run.";
@@ -2230,7 +2236,7 @@ impl AgentLoop {
                                     self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
                                 }
                                 if current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
-                                    self.handle_llm_error(ai::Error::ApiError("Stream ended prematurely with no output".to_string()), None).await?;
+                                    self.handle_llm_error(ai::Error::StreamTruncated("the response stream ended with no output".to_string()), None).await?;
                                     had_stream_error = true;
                                 }
                                 break;
@@ -2244,10 +2250,11 @@ impl AgentLoop {
                                 had_stream_error = true;
                                 break;
                             }
+                            // The request is sent again unchanged, so what the
+                            // failed stream delivered is not kept: it would end
+                            // the retried request on an assistant turn (a
+                            // prefill, which Claude 4.6 and later reject).
                             Err(e) => {
-                                if final_generation_response.is_none() {
-                                    self.keep_partial_output(&current_assistant_response_text_for_conv, &e);
-                                }
                                 self.reject_announced_calls(&mut native_stream_call_ids, FAILED_STREAM_CALL).await?;
                                 self.handle_llm_error(e, None).await?;
                                 had_stream_error = true;
@@ -2283,7 +2290,8 @@ impl AgentLoop {
                     );
                     self.reject_announced_calls(&mut native_stream_call_ids, UNDELIVERED_CALL)
                         .await?;
-                    self.handle_llm_error(ai::Error::ApiError("Agent failed to produce a tool call. You MUST use one or more tools in every response, even if it is just 'complete_task'.".to_string()), None).await?;
+                    self.handle_model_output_failure(NO_NATIVE_TOOL_CALL.to_string())
+                        .await?;
                     if self.task.current_state.is_terminal() {
                         break 'main_loop;
                     }
@@ -2608,13 +2616,8 @@ impl AgentLoop {
                             next_user_message_str_accumulated.push_str(&error_msg);
                         } else if tool_call_groups.is_empty() {
                             if !self.task.current_state.is_terminal() {
-                                self.handle_llm_error(
-                                    ai::Error::ApiError(
-                                        "Agent failed to produce a tool call.".to_string(),
-                                    ),
-                                    None,
-                                )
-                                .await?;
+                                self.handle_model_output_failure(NO_TEXT_TOOL_CALL.to_string())
+                                    .await?;
                                 if self.task.current_state.is_terminal() {
                                     break 'main_loop;
                                 }
@@ -2882,10 +2885,9 @@ impl AgentLoop {
                             self.task.id,
                             e
                         );
-                        self.handle_llm_error(
-                            ai::Error::ApiError(format!("Assembly failed: {}", e)),
-                            None,
-                        )
+                        self.handle_model_output_failure(format!(
+                            "Your tool call could not be read ({e}). Write it again in the format the system prompt describes."
+                        ))
                         .await?;
                         if self.task.current_state.is_terminal() {
                             break 'main_loop;
@@ -3789,29 +3791,6 @@ impl AgentLoop {
         )
     }
 
-    /// Whether recovering from `error` resends the same request without
-    /// adding to the conversation. Output a failed stream delivered is then
-    /// dropped: kept, it would end the retried request on an assistant turn
-    /// (a prefill, which Claude 4.6 and later reject).
-    fn retries_unchanged(&self, error: &ai::Error) -> bool {
-        match self.recovery_wait(error) {
-            RecoveryWait::Capacity(_) | RecoveryWait::RateLimit(_) => true,
-            RecoveryWait::UsageLimit => self.usage_limit_wait(error).is_some(),
-            RecoveryWait::Ordinary => false,
-        }
-    }
-
-    /// Records the output a failed stream delivered before it failed with
-    /// `error`, unless the retry resends the request unchanged; see
-    /// [`retries_unchanged`](Self::retries_unchanged).
-    fn keep_partial_output(&mut self, text: &str, error: &ai::Error) {
-        // A failed fallback request leaves the refused turn as it was.
-        let failed_fallback = self.task.fallback_for.is_some() && self.current_request_is_fallback;
-        if !text.is_empty() && !failed_fallback && !self.retries_unchanged(error) {
-            self.task.conversation.add_assistant_message(text);
-        }
-    }
-
     /// Before a model request: a conversation that ends on an assistant
     /// turn (output kept from an interrupted stream, or a kept refusal, in a
     /// task resumed without a new message) gets a user message asking to
@@ -3834,10 +3813,32 @@ impl AgentLoop {
         Ok(())
     }
 
+    /// Recovers from a failed model request (a connection failure, a server
+    /// error, a truncated stream, a refusal, ...): under the error policy, the
+    /// request is sent again unchanged, without a note in the conversation,
+    /// since the model had no part in the failure, or recovery ends.
     async fn handle_llm_error(
         &mut self,
         error: ai::Error,
         tool_call_id: Option<Uuid>,
+    ) -> Result<(), ArkoAgentsError> {
+        self.recover(error, tool_call_id, None).await
+    }
+
+    /// Recovers from a response the runtime can't use (no tool call, or an
+    /// output-based call it can't read) under the error policy, like a
+    /// failed request, but with `note` added to the conversation before the
+    /// next request, so the model can do better.
+    async fn handle_model_output_failure(&mut self, note: String) -> Result<(), ArkoAgentsError> {
+        self.recover(ai::Error::ApiError(note.clone()), None, Some(note))
+            .await
+    }
+
+    async fn recover(
+        &mut self,
+        error: ai::Error,
+        tool_call_id: Option<Uuid>,
+        note: Option<String>,
     ) -> Result<(), ArkoAgentsError> {
         if self.task.fallback_for.is_some() && self.current_request_is_fallback {
             // The fallback model couldn't answer the refused turn: the
@@ -3910,9 +3911,12 @@ impl AgentLoop {
                     "LLM {kind} (attempt {attempt}; retrying when the provider allows): {error}"
                 )
             }
-            RecoveryWait::Ordinary | RecoveryWait::UsageLimit => {
-                format!("LLM error (attempt {attempt}/{max_attempts}): {error}")
-            }
+            RecoveryWait::Ordinary | RecoveryWait::UsageLimit => match &note {
+                Some(note) => {
+                    format!("Model response not usable (attempt {attempt}/{max_attempts}): {note}")
+                }
+                None => format!("LLM error (attempt {attempt}/{max_attempts}): {error}"),
+            },
         };
         let stop_reason = if !error.is_retryable() {
             Some("Failure requires a request, credential, or configuration change")
@@ -3971,8 +3975,8 @@ impl AgentLoop {
             rate_limit: error.is_rate_limit(),
         })
         .await?;
-        if !indefinite {
-            self.append_error_recovery_user_message(&format!("An error occurred during the previous LLM call (attempt {attempt}): {error}. Please retry or adjust your approach."))?;
+        if let Some(note) = &note {
+            self.append_error_recovery_user_message(note)?;
         }
         let waiting_since = tokio::time::Instant::now();
         let waited = self.wait_before_retry(retry_at, tool_call_id).await;

@@ -26,6 +26,7 @@ mod tests {
     #[test]
     fn exponential_delay_saturates_and_jitter_stays_in_bounds() {
         let mut config = LLMRetryConfig {
+            initial_delay_ms: 250,
             jitter: false,
             ..Default::default()
         };

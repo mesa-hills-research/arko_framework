@@ -17,7 +17,10 @@ pub(super) fn harness() -> (
     .role_description("test".into())
     .instructions("test".into())
     .llm_error_policy(LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts: 10 })
+    // Short, exact delays: these tests check the mechanisms, not the
+    // default timing.
     .llm_retry_config(LLMRetryConfig {
+        initial_delay_ms: 250,
         jitter: false,
         ..Default::default()
     })
@@ -573,6 +576,34 @@ async fn expired_oauth_without_refresh_credentials_uses_recovery_instead_of_losi
     assert!(task.usage_history.is_empty());
 }
 
+/// The default recovery lasts long enough for its limits to apply: ten
+/// attempts whose backoff grows from 2 s to the 64 s cap, and whose delays
+/// (at their largest, without jitter) add up to more than the 5-minute
+/// elapsed budget, which then ends recovery.
+#[test]
+fn default_recovery_reaches_the_backoff_cap_and_the_elapsed_budget() {
+    assert_eq!(
+        LLMErrorPolicy::default(),
+        LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts: 10 }
+    );
+    let config = LLMRetryConfig {
+        jitter: false,
+        ..LLMRetryConfig::default()
+    };
+    let delays: Vec<Duration> = (1..10)
+        .map(|attempt| super::super::retry::retry_delay(&config, attempt, None, 0))
+        .collect();
+    assert_eq!(delays[0], Duration::from_secs(2));
+    assert_eq!(delays[5], Duration::from_secs(64));
+    assert!(delays.iter().all(|delay| *delay <= Duration::from_secs(64)));
+    let total: Duration = delays.iter().sum();
+    assert!(
+        total > Duration::from_millis(config.max_elapsed_ms),
+        "{total:?}"
+    );
+    assert_eq!(config.max_elapsed_ms, 300_000);
+}
+
 #[test]
 fn retry_configuration_defaults_round_trip_and_rejects_invalid_limits() {
     let (agent, _events, _commands) = harness();
@@ -592,7 +623,7 @@ fn retry_configuration_defaults_round_trip_and_rejects_invalid_limits() {
     };
     assert!(invalid.validate().is_err());
     let parsed: LLMRetryConfig = serde_json::from_str("{\"max_elapsed_ms\":60000}").unwrap();
-    assert_eq!(parsed.initial_delay_ms, 250);
+    assert_eq!(parsed.initial_delay_ms, 2_000);
     assert_eq!(parsed.max_elapsed_ms, 60_000);
     assert!(parsed.capacity_retry.is_none());
     let parsed: LLMRetryConfig = serde_json::from_str(r#"{"capacity_retry":{}}"#).unwrap();

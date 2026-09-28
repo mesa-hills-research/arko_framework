@@ -385,8 +385,12 @@ pub enum LLMErrorPolicy {
 }
 
 impl Default for LLMErrorPolicy {
+    /// Ten attempts (the first request and nine retries), then a pause. With
+    /// the default [`LLMRetryConfig`] timing the retries back off from about
+    /// 2 seconds to the 64-second cap, so the 5-minute elapsed budget, not
+    /// the attempt count, usually ends recovery from an outage.
     fn default() -> Self {
-        LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts: 3 }
+        LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts: 10 }
     }
 }
 
@@ -436,7 +440,7 @@ pub struct LLMRetryConfig {
 impl Default for LLMRetryConfig {
     fn default() -> Self {
         Self {
-            initial_delay_ms: 250,
+            initial_delay_ms: 2_000,
             max_delay_ms: 64_000,
             max_elapsed_ms: 300_000,
             jitter: true,

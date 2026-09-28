@@ -107,10 +107,59 @@ async fn a_capacity_retry_after_partial_output_resends_the_request_unchanged() {
     assert_eq!(roles, [ai::Role::User, ai::Role::Assistant, ai::Role::User]);
 }
 
-/// An ordinary retry keeps the partial output and adds the error message
-/// after it, so the conversation alternates as before.
+/// A failed request (here a 503 after some output, then a truncated
+/// stream) is sent again unchanged: the failed stream's output is not kept
+/// and no note about the failure is added, since the model had no part in
+/// it.
 #[tokio::test(start_paused = true)]
-async fn an_ordinary_retry_keeps_partial_output_followed_by_a_user_turn() {
+async fn a_failed_request_is_sent_again_unchanged_without_a_note() {
+    for failure in [
+        provider_failure(503, None),
+        ai::Error::StreamTruncated("no data arrived for 1s".into()),
+    ] {
+        let (mut agent, mut events, _commands) = harness();
+        agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
+        agent
+            .task
+            .agent_config
+            .tool_config
+            .default_auto_approve_tool_use = true;
+        let scripted = agent.scripted_responses.get_mut().unwrap();
+        scripted.push_back(Ok(futures::stream::iter([
+            Ok(ai::StreamEvent::TextChunk("partial answer".into())),
+            Err(failure),
+        ])
+        .boxed()));
+        scripted.push_back(Ok(futures::stream::iter([Ok(complete_response())]).boxed()));
+        let task = timeout(Duration::from_secs(60), agent.run())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(task.current_state, TaskState::Completed { .. }));
+        // The task prompt, the completed turn and its tool result.
+        let roles: Vec<_> = task
+            .conversation
+            .messages
+            .iter()
+            .map(|m| m.role.clone())
+            .collect();
+        assert_eq!(roles, [ai::Role::User, ai::Role::Assistant, ai::Role::User]);
+        assert!(!assistant_texts(&task).contains(&"partial answer".to_string()));
+        assert!(task.runtime_messages.is_empty());
+        // The failure is still reported to the host.
+        let events = events_of(&mut events);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::RetryScheduled { attempt: 1, .. }))
+        );
+    }
+}
+
+/// A response the runtime can't use gets a note before the next request:
+/// a native turn without a tool call is told how to go on.
+#[tokio::test(start_paused = true)]
+async fn a_response_without_a_tool_call_gets_a_note() {
     let (mut agent, _events, _commands) = harness();
     agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
     agent
@@ -119,34 +168,19 @@ async fn an_ordinary_retry_keeps_partial_output_followed_by_a_user_turn() {
         .tool_config
         .default_auto_approve_tool_use = true;
     let scripted = agent.scripted_responses.get_mut().unwrap();
-    scripted.push_back(Ok(futures::stream::iter([
-        Ok(ai::StreamEvent::TextChunk("partial answer".into())),
-        Err(provider_failure(503, None)),
-    ])
-    .boxed()));
+    scripted.push_back(super::image_tests::response(ai::Message::new_assistant(
+        "I think the task is done.",
+    )));
     scripted.push_back(Ok(futures::stream::iter([Ok(complete_response())]).boxed()));
     let task = timeout(Duration::from_secs(60), agent.run())
         .await
         .unwrap()
         .unwrap();
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
-    let roles: Vec<_> = task
-        .conversation
-        .messages
-        .iter()
-        .map(|m| m.role.clone())
-        .collect();
-    assert_eq!(
-        roles,
-        [
-            ai::Role::User,
-            ai::Role::Assistant,
-            ai::Role::User,
-            ai::Role::Assistant,
-            ai::Role::User
-        ]
-    );
-    assert_eq!(assistant_texts(&task)[0], "partial answer");
+    let note = &task.conversation.messages[2];
+    assert_eq!(note.role, ai::Role::User);
+    assert_eq!(note.content[0].as_text(), Some(NO_NATIVE_TOOL_CALL));
+    assert!(task.runtime_messages.contains(&2));
 }
 
 /// A task resumed while its conversation ends on assistant text (output

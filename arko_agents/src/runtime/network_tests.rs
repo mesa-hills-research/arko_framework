@@ -148,7 +148,11 @@ async fn a_stream_idle_timeout_cuts_a_quiet_stream_off_and_it_is_sent_again() {
         "{:?}",
         task.current_state
     );
-    assert_eq!(bodies.lock().unwrap().len(), 2);
+    // The request was sent again unchanged, without a note about the cut.
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[0]["input"], bodies[1]["input"]);
+    assert!(task.runtime_messages.is_empty());
     let mut truncated = false;
     while let Ok(event) = events.try_recv() {
         if let AgentEvent::ErrorEncountered { error_message, .. } = event {

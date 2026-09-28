@@ -153,7 +153,7 @@ runtime validates them again when a task starts. The quick start's agent as JSON
 | `tool_config` | `complete_task` only, native tool calling | Available tools, tool calling mode, approvals, batching, and workspace path policy. |
 | `environment_details_config` | Nothing included | Working directory, file tree, date and time, and operating system, each placed in the system prompt, the task prompt, or every user message. |
 | `error_recovery_config` | `InformAgentAndContinue` | What a failed tool execution does. |
-| `llm_error_policy`, `llm_retry_config` | 3 attempts, then pause | What a failed model request does; see [Model-call recovery](#model-call-recovery). |
+| `llm_error_policy`, `llm_retry_config` | 10 attempts over up to 5 minutes, then pause | What a failed model request does; see [Model-call recovery](#model-call-recovery). |
 | `user_command_timeout_seconds` | None (waits indefinitely) | Opt-in: how long an awaiting task waits for a command before it is returned `Interrupted`. |
 | `user_reminder` | None | Text appended as `# Reminder` to the task prompt, every user message, or every Nth message. |
 | `skills_config` | None | Skill sources; see [Skills](#skills). |
@@ -502,14 +502,22 @@ the timing:
 
 | Policy | Behavior |
 | --- | --- |
-| `RetryThenPauseAndAwaitApproval { max_attempts }` | The default, with 3 attempts. Retries with backoff; when recovery ends, the task waits in `AwaitingErrorRecoveryApproval`. |
+| `RetryThenPauseAndAwaitApproval { max_attempts }` | The default, with 10 attempts. Retries with backoff; when recovery ends, the task waits in `AwaitingErrorRecoveryApproval`. |
 | `RetryThenInformAgent { max_attempts }` | Retries the same way; when recovery ends, the task is returned `Interrupted`. |
 | `InformAgentAndContinue` | Retries without an attempt limit until the elapsed budget ends, then returns the task `Interrupted`. |
 | `PauseAndAwaitApproval` | Waits in `AwaitingErrorRecoveryApproval` after the first failure. |
 
 Recovery ends when the attempts or the elapsed budget run out or the error cannot be
-retried. Attempt limits count the first request, and zero counts as one. Each ordinary
-retry adds a note about the error to the conversation. From a pause,
+retried. Attempt limits count the first request, and zero counts as one. With the
+defaults, retries back off from about 2 seconds to the 64-second cap, so an outage is
+retried for up to the 5-minute elapsed budget before the task pauses.
+
+A failed request (a connection failure, an HTTP 408, 409 or 5xx response, a truncated
+stream, including one cut by the opt-in stream idle timeout, or an error reported after a
+stream started) is sent again unchanged, without a note in the conversation: the model
+had no part in it. A response the runtime cannot use is retried with a note that tells
+the model what to do: a native response without a tool call, an output-based response
+without one, or output-based calls that cannot be read. From a pause,
 `ApproveErrorRecovery { message }` adds a note about the error (with the message) and
 starts a new recovery episode, and `RejectErrorRecovery` fails the task. An interrupted
 task starts a new episode when it is run again.
@@ -522,7 +530,7 @@ provider codes (such as quota exhaustion and invalid refresh grants) end recover
 
 | `LLMRetryConfig` field | Default | Meaning |
 | --- | --- | --- |
-| `initial_delay_ms` | 250 | First backoff delay. |
+| `initial_delay_ms` | 2,000 | First backoff delay. |
 | `max_delay_ms` | 64,000 | Cap of the exponential backoff. |
 | `max_elapsed_ms` | 300,000 | Recovery budget from the first failure, including waits, token refreshes, requests, and streams. |
 | `jitter` | `true` | Each backoff delay is drawn between half and all of its capped value. |
@@ -531,13 +539,13 @@ provider codes (such as quota exhaustion and invalid refresh grants) end recover
 | `usage_limit_policy` | `Pause` | Handling of plan usage limits. |
 | `stream_idle_timeout_ms` | `None` | Opt-in: the longest gap between data on a streamed response before it is cut off; see below. |
 
-For example, ten attempts with indefinite capacity waits:
+For example, twenty attempts with indefinite capacity waits:
 
 ```rust
 use arko_agents::{LLMCapacityRetryConfig, LLMErrorPolicy, LLMRetryConfig};
 
 let builder = builder
-    .llm_error_policy(LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts: 10 })
+    .llm_error_policy(LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts: 20 })
     .llm_retry_config(LLMRetryConfig {
         capacity_retry: Some(LLMCapacityRetryConfig::default()),
         ..LLMRetryConfig::default()
@@ -590,12 +598,11 @@ shorter than the longest silent stretch of the models you use cuts healthy respo
 so make it generous (for example two hours, 7,200,000). Only the gaps between data count;
 there is no total deadline. It is never sent to the model.
 
-**Streams.** Output a failed stream delivered is kept, followed by the error note, when
-recovery adds a message, and dropped when the request is resent unchanged. A request
-whose conversation ends on assistant text, such as a task resumed after `SuspendTask`
-mid-stream, first gets a user message asking the model to continue, because some
-providers reject a conversation that ends on an assistant turn (Claude 4.6 and later
-reject prefill). Native calls announced with `ToolCallInitiated` that never run (the
+**Streams.** Output a failed stream delivered is not kept, since the request is sent
+again unchanged. A request whose conversation ends on assistant text, such as a task
+resumed after `SuspendTask` mid-stream, first gets a user message asking the model to
+continue, because some providers reject a conversation that ends on an assistant turn
+(Claude 4.6 and later reject prefill). Native calls announced with `ToolCallInitiated` that never run (the
 stream failed, was interrupted, or was refused, or the final response does not hold
 them) get a `ToolRejected` event. Model recovery never runs a tool call again. A stream
 that fails may have used provider tokens without reporting its usage.
