@@ -459,6 +459,16 @@ impl LLMClient {
         crate::prompt_cache::prompt_cache_lifetime(model, config, chatgpt_oauth)
     }
 
+    /// The most input tokens this client's requests to `model` may carry;
+    /// see [`effective_max_input_tokens`](crate::input_limit::effective_max_input_tokens).
+    /// For OpenAI models it depends on the client's OpenAI auth: API key or
+    /// ChatGPT OAuth.
+    pub async fn max_input_tokens(&self, model: &Model) -> Option<usize> {
+        let chatgpt_oauth =
+            model.provider == Provider::OpenAI && self.is_openai_chatgpt_oauth().await;
+        crate::input_limit::effective_max_input_tokens(model, chatgpt_oauth)
+    }
+
     /// Replaces the ChatGPT OAuth credentials only if the client still holds
     /// `expected`; returns whether it did.
     pub(crate) async fn replace_openai_chatgpt_credentials(

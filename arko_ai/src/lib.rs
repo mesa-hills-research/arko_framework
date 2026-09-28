@@ -3,6 +3,7 @@ pub mod codex_auth;
 pub mod config;
 pub mod conversation;
 pub mod error;
+pub mod input_limit;
 pub mod message;
 pub mod model;
 mod notice;
@@ -29,6 +30,7 @@ pub use config::{
 };
 pub use conversation::{Conversation, OpenAITurnState};
 pub use error::{Error, RetryClass};
+pub use input_limit::{CHATGPT_OAUTH_MAX_INPUT_TOKENS, effective_max_input_tokens};
 pub use message::{ConfigurationUpdate, Content, Image, Message, Role};
 pub use model::{Model, ModelPricing, Provider};
 pub use pricing::{ResidencyPricing, ScheduledPricing, ServiceTier, TierPricing};

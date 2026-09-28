@@ -114,6 +114,12 @@ OpenRouter models are not in the registry: `Model::openrouter(slug)` accepts any
 and the OpenRouter catalog supplies limits and prices on request; see
 [Models and the catalog](#models-and-the-catalog).
 
+`Model::max_input_tokens` is the provider's published input limit. The ChatGPT OAuth
+backend accepts less: `LLMClient::max_input_tokens(&model)` returns the limit for the
+client's auth path, capping OpenAI models at `CHATGPT_OAUTH_MAX_INPUT_TOKENS` (272,000)
+over ChatGPT OAuth, and `effective_max_input_tokens(&model, chatgpt_oauth)` computes the
+same without a client. Both return `None` when the limit is unknown.
+
 ## Generation settings and tool calls
 
 `GenerationConfig` holds the per-request settings, built from
