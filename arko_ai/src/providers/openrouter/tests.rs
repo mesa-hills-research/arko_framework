@@ -220,7 +220,12 @@ fn session_id_is_always_sent_and_caching_adds_the_cache_key_and_claude_cache_con
     }
 
     let ttl = GenerationConfig::default().with_anthropic_cache_ttl(AnthropicCacheTtl::FiveMinutes);
-    assert!(error(GPT, &ttl).contains("TTL"));
+    // A Claude setting: dropped for other models, an error on Claude with
+    // caching off.
+    assert!(body(GPT, &ttl).get("cache_control").is_none());
+    assert!(crate::notice::warned(
+        "foreign:OpenRouter:anthropic_cache_ttl"
+    ));
     assert!(error(CLAUDE, &ttl.clone().with_prompt_caching(false)).contains("TTL"));
 
     // Disabling caching on an OpenAI model that bills cache writes (known
@@ -310,12 +315,14 @@ fn reasoning_is_sent_only_from_the_openrouter_variant() {
         )
         .contains("not both")
     );
-    let foreign = error(
+    // Another provider's variant is dropped with a warning, not converted.
+    let foreign = body(
         GPT,
         &GenerationConfig::default()
             .with_reasoning(ReasoningConfig::openai(OpenAIEffort::High, true)),
     );
-    assert!(foreign.contains("to_openrouter"), "{foreign}");
+    assert!(foreign.get("reasoning").is_none(), "{foreign}");
+    assert!(crate::notice::warned("foreign:OpenRouter:reasoning:OpenAI"));
 
     // Claude needs max_tokens above the thinking budget.
     let budget = |max_tokens: usize| {
@@ -450,7 +457,8 @@ fn tools_choices_and_the_claude_strict_beta() {
     let interleaved = config.clone().with_interleaved_thinking(true);
     let (_, betas) = prepare(&client(), &conversation(CLAUDE), &interleaved).unwrap();
     assert_eq!(betas, [INTERLEAVED_THINKING_BETA, STRUCTURED_OUTPUTS_BETA]);
-    assert!(error(GPT, &interleaved).contains("interleaved_thinking"));
+    let (_, betas) = prepare(&client(), &conversation(GPT), &interleaved).unwrap();
+    assert!(betas.is_empty(), "dropped for models other than Claude");
     assert!(
         error(
             CLAUDE,
@@ -461,7 +469,7 @@ fn tools_choices_and_the_claude_strict_beta() {
 }
 
 #[test]
-fn options_from_other_providers_are_rejected_not_dropped() {
+fn options_from_other_providers_are_dropped_with_a_warning() {
     let cases: Vec<(GenerationConfig, &str)> = vec![
         (
             GenerationConfig::default().with_openai_reasoning_mode(OpenAIReasoningMode::Pro),
@@ -486,8 +494,14 @@ fn options_from_other_providers_are_rejected_not_dropped() {
         ),
     ];
     for (config, field) in cases {
-        let message = error(CLAUDE, &config);
-        assert!(message.contains(field), "{message}");
+        let sent = body(CLAUDE, &config);
+        for absent in ["reasoning", "service_tier", "speed", "inference_geo"] {
+            assert!(sent.get(absent).is_none(), "{field}: {sent}");
+        }
+        assert!(
+            crate::notice::warned(&format!("foreign:OpenRouter:{field}")),
+            "{field}"
+        );
     }
     // Documented no-ops: OpenRouter already summarizes Claude thinking and
     // enables extended context where the model has it.

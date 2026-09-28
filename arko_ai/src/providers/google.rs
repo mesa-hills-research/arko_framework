@@ -624,6 +624,8 @@ impl GoogleClient {
         stream: bool,
     ) -> Result<InteractionsRequest, Error> {
         super::ensure_supported_inputs(conversation)?;
+        let sanitized = super::without_foreign_settings(&conversation.model, config);
+        let config: &GenerationConfig = &sanitized;
         if let Some(tool_config) = &config.tool_config
             && tool_config.parallel_tool_calls == Some(false)
         {
@@ -698,6 +700,21 @@ impl GoogleClient {
             generation_config: Some(generation_config),
             tools,
         })
+    }
+
+    /// The request body [`build_request`](Self::build_request) produces,
+    /// serialized as it is sent.
+    #[cfg(test)]
+    pub(crate) fn request_body(
+        &self,
+        conversation: &Conversation,
+        config: &GenerationConfig,
+    ) -> Result<String, Error> {
+        Ok(serde_json::to_string(&self.build_request(
+            conversation,
+            config,
+            false,
+        )?)?)
     }
 
     fn resolve_thinking(

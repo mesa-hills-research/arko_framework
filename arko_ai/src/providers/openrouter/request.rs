@@ -145,55 +145,15 @@ fn invalid(message: String) -> Error {
     Error::InvalidRequest(message)
 }
 
-/// GenerationConfig fields that belong to another provider's API and have no
-/// OpenRouter equivalent arko would send; setting them is an error rather
-/// than a silent drop.
-fn reject_foreign_options(model: &Model, config: &GenerationConfig) -> Result<(), Error> {
-    let id = &model.id;
-    let unsupported = |field: &str, hint: &str| {
-        Err(Error::UnsupportedFeature(format!(
-            "GenerationConfig::{field} is not used by OpenRouter model '{id}'. {hint}"
-        )))
-    };
-    if config.openai_reasoning_mode.is_some() {
-        return unsupported(
-            "openai_reasoning_mode",
-            "Set the mode on OpenRouterReasoning (ReasoningConfig::OpenRouter) instead.",
-        );
-    }
-    if config.anthropic_thinking_enabled.is_some() {
-        return unsupported(
-            "anthropic_thinking_enabled",
-            "Use OpenRouterReasoning::enabled() or ::disabled() instead.",
-        );
-    }
-    if config.openai_service_tier.is_some() {
-        return unsupported(
-            "openai_service_tier",
-            "Set OpenRouterOptions::service_tier instead.",
-        );
-    }
-    if config.anthropic_fast_mode.is_some() {
-        return unsupported(
-            "anthropic_fast_mode",
-            "OpenRouter's Chat Completions API has no fast-mode option.",
-        );
-    }
-    if config.anthropic_inference_geo.is_some() {
-        return unsupported(
-            "anthropic_inference_geo",
-            "Use provider preferences or OpenRouter's in-region routing instead.",
-        );
-    }
+/// Interleaved thinking on Claude: OpenRouter sends the beta that turns it
+/// on, but has no way to turn it off. (On other models the setting is
+/// dropped with the other Anthropic ones; see `without_foreign_settings`.)
+fn check_interleaved_thinking(model: &Model, config: &GenerationConfig) -> Result<(), Error> {
     match config.interleaved_thinking {
-        Some(true) if !is_claude_family(id) => unsupported(
-            "interleaved_thinking",
-            "Interleaved thinking is an Anthropic beta, available only for anthropic/ models.",
-        ),
-        Some(false) => unsupported(
-            "interleaved_thinking",
-            "OpenRouter can't disable interleaved thinking; leave it unset.",
-        ),
+        Some(false) if is_claude_family(&model.id) => Err(Error::UnsupportedFeature(format!(
+            "GenerationConfig::interleaved_thinking: OpenRouter can't disable interleaved thinking for '{}'; leave it unset.",
+            model.id
+        ))),
         _ => Ok(()),
     }
 }
@@ -438,7 +398,9 @@ impl OpenRouterClient {
             )));
         }
         super::super::ensure_supported_inputs(conversation)?;
-        reject_foreign_options(requested, config)?;
+        let sanitized = super::super::without_foreign_settings(requested, config);
+        let config: &GenerationConfig = &sanitized;
+        check_interleaved_thinking(requested, config)?;
         let slug = requested.id.as_str();
 
         // The model's own catalog metadata, else the loaded catalog's.
@@ -496,12 +458,8 @@ impl OpenRouterClient {
                 }
                 Some(reasoning.clone())
             }
-            Some(other) => {
-                return Err(invalid(format!(
-                    "OpenRouter model '{slug}' takes ReasoningConfig::OpenRouter, not a {:?} reasoning configuration; convert it explicitly with ReasoningConfig::to_openrouter.",
-                    other.provider()
-                )));
-            }
+            // Another provider's variant was dropped above.
+            Some(_) => None,
         };
 
         if let Some(verbosity) = config.verbosity {

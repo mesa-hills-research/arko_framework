@@ -5,6 +5,7 @@ pub mod conversation;
 pub mod error;
 pub mod message;
 pub mod model;
+mod notice;
 pub mod pricing;
 pub mod prompt_cache;
 pub mod providers;

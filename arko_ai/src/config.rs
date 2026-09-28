@@ -16,6 +16,13 @@ pub enum Verbosity {
 /// Configs saved by earlier versions carry a `temperature_specified` flag next
 /// to `temperature`; they still load: `temperature_specified: false` means no
 /// temperature, whatever `temperature` holds.
+///
+/// One config can serve models of several providers. A setting the model's
+/// provider has no use for (an `openai_*` setting on Claude, an `anthropic_*`
+/// one on GPT or Gemini, another provider's [`ReasoningConfig`] variant) is
+/// dropped from the request, with a warning logged once per provider and
+/// setting. A value the provider can't accept for a setting it does use is
+/// an error.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(remote = "Self", default)]
 pub struct GenerationConfig {
@@ -23,7 +30,7 @@ pub struct GenerationConfig {
     /// default applies. OpenAI reasoning models and Google's Interactions API
     /// take no temperature, so a set one is an error for requests to them;
     /// Claude models that take no sampling parameters (Fable 5.x, Opus 4.7 and
-    /// later, Sonnet 5) drop it.
+    /// later, Sonnet 5) drop it, with a warning logged once per model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     pub max_tokens: Option<usize>,
@@ -135,7 +142,7 @@ pub struct GenerationConfig {
     /// OpenRouter routing and request options for this request. Fields set
     /// here override the client's defaults
     /// ([`OpenRouterClient::with_default_options`]) field by field; see
-    /// [`OpenRouterOptions`]. Ignored by other providers.
+    /// [`OpenRouterOptions`]. Other providers drop it with a warning.
     ///
     /// [`OpenRouterClient::with_default_options`]: crate::providers::openrouter::OpenRouterClient::with_default_options
     /// [`OpenRouterOptions`]: crate::providers::openrouter::OpenRouterOptions

@@ -114,14 +114,24 @@ and the OpenRouter catalog supplies limits and prices on request; see
 `with_reasoning`, `with_verbosity`, `with_prompt_caching`, and `with_tool_config`. The
 default sends no temperature: `temperature` is an `Option<f64>`, and `None` lets the
 model's default apply. A set temperature is rejected for OpenAI reasoning models and
-Gemini, and dropped for Claude models that take no sampling parameters. Configs saved
+Gemini, and dropped with a warning for Claude models that take no sampling parameters.
+Configs saved
 with the earlier `temperature_specified` flag still load (`false` means no temperature).
 A config deserializes from partial JSON or YAML, with omitted fields at their defaults.
 Each provider takes its own `ReasoningConfig` variant:
 `ReasoningConfig::openai(effort, include_summaries)`, `anthropic(budget_tokens)` or
 `anthropic_adaptive()`, `gemini(thinking_level, include_summaries)` or
 `google(thinking_budget, include_summaries)` (mapped to a thinking level), and
-`openrouter_effort(effort)`. Prompt caching is on by default
+`openrouter_effort(effort)`.
+
+One config can serve models of several providers. Settings the model's provider has no
+use for are dropped from the request, with a warning logged once per provider and
+setting: another provider's `ReasoningConfig` variant (the model's default reasoning then
+applies), `openai_*` settings and `verbosity` on Claude and Gemini, `anthropic_*`
+settings, `long_context` and `interleaved_thinking` on GPT and Gemini, `openrouter` on
+the direct providers, and on OpenRouter the settings listed under
+[Other generation settings](#other-generation-settings). A value the provider can't
+accept for a setting it does use, such as an effort the model lacks, is an error. Prompt caching is on by default
 (`Conversation::enable_cache`); a new conversation's `prompt_cache_key` is a random UUID
 (`with_prompt_cache_key` sets another; restored conversations keep their saved key), so
 give each independent agent or task its own conversation.
@@ -681,9 +691,10 @@ want their own app credited.
 OpenRouter models take `ReasoningConfig::OpenRouter(OpenRouterReasoning)` only: `effort`
 (`none` to `max`, clamped by OpenRouter to the nearest level the model supports) or
 `max_tokens` (not both), `exclude`, `enabled`, `summary`, `context` and `mode`. Other
-variants are rejected; `ReasoningConfig::to_openrouter()` converts them explicitly (OpenAI
-effort and summaries, Anthropic budgets or adaptive effort, Gemini budgets and levels) and
-fails where there is no equivalent. On Claude, a reasoning `max_tokens` budget must stay
+variants are dropped with a warning, and nothing is converted implicitly;
+`ReasoningConfig::to_openrouter()` converts them explicitly (OpenAI effort and summaries,
+Anthropic budgets or adaptive effort, Gemini budgets and levels) and fails where there is
+no equivalent. On Claude, a reasoning `max_tokens` budget must stay
 below the request's `max_tokens`; this is checked before sending. `exclude: true` hides
 the reasoning text (it is still billed); whether it also withholds the `reasoning_details`
 needed to continue tool calls is undocumented, so avoid it in tool loops.
@@ -784,11 +795,14 @@ stream chunk, as a 200 body with `error` instead of choices, or in `choices[0].e
 ### Other generation settings
 
 `openai_reasoning_mode`, `anthropic_thinking_enabled`, `openai_service_tier`,
-`anthropic_fast_mode`, `anthropic_inference_geo` and `interleaved_thinking` (except `true`
-on Claude) are rejected rather than dropped; use `OpenRouterReasoning` and
-`OpenRouterOptions` instead. `anthropic_summarized_thinking` and `long_context` are
-accepted as no-ops: OpenRouter already returns summarized Claude thinking and enables
-extended context where the model has it.
+`anthropic_fast_mode` and `anthropic_inference_geo` have no OpenRouter equivalent sent by
+arko: they are dropped with a warning (logged once per setting); use `OpenRouterReasoning`
+and `OpenRouterOptions` instead. On Claude models, `anthropic_cache_ttl` and
+`interleaved_thinking: Some(true)` are sent (see [What is sent](#what-is-sent)),
+`interleaved_thinking: Some(false)` is an error because OpenRouter can't turn it off, and
+`anthropic_summarized_thinking` and `long_context` are accepted as no-ops: OpenRouter
+already returns summarized Claude thinking and enables extended context where the model
+has it. On other models these four Claude settings are dropped with a warning too.
 
 ### Known gaps
 

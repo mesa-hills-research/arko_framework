@@ -4,6 +4,9 @@ pub mod openai;
 pub mod openrouter;
 pub mod voyage;
 
+mod foreign;
+pub(crate) use foreign::without_foreign_settings;
+
 use crate::{
     config::GenerationConfig,
     conversation::Conversation,

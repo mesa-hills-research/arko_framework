@@ -900,11 +900,21 @@ impl AnthropicClient {
         config: &GenerationConfig,
     ) -> Result<AnthropicRequest, Error> {
         super::ensure_supported_inputs(conversation)?;
+        let sanitized = super::without_foreign_settings(&conversation.model, config);
+        let config: &GenerationConfig = &sanitized;
         // Omitted unless set, so the provider default applies (1.0, which is
         // also what thinking requires; validate_config rejects anything else).
-        let temperature = config
-            .temperature
-            .filter(|_| !conversation.model.omits_anthropic_sampling_parameters());
+        // Models that take no sampling parameters reject one, so it is dropped.
+        let omits_sampling = conversation.model.omits_anthropic_sampling_parameters();
+        if omits_sampling && config.temperature.is_some() {
+            let id = &conversation.model.id;
+            crate::notice::warn_once(&format!("anthropic:temperature:{id}"), || {
+                format!(
+                    "arko_ai: Claude model '{id}' takes no temperature; GenerationConfig::temperature is ignored for it."
+                )
+            });
+        }
+        let temperature = config.temperature.filter(|_| !omits_sampling);
 
         let mut request = AnthropicRequest {
             model: conversation.model.id.clone(),
@@ -1082,6 +1092,19 @@ impl AnthropicClient {
         }
 
         Ok(request)
+    }
+
+    /// The request body [`build_request`](Self::build_request) produces,
+    /// serialized as it is sent.
+    #[cfg(test)]
+    pub(crate) fn request_body(
+        &self,
+        conversation: &Conversation,
+        config: &GenerationConfig,
+    ) -> Result<String, Error> {
+        Ok(serde_json::to_string(
+            &self.build_request(conversation, config)?,
+        )?)
     }
 
     fn convert_message_to_anthropic(&self, message: &Message) -> Result<AnthropicMessage, Error> {

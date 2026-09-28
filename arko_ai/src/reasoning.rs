@@ -304,8 +304,8 @@ impl ReasoningConfig {
     }
 
     /// The closest OpenRouter equivalent of this configuration. Nothing is
-    /// translated implicitly: OpenRouter models reject other variants, and
-    /// this conversion fails where no equivalent exists.
+    /// translated implicitly: OpenRouter models drop other variants (with a
+    /// warning), and this conversion fails where no equivalent exists.
     ///
     /// - `OpenAI`: the effort, plus `summary: "auto"` when summaries were requested.
     /// - `Anthropic`: the budget as `max_tokens`, or `enabled: false` for a zero

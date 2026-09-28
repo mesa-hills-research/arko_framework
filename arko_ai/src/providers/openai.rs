@@ -1906,6 +1906,8 @@ impl OpenAIClient {
         is_chatgpt_oauth: bool,
     ) -> Result<OpenAIRequest, Error> {
         super::ensure_supported_inputs(conversation)?;
+        let sanitized = super::without_foreign_settings(&conversation.model, config);
+        let config: &GenerationConfig = &sanitized;
         let resolved_max_tokens = if is_chatgpt_oauth {
             None
         } else {
@@ -2322,6 +2324,22 @@ impl OpenAIClient {
         }
 
         Ok(request)
+    }
+
+    /// The request body [`build_request`](Self::build_request) produces,
+    /// serialized as it is sent.
+    #[cfg(test)]
+    pub(crate) fn request_body(
+        &self,
+        conversation: &Conversation,
+        config: &GenerationConfig,
+        is_chatgpt_oauth: bool,
+    ) -> Result<String, Error> {
+        Ok(serde_json::to_string(&self.build_request(
+            conversation,
+            config,
+            is_chatgpt_oauth,
+        )?)?)
     }
 
     /// Replays a response's stored output items verbatim and in order (see
