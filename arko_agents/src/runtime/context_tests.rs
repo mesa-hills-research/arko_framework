@@ -477,3 +477,97 @@ fn the_system_prompt_datetime_is_labelled_as_the_task_start() {
         assert_eq!(prompt.matches("Datetime (UTC)").count(), 1, "{prompt}");
     }
 }
+
+/// In native mode the environment details and reminder due with a user
+/// message go with tool results too, as text after the results in the same
+/// turn (they used to reach only the runtime's own notes). Without such
+/// settings a tool-results message holds only the results.
+#[tokio::test]
+async fn native_tool_results_carry_the_details_and_reminder_due() {
+    use crate::agent_config::{
+        DeveloperDefinableEnvironmentDetail, ReminderInjectionFrequency, UserReminder,
+    };
+    let turn = |id: &str| {
+        let mut message = ai::Message::new_assistant("");
+        message.tool_calls.push(call(id, "plain_text"));
+        response(message)
+    };
+    let done = || {
+        let mut message = ai::Message::new_assistant("");
+        message.tool_calls.push(ai::ToolCall {
+            arguments: serde_json::json!({"summary": "done"}),
+            ..call("done", "complete_task")
+        });
+        response(message)
+    };
+    for frequency in [
+        None,
+        Some(ReminderInjectionFrequency::EveryUserMessage),
+        Some(ReminderInjectionFrequency::EveryNUserMessages(2)),
+    ] {
+        let (mut agent, _events, _commands) = harness(ToolCallingMode::Native);
+        if let Some(frequency) = frequency.clone() {
+            agent.task.agent_config.user_reminder =
+                Some(UserReminder::new("Stay in scope.".into(), frequency));
+            agent.task.developer_env_details =
+                Some(vec![DeveloperDefinableEnvironmentDetail::new_static(
+                    "Build".into(),
+                    "green".into(),
+                    EnvironmentDetailPlacement::EachUserMessage,
+                )]);
+        }
+        agent
+            .scripted_responses
+            .get_mut()
+            .unwrap()
+            .extend([turn("one"), turn("two"), done()]);
+        let task = timeout(Duration::from_secs(10), agent.run())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(task.current_state, TaskState::Completed { .. }));
+        // The tool-results messages of the two turns, in order.
+        let beside: Vec<Vec<&str>> = task
+            .conversation
+            .messages
+            .iter()
+            .filter(|message| {
+                message
+                    .content
+                    .first()
+                    .is_some_and(|content| content.as_tool_result().is_some())
+            })
+            .map(|message| {
+                message
+                    .content
+                    .iter()
+                    .filter_map(ai::Content::as_text)
+                    .collect()
+            })
+            .take(2)
+            .collect();
+        assert_eq!(beside.len(), 2);
+        let details = "# Current Environment Information (updated this turn)\nBuild:\ngreen\n";
+        match frequency {
+            None => assert!(beside.iter().all(Vec::is_empty), "{beside:?}"),
+            Some(ReminderInjectionFrequency::EveryUserMessage) => {
+                for texts in &beside {
+                    assert_eq!(
+                        texts,
+                        &[format!("{details}\n\n# Reminder\nStay in scope.").as_str()]
+                    );
+                }
+            }
+            Some(_) => {
+                // The task prompt is user message 1: the first results are
+                // message 2, the second message 3, when every second one
+                // after the prompt gets the reminder.
+                assert_eq!(beside[0], [details]);
+                assert_eq!(
+                    beside[1],
+                    [format!("{details}\n\n# Reminder\nStay in scope.").as_str()]
+                );
+            }
+        }
+    }
+}

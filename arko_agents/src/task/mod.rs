@@ -434,6 +434,12 @@ impl Task {
         let answer = self.with_pending_text_tool_results(format!(
             "Response to the agent's questions:\nQuestions: {questions}\nResponse: {response}"
         ));
+        // With the environment details and reminder due, as the runtime
+        // sends any user message.
+        let parsing = self.agent_config.get_tool_parsing_config();
+        let answer = crate::parsing::PromptBuilder::new(&self.agent_config, vec![], &parsing, None)
+            .text_beside_tool_results(self, Some(&answer), self.user_message_count + 1)?
+            .unwrap_or(answer);
         self.add_pending_tool_results(Some(&answer));
         Ok(())
     }

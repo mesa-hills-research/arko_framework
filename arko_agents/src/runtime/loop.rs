@@ -1301,11 +1301,23 @@ impl AgentLoop {
         Ok(())
     }
 
+    /// Adds the turn's native results to the conversation as one user
+    /// message: the results, then `extra_text` (an answer or a note) and
+    /// the environment details and reminder due with this user message, as
+    /// text after the results in the same turn.
     fn flush_native_results_to_conversation(
         &mut self,
         extra_text: Option<&str>,
     ) -> Result<(), ArkoAgentsError> {
-        self.task.add_pending_tool_results(extra_text);
+        if self.task.pending_native_tool_results.is_empty()
+            && extra_text.is_none()
+            && self.task.pending_tool_images.is_empty()
+        {
+            return Ok(());
+        }
+        let text = PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None)
+            .text_beside_tool_results(&self.task, extra_text, self.task.user_message_count + 1)?;
+        self.task.add_pending_tool_results(text.as_deref());
         Ok(())
     }
 

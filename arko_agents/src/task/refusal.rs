@@ -95,19 +95,29 @@ const ENVIRONMENT_SECTIONS: [&str; 2] = [
     "\n\n# Current Environment Information (updated this turn)\n",
 ];
 
-/// Where the runtime-added sections at the end of `text` start.
+/// Where the runtime-added sections at the end of `text` start. Beside
+/// native tool results the sections can be the whole text, without the
+/// blank line before them.
 fn runtime_sections_start(text: &str, reminder: Option<&str>) -> usize {
     let mut end = text.len();
     if let Some(reminder) = reminder {
         let section = format!("\n\n# Reminder\n{reminder}");
         if text.ends_with(&section) {
             end -= section.len();
+        } else if text == format!("# Reminder\n{reminder}") {
+            return 0;
         }
     }
     ENVIRONMENT_SECTIONS
         .iter()
         .filter_map(|marker| text[..end].rfind(marker))
         .max()
+        .or_else(|| {
+            ENVIRONMENT_SECTIONS
+                .iter()
+                .any(|marker| text.starts_with(&marker[2..]))
+                .then_some(0)
+        })
         .unwrap_or(end)
 }
 
@@ -127,8 +137,13 @@ fn rephrase(message: &mut Message, text: &str, reminder: Option<&str>) {
     match target {
         Some(index) => {
             let old = message.content[index].as_text().unwrap_or_default();
-            let kept = old[runtime_sections_start(old, reminder)..].to_string();
-            message.content[index] = Content::Text(format!("{text}{kept}"));
+            let kept = &old[runtime_sections_start(old, reminder)..];
+            let separator = if kept.is_empty() || kept.starts_with("\n\n") {
+                ""
+            } else {
+                "\n\n"
+            };
+            message.content[index] = Content::Text(format!("{text}{separator}{kept}"));
         }
         None => {
             let after_results = message
@@ -536,6 +551,36 @@ mod tests {
             )
         );
         assert_eq!(task.initial_task_prompt, "new task");
+    }
+
+    /// Beside native tool results the runtime's sections can be the whole
+    /// text; rephrasing puts the new text before them.
+    #[test]
+    fn rephrasing_beside_results_keeps_sections_that_are_the_whole_text() {
+        let mut task = task();
+        task.conversation.add_user_message("task");
+        let mut turn = Message::new_assistant("");
+        turn.tool_calls.push(call("call_1"));
+        task.conversation.messages.push(turn);
+        task.conversation.add_user_message_with_contents(vec![
+            Content::ToolResult(ToolResult::from_tool_call(&call("call_1"), "output")),
+            Content::Text(
+                "# Current Environment Information (updated this turn)\ncwd: /work\n\n# Reminder\nStay on task."
+                    .into(),
+            ),
+        ]);
+        task.refused_input = task.current_input();
+        task.resolve_refusal(vec![RefusalResolution::RephraseUserMessage {
+            message_index: 2,
+            text: "Answer: no".into(),
+        }])
+        .unwrap();
+        assert_eq!(
+            task.conversation.messages[2].content[1].as_text(),
+            Some(
+                "Answer: no\n\n# Current Environment Information (updated this turn)\ncwd: /work\n\n# Reminder\nStay on task."
+            )
+        );
     }
 
     #[test]

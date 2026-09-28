@@ -224,6 +224,31 @@ impl<'a> PromptBuilder<'a> {
         Ok(full_content)
     }
 
+    /// The text that goes beside a turn's native tool results in their user
+    /// message: `text` (an answer or a note) followed by the sections
+    /// [`augment_user_message_with_env_details_and_reminder`](Self::augment_user_message_with_env_details_and_reminder)
+    /// adds, or those sections alone; `None` when there is neither. Providers
+    /// take it after the results in the same turn.
+    pub fn text_beside_tool_results(
+        &self,
+        task: &'a Task,
+        text: Option<&str>,
+        user_message_number: usize,
+    ) -> Result<Option<String>, ArkoAgentsError> {
+        let augmented = self.augment_user_message_with_env_details_and_reminder(
+            task,
+            text.unwrap_or_default(),
+            user_message_number,
+        )?;
+        Ok(match text {
+            Some(_) => Some(augmented),
+            None => {
+                let sections = augmented.trim_start_matches("\n\n");
+                (!sections.is_empty()).then(|| sections.to_string())
+            }
+        })
+    }
+
     /// Determines if a reminder should be injected for the given user message number.
     fn should_inject_reminder(
         &self,

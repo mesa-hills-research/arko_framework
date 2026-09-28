@@ -166,6 +166,11 @@ In `role_description` and `instructions`, text between `{{#output_based_only}}` 
 `{{/output_based_only}}` is kept, without the markers, in output-based mode and removed
 in native mode, so one configuration can carry tool-call examples for text-parsed calls.
 
+Details placed in every user message (`EachUserMessage`) and reminders for every user
+message or every Nth go with each message the model receives, tool results included: in
+native mode they are text after the turn's results, in the same user message, which every
+provider accepts. Every such message counts toward `EveryNUserMessages`.
+
 The system prompt is written once, when a task starts, so a date and time placed there
 is labelled `Task Start Datetime (UTC)`; placed in a user message it is labelled
 `Current Datetime (UTC)`.
