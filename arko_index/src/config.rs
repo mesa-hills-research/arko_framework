@@ -29,6 +29,14 @@ pub struct Config {
     /// Opt-in: the transient failures a search query embedding may have
     /// before the search fails, instead of `max_transient_attempts`.
     pub query_max_transient_attempts: Option<usize>,
+    /// Opt-in: the most tokens one embedding request may carry, below the
+    /// model's per-request limit (for example to stay within an account's
+    /// rate limit). It can't exceed that limit or be below the per-input
+    /// limit. `None` packs requests up to the model's limit.
+    pub embedding_batch_tokens: Option<usize>,
+    /// Opt-in: the most inputs one embedding request may carry, below the
+    /// model's limit. `None` uses the model's limit.
+    pub embedding_batch_items: Option<usize>,
     /// Opt-in retention: keep the newest `n` complete generations of each
     /// index and prune older ones after each publish (their chunks, file
     /// states and request artifacts; the job, its events and usage stay,
@@ -50,6 +58,8 @@ impl Default for Config {
             max_capacity_wait_ms: Some(DEFAULT_MAX_CAPACITY_WAIT_MS),
             query_priority: false,
             query_max_transient_attempts: None,
+            embedding_batch_tokens: None,
+            embedding_batch_items: None,
             keep_generations: None,
             synchronous: Synchronous::Full,
         }

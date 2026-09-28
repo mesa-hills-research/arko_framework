@@ -80,6 +80,8 @@ pub struct ArkoIndex {
 }
 pub(crate) struct Inner {
     pub db: Db,
+    /// The backend's embedding request limits, lowered by the configuration.
+    pub limits: backend::Limits,
     pub backend: Arc<dyn Backend>,
     pub config: Config,
     pub chunking: Scheduler,
@@ -100,10 +102,12 @@ impl ArkoIndex {
                 "backend embedding profile differs from index configuration",
             ));
         }
+        let limits = embedding_request_limits(&config, &*backend)?;
         let db = Db::open(path.as_ref(), config.synchronous).await?;
         Ok(Self {
             inner: Arc::new(Inner {
                 db,
+                limits,
                 chunking: Scheduler::new(
                     backend.clone(),
                     config.concurrency,
@@ -948,7 +952,7 @@ impl ArkoIndex {
             .filter(|p| !existing.contains(&p.id))
             .cloned()
             .collect();
-        let bins = packing::pack(missing, self.inner.backend.limits())?;
+        let bins = packing::pack(missing, self.inner.limits)?;
         self.inner
             .db
             .event(
@@ -1171,6 +1175,30 @@ fn runtime_changes(saved: &Config, current: &Config) -> Result<Vec<Value>> {
             |(setting, value)| json!({"setting": setting, "from": saved.get(setting), "to": value}),
         )
         .collect())
+}
+/// The backend's embedding request limits, lowered where the configuration
+/// asks; a setting may not raise them.
+fn embedding_request_limits(config: &Config, backend: &dyn Backend) -> Result<backend::Limits> {
+    let mut limits = backend.limits();
+    if let Some(tokens) = config.embedding_batch_tokens {
+        if tokens > limits.batch_tokens || tokens < limits.item_tokens {
+            return Err(error::invalid(format!(
+                "embedding_batch_tokens must be between the model's per-input limit ({}) and its per-request limit ({})",
+                limits.item_tokens, limits.batch_tokens
+            )));
+        }
+        limits.batch_tokens = tokens;
+    }
+    if let Some(items) = config.embedding_batch_items {
+        if items == 0 || items > limits.batch_items {
+            return Err(error::invalid(format!(
+                "embedding_batch_items must be between 1 and the model's limit ({})",
+                limits.batch_items
+            )));
+        }
+        limits.batch_items = items;
+    }
+    Ok(limits)
 }
 fn retry_policy(config: &Config) -> crate::scheduler::RetryPolicy {
     crate::scheduler::RetryPolicy {

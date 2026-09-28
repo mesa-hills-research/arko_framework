@@ -173,6 +173,27 @@ impl ChunkModelInfo {
     }
 }
 
+/// The per-request token limit assumed for a Voyage model whose limit Voyage
+/// does not publish (`voyage-code-4`): 120,000, the smallest per-request
+/// limit Voyage publishes for any current model.
+pub const UNPUBLISHED_BATCH_TOKENS: usize = 120_000;
+
+/// The request limits of a Voyage embedding model: its published per-input,
+/// per-request token and per-request input limits, with
+/// [`UNPUBLISHED_BATCH_TOKENS`] where no per-request token limit is
+/// published.
+pub fn embedding_limits(details: &EmbeddingModelDetails) -> Result<Limits> {
+    Ok(Limits {
+        item_tokens: details.max_input_tokens_per_item,
+        batch_tokens: details
+            .max_batch_total_tokens
+            .unwrap_or(UNPUBLISHED_BATCH_TOKENS),
+        batch_items: details
+            .max_batch_size
+            .ok_or_else(|| invalid("model has no verified item-count limit"))?,
+    })
+}
+
 pub struct ArkoBackend {
     llm: LLMClient,
     embeddings: EmbeddingClient,
@@ -198,15 +219,7 @@ impl ArkoBackend {
         if !details.supported_dimensions.contains(&profile.dimensions) {
             return Err(invalid("unsupported embedding dimension"));
         }
-        let limits = Limits {
-            item_tokens: details.max_input_tokens_per_item,
-            batch_tokens: details
-                .max_batch_total_tokens
-                .ok_or_else(|| invalid("model has no verified aggregate request limit"))?,
-            batch_items: details
-                .max_batch_size
-                .ok_or_else(|| invalid("model has no verified item-count limit"))?,
-        };
+        let limits = embedding_limits(&details)?;
         let tokenizer = embeddings
             .token_counter(
                 &EmbeddingConfig::new(EmbeddingProviderIdentifier::Voyage, &profile.model)
@@ -451,6 +464,24 @@ mod tests {
         );
         let plain = ChunkModelInfo::new(&Model::openai_gpt_5_5(), &GenerationConfig::default());
         assert_eq!(plain.reasoning, Value::Null);
+    }
+
+    #[test]
+    fn voyage_code_4_gets_a_conservative_request_limit() {
+        let code = embedding_limits(&EmbeddingModelDetails::voyage_code_4()).unwrap();
+        assert_eq!(
+            (code.item_tokens, code.batch_tokens, code.batch_items),
+            (32_000, 120_000, 1_000)
+        );
+        let published = embedding_limits(&EmbeddingModelDetails::voyage_4()).unwrap();
+        assert_eq!(
+            (
+                published.item_tokens,
+                published.batch_tokens,
+                published.batch_items
+            ),
+            (32_000, 320_000, 1_000)
+        );
     }
 
     #[test]

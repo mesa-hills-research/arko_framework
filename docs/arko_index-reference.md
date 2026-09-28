@@ -226,6 +226,8 @@ blocked.
 | `max_capacity_wait_ms` | 15 minutes | Longest total wait per request for capacity signals; `None` waits as long as the provider is overloaded. |
 | `query_priority` | `false` | Opt-in: dispatch search query embeddings before queued build embeddings. |
 | `query_max_transient_attempts` | `None` | Opt-in: a smaller transient attempt budget for search query embeddings; `None` uses `max_transient_attempts`. |
+| `embedding_batch_tokens` | `None` | Opt-in: fewer tokens per embedding request than the model allows; see [Embeddings](#embeddings). |
+| `embedding_batch_items` | `None` | Opt-in: fewer inputs per embedding request than the model allows. |
 | `keep_generations` | `None` | Opt-in: prune complete generations beyond the newest `n`; see [Storage and updates](#storage-and-updates). |
 | `synchronous` | `Full` | SQLite `synchronous` mode; `Normal` is an opt-in; see [Storage and updates](#storage-and-updates). |
 
@@ -282,11 +284,18 @@ chunk-model request with its response or error and its attempt events.
 The default `EmbeddingProfile` is Voyage `voyage-4` with 1,024 float32 dimensions,
 counting tokens with the `voyageai/voyage-4` tokenizer at the pinned revision
 `44f3b2ae4ddf33403ed4dd66bec3fa48ff7dbbf9`. `ArkoBackend::new` loads that tokenizer from
-the Hugging Face Hub. It accepts Voyage models whose per-input, per-request token and
-per-request item limits are known (not `voyage-code-4`), at a dimension the model
-supports; for `voyage-4` the limits are 32,000 tokens per input, and 320,000 tokens and
-1,000 inputs per request. `ArkoIndex::open` requires the backend's profile to equal
-`Config::embedding`.
+the Hugging Face Hub. It accepts the Voyage models of the `arko_ai` registry at a
+dimension the model supports, with their published limits: for `voyage-4`, 32,000 tokens
+per input, and 320,000 tokens and 1,000 inputs per request. Voyage publishes no
+per-request token limit for `voyage-code-4`, the code retrieval model; requests to it are
+limited to 120,000 tokens (`backend::UNPUBLISHED_BATCH_TOKENS`), the smallest per-request
+limit Voyage publishes for any current model. `ArkoIndex::open` requires the backend's
+profile to equal `Config::embedding`.
+
+`Config::embedding_batch_tokens` and `Config::embedding_batch_items` lower the tokens and
+inputs of one embedding request, for example to stay within an account's rate limit. They
+can't raise the model's limits, and the token setting can't be below the per-input limit;
+`ArkoIndex::open` rejects such values.
 
 Embedding starts once every file has valid boundaries. Token counts use the exact
 submitted text, and Voyage truncation is disabled. A chunk is split only when it exceeds

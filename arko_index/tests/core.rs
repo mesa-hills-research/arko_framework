@@ -3447,3 +3447,83 @@ async fn the_repair_limit_can_block_or_be_lifted() {
         (Some(5), RepairLimitPolicy::Merge)
     );
 }
+
+#[tokio::test]
+async fn embedding_request_limits_can_only_be_lowered() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    // Two single-line files of 20,000 fake tokens each.
+    for n in 0..2 {
+        std::fs::write(
+            root.path().join(format!("{n}.txt")),
+            format!("alpha{n} {}", "x".repeat(79_990)),
+        )
+        .unwrap();
+    }
+    for n in 0..3 {
+        std::fs::write(
+            root.path().join(format!("small{n}.txt")),
+            format!("alpha small {n}\n"),
+        )
+        .unwrap();
+    }
+    let fake = Arc::new(Fake::new());
+    let bins = |config: Config| {
+        let (fake, root) = (fake.clone(), root.path().to_owned());
+        let db = db.path().join(format!(
+            "{:?}.db",
+            (config.embedding_batch_tokens, config.embedding_batch_items)
+        ));
+        async move {
+            let index = ArkoIndex::open(&db, fake, config).await.unwrap();
+            let spec = BuildSpec::new("test", &root).with_chunking(ChunkingOptions {
+                max_request_bytes: Some(1_000_000),
+                ..Default::default()
+            });
+            let job = index.start_build(spec).await.unwrap();
+            assert_eq!(settle(&index, &job.job).await.phase, "ready");
+            let events = index.events(&job.job, 0, 1000).await.unwrap();
+            events
+                .iter()
+                .find(|e| e.kind == "embedding_plan")
+                .unwrap()
+                .detail["bins"]
+                .clone()
+        }
+    };
+    assert_eq!(bins(config(&fake)).await, 1);
+    let tokens = Config {
+        embedding_batch_tokens: Some(32_000),
+        ..config(&fake)
+    };
+    assert_eq!(bins(tokens).await, 2);
+    let items = Config {
+        embedding_batch_items: Some(2),
+        ..config(&fake)
+    };
+    assert_eq!(bins(items).await, 3);
+    // Above the model's limits, or below the per-input limit: refused.
+    for config in [
+        Config {
+            embedding_batch_tokens: Some(320_001),
+            ..config(&fake)
+        },
+        Config {
+            embedding_batch_tokens: Some(31_999),
+            ..config(&fake)
+        },
+        Config {
+            embedding_batch_items: Some(1_001),
+            ..config(&fake)
+        },
+        Config {
+            embedding_batch_items: Some(0),
+            ..config(&fake)
+        },
+    ] {
+        assert!(matches!(
+            ArkoIndex::open(db.path().join("refused.db"), fake.clone(), config).await,
+            Err(Error::Invalid(_))
+        ));
+    }
+}
