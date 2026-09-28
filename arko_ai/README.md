@@ -118,13 +118,16 @@ and the OpenRouter catalog supplies limits and prices on request; see
 
 `GenerationConfig` holds the per-request settings, built from
 `GenerationConfig::default()` with methods such as `with_max_tokens`, `with_temperature`,
-`with_reasoning`, `with_verbosity`, `with_prompt_caching`, and `with_tool_config`. The
-default sends no temperature: `temperature` is an `Option<f64>`, and `None` lets the
+`with_reasoning`, `with_verbosity`, `with_prompt_caching`, and `with_tool_config`. A config
+deserializes from partial JSON or YAML, with omitted fields at their defaults.
+
+The default sends no temperature: `temperature` is an `Option<f64>`, and `None` lets the
 model's default apply. A set temperature is rejected for OpenAI reasoning models and
 Gemini, and dropped with a warning for Claude models that take no sampling parameters.
-Configs saved
-with the earlier `temperature_specified` flag still load (`false` means no temperature).
-A config deserializes from partial JSON or YAML, with omitted fields at their defaults.
+Configs saved with the earlier `temperature_specified` flag still load (`false` means no
+temperature). A `temperature` written without that flag is now sent; earlier versions
+ignored it.
+
 Each provider takes its own `ReasoningConfig` variant:
 `ReasoningConfig::openai(effort, include_summaries)`, `anthropic(budget_tokens)` or
 `anthropic_adaptive()`, `gemini(thinking_level, include_summaries)` or
@@ -142,10 +145,12 @@ applies), `openai_*` settings and `verbosity` on Claude and Gemini, `anthropic_*
 settings, `long_context` and `interleaved_thinking` on GPT and Gemini, `openrouter` on
 the direct providers, and on OpenRouter the settings listed under
 [Other generation settings](#other-generation-settings). A value the provider can't
-accept for a setting it does use, such as an effort the model lacks, is an error. Prompt caching is on by default
-(`Conversation::enable_cache`); a new conversation's `prompt_cache_key` is a random UUID
-(`with_prompt_cache_key` sets another; restored conversations keep their saved key), so
-give each independent agent or task its own conversation.
+accept for a setting it does use, such as an effort the model lacks, is an error.
+
+Prompt caching is on by default (`Conversation::enable_cache`); a new conversation's
+`prompt_cache_key` is a random UUID (`with_prompt_cache_key` sets another; restored
+conversations keep their saved key), so give each independent agent or task its own
+conversation.
 
 `LLMClient::prompt_cache_lifetime(&model, &config)` reports how long the provider keeps a
 request's prompt cache after its last use: `PromptCacheLifetime::Known(duration)`,
@@ -227,12 +232,13 @@ called something else, or whether the call's arguments are not valid JSON.
 
 ### Tool images
 
-A tool can return images with its result: `ToolResult::with_images(vec![ToolResultImage::new(label, image)])`,
-where the label is short text such as a file name and size. Where the model takes images
-inside a tool result (`Model::accepts_tool_result_images()`), they go inside that result,
-after its output text; otherwise they follow all of the turn's results, each after the
-text `"Image from tool {name}, call {call_id}: {label}"` (`unidentified` when the result
-has no call id), the layout arko_agents has always used for tool images:
+A tool can return images with its result:
+`ToolResult::with_images(vec![ToolResultImage::new(label, image)])`, where the label is
+short text such as a file name and size. Where the model takes images inside a tool
+result (`Model::accepts_tool_result_images()`), they go inside that result, after its
+output text; otherwise they follow all of the turn's results, each after the text
+`"Image from tool {name}, call {call_id}: {label}"` (`unidentified` when the result has
+no call id), the layout arko_agents has always used for tool images:
 
 | Provider and model | Result images |
 | --- | --- |
@@ -255,10 +261,15 @@ separate user turn after the results, which every provider accepts.
 Empty texts (an empty output with images, an empty label) are left out of the result. A
 result without images is sent exactly as before result images existed, and conversations
 saved before then (with tool images as sibling content of the message) load and are sent
-unchanged. Result images count as image input: a model without it rejects them before
-sending. `Message::has_images()`, `image_count()` and `remove_images()` cover images both
-as content and inside results; `Conversation::redact_tool_result` replaces only a
-result's text and keeps its images.
+unchanged, except to Gemini 3 and later: there a tool-result message that also holds text
+or images is now folded as described above, so a saved conversation with such a message
+is sent differently than before, and its first request after the upgrade misses Gemini's
+implicit cache from that message on.
+
+Result images count as image input: a model without it rejects them before sending.
+`Message::has_images()`, `image_count()` and `remove_images()` cover images both as content
+and inside results; `Conversation::redact_tool_result` replaces only a result's text and
+keeps its images.
 
 ## Stop reasons and refusals
 
