@@ -334,6 +334,14 @@ nothing is chunked or embedded again. An unset revision is omitted from saved pr
 (jobs' configurations, vectors' `profile`), which earlier versions read as the former
 default; a search's `tokenizer` is then `voyageai/<model>@main`.
 
+Profiles compare by the revision as written, not by the tokenizer it loads. So
+`tokenizer_revision: Some("main")` loads the same tokenizer as an unset revision today, but
+it is a different embedding profile from an index built with the default (unset, or the
+former default pin): its semantic and hybrid searches and its resumed jobs fail with a
+profile mismatch, and an update embeds every file again instead of reusing the earlier
+generation's boundaries and vectors. Leave the revision unset for such an index, or pin
+exactly the revision it was built with.
+
 `Config::embedding_batch_tokens` and `Config::embedding_batch_items` lower the tokens and
 inputs of one embedding request, for example to stay within an account's rate limit. They
 can't raise the model's limits, and the token setting can't be below the per-input limit;
