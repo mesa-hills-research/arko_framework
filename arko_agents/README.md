@@ -745,7 +745,8 @@ refusals are removed from history.
 
 **Changing the refused input.** `RefusedInput` lists the user messages after the last
 assistant turn, each a `RefusedMessage` with its `message_index`, `runtime` and
-`runtime_text` flags, `tool_results` (by provider call ID), and image count. It is also
+`runtime_text` flags, `tool_results` (by provider call ID), and image count (images inside
+its tool results included). It is also
 kept in `Task::refused_input` until the refusal is resolved, recovery is approved, or a
 later turn completes. Messages the runtime added (file-tree updates, error and recovery
 notes, requests to continue) are marked `runtime` and cannot be changed, and neither can
@@ -759,8 +760,8 @@ and the task keeps waiting.
 | --- | --- |
 | `RephraseUserMessage { message_index, text }` | Replaces the message's text and keeps the sections the runtime appended to it (`# Initial Environment Information`, `# Current Environment Information (updated this turn)`, `# Reminder`). In a message with tool results, it replaces the text beside them, such as a native `ask_user` answer. The text must not be empty. Rephrasing the task prompt applies its `output_based_only` markers and updates `Task::initial_task_prompt`. |
 | `RemoveUserMessage { message_index }` | Removes a message without tool results. At least one user message not added by the runtime must remain. |
-| `RemoveImages { message_index }` | Removes a message's images, such as tool screenshots, with their descriptions. |
-| `RedactToolResults { call_ids, replacement }` | Replaces tool outputs; each call stays paired with its result. |
+| `RemoveImages { message_index }` | Removes a message's images, such as tool screenshots: those inside its tool results (which keep their text) and its own, with the descriptions the runtime added before them. |
+| `RedactToolResults { call_ids, replacement }` | Replaces tool outputs' text; each call stays paired with its result. Images inside the results stay; remove them with `RemoveImages`. |
 
 The refused input must still be the conversation's last input, followed at most by the
 kept refused turn. The refused turn is removed, the changed input is sent as it is, and

@@ -42,7 +42,8 @@ pub struct RefusedMessage {
     /// output-based tool mode, results are text in the message instead.)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_results: Vec<RefusedToolResult>,
-    /// Images in the message, such as tool screenshots.
+    /// Images in the message, such as tool screenshots: its own and those
+    /// inside its tool results.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub images: usize,
 }
@@ -78,11 +79,13 @@ pub enum RefusalResolution {
     /// added by the runtime must remain in the conversation, so the task
     /// prompt can't be removed when it is the only one.
     RemoveUserMessage { message_index: usize },
-    /// Remove a message's images (and the descriptions the runtime added
-    /// before tool images).
+    /// Remove a message's images: those inside its tool results (which keep
+    /// their text) and its own, with the descriptions the runtime added
+    /// before tool images sent beside the results.
     RemoveImages { message_index: usize },
-    /// Replace the output of tool results by provider call id, keeping each
-    /// call paired with its result.
+    /// Replace the output text of tool results by provider call id, keeping
+    /// each call paired with its result. Images inside the results stay;
+    /// remove them with `RemoveImages`.
     RedactToolResults {
         call_ids: Vec<String>,
         replacement: String,
@@ -159,15 +162,15 @@ fn rephrase(message: &mut Message, text: &str, reminder: Option<&str>) {
 }
 
 fn remove_images(message: &mut Message) {
+    // The descriptions first: they are recognized by the image after them.
     let content = std::mem::take(&mut message.content);
     message.content = content
         .iter()
         .enumerate()
-        .filter(|(index, part)| {
-            part.as_image().is_none() && !is_image_description(&content, *index)
-        })
+        .filter(|(index, _)| !is_image_description(&content, *index))
         .map(|(_, part)| part.clone())
         .collect();
+    message.remove_images();
 }
 
 impl Task {
@@ -199,11 +202,7 @@ impl Task {
                         tool_name: result.name.clone(),
                     })
                     .collect(),
-                images: messages[index]
-                    .content
-                    .iter()
-                    .filter(|content| content.as_image().is_some())
-                    .count(),
+                images: messages[index].image_count(),
             })
             .collect();
         (!messages.is_empty()).then_some(RefusedInput { messages })
@@ -609,6 +608,52 @@ mod tests {
         assert_eq!(task.conversation.messages.len(), 4);
         assert!(task.runtime_messages.contains(&3));
         assert!(task.refused_input.is_none());
+    }
+
+    /// Images inside tool results count as the message's images;
+    /// `RemoveImages` removes them (keeping each result's text), and
+    /// redaction replaces only the text.
+    #[test]
+    fn images_inside_tool_results_are_counted_and_removed() {
+        use arko_ai::ToolResultImage;
+        let result_with_image = || {
+            ToolResult::from_tool_call(&call("call_1"), "secret output").with_images(vec![
+                ToolResultImage::new("the screen", Image::new_url("https://example.com/s.png")),
+            ])
+        };
+        let refused = |task: &mut Task| {
+            task.conversation.add_user_message("task");
+            let mut turn = Message::new_assistant("");
+            turn.tool_calls.push(call("call_1"));
+            task.conversation.messages.push(turn);
+            task.conversation
+                .add_user_message_with_contents(vec![Content::ToolResult(result_with_image())]);
+            task.refused_input = task.current_input();
+        };
+        let mut task = task();
+        refused(&mut task);
+        assert_eq!(task.refused_input.as_ref().unwrap().messages[0].images, 1);
+        task.resolve_refusal(vec![RefusalResolution::RedactToolResults {
+            call_ids: vec!["call_1".into()],
+            replacement: "[removed]".into(),
+        }])
+        .unwrap();
+        let result = task.conversation.messages[2].content[0]
+            .as_tool_result()
+            .unwrap();
+        assert_eq!(result.output, "[removed]");
+        assert_eq!(result.images.len(), 1, "redaction keeps the image");
+
+        let mut task = self::task();
+        refused(&mut task);
+        task.resolve_refusal(vec![RefusalResolution::RemoveImages { message_index: 2 }])
+            .unwrap();
+        let result = task.conversation.messages[2].content[0]
+            .as_tool_result()
+            .unwrap();
+        assert_eq!(result.output, "secret output");
+        assert!(result.images.is_empty());
+        assert_eq!(task.conversation.messages[2].content.len(), 1);
     }
 
     #[test]
