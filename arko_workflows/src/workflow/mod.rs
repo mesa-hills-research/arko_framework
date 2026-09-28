@@ -197,8 +197,9 @@ impl Workflow {
 
     /// Spawn an agent without blocking. Returns a handle for driving it.
     ///
-    /// Use [`AgentHandle::wait`] to drive the event loop with default behavior
-    /// (auto-approve, hooks, context freshness, budget) and collect the result.
+    /// Use [`AgentHandle::wait`] to drive the event loop with the workflow's
+    /// behavior (its approval and error recovery policies, hooks, context
+    /// freshness, budget) and collect the result.
     ///
     /// Use [`AgentHandle::into_parts`] to get the raw channels for custom
     /// event processing.
@@ -627,9 +628,9 @@ impl AgentHandle {
 
     /// Drive the event loop with default workflow behavior and wait for completion.
     ///
-    /// Handles hooks, context freshness, budget tracking, and error recovery
-    /// automatically. Returns the agent result on completion, and otherwise
-    /// the same errors as [`Workflow::run_agent`].
+    /// Applies the workflow's approval and error recovery policies, hooks,
+    /// context freshness, and budget tracking. Returns the agent result on
+    /// completion, and otherwise the same errors as [`Workflow::run_agent`].
     pub async fn wait(mut self) -> Result<AgentResult, WorkflowError> {
         let run = self.take_run();
         let result = engine::drive_to_result(run, &self.context, self.persistence.as_ref()).await;

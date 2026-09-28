@@ -278,3 +278,48 @@ fn the_workspace_is_normalized_to_an_absolute_path() {
         "{missing}"
     );
 }
+
+/// How each workflow tool declares itself to the agent runtime: read-only
+/// tools may run beside other parallel-safe calls; tools whose order
+/// matters (a message, a write, a vote, a delegated run) or that wait
+/// don't. The waiting and delegating tools opt out of the host tool time
+/// limit, and a delegated run isn't interrupted mid-call (the workflow
+/// winds the delegated agent down itself).
+#[test]
+fn workflow_tools_declare_how_they_run() {
+    let workspace = Workspace::new();
+    let workflow = builder(&workspace.0, &["lead", "worker"])
+        .memory(crate::memory::MemoryConfig::new().global_tier("notes"))
+        .workflow_services(
+            crate::services::WorkflowServicesConfig::default()
+                .allow_caller("lead")
+                .allow_target("worker"),
+        )
+        .enable_voting(["lead"])
+        .build()
+        .unwrap();
+    let registry = workflow
+        .engine
+        .build_tool_registry("lead", workflow.context(), 0);
+    for (tool, parallel_safe, host_timeout, interruptible) in [
+        (READ_MEMORY_TOOL_NAME, true, true, true),
+        (LIST_MEMORIES_TOOL_NAME, true, true, true),
+        (WRITE_MEMORY_TOOL_NAME, false, true, true),
+        ("list_recipients", true, true, true),
+        ("send_message", false, true, true),
+        ("wait_for_message", false, false, true),
+        ("run_workflow_agent", false, false, false),
+        ("cast_vote", false, true, true),
+    ] {
+        let tool_ref = registry.get(tool).unwrap_or_else(|| panic!("{tool}"));
+        assert_eq!(
+            (
+                tool_ref.definition().parallel_safe,
+                tool_ref.uses_host_timeout(),
+                tool_ref.interruptible()
+            ),
+            (parallel_safe, host_timeout, interruptible),
+            "{tool}"
+        );
+    }
+}
