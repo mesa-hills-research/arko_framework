@@ -7,6 +7,20 @@ use syn::{spanned::Spanned, visit::Visit};
 pub fn hash(bytes: impl AsRef<[u8]>) -> String {
     format!("{:x}", Sha256::digest(bytes.as_ref()))
 }
+/// The byte offset of each line of normalized `text`.
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = vec![];
+    if !text.is_empty() {
+        starts.push(0);
+    }
+    starts.extend(
+        text.bytes()
+            .enumerate()
+            .filter(|&(i, c)| c == b'\n' && i + 1 < text.len())
+            .map(|(i, _)| i + 1),
+    );
+    starts
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub path: String,
@@ -22,15 +36,7 @@ impl Snapshot {
             return Err(invalid("binary NUL"));
         }
         let text = original.replace("\r\n", "\n").replace('\r', "\n");
-        let mut line_starts = vec![];
-        if !text.is_empty() {
-            line_starts.push(0);
-        }
-        for (i, c) in text.bytes().enumerate() {
-            if c == b'\n' && i + 1 < text.len() {
-                line_starts.push(i + 1);
-            }
-        }
+        let line_starts = line_starts(&text);
         Ok(Self {
             path: path.into(),
             original_hash: hash(bytes),
@@ -38,6 +44,23 @@ impl Snapshot {
             text,
             line_starts,
         })
+    }
+    /// A snapshot as stored: `text` is already normalized, and `hash` and
+    /// `original_hash` are its hashes.
+    pub(crate) fn stored(
+        path: impl Into<String>,
+        text: String,
+        hash: String,
+        original_hash: String,
+    ) -> Self {
+        let line_starts = line_starts(&text);
+        Self {
+            path: path.into(),
+            original_hash,
+            hash,
+            text,
+            line_starts,
+        }
     }
     pub fn rows(&self) -> usize {
         self.line_starts.len()
@@ -453,5 +476,28 @@ pub fn structure(source: &Snapshot) -> Structure {
     Structure {
         status: "unchecked".into(),
         protected: vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stored_snapshot_is_the_snapshot_it_was_made_from() {
+        for text in ["", "one line", "a\r\nb\rc\n", "a\n\nb\n", "\n"] {
+            let fresh = Snapshot::new("a.txt", text.as_bytes()).unwrap();
+            let stored = Snapshot::stored(
+                "a.txt",
+                fresh.text.clone(),
+                fresh.hash.clone(),
+                fresh.original_hash.clone(),
+            );
+            assert_eq!(stored.line_starts, fresh.line_starts, "{text:?}");
+            assert_eq!(
+                (stored.text, stored.hash, stored.original_hash),
+                (fresh.text, fresh.hash, fresh.original_hash)
+            );
+        }
     }
 }

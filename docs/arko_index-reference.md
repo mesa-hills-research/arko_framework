@@ -376,6 +376,8 @@ prunes the index's complete generations beyond the newest `n`: their chunks, fil
 and request artifacts are removed, the job keeps its events and usage with the phase
 `pruned` (and a `phase` event), unreferenced data is removed as by `delete`, and the
 publishing job records a `pruned` event listing the generations and what was removed.
+Pruning is part of the publishing transaction, so once a job is `ready` the older
+generations are pruned; if pruning fails, they are kept and a warning is logged.
 `read_chunks` and cursors for a pruned generation return `Error::Stale`. The default,
 `None`, keeps every generation.
 

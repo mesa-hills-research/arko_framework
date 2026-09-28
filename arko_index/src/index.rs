@@ -530,8 +530,10 @@ impl ArkoIndex {
     async fn files(&self, job: &str) -> Result<Vec<(Snapshot, FileState)>> {
         let job = job.to_owned();
         self.inner.db.call(move|c|{
-            let rows:Vec<(String,String,String,String)>=c.prepare("SELECT f.path,s.content,f.original_hash,f.state FROM files f JOIN snapshots s ON s.hash=f.hash WHERE f.job=?1 ORDER BY f.path")?.query_map([job],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?.collect::<std::result::Result<_,_>>()?;
-            rows.into_iter().map(|(path,text,original,state)|{let mut s=Snapshot::new(path,text.as_bytes())?;s.original_hash=original;Ok((s,decode(&state)?))}).collect()
+            let rows:Vec<(String,String,String,String,String)>=c.prepare("SELECT f.path,s.content,f.hash,f.original_hash,f.state FROM files f JOIN snapshots s ON s.hash=f.hash WHERE f.job=?1 ORDER BY f.path")?.query_map([job],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?.collect::<std::result::Result<_,_>>()?;
+            // Snapshots are stored normalized under their hash; nothing to
+            // normalize or hash again.
+            rows.into_iter().map(|(path,text,hash,original,state)|Ok((Snapshot::stored(path,text,hash,original),decode(&state)?))).collect()
         }).await
     }
     fn dispatch(
@@ -1124,7 +1126,8 @@ impl ArkoIndex {
         // "ready" becomes visible together with the control's removal, as the
         // other final phases do in `launch`; pause and cancel wait for both.
         let mut controls = self.inner.controls.lock().await;
-        self.inner.db.call(move|c|{control.check()?;let tx=c.transaction()?;
+        let keep_generations = self.inner.config.keep_generations;
+        self.inner.db.call(move|c|{control.check()?;let mut tx=c.transaction()?;
             let old_hash:String=tx.query_row("SELECT manifest FROM jobs WHERE id=?1",[&j],|r|r.get(0))?;
             tx.execute("DELETE FROM chunks WHERE job=?1",[&j])?;
             for mut chunk in chunks {
@@ -1136,44 +1139,53 @@ impl ArkoIndex {
             tx.execute("UPDATE jobs SET phase='ready',fresh=?2,problem=NULL WHERE id=?1",params![j,scanned.as_ref()==Some(&old_hash)])?;
             tx.execute("UPDATE indexes SET active=?1,config=(SELECT config FROM jobs WHERE id=?1) WHERE id=(SELECT index_id FROM jobs WHERE id=?1)",[&j])?;
             tx.execute("INSERT INTO events(job,kind,detail) VALUES(?1,'phase','{\"phase\":\"ready\"}')",[&j])?;
+            // Pruning is part of publishing: once the job is `ready`, older
+            // generations are pruned. A failure keeps them and is logged.
+            if let Some(keep)=keep_generations {
+                let savepoint=tx.savepoint()?;
+                match prune_generations(&savepoint,&j,keep) {
+                    Ok(())=>savepoint.commit()?,
+                    Err(error)=>log::warn!("job {j}: could not prune older generations: {error}"),
+                }
+            }
             control.check()?;tx.commit()?;Ok(())}).await?;
         controls.remove(job);
-        drop(controls);
-        if let Some(keep) = self.inner.config.keep_generations
-            && let Err(error) = self.prune(job, keep).await
-        {
-            log::warn!("job {job}: could not prune older generations: {error}");
-        }
         Ok(())
     }
-    /// Prunes the complete generations of `job`'s index older than the
-    /// newest `keep`, then collects data nothing references.
-    async fn prune(&self, job: &str, keep: usize) -> Result<()> {
-        let job = job.to_owned();
-        self.inner.db.call(move |c| {
-            let tx = c.transaction()?;
-            let index: String = tx.query_row("SELECT index_id FROM jobs WHERE id=?1", [&job], |r| r.get(0))?;
-            let old: Vec<String> = tx
-                .prepare("SELECT id FROM jobs WHERE index_id=?1 AND phase='ready' AND id<>(SELECT active FROM indexes WHERE id=?1) ORDER BY rowid DESC")?
-                .query_map([&index], |r| r.get(0))?
-                .collect::<std::result::Result<_, _>>()?;
-            let old: Vec<String> = old.into_iter().skip(keep.saturating_sub(1)).collect();
-            if old.is_empty() {
-                return Ok(());
-            }
-            for generation in &old {
-                for table in ["chunks", "files", "requests"] {
-                    tx.execute(&format!("DELETE FROM {table} WHERE job=?1"), [generation])?;
-                }
-                tx.execute("UPDATE jobs SET phase='pruned' WHERE id=?1", [generation])?;
-                tx.execute("INSERT INTO events(job,kind,detail) VALUES(?1,'phase','{\"phase\":\"pruned\"}')", [generation])?;
-            }
-            let collected = storage::collect_garbage(&tx)?;
-            tx.execute("INSERT INTO events(job,kind,detail) VALUES(?1,'pruned',?2)", params![job, encode(&json!({"generations": old, "removed": collected}))?])?;
-            tx.commit()?;
-            Ok(())
-        }).await
+}
+/// Prunes the complete generations of `job`'s index older than the newest
+/// `keep` (never the active one), then collects data nothing references; in
+/// the caller's transaction.
+fn prune_generations(c: &rusqlite::Connection, job: &str, keep: usize) -> Result<()> {
+    let index: String =
+        c.query_row("SELECT index_id FROM jobs WHERE id=?1", [job], |r| r.get(0))?;
+    let old: Vec<String> = c
+        .prepare("SELECT id FROM jobs WHERE index_id=?1 AND phase='ready' AND id<>(SELECT active FROM indexes WHERE id=?1) ORDER BY rowid DESC")?
+        .query_map([&index], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    let old: Vec<String> = old.into_iter().skip(keep.saturating_sub(1)).collect();
+    if old.is_empty() {
+        return Ok(());
     }
+    for generation in &old {
+        for table in ["chunks", "files", "requests"] {
+            c.execute(&format!("DELETE FROM {table} WHERE job=?1"), [generation])?;
+        }
+        c.execute("UPDATE jobs SET phase='pruned' WHERE id=?1", [generation])?;
+        c.execute(
+            "INSERT INTO events(job,kind,detail) VALUES(?1,'phase','{\"phase\":\"pruned\"}')",
+            [generation],
+        )?;
+    }
+    let collected = storage::collect_garbage(c)?;
+    c.execute(
+        "INSERT INTO events(job,kind,detail) VALUES(?1,'pruned',?2)",
+        params![
+            job,
+            encode(&json!({"generations": old, "removed": collected}))?
+        ],
+    )?;
+    Ok(())
 }
 /// The runtime settings that differ between a job's saved configuration and
 /// the current one, as `{setting, from, to}`.

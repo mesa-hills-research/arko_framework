@@ -395,7 +395,9 @@ impl ArkoIndex {
             let available=ranked.len();
             let mut hits=vec![];
             for (rank,payload) in ranked.into_iter().skip(page_offset).take(page_size){
-                let (mut hit,text):(SearchHit,String)=c.query_row("SELECT ch.id,ch.path,ch.hash,ch.start,ch.end,ch.first_line,ch.last_line,ch.structure,CAST(substr(CAST(s.content AS BLOB),ch.start+1,ch.end-ch.start) AS TEXT) FROM chunks ch JOIN snapshots s ON s.hash=ch.hash WHERE ch.id=?1 AND ch.job=?2",params![rank.id,g],|r|Ok((SearchHit{id:r.get(0)?,path:r.get(1)?,snapshot:r.get(2)?,start_byte:r.get(3)?,end_byte:r.get(4)?,first_line:r.get(5)?,last_line:r.get(6)?,structure:r.get(7)?,score:rank.score,score_type:match mode{SearchMode::Hybrid=>"rrf",SearchMode::Semantic=>"cosine",SearchMode::Lexical=>"negative_bm25"}.into(),text:String::new(),other_locations:0,may_be_stale:false},r.get(8)?)))?;
+                // The text comes from the chunk's shared text row, not from its file's
+                // whole snapshot, so a hit in a huge file costs its own size.
+                let (mut hit,text):(SearchHit,String)=c.query_row("SELECT ch.id,ch.path,ch.hash,ch.start,ch.end,ch.first_line,ch.last_line,ch.structure,COALESCE((SELECT body FROM chunk_text_fts WHERE rowid=ch.text_id),CAST(substr(CAST(s.content AS BLOB),ch.start+1,ch.end-ch.start) AS TEXT)) FROM chunks ch JOIN snapshots s ON s.hash=ch.hash WHERE ch.id=?1 AND ch.job=?2",params![rank.id,g],|r|Ok((SearchHit{id:r.get(0)?,path:r.get(1)?,snapshot:r.get(2)?,start_byte:r.get(3)?,end_byte:r.get(4)?,first_line:r.get(5)?,last_line:r.get(6)?,structure:r.get(7)?,score:rank.score,score_type:match mode{SearchMode::Hybrid=>"rrf",SearchMode::Semantic=>"cosine",SearchMode::Lexical=>"negative_bm25"}.into(),text:String::new(),other_locations:0,may_be_stale:false},r.get(8)?)))?;
                 let count:usize=c.query_row("SELECT count(*) FROM chunks WHERE job=?1 AND payload=?2",params![g,payload],|r|r.get(0))?;hit.other_locations=count.saturating_sub(1);hits.push((hit,text));
             }
             Ok((available,hits))
@@ -472,7 +474,7 @@ impl ArkoIndex {
                 }
             }
             let mut out=vec![];
-            for id in selected{out.push(c.query_row("SELECT ch.id,ch.path,ch.hash,ch.start,ch.end,ch.first_line,ch.last_line,CAST(substr(CAST(s.content AS BLOB),ch.start+1,ch.end-ch.start) AS TEXT) FROM chunks ch JOIN snapshots s ON s.hash=ch.hash WHERE ch.job=?1 AND ch.id=?2",params![generation,id],|r|Ok(ChunkRead{id:r.get(0)?,path:r.get(1)?,snapshot:r.get(2)?,start_byte:r.get(3)?,end_byte:r.get(4)?,first_line:r.get(5)?,last_line:r.get(6)?,text:r.get(7)?}))?);}
+            for id in selected{out.push(c.query_row("SELECT ch.id,ch.path,ch.hash,ch.start,ch.end,ch.first_line,ch.last_line,COALESCE((SELECT body FROM chunk_text_fts WHERE rowid=ch.text_id),CAST(substr(CAST(s.content AS BLOB),ch.start+1,ch.end-ch.start) AS TEXT)) FROM chunks ch JOIN snapshots s ON s.hash=ch.hash WHERE ch.job=?1 AND ch.id=?2",params![generation,id],|r|Ok(ChunkRead{id:r.get(0)?,path:r.get(1)?,snapshot:r.get(2)?,start_byte:r.get(3)?,end_byte:r.get(4)?,first_line:r.get(5)?,last_line:r.get(6)?,text:r.get(7)?}))?);}
             out.sort_by(|a,b|a.path.cmp(&b.path).then(a.start_byte.cmp(&b.start_byte)));Ok(out)
         }).await
     }
