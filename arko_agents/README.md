@@ -525,9 +525,9 @@ A skill carries exact instructions, so `load_skill` results reach the agent as w
 a result interceptor, such as a workflow's distiller, does not see them. The opt-in
 `SkillsConfig::load_skill_interception: Some(policy)` lets it replace them, with `policy`
 (an `InterceptionFailurePolicy`) deciding what a failure the interceptor reports does:
-retry, fall back to the full result, or give the full result with a note. (arko_workflows'
-distillers currently handle their own failures, with the workflow's interception failure
-policy, and report none.)
+retry, fall back to the full result, or give the full result with a note. (When
+arko_workflows chains several interceptors, the chain applies this policy to each
+interceptor in it and reports no failures itself.)
 
 ### Interactive terminals
 

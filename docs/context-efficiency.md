@@ -130,8 +130,8 @@ Only a finished summary replaces the tool result, and every call is billed:
   without a retry, because a retry would most likely end the same way.
 - Any other early stop (including an unreported stop reason) or an empty summary
   is an interceptor error. The workflow's interception failure policy may retry it
-  before falling back to the raw result (resuming at the distiller when it follows
-  other interceptors).
+  before falling back to the result the distiller was given (the output of any
+  interceptors before it, which don't run again).
 
 Once the workflow run is stopped, cancelled or aborted by a hook, distillers make
 no further requests and leave tool output unchanged.

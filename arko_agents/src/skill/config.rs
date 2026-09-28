@@ -55,8 +55,9 @@ pub struct SkillsConfig {
     /// back to the full result, or give the full result with a note that it
     /// could not be shortened. `None`, the default, sends skills as written:
     /// a skill carries exact instructions, which a summary would lose.
-    /// (arko_workflows' distillers currently handle their own failures with
-    /// the workflow's interception failure policy and report none.)
+    /// (When arko_workflows chains several interceptors, the chain applies
+    /// this policy to each interceptor in it and reports no failures
+    /// itself.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_skill_interception: Option<crate::tool::InterceptionFailurePolicy>,
 }
