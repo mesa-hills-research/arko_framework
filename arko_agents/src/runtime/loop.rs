@@ -4277,7 +4277,11 @@ impl AgentLoop {
             self.capacity_retry_attempts = self.capacity_retry_attempts.saturating_add(1);
             (self.capacity_retry_attempts, started)
         } else {
-            self.resume_ordinary_recovery_clock();
+            // A response the runtime can't use isn't an outage: the elapsed
+            // budget stays as it was (paused while the response ran).
+            if !model_output {
+                self.resume_ordinary_recovery_clock();
+            }
             let started = if model_output {
                 self.recovery_started
                     .unwrap_or_else(tokio::time::Instant::now)
@@ -4398,6 +4402,8 @@ impl AgentLoop {
         .await?;
         if let Some(note) = &note {
             self.append_error_recovery_user_message(note)?;
+            // Asked again at once, with no budget deadline to meet.
+            return Ok(());
         }
         let waiting_since = tokio::time::Instant::now();
         let waited = self.wait_before_retry(retry_at, tool_call_id).await;

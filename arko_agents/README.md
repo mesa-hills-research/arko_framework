@@ -248,8 +248,9 @@ task was not completed and asks the model to review the results and call `comple
 again if the task is done. This holds even when `complete_task` needs approval: when the
 failure is known before the approval would be asked, it isn't asked, and an approval given
 before a failure became known doesn't complete the task either. `complete_task` always
-runs alone, after the calls before it, whatever a per-tool setting says. (An output-based response can't call `complete_task` after
-another tool: it holds one call or one batch of calls to the same tool.)
+runs alone, after the calls before it, whatever a per-tool setting says. (An output-based
+response can't call `complete_task` after another tool: it holds one call or one batch of
+calls to the same tool.)
 
 `tool_config.one_tool_call_per_turn: true` (off by default) asks for one call per
 response. Native requests then disable parallel tool calls where the provider can (OpenAI
