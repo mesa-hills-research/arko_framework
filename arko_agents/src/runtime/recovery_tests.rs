@@ -355,3 +355,66 @@ async fn a_response_cut_at_the_output_limit_is_reported() {
         .collect();
     assert_eq!(reported, [128_000]);
 }
+
+/// Under `InformAgentAndContinue` (no attempt limit), responses without a
+/// tool call are asked again at once but not forever: they get
+/// `MODEL_OUTPUT_ATTEMPTS_WITHOUT_LIMIT` attempts, then the task is
+/// returned interrupted.
+#[tokio::test(start_paused = true)]
+async fn responses_without_a_tool_call_are_bounded_without_an_attempt_limit() {
+    let (mut agent, _events, _commands) = harness();
+    agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
+    agent.task.agent_config.llm_error_policy = LLMErrorPolicy::InformAgentAndContinue;
+    let scripted = agent.scripted_responses.get_mut().unwrap();
+    for _ in 0..50 {
+        scripted.push_back(super::image_tests::response(ai::Message::new_assistant(
+            "Just chatting.",
+        )));
+    }
+    let task = timeout(Duration::from_secs(60), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(task.current_state, TaskState::Interrupted { ref reason } if reason.contains("attempt limit")),
+        "{:?}",
+        task.current_state
+    );
+    assert_eq!(
+        task.usage_history.len(),
+        MODEL_OUTPUT_ATTEMPTS_WITHOUT_LIMIT as usize
+    );
+}
+
+/// A completed response ends an outage's elapsed budget: after a failed
+/// request, a response without a tool call and a slow next response are
+/// not cut off by the budget the failure started.
+#[tokio::test(start_paused = true)]
+async fn a_completed_response_ends_the_elapsed_budget_of_a_failure() {
+    let (mut agent, _events, _commands) = harness();
+    agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
+    agent
+        .task
+        .agent_config
+        .tool_config
+        .default_auto_approve_tool_use = true;
+    let scripted = agent.scripted_responses.get_mut().unwrap();
+    scripted.push_back(Err(provider_failure(503, None)));
+    scripted.push_back(super::image_tests::response(ai::Message::new_assistant(
+        "Thinking out loud.",
+    )));
+    scripted.push_back(Ok(futures::stream::once(async {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        Ok(complete_response())
+    })
+    .boxed()));
+    let task = timeout(Duration::from_secs(7200), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+}

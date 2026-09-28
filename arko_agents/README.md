@@ -254,7 +254,8 @@ calls run at the same time: those settings let a response hold several calls, wh
 one after another. `allow_batched_tool_calls` is ignored (`false` logs a warning once); a
 per-tool `allow_batched_calls: false` loads as `parallel_safe: Some(false)` and `true` is
 ignored; a saved tool definition's `supports_batched_calls` is ignored, so it loads as
-not parallel-safe.
+not parallel-safe, and in output-based mode it can no longer be batched until its
+definition or a per-tool setting makes it parallel-safe.
 
 ### Tool time limit
 
@@ -605,7 +606,7 @@ the timing:
 | --- | --- |
 | `RetryThenPauseAndAwaitApproval { max_attempts }` | The default, with 10 attempts. Retries with backoff; when recovery ends, the task waits in `AwaitingErrorRecoveryApproval`. |
 | `RetryThenInformAgent { max_attempts }` | Retries the same way; when recovery ends, the task is returned `Interrupted`. |
-| `InformAgentAndContinue` | Retries without an attempt limit until the elapsed budget ends, then returns the task `Interrupted`. |
+| `InformAgentAndContinue` | Retries failed requests without an attempt limit until the elapsed budget ends, and responses it can't use up to 10 times, then returns the task `Interrupted`. |
 | `PauseAndAwaitApproval` | Waits in `AwaitingErrorRecoveryApproval` after the first failure. |
 
 Recovery ends when the attempts or the elapsed budget run out or the error cannot be
@@ -619,8 +620,9 @@ stream started) is sent again unchanged, without a note in the conversation: the
 had no part in it. A response the runtime cannot use is retried with a note that tells
 the model what to do: a native response without a tool call, an output-based response
 without one, or output-based calls that cannot be read. Such a retry is not an outage: it
-is made at once, without backoff, and the elapsed budget neither starts nor applies, so
-only the attempt limit bounds it. From a pause,
+is made at once, without backoff, and bounded by the attempt limit (10 under
+`InformAgentAndContinue`, which has none), not by the elapsed budget. Any completed
+response ends the elapsed budget a failed request started. From a pause,
 `ApproveErrorRecovery { message }` adds a note about the error (with the message) and
 starts a new recovery episode, and `RejectErrorRecovery` fails the task. An interrupted
 task starts a new episode when it is run again.

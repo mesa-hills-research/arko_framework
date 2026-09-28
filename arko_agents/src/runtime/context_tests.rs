@@ -745,3 +745,44 @@ impl super::super::TurnContextSource for AfterFirst {
         (self.0.fetch_add(1, Ordering::SeqCst) == 1).then(|| "Agent `b` finished.".to_string())
     }
 }
+
+/// A context update that follows a user message without this turn's
+/// details (the prompt of a continued task) carries them itself.
+#[tokio::test]
+async fn a_context_update_after_a_continuation_prompt_carries_the_details() {
+    use crate::agent_config::DeveloperDefinableEnvironmentDetail;
+    let (mut agent, _events, _commands) = harness(ToolCallingMode::Native);
+    agent.task.developer_env_details = Some(vec![DeveloperDefinableEnvironmentDetail::new_static(
+        "Build".into(),
+        "green".into(),
+        EnvironmentDetailPlacement::EachUserMessage,
+    )]);
+    agent.task.conversation.system_message = Some("Written earlier.".into());
+    agent
+        .task
+        .conversation
+        .add_user_message("Continue with the next part.");
+    agent.task.pending_context_injections = vec!["Agent `b` finished.".into()];
+    let mut done = ai::Message::new_assistant("");
+    done.tool_calls.push(ai::ToolCall {
+        arguments: serde_json::json!({"summary": "done"}),
+        ..call("done", "complete_task")
+    });
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(response(done));
+    let task = timeout(Duration::from_secs(10), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    let update = task
+        .conversation
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter().filter_map(ai::Content::as_text))
+        .find(|text| text.starts_with("# Workflow context update"))
+        .expect("the update was added");
+    assert!(update.contains("Build:\ngreen"), "{update}");
+}

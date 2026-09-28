@@ -93,6 +93,10 @@ fn describe_duration(duration: Duration) -> String {
 const NO_NATIVE_TOOL_CALL: &str = "Your response did not call a tool, so the task is still open. Continue with your tools, or call complete_task with a summary if the task is finished.";
 const NO_TEXT_TOOL_CALL: &str = "Your response did not contain a tool call. Use one of your tools in the format the system prompt describes, or complete_task if the task is finished.";
 
+/// The attempts a response the runtime can't use gets under
+/// `LLMErrorPolicy::InformAgentAndContinue`, which has no attempt limit.
+const MODEL_OUTPUT_ATTEMPTS_WITHOUT_LIMIT: u32 = 10;
+
 /// `ToolRejected` reasons for calls a stream announced but never finished.
 const INTERRUPTED_CALL: &str =
     "The model's response was interrupted before this call finished; it was not run.";
@@ -306,6 +310,10 @@ pub struct AgentLoop {
     /// `SuspendTask` stopped running tool calls; the loop reports the
     /// task's state as it stops.
     suspended_tools: bool,
+    /// The index of the message that carried this turn's environment
+    /// details and reminder, when the loop added it since the last request;
+    /// see [`add_taken_context`](Self::add_taken_context).
+    details_sent_with: Option<usize>,
     #[cfg(test)]
     scripted_responses: std::sync::Mutex<VecDeque<ScriptedStreamResult>>,
     /// The model of every request made, in order.
@@ -391,6 +399,7 @@ impl AgentLoop {
             deferring_tool_errors: false,
             failed_on_tool_error: false,
             suspended_tools: false,
+            details_sent_with: None,
             #[cfg(test)]
             scripted_responses: std::sync::Mutex::new(VecDeque::new()),
             #[cfg(test)]
@@ -519,19 +528,15 @@ impl AgentLoop {
         let prompt_builder =
             PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None);
         let next_message_number = self.task.user_message_count + 1;
-        // A user message just before this one (tool results, say) already
-        // carried the environment details of this turn.
-        let follows_user_message = self
-            .task
-            .conversation
-            .messages
-            .last()
-            .is_some_and(|message| message.role == ai::Role::User);
+        // The message just before this one (tool results, say) already
+        // carried this turn's environment details.
+        let details_sent = self.details_sent_with.is_some()
+            && self.details_sent_with == self.task.conversation.messages.len().checked_sub(1);
         let message = prompt_builder.augment_user_message(
             &self.task,
             &format!("# Workflow context update\n\n{content}"),
             next_message_number,
-            !follows_user_message,
+            !details_sent,
         )?;
         self.task.conversation.add_user_message(&message);
         self.task.increment_user_message_count();
@@ -1343,7 +1348,14 @@ impl AgentLoop {
         let text = PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None)
             .text_beside_tool_results(&self.task, extra_text, self.task.user_message_count + 1)?;
         self.task.add_pending_tool_results(text.as_deref());
+        self.mark_details_sent();
         Ok(())
+    }
+
+    /// Records that the conversation's last message carries this turn's
+    /// environment details and reminder.
+    fn mark_details_sent(&mut self) {
+        self.details_sent_with = self.task.conversation.messages.len().checked_sub(1);
     }
 
     /// Whether an approved native turn's results go into the conversation
@@ -2241,6 +2253,7 @@ impl AgentLoop {
                                         next_msg_num,
                                     )?;
                                 self.add_text_tool_results_to_conversation(&augmented_msg);
+                                self.mark_details_sent();
                                 if next_message_is_runtime {
                                     self.task.mark_last_message_runtime();
                                 }
@@ -2527,6 +2540,12 @@ impl AgentLoop {
                                 // refusal and answers any refused input.
                                 self.task.fallback_for = None;
                                 self.task.refused_input = None;
+                                // The provider answered: an outage is over, so
+                                // its elapsed budget no longer runs (a response
+                                // the runtime can't use still counts as an
+                                // attempt).
+                                self.recovery_started = None;
+                                self.paused_recovery_elapsed = None;
                                 self.task.conversation.add_assistant_message_from_response(generation_response.clone());
                                 final_generation_response = Some(generation_response);
                                 if let Some(ref mut p) = parser {
@@ -3247,6 +3266,7 @@ impl AgentLoop {
                             next_msg_num,
                         )?;
                     self.add_text_tool_results_to_conversation(&augmented_user_message);
+                    self.mark_details_sent();
                     self.task.increment_user_message_count();
                 } else if next_user_message_str_accumulated.is_empty()
                     && !self.task.current_state.is_terminal()
@@ -3973,6 +3993,11 @@ impl AgentLoop {
             LLMErrorPolicy::RetryThenInformAgent { max_attempts }
             | LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts } => {
                 max_attempts.max(1)
+            }
+            // Responses the runtime can't use are asked again at once and
+            // outside the elapsed budget, so they need an attempt limit.
+            LLMErrorPolicy::InformAgentAndContinue if model_output => {
+                MODEL_OUTPUT_ATTEMPTS_WITHOUT_LIMIT
             }
             LLMErrorPolicy::InformAgentAndContinue => u32::MAX,
             LLMErrorPolicy::PauseAndAwaitApproval => 1,
