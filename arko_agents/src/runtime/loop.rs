@@ -145,11 +145,20 @@ struct GroupRun {
     stop: Option<ToolsStopped>,
 }
 
-/// The result text of a call a stop ended while it ran.
-fn stopped_call_reason(stop: ToolsStopped) -> &'static str {
-    match stop {
-        ToolsStopped::Cancelled => STOPPED_BY_CANCEL,
-        ToolsStopped::Suspended => STOPPED_BY_SUSPEND,
+/// Results of calls that were running when the task ended another way (a
+/// call beside them failed or completed it) as a stop arrived.
+const STOPPED_TASK_ENDED: &str =
+    "The task ended while this call was running, so the call was stopped before it finished.";
+
+/// The result text of a call a stop ended while it ran, given the task's
+/// state once the stop is applied: a cancellation it made, a suspension, or
+/// an end another call of the group had already brought about.
+fn stopped_call_reason(stop: ToolsStopped, state: &TaskState) -> &'static str {
+    match (stop, state) {
+        (_, TaskState::Cancelled { reason }) if reason == CANCELLED_BY_USER => STOPPED_BY_CANCEL,
+        (_, state) if state.is_terminal() => STOPPED_TASK_ENDED,
+        (ToolsStopped::Suspended, _) => STOPPED_BY_SUSPEND,
+        (ToolsStopped::Cancelled, _) => STOPPED_BY_CANCEL,
     }
 }
 
@@ -314,6 +323,9 @@ pub struct AgentLoop {
     /// details and reminder, when the loop added it since the last request;
     /// see [`add_taken_context`](Self::add_taken_context).
     details_sent_with: Option<usize>,
+    /// The state the last `TaskStateChanged` reported, so a state reported
+    /// by one path isn't reported again by another.
+    last_reported_state: std::sync::Mutex<Option<TaskState>>,
     #[cfg(test)]
     scripted_responses: std::sync::Mutex<VecDeque<ScriptedStreamResult>>,
     /// The model of every request made, in order.
@@ -400,6 +412,7 @@ impl AgentLoop {
             failed_on_tool_error: false,
             suspended_tools: false,
             details_sent_with: None,
+            last_reported_state: std::sync::Mutex::new(None),
             #[cfg(test)]
             scripted_responses: std::sync::Mutex::new(VecDeque::new()),
             #[cfg(test)]
@@ -796,7 +809,7 @@ impl AgentLoop {
             }
             if let Some(stop) = group.stop {
                 self.stop_after_calls(stop).await?;
-                let reason = stopped_call_reason(stop);
+                let reason = stopped_call_reason(stop, &self.task.current_state);
                 for (index, call, id) in stopped {
                     self.emit_event(AgentEvent::ToolRejected {
                         tool_call_id: id,
@@ -1635,9 +1648,12 @@ impl AgentLoop {
 
         'main_loop: loop {
             if self.stop_requested {
-                if std::mem::take(&mut self.suspended_tools) {
-                    // Suspended while tool calls ran, in the state the turn
-                    // left it in.
+                // Suspended while tool calls ran, in the state the turn left
+                // it in, which is reported as a suspension always is, unless
+                // a call already ended the task and that was reported.
+                let ended_and_reported =
+                    self.task.current_state.is_terminal() && self.state_reported();
+                if std::mem::take(&mut self.suspended_tools) && !ended_and_reported {
                     self.emit_event(AgentEvent::TaskStateChanged(
                         self.task.current_state.clone(),
                     ))
@@ -2212,7 +2228,9 @@ impl AgentLoop {
                             break 'main_loop;
                         }
 
-                        if self.task.current_state != original_state_before_command_processing {
+                        if self.task.current_state != original_state_before_command_processing
+                            && !self.state_reported()
+                        {
                             self.emit_event(AgentEvent::TaskStateChanged(
                                 self.task.current_state.clone(),
                             ))
@@ -3558,7 +3576,16 @@ impl AgentLoop {
         Ok(())
     }
 
+    /// Whether the last `TaskStateChanged` reported the task's current
+    /// state.
+    fn state_reported(&self) -> bool {
+        self.last_reported_state.lock().unwrap().as_ref() == Some(&self.task.current_state)
+    }
+
     async fn emit_event(&self, event: AgentEvent) -> Result<(), ArkoAgentsError> {
+        if let AgentEvent::TaskStateChanged(state) = &event {
+            *self.last_reported_state.lock().unwrap() = Some(state.clone());
+        }
         if self.event_sender.send(event.clone()).await.is_err() {
             let err_msg = format!("Failed to send AgentEvent: {:?}", event);
             log::error!("{}", err_msg);
@@ -4491,7 +4518,7 @@ impl AgentLoop {
             None => {
                 let stop = group.stop.expect("a call without an outcome was stopped");
                 self.stop_after_calls(stop).await?;
-                let reason = stopped_call_reason(stop);
+                let reason = stopped_call_reason(stop, &self.task.current_state);
                 self.emit_event(AgentEvent::ToolRejected {
                     tool_call_id,
                     tool_name: tool_name.to_string(),

@@ -1011,6 +1011,11 @@ pub struct AgentConfig {
     ///
     /// The fallback must use the configured model's provider ([`validate`](AgentConfig::validate)
     /// rejects others): providers can't replay each other's assistant turns.
+    /// Its `tool_config` is sent with its requests (in native mode, its
+    /// `tool_choice` and `parallel_tool_calls`), but the calls of its
+    /// response run under the agent's settings: one at a time only when
+    /// [`AgentToolConfig::one_tool_call_per_turn`] or the configured model's
+    /// `tool_config` asks for it.
     /// Its ChatGPT turn-state token is kept apart from the configured
     /// model's, and OpenAI reasoning is replayed between the two models only
     /// when both are in one Codex compaction family (the GPT-5.6 and GPT-6

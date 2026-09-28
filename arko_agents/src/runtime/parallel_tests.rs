@@ -744,7 +744,104 @@ async fn a_call_that_finished_before_a_stop_keeps_its_result() {
         event,
         AgentEvent::ToolResult { tool_name, .. } if tool_name == "probe_read"
     )));
+    // The cancellation is reported once.
+    assert_eq!(
+        seen.iter()
+            .filter(|event| matches!(
+                event,
+                AgentEvent::TaskStateChanged(TaskState::Cancelled { .. })
+            ))
+            .count(),
+        1
+    );
     std::fs::remove_dir_all(workspace).unwrap();
+}
+
+/// A cancellation while an approved call runs is reported once, and when a
+/// call of the stopped group had already failed the task, the stopped calls
+/// say the task ended rather than that it was cancelled.
+#[tokio::test]
+async fn stops_are_reported_once_and_worded_for_how_the_task_ended() {
+    let workspace = workspace();
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(Waits));
+    let mut config = config(ToolCallingMode::Native, &["waits"]);
+    config.tool_config.default_auto_approve_tool_use = false;
+    let (mut agent, mut events, commands) = agent(config, registry, &workspace);
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(turn(vec![native_call(
+            "wait",
+            "waits",
+            serde_json::json!({}),
+        )]));
+    let run = tokio::spawn(agent.run());
+    let mut seen = Vec::new();
+    loop {
+        let event = timeout(Duration::from_secs(10), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if let AgentEvent::ToolCallAwaitingApproval { tool_call_id, .. } = &event {
+            commands
+                .send(UserCommand::ApproveToolUse {
+                    tool_call_id: *tool_call_id,
+                    custom_tool_output: None,
+                    message_to_agent: None,
+                })
+                .await
+                .unwrap();
+            break;
+        }
+        seen.push(event);
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    commands.send(UserCommand::CancelTask).await.unwrap();
+    let task = timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    seen.extend(drain(&mut events));
+    assert!(matches!(task.current_state, TaskState::Cancelled { .. }));
+    assert_calls_paired(&task.conversation);
+    assert_eq!(
+        seen.iter()
+            .filter(|event| matches!(
+                event,
+                AgentEvent::TaskStateChanged(TaskState::Cancelled { .. })
+            ))
+            .count(),
+        1,
+        "{seen:#?}"
+    );
+    std::fs::remove_dir_all(workspace).unwrap();
+
+    // A call of the group failed the task (FailTask) as the cancel arrived.
+    assert_eq!(
+        stopped_call_reason(
+            ToolsStopped::Cancelled,
+            &TaskState::Failed {
+                reason: "tool error".into()
+            }
+        ),
+        STOPPED_TASK_ENDED
+    );
+    assert_eq!(
+        stopped_call_reason(ToolsStopped::Suspended, &TaskState::InProgress),
+        STOPPED_BY_SUSPEND
+    );
+    assert_eq!(
+        stopped_call_reason(
+            ToolsStopped::Cancelled,
+            &TaskState::Cancelled {
+                reason: CANCELLED_BY_USER.into()
+            }
+        ),
+        STOPPED_BY_CANCEL
+    );
 }
 
 /// A tool that winds its own work down when the task stops.
