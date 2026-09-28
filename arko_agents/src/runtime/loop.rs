@@ -1508,6 +1508,21 @@ impl AgentLoop {
     /// Runs the agent loop to completion.
     pub async fn run(mut self) -> Result<Task, ArkoAgentsError> {
         self.task.agent_config.validate()?;
+        if self.is_native_mode()
+            && self
+                .task
+                .agent_config
+                .llm_config
+                .generation_config
+                .tool_config
+                .as_ref()
+                .is_some_and(|tools| !tools.tools.is_empty())
+        {
+            log::warn!(
+                "Task {}: the model's tool_config lists tool definitions, which native tool calling doesn't send: the agent's tools come from its tool registry. Its tool_choice and parallel_tool_calls apply.",
+                self.task.id
+            );
+        }
         // Every developer environment detail the run can show needs content:
         // details placed in every user message on every turn, and the others
         // while the system prompt and task prompt are still to be written.
