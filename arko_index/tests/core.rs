@@ -18,6 +18,8 @@ enum Rejection {
     WrongCallRetryLater,
     /// A refusal: permanent.
     Refusal,
+    /// A plan usage limit that resets in three hours.
+    UsageLimit,
 }
 struct Fake {
     profile: EmbeddingProfile,
@@ -108,6 +110,14 @@ impl Backend for Fake {
                 Rejection::Refusal => Error::from(arko_ai::Error::Refusal(Box::new(
                     arko_ai::Refusal::new(arko_ai::RefusalSource::Model),
                 ))),
+                Rejection::UsageLimit => {
+                    return Err(Error::from(arko_ai::Error::ProviderError {
+                        message: "The usage limit has been reached".into(),
+                        status: Some(429),
+                        code: Some("usage_limit_reached".into()),
+                        retry_after: Some(Duration::from_secs(3 * 3600)),
+                    }));
+                }
             };
             return Err(error.with_usage(chunk_usage()));
         }
@@ -3124,4 +3134,60 @@ async fn semantic_search_refuses_another_embedding_profile() {
         .await
         .unwrap();
     assert_eq!(lexical.hits.len(), 1);
+}
+
+#[tokio::test]
+async fn a_usage_limit_pauses_the_job_until_it_is_resumed() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    for n in 0..3 {
+        std::fs::write(
+            root.path().join(format!("{n}.txt")),
+            format!("alpha {n}\nbeta\n"),
+        )
+        .unwrap();
+    }
+    let mut fake = Fake::new();
+    fake.rejection = Rejection::UsageLimit;
+    let fake = Arc::new(fake);
+    fake.rejected_chunks.store(1, Ordering::SeqCst);
+    let config = Config {
+        batch_count: 1,
+        concurrency: 1,
+        ..config(&fake)
+    };
+    let index = ArkoIndex::open(db.path().join("i.db"), fake.clone(), config)
+        .await
+        .unwrap();
+    let job = index
+        .start_build(BuildSpec::new("test", root.path()))
+        .await
+        .unwrap();
+    let paused = settle(&index, &job.job).await;
+    assert_eq!(paused.phase, "paused");
+    let problem = paused.problem.unwrap();
+    assert!(
+        problem.starts_with("usage limit reached; resets at ")
+            && (problem.contains("(in about 2h 59m)") || problem.contains("(in about 3h 0m)"))
+            && problem.contains("Resume the job after the reset."),
+        "{problem}"
+    );
+    // Queued requests stopped with the job instead of failing; one the
+    // scheduler had already started may finish.
+    assert!(fake.calls.lock().unwrap().len() < 3);
+    index.resume(&job.job).await.unwrap();
+    let done = settle(&index, &job.job).await;
+    assert_eq!(done.phase, "ready", "{:?}", done.problem);
+    assert_eq!(done.validated, 3);
+}
+#[test]
+fn capacity_waits_are_bounded_by_default() {
+    let config = Config::default();
+    assert_eq!(config.max_capacity_wait_ms, Some(15 * 60 * 1000));
+    assert!(!config.query_priority);
+    assert_eq!(config.query_max_transient_attempts, None);
+    let saved: Config = serde_json::from_value(json!({"batch_count": 6})).unwrap();
+    assert_eq!(saved.max_capacity_wait_ms, Some(15 * 60 * 1000));
+    let unbounded: Config = serde_json::from_value(json!({"max_capacity_wait_ms": null})).unwrap();
+    assert_eq!(unbounded.max_capacity_wait_ms, None);
 }

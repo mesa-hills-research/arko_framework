@@ -190,6 +190,7 @@ version = "0.2.0"
 dependencies = [
  "arko_ai",
  "async-trait",
+ "chrono",
  "clap",
  "futures",
  "glob",

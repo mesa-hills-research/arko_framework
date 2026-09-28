@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 arko_ai.workspace = true
 async-trait.workspace = true
+chrono.workspace = true
 futures.workspace = true
 log.workspace = true
 serde.workspace = true

@@ -49,6 +49,35 @@ fn deadline(now: Instant, delay: Duration) -> Instant {
     now
 }
 
+/// How long a scheduler lets a request keep failing.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RetryPolicy {
+    /// Transient failures allowed per request (capacity waits excluded).
+    pub max_transient_attempts: usize,
+    /// The longest a request may spend in capacity waits in all; `None`
+    /// waits as long as the provider reports it is overloaded.
+    pub max_capacity_wait: Option<Duration>,
+}
+impl RetryPolicy {
+    #[cfg(test)]
+    pub fn attempts(max_transient_attempts: usize) -> Self {
+        Self {
+            max_transient_attempts,
+            max_capacity_wait: None,
+        }
+    }
+}
+/// How a request is queued.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Request {
+    /// Initial chunk requests and build embeddings go before repairs and
+    /// retries.
+    pub initial: bool,
+    /// Dispatched before every other request (search queries, opt-in).
+    pub first: bool,
+    /// Replaces the scheduler's transient attempt budget.
+    pub max_transient_attempts: Option<usize>,
+}
 #[derive(Clone)]
 pub(crate) enum Operation {
     Chunk(ModelRequest),
@@ -76,9 +105,13 @@ impl Outcome {
 struct Task {
     operation: Operation,
     initial: bool,
+    first: bool,
     attempts: usize,
     /// Failures that consumed the transient-attempt budget (not capacity).
     transient_failures: usize,
+    max_transient_attempts: usize,
+    /// Time spent in capacity waits so far.
+    capacity_waited: Duration,
     failures: Vec<serde_json::Value>,
     /// Usage of the responses the backend rejected so far.
     rejected: Vec<UsageInfo>,
@@ -179,13 +212,14 @@ async fn stopped(mut control: watch::Receiver<u8>) {
 #[derive(Clone)]
 pub(crate) struct Scheduler {
     tx: mpsc::Sender<Task>,
+    max_transient_attempts: usize,
     pub active: Arc<AtomicUsize>,
     /// Scheduling-loop iterations, so tests can tell waiting from spinning.
     #[cfg(test)]
     iterations: Arc<AtomicUsize>,
 }
 impl Scheduler {
-    pub fn new(backend: Arc<dyn Backend>, limit: usize, max_transient_attempts: usize) -> Self {
+    pub fn new(backend: Arc<dyn Backend>, limit: usize, policy: RetryPolicy) -> Self {
         let (tx, mut rx) = mpsc::channel::<Task>(64);
         let active = Arc::new(AtomicUsize::new(0));
         let count = active.clone();
@@ -222,7 +256,8 @@ impl Scheduler {
                     let now = Instant::now();
                     let position = queue
                         .iter()
-                        .position(|t| t.initial && t.ready <= now)
+                        .position(|t| t.first && t.ready <= now)
+                        .or_else(|| queue.iter().position(|t| t.initial && t.ready <= now))
                         .or_else(|| queue.iter().position(|t| t.ready <= now));
                     let Some(position) = position else {
                         break;
@@ -291,17 +326,30 @@ impl Scheduler {
                                 if let Err(error)=&result {task.record_failure(error);}
                                 if let Err(error @ Error::Provider { transient: true, retry_after, .. }) = &result
                                     && *task.control.borrow() == 0 {
-                                        // Capacity signals wait without consuming the attempt budget.
-                                        let capacity = error.retry_class() == Some(arko_ai::RetryClass::Capacity);
-                                        if !capacity { task.transient_failures = task.transient_failures.saturating_add(1); }
-                                        if capacity || task.transient_failures < max_transient_attempts {
+                                        let class = error.retry_class();
+                                        if class == Some(arko_ai::RetryClass::UsageLimit) {
+                                            // A plan limit resets hours or days later: the job pauses.
+                                            task.event("usage_limit",serde_json::json!({"resets_in_ms":retry_after.map(|d|d.as_millis())}));
+                                        } else {
+                                            // Capacity signals wait without consuming the attempt
+                                            // budget, up to the capacity wait limit.
+                                            let capacity = class == Some(arko_ai::RetryClass::Capacity);
+                                            if !capacity { task.transient_failures = task.transient_failures.saturating_add(1); }
                                             let attempt = u32::try_from(task.attempts).unwrap_or(u32::MAX);
                                             let delay = retry_delay(attempt, *retry_after);
-                                            task.event("retry_wait",serde_json::json!({"delay_ms":delay.as_millis(),"capacity":capacity}));
-                                            task.attempts = task.attempts.saturating_add(1); task.initial = false; task.ready = deadline(Instant::now(), delay);
-                                            queue.push_back(task); continue;
+                                            let waits = if capacity {
+                                                policy.max_capacity_wait.is_none_or(|max| task.capacity_waited.saturating_add(delay) <= max)
+                                            } else {
+                                                task.transient_failures < task.max_transient_attempts
+                                            };
+                                            if waits {
+                                                if capacity { task.capacity_waited = task.capacity_waited.saturating_add(delay); }
+                                                task.event("retry_wait",serde_json::json!({"delay_ms":delay.as_millis(),"capacity":capacity}));
+                                                task.attempts = task.attempts.saturating_add(1); task.initial = false; task.ready = deadline(Instant::now(), delay);
+                                                queue.push_back(task); continue;
+                                            }
+                                            task.event("retries_exhausted",serde_json::json!({"transient_failures":task.transient_failures,"capacity_waited_ms":task.capacity_waited.as_millis()}));
                                         }
-                                        task.event("retries_exhausted",serde_json::json!({"transient_failures":task.transient_failures}));
                                     }
                                 if result.is_ok() {task.event("completed",serde_json::json!({}));}
                                 match &mut result {
@@ -321,6 +369,7 @@ impl Scheduler {
         });
         Self {
             tx,
+            max_transient_attempts: policy.max_transient_attempts,
             active,
             #[cfg(test)]
             iterations,
@@ -336,15 +385,33 @@ impl Scheduler {
         control: &Control,
         progress: Option<mpsc::UnboundedSender<serde_json::Value>>,
     ) -> Outcome {
+        let request = Request {
+            initial,
+            ..Default::default()
+        };
+        self.submit(operation, request, control, progress).await
+    }
+    pub async fn submit(
+        &self,
+        operation: Operation,
+        request: Request,
+        control: &Control,
+        progress: Option<mpsc::UnboundedSender<serde_json::Value>>,
+    ) -> Outcome {
         if let Err(error) = control.check() {
             return Outcome::failed(error);
         }
         let (reply, outcome) = oneshot::channel();
         let task = Task {
             operation,
-            initial,
+            initial: request.initial,
+            first: request.first,
             attempts: 1,
             transient_failures: 0,
+            max_transient_attempts: request
+                .max_transient_attempts
+                .unwrap_or(self.max_transient_attempts),
+            capacity_waited: Duration::ZERO,
             failures: vec![],
             rejected: vec![],
             ready: Instant::now(),
@@ -379,6 +446,8 @@ mod tests {
         retry_delay: Duration,
         /// Fail with an explicit capacity signal instead of a plain transient error.
         capacity: bool,
+        /// Fail with a plan usage limit instead.
+        usage_limit: bool,
         /// Usage of each failed (rejected) response.
         usage: Option<arko_ai::UsageInfo>,
     }
@@ -393,18 +462,28 @@ mod tests {
                 tries[id]
             };
             if id == 0 && attempt <= self.retry_attempts {
-                return Err(Error::Provider {
-                    message: "temporary capacity".into(),
-                    transient: true,
-                    retry_after: Some(self.retry_delay),
-                    source: self.capacity.then(|| {
+                let source = if self.usage_limit {
+                    Some(Box::new(arko_ai::Error::ProviderError {
+                        message: "usage limit".into(),
+                        status: Some(429),
+                        code: Some("usage_limit_reached".into()),
+                        retry_after: Some(self.retry_delay),
+                    }))
+                } else {
+                    self.capacity.then(|| {
                         Box::new(arko_ai::Error::ProviderError {
                             message: "overloaded".into(),
                             status: Some(529),
                             code: Some("overloaded_error".into()),
                             retry_after: None,
                         })
-                    }),
+                    })
+                };
+                return Err(Error::Provider {
+                    message: "temporary capacity".into(),
+                    transient: true,
+                    retry_after: Some(self.retry_delay),
+                    source,
                     usage: self.usage.clone().map(Box::new),
                 });
             }
@@ -449,9 +528,10 @@ mod tests {
             retry_attempts: usize::from(retry),
             retry_delay: Duration::from_secs(3600),
             capacity: false,
+            usage_limit: false,
             usage: None,
         });
-        let scheduler = Scheduler::new(gate.clone(), concurrency, 10);
+        let scheduler = Scheduler::new(gate.clone(), concurrency, RetryPolicy::attempts(10));
         (gate, scheduler, rx)
     }
     fn enqueue(
@@ -593,9 +673,10 @@ mod tests {
             retry_attempts: 4,
             retry_delay: Duration::from_secs(10),
             capacity: false,
+            usage_limit: false,
             usage: None,
         });
-        let scheduler = Scheduler::new(gate.clone(), 1, 10);
+        let scheduler = Scheduler::new(gate.clone(), 1, RetryPolicy::attempts(10));
         let control = Control::new();
         let (progress, mut events) = mpsc::unbounded_channel();
         let request = Operation::Chunk(ModelRequest {
@@ -666,6 +747,7 @@ mod tests {
             retry_attempts: failures,
             retry_delay: Duration::from_secs(10),
             capacity,
+            usage_limit: false,
             usage: None,
         });
         (gate, started_rx)
@@ -681,7 +763,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn transient_failures_stop_at_the_attempt_limit_with_the_last_error() {
         let (gate, _started) = failing_gate(usize::MAX, false);
-        let scheduler = Scheduler::new(gate.clone(), 1, 3);
+        let scheduler = Scheduler::new(gate.clone(), 1, RetryPolicy::attempts(3));
         let control = Control::new();
         let (progress, mut events) = mpsc::unbounded_channel();
         let result = scheduler
@@ -712,7 +794,7 @@ mod tests {
     async fn capacity_waits_do_not_consume_the_attempt_limit() {
         let (gate, _started) = failing_gate(5, true);
         gate.gates[0].add_permits(1);
-        let scheduler = Scheduler::new(gate.clone(), 1, 2);
+        let scheduler = Scheduler::new(gate.clone(), 1, RetryPolicy::attempts(2));
         let control = Control::new();
         let Reply::Chunk(reply) = scheduler
             .call(chunk_request(), true, &control)
@@ -735,7 +817,7 @@ mod tests {
             ..Arc::into_inner(gate).unwrap()
         });
         gate.gates[0].add_permits(1);
-        let scheduler = Scheduler::new(gate.clone(), 1, 2);
+        let scheduler = Scheduler::new(gate.clone(), 1, RetryPolicy::attempts(2));
         let (progress, mut events) = mpsc::unbounded_channel();
         let Reply::Chunk(reply) = scheduler
             .call_tracked(chunk_request(), true, &Control::new(), Some(progress))
@@ -763,8 +845,11 @@ mod tests {
         let task = Task {
             operation: chunk_request(),
             initial: true,
+            first: false,
             attempts: 1,
             transient_failures: 0,
+            max_transient_attempts: 10,
+            capacity_waited: Duration::ZERO,
             failures: vec![],
             rejected: vec![],
             ready,
@@ -773,6 +858,101 @@ mod tests {
             progress: None,
         };
         (task, outcome)
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_usage_limit_is_not_retried() {
+        let (gate, _started) = failing_gate(usize::MAX, false);
+        let gate = Arc::new(Gate {
+            usage_limit: true,
+            retry_delay: Duration::from_secs(3 * 3600),
+            ..Arc::into_inner(gate).unwrap()
+        });
+        let scheduler = Scheduler::new(gate.clone(), 1, RetryPolicy::attempts(10));
+        let (progress, mut events) = mpsc::unbounded_channel();
+        let result = scheduler
+            .call_tracked(chunk_request(), true, &Control::new(), Some(progress))
+            .await
+            .result;
+        let error = result.err().unwrap();
+        assert_eq!(error.retry_class(), Some(arko_ai::RetryClass::UsageLimit));
+        assert_eq!(gate.tries.lock().unwrap()[0], 1);
+        let mut phases = vec![];
+        while let Ok(event) = events.try_recv() {
+            phases.push(event["phase"].as_str().unwrap().to_owned());
+        }
+        assert!(phases.contains(&"usage_limit".to_owned()));
+        assert!(!phases.contains(&"retry_wait".to_owned()));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn capacity_waits_stop_at_the_capacity_wait_limit() {
+        let (gate, _started) = failing_gate(usize::MAX, true);
+        let policy = RetryPolicy {
+            max_transient_attempts: 2,
+            max_capacity_wait: Some(Duration::from_secs(30)),
+        };
+        let scheduler = Scheduler::new(gate.clone(), 1, policy);
+        let (progress, mut events) = mpsc::unbounded_channel();
+        let result = scheduler
+            .call_tracked(chunk_request(), true, &Control::new(), Some(progress))
+            .await
+            .result;
+        assert!(matches!(result, Err(Error::Provider { .. })));
+        // Waits of at least 10 s each: two fit in 30 s, a third doesn't.
+        assert_eq!(gate.tries.lock().unwrap()[0], 3);
+        let mut last = serde_json::Value::Null;
+        while let Ok(event) = events.try_recv() {
+            last = event;
+        }
+        assert_eq!(last["phase"], "retries_exhausted");
+        assert!(last["detail"]["capacity_waited_ms"].as_u64().unwrap() >= 20_000);
+    }
+    #[tokio::test]
+    async fn queries_can_go_first_with_their_own_attempt_budget() {
+        let (gate, s, mut started) = setup(3, 1, false);
+        let c = Control::new();
+        let busy = enqueue(&s, 0, true, &c);
+        assert_eq!(started.recv().await, Some(0));
+        let queued = enqueue(&s, 1, true, &c);
+        let first = {
+            let (s, c) = (s.clone(), c.clone());
+            tokio::spawn(async move {
+                let request = Request {
+                    first: true,
+                    ..Default::default()
+                };
+                let operation = Operation::Chunk(ModelRequest {
+                    system: String::new(),
+                    prompt: "2".into(),
+                    tool: "test".into(),
+                    schema: json!({}),
+                });
+                s.submit(operation, request, &c, None).await.result
+            })
+        };
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        gate.gates[0].add_permits(1);
+        assert_eq!(started.recv().await, Some(2));
+        gate.gates[2].add_permits(1);
+        assert_eq!(started.recv().await, Some(1));
+        gate.gates[1].add_permits(1);
+        busy.await.unwrap().unwrap();
+        queued.await.unwrap().unwrap();
+        first.await.unwrap().unwrap();
+        // A smaller attempt budget for one request.
+        let (gate, _started) = failing_gate(usize::MAX, false);
+        let scheduler = Scheduler::new(gate.clone(), 1, RetryPolicy::attempts(10));
+        let request = Request {
+            max_transient_attempts: Some(1),
+            ..Default::default()
+        };
+        let result = scheduler
+            .submit(chunk_request(), request, &Control::new(), None)
+            .await
+            .result;
+        assert!(result.is_err());
+        assert_eq!(gate.tries.lock().unwrap()[0], 1);
     }
     #[test]
     fn a_retry_that_became_due_after_the_refill_is_still_waited_for() {
@@ -866,7 +1046,7 @@ mod tests {
     async fn rejected_responses_report_their_usage_when_a_retry_succeeds() {
         let (gate, _started) = rejecting_gate(2, arko_ai::UsageInfo::new(100, 10));
         gate.gates[0].add_permits(1);
-        let scheduler = Scheduler::new(gate.clone(), 1, 10);
+        let scheduler = Scheduler::new(gate.clone(), 1, RetryPolicy::attempts(10));
         let (progress, mut events) = mpsc::unbounded_channel();
         let outcome = scheduler
             .call_tracked(chunk_request(), true, &Control::new(), Some(progress))
@@ -892,7 +1072,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn exhausted_retries_return_the_usage_of_every_rejected_attempt() {
         let (gate, _started) = rejecting_gate(usize::MAX, arko_ai::UsageInfo::new(100, 10));
-        let scheduler = Scheduler::new(gate.clone(), 1, 3);
+        let scheduler = Scheduler::new(gate.clone(), 1, RetryPolicy::attempts(3));
         let outcome = scheduler.call(chunk_request(), true, &Control::new()).await;
         assert!(matches!(outcome.result, Err(Error::Provider { .. })));
         assert_eq!(gate.tries.lock().unwrap()[0], 3);
@@ -901,7 +1081,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_pause_during_a_retry_wait_keeps_the_rejected_usage() {
         let (gate, _started) = rejecting_gate(usize::MAX, arko_ai::UsageInfo::new(100, 10));
-        let scheduler = Scheduler::new(gate.clone(), 1, 10);
+        let scheduler = Scheduler::new(gate.clone(), 1, RetryPolicy::attempts(10));
         let control = Control::new();
         let (progress, mut events) = mpsc::unbounded_channel();
         let call = {
@@ -927,7 +1107,7 @@ mod tests {
         };
         let (gate, _started) = rejecting_gate(1, broken);
         gate.gates[0].add_permits(1);
-        let scheduler = Scheduler::new(gate.clone(), 1, 10);
+        let scheduler = Scheduler::new(gate.clone(), 1, RetryPolicy::attempts(10));
         let outcome = scheduler.call(chunk_request(), true, &Control::new()).await;
         assert_eq!(outcome.rejected[0].total_cost, 0.0);
         let Reply::Chunk(reply) = outcome.result.unwrap() else {

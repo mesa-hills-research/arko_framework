@@ -13,9 +13,22 @@ pub struct Config {
     /// Attempts of one provider request that may fail with transient errors
     /// (rate limits, timeouts, server errors, truncated streams, malformed
     /// tool calls) before the request fails with the last error. Explicit
-    /// capacity signals (overloaded / unavailable) keep waiting without
-    /// consuming attempts; pause and cancel interrupt any wait.
+    /// capacity signals (overloaded / unavailable) wait without consuming
+    /// attempts, up to `max_capacity_wait_ms`. A plan usage limit is not
+    /// retried: the job pauses. Pause and cancel interrupt any wait.
     pub max_transient_attempts: usize,
+    /// The longest one request may spend waiting out explicit capacity
+    /// signals (overloaded / unavailable), in milliseconds, before it fails
+    /// with the last error: 15 minutes by default. `None` waits as long as
+    /// the provider reports it is overloaded.
+    pub max_capacity_wait_ms: Option<u64>,
+    /// Opt-in: dispatch search query embeddings before queued build
+    /// embeddings. Off by default: a query waits its turn behind a running
+    /// update's embedding requests.
+    pub query_priority: bool,
+    /// Opt-in: the transient failures a search query embedding may have
+    /// before the search fails, instead of `max_transient_attempts`.
+    pub query_max_transient_attempts: Option<usize>,
     /// Opt-in retention: keep the newest `n` complete generations of each
     /// index and prune older ones after each publish (their chunks, file
     /// states and request artifacts; the job, its events and usage stay,
@@ -34,11 +47,16 @@ impl Default for Config {
             embedding: EmbeddingProfile::default(),
             vector_cache_bytes: 64 * 1024 * 1024,
             max_transient_attempts: 10,
+            max_capacity_wait_ms: Some(DEFAULT_MAX_CAPACITY_WAIT_MS),
+            query_priority: false,
+            query_max_transient_attempts: None,
             keep_generations: None,
             synchronous: Synchronous::Full,
         }
     }
 }
+/// The default [`Config::max_capacity_wait_ms`]: 15 minutes.
+pub const DEFAULT_MAX_CAPACITY_WAIT_MS: u64 = 15 * 60 * 1000;
 /// SQLite's `synchronous` setting for the index database
 /// ([`Config::synchronous`]).
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,6 +97,11 @@ impl Config {
         }
         if self.max_transient_attempts == 0 {
             return Err(invalid("max_transient_attempts must be positive"));
+        }
+        if self.query_max_transient_attempts == Some(0) {
+            return Err(invalid(
+                "query_max_transient_attempts must be positive when set",
+            ));
         }
         if self.keep_generations == Some(0) {
             return Err(invalid("keep_generations must be positive when set"));

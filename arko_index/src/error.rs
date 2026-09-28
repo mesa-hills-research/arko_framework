@@ -7,6 +7,10 @@ pub enum Error {
     Blocked(String),
     #[error("paused")]
     Paused,
+    /// A plan usage limit stopped the job; the message says when the limit
+    /// resets, when the provider said. The job is paused.
+    #[error("{0}")]
+    UsageLimit(String),
     #[error("cancelled")]
     Cancelled,
     #[error("stale reference: {0}")]
@@ -84,6 +88,51 @@ impl Error {
 impl From<tokio::task::JoinError> for Error {
     fn from(e: tokio::task::JoinError) -> Self {
         Self::Worker(e.to_string())
+    }
+}
+/// The [`Error::UsageLimit`] for a provider failure that is a plan usage
+/// limit, naming when it resets; `None` for other errors.
+pub(crate) fn usage_limit(error: &Error) -> Option<Error> {
+    let Error::Provider { retry_after, .. } = error else {
+        return None;
+    };
+    if error.retry_class() != Some(arko_ai::RetryClass::UsageLimit) {
+        return None;
+    }
+    let when = match retry_after.and_then(|delay| {
+        chrono::Duration::from_std(delay)
+            .ok()
+            .and_then(|delta| chrono::Utc::now().checked_add_signed(delta))
+            .map(|at| (delay, at))
+    }) {
+        Some((delay, at)) => format!(
+            "resets at {} (in about {})",
+            at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            describe_duration(delay)
+        ),
+        None => "the provider did not say when it resets".into(),
+    };
+    Some(Error::UsageLimit(format!(
+        "usage limit reached; {when}. Resume the job after the reset. {error}"
+    )))
+}
+/// `3h 12m`, `5m 3s`, `2d 4h`.
+fn describe_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let (days, hours, minutes, rest) = (
+        seconds / 86_400,
+        seconds % 86_400 / 3_600,
+        seconds % 3_600 / 60,
+        seconds % 60,
+    );
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m {rest}s")
+    } else {
+        format!("{rest}s")
     }
 }
 pub(crate) fn invalid(message: impl Into<String>) -> Error {

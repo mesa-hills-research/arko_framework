@@ -182,9 +182,9 @@ the phase, the last `problem`, file counts (`files`, `validated`, `bypassed`,
 `unchecked`, `skipped`), the requests in flight and the job's usage. A job moves through
 `snapshotting`, `chunking` and `embedding` to `ready`, or stops as:
 
-- `paused`: after `pause(job)`, or when its process stopped mid-run (detected when the
-  database is next opened, with the problem "process interrupted; resume persisted
-  work");
+- `paused`: after `pause(job)`, when a plan usage limit was reached, or when its process
+  stopped mid-run (detected when the database is next opened, with the problem "process
+  interrupted; resume persisted work");
 - `blocked`: after a provider error, an invalid response, or with files whose boundaries
   still need repair. When only transient provider failures that ran out of attempts
   blocked it, its `phase` event has `retryable: true`;
@@ -210,12 +210,15 @@ blocked.
 | `embedding` | `voyage-4`, 1,024 dimensions | Embedding profile; see [Embeddings](#embeddings). |
 | `vector_cache_bytes` | 64 MiB | Memory for caching search vectors; see [Search](#search). |
 | `max_transient_attempts` | 10 | Transient failures allowed per request before it fails. |
+| `max_capacity_wait_ms` | 15 minutes | Longest total wait per request for capacity signals; `None` waits as long as the provider is overloaded. |
+| `query_priority` | `false` | Opt-in: dispatch search query embeddings before queued build embeddings. |
+| `query_max_transient_attempts` | `None` | Opt-in: a smaller transient attempt budget for search query embeddings; `None` uses `max_transient_attempts`. |
 | `keep_generations` | `None` | Opt-in: prune complete generations beyond the newest `n`; see [Storage and updates](#storage-and-updates). |
 | `synchronous` | `Full` | SQLite `synchronous` mode; `Normal` is an opt-in; see [Storage and updates](#storage-and-updates). |
 
-`batch_count`, both concurrency limits and `max_transient_attempts` must be positive. A
-finished request slot is refilled immediately, and initial chunk requests take priority
-over repairs and retries.
+`batch_count`, both concurrency limits and `max_transient_attempts` must be positive, and
+`query_max_transient_attempts` too when set. A finished request slot is refilled
+immediately, and initial chunk requests take priority over repairs and retries.
 
 Transient provider failures (rate limits, timeouts, server errors, truncated streams and
 malformed tool calls) are retried with jittered exponential backoff. The backoff step
@@ -224,8 +227,15 @@ step, and is never shorter than a retry delay the provider asks for. After
 `max_transient_attempts` transient failures, the request fails with its last error, a
 `retries_exhausted` attempt event is recorded, and the job becomes `blocked`. Explicit
 capacity signals (overloaded or unavailable) are retried on the same schedule without
-consuming attempts, with no limit on the total wait. Other errors, such as authentication
-failures, invalid requests and refusals, are not retried.
+consuming attempts, until one request has waited `max_capacity_wait_ms` (15 minutes by
+default) for them in all; then it fails the same way. Other errors, such as
+authentication failures, invalid requests and refusals, are not retried.
+
+A plan usage limit (ChatGPT `usage_limit_reached`) is not retried: the request records a
+`usage_limit` attempt event, queued requests stop, requests already in flight finish, and
+the job becomes `paused` with a problem such as "usage limit reached; resets at
+2026-09-28T14:05:00Z (in about 3h 12m). Resume the job after the reset." followed by the
+provider's error. The watcher leaves such a job for the host; `resume(job)` continues it.
 
 `pause(job)` stops queued requests and ends retry waits at once, while requests already in
 flight finish and are checkpointed. `cancel(job)` also drops in-flight requests. A job
@@ -240,7 +250,7 @@ JSON `detail`:
 | `phase` | The new `phase` and `problem`, and `retryable: true` for a job blocked only by transient provider failures. |
 | `snapshot` | Counts of scanned, excluded and affected files; the manifest hash; `chunking_policy` and `policy_changed`; the chunk `model` and `reasoning`; the resolved `chunk_budget` (`tokenizer`, `max_tokens`, `max_bytes`, the model's `max_input_tokens`, whether it was known, and the `oversize` policy); the number of `oversize_files` and `skipped` files. |
 | `oversize` | A file over the chunk request budget: its `path`, rendered `bytes` and `tokens`, the `budget`, the `action` (`split`, `skipped` or `blocked`), its `windows` and the `forced_rows` made into their own chunks. |
-| `request_attempt` | `artifact` (request ID), `repair`, and `event`: `phase` (`started`, `failed`, `retry_wait`, `retries_exhausted` or `completed`), `attempt`, `unix_ms` and a phase-specific `detail`, such as `error` and `usage` for a failure or `delay_ms` and `capacity` for a retry wait. |
+| `request_attempt` | `artifact` (request ID), `repair`, and `event`: `phase` (`started`, `failed`, `retry_wait`, `retries_exhausted`, `usage_limit` or `completed`), `attempt`, `unix_ms` and a phase-specific `detail`, such as `error` and `usage` for a failure or `delay_ms` and `capacity` for a retry wait. |
 | `request_finished` | `artifact`, `repair` and the `usage` of the accepted reply. |
 | `deterministic_repair` | Cuts removed without a model request. |
 | `pause_requested` | A pause was requested. |
@@ -483,7 +493,10 @@ the rest). `determining_changes` is true until the update has scanned the source
 still come from the last complete generation.
 
 Semantic and hybrid searches embed the query with the configured Voyage profile; a query
-over the per-input token limit is rejected. They return `Error::Invalid` when the
+over the per-input token limit is rejected. Query embeddings share the embedding request
+slots with running jobs and wait behind queued build embeddings; `Config::query_priority`
+dispatches them first, and `Config::query_max_transient_attempts` gives them a smaller
+retry budget. They return `Error::Invalid` when the
 generation was embedded with another profile (model, dimensions or tokenizer revision),
 since its vectors can't be compared with the query's; lexical search still works, and an
 update publishes a generation with the configured profile. Query embeddings are cached in memory. The

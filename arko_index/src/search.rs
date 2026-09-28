@@ -2,7 +2,7 @@ use crate::{
     ArkoIndex, Error, Result,
     error::invalid,
     packing,
-    scheduler::{Control, Operation, Reply},
+    scheduler::{Control, Operation, Reply, Request},
     storage::{decode, required},
 };
 use rusqlite::{OptionalExtension, params};
@@ -298,13 +298,19 @@ impl ArkoIndex {
                     if count > self.inner.backend.limits().item_tokens {
                         return Err(invalid("query exceeds embedding limit"));
                     }
+                    let request = Request {
+                        initial: false,
+                        first: self.inner.config.query_priority,
+                        max_transient_attempts: self.inner.config.query_max_transient_attempts,
+                    };
                     match self
                         .inner
                         .embeddings
-                        .call(
+                        .submit(
                             Operation::Embed(vec![query.into()], true),
-                            false,
+                            request,
                             &Control::new(),
+                            None,
                         )
                         .await
                         .result?

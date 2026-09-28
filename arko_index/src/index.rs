@@ -107,12 +107,12 @@ impl ArkoIndex {
                 chunking: Scheduler::new(
                     backend.clone(),
                     config.concurrency,
-                    config.max_transient_attempts,
+                    retry_policy(&config),
                 ),
                 embeddings: Scheduler::new(
                     backend.clone(),
                     config.embedding_concurrency,
-                    config.max_transient_attempts,
+                    retry_policy(&config),
                 ),
                 backend,
                 config,
@@ -179,8 +179,9 @@ impl ArkoIndex {
         tokio::spawn(async move {
             // On success, publish records "ready" and removes the control.
             if let Err(error) = this.run(&job, &control).await {
+                let error = error::usage_limit(&error).unwrap_or(error);
                 let phase = match error {
-                    Error::Paused => "paused",
+                    Error::Paused | Error::UsageLimit(_) => "paused",
                     Error::Cancelled => "cancelled",
                     Error::Blocked(_) | Error::Invalid(_) | Error::Provider { .. } => "blocked",
                     _ => "failed",
@@ -667,6 +668,8 @@ impl ArkoIndex {
         let mut group_size = budget::Size::default();
         // Windows whose last failure was a transient provider error.
         let mut transient = HashSet::new();
+        // The usage limit that paused the job.
+        let mut usage_limited = None;
         for (i, (s, state)) in files.iter().enumerate() {
             for (w, window) in state.windows.iter().enumerate() {
                 if let Some(cuts) = &window.cuts {
@@ -766,6 +769,14 @@ impl ArkoIndex {
                         }
                     }
                     Err(Error::Paused | Error::Cancelled) => {}
+                    Err(e) if error::usage_limit(e).is_some() => {
+                        // The whole job pauses: queued requests stop and the
+                        // window is sent again when the job is resumed.
+                        if usage_limited.is_none() {
+                            usage_limited = error::usage_limit(e);
+                            control.pause();
+                        }
+                    }
                     Err(e) => {
                         window.problem = Some(e.to_string());
                         if matches!(
@@ -801,6 +812,11 @@ impl ArkoIndex {
                 });
                 self.inner.db.file(job, &s.path, state).await?;
             }
+        }
+        if let Some(error) = usage_limited
+            && !matches!(control.check(), Err(Error::Cancelled))
+        {
+            return Err(error);
         }
         control.check()?;
         // Includes resumed forced/bypass windows, even when there was no provider work.
@@ -1092,6 +1108,14 @@ fn runtime_changes(saved: &Config, current: &Config) -> Result<Vec<Value>> {
             |(setting, value)| json!({"setting": setting, "from": saved.get(setting), "to": value}),
         )
         .collect())
+}
+fn retry_policy(config: &Config) -> crate::scheduler::RetryPolicy {
+    crate::scheduler::RetryPolicy {
+        max_transient_attempts: config.max_transient_attempts,
+        max_capacity_wait: config
+            .max_capacity_wait_ms
+            .map(std::time::Duration::from_millis),
+    }
 }
 fn extension(path: &str) -> String {
     Path::new(path)
