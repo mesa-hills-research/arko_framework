@@ -539,6 +539,13 @@ impl MemoryConfig {
                 );
             }
         }
+        for name in dropped {
+            if !saved.iter().any(|tier| &tier.name == name) {
+                log::warn!(
+                    "drop_memory_tier_on_resume: the checkpoint has no memory tier '{name}'"
+                );
+            }
+        }
         for mut old in saved {
             if dropped.contains(&old.name) {
                 log::info!(

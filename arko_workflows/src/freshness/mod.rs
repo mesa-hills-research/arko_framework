@@ -442,6 +442,11 @@ impl ResourceTracker {
     /// resources it read that another actor changed since, sorted.
     pub fn resume_actor(&self, actor: &ActorId) -> Vec<ResourceId> {
         self.finished.write().remove(actor);
+        self.changed_since_read(actor)
+    }
+
+    /// The resources `actor` read that another actor changed since, sorted.
+    pub fn changed_since_read(&self, actor: &ActorId) -> Vec<ResourceId> {
         let state = self.state.read();
         let Some(reads) = state.reads.get(actor) else {
             return Vec::new();

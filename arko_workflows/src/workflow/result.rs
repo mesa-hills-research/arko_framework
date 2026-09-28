@@ -36,6 +36,21 @@ impl AgentRunStatus {
     pub fn is_paused(&self) -> bool {
         matches!(self, Self::WaitingForInput | Self::Paused)
     }
+
+    /// The status a run whose task ended in `state` records.
+    pub fn of_state(state: &arko_agents::TaskState) -> Self {
+        use arko_agents::TaskState;
+        match state {
+            TaskState::Completed { .. } => Self::Completed,
+            TaskState::Cancelled { .. } => Self::Cancelled,
+            TaskState::Failed { .. } => Self::Failed,
+            TaskState::AwaitingUserResponse { .. } => Self::WaitingForInput,
+            TaskState::AwaitingToolApproval { .. }
+            | TaskState::AwaitingBatchToolApproval { .. }
+            | TaskState::AwaitingErrorRecoveryApproval { .. } => Self::Paused,
+            _ => Self::Interrupted,
+        }
+    }
 }
 
 /// Result of a single agent run within a workflow.

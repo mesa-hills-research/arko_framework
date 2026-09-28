@@ -4425,7 +4425,9 @@ impl AgentLoop {
                 if model_output {
                     ErrorRecoveryCause::UnusableResponses
                 } else {
-                    ErrorRecoveryCause::RetriesExhausted
+                    ErrorRecoveryCause::RetriesExhausted {
+                        retry_after_ms: error.retry_after().map(duration_millis),
+                    }
                 },
             ))
         } else {
@@ -4460,7 +4462,9 @@ impl AgentLoop {
                 .finish_llm_recovery(
                     format!("Next retry cannot fit the elapsed recovery budget. {message}"),
                     tool_call_id,
-                    ErrorRecoveryCause::RetriesExhausted,
+                    ErrorRecoveryCause::RetriesExhausted {
+                        retry_after_ms: Some(duration_millis(delay)),
+                    },
                 )
                 .await;
         }
@@ -4469,7 +4473,9 @@ impl AgentLoop {
                 .finish_llm_recovery(
                     format!("Server retry delay cannot be represented safely. {message}"),
                     tool_call_id,
-                    ErrorRecoveryCause::RetriesExhausted,
+                    ErrorRecoveryCause::RetriesExhausted {
+                        retry_after_ms: Some(duration_millis(delay)),
+                    },
                 )
                 .await;
         };
@@ -4578,7 +4584,8 @@ impl AgentLoop {
             tokio::select! {
                 biased;
                 _ = wait_for_recovery_deadline(deadline) => {
-                    return self.finish_llm_recovery("Elapsed model recovery budget exhausted during backoff.".into(), tool_call_id, ErrorRecoveryCause::RetriesExhausted).await;
+                    let retry_after_ms = Some(duration_millis(retry_at.saturating_duration_since(tokio::time::Instant::now())));
+                    return self.finish_llm_recovery("Elapsed model recovery budget exhausted during backoff.".into(), tool_call_id, ErrorRecoveryCause::RetriesExhausted { retry_after_ms }).await;
                 }
                 command = self.command_receiver.recv() => {
                     if self.handle_recovery_command(command).await? { return Ok(()); }

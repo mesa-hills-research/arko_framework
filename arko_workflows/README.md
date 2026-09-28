@@ -505,6 +505,7 @@ A paused agent is recorded with `AgentRunStatus::Paused`, the call returns
 Decide and continue with `resume_agent`:
 
 ```rust
+use arko_agents::runtime::command::ToolApprovalDecision;
 use arko_workflows::prelude::*;
 
 match workflow.run_agent("coder", "Deploy the fix").await {
@@ -525,10 +526,13 @@ match workflow.run_agent("coder", "Deploy the fix").await {
 }
 ```
 
-(`ToolApprovalDecision` is `arko_agents::runtime::command::ToolApprovalDecision`.) The
-paused task is saved with checkpoints, so it can be resumed after a restart. A pause
-by an opt-in agent monitor (the plan-usage threshold's `Pause` action or the cache
-monitor's `pause_below`) always returns to the caller. See
+The paused task is saved with checkpoints, so it can be resumed after a restart. A
+pause by an opt-in agent monitor (the plan-usage threshold's `Pause` action or the
+cache monitor's `pause_below`) always returns to the caller. An agent running inside
+another agent's tool call (a completion verifier or a delegated run) can't pause:
+there a call that needs approval is rejected and the agent is told, and an
+error-recovery pause left to the caller fails that run. Give such agents
+configurations that auto-approve the tools they need, or use a `Handler`. See
 [Approvals and error recovery](INDEX.md#approvals-and-error-recovery) for every cause
 and option.
 
@@ -631,7 +635,10 @@ run is stopped, its cancellation. Files are pretty-printed JSON, written to a
 temporary file, synced, and renamed into place.
 
 By default a checkpoint is saved after every finalized agent run, and every
-checkpoint is kept: `retain_checkpoints(n)` opts in to keeping only the newest `n`.
+checkpoint is kept: `retain_checkpoints(n)` opts in to keeping only the newest `n`. A
+task file always holds its task's latest state, so an older checkpoint reads a task
+that has since run on as it is now (a warning is logged when its recorded status and
+the task disagree).
 The event log records every event, including each streamed text and reasoning
 fragment; `event_log(EventLog::LifecycleOnly)` leaves the fragments out (the
 finished responses stay in the task files). Events are buffered and written at least

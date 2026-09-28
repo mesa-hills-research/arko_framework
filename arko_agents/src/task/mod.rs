@@ -78,7 +78,12 @@ pub enum ErrorRecoveryCause {
     /// A request that may succeed later (a network, server, capacity or
     /// rate-limit error) kept failing until recovery ended: its attempts or
     /// its elapsed budget ran out. Approving starts a new recovery.
-    RetriesExhausted,
+    /// `retry_after_ms` is how long the provider asked to wait before the
+    /// next attempt (or the wait the runtime had scheduled), when known.
+    RetriesExhausted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_ms: Option<u64>,
+    },
     /// A failure retrying unchanged can't fix: the request, a credential or
     /// the configuration must change (for example an authentication or
     /// invalid-request error).

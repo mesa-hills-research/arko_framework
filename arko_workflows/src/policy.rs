@@ -112,11 +112,16 @@ pub enum ErrorRecoveryPolicy {
     ///
     /// - Retries that ran out (an outage, repeated rate limits): after a
     ///   wait that grows from 30 seconds to 15 minutes while the pauses
-    ///   repeat without a model response in between, the failed request is
-    ///   sent again unchanged, starting a new round of the agent's retries.
-    /// - A plan usage limit: the driver waits until it resets (plus a few
-    ///   seconds), or, when the provider didn't say when, for the growing
-    ///   wait above, and sends the request again unchanged.
+    ///   repeat without a model response in between (and at least the delay
+    ///   the provider asked for), the failed request is sent again
+    ///   unchanged, starting a new round of the agent's retries.
+    /// - A plan usage limit: the driver waits until it resets (plus 5
+    ///   seconds; when the limit is reported again right after, at least the
+    ///   growing wait above), or, when the provider didn't say when, for the
+    ///   growing wait, and sends the request again unchanged.
+    ///
+    /// Each wait gets up to 30 seconds (at most a quarter of it) added at
+    /// random, so agents sharing a plan don't all resend at once.
     /// - Tool errors (under the agent's opt-in
     ///   `ToolErrorPolicy::PauseAndAwaitApproval`): the agent continues;
     ///   the calls' results report the errors.
@@ -241,7 +246,7 @@ impl fmt::Display for AgentPause {
 pub(crate) fn cause_name(cause: &ErrorRecoveryCause) -> &'static str {
     match cause {
         ErrorRecoveryCause::Unknown => "unknown",
-        ErrorRecoveryCause::RetriesExhausted => "retries_exhausted",
+        ErrorRecoveryCause::RetriesExhausted { .. } => "retries_exhausted",
         ErrorRecoveryCause::NonRetryable => "non_retryable",
         ErrorRecoveryCause::UnusableResponses => "unusable_responses",
         ErrorRecoveryCause::UsageLimit { .. } => "usage_limit",
@@ -289,6 +294,9 @@ pub(crate) struct RecoveryWaits {
     pub max: Duration,
     /// Added to a usage limit's reset.
     pub reset_margin: Duration,
+    /// Up to this much more is added at random to each wait (at most a
+    /// quarter of it), so agents sharing a plan don't all resend at once.
+    pub max_jitter: Duration,
 }
 
 impl Default for RecoveryWaits {
@@ -297,6 +305,7 @@ impl Default for RecoveryWaits {
             initial: Duration::from_secs(30),
             max: Duration::from_secs(15 * 60),
             reset_margin: Duration::from_secs(5),
+            max_jitter: Duration::from_secs(30),
         }
     }
 }
@@ -309,6 +318,16 @@ impl RecoveryWaits {
         self.initial
             .saturating_mul(1_u32 << doublings)
             .min(self.max)
+    }
+
+    /// `wait` plus its jitter: a `sample` share of the smaller of
+    /// [`max_jitter`](Self::max_jitter) and a quarter of `wait`.
+    pub fn with_jitter(&self, wait: Duration, sample: u64) -> Duration {
+        let spread = self.max_jitter.min(wait / 4);
+        let spread_ms = u64::try_from(spread.as_millis()).unwrap_or(u64::MAX);
+        wait.saturating_add(Duration::from_millis(
+            sample.checked_rem(spread_ms.saturating_add(1)).unwrap_or(0),
+        ))
     }
 }
 
@@ -330,12 +349,29 @@ impl ErrorRecoveryPolicy {
             Self::Automatic => None,
             Self::Limited { max } => Some(*max),
         };
+        // After the first pause of a series the growing wait applies too, so
+        // a provider that keeps reporting a reset or delay already passed
+        // (or one too short) is not asked again every few seconds.
+        let at_least_backoff = |wait: Duration| {
+            if repeat > 1 {
+                wait.max(waits.backoff(repeat))
+            } else {
+                wait
+            }
+        };
         let wait = match cause {
-            ErrorRecoveryCause::RetriesExhausted => waits.backoff(repeat),
+            ErrorRecoveryCause::RetriesExhausted {
+                retry_after_ms: Some(delay),
+            } => Duration::from_millis(*delay).max(waits.backoff(repeat)),
+            ErrorRecoveryCause::RetriesExhausted {
+                retry_after_ms: None,
+            } => waits.backoff(repeat),
             ErrorRecoveryCause::UsageLimit {
                 resets_at_unix_ms: Some(resets_at),
-            } => Duration::from_millis(resets_at.saturating_sub(now_unix_ms))
-                .saturating_add(waits.reset_margin),
+            } => at_least_backoff(
+                Duration::from_millis(resets_at.saturating_sub(now_unix_ms))
+                    .saturating_add(waits.reset_margin),
+            ),
             ErrorRecoveryCause::UsageLimit {
                 resets_at_unix_ms: None,
             } => waits.backoff(repeat),
@@ -377,7 +413,54 @@ mod tests {
     use super::*;
 
     fn waits() -> RecoveryWaits {
-        RecoveryWaits::default()
+        RecoveryWaits {
+            max_jitter: Duration::ZERO,
+            ..RecoveryWaits::default()
+        }
+    }
+
+    /// A usage limit reported again right after its reset (a reset already
+    /// past, or reported wrongly) is not resent every few seconds: from the
+    /// second pause in a row, the growing wait applies too.
+    #[test]
+    fn a_usage_limit_reported_again_waits_at_least_the_growing_wait() {
+        let waits = waits();
+        let now = 1_000_000;
+        let stale = ErrorRecoveryCause::UsageLimit {
+            resets_at_unix_ms: Some(now + 1_000),
+        };
+        let wait =
+            |repeat| ErrorRecoveryPolicy::Automatic.action(&stale, "limit", 0, repeat, &waits, now);
+        assert_eq!(
+            wait(1),
+            RecoveryAction::ContinueAfter(Duration::from_secs(6))
+        );
+        assert_eq!(
+            wait(2),
+            RecoveryAction::ContinueAfter(Duration::from_secs(60))
+        );
+        assert_eq!(
+            wait(9),
+            RecoveryAction::ContinueAfter(Duration::from_secs(900))
+        );
+    }
+
+    #[test]
+    fn jitter_adds_at_most_a_quarter_of_the_wait_and_30_seconds() {
+        let waits = RecoveryWaits::default();
+        for (wait, spread) in [
+            (Duration::from_secs(20), Duration::from_secs(5)),
+            (Duration::from_secs(3_600), Duration::from_secs(30)),
+            (Duration::ZERO, Duration::ZERO),
+        ] {
+            for sample in [0, 1, 7_777, u64::MAX] {
+                let jittered = waits.with_jitter(wait, sample);
+                assert!(
+                    jittered >= wait && jittered <= wait + spread,
+                    "{wait:?} {sample}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -401,8 +484,18 @@ mod tests {
             policy.action(&cause, "boom", recovered, 1, &waits, now)
         };
         let automatic = ErrorRecoveryPolicy::Automatic;
+        let exhausted = |retry_after_ms| ErrorRecoveryCause::RetriesExhausted { retry_after_ms };
         assert_eq!(
-            action(&automatic, ErrorRecoveryCause::RetriesExhausted, 1_000),
+            action(&automatic, exhausted(None), 1_000),
+            RecoveryAction::ContinueAfter(Duration::from_secs(30))
+        );
+        // The provider's longer delay is waited out.
+        assert_eq!(
+            action(&automatic, exhausted(Some(600_000)), 0),
+            RecoveryAction::ContinueAfter(Duration::from_secs(600))
+        );
+        assert_eq!(
+            action(&automatic, exhausted(Some(1_000)), 0),
             RecoveryAction::ContinueAfter(Duration::from_secs(30))
         );
         assert_eq!(
@@ -456,11 +549,11 @@ mod tests {
 
         let limited = ErrorRecoveryPolicy::Limited { max: 2 };
         assert!(matches!(
-            action(&limited, ErrorRecoveryCause::RetriesExhausted, 1),
+            action(&limited, exhausted(None), 1),
             RecoveryAction::ContinueAfter(_)
         ));
         assert!(matches!(
-            action(&limited, ErrorRecoveryCause::RetriesExhausted, 2),
+            action(&limited, exhausted(None), 2),
             RecoveryAction::Fail(reason) if reason.contains("limit (2 automatic recoveries)")
         ));
         assert!(matches!(
@@ -477,7 +570,7 @@ mod tests {
         );
 
         for cause in [
-            ErrorRecoveryCause::RetriesExhausted,
+            exhausted(None),
             ErrorRecoveryCause::NonRetryable,
             ErrorRecoveryCause::ToolError,
             ErrorRecoveryCause::Refusal,

@@ -67,10 +67,11 @@ pub struct SharedContext {
     /// How agents' error-recovery pauses are answered.
     pub error_recovery_policy: crate::policy::ErrorRecoveryPolicy,
     pub(crate) recovery_waits: crate::policy::RecoveryWaits,
-    /// Why each approved call awaited approval, until it has run: for the
-    /// tool hooks.
+    /// Why each approved call (by call ID) of a run (task ID) awaited
+    /// approval, until it has run, won't run, or its run ended: for the tool
+    /// hooks.
     pub(crate) approval_reasons:
-        parking_lot::Mutex<HashMap<uuid::Uuid, arko_agents::ApprovalReason>>,
+        parking_lot::Mutex<HashMap<uuid::Uuid, (uuid::Uuid, arko_agents::ApprovalReason)>>,
     /// The (agent, tool, reason) auto-approvals already warned about.
     pub(crate) approval_warnings:
         parking_lot::Mutex<std::collections::HashSet<(String, String, String)>>,

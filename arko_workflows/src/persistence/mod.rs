@@ -372,8 +372,11 @@ impl PersistenceManager {
         self.write_task(task).await
     }
 
-    /// Writes `task` to its file; the caller holds the write lock.
+    /// Writes `task` to its file; the caller holds the write lock. Until the
+    /// write succeeds the task counts as not saved, so a checkpoint writes
+    /// it again rather than refer to an older file.
     async fn write_task(&self, task: &arko_agents::Task) -> Result<PathBuf, WorkflowError> {
+        self.saved_tasks.lock().remove(&task.id);
         let directory = self.config.checkpoint_dir.join("agents");
         tokio::fs::create_dir_all(&directory).await?;
         let path = self.config.checkpoint_dir.join(task_file(task.id));
@@ -760,6 +763,28 @@ mod tests {
             .await;
         drop(manager);
         assert_eq!(lines(&workspace.0.join("events.jsonl")).len(), 2);
+    }
+
+    /// A task whose latest write failed is written again by the next
+    /// checkpoint, instead of the checkpoint referring to its older file.
+    #[tokio::test]
+    async fn a_task_whose_write_failed_is_written_by_the_next_checkpoint() {
+        let workspace = crate::test_support::Workspace::new();
+        let manager = manager(PersistenceConfig::new(&workspace.0));
+        let config = crate::test_support::agent_config("Friendly Coder");
+        let mut task = arko_agents::Task::new(config, "first".into(), workspace.0.clone(), None);
+        manager.save_agent_task(&task).await.unwrap();
+        assert!(manager.saved_tasks.lock().contains(&task.id));
+        // The next write fails: its temporary file's path is a directory.
+        let temporary = workspace.0.join(format!("agents/{}.json.tmp", task.id));
+        std::fs::create_dir(&temporary).unwrap();
+        task.initial_task_prompt = "second".into();
+        assert!(manager.save_agent_task(&task).await.is_err());
+        assert!(!manager.saved_tasks.lock().contains(&task.id));
+        std::fs::remove_dir(&temporary).unwrap();
+        manager.save_agent_task(&task).await.unwrap();
+        let saved = std::fs::read_to_string(workspace.0.join(task_file(task.id))).unwrap();
+        assert!(saved.contains("second"));
     }
 
     #[test]

@@ -348,11 +348,50 @@ fn warn_auto_approved(ctx: &SharedContext, agent_name: &str, call: &PendingToolC
     }
 }
 
+/// Why a nested run's call that would pause is rejected.
+const NESTED_APPROVAL_REJECTED: &str = "Not run: this call needs approval, and an agent running inside another agent's tool call (a completion verifier or a delegated run) can't be paused for it. Continue without it, or report what you need.";
+
 /// Decides tool calls awaiting approval under the workflow's approval
 /// policy: a decision per call, or `None` to pause the agent for its
-/// caller. Each call's approval reason is kept for the tool hooks until it
-/// has run.
+/// caller. A `nested` run (inside another agent's tool call) can't pause:
+/// its calls are rejected instead. Each call's approval reason is kept for
+/// the tool hooks until it has run.
 async fn decide_tool_calls(
+    agent_name: &str,
+    agent_run_id: uuid::Uuid,
+    calls: &[PendingToolCallInfo],
+    nested: bool,
+    ctx: &Arc<SharedContext>,
+) -> Result<Option<Vec<(uuid::Uuid, ToolApprovalDecision)>>, WorkflowError> {
+    let Some(decisions) = decide_tool_calls_by_policy(agent_name, agent_run_id, calls, ctx).await?
+    else {
+        if !nested {
+            return Ok(None);
+        }
+        log::warn!(
+            "Workflow '{}': agent '{agent_name}' runs inside another agent's tool call, so its calls that need approval can't pause for the caller; rejected",
+            ctx.workflow_name
+        );
+        return Ok(Some(
+            calls
+                .iter()
+                .map(|call| {
+                    (
+                        call.tool_call_id,
+                        ToolApprovalDecision::Reject {
+                            reason: Some(NESTED_APPROVAL_REJECTED.to_string()),
+                        },
+                    )
+                })
+                .collect(),
+        ));
+    };
+    record_approval_reasons(ctx, agent_run_id, calls, &decisions);
+    Ok(Some(decisions))
+}
+
+/// [`decide_tool_calls`] by the policy alone.
+async fn decide_tool_calls_by_policy(
     agent_name: &str,
     agent_run_id: uuid::Uuid,
     calls: &[PendingToolCallInfo],
@@ -406,7 +445,6 @@ async fn decide_tool_calls(
             decisions
         }
     };
-    record_approval_reasons(ctx, calls, &decisions);
     Ok(Some(decisions))
 }
 
@@ -414,6 +452,7 @@ async fn decide_tool_calls(
 /// until each has run.
 fn record_approval_reasons(
     ctx: &SharedContext,
+    agent_run_id: uuid::Uuid,
     calls: &[PendingToolCallInfo],
     decisions: &[(uuid::Uuid, ToolApprovalDecision)],
 ) {
@@ -423,7 +462,10 @@ fn record_approval_reasons(
             *id == call.tool_call_id && matches!(decision, ToolApprovalDecision::Approve { .. })
         });
         if approved {
-            reasons.insert(call.tool_call_id, call.approval_reason.clone());
+            reasons.insert(
+                call.tool_call_id,
+                (agent_run_id, call.approval_reason.clone()),
+            );
         }
     }
 }
@@ -465,12 +507,14 @@ async fn send_tool_decisions(
 
 /// Answers an error-recovery pause under the workflow's error recovery
 /// policy: continues (after a wait), fails the task, or pauses the agent
-/// for its caller.
+/// for its caller; a `nested` run (inside another agent's tool call) can't
+/// pause, so it fails instead.
 async fn answer_recovery_pause(
     agent_name: &str,
     agent_run_id: uuid::Uuid,
     fallback_error: String,
     recovery: &mut RecoveryState,
+    nested: bool,
     cmd_tx: &tokio::sync::mpsc::Sender<UserCommand>,
     ctx: &Arc<SharedContext>,
 ) -> Result<(), WorkflowError> {
@@ -489,6 +533,9 @@ async fn answer_recovery_pause(
         now_unix_ms,
     ) {
         RecoveryAction::ContinueAfter(wait) => {
+            let wait = ctx
+                .recovery_waits
+                .with_jitter(wait, arko_ai::retry::random_sample());
             if !wait.is_zero() {
                 let until = chrono::Utc::now()
                     + chrono::Duration::from_std(wait).unwrap_or(chrono::Duration::MAX);
@@ -527,6 +574,17 @@ async fn answer_recovery_pause(
                 .await;
             Ok(())
         }
+        RecoveryAction::ReturnToCaller if nested => {
+            let _ = cmd_tx
+                .send(UserCommand::RejectErrorRecovery {
+                    message: Some(format!(
+                        "The error-recovery pause ({}) is left to the caller, but an agent running inside another agent's tool call (a completion verifier or a delegated run) can't be paused: {error}",
+                        crate::policy::cause_name(&cause)
+                    )),
+                })
+                .await;
+            Ok(())
+        }
         RecoveryAction::ReturnToCaller => {
             pause_for_caller(
                 agent_name,
@@ -554,6 +612,7 @@ async fn answer_recovery_pause(
 ///
 /// A `batch_stop` (fail-fast in `run_agents_parallel`) that is set stops the
 /// agent too: the loop returns `AgentCancelled` with its reason.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn drive_event_loop(
     agent_name: &str,
     agent_run_id: uuid::Uuid,
@@ -562,16 +621,24 @@ pub(crate) async fn drive_event_loop(
     ctx: &Arc<SharedContext>,
     persistence: Option<&Arc<PersistenceManager>>,
     batch_stop: Option<tokio::sync::watch::Receiver<Option<String>>>,
+    nested: bool,
 ) -> Result<(), WorkflowError> {
+    let drive = Drive {
+        agent_name,
+        agent_run_id,
+        nested,
+        ctx,
+        persistence,
+    };
     let Some(mut batch_stop) = batch_stop else {
-        return drive_events(agent_name, agent_run_id, event_rx, cmd_tx, ctx, persistence).await;
+        return drive_events(&drive, event_rx, cmd_tx).await;
     };
     let stopped = tokio::select! {
         biased;
         stopped = batch_stop.wait_for(Option::is_some) => {
             stopped.map(|reason| reason.clone().unwrap_or_default())
         }
-        result = drive_events(agent_name, agent_run_id, event_rx, cmd_tx, ctx, persistence) => {
+        result = drive_events(&drive, event_rx, cmd_tx) => {
             return result;
         }
     };
@@ -581,19 +648,34 @@ pub(crate) async fn drive_event_loop(
             reason,
         }),
         // The call that could stop it is gone: drive on.
-        Err(_) => drive_events(agent_name, agent_run_id, event_rx, cmd_tx, ctx, persistence).await,
+        Err(_) => drive_events(&drive, event_rx, cmd_tx).await,
     }
+}
+
+/// The run a driver drives.
+struct Drive<'a> {
+    agent_name: &'a str,
+    agent_run_id: uuid::Uuid,
+    /// Runs inside another agent's tool call, so it can't pause for the
+    /// caller.
+    nested: bool,
+    ctx: &'a Arc<SharedContext>,
+    persistence: Option<&'a Arc<PersistenceManager>>,
 }
 
 /// [`drive_event_loop`] without a batch stop.
 async fn drive_events(
-    agent_name: &str,
-    agent_run_id: uuid::Uuid,
+    drive: &Drive<'_>,
     event_rx: &mut tokio::sync::mpsc::Receiver<AgentEvent>,
     cmd_tx: &tokio::sync::mpsc::Sender<UserCommand>,
-    ctx: &Arc<SharedContext>,
-    persistence: Option<&Arc<PersistenceManager>>,
 ) -> Result<(), WorkflowError> {
+    let Drive {
+        agent_name,
+        agent_run_id,
+        nested,
+        ctx,
+        persistence,
+    } = *drive;
     let mut recovery = RecoveryState::default();
     loop {
         let event = tokio::select! {
@@ -629,7 +711,7 @@ async fn drive_events(
                     tool_description,
                     approval_reason,
                 }];
-                match decide_tool_calls(agent_name, agent_run_id, &calls, ctx).await? {
+                match decide_tool_calls(agent_name, agent_run_id, &calls, nested, ctx).await? {
                     Some(decisions) => send_tool_decisions(cmd_tx, None, decisions).await,
                     None => {
                         return pause_for_caller(
@@ -648,7 +730,9 @@ async fn drive_events(
             AgentEvent::BatchToolCallAwaitingApproval {
                 batch_id,
                 pending_calls,
-            } => match decide_tool_calls(agent_name, agent_run_id, &pending_calls, ctx).await? {
+            } => match decide_tool_calls(agent_name, agent_run_id, &pending_calls, nested, ctx)
+                .await?
+            {
                 Some(decisions) => send_tool_decisions(cmd_tx, Some(batch_id), decisions).await,
                 None => {
                     return pause_for_caller(
@@ -712,6 +796,7 @@ async fn drive_events(
                     agent_run_id,
                     error_message,
                     &mut recovery,
+                    nested,
                     cmd_tx,
                     ctx,
                 )
@@ -1034,6 +1119,7 @@ pub(crate) async fn drive_to_result(
         ctx,
         persistence,
         batch_stop,
+        depth > 0,
     )
     .await;
 
@@ -1089,6 +1175,9 @@ pub(crate) async fn drive_to_result(
             run_status(&task.current_state)
         }),
     );
+    // The runtime has ended: nothing more is delivered to it, and no notice
+    // is queued for it while its messages are settled.
+    ctx.messages.unregister_active(&agent_name, agent_run_id);
     let result = match final_task {
         Ok(mut task) => {
             // The runtime records its generic reason for a CancelTask; the
@@ -1111,7 +1200,6 @@ pub(crate) async fn drive_to_result(
         }
         Err(error) => Err(error),
     };
-    ctx.messages.unregister_active(&agent_name, agent_run_id);
     ctx.run_control.unregister(agent_run_id);
     // Set when a verifier that failed stopped the task.
     let verifier_failure = ctx.verifier_failures.lock().remove(&agent_run_id);
@@ -1199,16 +1287,7 @@ impl Drop for Abandoned<'_> {
 
 /// The run status a final task state records.
 fn run_status(state: &TaskState) -> AgentRunStatus {
-    match state {
-        TaskState::Completed { .. } => AgentRunStatus::Completed,
-        TaskState::Cancelled { .. } => AgentRunStatus::Cancelled,
-        TaskState::Failed { .. } => AgentRunStatus::Failed,
-        TaskState::AwaitingUserResponse { .. } => AgentRunStatus::WaitingForInput,
-        TaskState::AwaitingToolApproval { .. }
-        | TaskState::AwaitingBatchToolApproval { .. }
-        | TaskState::AwaitingErrorRecoveryApproval { .. } => AgentRunStatus::Paused,
-        _ => AgentRunStatus::Interrupted,
-    }
+    AgentRunStatus::of_state(state)
 }
 
 /// Why the workflow stopped an agent: the run's stop, or the error the
@@ -1249,19 +1328,13 @@ pub(crate) async fn finalize_agent_task(
     persistence: Option<&Arc<PersistenceManager>>,
 ) -> Result<AgentResult, WorkflowError> {
     let agent_run_id = task.id;
-    // Channel acceptance is not consumption: complete_task may finish with
-    // unread InjectContext commands. Only context in the conversation counts
-    // as read; context taken but not added stays with the task.
-    ctx.messages.settle_run(
-        &agent_name,
-        agent_run_id,
-        &task.conversation,
-        prompt_ids,
-        &task.pending_context_injections,
-        matches!(task.current_state, TaskState::Completed { .. }),
-    );
+    // Approved calls the run didn't get to run.
+    ctx.approval_reasons
+        .lock()
+        .retain(|_, (task_id, _)| *task_id != agent_run_id);
     // A task that can be continued keeps its reads; freshness no longer
-    // notifies it (a continuation is told what changed).
+    // notifies it (a continuation is told what changed). First, so that no
+    // notice is queued for it once its messages are settled.
     if let Some(tracker) = &ctx.resource_tracker {
         let continued = matches!(
             task.current_state,
@@ -1273,6 +1346,17 @@ pub(crate) async fn finalize_agent_task(
         );
         tracker.finish_actor(&ActorId::new(agent_run_id, &agent_name), continued);
     }
+    // Channel acceptance is not consumption: complete_task may finish with
+    // unread InjectContext commands. Only context in the conversation counts
+    // as read; context taken but not added stays with the task.
+    ctx.messages.settle_run(
+        &agent_name,
+        agent_run_id,
+        &task.conversation,
+        prompt_ids,
+        &task.pending_context_injections,
+        matches!(task.current_state, TaskState::Completed { .. }),
+    );
     let pause = AgentPause::of(&task.current_state);
     let (status, summary, error, hook_point) = match &task.current_state {
         TaskState::Completed { summary } => (
@@ -1904,6 +1988,15 @@ impl WorkflowEngine {
                             place = permits.acquire_owned() => place,
                         };
                         _place = place.ok();
+                        // Admitted when the call began; the run may have
+                        // stopped, or the budget run out, since.
+                        ctx_clone.run_control.check()?;
+                        if ctx_clone.budget.is_exceeded() {
+                            return Err(WorkflowError::BudgetExceeded {
+                                spent: ctx_clone.budget.total_spent(),
+                                limit: ctx_clone.budget.limit().unwrap_or(0.0),
+                            });
+                        }
                         let task_id = uuid::Uuid::new_v4();
                         ctx_clone.registry.start(&[(task_id, name_owned.as_str())]);
                         Reservation {
@@ -2040,6 +2133,16 @@ impl WorkflowEngine {
         let mut registry = self.build_tool_registry(agent_name, ctx, depth);
         let skill_prompt_context =
             Self::setup_skills(&mut task.agent_config, &mut registry, &ctx.workspace)?;
+        // What the task holds, recorded again for a task saved before
+        // messages recorded who holds them.
+        ctx.messages.settle_run(
+            agent_name,
+            task.id,
+            &task.conversation,
+            &[],
+            &task.pending_context_injections,
+            false,
+        );
         // No roster: the task's initial prompt has one. Start notices tell it
         // about recipients that started since it last ran.
         let (messages, pending_message_ids) = self.pending_messages(agent_name, task.id, ctx);
@@ -2053,16 +2156,19 @@ impl WorkflowEngine {
                 .any(|id| crate::messaging::is_injection_of(content, *id))
         });
         // The resources it read that changed since, when freshness is on.
+        // It counts as finished (no notices) until it is registered below.
+        let actor = ActorId::new(task.id, agent_name.as_str());
         let changed = ctx
             .resource_tracker
             .as_ref()
-            .and_then(|tracker| {
-                tracker.changed_notice(
-                    &tracker.resume_actor(&ActorId::new(task.id, agent_name.as_str())),
-                )
-            })
+            .map(|tracker| tracker.changed_since_read(&actor))
+            .unwrap_or_default();
+        let changed_notice = ctx
+            .resource_tracker
+            .as_ref()
+            .and_then(|tracker| tracker.changed_notice(&changed))
             .map_or_else(String::new, |notice| format!("\n\n{notice}"));
-        let prompt = format!("{continuation_prompt}{messages}{changed}");
+        let prompt = format!("{continuation_prompt}{messages}{changed_notice}");
         match previous.status {
             AgentRunStatus::Completed => {
                 task.prepare_for_resumption_from_completed(prompt)?;
@@ -2081,6 +2187,18 @@ impl WorkflowEngine {
             ctx,
             depth,
         );
+        // Now registered, it is notified of writes; one made while it
+        // started is told now.
+        if let Some(tracker) = &ctx.resource_tracker {
+            let since = tracker
+                .resume_actor(&actor)
+                .into_iter()
+                .filter(|resource| !changed.contains(resource))
+                .collect::<Vec<_>>();
+            if let Some(notice) = tracker.changed_notice(&since) {
+                ctx.messages.inject_task(run.agent_run_id, notice).await;
+            }
+        }
         drive_to_result(run, ctx, self.persistence.as_ref()).await
     }
 
@@ -2128,7 +2246,7 @@ impl WorkflowEngine {
                     TaskState::AwaitingBatchToolApproval { batch_id, .. } => Some(*batch_id),
                     _ => None,
                 };
-                record_approval_reasons(ctx, calls, &decisions);
+                record_approval_reasons(ctx, previous.agent_run_id, calls, &decisions);
                 Decision::Tools(batch_id, decisions)
             }
             (AgentPause::ErrorRecovery { .. }, AgentResume::ContinueAfterError { note }) => {
@@ -2149,6 +2267,16 @@ impl WorkflowEngine {
         let agent_name = &previous.agent_name;
         self.admit(agent_name, Some(previous.agent_run_id), ctx)?;
         let mut task = previous.task.clone();
+        // What the task holds, recorded again for a task saved before
+        // messages recorded who holds them.
+        ctx.messages.settle_run(
+            agent_name,
+            task.id,
+            &task.conversation,
+            &[],
+            &task.pending_context_injections,
+            false,
+        );
         let mut registry = self.build_tool_registry(agent_name, ctx, 0);
         let skill_prompt_context =
             Self::setup_skills(&mut task.agent_config, &mut registry, &ctx.workspace)?;
@@ -2563,9 +2691,9 @@ impl WorkflowExecutionMiddleware {
     }
 }
 
-#[async_trait]
-impl ToolExecutionMiddleware for WorkflowExecutionMiddleware {
-    async fn before(
+impl WorkflowExecutionMiddleware {
+    /// What `before` decides for a call.
+    async fn gate(
         &self,
         execution: &ToolExecutionContext<'_>,
         call: &ToolCallContext<'_>,
@@ -2578,7 +2706,7 @@ impl ToolExecutionMiddleware for WorkflowExecutionMiddleware {
             .approval_reasons
             .lock()
             .get(&call.tool_call_id)
-            .cloned();
+            .map(|(_, reason)| reason.clone());
         match fire_hooks(&self.context, &HookPoint::PreToolExecution, |hook| {
             hook.agent_name = Some(self.agent_name.clone());
             hook.agent_run_id = Some(execution.task_id);
@@ -2640,6 +2768,25 @@ impl ToolExecutionMiddleware for WorkflowExecutionMiddleware {
         Ok(self
             .stop_decision()
             .unwrap_or(ToolExecutionDecision::Continue))
+    }
+}
+
+#[async_trait]
+impl ToolExecutionMiddleware for WorkflowExecutionMiddleware {
+    async fn before(
+        &self,
+        execution: &ToolExecutionContext<'_>,
+        call: &ToolCallContext<'_>,
+    ) -> Result<ToolExecutionDecision, ToolError> {
+        let decision = self.gate(execution, call).await;
+        // A call that won't run needs no approval reason for its hooks.
+        if !matches!(decision, Ok(ToolExecutionDecision::Continue)) {
+            self.context
+                .approval_reasons
+                .lock()
+                .remove(&call.tool_call_id);
+        }
+        decision
     }
 
     async fn after(
@@ -2719,7 +2866,8 @@ impl ToolExecutionMiddleware for WorkflowExecutionMiddleware {
             .context
             .approval_reasons
             .lock()
-            .remove(&call.tool_call_id);
+            .remove(&call.tool_call_id)
+            .map(|(_, reason)| reason);
         let hook_result = fire_hooks(&self.context, &HookPoint::PostToolExecution, |hook| {
             hook.agent_name = Some(self.agent_name.clone());
             hook.agent_run_id = Some(execution.task_id);
@@ -2789,6 +2937,7 @@ mod tests {
                 workflow.context(),
                 None,
                 None,
+                false,
             ),
         )
         .await

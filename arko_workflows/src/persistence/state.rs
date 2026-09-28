@@ -106,6 +106,15 @@ impl WorkflowState {
                         record.agent_name
                     ))
                 })?;
+            let now = AgentRunStatus::of_state(&task.current_state);
+            if now != record.status {
+                log::warn!(
+                    "The task file {} of agent '{}' holds a later state ({now:?}) than the checkpoint recorded ({:?}): a task file holds a task's latest state, so an older checkpoint reads the task as it is now",
+                    path.display(),
+                    record.agent_name,
+                    record.status
+                );
+            }
             results.push(AgentResult {
                 agent_run_id: record.agent_run_id,
                 agent_name: record.agent_name.clone(),

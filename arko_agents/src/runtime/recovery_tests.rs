@@ -483,7 +483,7 @@ async fn error_recovery_pauses_record_their_cause() {
             )
         }),
         (provider_failure(503, None), |cause| {
-            *cause == ErrorRecoveryCause::RetriesExhausted
+            matches!(cause, ErrorRecoveryCause::RetriesExhausted { .. })
         }),
     ];
     for (error, expected) in cases {
@@ -613,7 +613,7 @@ async fn continuing_after_an_error_sends_the_request_again_unchanged_or_with_the
         scripted.push_back(Err(provider_failure(503, None)));
         scripted.push_back(Ok(futures::stream::iter([Ok(complete_response())]).boxed()));
         let (task, cause) = run_answering_the_pause(agent, events, commands, command).await;
-        assert_eq!(cause, ErrorRecoveryCause::RetriesExhausted);
+        assert!(matches!(cause, ErrorRecoveryCause::RetriesExhausted { .. }));
         assert!(matches!(task.current_state, TaskState::Completed { .. }));
         let user_texts: Vec<String> = task
             .conversation

@@ -541,8 +541,9 @@ background and notify the agent of input requests and completion. See
 `AwaitingBatchToolApproval`, `AwaitingUserResponse`, `AwaitingErrorRecoveryApproval`,
 `Interrupted`, `Completed`, `Failed`, or `Cancelled { reason }`; `Completed`, `Failed`,
 and `Cancelled` are terminal. `AwaitingErrorRecoveryApproval { error_message, cause }`
-says why the task paused, as an `ErrorRecoveryCause`: `RetriesExhausted` (a request that
-may succeed later kept failing until recovery ended), `NonRetryable` (the request, a
+says why the task paused, as an `ErrorRecoveryCause`: `RetriesExhausted { retry_after_ms }`
+(a request that may succeed later kept failing until recovery ended; `retry_after_ms` is
+the delay the provider asked for, or the wait the runtime had scheduled, when known), `NonRetryable` (the request, a
 credential, or the configuration must change), `UnusableResponses` (responses the runtime
 couldn't use, up to the attempt limit), `UsageLimit { resets_at_unix_ms }`, `Refusal`
 (after the opt-in refusal fallback, if configured, could not answer), `ToolError` (under

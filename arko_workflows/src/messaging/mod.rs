@@ -260,6 +260,8 @@ async fn forward(
                             state.active.remove(&agent_name);
                         }
                     }
+                    // A waiter learns that the run is gone.
+                    signal_arrival(&state.arrivals, task_id);
                 }
                 // Nothing has been acknowledged: every unsent message remains
                 // in the checkpoint-backed queue for the next invocation.
@@ -547,17 +549,28 @@ impl MessageBus {
     }
 
     /// Resolves once every agent message queued for run `task_id` of
-    /// `agent_name` is in its command channel.
+    /// `agent_name` is in its command channel, or the run can't take them
+    /// (its channel closed, or it is not registered).
     pub(crate) async fn forwarded(&self, agent_name: &str, task_id: Uuid) {
         let mut arrivals = self.watch_arrivals(task_id);
         loop {
             arrivals.borrow_and_update();
-            if self.unseen_messages(agent_name, task_id).forwarded
+            if !self.is_registered(agent_name, task_id)
+                || self.unseen_messages(agent_name, task_id).forwarded
                 || arrivals.changed().await.is_err()
             {
                 return;
             }
         }
+    }
+
+    /// Whether run `task_id` of `agent_name` is registered for delivery.
+    fn is_registered(&self, agent_name: &str, task_id: Uuid) -> bool {
+        self.state
+            .lock()
+            .active
+            .get(agent_name)
+            .is_some_and(|instances| instances.contains_key(&task_id))
     }
 
     /// Notes a message committed to run `task_id`'s conversation: the agent
@@ -744,6 +757,28 @@ impl MessageBus {
         taken: &[String],
         completed: bool,
     ) {
+        // The conversation is searched outside the lock (it can be long);
+        // messages queued meanwhile aren't in it.
+        let queued = self
+            .state
+            .lock()
+            .queues
+            .get(agent_name)
+            .cloned()
+            .unwrap_or_default();
+        let mut in_conversation = HashSet::new();
+        let mut held = HashSet::new();
+        for message in &queued {
+            if prompt_ids.contains(&message.id) || conversation_holds(conversation, message) {
+                in_conversation.insert(message.id);
+                held.insert(message.id);
+            } else if taken
+                .iter()
+                .any(|content| is_injection_of(content, message.id))
+            {
+                held.insert(message.id);
+            }
+        }
         let mut state = self.state.lock();
         let Some(messages) = state.queues.get_mut(agent_name) else {
             return;
@@ -752,16 +787,10 @@ impl MessageBus {
             if message.to_task_id == Some(task_id) {
                 return false;
             }
-            let in_conversation =
-                prompt_ids.contains(&message.id) || conversation_holds(conversation, message);
-            if completed && in_conversation {
+            if completed && in_conversation.contains(&message.id) {
                 return false;
             }
-            let held = in_conversation
-                || taken
-                    .iter()
-                    .any(|content| is_injection_of(content, message.id));
-            if held && !message.is_held_by(task_id) {
+            if held.contains(&message.id) && !message.is_held_by(task_id) {
                 message.held_by.push(task_id);
             }
             true
@@ -919,6 +948,36 @@ mod tests {
                 .count();
             assert_eq!(deliveries, 1);
         }
+    }
+
+    /// Waiting for the queue to be forwarded ends when the run's channel
+    /// closes before it could take them (a runtime that exited at once).
+    #[tokio::test]
+    async fn waiting_for_forwards_ends_when_the_run_closes() {
+        let bus = MessageBus::new(["lead".to_string(), "worker".to_string()]);
+        let run = Uuid::new_v4();
+        let (sender, receiver) = mpsc::channel(1);
+        sender
+            .try_send(UserCommand::InjectContext {
+                content: "fills the channel".into(),
+            })
+            .unwrap();
+        bus.send("worker", None, "lead", "queued".into(), vec![])
+            .await
+            .unwrap();
+        bus.register_run("lead", run, sender, &[]);
+        let wait = bus.forwarded("lead", run);
+        drop(receiver);
+        tokio::time::timeout(Duration::from_secs(10), wait)
+            .await
+            .expect("the wait ended");
+        // An unregistered run doesn't wait at all.
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            bus.forwarded("lead", Uuid::new_v4()),
+        )
+        .await
+        .expect("no wait for an unknown run");
     }
 
     /// A message the delivery worker has not forwarded yet (the command

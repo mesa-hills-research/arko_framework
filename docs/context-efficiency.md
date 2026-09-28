@@ -4,8 +4,10 @@ Arko keeps an agent's context accurate and compact with four mechanisms:
 versioned memory reads, file-tree change notices, opt-in tool-result distillation,
 and background shell jobs with completion notices. State that changes during a run
 is delivered as exact, deterministic changes. Model-written summaries are reserved
-for bulk tool output, and only where a workflow opts in; the original material
-stays retrievable through tools.
+for bulk tool output, and only where a workflow opts in by naming the agents and
+tools to distill. The original output stays in the event log and interception
+events; an agent that needs the exact text of a distilled result (for example a
+distilled `read_file`) can't get it by calling the tool again.
 
 ## Memory reads
 

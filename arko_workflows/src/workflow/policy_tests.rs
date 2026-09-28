@@ -88,6 +88,7 @@ fn instant() -> RecoveryWaits {
         initial: Duration::from_millis(1),
         max: Duration::from_millis(1),
         reset_margin: Duration::ZERO,
+        max_jitter: Duration::ZERO,
     }
 }
 
@@ -431,7 +432,7 @@ async fn return_to_caller_pauses_at_recovery_and_resume_continues_or_fails() {
             task_id,
             pause:
                 AgentPause::ErrorRecovery {
-                    cause: ErrorRecoveryCause::RetriesExhausted,
+                    cause: ErrorRecoveryCause::RetriesExhausted { .. },
                     ..
                 },
             ..
@@ -922,4 +923,239 @@ async fn fail_fast_stops_the_other_agents_at_the_first_failure() {
             Some(_) => assert!(held.is_none()),
         }
     }
+}
+
+/// An agent running inside another agent's tool call (here a completion
+/// verifier) can't be paused for the caller: under `RespectAgentConfig` its
+/// call that needs approval is rejected, and it goes on; no paused result is
+/// left behind.
+#[tokio::test]
+async fn a_nested_run_rejects_a_call_it_cant_pause_for() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|_, body| {
+        Some(if body.contains("You are a completion verifier") {
+            if body.contains("can't be paused for it") {
+                complete_turn("v2", "ACCEPTED")
+            } else {
+                tool_call_turn("v1", "probe", json!({}))
+            }
+        } else {
+            complete_turn("c", "done")
+        })
+    })
+    .await;
+    let probe = ProbeTool::new("probe", false);
+    let hooks = HookCounts::default();
+    let workflow = hooks
+        .register(
+            Workflow::builder()
+                .name("nested-approval-test")
+                .workspace(&workspace.0)
+                .llm_client(Arc::new(server.client()))
+                .agent("coder", approving_agent(&[]))
+                .agent("reviewer", approving_agent(&[]))
+                .agent_tool("reviewer", probe.clone())
+                .completion_verifier(
+                    crate::verification::CompletionVerifierConfig::correctness("check", "reviewer")
+                        .target("coder"),
+                )
+                .approval_policy(ApprovalPolicy::RespectAgentConfig)
+                .recovery_waits(instant()),
+        )
+        .build()
+        .unwrap();
+    // The coder's own complete_task is auto-approved (approving_agent).
+    let result = within(workflow.run_agent("coder", "Write it."))
+        .await
+        .unwrap();
+    assert_eq!(result.status, AgentRunStatus::Completed);
+    assert_eq!(probe.calls(), 0);
+    assert_eq!(hooks.get(HookPoint::OnAgentPaused), 0);
+    assert!(
+        workflow
+            .result()
+            .agent_results
+            .iter()
+            .all(|result| result.status != AgentRunStatus::Paused)
+    );
+}
+
+/// A run waiting for input in a checkpoint saved before messages recorded
+/// who holds them still gets no message twice when continued: what its
+/// conversation holds is recorded again first.
+#[tokio::test]
+async fn a_waiting_run_from_an_older_checkpoint_gets_no_message_twice() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|index, _| {
+        Some(match index {
+            0 => tool_call_turn("r", "relay", json!({})),
+            1 => tool_call_turn("q", "ask_user", json!({"questions": "Which file?"})),
+            _ => complete_turn("done", "done"),
+        })
+    })
+    .await;
+    let mut lead = agent_config("Friendly Lead");
+    lead.tool_config
+        .available_tool_names
+        .push("ask_user".into());
+    let run_dir = workspace.0.join(".run");
+    let build = |resume: Option<&std::path::Path>| {
+        let relay = Arc::new(Relay::default());
+        let mut builder = Workflow::builder()
+            .name("legacy-message-test")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(server.client()))
+            .agent("lead", lead.clone())
+            .agent_tool("lead", relay.clone())
+            .persistence(crate::persistence::PersistenceConfig::new(&run_dir));
+        if let Some(path) = resume {
+            builder = builder.resume_from(path);
+        }
+        let workflow = builder.build().unwrap();
+        relay.0.set(workflow.context().clone()).unwrap();
+        workflow
+    };
+    let first = build(None);
+    let error = within(first.run_agent("lead", "Lead the work."))
+        .await
+        .unwrap_err();
+    let WorkflowError::UserInputRequired { task_id, .. } = error else {
+        panic!("{error:?}");
+    };
+    drop(first);
+    // As an older version saved it: no held_by.
+    let name = std::fs::read_to_string(run_dir.join("latest-checkpoint")).unwrap();
+    let path = run_dir.join(name.trim());
+    let mut checkpoint: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for message in checkpoint["message_queues"]["lead"].as_array_mut().unwrap() {
+        message.as_object_mut().unwrap().remove("held_by");
+    }
+    std::fs::write(&path, checkpoint.to_string()).unwrap();
+
+    let resumed = build(Some(&path));
+    let waiting = resumed.agent_result(task_id).unwrap();
+    within(resumed.continue_agent(&waiting, "parser.rs"))
+        .await
+        .unwrap();
+    let last = user_text(server.bodies().last().unwrap());
+    assert_eq!(last.matches("Check the parser.").count(), 1, "{last}");
+    assert!(resumed.context().messages.pending("lead").is_empty());
+}
+
+/// `Automatic` waits out a plan usage limit until its reported reset, then
+/// sends the request again unchanged.
+#[tokio::test]
+async fn automatic_recovery_waits_out_a_usage_limit() {
+    let workspace = Workspace::new();
+    let server = scripted(|index| {
+        if index == 0 {
+            Reply::Status {
+                status: 429,
+                retry_after: Some(1),
+                body: json!({"error": {"message": "limit reached", "type": "rate_limit_error"}})
+                    .to_string(),
+            }
+        } else {
+            done()
+        }
+    })
+    .await;
+    let mut config = agent_config("Friendly Coder");
+    // Any provider delay counts as a usage limit here.
+    config.llm_retry_config.rate_limit_retry = Some(arko_agents::LLMRateLimitRetryConfig {
+        initial_delay_ms: 1,
+        max_delay_ms: 1,
+        max_wait_ms: 1,
+    });
+    let workflow = builder(&server, &workspace, config).build().unwrap();
+    let causes = pause_causes(&workflow);
+    let started = std::time::Instant::now();
+    let result = within(workflow.run_agent("coder", "Write it."))
+        .await
+        .unwrap();
+    assert_eq!(result.summary, "done");
+    // The reset was a second away.
+    assert!(started.elapsed() >= Duration::from_millis(500));
+    let bodies = server.bodies();
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(input(&bodies[0]), input(&bodies[1]));
+    assert!(matches!(
+        seen(&causes).await.as_slice(),
+        [ErrorRecoveryCause::UsageLimit {
+            resets_at_unix_ms: Some(_)
+        }]
+    ));
+}
+
+/// The causes of the error-recovery pauses the workflow's agents report,
+/// as they are broadcast.
+fn pause_causes(workflow: &Workflow) -> Arc<parking_lot::Mutex<Vec<ErrorRecoveryCause>>> {
+    let causes = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let mut events = workflow.subscribe_events();
+    tokio::spawn({
+        let causes = causes.clone();
+        async move {
+            while let Ok(event) = events.recv().await {
+                if let arko_agents::AgentEvent::TaskStateChanged(
+                    arko_agents::TaskState::AwaitingErrorRecoveryApproval { cause, .. },
+                ) = event.event
+                {
+                    causes.lock().push(cause);
+                }
+            }
+        }
+    });
+    causes
+}
+
+/// The causes collected so far, once there is at least one.
+async fn seen(causes: &parking_lot::Mutex<Vec<ErrorRecoveryCause>>) -> Vec<ErrorRecoveryCause> {
+    within(async {
+        loop {
+            let seen = causes.lock().clone();
+            if !seen.is_empty() {
+                return seen;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+}
+
+/// `Automatic` continues at once after a pause on tool errors (the agent's
+/// opt-in `ToolErrorPolicy::PauseAndAwaitApproval`); the call's result
+/// reports the error, and nothing says a user approved.
+#[tokio::test]
+async fn automatic_recovery_continues_after_tool_errors() {
+    let workspace = Workspace::new();
+    let server = scripted(|index| {
+        if index == 0 {
+            Reply::Stream(tool_call_turn(
+                "r",
+                "read_file",
+                json!({"path": "missing.txt"}),
+            ))
+        } else {
+            done()
+        }
+    })
+    .await;
+    let mut config = agent_config("Friendly Coder");
+    config
+        .tool_config
+        .available_tool_names
+        .push("read_file".into());
+    config.error_recovery_config.on_tool_execution_error =
+        arko_agents::ToolErrorPolicy::PauseAndAwaitApproval;
+    let workflow = builder(&server, &workspace, config).build().unwrap();
+    let causes = pause_causes(&workflow);
+    let result = within(workflow.run_agent("coder", "Read it."))
+        .await
+        .unwrap();
+    assert_eq!(result.summary, "done");
+    assert_eq!(seen(&causes).await, [ErrorRecoveryCause::ToolError]);
+    let second = &server.bodies()[1];
+    assert!(second.contains("missing.txt"), "{second}");
+    assert!(!user_text(second).contains("approved"), "{second}");
 }
