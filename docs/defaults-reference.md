@@ -224,7 +224,7 @@ all as separate user input. See [Tool images](../arko_ai/README.md#tool-images).
 | `voyage_input_type` | `None`: not sent | `Document`, `Query` (for search queries). |
 | `voyage_truncation` | `None`: `truncation: false` is sent | Voyage's own default is `true`. Either way an input over the 32,000-token limit fails locally with `Error::TokenLimitExceeded` before sending; split long inputs first. |
 | `tokenizer_revision` | `None`: `main`, unpinned | Inputs are counted locally before sending, with the `voyageai/<model>` tokenizer downloaded from the Hugging Face Hub on first use (`HF_HOME`, `HF_ENDPOINT`). A failed download is an error, and nothing is sent. |
-| `hf_token` | `None`: the Hugging Face token saved on the machine, if any | Serialized in clear text with the config. |
+| `hf_token` | `None`: the Hugging Face token saved on the machine, if any | Never serialized (and redacted in `Debug`): after loading a config, set it again with `with_hf_token`, in code or from an environment variable the application reads. A config saved with it by an earlier version still loads it. |
 
 Requests are checked locally against 32,000 tokens per input, 1,000 inputs, and the
 model's total tokens per request (unpublished for `voyage-code-4`, so not checked). See

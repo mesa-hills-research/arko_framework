@@ -682,7 +682,8 @@ before account credits or discounts.
 Requests are checked against these limits before sending. Tokens are counted with the
 matching `voyageai/<model_id>` tokenizer from Hugging Face, on a blocking worker; the
 tokenizer is cached per repository and revision (`with_tokenizer_revision` pins a
-revision), with truncation and padding disabled, and concurrent first loads share one
+revision; `with_hf_token` gives a token for gated tokenizers, which is never serialized
+with the config, so set it again after loading one), with truncation and padding disabled, and concurrent first loads share one
 initialization. The first load downloads the tokenizer from the Hugging Face Hub
 (huggingface.co) into the Hugging Face cache (`HF_HOME`, by default
 `~/.cache/huggingface`); later loads, in this and later runs, read the cached copy with no

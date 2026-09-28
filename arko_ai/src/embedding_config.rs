@@ -25,6 +25,12 @@ pub struct EmbeddingConfig {
     /// If `None`, the provider default is used (false for our implementation).
     pub voyage_truncation: Option<bool>,
     /// Hugging Face access token for tokenizers that require authentication.
+    /// Never serialized, so a saved config doesn't hold the secret (`Debug`
+    /// redacts it too): after loading a config, set it again with
+    /// [`with_hf_token`](Self::with_hf_token), from wherever the application
+    /// keeps it (for example an environment variable it reads). A config
+    /// saved by an earlier version that holds it still loads it.
+    #[serde(skip_serializing)]
     pub hf_token: Option<String>,
     /// Pin token accounting to a Hugging Face revision.
     #[serde(default)]
@@ -89,6 +95,28 @@ impl std::fmt::Debug for EmbeddingConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The token is never written when a config is serialized (it was, in
+    /// plain text); a loaded config has none until it is set again, and a
+    /// config an earlier version saved with one still loads it.
+    #[test]
+    fn the_hugging_face_token_is_never_serialized() {
+        let config = EmbeddingConfig::new(EmbeddingProviderIdentifier::Voyage, "voyage-4")
+            .with_hf_token("hf_synthetic_secret".into())
+            .with_tokenizer_revision("main");
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(!json.contains("hf_synthetic_secret"), "{json}");
+        assert!(!json.contains("hf_token"), "{json}");
+        let loaded: EmbeddingConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.hf_token, None);
+        assert_eq!(loaded.tokenizer_revision.as_deref(), Some("main"));
+        let loaded = loaded.with_hf_token("hf_synthetic_secret".into());
+        assert_eq!(loaded.hf_token.as_deref(), Some("hf_synthetic_secret"));
+
+        let older = r#"{"provider":"Voyage","model_id":"voyage-4","output_dimensionality":null,"voyage_input_type":null,"voyage_truncation":null,"hf_token":"hf_synthetic_secret","tokenizer_revision":null}"#;
+        let loaded: EmbeddingConfig = serde_json::from_str(older).unwrap();
+        assert_eq!(loaded.hf_token.as_deref(), Some("hf_synthetic_secret"));
+    }
 
     #[test]
     fn debug_output_redacts_the_hugging_face_token() {
