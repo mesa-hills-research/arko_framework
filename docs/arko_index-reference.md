@@ -210,6 +210,8 @@ blocked.
 | `embedding` | `voyage-4`, 1,024 dimensions | Embedding profile; see [Embeddings](#embeddings). |
 | `vector_cache_bytes` | 64 MiB | Memory for caching search vectors; see [Search](#search). |
 | `max_transient_attempts` | 10 | Transient failures allowed per request before it fails. |
+| `keep_generations` | `None` | Opt-in: prune complete generations beyond the newest `n`; see [Storage and updates](#storage-and-updates). |
+| `synchronous` | `Full` | SQLite `synchronous` mode; `Normal` is an opt-in; see [Storage and updates](#storage-and-updates). |
 
 `batch_count`, both concurrency limits and `max_transient_attempts` must be positive. A
 finished request slot is refilled immediately, and initial chunk requests take priority
@@ -242,6 +244,7 @@ JSON `detail`:
 | `request_finished` | `artifact`, `repair` and the `usage` of the accepted reply. |
 | `deterministic_repair` | Cuts removed without a model request. |
 | `pause_requested` | A pause was requested. |
+| `pruned` | Generations pruned after this job published (`generations`) and the unreferenced data removed (`removed`). |
 | `settings_changed` | A resume with other runtime settings: `changes`, each with the `setting` and its `from` and `to` values. |
 | `embedding_plan` | Embedding `payloads`, `reused` vectors and request `bins`. |
 | `embedded` | An embedding request's `billed_tokens`, `usage` and `rejected_usage`. |
@@ -303,12 +306,36 @@ when the generation was published.
 `changes(job)` returns the update's file changes: `Added`, `Modified`, `Deleted`, and
 `Moved` when exactly one deleted file and one added file have the same content.
 
+Storage is shared where content is the same. Snapshots are stored once per normalized
+content, vectors once per embedded text, and a chunk's full-text entry once per location
+and content, so generations that keep a file unchanged share its chunk texts; each
+generation adds only its chunk and file-state rows.
+
 Generations, events and request artifacts are kept until the index is removed with
 `delete(index)`, which fails while a job is running. `read_chunks` reads any complete
-generation.
+generation. `delete` also removes the data no remaining index uses: chunk texts no chunk
+uses, snapshots no file state or chunk uses, and, when no job of any index is unfinished,
+vectors no chunk uses (an unfinished job may rely on vectors it has not published yet).
+Data another index shares is kept.
 
-A database created with an older, incompatible schema is rejected when opened; build a new
-database. Complete generations in a compatible database remain searchable, and the next
+`Config::keep_generations` is an opt-in retention setting. With `Some(n)`, each publish
+prunes the index's complete generations beyond the newest `n`: their chunks, file states
+and request artifacts are removed, the job keeps its events and usage with the phase
+`pruned` (and a `phase` event), unreferenced data is removed as by `delete`, and the
+publishing job records a `pruned` event listing the generations and what was removed.
+`read_chunks` and cursors for a pruned generation return `Error::Stale`. The default,
+`None`, keeps every generation.
+
+`Config::synchronous` sets SQLite's `synchronous` mode. `Full` (the default) syncs every
+commit to disk. `Normal`, an opt-in, syncs at WAL checkpoints: fewer disk syncs while jobs
+record progress, at the risk of losing the last commits (never corrupting the database) on
+power loss or an operating-system crash; jobs resume from their checkpoints.
+
+A database of the first schema version is migrated when opened, in one transaction that
+leaves it unchanged if anything fails: each generation's full-text copies of its chunks
+become shared chunk texts, and everything else is kept as it was. The migration does not
+shrink the file; SQLite reuses the freed pages. A database with an unknown schema version
+is rejected; build a new database. Complete generations remain searchable, and the next
 update re-chunks every file if the chunking policy has changed.
 
 ## Usage and cost

@@ -16,6 +16,14 @@ pub struct Config {
     /// capacity signals (overloaded / unavailable) keep waiting without
     /// consuming attempts; pause and cancel interrupt any wait.
     pub max_transient_attempts: usize,
+    /// Opt-in retention: keep the newest `n` complete generations of each
+    /// index and prune older ones after each publish (their chunks, file
+    /// states and request artifacts; the job, its events and usage stay,
+    /// with the phase `pruned`), then remove data nothing references. `None`
+    /// (the default) keeps every generation until the index is deleted.
+    pub keep_generations: Option<usize>,
+    /// How SQLite syncs commits to disk. [`Synchronous::Full`] by default.
+    pub synchronous: Synchronous,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -26,8 +34,25 @@ impl Default for Config {
             embedding: EmbeddingProfile::default(),
             vector_cache_bytes: 64 * 1024 * 1024,
             max_transient_attempts: 10,
+            keep_generations: None,
+            synchronous: Synchronous::Full,
         }
     }
+}
+/// SQLite's `synchronous` setting for the index database
+/// ([`Config::synchronous`]).
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Synchronous {
+    /// Every commit is synced to disk before it returns: nothing committed
+    /// is lost on power loss.
+    #[default]
+    Full,
+    /// Opt-in: commits are synced at WAL checkpoints, so fewer disk syncs
+    /// run while jobs record their progress. Power loss or an operating
+    /// system crash can lose the last commits (never corrupting the
+    /// database); jobs resume from their checkpoints.
+    Normal,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -54,6 +79,9 @@ impl Config {
         }
         if self.max_transient_attempts == 0 {
             return Err(invalid("max_transient_attempts must be positive"));
+        }
+        if self.keep_generations == Some(0) {
+            return Err(invalid("keep_generations must be positive when set"));
         }
         if self.embedding.tokenizer_revision.is_empty() {
             return Err(invalid("pin a tokenizer revision"));

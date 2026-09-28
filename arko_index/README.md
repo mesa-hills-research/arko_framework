@@ -111,7 +111,11 @@ the subscription (see [Usage and cost](../docs/arko_index-reference.md#usage-and
   chunk-model and embedding response a job received, retries and rejected responses
   included. See [Usage and cost](../docs/arko_index-reference.md#usage-and-cost).
 - **Storage.** An index database is a single SQLite file, locked so that one `ArkoIndex`
-  serves it at a time. Keep it outside the indexed directory.
+  serves it at a time. Keep it outside the indexed directory. Unchanged chunks are stored
+  once and shared across generations; `delete` removes data no remaining index uses, and
+  pruning older generations is opt-in (`Config::keep_generations`). Databases of the first
+  schema version are migrated when opened. See
+  [Storage and updates](../docs/arko_index-reference.md#storage-and-updates).
 
 ## Example CLI
 

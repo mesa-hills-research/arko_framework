@@ -190,8 +190,15 @@ impl ArkoIndex {
         let requested = options.cursor.as_ref().map(|c| c.generation.clone());
         let(generation,fresh,rebuild)=self.inner.db.call(move|c|{
             let active:Option<String>=required(c.query_row("SELECT active FROM indexes WHERE id=?1",[&idx],|r|r.get(0)).optional()?,"index")?;
+            let from_cursor=requested.is_some();
             let generation=requested.or(active).ok_or_else(||Error::Blocked("initial index build has no complete searchable generation yet".into()))?;
-            let fresh:bool=required(c.query_row("SELECT fresh FROM jobs WHERE id=?1 AND index_id=?2 AND phase='ready'",params![generation,idx],|r|r.get(0)).optional()?,"complete generation")?;
+            let fresh:Option<bool>=c.query_row("SELECT fresh FROM jobs WHERE id=?1 AND index_id=?2 AND phase='ready'",params![generation,idx],|r|r.get(0)).optional()?;
+            let fresh=match fresh {
+                Some(fresh)=>fresh,
+                // A pruned generation, or one of another index.
+                None if from_cursor=>return Err(Error::Stale("the cursor's generation is no longer available".into())),
+                None=>return Err(invalid("unknown complete generation")),
+            };
             let pending:Option<(String,String,String,Option<String>)>=c.query_row("SELECT id,phase,affected,manifest FROM jobs WHERE index_id=?1 AND phase IN ('snapshotting','chunking','embedding','paused','blocked') ORDER BY rowid DESC LIMIT 1",[idx],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
             let rebuild=pending.map(|(job,phase,affected,manifest)|Ok::<_,Error>(RebuildNotice{message:"Index is being rebuilt; results use the last complete generation.".into(),job,phase,affected_files:decode(&affected)?,omitted_files:0,determining_changes:manifest.is_none()})).transpose()?;
             Ok((generation,fresh,rebuild))
@@ -276,7 +283,7 @@ impl ArkoIndex {
         let ranked=self.inner.db.call(move|c|{
             let mut lexical=vec![];let mut semantic=vec![];
             if mode!=SearchMode::Semantic&&!fts.is_empty(){
-                let mut statement=c.prepare("SELECT f.id,bm25(chunk_fts) FROM chunk_fts f JOIN chunks ch ON ch.id=f.id AND ch.job=f.job WHERE chunk_fts MATCH ?1 AND f.job=?2 AND substr(ch.path,1,length(?3))=?3 AND (?4='' OR instr(f.body,?4)>0) AND ch.end-ch.start>=?5 ORDER BY bm25(chunk_fts),f.id")?;
+                let mut statement=c.prepare("SELECT ch.id,bm25(chunk_text_fts) FROM chunk_text_fts f JOIN chunks ch ON ch.text_id=f.rowid WHERE chunk_text_fts MATCH ?1 AND ch.job=?2 AND substr(ch.path,1,length(?3))=?3 AND (?4='' OR instr(f.body,?4)>0) AND ch.end-ch.start>=?5 ORDER BY bm25(chunk_text_fts),ch.id")?;
                 lexical=statement.query_map(params![fts,g,prefix,literal,min_chunk_bytes],|r|Ok((r.get::<_,String>(0)?,r.get::<_,f64>(1)?)))?.collect::<std::result::Result<_,_>>()?;
             }
             if let Some(vector)=vector{

@@ -5,7 +5,7 @@ use crate::{
     packing::{self, Payload},
     scheduler::{Control, Operation, Reply, Scheduler},
     source::{Snapshot, Structure},
-    storage::{Db, add_job_usage, decode, encode, job_usage, required},
+    storage::{self, Db, add_job_usage, decode, encode, job_usage, required},
     *,
 };
 use futures::{StreamExt, stream::FuturesUnordered};
@@ -100,7 +100,7 @@ impl ArkoIndex {
                 "backend embedding profile differs from index configuration",
             ));
         }
-        let db = Db::open(path.as_ref()).await?;
+        let db = Db::open(path.as_ref(), config.synchronous).await?;
         Ok(Self {
             inner: Arc::new(Inner {
                 db,
@@ -159,7 +159,7 @@ impl ArkoIndex {
         };
         self.inner.db.call(move|c|{let tx=c.transaction()?;
             required(tx.query_row("SELECT id FROM indexes WHERE id=?1",[&i],|r|r.get::<_,String>(0)).optional()?,"index")?;
-            let pending:i64=tx.query_row("SELECT count(*) FROM jobs WHERE index_id=?1 AND phase NOT IN ('ready','cancelled','failed')",[&i],|r|r.get(0))?;
+            let pending:i64=tx.query_row("SELECT count(*) FROM jobs WHERE index_id=?1 AND phase NOT IN ('ready','cancelled','failed','pruned')",[&i],|r|r.get(0))?;
             if pending>0{return Err(error::invalid("resume or cancel the existing update before starting another"));}
             tx.execute("INSERT INTO jobs(id,index_id,phase,config) VALUES(?1,?2,'snapshotting',?3)",params![j,i,config])?;tx.commit()?;Ok(())}).await?;
         self.launch(&handle.job).await?;
@@ -226,7 +226,7 @@ impl ArkoIndex {
             return Ok(());
         }
         let status = self.status(job).await?;
-        if status.phase == "ready" {
+        if matches!(status.phase.as_str(), "ready" | "pruned") {
             return Err(error::invalid("completed generation cannot be cancelled"));
         }
         self.inner.db.phase(job, "cancelled", None).await
@@ -413,8 +413,11 @@ impl ArkoIndex {
             let tx=c.transaction()?;
             let running:usize=tx.query_row("SELECT count(*) FROM jobs WHERE index_id=?1 AND phase IN ('snapshotting','chunking','embedding')",[&index],|r|r.get(0))?;
             if running>0{return Err(error::invalid("cancel or pause active work before deleting the index"));}
-            tx.execute("DELETE FROM chunk_fts WHERE job IN (SELECT id FROM jobs WHERE index_id=?1)",[&index])?;
-            tx.execute("DELETE FROM indexes WHERE id=?1",[index])?;tx.commit()?;Ok(())
+            tx.execute("DELETE FROM indexes WHERE id=?1",[&index])?;
+            let collected=storage::collect_garbage(&tx)?;
+            tx.commit()?;
+            log::info!("index {index} deleted; removed unreferenced data: {collected}");
+            Ok(())
         }).await
     }
     async fn prepare(&self, job: &str) -> Result<()> {
@@ -1025,18 +1028,53 @@ impl ArkoIndex {
         let mut controls = self.inner.controls.lock().await;
         self.inner.db.call(move|c|{control.check()?;let tx=c.transaction()?;
             let old_hash:String=tx.query_row("SELECT manifest FROM jobs WHERE id=?1",[&j],|r|r.get(0))?;
-            tx.execute("DELETE FROM chunk_fts WHERE job=?1",[&j])?;tx.execute("DELETE FROM chunks WHERE job=?1",[&j])?;
+            tx.execute("DELETE FROM chunks WHERE job=?1",[&j])?;
             for mut chunk in chunks {
+                // Generations that keep a chunk share its text row.
+                let text=storage::chunk_text(&tx,&chunk.id,&chunk.path,&chunk.text)?;
                 chunk.id=source::hash(serde_json::to_vec(&(&j,&chunk.id))?);
-                tx.execute("INSERT INTO chunks VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![chunk.id,j,chunk.path,chunk.hash,chunk.start,chunk.end,chunk.first_line,chunk.last_line,chunk.payload,chunk.structure])?;
-                tx.execute("INSERT INTO chunk_fts(id,job,path,terms,body) VALUES(?1,?2,?3,?4,?5)",params![chunk.id,j,chunk.path,crate::search::identifier_terms(&chunk.text),chunk.text])?;
+                tx.execute("INSERT INTO chunks(id,job,path,hash,start,end,first_line,last_line,payload,structure,text_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![chunk.id,j,chunk.path,chunk.hash,chunk.start,chunk.end,chunk.first_line,chunk.last_line,chunk.payload,chunk.structure,text])?;
             }
             tx.execute("UPDATE jobs SET phase='ready',fresh=?2,problem=NULL WHERE id=?1",params![j,old_hash==manifest.hash])?;
             tx.execute("UPDATE indexes SET active=?1,config=(SELECT config FROM jobs WHERE id=?1) WHERE id=(SELECT index_id FROM jobs WHERE id=?1)",[&j])?;
             tx.execute("INSERT INTO events(job,kind,detail) VALUES(?1,'phase','{\"phase\":\"ready\"}')",[&j])?;
             control.check()?;tx.commit()?;Ok(())}).await?;
         controls.remove(job);
+        drop(controls);
+        if let Some(keep) = self.inner.config.keep_generations
+            && let Err(error) = self.prune(job, keep).await
+        {
+            log::warn!("job {job}: could not prune older generations: {error}");
+        }
         Ok(())
+    }
+    /// Prunes the complete generations of `job`'s index older than the
+    /// newest `keep`, then collects data nothing references.
+    async fn prune(&self, job: &str, keep: usize) -> Result<()> {
+        let job = job.to_owned();
+        self.inner.db.call(move |c| {
+            let tx = c.transaction()?;
+            let index: String = tx.query_row("SELECT index_id FROM jobs WHERE id=?1", [&job], |r| r.get(0))?;
+            let old: Vec<String> = tx
+                .prepare("SELECT id FROM jobs WHERE index_id=?1 AND phase='ready' AND id<>(SELECT active FROM indexes WHERE id=?1) ORDER BY rowid DESC")?
+                .query_map([&index], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            let old: Vec<String> = old.into_iter().skip(keep.saturating_sub(1)).collect();
+            if old.is_empty() {
+                return Ok(());
+            }
+            for generation in &old {
+                for table in ["chunks", "files", "requests"] {
+                    tx.execute(&format!("DELETE FROM {table} WHERE job=?1"), [generation])?;
+                }
+                tx.execute("UPDATE jobs SET phase='pruned' WHERE id=?1", [generation])?;
+                tx.execute("INSERT INTO events(job,kind,detail) VALUES(?1,'phase','{\"phase\":\"pruned\"}')", [generation])?;
+            }
+            let collected = storage::collect_garbage(&tx)?;
+            tx.execute("INSERT INTO events(job,kind,detail) VALUES(?1,'pruned',?2)", params![job, encode(&json!({"generations": old, "removed": collected}))?])?;
+            tx.commit()?;
+            Ok(())
+        }).await
     }
 }
 /// The runtime settings that differ between a job's saved configuration and
@@ -1204,13 +1242,7 @@ fn prepare_chunks(
                     covered = end;
                     let text = s.text[start..end].to_owned();
                     let payload = packing::payload(backend, text.clone())?;
-                    let id = source::hash(serde_json::to_vec(&(
-                        &s.path,
-                        &s.hash,
-                        start,
-                        end,
-                        &payload.id,
-                    ))?);
+                    let id = storage::chunk_text_key(&s.path, &s.hash, start, end, &payload.id)?;
                     chunks.push(PreparedChunk {
                         id,
                         path: s.path.clone(),

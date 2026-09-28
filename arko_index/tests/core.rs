@@ -2596,3 +2596,309 @@ async fn resume_takes_runtime_settings_from_the_current_configuration() {
     let refused = index.resume(&update.job).await.unwrap_err();
     assert!(refused.to_string().contains("embeds with"), "{refused}");
 }
+
+/// Rows of `table` in the database at `path`.
+fn rows(path: &std::path::Path, table: &str) -> usize {
+    let c = rusqlite::Connection::open(path).unwrap();
+    c.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| {
+        r.get::<_, i64>(0)
+    })
+    .unwrap() as usize
+}
+#[tokio::test]
+async fn unchanged_chunks_share_one_text_across_generations() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let path = db.path().join("i.db");
+    for n in 0..3 {
+        std::fs::write(root.path().join(format!("{n}.txt")), format!("alpha {n}\n")).unwrap();
+    }
+    let fake = Arc::new(Fake::new());
+    let index = ArkoIndex::open(&path, fake.clone(), config(&fake))
+        .await
+        .unwrap();
+    let build = index
+        .start_build(BuildSpec::new("test", root.path()))
+        .await
+        .unwrap();
+    assert_eq!(settle(&index, &build.job).await.phase, "ready");
+    assert_eq!(rows(&path, "chunk_texts"), 3);
+    std::fs::write(root.path().join("0.txt"), "alpha changed\n").unwrap();
+    let update = index.start_update(&build.index).await.unwrap();
+    assert_eq!(settle(&index, &update.job).await.phase, "ready");
+    // Two generations of three chunks; two chunks are the same in both.
+    assert_eq!(rows(&path, "chunks"), 6);
+    assert_eq!(rows(&path, "chunk_texts"), 4);
+    assert_eq!(rows(&path, "chunk_text_fts"), 4);
+    let page = index
+        .search(&build.index, "alpha", options(SearchMode::Lexical))
+        .await
+        .unwrap();
+    assert_eq!(page.generation, update.job);
+    let mut texts: Vec<_> = page.hits.iter().map(|h| h.text.as_str()).collect();
+    texts.sort_unstable();
+    assert_eq!(texts, ["alpha 1\n", "alpha 2\n", "alpha changed\n"]);
+    let old = index
+        .search(&build.index, "changed", options(SearchMode::Lexical))
+        .await
+        .unwrap();
+    assert_eq!(old.hits.len(), 1);
+}
+#[tokio::test]
+async fn delete_removes_only_data_no_other_index_uses() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let path = db.path().join("i.db");
+    for root in [&a, &b] {
+        std::fs::write(root.path().join("shared.txt"), "alpha shared\n").unwrap();
+    }
+    std::fs::write(a.path().join("only_a.txt"), "alpha a\n").unwrap();
+    std::fs::write(b.path().join("only_b.txt"), "alpha b\n").unwrap();
+    let fake = Arc::new(Fake::new());
+    let index = ArkoIndex::open(&path, fake.clone(), config(&fake))
+        .await
+        .unwrap();
+    let mut handles = vec![];
+    for (name, root) in [("a", &a), ("b", &b)] {
+        let job = index
+            .start_build(BuildSpec::new(name, root.path()))
+            .await
+            .unwrap();
+        assert_eq!(settle(&index, &job.job).await.phase, "ready");
+        handles.push(job);
+    }
+    // The shared file's snapshot, vector and text are stored once.
+    assert_eq!(
+        (
+            rows(&path, "snapshots"),
+            rows(&path, "vectors"),
+            rows(&path, "chunk_texts")
+        ),
+        (3, 3, 3)
+    );
+    index.delete(&handles[0].index).await.unwrap();
+    assert_eq!(
+        (
+            rows(&path, "snapshots"),
+            rows(&path, "vectors"),
+            rows(&path, "chunk_texts")
+        ),
+        (2, 2, 2)
+    );
+    assert_eq!(rows(&path, "chunk_text_fts"), 2);
+    for mode in [SearchMode::Lexical, SearchMode::Semantic] {
+        let page = index
+            .search(&handles[1].index, "alpha", options(mode))
+            .await
+            .unwrap();
+        let mut texts: Vec<_> = page.hits.iter().map(|h| h.text.as_str()).collect();
+        texts.sort_unstable();
+        assert_eq!(texts, ["alpha b\n", "alpha shared\n"]);
+    }
+}
+#[tokio::test]
+async fn keep_generations_prunes_older_generations_when_asked() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let path = db.path().join("i.db");
+    std::fs::write(root.path().join("a.txt"), "alpha 0\n").unwrap();
+    let fake = Arc::new(Fake::new());
+    let config = Config {
+        keep_generations: Some(2),
+        ..config(&fake)
+    };
+    let index = ArkoIndex::open(&path, fake.clone(), config).await.unwrap();
+    let build = index
+        .start_build(BuildSpec::new("test", root.path()))
+        .await
+        .unwrap();
+    assert_eq!(settle(&index, &build.job).await.phase, "ready");
+    let first = index
+        .search(&build.index, "alpha", options(SearchMode::Lexical))
+        .await
+        .unwrap();
+    let mut jobs = vec![build.job.clone()];
+    for n in 1..3 {
+        std::fs::write(root.path().join("a.txt"), format!("alpha {n}\n")).unwrap();
+        let update = index.start_update(&build.index).await.unwrap();
+        assert_eq!(settle(&index, &update.job).await.phase, "ready");
+        jobs.push(update.job);
+    }
+    // The newest two are kept.
+    assert_eq!(index.status(&jobs[0]).await.unwrap().phase, "pruned");
+    assert_eq!(index.status(&jobs[1]).await.unwrap().phase, "ready");
+    assert!(matches!(
+        index
+            .read_chunks(&build.index, &jobs[0], &[first.hits[0].id.clone()], 0)
+            .await,
+        Err(Error::Stale(_))
+    ));
+    assert!(index.cancel(&jobs[0]).await.is_err());
+    assert_eq!(rows(&path, "chunks"), 2);
+    assert_eq!(
+        (rows(&path, "chunk_texts"), rows(&path, "snapshots")),
+        (2, 2)
+    );
+    let events = index.events(&jobs[2], 0, 1000).await.unwrap();
+    let pruned = events.iter().find(|e| e.kind == "pruned").unwrap();
+    assert_eq!(pruned.detail["generations"], json!([jobs[0]]));
+    // Updates continue from the kept generations.
+    std::fs::write(root.path().join("a.txt"), "alpha 3\n").unwrap();
+    let update = index.start_update(&build.index).await.unwrap();
+    assert_eq!(settle(&index, &update.job).await.phase, "ready");
+}
+/// The schema of the first index databases (`user_version` 1).
+const V1_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS indexes(id TEXT PRIMARY KEY,name TEXT NOT NULL,spec TEXT NOT NULL,active TEXT,config TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,index_id TEXT NOT NULL REFERENCES indexes(id) ON DELETE CASCADE,phase TEXT NOT NULL,config TEXT NOT NULL,manifest TEXT,excluded TEXT NOT NULL DEFAULT '[]',affected TEXT NOT NULL DEFAULT '[]',changes TEXT NOT NULL DEFAULT '[]',fresh INTEGER NOT NULL DEFAULT 1,problem TEXT);
+CREATE TABLE IF NOT EXISTS snapshots(hash TEXT PRIMARY KEY,content TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS files(job TEXT REFERENCES jobs(id) ON DELETE CASCADE,path TEXT,hash TEXT NOT NULL REFERENCES snapshots(hash),original_hash TEXT NOT NULL,state TEXT NOT NULL,PRIMARY KEY(job,path));
+CREATE TABLE IF NOT EXISTS vectors(id TEXT PRIMARY KEY,profile TEXT NOT NULL,tokens INTEGER NOT NULL,vector BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS chunks(id TEXT PRIMARY KEY,job TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,path TEXT NOT NULL,hash TEXT NOT NULL REFERENCES snapshots(hash),start INTEGER NOT NULL,end INTEGER NOT NULL,first_line INTEGER NOT NULL,last_line INTEGER NOT NULL,payload TEXT NOT NULL REFERENCES vectors(id),structure TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS chunks_job_payload ON chunks(job,payload);
+CREATE INDEX IF NOT EXISTS files_hash ON files(hash);
+CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(id UNINDEXED,job UNINDEXED,path,terms,body,tokenize='unicode61');
+CREATE TABLE IF NOT EXISTS events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,job TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,kind TEXT NOT NULL,detail TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS events_job ON events(job,sequence);
+CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY AUTOINCREMENT,job TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,request TEXT NOT NULL,response TEXT,error TEXT);
+CREATE TABLE IF NOT EXISTS job_usage(job TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,usage TEXT NOT NULL);
+PRAGMA user_version=1;
+"#;
+#[tokio::test]
+async fn databases_of_the_first_schema_migrate_without_losing_data() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let path = db.path().join("i.db");
+    let text = "alpha original\n";
+    std::fs::write(root.path().join("a.txt"), text).unwrap();
+    let fake = Arc::new(Fake::new());
+    let snapshot = Snapshot::new("a.txt", text.as_bytes()).unwrap();
+    let payload = payload(&*fake, text.to_owned()).unwrap();
+    let root_path = std::fs::canonicalize(root.path()).unwrap();
+    // As the first version saved them: two complete generations with the
+    // same chunk, each with its own full-text copy.
+    let spec = json!({"name": "old", "root": root_path, "include": [], "exclude": []});
+    let saved_config = json!({"batch_count": 6, "concurrency": 2, "embedding_concurrency": 2,
+        "embedding": fake.profile, "vector_cache_bytes": 67108864, "max_transient_attempts": 10});
+    let state = json!({"windows": [{"start": 0, "end": text.len(), "cuts": [], "repair_rounds": 0,
+        "forced": false, "problem": null}], "structure": {"status": "unchecked", "protected": []},
+        "bypass": false, "complete": true});
+    let vector: Vec<u8> = [1.0f32, 0.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(V1_SCHEMA).unwrap();
+        c.execute(
+            "INSERT INTO indexes VALUES('i','old',?1,'g2',?2)",
+            rusqlite::params![spec.to_string(), saved_config.to_string()],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO snapshots VALUES(?1,?2)",
+            rusqlite::params![snapshot.hash, text],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO vectors VALUES(?1,?2,?3,?4)",
+            rusqlite::params![
+                payload.id,
+                serde_json::to_string(&fake.profile).unwrap(),
+                payload.tokens,
+                vector
+            ],
+        )
+        .unwrap();
+        for generation in ["g1", "g2"] {
+            c.execute(
+                "INSERT INTO jobs(id,index_id,phase,config,manifest) VALUES(?1,'i','ready',?2,'m')",
+                rusqlite::params![generation, saved_config.to_string()],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO files VALUES(?1,'a.txt',?2,?3,?4)",
+                rusqlite::params![
+                    generation,
+                    snapshot.hash,
+                    snapshot.original_hash,
+                    state.to_string()
+                ],
+            )
+            .unwrap();
+            let chunk = format!("chunk-{generation}");
+            c.execute(
+                "INSERT INTO chunks VALUES(?1,?2,'a.txt',?3,0,?4,1,1,?5,'unchecked')",
+                rusqlite::params![chunk, generation, snapshot.hash, text.len(), payload.id],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO chunk_fts(id,job,path,terms,body) VALUES(?1,?2,'a.txt','alpha original',?3)",
+                rusqlite::params![chunk, generation, text],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO events(job,kind,detail) VALUES(?1,'snapshot',?2)",
+                rusqlite::params![
+                    generation,
+                    json!({"chunking_policy": policy_hash()}).to_string()
+                ],
+            )
+            .unwrap();
+        }
+    }
+    let index = ArkoIndex::open(&path, fake.clone(), config(&fake))
+        .await
+        .unwrap();
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        let version: i64 = c
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        let old_table: i64 = c
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='chunk_fts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_table, 0);
+        let linked: i64 = c
+            .query_row(
+                "SELECT count(*) FROM chunks WHERE text_id IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked, 2);
+    }
+    assert_eq!(rows(&path, "chunk_texts"), 1);
+    // Both generations stay searchable and readable.
+    for mode in [
+        SearchMode::Lexical,
+        SearchMode::Semantic,
+        SearchMode::Hybrid,
+    ] {
+        let page = index.search("i", "original", options(mode)).await.unwrap();
+        assert_eq!(page.generation, "g2");
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(page.hits[0].text, text);
+    }
+    for generation in ["g1", "g2"] {
+        let read = index
+            .read_chunks("i", generation, &[format!("chunk-{generation}")], 0)
+            .await
+            .unwrap();
+        assert_eq!(read[0].text, text);
+    }
+    // An unchanged file keeps its boundaries; a changed one is chunked.
+    std::fs::write(root.path().join("b.txt"), "alpha new\nbeta\n").unwrap();
+    let update = index.start_update("i").await.unwrap();
+    let done = settle(&index, &update.job).await;
+    assert_eq!(done.phase, "ready", "{:?}", done.problem);
+    assert_eq!(fake.calls.lock().unwrap().len(), 1);
+    let page = index
+        .search("i", "alpha", options(SearchMode::Lexical))
+        .await
+        .unwrap();
+    assert_eq!(page.hits.len(), 2);
+}
