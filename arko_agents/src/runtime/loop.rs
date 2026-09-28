@@ -3887,7 +3887,10 @@ impl AgentLoop {
     /// Recovers from a response the runtime can't use (no tool call, or an
     /// output-based call it can't read) under the error policy, like a
     /// failed request, but with `note` added to the conversation before the
-    /// next request, so the model can do better.
+    /// next request, so the model can do better. It isn't an outage: the
+    /// request is made again at once, without backoff, and the elapsed
+    /// recovery budget neither starts nor applies; the attempt limit bounds
+    /// it.
     async fn handle_model_output_failure(&mut self, note: String) -> Result<(), ArkoAgentsError> {
         self.recover(ai::Error::ApiError(note.clone()), None, Some(note))
             .await
@@ -3916,6 +3919,7 @@ impl AgentLoop {
             return self.handle_usage_limit(error, tool_call_id).await;
         }
         let indefinite = !matches!(wait, RecoveryWait::Ordinary);
+        let model_output = note.is_some();
         let (attempt, started) = if indefinite {
             // These waits neither consume nor reset ordinary recovery: its
             // elapsed clock stops while they last, and the requests they
@@ -3929,12 +3933,15 @@ impl AgentLoop {
             (self.capacity_retry_attempts, started)
         } else {
             self.resume_ordinary_recovery_clock();
-            (
-                self.ordinary_attempts(),
+            let started = if model_output {
+                self.recovery_started
+                    .unwrap_or_else(tokio::time::Instant::now)
+            } else {
                 *self
                     .recovery_started
-                    .get_or_insert_with(tokio::time::Instant::now),
-            )
+                    .get_or_insert_with(tokio::time::Instant::now)
+            };
+            (self.ordinary_attempts(), started)
         };
         match &wait {
             RecoveryWait::Capacity(capacity) => {
@@ -3995,13 +4002,18 @@ impl AgentLoop {
             RecoveryWait::RateLimit(_) if error.retry_after().is_some() => 1,
             _ => attempt,
         };
-        let delay = super::retry::retry_delay(
-            &config,
-            backoff_attempt,
-            error.retry_after(),
-            ai::retry::random_sample(),
-        );
+        let delay = if model_output {
+            Duration::ZERO
+        } else {
+            super::retry::retry_delay(
+                &config,
+                backoff_attempt,
+                error.retry_after(),
+                ai::retry::random_sample(),
+            )
+        };
         if !indefinite
+            && !model_output
             && elapsed.saturating_add(delay) >= Duration::from_millis(config.max_elapsed_ms)
         {
             return self

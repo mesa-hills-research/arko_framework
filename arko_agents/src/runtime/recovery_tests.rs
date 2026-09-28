@@ -157,10 +157,13 @@ async fn a_failed_request_is_sent_again_unchanged_without_a_note() {
 }
 
 /// A response the runtime can't use gets a note before the next request:
-/// a native turn without a tool call is told how to go on.
+/// a native turn without a tool call is told how to go on. It is asked
+/// again at once, without backoff, and without starting the elapsed
+/// recovery budget (the model's work is not an outage): an hour-long
+/// response afterwards is not cut off.
 #[tokio::test(start_paused = true)]
 async fn a_response_without_a_tool_call_gets_a_note() {
-    let (mut agent, _events, _commands) = harness();
+    let (mut agent, mut events, _commands) = harness();
     agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
     agent
         .task
@@ -171,12 +174,31 @@ async fn a_response_without_a_tool_call_gets_a_note() {
     scripted.push_back(super::image_tests::response(ai::Message::new_assistant(
         "I think the task is done.",
     )));
-    scripted.push_back(Ok(futures::stream::iter([Ok(complete_response())]).boxed()));
-    let task = timeout(Duration::from_secs(60), agent.run())
+    // The next response takes an hour.
+    scripted.push_back(Ok(futures::stream::once(async {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        Ok(complete_response())
+    })
+    .boxed()));
+    let started = tokio::time::Instant::now();
+    let task = timeout(Duration::from_secs(7200), agent.run())
         .await
         .unwrap()
         .unwrap();
-    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert!(started.elapsed() >= Duration::from_secs(3600));
+    let delays: Vec<u64> = events_of(&mut events)
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::RetryScheduled { delay_ms, .. } => Some(delay_ms),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(delays, [0]);
     let note = &task.conversation.messages[2];
     assert_eq!(note.role, ai::Role::User);
     assert_eq!(note.content[0].as_text(), Some(NO_NATIVE_TOOL_CALL));

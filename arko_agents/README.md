@@ -609,7 +609,9 @@ stream, including one cut by the opt-in stream idle timeout, or an error reporte
 stream started) is sent again unchanged, without a note in the conversation: the model
 had no part in it. A response the runtime cannot use is retried with a note that tells
 the model what to do: a native response without a tool call, an output-based response
-without one, or output-based calls that cannot be read. From a pause,
+without one, or output-based calls that cannot be read. Such a retry is not an outage: it
+is made at once, without backoff, and the elapsed budget neither starts nor applies, so
+only the attempt limit bounds it. From a pause,
 `ApproveErrorRecovery { message }` adds a note about the error (with the message) and
 starts a new recovery episode, and `RejectErrorRecovery` fails the task. An interrupted
 task starts a new episode when it is run again.
