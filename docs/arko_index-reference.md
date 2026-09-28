@@ -483,7 +483,10 @@ the rest). `determining_changes` is true until the update has scanned the source
 still come from the last complete generation.
 
 Semantic and hybrid searches embed the query with the configured Voyage profile; a query
-over the per-input token limit is rejected. Query embeddings are cached in memory. The
+over the per-input token limit is rejected. They return `Error::Invalid` when the
+generation was embedded with another profile (model, dimensions or tokenizer revision),
+since its vectors can't be compared with the query's; lexical search still works, and an
+update publishes a generation with the configured profile. Query embeddings are cached in memory. The
 vectors of the most recent generation and filter set are cached when they fit in
 `vector_cache_bytes`; larger sets are streamed from the database, with identical results.
 

@@ -3084,3 +3084,44 @@ async fn hits_from_files_changed_since_indexing_may_be_stale() {
     index.cancel(&update.job).await.unwrap();
     settle(&index, &update.job).await;
 }
+
+#[tokio::test]
+async fn semantic_search_refuses_another_embedding_profile() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let path = db.path().join("i.db");
+    std::fs::write(root.path().join("a.txt"), "alpha text\n").unwrap();
+    let fake = Arc::new(Fake::new());
+    let index = ArkoIndex::open(&path, fake.clone(), config(&fake))
+        .await
+        .unwrap();
+    let job = index
+        .start_build(BuildSpec::new("test", root.path()))
+        .await
+        .unwrap();
+    assert_eq!(settle(&index, &job.job).await.phase, "ready");
+    drop(index);
+    // Same dimensions, another model: the vectors are not comparable.
+    let mut other = Fake::new();
+    other.profile.model = "voyage-3.5".into();
+    let other = Arc::new(other);
+    let index = ArkoIndex::open(&path, other.clone(), config(&other))
+        .await
+        .unwrap();
+    for mode in [SearchMode::Semantic, SearchMode::Hybrid] {
+        let error = index
+            .search(&job.index, "alpha", options(mode))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::Invalid(ref m) if m.contains("voyage-3.5")),
+            "{error}"
+        );
+    }
+    assert_eq!(other.queries.load(Ordering::SeqCst), 0);
+    let lexical = index
+        .search(&job.index, "alpha", options(SearchMode::Lexical))
+        .await
+        .unwrap();
+    assert_eq!(lexical.hits.len(), 1);
+}

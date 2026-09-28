@@ -223,6 +223,10 @@ impl ArkoIndex {
         }
         let idx = index.to_owned();
         let requested = options.cursor.as_ref().map(|c| c.generation.clone());
+        let (embedding, semantic) = (
+            self.inner.config.embedding.clone(),
+            options.mode != SearchMode::Lexical,
+        );
         let(generation,fresh,rebuild,spec)=self.inner.db.call(move|c|{
             let (active,spec):(Option<String>,String)=required(c.query_row("SELECT active,spec FROM indexes WHERE id=?1",[&idx],|r|Ok((r.get(0)?,r.get(1)?))).optional()?,"index")?;
             let spec:crate::BuildSpec=decode(&spec)?;
@@ -235,6 +239,15 @@ impl ArkoIndex {
                 None if from_cursor=>return Err(Error::Stale("the cursor's generation is no longer available".into())),
                 None=>return Err(invalid("unknown complete generation")),
             };
+            // Query vectors from another embedding profile would rank the
+            // generation's vectors meaninglessly.
+            if semantic {
+                let saved:String=c.query_row("SELECT config FROM jobs WHERE id=?1",[&generation],|r|r.get(0))?;
+                let saved=decode::<crate::Config>(&saved)?.embedding;
+                if saved!=embedding {
+                    return Err(invalid(format!("generation {generation} was embedded with {} at {} dimensions (tokenizer revision {}), but the index is configured with {} at {} dimensions (tokenizer revision {}); search lexically, open the index with the generation's embedding profile, or publish an update with the new one",saved.model,saved.dimensions,saved.tokenizer_revision,embedding.model,embedding.dimensions,embedding.tokenizer_revision)));
+                }
+            }
             let pending:Option<(String,String,String,Option<String>)>=c.query_row("SELECT id,phase,affected,manifest FROM jobs WHERE index_id=?1 AND phase IN ('snapshotting','chunking','embedding','paused','blocked') ORDER BY rowid DESC LIMIT 1",[idx],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
             let rebuild=pending.map(|(job,phase,affected,manifest)|Ok::<_,Error>(RebuildNotice{message:"Index is being rebuilt; results use the last complete generation.".into(),job,phase,affected_files:decode(&affected)?,omitted_files:0,determining_changes:manifest.is_none()})).transpose()?;
             Ok((generation,fresh,rebuild,spec))
