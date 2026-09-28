@@ -73,7 +73,9 @@ pub mod prelude {
         ToolResourceEffect,
     };
     pub use crate::hooks::{HookCallback, HookPoint, HookResult};
-    pub use crate::memory::{AccessScope, MemoryConfig, MemoryEntry, MemoryTier, WriteMode};
+    pub use crate::memory::{
+        AccessScope, MemoryConfig, MemoryEntry, MemoryTier, MemoryWrite, WriteMode,
+    };
     pub use crate::messaging::registry::{AgentStatus, WaitReason};
     pub use crate::messaging::wait::WaitForMessageTimeout;
     pub use crate::messaging::{AgentMessage, MessageAttachment, MessagingPolicy};

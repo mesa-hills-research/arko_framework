@@ -42,7 +42,7 @@ Root re-exports: `Workflow`, `WorkflowBuilder`, `AgentHandle`, `WorkflowError`, 
 | `durable` | `DurableRetryPolicy`, `DurableStepContext`, `DurableStepSpec`, `DurableStepStatus`, `InDoubtContext`, `InDoubtResolution`, `ResolveInDoubt` |
 | `freshness` | `ActorId`, `ContextFreshnessConfig`, `FreshnessConflict`, `ResourceId`, `ResourceTracker`, `ToolResourceEffect` |
 | `hooks` | `HookCallback`, `HookPoint`, `HookResult` |
-| `memory` | `AccessScope`, `MemoryConfig`, `MemoryEntry`, `MemoryTier`, `WriteMode` |
+| `memory` | `AccessScope`, `MemoryConfig`, `MemoryEntry`, `MemoryTier`, `MemoryWrite`, `WriteMode` |
 | `messaging`, `messaging::registry`, `messaging::wait` | `AgentMessage`, `MessageAttachment`, `MessagingPolicy`, `AgentStatus`, `WaitReason`, `WaitForMessageTimeout` |
 | `persistence` | `EventLog`, `PersistenceConfig` |
 | `policy` | `AgentPause`, `AgentResume`, `ApprovalPolicy`, `ErrorRecoveryPolicy`, `ToolApprovalHandler`, `ToolApprovalOutcome`, `ToolApprovalRequest` |
@@ -92,7 +92,9 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 | `agent_budget(self, agent: impl Into<String>, limit: f64) -> Self` | Limit on the named agent's cumulative LLM spend across all its runs; finite and nonnegative. Default: unlimited. |
 | `hook(self, point: HookPoint, callback: HookCallback) -> Self` | Append a synchronous callback at a lifecycle point. Callbacks run in registration order. |
 | `persistence(self, config: PersistenceConfig) -> Self` | Enable checkpoints, event and task files, a persistent run identity, and durable steps. |
-| `resume_from(self, checkpoint: impl Into<PathBuf>) -> Self` | Restore state from a checkpoint JSON file (not a run directory) during `build`. Requires `persistence` whose run directory holds the checkpoint's `workflow_run_id`; a nil ID in the checkpoint is accepted. |
+| `resume_from(self, checkpoint: impl Into<PathBuf>) -> Self` | Restore state from a checkpoint JSON file (not a run directory) during `build`. Requires `persistence` whose run directory holds the checkpoint's `workflow_run_id`; a nil ID in the checkpoint is accepted. Memory access and limits come from the builder; see [Persistence and checkpoint state](#persistence-and-checkpoint-state). |
+| `rename_memory_tier_on_resume(self, from: impl Into<String>, to: impl Into<String>) -> Self` | On resume, restore the checkpoint's memory tier `from` into the configured tier `to`. A `from` the checkpoint lacks is logged as a warning. |
+| `drop_memory_tier_on_resume(self, name: impl Into<String>) -> Self` | On resume, discard the checkpoint's memory tier `name` instead of failing because it isn't configured. |
 | `ephemeral(self) -> Self` | Clear the persistence and resume settings made so far. Later setters can enable them again. |
 | `context_freshness(self, config: ContextFreshnessConfig) -> Self` | Enable versioned resource tracking. `ContextFreshnessConfig::default()` maps the built-in file tools `read_file`, `list_files`, `write_file`, and `apply_diff`. See [Context freshness](#context-freshness). |
 | `global_tool(self, tool: Arc<dyn arko_agents::tool::Tool>) -> Self` | Register a tool for every agent and add its name to each agent's available tools. |
@@ -553,16 +555,17 @@ Source: [context/mod.rs](src/context/mod.rs). `context::SharedContext`, returned
 
 Module: `arko_workflows::memory`. Sources: [store and configuration](src/memory/mod.rs), [agent tools](src/memory/tools.rs), [read responses](src/memory/reads.rs).
 
-Memory provides named tiers with independent read and write access, append or replace writes, write history, and optional size limits. `MemoryStore` and `MemoryConfig` default to empty. Below, `DateTime<Utc>` is `chrono::DateTime<chrono::Utc>`.
+Memory provides named tiers with independent read and write access, append or replace writes, write history, and optional size limits (none by default; opt in per tier with `max_bytes`, `global_tier_with_limit`, or `broadcast_tier_with_limit`). `MemoryStore` and `MemoryConfig` default to empty. Below, `DateTime<Utc>` is `chrono::DateTime<chrono::Utc>`.
 
 | Public type | Fields or variants; purpose and defaults |
 | --- | --- |
 | `AccessScope` | `All`, `Only(HashSet<String>)`, `None`. Grants access by exact agent registration name. `fn allows(&self, agent_name: &str) -> bool` checks it. |
 | `WriteMode` | `AppendOnly` (the Rust default) or `FullEdit`. An append adds a newline first when the content is nonempty; a full edit replaces the content. Both add a history entry. |
-| `MemoryEntry` | `id: Uuid`, `author: String`, `task_id: Option<Uuid>`, `timestamp: DateTime<Utc>`, `content: String`. Each successful write records its content, a new UUID, and the current UTC time. `task_id` defaults to `None` when omitted in JSON. |
-| `MemoryTier` | `name: String`, `content: String`, `readers: AccessScope`, `writers: AccessScope`, `write_mode: WriteMode`, `entries: Vec<MemoryEntry>`, `max_bytes: Option<usize>`. When omitted in JSON, `entries` defaults to `[]` and `max_bytes` to `None`. No `Default` implementation. |
+| `MemoryEntry` | `id: Uuid`, `author: String`, `task_id: Option<Uuid>`, `timestamp: DateTime<Utc>`, `content: String`. One write with its text, as `MemoryStore::entries` and `MemoryTier::history` return it. `task_id` defaults to `None` when omitted in JSON. |
+| `MemoryWrite` | `id: Uuid`, `author: String`, `task_id: Option<Uuid>`, `timestamp: DateTime<Utc>`, `content: Option<String>`, `range: Option<(usize, usize)>`. One write as the tier stores it: each successful write records a new UUID and the current UTC time, and its text is stored once, as a byte range of the tier's `content` while it is there (every append, and the latest full edit) or in `content` (an earlier version of a full-edit tier). `content` and `range` are omitted from JSON when `None`. |
+| `MemoryTier` | `name: String`, `content: String`, `readers: AccessScope`, `writers: AccessScope`, `write_mode: WriteMode`, `entries: Vec<MemoryWrite>`, `max_bytes: Option<usize>`. When omitted in JSON, `entries` defaults to `[]` and `max_bytes` to `None` (no limit). No `Default` implementation. `fn text_of(&self, write: &MemoryWrite) -> &str` and `fn history(&self) -> Vec<MemoryEntry>` read the texts. A tier saved by an earlier version, whose entries each held their text beside the content, loads converted: an append-only tier's writes are matched from the end of its content back, a full-edit tier's latest write to its content; the history reads the same. |
 
-These four types implement `Debug`, `Clone`, `Serialize`, and `Deserialize`. Enums serialize with their Rust variant names, for example `"AppendOnly"`, `"All"`, or `{"Only":["writer"]}`. `MemoryTier.write_mode` is required in JSON even though `WriteMode` has a Rust default.
+These five types implement `Debug`, `Clone`, `Serialize`, and `Deserialize`. Enums serialize with their Rust variant names, for example `"AppendOnly"`, `"All"`, or `{"Only":["writer"]}`. `MemoryTier.write_mode` is required in JSON even though `WriteMode` has a Rust default.
 
 ### Memory configuration
 
@@ -575,7 +578,9 @@ Methods on `MemoryConfig`; setters consume and return the configuration.
 | `fn global_tier(self, name: impl Into<String>) -> Self` | Add an empty append-only tier that every agent can read and write; no limit. |
 | `fn broadcast_tier(self, name: impl Into<String>, writers: impl IntoIterator<Item = impl Into<String>>) -> Self` | Add an empty append-only tier that every agent can read and only the named agents can write; no limit. |
 | `fn global_tier_with_limit(self, name: impl Into<String>, max_bytes: usize) -> Self` | As `global_tier`, with a limit on the resulting UTF-8 content size in bytes. |
-| `fn build(self) -> MemoryStore` | Construct the store. With duplicate tier names, the last tier wins. |
+| `fn broadcast_tier_with_limit(self, name: impl Into<String>, writers: impl IntoIterator<Item = impl Into<String>>, max_bytes: usize) -> Self` | As `broadcast_tier`, with a byte limit. |
+| `fn tiers(&self) -> &[MemoryTier]` | The configured tiers. |
+| `fn build(self) -> MemoryStore` | Construct the store. `WorkflowBuilder::build` rejects duplicate tier names and access sets naming unregistered agents. |
 
 ### Memory store
 
@@ -583,7 +588,7 @@ Methods on `MemoryStore`. Read and write methods check the named agent's access 
 
 | Signature | Purpose, result, and constraints |
 | --- | --- |
-| `fn new(tiers: Vec<MemoryTier>) -> Self` | Create a store from tier definitions; with duplicate names, the last wins. Initial content and history are kept as supplied. |
+| `fn new(tiers: Vec<MemoryTier>) -> Self` | Create a store from tier definitions; with duplicate names, the last wins. Initial content and history are kept as supplied, with each write's text stored once. |
 | `fn is_empty(&self) -> bool` | Whether the store has no tiers. |
 | `fn read(&self, agent_name: &str, tier_name: &str) -> Result<String, WorkflowError>` | Clone of the full current content. |
 | `fn read_versioned(&self, agent_name: &str, tier_name: &str) -> Result<(usize, String), WorkflowError>` | Atomically read `(version, content)`; the version is the tier's history-entry count. |
@@ -1208,7 +1213,7 @@ impl PersistenceManager {
 
 Filesystem and serialization failures are returned as `WorkflowError`. A run directory holds checkpoints, task snapshots, the event log, and the durable journal; running futures and ballots are not persisted.
 
-`resume_from` restores memory tiers and their history, pending messages, the cost ledger, finalized agent results, verification and distillation records, and the agent status registry. The saved memory replaces any `MemoryConfig` given to the new builder. Freshness state is restored only when freshness tracking is configured again. Agents, the client, tools, hooks, policies, budget limits, and metadata come from the new builder, not the checkpoint. The pause flag starts cleared, and active message channels, ballots, and verification repair counts and baselines start empty. Restoring does not continue agents or replay workflow control flow. Accounting is rebuilt from `cost_ledger`; `budget_spent` and `completed_agents` are not used on restore. A recorded `cancellation` is not restored: the resumed run starts again, as described under [Stopping a run](#stopping-a-run).
+`resume_from` restores memory content and history, pending messages, the cost ledger, finalized agent results, verification and distillation records, and the agent status registry. For memory, the new builder's `MemoryConfig` decides each tier's readers, writers, limit, and write mode, and the checkpoint supplies content and history by tier name. A configured tier the checkpoint lacks starts as configured. A checkpoint tier that matches no configured tier makes `build` fail with `BuilderInvalid` naming it, unless `rename_memory_tier_on_resume(from, to)` maps it to a configured tier or `drop_memory_tier_on_resume(name)` discards it; two checkpoint tiers mapped to one configured tier also fail. Content over a tier's configured limit is kept (with a warning); writes that grow it fail until it is smaller. When the write mode changed, each write's text is stored in its entry. Freshness state is restored only when freshness tracking is configured again. Agents, the client, tools, hooks, policies, budget limits, and metadata come from the new builder, not the checkpoint. The pause flag starts cleared, and active message channels, ballots, and verification repair counts and baselines start empty. Restoring does not continue agents or replay workflow control flow. Accounting is rebuilt from `cost_ledger`; `budget_spent` and `completed_agents` are not used on restore. A recorded `cancellation` is not restored: the resumed run starts again, as described under [Stopping a run](#stopping-a-run).
 
 No agent is running after a resume. From `agent_registry`, an agent that was running when the checkpoint was saved counts as finished (interrupted), and each continuable run keeps the registry version it has seen, so a continued run is told only about recipients that started after that. From a checkpoint without `agent_registry`, an agent with recorded results takes its latest result's outcome, and any other agent is not started.
 

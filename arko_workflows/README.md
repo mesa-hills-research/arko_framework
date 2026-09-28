@@ -254,8 +254,12 @@ Agents use the injected memory tools, each offered by access: `read_memory` to a
 agent that can read at least one tier, `write_memory` to one that can write one, and
 `list_memories` (which lists only the tiers the agent can access) to either. `build`
 rejects an access set naming an unregistered agent.
-Each write records its author, task, timestamp, and entry ID. Reads can request a
-trailing window, and a tier can enforce a byte limit. After the first full read,
+Each write records its author, task, timestamp, and entry ID, and its text is stored
+once. Reads can request a trailing window, and a tier can enforce a byte limit
+(opt-in; there is none by default). On `resume_from`, the memory configuration in
+code decides access and limits and the checkpoint supplies the content by tier name;
+a checkpoint tier that isn't configured stops the build unless it is renamed
+(`rename_memory_tier_on_resume`) or dropped (`drop_memory_tier_on_resume`). After the first full read,
 `read_memory` returns exact versioned changes; see
 [context management](../docs/context-efficiency.md#memory-reads).
 

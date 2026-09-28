@@ -223,3 +223,77 @@ async fn an_event_log_that_cant_be_written_doesnt_stop_the_run() {
         "{events}"
     );
 }
+
+/// Resuming keeps memory content by tier name under the configuration's
+/// access; a checkpoint tier the configuration lacks stops the build unless
+/// it is dropped or renamed.
+#[tokio::test]
+async fn resumed_memory_follows_the_configuration() {
+    use crate::memory::{AccessScope, MemoryConfig, MemoryTier, WriteMode};
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let config = || PersistenceConfig::new(run_dir(&workspace));
+    let first = builder(&server, &workspace)
+        .persistence(config())
+        .memory(MemoryConfig::new().global_tier("notes").global_tier("old"))
+        .build()
+        .unwrap();
+    first
+        .context()
+        .memory
+        .write("coder", "notes", "kept")
+        .unwrap();
+    first
+        .context()
+        .memory
+        .write("coder", "old", "archived")
+        .unwrap();
+    first.checkpoint().await.unwrap();
+    let (path, _) = latest(&workspace);
+    drop(first);
+
+    let read_only = || {
+        MemoryConfig::new().tier(MemoryTier {
+            name: "notes".into(),
+            content: String::new(),
+            readers: AccessScope::All,
+            writers: AccessScope::None,
+            write_mode: WriteMode::AppendOnly,
+            entries: Vec::new(),
+            max_bytes: None,
+        })
+    };
+    let refused = builder(&server, &workspace)
+        .persistence(config())
+        .memory(read_only())
+        .resume_from(&path)
+        .build()
+        .err()
+        .unwrap();
+    assert!(
+        refused
+            .to_string()
+            .contains("memory tier 'old' of the checkpoint is not configured"),
+        "{refused}"
+    );
+
+    let resumed = builder(&server, &workspace)
+        .persistence(config())
+        .memory(read_only())
+        .drop_memory_tier_on_resume("old")
+        .resume_from(&path)
+        .build()
+        .unwrap();
+    let memory = &resumed.context().memory;
+    assert_eq!(memory.read("coder", "notes").unwrap(), "kept");
+    assert!(
+        memory.write("coder", "notes", "more").is_err(),
+        "writers from the configuration"
+    );
+    // The tools follow the restored access too.
+    let registry = resumed
+        .engine
+        .build_tool_registry("coder", resumed.context(), 0);
+    assert!(registry.get("read_memory").is_some());
+    assert!(registry.get("write_memory").is_none());
+}

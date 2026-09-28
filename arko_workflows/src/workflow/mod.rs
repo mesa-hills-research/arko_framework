@@ -687,6 +687,10 @@ pub struct WorkflowBuilder {
     llm_client: Option<Arc<LLMClient>>,
     agents: Vec<(String, AgentConfig)>,
     memory_config: Option<MemoryConfig>,
+    /// On resume: checkpoint memory tier name -> configured tier name.
+    memory_renames: HashMap<String, String>,
+    /// On resume: checkpoint memory tiers to discard.
+    dropped_memory_tiers: HashSet<String>,
     budget_limit: Option<f64>,
     budget_warning: Option<f64>,
     agent_budgets: HashMap<String, f64>,
@@ -723,6 +727,8 @@ impl WorkflowBuilder {
             llm_client: None,
             agents: Vec::new(),
             memory_config: None,
+            memory_renames: HashMap::new(),
+            dropped_memory_tiers: HashSet::new(),
             budget_limit: None,
             budget_warning: None,
             agent_budgets: HashMap::new(),
@@ -821,9 +827,37 @@ impl WorkflowBuilder {
         self
     }
 
+    /// On resume, restore the checkpoint's memory tier `from` into the
+    /// configured tier `to` (a tier renamed in code).
+    pub fn rename_memory_tier_on_resume(
+        mut self,
+        from: impl Into<String>,
+        to: impl Into<String>,
+    ) -> Self {
+        self.memory_renames.insert(from.into(), to.into());
+        self
+    }
+
+    /// On resume, discard the checkpoint's memory tier `name` (one no longer
+    /// configured), with its content and history. Without this, a
+    /// checkpoint tier that matches no configured tier makes `build` fail.
+    pub fn drop_memory_tier_on_resume(mut self, name: impl Into<String>) -> Self {
+        self.dropped_memory_tiers.insert(name.into());
+        self
+    }
+
     /// Restore workflow state from a checkpoint when building. Persistence
     /// must also be configured, and its run directory must match the
     /// checkpoint's workflow-run identity.
+    ///
+    /// Memory: the current configuration decides each tier's readers,
+    /// writers, limit and write mode, and the checkpoint supplies content
+    /// and history by tier name. A configured tier the checkpoint lacks
+    /// starts as configured. A checkpoint tier matching no configured tier
+    /// makes `build` fail, unless it is mapped to one with
+    /// [`rename_memory_tier_on_resume`](Self::rename_memory_tier_on_resume)
+    /// or discarded with
+    /// [`drop_memory_tier_on_resume`](Self::drop_memory_tier_on_resume).
     pub fn resume_from(mut self, checkpoint: impl Into<PathBuf>) -> Self {
         self.resume_from = Some(checkpoint.into());
         self
@@ -1346,10 +1380,15 @@ impl WorkflowBuilder {
         for (agent, limit) in self.agent_budgets {
             budget.set_agent_limit(agent, limit);
         }
-        let memory = if let Some(state) = &resume_state {
-            crate::memory::MemoryStore::new(state.memory_snapshot.clone())
-        } else {
-            self.memory_config.unwrap_or_default().build()
+        // On resume the configuration decides access, limits and write
+        // modes; the checkpoint supplies content and history by tier name.
+        let memory = match &resume_state {
+            Some(state) => self.memory_config.unwrap_or_default().restore(
+                state.memory_snapshot.clone(),
+                &self.memory_renames,
+                &self.dropped_memory_tiers,
+            )?,
+            None => self.memory_config.unwrap_or_default().build(),
         };
         let messages = if let Some(state) = &resume_state {
             MessageBus::from_snapshot(agent_names.iter().cloned(), state.message_queues.clone())
