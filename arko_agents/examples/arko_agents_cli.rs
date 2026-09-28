@@ -80,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
 
-    let mut llm_client_builder = LLMClient::from_env();
+    let mut llm_client_builder = LLMClient::from_env()?;
 
     if let Some(ref auth_json_path) = cli.openai_auth_json {
         println!("[SYSTEM] Loading OpenAI OAuth from {:?}", auth_json_path);

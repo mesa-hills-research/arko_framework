@@ -443,6 +443,9 @@ pub struct OpenAIClient {
     originator: Option<String>,
     user_agent: Option<String>,
     credential_store: Option<Arc<dyn ChatGptOAuthStore>>,
+    /// Warn (once) when a refresh rotates tokens that no store keeps: set for
+    /// credentials taken from the environment by `LLMClient::from_env`.
+    warn_unsaved_rotation: bool,
     /// Counts replacements of `auth`, shared by clones. Read before waiting
     /// for the credential lock, it tells a refresh whether the credentials
     /// were replaced while it waited.
@@ -483,6 +486,7 @@ impl OpenAIClient {
             originator: None,
             user_agent: None,
             credential_store: None,
+            warn_unsaved_rotation: false,
             auth_epoch: Arc::new(AtomicU64::new(0)),
             oauth_refresh_timeout: Some(OAUTH_REFRESH_TIMEOUT),
             oauth_refresh_retry: OAUTH_REFRESH_RETRY,
@@ -511,6 +515,7 @@ impl OpenAIClient {
             originator: None,
             user_agent: None,
             credential_store: None,
+            warn_unsaved_rotation: false,
             auth_epoch: Arc::new(AtomicU64::new(0)),
             oauth_refresh_timeout: Some(OAUTH_REFRESH_TIMEOUT),
             oauth_refresh_retry: OAUTH_REFRESH_RETRY,
@@ -529,6 +534,7 @@ impl OpenAIClient {
             originator: None,
             user_agent: None,
             credential_store: None,
+            warn_unsaved_rotation: false,
             auth_epoch: Arc::new(AtomicU64::new(0)),
             oauth_refresh_timeout: Some(OAUTH_REFRESH_TIMEOUT),
             oauth_refresh_retry: OAUTH_REFRESH_RETRY,
@@ -577,6 +583,26 @@ impl OpenAIClient {
     pub fn with_credential_store(mut self, store: Option<Arc<dyn ChatGptOAuthStore>>) -> Self {
         self.credential_store = store;
         self
+    }
+
+    /// Logs a warning (once per process) when a refresh rotates tokens that
+    /// no credential store keeps, for credentials whose source (the
+    /// environment) can't be updated.
+    pub(crate) fn with_unsaved_rotation_warning(mut self) -> Self {
+        self.warn_unsaved_rotation = true;
+        self
+    }
+
+    /// Whether a credential store is installed.
+    #[cfg(test)]
+    pub(crate) fn has_credential_store(&self) -> bool {
+        self.credential_store.is_some()
+    }
+
+    /// Whether [`with_unsaved_rotation_warning`](Self::with_unsaved_rotation_warning) was set.
+    #[cfg(test)]
+    pub(crate) fn warns_unsaved_rotation(&self) -> bool {
+        self.warn_unsaved_rotation
     }
 
     /// Writes every request and response to `trace`; see [`RequestTrace`].
@@ -707,6 +733,12 @@ impl OpenAIClient {
     /// Returns `Ok(None)` when the credentials held don't expire within
     /// `margin` (including ones another caller installed while this call
     /// waited), and for API-key clients.
+    ///
+    /// Credentials without a refresh token can't be refreshed: they are used
+    /// until the server rejects them, so this returns `Ok(None)` for them,
+    /// even once their access token's expiry has passed. A request the
+    /// server then rejects as expired fails with
+    /// [`Error::AuthenticationFailed`] saying there is no refresh token.
     pub async fn refresh_oauth_token_if_expiring(
         &self,
         margin: Duration,
@@ -917,12 +949,23 @@ impl OpenAIClient {
         if matches!(target, RefreshTarget::Reload(_)) {
             return Ok(None);
         }
-        let refresh_token = current.refresh_token.as_deref().ok_or_else(|| {
-            Error::AuthenticationFailed(
-                "No refresh_token stored in ChatGPT OAuth credentials. Provide a refresh_token when constructing the client to enable automatic token refresh."
-                    .to_string(),
-            )
-        })?;
+        let Some(refresh_token) = current.refresh_token.as_deref() else {
+            return match target {
+                // Without a refresh token the access token is used until the
+                // server rejects it.
+                RefreshTarget::Expiring(_) => Ok(None),
+                RefreshTarget::Rejected(_) => {
+                    Err(Error::AuthenticationFailed(
+                        "The ChatGPT OAuth access token has expired and there is no refresh token to renew it. Sign in again and provide the new credentials, or provide a refresh token (for example by loading a Codex auth.json with CodexAuthFile)."
+                            .to_string(),
+                    ))
+                }
+                _ => Err(Error::AuthenticationFailed(
+                    "There is no refresh token in the ChatGPT OAuth credentials to refresh them with. Provide a refresh_token when constructing the client."
+                        .to_string(),
+                )),
+            };
+        };
         let result = match request_oauth_refresh(
             &self.http_client,
             refresh_token,
@@ -959,6 +1002,10 @@ impl OpenAIClient {
         // before anything else can fail.
         if let Some(store) = &self.credential_store {
             store.save_refreshed(&refreshed, result.id_token.as_deref())?;
+        } else if self.warn_unsaved_rotation {
+            crate::notice::warn_once("openai-oauth:unsaved-rotation", || {
+                "arko_ai: the ChatGPT OAuth refresh token from OPENAI_OAUTH_REFRESH_TOKEN was rotated; the new tokens are kept in memory only, and the value in the environment no longer works. Save them from LLMClient::openai_chatgpt_oauth_credentials(), or load the credentials with CodexAuthFile and LLMClient::with_codex_auth_file so every rotation is written back.".to_string()
+            });
         }
         Ok(Some(result))
     }

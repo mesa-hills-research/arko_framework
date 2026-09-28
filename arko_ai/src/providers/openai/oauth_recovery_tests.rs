@@ -1883,3 +1883,102 @@ async fn a_token_the_server_refused_for_good_is_not_sent_again() {
     .await
     .unwrap();
 }
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// Credentials without a refresh token are used until the server rejects
+/// them, instead of failing from the refresh margin before their expiry.
+#[tokio::test]
+async fn an_access_token_without_a_refresh_token_is_used_until_the_server_rejects_it() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let margin = Duration::from_secs(300);
+        let (url, server) = server(vec![expired()]).await;
+        // Expires within the refresh margin, but hasn't expired yet.
+        let expiring = served_by(
+            OpenAIClient::new_chatgpt_oauth(&jwt(now_secs() + 60), None, "synthetic-account"),
+            &url,
+        );
+        assert!(expiring.is_oauth_token_expired(margin).await);
+        assert!(
+            expiring
+                .refresh_oauth_token_if_expiring(margin)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // An unreadable expiry is left to the server too.
+        let unreadable = served_by(
+            OpenAIClient::new_chatgpt_oauth("not-a-jwt", None, "synthetic-account"),
+            &url,
+        );
+        assert!(
+            unreadable
+                .refresh_oauth_token_if_expiring(margin)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // The server's rejection is the clear error.
+        let error = expiring
+            .generate_text(
+                &Conversation::new(Model::openai_gpt_6_astra()),
+                &GenerationConfig::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::AuthenticationFailed(_)), "{error}");
+        assert!(!error.is_retryable());
+        assert!(error.to_string().contains("no refresh token"), "{error}");
+        assert_eq!(server.await.unwrap().len(), 1, "no refresh request");
+
+        // So is a token whose expiry has passed: only the server's
+        // rejection counts.
+        let gone = served_by(
+            OpenAIClient::new_chatgpt_oauth(&jwt(now_secs() - 60), None, "synthetic-account"),
+            &url,
+        );
+        assert!(
+            gone.refresh_oauth_token_if_expiring(margin)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    })
+    .await
+    .unwrap();
+}
+
+/// Credentials taken from the environment can't be updated there: the first
+/// rotation says so, once.
+#[tokio::test]
+async fn a_rotation_no_store_keeps_warns_only_when_asked() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (url, server) = server(vec![
+            rotates_to("access-a", "refresh-a2"),
+            rotates_to("access-b", "refresh-b2"),
+        ])
+        .await;
+        let host = served_by(
+            OpenAIClient::new_chatgpt_oauth(&fresh_jwt(), Some("refresh-a"), "synthetic-account"),
+            &url,
+        );
+        host.refresh_oauth_token().await.unwrap();
+        assert!(!crate::notice::warned("openai-oauth:unsaved-rotation"));
+        let from_env = served_by(
+            OpenAIClient::new_chatgpt_oauth(&fresh_jwt(), Some("refresh-b"), "synthetic-account")
+                .with_unsaved_rotation_warning(),
+            &url,
+        );
+        from_env.refresh_oauth_token().await.unwrap();
+        assert!(crate::notice::warned("openai-oauth:unsaved-rotation"));
+        assert_eq!(server.await.unwrap().len(), 2);
+    })
+    .await
+    .unwrap();
+}

@@ -102,11 +102,18 @@ impl CodexAuthFile {
     /// `$CODEX_HOME/auth.json`, else `~/.codex/auth.json`. Reads environment
     /// variables only when called.
     pub fn default_path() -> Option<PathBuf> {
-        if let Some(codex_home) = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
+        Self::default_path_with(|name| std::env::var_os(name))
+    }
+
+    /// [`default_path`](Self::default_path), reading variables with `var`.
+    pub(crate) fn default_path_with(
+        var: impl Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> Option<PathBuf> {
+        if let Some(codex_home) = var("CODEX_HOME").filter(|value| !value.is_empty()) {
             return Some(PathBuf::from(codex_home).join("auth.json"));
         }
-        let home = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
+        let home = var("HOME")
+            .or_else(|| var("USERPROFILE"))
             .filter(|value| !value.is_empty())?;
         Some(PathBuf::from(home).join(".codex").join("auth.json"))
     }

@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     // Configures every provider whose credentials are in the environment.
-    let client = Arc::new(LLMClient::from_env());
+    let client = Arc::new(LLMClient::from_env()?);
     let workspace = std::fs::canonicalize("./project")?;
     let task = Task::new(config, "Add a README that explains how to build the project.".into(), workspace, None);
 

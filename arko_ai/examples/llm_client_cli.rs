@@ -365,7 +365,7 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
 
 /// `LLMClient::from_env`, with OpenAI from a Codex `auth.json` when asked.
 fn create_client(cli: &Cli) -> Result<LLMClient, Error> {
-    let client = LLMClient::from_env();
+    let client = LLMClient::from_env()?;
     let path = match (&cli.codex_auth_json, cli.codex_auth) {
         (Some(path), _) => path.clone(),
         (None, true) => CodexAuthFile::default_path().ok_or_else(|| {

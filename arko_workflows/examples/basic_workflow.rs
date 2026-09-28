@@ -18,7 +18,7 @@ use arko_workflows::prelude::*;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
-    let llm_client = Arc::new(LLMClient::from_env());
+    let llm_client = Arc::new(LLMClient::from_env()?);
 
     let architect_config = AgentConfig::load_from_path("configs/architect.json".as_ref())
         .expect("Failed to load architect config");

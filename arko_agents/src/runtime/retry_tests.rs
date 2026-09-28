@@ -494,16 +494,59 @@ async fn peer_context_does_not_reset_recovery_limits() {
     ));
 }
 
-#[tokio::test(start_paused = true)]
+// Real sockets run on the real clock: a paused one would jump to the next
+// timer while they wait.
+#[tokio::test]
 async fn expired_oauth_without_refresh_credentials_uses_recovery_instead_of_losing_task() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let (mut agent, mut events, commands) = harness();
-    // Synthetic non-JWT access token is treated as expired. No refresh token
-    // means no HTTP request can be made by this test.
-    agent.llm_client = Arc::new(ai::LLMClient::new().with_openai_chatgpt_oauth(
-        "synthetic-expired-token",
-        None,
-        "test-account",
-    ));
+    // A local server that rejects every request as expired, as the ChatGPT
+    // backend does once the access token has expired.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut chunk = [0; 8192];
+                while let Ok(n @ 1..) = socket.read(&mut chunk).await {
+                    request.extend_from_slice(&chunk[..n]);
+                    let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                    let length: usize = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .map_or(0, |value| value.trim().parse().unwrap_or(0));
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+                let body = r#"{"error":{"code":"token_expired"}}"#;
+                let _ = socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            });
+        }
+    });
+    // A synthetic JWT that expired in 1970, and no refresh token to renew it.
+    agent.llm_client = Arc::new(
+        ai::LLMClient::new().with_openai_client(
+            ai::providers::openai::OpenAIClient::new_chatgpt_oauth(
+                "header.eyJleHAiOjF9.signature",
+                None,
+                "test-account",
+            )
+            .with_base_url(url),
+        ),
+    );
     let runner = tokio::spawn(agent.run());
     loop {
         if let AgentEvent::ErrorEncountered {
@@ -513,7 +556,7 @@ async fn expired_oauth_without_refresh_credentials_uses_recovery_instead_of_losi
         } = events.recv().await.unwrap()
         {
             assert!(requires_approval_to_retry);
-            assert!(error_message.contains("No refresh_token"));
+            assert!(error_message.contains("no refresh token"));
             break;
         }
     }

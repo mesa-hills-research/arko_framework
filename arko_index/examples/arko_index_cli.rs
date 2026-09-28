@@ -75,7 +75,7 @@ enum Command {
 fn load_client(path: Option<PathBuf>) -> AnyResult<LLMClient> {
     match path {
         Some(path) => Ok(arko_ai::CodexAuthFile::load(path)?.client()?),
-        None => Ok(LLMClient::from_env()),
+        None => Ok(LLMClient::from_env()?),
     }
 }
 async fn observe(index: &ArkoIndex, job: &str) -> AnyResult<()> {

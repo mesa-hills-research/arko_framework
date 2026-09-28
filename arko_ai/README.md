@@ -25,7 +25,7 @@ use futures::StreamExt;
 #[tokio::main]
 async fn main() -> Result<(), arko_ai::Error> {
     // Configures every provider whose credentials are in the environment.
-    let client = LLMClient::from_env();
+    let client = LLMClient::from_env()?;
     let mut conversation = client
         .new_conversation(Model::anthropic_claude_sonnet_5())
         .with_system_message("Answer in one short paragraph.");
@@ -64,7 +64,11 @@ replay and leaves out refused turns that must not stay in history.
 ## Providers and credentials
 
 `LLMClient::from_env()` configures every provider whose credentials are set and ignores
-empty values. `LLMClient` reads no environment variables unless it is called.
+empty values. `LLMClient` reads no environment variables unless it is called. Setting only
+some of the `OPENAI_OAUTH_*` variables is an error (`Error::AuthenticationFailed`), not a
+silent switch to `OPENAI_API_KEY` and API billing; see
+[ChatGPT OAuth credentials](#chatgpt-oauth-credentials) for what happens to an
+`OPENAI_OAUTH_REFRESH_TOKEN`.
 
 | Provider | Variables |
 | --- | --- |
@@ -331,9 +335,18 @@ step with its `auth.json`.
 
 **Where credentials come from.**
 
-- `with_openai_chatgpt_oauth(access_token, refresh_token, account_id)` and `from_env`
-  keep the credentials in memory only. Save rotated tokens yourself from
+- `with_openai_chatgpt_oauth(access_token, refresh_token, account_id)` keeps the
+  credentials in memory only. Save rotated tokens yourself from
   `LLMClient::openai_chatgpt_oauth_credentials()`.
+- `from_env` compares `OPENAI_OAUTH_REFRESH_TOKEN` with the refresh token in the Codex
+  `auth.json` (`$CODEX_HOME/auth.json`, else `~/.codex/auth.json`) by SHA-256
+  fingerprint. When they match for the same account, the client uses that file as its
+  credential store, as if built with `with_codex_auth_file`, so rotated tokens are written
+  back and Codex stays signed in; this is logged at info level. Otherwise the
+  credentials are kept in memory, and the first rotation logs a warning: the refresh
+  token in the environment stops working once it is used, so save the new tokens from
+  `openai_chatgpt_oauth_credentials()`, or load the credentials with `CodexAuthFile`
+  instead.
 - A client built from a Codex `auth.json` keeps the file in step with it through a
   `CodexAuthStore`. Load the file with `CodexAuthFile::load(path)` or
   `CodexAuthFile::load_default()` (`$CODEX_HOME/auth.json`, else `~/.codex/auth.json`),
@@ -342,6 +355,11 @@ step with its `auth.json`.
   writes and top-level token fields are read.
 - Other storage implements `ChatGptOAuthStore` and is installed with
   `OpenAIClient::with_credential_store`.
+
+**Without a refresh token** the access token is used until the server rejects it:
+`refresh_openai_oauth_token_if_expiring` returns `None`, even once the token's expiry has
+passed, and a request the server rejects with `token_expired` fails with
+`Error::AuthenticationFailed` saying there is no refresh token to renew it.
 
 **When a refresh happens.** A client refreshes when asked
 (`refresh_openai_oauth_token`, or `refresh_openai_oauth_token_if_expiring`, which the
@@ -596,7 +614,7 @@ compatibility APIs.
 ```rust
 use arko_ai::{GenerationConfig, LLMClient, Model, ReasoningConfig, ReasoningEffort};
 
-let client = LLMClient::from_env(); // reads OPENROUTER_API_KEY among others
+let client = LLMClient::from_env()?; // reads OPENROUTER_API_KEY among others
 let mut conversation = client.new_conversation(Model::openrouter("anthropic/claude-sonnet-5"));
 conversation.add_user_message("Hello");
 let config = GenerationConfig::default()

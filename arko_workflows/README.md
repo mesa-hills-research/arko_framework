@@ -37,7 +37,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<(), WorkflowError> {
     // Configures every provider whose credentials are in the environment.
-    let client = Arc::new(LLMClient::from_env());
+    let client = Arc::new(LLMClient::from_env()?);
 
     let workflow = Workflow::builder()
         .name("my-workflow")
@@ -56,7 +56,8 @@ async fn main() -> Result<(), WorkflowError> {
 }
 ```
 
-`LLMClient::from_env()` reads these variables and ignores blank values:
+`LLMClient::from_env()` reads these variables and ignores blank values. Setting only some
+of the `OPENAI_OAUTH_*` variables is an error:
 
 | Provider | Variables |
 | --- | --- |

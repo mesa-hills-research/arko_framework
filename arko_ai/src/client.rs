@@ -40,32 +40,73 @@ impl LLMClient {
     ///
     /// - OpenAI: ChatGPT OAuth from `OPENAI_OAUTH_ACCESS_TOKEN` and
     ///   `OPENAI_OAUTH_ACCOUNT_ID` (plus optional `OPENAI_OAUTH_REFRESH_TOKEN`)
-    ///   when both are set; otherwise `OPENAI_API_KEY`. For credentials in a
-    ///   Codex `auth.json`, use [`CodexAuthFile`](crate::codex_auth::CodexAuthFile).
+    ///   when both are set; otherwise `OPENAI_API_KEY`. Setting only some of
+    ///   the `OPENAI_OAUTH_*` variables is an error
+    ///   ([`Error::AuthenticationFailed`]) rather than a silent switch to
+    ///   API-key billing.
     /// - Anthropic: `ANTHROPIC_API_KEY`.
     /// - Google: `GOOGLE_API_KEY`, else `GEMINI_API_KEY`.
     /// - OpenRouter: `OPENROUTER_API_KEY`.
     ///
-    /// The library reads no environment variables unless this is called.
-    pub fn from_env() -> Self {
+    /// ChatGPT OAuth refresh tokens rotate: a refresh makes the refresh token
+    /// in the environment stop working. When `OPENAI_OAUTH_REFRESH_TOKEN` is
+    /// the one the Codex `auth.json` holds (`$CODEX_HOME/auth.json`, else
+    /// `~/.codex/auth.json`, compared by SHA-256 fingerprint, for the same
+    /// account), the client uses that file as its credential store instead,
+    /// as [`with_codex_auth_file`](Self::with_codex_auth_file) does, so
+    /// rotated tokens are written back and Codex stays signed in (logged at
+    /// info level). Otherwise rotated tokens are kept in memory only, and the
+    /// first rotation logs a warning: save them from
+    /// [`openai_chatgpt_oauth_credentials`](Self::openai_chatgpt_oauth_credentials),
+    /// or load credentials with [`CodexAuthFile`](crate::codex_auth::CodexAuthFile)
+    /// and [`with_codex_auth_file`](Self::with_codex_auth_file). Without a
+    /// refresh token the access token is used until the server rejects it.
+    ///
+    /// The library reads no environment variables unless this is called; the
+    /// Codex `auth.json` is read only when `OPENAI_OAUTH_REFRESH_TOKEN` is set.
+    pub fn from_env() -> Result<Self, Error> {
         Self::from_lookup(|name| std::env::var(name).ok())
     }
 
-    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, Error> {
         let var = |name: &str| lookup(name).filter(|value| !value.trim().is_empty());
         let mut client = Self::new();
-        if let (Some(access_token), Some(account_id)) = (
-            var("OPENAI_OAUTH_ACCESS_TOKEN"),
-            var("OPENAI_OAUTH_ACCOUNT_ID"),
-        ) {
-            let refresh_token = var("OPENAI_OAUTH_REFRESH_TOKEN");
-            client = client.with_openai_chatgpt_oauth(
-                &access_token,
-                refresh_token.as_deref(),
-                &account_id,
-            );
-        } else if let Some(key) = var("OPENAI_API_KEY") {
-            client = client.with_openai_api_key(&key);
+        let oauth = [
+            "OPENAI_OAUTH_ACCESS_TOKEN",
+            "OPENAI_OAUTH_ACCOUNT_ID",
+            "OPENAI_OAUTH_REFRESH_TOKEN",
+        ]
+        .map(|name| (name, var(name)));
+        match &oauth {
+            [
+                (_, Some(access_token)),
+                (_, Some(account_id)),
+                (_, refresh_token),
+            ] => {
+                client = client.with_chatgpt_oauth_from_env(
+                    access_token,
+                    refresh_token.as_deref(),
+                    account_id,
+                    &lookup,
+                )?;
+            }
+            [(_, None), (_, None), (_, None)] => {
+                if let Some(key) = var("OPENAI_API_KEY") {
+                    client = client.with_openai_api_key(&key);
+                }
+            }
+            partial => {
+                let set: Vec<&str> = partial
+                    .iter()
+                    .filter(|(_, value)| value.is_some())
+                    .map(|(name, _)| *name)
+                    .collect();
+                return Err(Error::AuthenticationFailed(format!(
+                    "ChatGPT OAuth needs both OPENAI_OAUTH_ACCESS_TOKEN and OPENAI_OAUTH_ACCOUNT_ID, but only {} {} set. Set both, or unset the OPENAI_OAUTH_* variables to use OPENAI_API_KEY.",
+                    set.join(" and "),
+                    if set.len() == 1 { "is" } else { "are" }
+                )));
+            }
         }
         if let Some(key) = var("ANTHROPIC_API_KEY") {
             client = client.with_anthropic_api_key(&key);
@@ -76,7 +117,39 @@ impl LLMClient {
         if let Some(key) = var("OPENROUTER_API_KEY") {
             client = client.with_openrouter_api_key(&key);
         }
-        client
+        Ok(client)
+    }
+
+    /// ChatGPT OAuth credentials from the environment: kept in step with the
+    /// Codex `auth.json` when it holds the same refresh token, otherwise in
+    /// memory with a warning at the first rotation.
+    fn with_chatgpt_oauth_from_env(
+        self,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        account_id: &str,
+        lookup: &impl Fn(&str) -> Option<String>,
+    ) -> Result<Self, Error> {
+        if let Some(refresh_token) = refresh_token
+            && let Some(file) = codex_file_holding(refresh_token, account_id, lookup)
+        {
+            log::info!(
+                "arko_ai: OPENAI_OAUTH_REFRESH_TOKEN is the refresh token in {}; using that file for the ChatGPT OAuth credentials, so rotated tokens are saved to it and Codex stays signed in",
+                file.path().display()
+            );
+            return self.with_codex_auth_file(&file);
+        }
+        let client = providers::openai::OpenAIClient::new_chatgpt_oauth(
+            access_token,
+            refresh_token,
+            account_id,
+        );
+        let client = if refresh_token.is_some() {
+            client.with_unsaved_rotation_warning()
+        } else {
+            client
+        };
+        Ok(self.with_openai_client(client))
     }
 
     /// Whether a provider client is configured for `provider`.
@@ -409,7 +482,10 @@ impl LLMClient {
     /// Returns `Ok(Some(_))` when this call installed new credentials
     /// (refreshed, or adopted from the credential store), and `Ok(None)` when
     /// the credentials don't expire within `margin` (including ones another
-    /// caller just refreshed) and for API-key and unconfigured clients. See
+    /// caller just refreshed) and for API-key and unconfigured clients.
+    /// Credentials without a refresh token are used until the server rejects
+    /// them: this returns `Ok(None)` for them, and the rejected request fails
+    /// with [`Error::AuthenticationFailed`]. See
     /// [`OpenAIClient::refresh_oauth_token_if_expiring`](providers::openai::OpenAIClient::refresh_oauth_token_if_expiring).
     pub async fn refresh_openai_oauth_token_if_expiring(
         &self,
@@ -541,6 +617,43 @@ impl LLMClient {
     }
 }
 
+/// The Codex `auth.json` (located through `lookup`, as
+/// [`CodexAuthFile::default_path`] locates it) when it holds `refresh_token`
+/// for `account_id`. Tokens are compared by SHA-256 fingerprint; a missing or
+/// unreadable file is no match. Nothing about the tokens is logged.
+///
+/// [`CodexAuthFile::default_path`]: crate::codex_auth::CodexAuthFile::default_path
+fn codex_file_holding(
+    refresh_token: &str,
+    account_id: &str,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Option<crate::codex_auth::CodexAuthFile> {
+    use sha2::{Digest, Sha256};
+    let path = crate::codex_auth::CodexAuthFile::default_path_with(|name| {
+        lookup(name).map(std::ffi::OsString::from)
+    })?;
+    if !path.is_file() {
+        return None;
+    }
+    let file = match crate::codex_auth::CodexAuthFile::load(&path) {
+        Ok(file) => file,
+        Err(error) => {
+            log::debug!(
+                "arko_ai: not comparing OPENAI_OAUTH_REFRESH_TOKEN with {}: {error}",
+                path.display()
+            );
+            return None;
+        }
+    };
+    let stored = file.credentials().ok()?;
+    let fingerprint = |token: &str| Sha256::digest(token.as_bytes());
+    let same_token = stored
+        .refresh_token
+        .as_deref()
+        .is_some_and(|stored| fingerprint(stored) == fingerprint(refresh_token));
+    (same_token && stored.account_id == account_id).then_some(file)
+}
+
 impl Default for LLMClient {
     fn default() -> Self {
         Self::new()
@@ -551,12 +664,16 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    fn client(vars: &[(&str, &str)]) -> LLMClient {
+    fn try_client(vars: &[(&str, &str)]) -> Result<LLMClient, Error> {
         let vars: HashMap<String, String> = vars
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         LLMClient::from_lookup(|name| vars.get(name).cloned())
+    }
+
+    fn client(vars: &[(&str, &str)]) -> LLMClient {
+        try_client(vars).unwrap()
     }
 
     #[tokio::test]
@@ -598,14 +715,136 @@ mod tests {
             !oauth.has_provider(&Provider::Anthropic),
             "blank values are ignored"
         );
+    }
 
-        // An incomplete OAuth pair falls back to the API key.
-        let partial = client(&[
-            ("OPENAI_OAUTH_ACCESS_TOKEN", "access"),
-            ("OPENAI_API_KEY", "sk"),
+    /// Part of the OAuth variables is a mistake, not a reason to bill the API
+    /// key instead.
+    #[test]
+    fn a_partial_oauth_configuration_is_an_error() {
+        for (set, named) in [
+            (
+                vec![("OPENAI_OAUTH_ACCESS_TOKEN", "access")],
+                "OPENAI_OAUTH_ACCESS_TOKEN is set",
+            ),
+            (
+                vec![("OPENAI_OAUTH_ACCOUNT_ID", "account")],
+                "OPENAI_OAUTH_ACCOUNT_ID is set",
+            ),
+            (
+                vec![
+                    ("OPENAI_OAUTH_ACCESS_TOKEN", "access"),
+                    ("OPENAI_OAUTH_REFRESH_TOKEN", "refresh"),
+                ],
+                "OPENAI_OAUTH_ACCESS_TOKEN and OPENAI_OAUTH_REFRESH_TOKEN",
+            ),
+            (
+                vec![("OPENAI_OAUTH_REFRESH_TOKEN", "refresh")],
+                "OPENAI_OAUTH_REFRESH_TOKEN is set",
+            ),
+        ] {
+            let mut vars = set.clone();
+            vars.push(("OPENAI_API_KEY", "sk"));
+            let error = try_client(&vars).err().unwrap();
+            assert!(matches!(error, Error::AuthenticationFailed(_)), "{error}");
+            let message = error.to_string();
+            assert!(message.contains(named), "{message}");
+            for (_, value) in set {
+                assert!(
+                    !message.contains(value),
+                    "values are never shown: {message}"
+                );
+            }
+        }
+        // Blank values count as unset.
+        let key = client(&[("OPENAI_OAUTH_ACCESS_TOKEN", " "), ("OPENAI_API_KEY", "sk")]);
+        assert!(key.has_provider(&Provider::OpenAI));
+    }
+
+    fn write_codex_auth(dir: &std::path::Path, refresh_token: &str, account_id: &str) {
+        std::fs::write(
+            dir.join("auth.json"),
+            serde_json::json!({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": "file-access",
+                    "refresh_token": refresh_token,
+                    "account_id": account_id,
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    fn openai(client: &LLMClient) -> &providers::openai::OpenAIClient {
+        client.openai_client.as_ref().unwrap()
+    }
+
+    /// An environment refresh token that is Codex's own is kept in step with
+    /// its auth.json, so a rotation can't sign Codex out.
+    #[tokio::test]
+    async fn an_environment_refresh_token_codex_holds_uses_its_auth_file() {
+        let codex_home = tempfile::tempdir().unwrap();
+        write_codex_auth(codex_home.path(), "shared-refresh", "account");
+        let home = codex_home.path().to_str().unwrap();
+        let oauth = |refresh: &str, account: &str| {
+            client(&[
+                ("CODEX_HOME", home),
+                ("OPENAI_OAUTH_ACCESS_TOKEN", "env-access"),
+                ("OPENAI_OAUTH_ACCOUNT_ID", account),
+                ("OPENAI_OAUTH_REFRESH_TOKEN", refresh),
+            ])
+        };
+
+        let shared = oauth("shared-refresh", "account");
+        assert!(openai(&shared).has_credential_store());
+        assert!(!openai(&shared).warns_unsaved_rotation());
+        let credentials = shared.openai_chatgpt_oauth_credentials().await.unwrap();
+        assert_eq!(credentials.access_token, "file-access");
+
+        // Another token, or the same token for another account: memory only,
+        // with a warning at the first rotation.
+        for other in [
+            oauth("other-refresh", "account"),
+            oauth("shared-refresh", "other"),
+        ] {
+            assert!(!openai(&other).has_credential_store());
+            assert!(openai(&other).warns_unsaved_rotation());
+            let credentials = other.openai_chatgpt_oauth_credentials().await.unwrap();
+            assert_eq!(credentials.access_token, "env-access");
+        }
+
+        // Without a refresh token there is nothing to rotate or compare.
+        let no_refresh = client(&[
+            ("CODEX_HOME", home),
+            ("OPENAI_OAUTH_ACCESS_TOKEN", "env-access"),
+            ("OPENAI_OAUTH_ACCOUNT_ID", "account"),
         ]);
-        assert!(!partial.is_openai_chatgpt_oauth().await);
-        assert!(partial.has_provider(&Provider::OpenAI));
+        assert!(!openai(&no_refresh).has_credential_store());
+        assert!(!openai(&no_refresh).warns_unsaved_rotation());
+
+        // A missing or unreadable file is no match; ~/.codex is found through
+        // HOME when CODEX_HOME is unset.
+        let empty = tempfile::tempdir().unwrap();
+        std::fs::create_dir(empty.path().join(".codex")).unwrap();
+        std::fs::write(empty.path().join(".codex").join("auth.json"), "not json").unwrap();
+        let unreadable = client(&[
+            ("HOME", empty.path().to_str().unwrap()),
+            ("OPENAI_OAUTH_ACCESS_TOKEN", "env-access"),
+            ("OPENAI_OAUTH_ACCOUNT_ID", "account"),
+            ("OPENAI_OAUTH_REFRESH_TOKEN", "shared-refresh"),
+        ]);
+        assert!(!openai(&unreadable).has_credential_store());
+        let home_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home_dir.path().join(".codex")).unwrap();
+        write_codex_auth(&home_dir.path().join(".codex"), "shared-refresh", "account");
+        let found = client(&[
+            ("HOME", home_dir.path().to_str().unwrap()),
+            ("OPENAI_OAUTH_ACCESS_TOKEN", "env-access"),
+            ("OPENAI_OAUTH_ACCOUNT_ID", "account"),
+            ("OPENAI_OAUTH_REFRESH_TOKEN", "shared-refresh"),
+        ]);
+        assert!(openai(&found).has_credential_store());
     }
 
     /// Only OpenAI requests are traced; a traced request to another provider

@@ -204,7 +204,12 @@ impl PyWorkflowBuilder {
             builder = builder.memory(memory);
         }
 
-        let llm_client = std::sync::Arc::new(arko_ai::LLMClient::from_env());
+        let llm_client = std::sync::Arc::new(arko_ai::LLMClient::from_env().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Failed to configure model providers from the environment: {}",
+                e
+            ))
+        })?);
         builder = builder.llm_client(llm_client);
 
         for (name, config_path) in &self.agents {
