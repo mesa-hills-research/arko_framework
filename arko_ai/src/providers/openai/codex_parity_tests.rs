@@ -148,6 +148,8 @@ async fn oauth_requests_carry_the_conversation_identity_and_api_key_requests_do_
         let requests = server.await.unwrap();
 
         let (oauth, oauth_body) = &requests[0];
+        // A new conversation's key is a bare UUID, sent as is.
+        assert!(uuid::Uuid::parse_str(&key).is_ok(), "{key}");
         for name in ["session-id", "thread-id", "x-client-request-id"] {
             assert_eq!(header(oauth, name).as_deref(), Some(key.as_str()), "{name}");
         }

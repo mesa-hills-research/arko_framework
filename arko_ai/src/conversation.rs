@@ -10,8 +10,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+/// A random UUID, with nothing that names the library.
 fn new_prompt_cache_key() -> String {
-    format!("arko:conversation:{}", Uuid::new_v4())
+    Uuid::new_v4().to_string()
 }
 
 /// A saved model copy, replaced by the registry's entry for its id when there
@@ -37,8 +38,9 @@ pub struct Conversation {
     pub enable_cache: bool,
     /// Stable request-routing key for providers with prefix prompt caches.
     ///
-    /// The key is generated once per conversation and serialized so restored
-    /// conversations continue to reach the same cache lineage. OpenAI
+    /// A new conversation gets a random UUID, generated once and serialized
+    /// so restored conversations continue to reach the same cache lineage
+    /// (conversations saved with an older key form keep theirs). OpenAI
     /// requests send it as `prompt_cache_key`; ChatGPT OAuth requests also
     /// send it as the `session-id`, `thread-id` and `x-client-request-id`
     /// headers, since the ChatGPT backend derives cache affinity from
@@ -532,8 +534,22 @@ mod tests {
         let first = Conversation::new(Model::openai_gpt_5_6_sol());
         let second = Conversation::new(Model::openai_gpt_5_6_sol());
 
-        assert!(first.prompt_cache_key.starts_with("arko:conversation:"));
+        // A bare UUID, with nothing that names the library.
+        let parsed = Uuid::parse_str(&first.prompt_cache_key).unwrap();
+        assert_eq!(parsed.to_string(), first.prompt_cache_key);
         assert_ne!(first.prompt_cache_key, second.prompt_cache_key);
+    }
+
+    #[test]
+    fn saved_conversations_keep_their_key() {
+        let mut saved =
+            serde_json::to_value(Conversation::new(Model::openai_gpt_6_astra())).unwrap();
+        saved["prompt_cache_key"] = "arko:conversation:0b6f2c1e-5d0a-4c7e-9b1f-3a2d4e5f6a7b".into();
+        let restored: Conversation = serde_json::from_value(saved).unwrap();
+        assert_eq!(
+            restored.prompt_cache_key,
+            "arko:conversation:0b6f2c1e-5d0a-4c7e-9b1f-3a2d4e5f6a7b"
+        );
     }
 
     #[test]

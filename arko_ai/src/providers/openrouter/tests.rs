@@ -214,8 +214,8 @@ fn session_id_is_always_sent_and_caching_adds_the_cache_key_and_claude_cache_con
         assert!(
             disabled["session_id"]
                 .as_str()
-                .unwrap()
-                .starts_with("arko:conversation:")
+                .and_then(|key| uuid::Uuid::parse_str(key).ok())
+                .is_some()
         );
     }
 

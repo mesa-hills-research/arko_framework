@@ -173,8 +173,8 @@ async fn requests_carry_only_the_key_and_no_attribution_by_default() {
         assert!(
             request.body["session_id"]
                 .as_str()
-                .unwrap()
-                .starts_with("arko:conversation:")
+                .and_then(|key| uuid::Uuid::parse_str(key).ok())
+                .is_some()
         );
         assert!(request.body.get("stream").is_none());
     })

@@ -116,13 +116,15 @@ default sends no temperature: `temperature` is an `Option<f64>`, and `None` lets
 model's default apply. A set temperature is rejected for OpenAI reasoning models and
 Gemini, and dropped for Claude models that take no sampling parameters. Configs saved
 with the earlier `temperature_specified` flag still load (`false` means no temperature).
-A config deserializes from partial JSON or YAML, with omitted fields at their defaults. Each provider takes its own `ReasoningConfig` variant:
+A config deserializes from partial JSON or YAML, with omitted fields at their defaults.
+Each provider takes its own `ReasoningConfig` variant:
 `ReasoningConfig::openai(effort, include_summaries)`, `anthropic(budget_tokens)` or
 `anthropic_adaptive()`, `gemini(thinking_level, include_summaries)` or
 `google(thinking_budget, include_summaries)` (mapped to a thinking level), and
 `openrouter_effort(effort)`. Prompt caching is on by default
-(`Conversation::enable_cache`); a conversation's `prompt_cache_key` is a new random key,
-so give each independent agent or task its own conversation.
+(`Conversation::enable_cache`); a new conversation's `prompt_cache_key` is a random UUID
+(`with_prompt_cache_key` sets another; restored conversations keep their saved key), so
+give each independent agent or task its own conversation.
 
 `LLMClient::prompt_cache_lifetime(&model, &config)` reports how long the provider keeps a
 request's prompt cache after its last use: `PromptCacheLifetime::Known(duration)`,
