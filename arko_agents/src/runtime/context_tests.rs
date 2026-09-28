@@ -571,3 +571,107 @@ async fn native_tool_results_carry_the_details_and_reminder_due() {
         }
     }
 }
+
+/// A tool registered as `load_skill`.
+#[derive(Debug)]
+struct Skill;
+
+#[async_trait]
+impl Tool for Skill {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: crate::skill::LOAD_SKILL_TOOL_NAME.into(),
+            description: "Loads a skill".into(),
+            parameters: vec![],
+            output_based_example: None,
+            parallel_safe: true,
+            tool_type_details: ToolTypeDetails::BuiltIn,
+            raw_json_schema_override: None,
+        }
+    }
+    async fn execute(
+        &self,
+        _: &TaskContext<'_>,
+        _: HashMap<String, Value>,
+    ) -> Result<String, ToolError> {
+        Ok("Exact skill instructions.".into())
+    }
+}
+
+struct Fails;
+#[async_trait]
+impl crate::tool::ToolResultInterceptor for Fails {
+    async fn intercept(
+        &self,
+        _: &str,
+        _: &str,
+        _: &HashMap<String, Value>,
+        _: &TaskContext<'_>,
+    ) -> Result<InterceptedResult, ToolError> {
+        Err(ToolError::ExecutionFailed("distiller unavailable".into()))
+    }
+}
+
+/// `load_skill` results are sent as written unless the skills
+/// configuration opts in to interception, which then uses its own failure
+/// policy; `InformAgent` gives the full result with a note.
+#[tokio::test]
+async fn load_skill_results_are_intercepted_only_when_opted_in() {
+    use crate::tool::InterceptionFailurePolicy;
+    let run = |opt_in: Option<InterceptionFailurePolicy>,
+               interceptor: Arc<dyn crate::tool::ToolResultInterceptor>| async move {
+        let (mut agent, _events, _commands) = harness(ToolCallingMode::Native);
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(Skill));
+        agent.tool_registry = Arc::new(registry);
+        agent.task.agent_config.skills_config = Some(crate::skill::SkillsConfig {
+            workspace_source: None,
+            global_sources: vec![],
+            on_invalid_skill: Default::default(),
+            load_skill_interception: opt_in,
+        });
+        agent.interceptor_config = Some(InterceptorConfig {
+            interceptor,
+            failure_policy: InterceptionFailurePolicy::UseRawResult,
+        });
+        agent
+            .execute_native_tool(
+                &call("skill", crate::skill::LOAD_SKILL_TOOL_NAME),
+                Uuid::new_v4(),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .output
+    };
+    assert_eq!(
+        run(None, Arc::new(Replace)).await,
+        "Exact skill instructions."
+    );
+    assert_eq!(
+        run(
+            Some(InterceptionFailurePolicy::UseRawResult),
+            Arc::new(Replace)
+        )
+        .await,
+        "distilled"
+    );
+    assert_eq!(
+        run(
+            Some(InterceptionFailurePolicy::UseRawResult),
+            Arc::new(Fails)
+        )
+        .await,
+        "Exact skill instructions."
+    );
+    let informed = run(
+        Some(InterceptionFailurePolicy::RetryThenInformAgent { max_attempts: 2 }),
+        Arc::new(Fails),
+    )
+    .await;
+    assert!(
+        informed.starts_with("Exact skill instructions.\n\n[This is the full result")
+            && informed.contains("distiller unavailable"),
+        "{informed}"
+    );
+}

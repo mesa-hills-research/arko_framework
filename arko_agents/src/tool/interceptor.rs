@@ -25,7 +25,10 @@ pub enum InterceptedResult {
 /// context. It returns `Unchanged` to pass through or `Replaced(String)` to
 /// substitute a new result.
 ///
-/// `complete_task` results are never passed to interceptors.
+/// `complete_task` and `ask_user` results are never passed to interceptors,
+/// and `load_skill` results only when the agent's
+/// [`SkillsConfig::load_skill_interception`](crate::skill::SkillsConfig::load_skill_interception)
+/// opts in.
 #[async_trait]
 pub trait ToolResultInterceptor: Send + Sync {
     async fn intercept(
@@ -45,6 +48,28 @@ pub enum InterceptionFailurePolicy {
     UseRawResult,
     /// Retry interception up to `max_attempts` times, then fall back to raw result.
     RetryThenUseRawResult { max_attempts: u32 },
+    /// Use the raw result, followed by a note telling the agent that it is
+    /// the full result because the interceptor failed.
+    InformAgent,
+    /// Retry interception up to `max_attempts` times, then use the raw
+    /// result with the note of [`InformAgent`](Self::InformAgent).
+    RetryThenInformAgent { max_attempts: u32 },
+}
+
+impl InterceptionFailurePolicy {
+    /// Interception attempts before the policy's fallback: at least one.
+    pub fn max_attempts(&self) -> u32 {
+        match self {
+            Self::UseRawResult | Self::InformAgent => 1,
+            Self::RetryThenUseRawResult { max_attempts }
+            | Self::RetryThenInformAgent { max_attempts } => (*max_attempts).max(1),
+        }
+    }
+
+    /// Whether the fallback tells the agent the interceptor failed.
+    pub fn informs_agent(&self) -> bool {
+        matches!(self, Self::InformAgent | Self::RetryThenInformAgent { .. })
+    }
 }
 
 /// Bundles a tool result interceptor with its failure handling policy.

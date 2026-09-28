@@ -427,9 +427,13 @@ The last two `run_task` arguments wrap tool execution:
 
 - An `InterceptorConfig` holds a `ToolResultInterceptor`, which can replace a result
   before it enters the conversation (for example with a summary), and an
-  `InterceptionFailurePolicy` for interceptor errors, which falls back to the original
-  result. `ToolResult` carries the original output; `ToolResultIntercepted` follows with
-  the replacement. Results of `complete_task` and `ask_user` are never intercepted.
+  `InterceptionFailurePolicy` for interceptor errors: `UseRawResult` (the default) and
+  `RetryThenUseRawResult { max_attempts }` fall back to the original result, and
+  `InformAgent` and `RetryThenInformAgent { max_attempts }` give the original result with
+  a note telling the agent the interceptor failed. `ToolResult` carries the original
+  output; `ToolResultIntercepted` follows with the replacement. Results of `complete_task`
+  and `ask_user` are never intercepted, and `load_skill` results only when the agent's
+  `SkillsConfig::load_skill_interception` opts in (see [Skills](#skills)).
 - A `ToolExecutionMiddleware` runs `before` and `after` every execution, whether
   approved or auto-approved, native or output-based. `before` returns `Continue`,
   `Reject { message_to_agent }`, `FailTask { reason }`, or `CancelTask { reason }`,
@@ -488,6 +492,12 @@ auto-approval; call it before `Task::new`, which keeps its own copy of the
 configuration. It returns the `SkillPromptContext` to pass to `run_task`. Auto-loaded
 skills are placed in the system prompt; the others are listed there by name and
 description and loaded on demand.
+
+A skill carries exact instructions, so `load_skill` results reach the agent as written:
+a result interceptor, such as a workflow's distiller, does not see them. The opt-in
+`SkillsConfig::load_skill_interception: Some(policy)` lets it replace them, with `policy`
+(an `InterceptionFailurePolicy`) deciding what an interceptor failure does: retry, fall
+back to the full result, or give the full result with a note.
 
 ### Interactive terminals
 

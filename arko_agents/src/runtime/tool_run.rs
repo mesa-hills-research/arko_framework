@@ -200,11 +200,9 @@ async fn intercept(
     raw_result: &str,
     params: &HashMap<String, Value>,
 ) -> (String, bool) {
-    let max_attempts = match interception.policy {
-        InterceptionFailurePolicy::UseRawResult => 1,
-        InterceptionFailurePolicy::RetryThenUseRawResult { max_attempts } => max_attempts.max(1),
-    };
+    let max_attempts = interception.policy.max_attempts();
     let context = environment.task_context();
+    let mut last_error = None;
     for attempt in 1..=max_attempts {
         match interception
             .interceptor
@@ -222,6 +220,7 @@ async fn intercept(
                     max_attempts,
                     e
                 );
+                last_error = Some(e);
             }
         }
     }
@@ -230,6 +229,17 @@ async fn intercept(
         environment.task_id,
         tool_name
     );
+    if interception.policy.informs_agent() {
+        let error = last_error
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        return (
+            format!(
+                "{raw_result}\n\n[This is the full result: it was to be shortened, but the tool-result interceptor failed ({error}).]"
+            ),
+            true,
+        );
+    }
     (raw_result.to_string(), false)
 }
 

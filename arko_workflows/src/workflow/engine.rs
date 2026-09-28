@@ -62,12 +62,7 @@ impl ToolResultInterceptor for ChainedInterceptor {
         let mut was_modified = false;
 
         for interceptor in &self.interceptors {
-            let attempts = match self.failure_policy {
-                arko_agents::InterceptionFailurePolicy::UseRawResult => 1,
-                arko_agents::InterceptionFailurePolicy::RetryThenUseRawResult { max_attempts } => {
-                    max_attempts.max(1)
-                }
-            };
+            let attempts = self.failure_policy.max_attempts();
             for attempt in 1..=attempts {
                 match interceptor
                     .intercept(tool_name, &current, params, task_context)
@@ -2130,6 +2125,7 @@ mod tests {
             }),
             global_sources: vec![],
             on_invalid_skill: InvalidSkillPolicy::Error,
+            load_skill_interception: None,
         });
         let mut registry = ToolRegistry::new();
         let context = WorkflowEngine::setup_skills(&mut config, &mut registry, &workspace)

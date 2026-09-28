@@ -585,15 +585,26 @@ impl AgentLoop {
 
     /// How a tool's results are intercepted: by the configured interceptor,
     /// unless the tool opts out or its results carry meaning the runtime
-    /// uses (`complete_task`, `ask_user`).
+    /// uses (`complete_task`, `ask_user`). `load_skill` results only when
+    /// the skills configuration opts in, with its own failure policy.
     fn interception_for(&self, tool_name: &str, tool: &dyn Tool) -> Option<Interception> {
         let config = self.interceptor_config.as_ref()?;
         if !tool.allow_result_interception() || INTERCEPTION_EXCLUDED_TOOLS.contains(&tool_name) {
             return None;
         }
+        let policy = if tool_name == crate::skill::LOAD_SKILL_TOOL_NAME {
+            self.task
+                .agent_config
+                .skills_config
+                .as_ref()?
+                .load_skill_interception
+                .clone()?
+        } else {
+            config.failure_policy.clone()
+        };
         Some(Interception {
             interceptor: config.interceptor.clone(),
-            policy: config.failure_policy.clone(),
+            policy,
         })
     }
 
