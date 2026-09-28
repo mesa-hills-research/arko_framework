@@ -253,10 +253,12 @@ fn gemini_3_sends_result_images_inside_the_function_result() {
             {"type": "image", "mime_type": "image/png", "data": "cGl4ZWxz"},
         ])
     );
+    // The answer text is folded into the last result (TI-3).
     assert_eq!(
         input[5]["result"],
-        json!([{"type": "text", "text": "not found"}])
+        json!([{"type": "text", "text": "not found\n\nAnswer: yes"}])
     );
+    assert_eq!(input[6]["type"], "model_output");
 }
 
 /// Gemini 2.x, Gemini ids whose version can't be read, and OpenRouter take
@@ -327,5 +329,185 @@ fn models_without_image_input_reject_result_images() {
             "{}: {error}",
             model.id
         );
+    }
+}
+
+/// Gemini 3.x: the rest of a tool-result message is folded into its last
+/// result, with no `user_input` after the results (TI-3).
+mod gemini_3_fold {
+    use super::*;
+
+    fn text(text: &str) -> Value {
+        json!({"type": "text", "text": text})
+    }
+
+    fn image() -> Value {
+        json!({"type": "image", "mime_type": "image/png", "data": "cGl4ZWxz"})
+    }
+
+    fn results_message(extra: Vec<Content>, results: usize) -> Conversation {
+        let mut conversation = Conversation::new(gemini_3()).with_prompt_cache_key("pinned");
+        conversation.add_user_message("Look at these.");
+        let calls: Vec<ToolCall> = (0..results)
+            .map(|index| {
+                ToolCall::from_argument_text(Some(format!("call_{index}")), "tool".into(), "{}")
+            })
+            .collect();
+        let mut assistant = Message::new_assistant("");
+        assistant.tool_calls = calls.clone();
+        conversation.messages.push(assistant);
+        let mut content: Vec<Content> = calls
+            .iter()
+            .map(|call| {
+                Content::ToolResult(ToolResult::from_tool_call(
+                    call,
+                    &format!("out {}", call.id.as_deref().unwrap()),
+                ))
+            })
+            .collect();
+        content.extend(extra);
+        conversation.add_user_message_with_contents(content);
+        conversation
+    }
+
+    /// The steps after the model's function calls.
+    fn after_calls(conversation: &Conversation) -> Vec<Value> {
+        let body = json(&google_body(conversation).unwrap());
+        body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .skip_while(|step| step["type"] != "function_result")
+            .cloned()
+            .collect()
+    }
+
+    fn results_of(steps: &[Value]) -> Vec<Value> {
+        assert!(
+            steps.iter().all(|step| step["type"] == "function_result"),
+            "no user_input after the results: {steps:?}"
+        );
+        steps.iter().map(|step| step["result"].clone()).collect()
+    }
+
+    #[test]
+    fn text_is_appended_to_the_last_result_after_a_blank_line() {
+        let conversation = results_message(
+            vec![
+                Content::Text("The user answered: yes".into()),
+                Content::Text("# Reminder\nKeep going.".into()),
+            ],
+            1,
+        );
+        assert_eq!(
+            results_of(&after_calls(&conversation)),
+            [json!([text(
+                "out call_0\n\nThe user answered: yes\n\n# Reminder\nKeep going."
+            )])]
+        );
+    }
+
+    #[test]
+    fn images_follow_the_last_result_with_their_labels() {
+        let conversation = results_message(
+            vec![
+                Content::Text("Image from tool tool, call call_0: a.png".into()),
+                Content::Image(pixels()),
+                Content::Image(pixels()),
+            ],
+            1,
+        );
+        assert_eq!(
+            results_of(&after_calls(&conversation)),
+            [json!([
+                text("out call_0"),
+                text("Image from tool tool, call call_0: a.png"),
+                image(),
+                image(),
+            ])]
+        );
+    }
+
+    #[test]
+    fn text_and_images_keep_their_order_and_follow_the_result_s_own_images() {
+        let mut conversation = results_message(
+            vec![
+                Content::Text("first".into()),
+                Content::Text("label b".into()),
+                Content::Image(pixels()),
+                Content::Text("second".into()),
+            ],
+            1,
+        );
+        let Content::ToolResult(result) = &mut conversation.messages[2].content[0] else {
+            unreachable!()
+        };
+        result.images = vec![ToolResultImage::new("own", pixels())];
+        assert_eq!(
+            results_of(&after_calls(&conversation)),
+            [json!([
+                text("out call_0\n\nfirst\n\nsecond"),
+                text("own"),
+                image(),
+                text("label b"),
+                image(),
+            ])]
+        );
+    }
+
+    #[test]
+    fn only_the_last_of_several_results_takes_the_rest() {
+        let conversation = results_message(vec![Content::Text("note".into())], 3);
+        assert_eq!(
+            results_of(&after_calls(&conversation)),
+            [
+                json!([text("out call_0")]),
+                json!([text("out call_1")]),
+                json!([text("out call_2\n\nnote")]),
+            ]
+        );
+    }
+
+    /// Gemini 2.x, and every other provider, keep the text after the results
+    /// (the pinned bodies show it); messages without results are unchanged.
+    #[test]
+    fn other_models_and_plain_messages_are_not_folded() {
+        let mut gemini_2_5 = results_message(vec![Content::Text("note".into())], 1);
+        gemini_2_5.model = gemini_2();
+        let steps = after_calls(&gemini_2_5);
+        assert_eq!(steps[0]["result"], json!([text("out call_0")]));
+        assert_eq!(
+            steps[1],
+            json!({"type": "user_input", "content": [text("note")]})
+        );
+
+        let mut plain = results_message(Vec::new(), 1);
+        plain.add_user_message("Next task.");
+        let steps = after_calls(&plain);
+        assert_eq!(
+            steps[1],
+            json!({"type": "user_input", "content": [text("Next task.")]})
+        );
+    }
+
+    /// A conversation saved with the runtime's sibling layout (before result
+    /// images existed) loads and is folded on Gemini 3.x.
+    #[test]
+    fn saved_conversations_with_sibling_images_load_and_fold() {
+        let saved = serde_json::to_string(&conversation(gemini_3(), Layout::Siblings)).unwrap();
+        let restored: Conversation = serde_json::from_str(&saved).unwrap();
+        let steps = after_calls(&restored);
+        assert_eq!(
+            results_of(&steps[..2]),
+            [
+                json!([text("a.png, 12 × 8")]),
+                json!([
+                    text("not found\n\nAnswer: yes"),
+                    text("Image from tool view_image, call call_a: a.png"),
+                    image(),
+                ]),
+            ]
+        );
+        assert_eq!(steps[2]["type"], "model_output");
     }
 }

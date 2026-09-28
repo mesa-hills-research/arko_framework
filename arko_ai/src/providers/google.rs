@@ -873,6 +873,9 @@ impl GoogleClient {
                             .to_string(),
                     ));
                 }
+                Role::User if inline && has_tool_results(message) => {
+                    steps.extend(self.results_with_the_rest_folded_in(message)?);
+                }
                 Role::User => {
                     let mut blocks = Vec::new();
 
@@ -981,6 +984,19 @@ impl GoogleClient {
         result: &crate::tool::ToolResult,
         inline: bool,
     ) -> Result<InteractionInputStep, Error> {
+        self.function_result_with(result, inline, &[], Vec::new())
+    }
+
+    /// [`function_result_step`](Self::function_result_step), with `texts`
+    /// appended to the output text (each after a blank line) and `blocks`
+    /// after the result's own images.
+    fn function_result_with(
+        &self,
+        result: &crate::tool::ToolResult,
+        inline: bool,
+        texts: &[&str],
+        extra: Vec<InteractionContentBlock>,
+    ) -> Result<InteractionInputStep, Error> {
         let mut blocks = Vec::new();
         if inline {
             for image in &result.images {
@@ -992,13 +1008,18 @@ impl GoogleClient {
                 blocks.push(self.convert_image_block(&image.image)?);
             }
         }
-        if !result.output.is_empty() || blocks.is_empty() {
-            blocks.insert(
-                0,
-                InteractionContentBlock::Text {
-                    text: result.output.clone(),
-                },
-            );
+        blocks.extend(extra);
+        let text = if texts.is_empty() {
+            result.output.clone()
+        } else {
+            std::iter::once(result.output.as_str())
+                .chain(texts.iter().copied())
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
+        if !text.is_empty() || blocks.is_empty() {
+            blocks.insert(0, InteractionContentBlock::Text { text });
         }
         Ok(InteractionInputStep::FunctionResult {
             name: result.name.clone(),
@@ -1006,6 +1027,66 @@ impl GoogleClient {
             is_error: result.is_error.then_some(true),
             result: blocks,
         })
+    }
+
+    /// Gemini 3.x: a user message's tool results, with the rest of the message
+    /// folded into its last result, so no `user_input` step follows them.
+    /// Google advises it: "We often see clients provide additional
+    /// instructions along with function responses as subsequent Parts. This
+    /// can lead to unexpected model behavior (e.g. thought leakage) and
+    /// result in lower quality outputs. Instead, append any extra
+    /// instructions to the end of the function response text separated by
+    /// two newlines."
+    /// (https://ai.google.dev/gemini-api/docs/whats-new-gemini-3.5#inline-instructions),
+    /// and images go inside the function response, not after it.
+    ///
+    /// Each text (an `ask_user` answer, a recovery note, environment details)
+    /// is appended to the last result's output text after a blank line. Each
+    /// image, with the text just before it as its label, follows the last
+    /// result's own images. Texts and images keep their order.
+    fn results_with_the_rest_folded_in(
+        &self,
+        message: &Message,
+    ) -> Result<Vec<InteractionInputStep>, Error> {
+        let results: Vec<_> = message
+            .content
+            .iter()
+            .filter_map(Content::as_tool_result)
+            .collect();
+        let rest: Vec<&Content> = message
+            .content
+            .iter()
+            .filter(|content| content.as_tool_result().is_none())
+            .collect();
+        let mut texts = Vec::new();
+        let mut images = Vec::new();
+        let mut index = 0;
+        while index < rest.len() {
+            match (rest[index], rest.get(index + 1)) {
+                (Content::Text(label), Some(Content::Image(image))) => {
+                    images.push(InteractionContentBlock::Text {
+                        text: label.clone(),
+                    });
+                    images.push(self.convert_image_block(image)?);
+                    index += 2;
+                    continue;
+                }
+                (Content::Text(text), _) => texts.push(text.as_str()),
+                (Content::Image(image), _) => images.push(self.convert_image_block(image)?),
+                (Content::ToolResult(_), _) => {}
+            }
+            index += 1;
+        }
+        let last = results.len() - 1;
+        let mut steps = Vec::with_capacity(results.len());
+        for (position, result) in results.into_iter().enumerate() {
+            steps.push(if position == last {
+                self.function_result_with(result, true, &texts, std::mem::take(&mut images))?
+            } else {
+                self.function_result_step(result, true)?
+            });
+        }
+        Ok(steps)
     }
 
     /// `message`'s tool-result images as content blocks after its results,
@@ -1286,6 +1367,13 @@ impl PendingFunctionCall {
         call.thought_signature = self.signature.filter(|signature| !signature.is_empty());
         call
     }
+}
+
+fn has_tool_results(message: &Message) -> bool {
+    message
+        .content
+        .iter()
+        .any(|content| content.as_tool_result().is_some())
 }
 
 #[derive(Debug, Serialize)]

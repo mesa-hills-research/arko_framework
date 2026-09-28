@@ -312,7 +312,9 @@ impl Conversation {
     /// the tool outputs.
     ///
     /// Tool results are placed before the text content, which matches
-    /// the ordering requirements of all supported providers.
+    /// the ordering requirements of all supported providers. Gemini 3 and
+    /// later get the text inside the last result instead, appended to its
+    /// output after a blank line, as Google advises.
     pub fn add_tool_results_with_text(
         &mut self,
         results: Vec<ToolResult>,

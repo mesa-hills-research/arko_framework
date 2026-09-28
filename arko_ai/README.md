@@ -240,6 +240,16 @@ has no call id), the layout arko_agents has always used for tool images:
 | Gemini 2.x, and Gemini IDs whose version can't be read | After the results, in a `user_input` step; Gemini 2.5 rejects images in function responses |
 | OpenRouter | After the `tool` messages, in a user message; how each upstream receives images in a tool message is not documented |
 
+**Text after tool results on Gemini 3.x.** A user message that holds tool results plus
+other content (an `ask_user` answer, a recovery note, environment details, or images
+saved as sibling content) is sent to Gemini 3 and later without a `user_input` step after
+the results: the other content is folded into the message's last `function_result`, as
+Google advises ("append any extra instructions to the end of the function response text
+separated by two newlines"). Each text is appended to that result's output text after a
+blank line, and each image, with the text just before it as its label, follows the
+result's own images; order is kept. Gemini 2.x and the other providers keep the text in a
+separate user turn after the results, which every provider accepts.
+
 Empty texts (an empty output with images, an empty label) are left out of the result. A
 result without images is sent exactly as before result images existed, and conversations
 saved before then (with tool images as sibling content of the message) load and are sent
