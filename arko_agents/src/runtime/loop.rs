@@ -489,13 +489,17 @@ impl AgentLoop {
         Ok(())
     }
 
-    /// Whether a user message can join the conversation now: no native call
-    /// waits for its result (a user message between a call and its result
-    /// breaks the next request for every provider), no command is awaited
-    /// (whose answer, such as tool results, comes first), and no refusal
-    /// fallback holds context back (it answers exactly the refused input).
+    /// Whether a user message can join the conversation as the loop stops:
+    /// no native call waits for its result (a user message between a call
+    /// and its result breaks the next request for every provider), no
+    /// command is awaited (whose answer, such as tool results, comes first),
+    /// and no refusal is pending: a refusal fallback answers exactly the
+    /// refused input, and [`Task::resolve_refusal`] needs the refused input
+    /// to be the conversation's last input.
     fn context_can_be_added_now(&self) -> bool {
-        !self.results_pending() && self.task.fallback_for.is_none()
+        !self.results_pending()
+            && self.task.fallback_for.is_none()
+            && self.task.refused_input.is_none()
     }
 
     /// Whether the last turn's results are not all in the conversation yet:
@@ -4129,7 +4133,8 @@ impl AgentLoop {
                 }
                 // The wait came after the boundary: commands sent meanwhile
                 // are taken as there, and context sent meanwhile joins this
-                // request rather than the next.
+                // request rather than the next, under the boundary's rule
+                // (only a pending fallback holds it back).
                 if self.take_queued_commands().await? {
                     return Ok(false);
                 }

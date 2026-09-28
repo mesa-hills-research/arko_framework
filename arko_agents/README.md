@@ -439,15 +439,16 @@ Besides answers to the waiting states, a running task accepts:
   to save it. A task suspended while it awaits a command, in any awaiting state, keeps
   its pending calls and results and waits for that command when it runs again.
 
-`CancelTask` and `SuspendTask` stop the task at once, also when queued behind other
-commands, without another model request. Context the runtime has taken from the channel is
-never lost when a task stops, for any reason. It is added to the conversation before the
-task is returned, unless a user message cannot go there yet: while the task awaits a
-command (a native call's result must come right after the call) or while a refusal fallback
-holds context back. Then it is kept in `Task::pending_context_injections`, saved with the
-task, and added at the first turn boundary after the task runs again, before context sent
-later. A completed task also keeps the context taken during its last turn there, since the
-model has not read it, and a continued task gets it.
+`CancelTask` and `SuspendTask` stop the task without another model request, also when
+queued behind context. Context the runtime has taken from the channel is never lost when a
+task stops, for any reason. It is added to the conversation before the task is returned,
+unless a user message cannot go there yet: while the task awaits a command (a native
+call's result must come right after the call), or while a refusal is unresolved (a pending
+fallback answers exactly the refused input, and `Task::resolve_refusal` needs it to be the
+last input). Then it is kept in `Task::pending_context_injections`, saved with the task,
+and added at the first turn boundary where it can go once the task runs again, before
+context sent later. A completed task also keeps the context taken during its last turn
+there, since the model has not read it, and a continued task gets it.
 
 Tasks serialize to JSON (`Task::save_to_path`, `Task::load_from_path`). Running a
 returned task again continues it: a task that is pending, in progress, or interrupted
@@ -592,8 +593,8 @@ ChatGPT backend reroute) emits `ModelRerouted` with both models.
   request against the latest report. When the most-used window is at or above `percent`,
   `PlanUsageThresholdReached` is emitted once per window and reset, and
   `PlanUsageAction::Pause` pauses once, or `SlowDown { delay_ms }` waits before every
-  request while usage stays that high; context sent during the wait joins that request.
-  The reported window is saved in
+  request while usage stays that high; context sent during the wait joins that request,
+  in a second context update. The reported window is saved in
   `Task::plan_usage_threshold_reported`, so a resumed task does not report it again, and
   a report whose window has since reset is ignored.
 - `cache: Some(CacheMonitorConfig::default())` emits `CacheEfficiencyReported` after each
@@ -657,9 +658,9 @@ reported (with its `RefusedInput`), and the same input goes once to the fallback
 (`RefusalFallback`). The refused turn is not kept; the fallback's response continues the
 task, and later turns use the configured model again. The pending fallback is saved with
 the task (`Task::fallback_for`), survives a monitor pause, and holds back context updates
-(saved with the task too) and file-tree changes until it has answered. If the fallback also refuses or its request
-fails, the refusal stands and can be resolved as above; approving recovery resends to the
-configured model.
+(saved with the task too) and file-tree changes until it has answered. If the fallback
+also refuses or its request fails, the refusal stands and can be resolved as above;
+approving recovery resends to the configured model.
 
 Across the two models, the ChatGPT turn-state token of one is not sent with the other's
 requests. OpenAI reasoning is replayed between them only when both are `Provider::OpenAI`

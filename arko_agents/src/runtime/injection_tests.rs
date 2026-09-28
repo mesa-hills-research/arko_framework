@@ -6,13 +6,16 @@
 //! call always gets its result before anything else follows it.
 
 use super::long_run_tests::turn_with_plan_usage;
-use super::retry_tests::{complete_response, harness, model_refusal, provider_failure};
+use super::retry_tests::{
+    complete_response, harness, model_refusal, provider_failure, refused_response,
+};
 use super::tool_call_tests::{
     agent, agent_for, assert_calls_paired, complete, config, native_call, result_for, turn,
     wait_for, workspace,
 };
 use super::*;
 use crate::agent_config::{AgentLLMConfig, MonitoringConfig, PlanUsageThreshold};
+use crate::task::RefusalResolution;
 use crate::tool::{Tool, ToolTypeDetails};
 use futures::StreamExt;
 
@@ -232,6 +235,113 @@ impl Tool for SendsThenCloses {
             })
             .unwrap();
         Ok("sent".into())
+    }
+}
+
+/// A task returned interrupted on a refusal, by the configured model or,
+/// after it, by the fallback, keeps the context taken meanwhile out of the
+/// conversation, so the refused input can still be changed
+/// (`Task::resolve_refusal` needs it to be the last input). Resolved and run
+/// again, the task gets the context after the changed input, once.
+#[tokio::test(start_paused = true)]
+async fn context_taken_before_a_refusal_leaves_it_resolvable() {
+    for fallback in [false, true] {
+        let (mut agent, _events, commands) = harness();
+        native(&mut agent);
+        agent.task.agent_config.llm_error_policy =
+            LLMErrorPolicy::RetryThenInformAgent { max_attempts: 3 };
+        if fallback {
+            agent.task.agent_config.refusal_fallback = Some(AgentLLMConfig {
+                model: ai::Model::openai_gpt_6_sol(),
+                generation_config: Default::default(),
+            });
+        }
+        let refused = || refused_response(ai::Message::new_assistant(""), model_refusal());
+        let slow_refusal = futures::stream::once(async move {
+            tokio_sleep(Duration::from_secs(1)).await;
+            Ok(refused())
+        })
+        .boxed();
+        push(&mut agent, Ok(slow_refusal));
+        if fallback {
+            push(&mut agent, scripted(refused()));
+        }
+        let run = tokio::spawn(agent.run());
+        tokio_sleep(Duration::from_millis(500)).await;
+        inject(&commands, "Peer note.");
+        let mut task = joined(run).await;
+        assert!(
+            matches!(task.current_state, TaskState::Interrupted { .. }),
+            "{fallback}: {:?}",
+            task.current_state
+        );
+        assert!(task.fallback_for.is_none());
+        assert!(update_texts(&task.conversation).is_empty(), "{fallback}");
+        assert_eq!(task.pending_context_injections, ["Peer note."]);
+        task.resolve_refusal(vec![RefusalResolution::RephraseUserMessage {
+            message_index: 0,
+            text: "Rephrased.".into(),
+        }])
+        .unwrap();
+
+        let (mut agent, _events, _commands) = resumed(task);
+        push(&mut agent, scripted(complete_response()));
+        let task = finish(agent).await;
+        assert!(matches!(task.current_state, TaskState::Completed { .. }));
+        assert!(text(&task.conversation.messages[0]).starts_with("Rephrased."));
+        assert_eq!(
+            updates(&task.conversation),
+            [(1, "Peer note.".to_string())],
+            "{fallback}: {:#?}",
+            task.conversation.messages
+        );
+        assert_eq!(last_assistant(&task.conversation), 2);
+        assert!(task.pending_context_injections.is_empty());
+    }
+}
+
+/// As the loop stops, context stays with the task while any of the last
+/// turn's results is not in the conversation, even in a state that awaits
+/// nothing; once they all are, it is added.
+#[test]
+fn context_waits_for_every_result_of_the_last_turn() {
+    let call = native_call("read", "read_file", serde_json::json!({}));
+    let mut open_turn = ai::Message::new_assistant("");
+    open_turn.tool_calls = vec![call.clone()];
+    let result = ai::ToolResult::from_tool_call(&call, "out");
+    for case in [
+        "open turn",
+        "native result",
+        "native call",
+        "text result",
+        "none",
+    ] {
+        let (mut agent, _events, _commands) = harness();
+        let task = &mut agent.task;
+        task.set_state(TaskState::Interrupted {
+            reason: "stopped".into(),
+        });
+        task.conversation.add_user_message("task");
+        match case {
+            "open turn" => task.conversation.messages.push(open_turn.clone()),
+            "native result" => task.pending_native_tool_results = vec![result.clone()],
+            "native call" => {
+                task.pending_native_tool_calls
+                    .insert(Uuid::new_v4(), call.clone());
+            }
+            "text result" => task.pending_text_tool_results = vec!["out".into()],
+            _ => {}
+        }
+        task.pending_context_injections = vec!["Note.".into()];
+        let messages = task.conversation.messages.len();
+        agent.keep_taken_context().unwrap();
+        if case == "none" {
+            assert_eq!(update_texts(&agent.task.conversation), ["Note."]);
+            assert!(agent.task.pending_context_injections.is_empty());
+        } else {
+            assert_eq!(agent.task.conversation.messages.len(), messages, "{case}");
+            assert_eq!(agent.task.pending_context_injections, ["Note."], "{case}");
+        }
     }
 }
 

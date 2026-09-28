@@ -268,8 +268,10 @@ pub struct Task {
     /// boundary, before any context sent later. A task that stops keeps here
     /// what could not be added before it stopped: in an awaiting state (a
     /// user message must not come between a call and its result), while a
-    /// refusal fallback holds context back, and once completed (the model
-    /// has not read it). Saved so a task that runs again still gets it.
+    /// refusal is unresolved (a pending fallback answers exactly the refused
+    /// input, and [`Task::resolve_refusal`] needs it to be the last input),
+    /// and once completed (the model has not read it). Saved so a task that
+    /// runs again still gets it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_context_injections: Vec<String>,
 }
