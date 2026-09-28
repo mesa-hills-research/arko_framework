@@ -628,20 +628,24 @@ let workflow = Workflow::builder()
 workflow.checkpoint().await?;
 ```
 
-A run directory holds the checkpoints, one task file per agent run
-(`agents/<task id>.json`, with its full conversation), the event log
-(`events.jsonl`), and the durable-step journal. A checkpoint contains the workflow
+A run directory holds the checkpoints, the agent runs' task versions
+(`agents/<task id>/<content hash>.json`, each with its full conversation), the event
+log (`events.jsonl`), and the durable-step journal. A checkpoint contains the workflow
 and run identity, metadata, memory, pending messages, the cost ledger, freshness
-versions, each agent result with a reference to its task file (a conversation is
-stored once, in its task file), verification and distillation records, and, once the
-run is stopped, its cancellation. Files are pretty-printed JSON, written to a
-temporary file, synced, and renamed into place.
+versions, each agent result with a reference to the version of its task the
+checkpoint saw, verification and distillation records, and, once the run is stopped,
+its cancellation. A task version is written only when the task changed, so
+checkpoints that saw the same task share its file, and an older checkpoint still
+resumes a task that has since run on as it was then. Files are pretty-printed JSON,
+written to a temporary file, synced, and renamed into place.
 
 By default a checkpoint is saved after every finalized agent run, and every
-checkpoint is kept: `retain_checkpoints(n)` opts in to keeping only the newest `n`. A
-task file always holds its task's latest state, so an older checkpoint reads a task
-that has since run on as it is now (a warning is logged when its recorded status and
-the task disagree).
+checkpoint and task version is kept: `retain_checkpoints(n)` opts in to keeping only
+the newest `n` checkpoints, and the task versions they refer to. Saving never fails
+an agent's run: a task or checkpoint that can't be written is logged as a warning
+and the next checkpoint tries again. A checkpoint written meanwhile refers to the
+task's last saved version and lists the run in `missing_task_states`; resuming from it
+restores the task as last saved, with a warning that its latest state is missing.
 The event log records every event, including each streamed text and reasoning
 fragment; `event_log(EventLog::LifecycleOnly)` leaves the fragments out (the
 finished responses stay in the task files). Events are buffered and written at least

@@ -158,9 +158,10 @@ impl PyWorkflowBuilder {
 
     /// Persist the run in `checkpoint_dir`. As in Rust: a checkpoint after
     /// every finalized agent run (`auto_checkpoint=True`), every checkpoint
-    /// kept (`retain_checkpoints=None`), and every event logged
-    /// (`event_log="full"`; `"lifecycle_only"` leaves out streamed
-    /// fragments).
+    /// and task version kept (`retain_checkpoints=None`; a count keeps the
+    /// newest checkpoints and the task versions they refer to), and every
+    /// event logged (`event_log="full"`; `"lifecycle_only"` leaves out
+    /// streamed fragments).
     #[pyo3(signature = (checkpoint_dir, auto_checkpoint=true, retain_checkpoints=None, event_log="full"))]
     fn persistence(
         &mut self,

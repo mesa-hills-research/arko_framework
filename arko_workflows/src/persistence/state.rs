@@ -36,10 +36,17 @@ pub struct WorkflowState {
     /// [`agent_runs`](Self::agent_runs) held them; empty in newer ones.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_results: Vec<AgentResult>,
-    /// Finalized agent results, each referring to its task file instead of
-    /// holding the task (the conversation is stored once, in the task file).
+    /// Finalized agent results, each referring to the version of its task
+    /// the checkpoint recorded instead of holding the task (a version is
+    /// stored once, however many checkpoints refer to it).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_runs: Vec<AgentRunRecord>,
+    /// The agent runs whose latest task state could not be saved: their
+    /// records in [`agent_runs`](Self::agent_runs) refer to their last
+    /// saved state instead, and a run with none is left out. Resuming from
+    /// the checkpoint restores them as last saved, with a warning.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_task_states: Vec<MissingTaskState>,
     #[serde(default)]
     pub verification_records: Vec<crate::verification::VerificationRecord>,
     #[serde(default)]
@@ -56,8 +63,8 @@ pub struct WorkflowState {
     pub agent_registry: Option<crate::messaging::registry::RegistrySnapshot>,
 }
 
-/// A finalized agent result in a checkpoint, with its task in the run
-/// directory's task file.
+/// A finalized agent result in a checkpoint, with its task in a task
+/// version file in the run directory.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AgentRunRecord {
     pub agent_run_id: uuid::Uuid,
@@ -66,34 +73,65 @@ pub struct AgentRunRecord {
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// The task file, relative to the run directory:
-    /// `agents/<agent_run_id>.json`.
+    /// The version of the task the checkpoint recorded, relative to the
+    /// run directory: `agents/<agent_run_id>/<content hash>.json`.
     pub task_file: String,
 }
 
 impl AgentRunRecord {
-    pub(crate) fn of(result: &AgentResult) -> Self {
+    pub(crate) fn of(result: &AgentResult, task_file: String) -> Self {
         Self {
             agent_run_id: result.agent_run_id,
             agent_name: result.agent_name.clone(),
             status: result.status.clone(),
             summary: result.summary.clone(),
             error: result.error.clone(),
-            task_file: super::task_file(result.agent_run_id),
+            task_file,
         }
     }
+}
+
+/// An agent run whose latest task state a checkpoint lacks, because it
+/// could not be saved.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MissingTaskState {
+    pub agent_run_id: uuid::Uuid,
+    pub agent_name: String,
+    /// The status of the state that is missing.
+    pub status: AgentRunStatus,
+    /// The task version the checkpoint refers to instead, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_saved: Option<String>,
+    /// Why it could not be saved.
+    pub reason: String,
 }
 
 impl WorkflowState {
     /// The checkpoint's agent results, with their tasks: those it holds (a
     /// checkpoint written before task files were referenced), then those
     /// whose tasks are in the task files of `run_dir`, the directory
-    /// holding the checkpoint.
+    /// holding the checkpoint. A run whose latest state the checkpoint
+    /// lacks ([`missing_task_states`](Self::missing_task_states)) is
+    /// restored as last saved, and one never saved isn't; each is logged
+    /// as a warning.
     pub fn agent_results_in(
         &self,
         run_dir: &std::path::Path,
     ) -> Result<Vec<AgentResult>, crate::WorkflowError> {
+        let (results, warnings) = self.agent_results_with_warnings(run_dir)?;
+        for warning in warnings {
+            log::warn!("{warning}");
+        }
+        Ok(results)
+    }
+
+    /// [`agent_results_in`](Self::agent_results_in), with its warnings.
+    pub(crate) fn agent_results_with_warnings(
+        &self,
+        run_dir: &std::path::Path,
+    ) -> Result<(Vec<AgentResult>, Vec<String>), crate::WorkflowError> {
         let mut results = self.agent_results.clone();
+        let mut warnings = Vec::new();
         for record in &self.agent_runs {
             let path = run_dir.join(&record.task_file);
             let task = std::fs::read_to_string(&path)
@@ -106,18 +144,36 @@ impl WorkflowState {
                         record.agent_name
                     ))
                 })?;
+            if let Some(missing) = self
+                .missing_task_states
+                .iter()
+                .find(|missing| missing.agent_run_id == record.agent_run_id)
+            {
+                let result = AgentResult::of_task(record.agent_name.clone(), task);
+                warnings.push(format!(
+                    "The checkpoint lacks the latest state of agent '{}' ({}), which could not be saved ({}): it was {:?}, but resumes as last saved, {:?}, from {}.",
+                    record.agent_name,
+                    record.agent_run_id,
+                    missing.reason,
+                    missing.status,
+                    result.status,
+                    path.display()
+                ));
+                results.push(result);
+                continue;
+            }
             let now = AgentRunStatus::of_state(&task.current_state);
             // A cancellation older versions recorded as a failure loads as
             // cancelled: the same outcome.
             let same = now == record.status
                 || (record.status == AgentRunStatus::Failed && now == AgentRunStatus::Cancelled);
             if !same {
-                log::warn!(
-                    "The task file {} of agent '{}' holds a later state ({now:?}) than the checkpoint recorded ({:?}): a task file holds a task's latest state, so an older checkpoint reads the task as it is now",
+                warnings.push(format!(
+                    "The task file {} of agent '{}' holds another state ({now:?}) than the checkpoint recorded ({:?}).",
                     path.display(),
                     record.agent_name,
                     record.status
-                );
+                ));
             }
             results.push(AgentResult {
                 agent_run_id: record.agent_run_id,
@@ -128,7 +184,15 @@ impl WorkflowState {
                 task,
             });
         }
-        Ok(results)
+        for missing in &self.missing_task_states {
+            if missing.last_saved.is_none() {
+                warnings.push(format!(
+                    "The checkpoint lacks agent '{}' ({}): no state of its task could be saved ({}), so it is not restored.",
+                    missing.agent_name, missing.agent_run_id, missing.reason
+                ));
+            }
+        }
+        Ok((results, warnings))
     }
 }
 
@@ -168,6 +232,7 @@ mod tests {
             freshness_snapshot: Some(tracker.snapshot()),
             agent_results: Vec::new(),
             agent_runs: Vec::new(),
+            missing_task_states: Vec::new(),
             verification_records: Vec::new(),
             distillation_records: Vec::new(),
             completed_agents: Vec::new(),

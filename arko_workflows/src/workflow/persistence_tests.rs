@@ -1,5 +1,6 @@
-//! Checkpoints that refer to task files, retention, resuming older
-//! checkpoints, and the event log during runs.
+//! Checkpoints that refer to task versions, retention, task states that
+//! can't be saved, resuming older checkpoints, and the event log during
+//! runs.
 
 use std::sync::Arc;
 
@@ -46,9 +47,30 @@ async fn done_server() -> ResponsesServer {
     ResponsesServer::start(|index, _| Some(complete_turn(&format!("c{index}"), "done"))).await
 }
 
-/// A checkpoint refers to each run's task file instead of holding the task
-/// (the conversation is stored once), stays pretty-printed, and a resume
-/// reads the tasks back from the files.
+/// The task version files of task `id`, relative to the run directory.
+fn versions(workspace: &Workspace, id: uuid::Uuid) -> Vec<String> {
+    let mut names = std::fs::read_dir(run_dir(workspace).join(format!("agents/{id}")))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| format!("agents/{id}/{}", entry.file_name().to_string_lossy()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+fn task_file_of(checkpoint: &Value) -> String {
+    checkpoint["agent_runs"][0]["task_file"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// A checkpoint refers to the version of each run's task it recorded
+/// instead of holding the task (the conversation is stored once), stays
+/// pretty-printed, and a resume reads the tasks back from the files.
 #[tokio::test]
 async fn checkpoints_refer_to_task_files_and_resume_reads_them() {
     let workspace = Workspace::new();
@@ -63,9 +85,14 @@ async fn checkpoints_refer_to_task_files_and_resume_reads_them() {
     assert!(checkpoint.get("agent_results").is_none(), "{checkpoint}");
     let runs = checkpoint["agent_runs"].as_array().unwrap();
     assert_eq!(runs.len(), 1);
+    let task_file = task_file_of(&checkpoint);
+    assert!(
+        task_file.starts_with(&format!("agents/{}/", result.agent_run_id)),
+        "{task_file}"
+    );
     assert_eq!(
-        runs[0]["task_file"],
-        format!("agents/{}.json", result.agent_run_id)
+        versions(&workspace, result.agent_run_id),
+        std::slice::from_ref(&task_file)
     );
     assert!(
         !checkpoint.to_string().contains("Write it."),
@@ -91,8 +118,7 @@ async fn checkpoints_refer_to_task_files_and_resume_reads_them() {
         result.task.conversation.messages.len()
     );
     // A missing task file is a clear error.
-    std::fs::remove_file(run_dir(&workspace).join(format!("agents/{}.json", result.agent_run_id)))
-        .unwrap();
+    std::fs::remove_file(run_dir(&workspace).join(&task_file)).unwrap();
     let error = builder(&server, &workspace)
         .persistence(config())
         .resume_from(&path)
@@ -154,11 +180,7 @@ async fn a_checkpoint_holding_its_tasks_still_resumes() {
     );
     workflow.checkpoint().await.unwrap();
     let (_, checkpoint) = latest(&workspace);
-    assert_eq!(
-        checkpoint["agent_runs"][0]["task_file"],
-        format!("agents/{}.json", task.id)
-    );
-    assert!(run.join(format!("agents/{}.json", task.id)).is_file());
+    assert_eq!(versions(&workspace, task.id), [task_file_of(&checkpoint)]);
     let state: WorkflowState = serde_json::from_value(checkpoint).unwrap();
     assert_eq!(
         state.agent_results_in(&run).unwrap()[0].agent_run_id,
@@ -198,6 +220,232 @@ async fn checkpoints_are_kept_unless_retention_is_set() {
                 assert!(path.is_file());
             }
         }
+    }
+}
+
+/// Each checkpoint refers to the task versions it saw: a task that runs on
+/// gets a new version, and an older checkpoint still reads the task as it
+/// was then. (Checkpoints once shared one task file, which held its latest
+/// state.)
+#[tokio::test]
+async fn an_older_checkpoint_reads_the_task_as_it_was() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let config = || PersistenceConfig::new(run_dir(&workspace));
+    let workflow = builder(&server, &workspace)
+        .persistence(config())
+        .build()
+        .unwrap();
+    let first = workflow.run_agent("coder", "Write it.").await.unwrap();
+    let (first_checkpoint, first_json) = latest(&workspace);
+    let second = workflow
+        .continue_agent(&first, "Now test it.")
+        .await
+        .unwrap();
+    let (second_checkpoint, second_json) = latest(&workspace);
+    assert_ne!(first_checkpoint, second_checkpoint);
+    assert_ne!(task_file_of(&first_json), task_file_of(&second_json));
+    assert_eq!(versions(&workspace, first.agent_run_id).len(), 2);
+    drop(workflow);
+
+    for (checkpoint, expected) in [(&first_checkpoint, &first), (&second_checkpoint, &second)] {
+        let resumed = builder(&server, &workspace)
+            .persistence(config())
+            .resume_from(checkpoint)
+            .build()
+            .unwrap();
+        let restored = resumed.agent_result(first.agent_run_id).unwrap();
+        assert_eq!(
+            restored.task.conversation.messages.len(),
+            expected.task.conversation.messages.len()
+        );
+        assert_eq!(
+            serde_json::to_string(&restored.task.conversation.messages)
+                .unwrap()
+                .contains("Now test it."),
+            std::ptr::eq(expected, &second)
+        );
+    }
+}
+
+/// A task that didn't change is written once: every checkpoint refers to
+/// the same version, in this process and after a resume.
+#[tokio::test]
+async fn an_unchanged_task_is_written_once() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let config = || PersistenceConfig::new(run_dir(&workspace));
+    let workflow = builder(&server, &workspace)
+        .persistence(config())
+        .build()
+        .unwrap();
+    let result = workflow.run_agent("coder", "Write it.").await.unwrap();
+    let saved = versions(&workspace, result.agent_run_id);
+    assert_eq!(saved.len(), 1);
+    let modified = || {
+        std::fs::metadata(run_dir(&workspace).join(&saved[0]))
+            .unwrap()
+            .modified()
+            .unwrap()
+    };
+    let written = modified();
+    for _ in 0..2 {
+        workflow.checkpoint().await.unwrap();
+        assert_eq!(task_file_of(&latest(&workspace).1), saved[0]);
+    }
+    let (path, _) = latest(&workspace);
+    drop(workflow);
+    let resumed = builder(&server, &workspace)
+        .persistence(config())
+        .resume_from(&path)
+        .build()
+        .unwrap();
+    resumed.checkpoint().await.unwrap();
+    assert_eq!(task_file_of(&latest(&workspace).1), saved[0]);
+    assert_eq!(versions(&workspace, result.agent_run_id), saved);
+    assert_eq!(modified(), written, "not written again");
+}
+
+/// With retention, the task versions only deleted checkpoints referred to
+/// are deleted too; those a kept checkpoint refers to stay, and so do the
+/// task files of older versions (`agents/<id>.json`).
+#[tokio::test]
+async fn retention_deletes_only_task_versions_no_kept_checkpoint_refers_to() {
+    for retain in [1, 2] {
+        let workspace = Workspace::new();
+        let server = done_server().await;
+        std::fs::create_dir_all(run_dir(&workspace).join("agents")).unwrap();
+        let legacy = run_dir(&workspace).join(format!("agents/{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&legacy, "{}").unwrap();
+        let workflow = builder(&server, &workspace)
+            .persistence(PersistenceConfig::new(run_dir(&workspace)).retain_checkpoints(retain))
+            .build()
+            .unwrap();
+        let first = workflow.run_agent("coder", "Write it.").await.unwrap();
+        let first_version = task_file_of(&latest(&workspace).1);
+        workflow
+            .continue_agent(&first, "Now test it.")
+            .await
+            .unwrap();
+        let second_version = task_file_of(&latest(&workspace).1);
+        let kept = versions(&workspace, first.agent_run_id);
+        if retain == 1 {
+            assert_eq!(kept, [second_version], "the first checkpoint is gone");
+        } else {
+            let mut both = vec![first_version, second_version];
+            both.sort();
+            assert_eq!(kept, both);
+        }
+        assert!(legacy.is_file());
+    }
+}
+
+/// A task state that can't be saved doesn't fail the run: the checkpoint
+/// is still written, refers to the task's last saved version, and records
+/// that its latest state is missing; a resume from it says so and restores
+/// the task as last saved. The next checkpoint saves the latest state. A
+/// task never saved is left out of the checkpoint (and not restored).
+#[tokio::test]
+async fn a_task_state_that_cant_be_saved_is_retried_and_reported() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let config = || PersistenceConfig::new(run_dir(&workspace));
+    let workflow = builder(&server, &workspace)
+        .persistence(config())
+        .build()
+        .unwrap();
+    let failing = || {
+        workflow
+            .engine
+            .persistence()
+            .unwrap()
+            .fail_task_writes
+            .clone()
+    };
+    let first = workflow.run_agent("coder", "Write it.").await.unwrap();
+    let saved = task_file_of(&latest(&workspace).1);
+
+    failing().store(true, std::sync::atomic::Ordering::SeqCst);
+    let second = workflow
+        .continue_agent(&first, "Now test it.")
+        .await
+        .expect("the run doesn't fail");
+    assert_eq!(second.status, AgentRunStatus::Completed);
+    let (stale_path, checkpoint) = latest(&workspace);
+    assert_eq!(task_file_of(&checkpoint), saved, "the last saved version");
+    let missing = &checkpoint["missing_task_states"][0];
+    assert_eq!(missing["agent_run_id"], json!(first.agent_run_id));
+    assert_eq!(missing["status"], "Completed");
+    assert_eq!(missing["last_saved"], json!(saved));
+    assert!(
+        missing["reason"]
+            .as_str()
+            .unwrap()
+            .contains("injected task write failure")
+    );
+    let state: WorkflowState = serde_json::from_value(checkpoint).unwrap();
+    let (results, warnings) = state
+        .agent_results_with_warnings(&run_dir(&workspace))
+        .unwrap();
+    assert_eq!(
+        results[0].task.conversation.messages.len(),
+        first.task.conversation.messages.len(),
+        "restored as last saved"
+    );
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].contains(&format!(
+            "The checkpoint lacks the latest state of agent 'coder' ({})",
+            first.agent_run_id
+        )),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings[0].contains("resumes as last saved"),
+        "{warnings:?}"
+    );
+
+    // Writing works again: the next checkpoint saves the latest state.
+    failing().store(false, std::sync::atomic::Ordering::SeqCst);
+    workflow.checkpoint().await.unwrap();
+    let (_, checkpoint) = latest(&workspace);
+    assert!(checkpoint.get("missing_task_states").is_none());
+    assert_ne!(task_file_of(&checkpoint), saved);
+    assert_eq!(versions(&workspace, first.agent_run_id).len(), 2);
+
+    // A task never saved is left out, and not restored.
+    failing().store(true, std::sync::atomic::Ordering::SeqCst);
+    let unsaved = workflow.run_agent("coder", "Write another.").await.unwrap();
+    let (path, checkpoint) = latest(&workspace);
+    assert_eq!(checkpoint["agent_runs"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        checkpoint["missing_task_states"][0]["agent_run_id"],
+        json!(unsaved.agent_run_id)
+    );
+    assert!(
+        checkpoint["missing_task_states"][0]
+            .get("last_saved")
+            .is_none()
+    );
+    let state: WorkflowState = serde_json::from_value(checkpoint).unwrap();
+    let (results, warnings) = state
+        .agent_results_with_warnings(&run_dir(&workspace))
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("so it is not restored")),
+        "{warnings:?}"
+    );
+    drop(workflow);
+    // Resuming from such a checkpoint works.
+    for checkpoint in [&stale_path, &path] {
+        builder(&server, &workspace)
+            .persistence(config())
+            .resume_from(checkpoint)
+            .build()
+            .unwrap();
     }
 }
 

@@ -1366,9 +1366,25 @@ impl WorkflowBuilder {
         let persistence = self
             .persistence_config
             .map(|config| PersistenceManager::new(config, workflow_run_id));
-        if let (Some(persistence), Some(state)) = (&persistence, &resume_state) {
-            // Their task files hold these tasks already.
-            persistence.mark_tasks_saved(state.agent_runs.iter().map(|run| run.agent_run_id));
+        if let (Some(persistence), Some(state), Some(path)) =
+            (&persistence, &resume_state, &self.resume_from)
+        {
+            // The tasks were loaded from these versions, which later
+            // checkpoints refer to when they are in this run directory.
+            let run_dir = path.parent().unwrap_or(std::path::Path::new("."));
+            let same_dir = |a: &std::path::Path, b: &std::path::Path| {
+                a.canonicalize()
+                    .ok()
+                    .is_some_and(|a| Some(a) == b.canonicalize().ok())
+            };
+            if same_dir(run_dir, &persistence.config().checkpoint_dir) {
+                persistence.mark_tasks_saved(
+                    state
+                        .agent_runs
+                        .iter()
+                        .map(|run| (run.agent_run_id, run.task_file.clone())),
+                );
+            }
         }
         let durable_store = persistence.as_ref().map(PersistenceManager::durable_store);
 

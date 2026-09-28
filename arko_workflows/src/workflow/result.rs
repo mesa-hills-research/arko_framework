@@ -53,6 +53,53 @@ impl AgentRunStatus {
     }
 }
 
+/// Puts `result` in `results`, replacing an earlier result of its task.
+pub(crate) fn upsert_result(results: &mut Vec<AgentResult>, result: AgentResult) {
+    match results
+        .iter_mut()
+        .find(|existing| existing.agent_run_id == result.agent_run_id)
+    {
+        Some(existing) => *existing = result,
+        None => results.push(result),
+    }
+}
+
+impl AgentResult {
+    /// The result a run whose task ended as `task` records.
+    pub(crate) fn of_task(agent_name: String, task: arko_agents::Task) -> Self {
+        use arko_agents::TaskState;
+        let status = AgentRunStatus::of_state(&task.current_state);
+        let (summary, error) = match &task.current_state {
+            TaskState::Completed { summary } => (summary.clone(), None),
+            TaskState::Cancelled { reason }
+            | TaskState::Failed { reason }
+            | TaskState::Interrupted { reason } => (String::new(), Some(reason.clone())),
+            TaskState::AwaitingUserResponse { questions } => {
+                (String::new(), Some(questions.clone()))
+            }
+            TaskState::AwaitingToolApproval { .. }
+            | TaskState::AwaitingBatchToolApproval { .. }
+            | TaskState::AwaitingErrorRecoveryApproval { .. } => (
+                String::new(),
+                crate::policy::AgentPause::of(&task.current_state)
+                    .map(|pause| format!("Paused, {pause}")),
+            ),
+            state => (
+                String::new(),
+                Some(format!("Agent ended in non-terminal state: {state:?}")),
+            ),
+        };
+        Self {
+            agent_run_id: task.id,
+            agent_name,
+            status,
+            summary,
+            error,
+            task,
+        }
+    }
+}
+
 /// Result of a single agent run within a workflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentResult {

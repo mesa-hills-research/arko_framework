@@ -429,15 +429,13 @@ fn approve_nested_completions(
     calls
         .iter()
         .map(|call| {
-            (call.tool_name == COMPLETE_TASK_TOOL_NAME).then(|| {
-                (
-                    call.tool_call_id,
-                    ToolApprovalDecision::Approve {
-                        custom_tool_output: None,
-                        message_to_agent: None,
-                    },
-                )
-            })
+            (call.tool_name == COMPLETE_TASK_TOOL_NAME).then_some((
+                call.tool_call_id,
+                ToolApprovalDecision::Approve {
+                    custom_tool_output: None,
+                    message_to_agent: None,
+                },
+            ))
         })
         .collect()
 }
@@ -1149,7 +1147,22 @@ async fn wind_down(
 /// records the final task, and maps it to the call's outcome. Once the run
 /// is stopped the outcome is the stop's error; the agent's result is
 /// recorded either way.
-pub(crate) async fn drive_to_result(
+///
+/// Boxed: an agent run's driver is large, and its callers (including a
+/// verifier's run inside the agent runtime's tool call) keep only a
+/// pointer to it on the stack.
+pub(crate) fn drive_to_result<'a>(
+    run: StartedRun,
+    ctx: &'a Arc<SharedContext>,
+    persistence: Option<&'a Arc<PersistenceManager>>,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<AgentResult, WorkflowError>> + Send + 'a>,
+> {
+    Box::pin(drive_run_to_result(run, ctx, persistence))
+}
+
+/// [`drive_to_result`], unboxed.
+async fn drive_run_to_result(
     run: StartedRun,
     ctx: &Arc<SharedContext>,
     persistence: Option<&Arc<PersistenceManager>>,
@@ -1387,6 +1400,12 @@ pub(crate) async fn save_stop_checkpoint(
     }
 }
 
+/// Records `result` in the run's results, replacing an earlier result of
+/// its task (without persistence; see [`PersistenceManager::record_result`]).
+fn record_result(ctx: &SharedContext, result: AgentResult) {
+    crate::workflow::result::upsert_result(&mut ctx.agent_results.write(), result);
+}
+
 /// Records an agent run that stopped: its result (replacing an earlier one
 /// of the same task), the messages it holds (acknowledged when it completed;
 /// `prompt_ids` are the messages its prompt presented), its lifecycle hook,
@@ -1429,71 +1448,24 @@ pub(crate) async fn finalize_agent_task(
         matches!(task.current_state, TaskState::Completed { .. }),
     );
     let pause = AgentPause::of(&task.current_state);
-    let (status, summary, error, hook_point) = match &task.current_state {
-        TaskState::Completed { summary } => (
-            crate::workflow::result::AgentRunStatus::Completed,
-            summary.clone(),
-            None,
-            HookPoint::PostAgentCompletion,
-        ),
-        TaskState::Cancelled { reason } => (
-            crate::workflow::result::AgentRunStatus::Cancelled,
-            String::new(),
-            Some(reason.clone()),
-            HookPoint::PostAgentCancellation,
-        ),
-        TaskState::Failed { reason } => (
-            crate::workflow::result::AgentRunStatus::Failed,
-            String::new(),
-            Some(reason.clone()),
-            HookPoint::PostAgentFailure,
-        ),
-        TaskState::Interrupted { reason } => (
-            crate::workflow::result::AgentRunStatus::Interrupted,
-            String::new(),
-            Some(reason.clone()),
-            HookPoint::PostAgentInterruption,
-        ),
-        TaskState::AwaitingUserResponse { questions } => (
-            crate::workflow::result::AgentRunStatus::WaitingForInput,
-            String::new(),
-            Some(questions.clone()),
-            HookPoint::OnUserInputRequired,
-        ),
-        TaskState::AwaitingToolApproval { .. }
-        | TaskState::AwaitingBatchToolApproval { .. }
-        | TaskState::AwaitingErrorRecoveryApproval { .. } => (
-            crate::workflow::result::AgentRunStatus::Paused,
-            String::new(),
-            pause.as_ref().map(|pause| format!("Paused, {pause}")),
-            HookPoint::OnAgentPaused,
-        ),
-        state => (
-            crate::workflow::result::AgentRunStatus::Interrupted,
-            String::new(),
-            Some(format!("Agent ended in non-terminal state: {state:?}")),
-            HookPoint::PostAgentInterruption,
-        ),
+    let result = AgentResult::of_task(agent_name.clone(), task);
+    let hook_point = match result.status {
+        AgentRunStatus::Completed => HookPoint::PostAgentCompletion,
+        AgentRunStatus::Cancelled => HookPoint::PostAgentCancellation,
+        AgentRunStatus::Failed => HookPoint::PostAgentFailure,
+        AgentRunStatus::Interrupted => HookPoint::PostAgentInterruption,
+        AgentRunStatus::WaitingForInput => HookPoint::OnUserInputRequired,
+        AgentRunStatus::Paused => HookPoint::OnAgentPaused,
     };
-
-    let result = AgentResult {
-        agent_run_id,
-        agent_name: agent_name.clone(),
-        status,
-        summary: summary.clone(),
-        error: error.clone(),
-        task,
-    };
-    {
-        let mut results = ctx.agent_results.write();
-        if let Some(existing) = results
-            .iter_mut()
-            .find(|existing| existing.agent_run_id == agent_run_id)
-        {
-            *existing = result.clone();
-        } else {
-            results.push(result.clone());
-        }
+    let summary = result.summary.clone();
+    let error = result.error.clone();
+    // With persistence, its task is saved first (a failure is logged and
+    // retried at the next checkpoint; it never fails the run).
+    // (Boxed: saving's state stays off the stack of the call driving the
+    // agent.)
+    match persistence {
+        Some(persistence) => Box::pin(persistence.record_result(ctx, result.clone())).await,
+        None => record_result(ctx, result.clone()),
     }
 
     let hook_result = fire_hooks_on_context(ctx, hook_point, |hook| {
@@ -1531,9 +1503,15 @@ pub(crate) async fn finalize_agent_task(
         }
     });
 
-    if let Some(persistence) = persistence {
-        persistence.save_agent_task(&result.task).await?;
-        persistence.auto_checkpoint(ctx).await?;
+    // A checkpoint that can't be saved is logged; the next one tries again.
+    if let Some(persistence) = persistence
+        && let Err(error) = Box::pin(persistence.auto_checkpoint(ctx)).await
+    {
+        log::warn!(
+            "Workflow '{}': could not save the checkpoint after agent '{}' ({agent_run_id}) ended: {error}. The next checkpoint tries again.",
+            ctx.workflow_name,
+            result.agent_name
+        );
     }
 
     hook_result?;
@@ -1547,6 +1525,11 @@ pub(crate) struct WorkflowEngine {
 }
 
 impl WorkflowEngine {
+    #[cfg(test)]
+    pub(crate) fn persistence(&self) -> Option<&Arc<PersistenceManager>> {
+        self.persistence.as_ref()
+    }
+
     fn setup_skills(
         config: &mut AgentConfig,
         registry: &mut ToolRegistry,

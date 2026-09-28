@@ -556,7 +556,8 @@ async fn a_refusal_from_the_fallback_model_stops_the_task() {
 #[tokio::test(start_paused = true)]
 async fn a_failed_fallback_request_is_recovered_from_by_its_own_error() {
     let dropped = || ai::Error::StreamTruncated("connection reset".into());
-    let cases: [(fn() -> ai::Error, u32, Option<ErrorRecoveryCause>); 5] = [
+    type Case = (fn() -> ai::Error, u32, Option<ErrorRecoveryCause>);
+    let cases: [Case; 5] = [
         (dropped, 3, None),
         (|| provider_failure(503, None), 3, None),
         (
