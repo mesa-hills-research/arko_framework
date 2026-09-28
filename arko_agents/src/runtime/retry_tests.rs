@@ -813,6 +813,42 @@ async fn full_runtime_capacity_recovers_after_old_limits_and_completes_once() {
     assert_eq!((retries, tools), (12, 1));
 }
 
+/// A retried response that runs a long time and then fails is retried: the
+/// budget the first failure started ended when the provider accepted the
+/// retry. (Real time, short durations.)
+#[tokio::test]
+async fn a_failure_late_in_a_long_retried_response_is_retried() {
+    use futures::StreamExt;
+    let (mut agent, _events, _commands) = harness();
+    agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
+    agent
+        .task
+        .agent_config
+        .tool_config
+        .default_auto_approve_tool_use = true;
+    let retry = &mut agent.task.agent_config.llm_retry_config;
+    retry.max_elapsed_ms = 200;
+    retry.initial_delay_ms = 10;
+    retry.max_delay_ms = 10;
+    let scripted = agent.scripted_responses.get_mut().unwrap();
+    scripted.push_back(Err(provider_failure(503, None)));
+    scripted.push_back(Ok(futures::stream::once(async {
+        tokio_sleep(Duration::from_millis(500)).await;
+        Err(ai::Error::StreamTruncated("the connection dropped".into()))
+    })
+    .boxed()));
+    scripted.push_back(Ok(futures::stream::iter([Ok(complete_response())]).boxed()));
+    let task = timeout(Duration::from_secs(10), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+}
+
 /// In the full runtime, a retried stream that runs past the elapsed budget
 /// is not cut off: it completes and the task goes on. (Real time, short
 /// durations.)

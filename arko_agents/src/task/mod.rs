@@ -216,6 +216,11 @@ pub struct Task {
     /// Persist them together so image attachments retain their call correlation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_native_tool_results: Vec<arko_ai::ToolResult>,
+    /// Native calls of the last turn that haven't run yet, by their
+    /// runtime call id: the calls awaiting approval (those the awaiting
+    /// state lists) and the auto-approved calls held until an earlier call's
+    /// approval is decided (see
+    /// [`AgentToolConfig`](crate::agent_config::AgentToolConfig)).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub pending_native_tool_calls: HashMap<Uuid, arko_ai::ToolCall>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

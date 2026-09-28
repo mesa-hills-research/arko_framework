@@ -283,6 +283,58 @@ async fn a_call_waits_for_an_earlier_call_awaiting_approval() {
     }
 }
 
+/// A call held behind a call awaiting approval gets its one result when the
+/// wait ends another way: a cancellation answers both as not run.
+#[tokio::test]
+async fn a_held_call_is_answered_when_the_approval_wait_is_cancelled() {
+    let workspace = workspace();
+    let record = Arc::new(Record::default());
+    let mut registry = probes(&record);
+    registry.register(Arc::new(Probe::new("probe_gate", false, &record)));
+    let mut config = config(ToolCallingMode::Native, &["probe_gate", "probe_write"]);
+    config.tool_config.tool_specific_configs.insert(
+        "probe_gate".into(),
+        PerToolConfigOverride {
+            auto_approve_tool_use: Some(false),
+            ..Default::default()
+        },
+    );
+    let (mut agent, mut events, commands) = agent(config, registry, &workspace);
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(turn(vec![
+            probe_call("g1", "probe_gate"),
+            probe_call("w1", "probe_write"),
+        ]));
+    let run = tokio::spawn(agent.run());
+    loop {
+        let event = timeout(Duration::from_secs(10), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if matches!(event, AgentEvent::BatchToolCallAwaitingApproval { .. }) {
+            break;
+        }
+    }
+    commands.send(UserCommand::CancelTask).await.unwrap();
+    let task = timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Cancelled { .. }));
+    assert_calls_paired(&task.conversation);
+    for id in ["g1", "w1"] {
+        let result = &result_for(&task.conversation, id)[0];
+        assert_eq!(result.output, TASK_CANCELLED_CALL);
+    }
+    assert!(record.log.lock().unwrap().is_empty());
+    assert!(task.pending_native_tool_calls.is_empty());
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
 /// A per-tool override makes a tool parallel-safe or not.
 #[tokio::test]
 async fn a_per_tool_override_decides_parallel_safety() {

@@ -614,8 +614,9 @@ Recovery ends when the attempts or the elapsed budget run out or the error canno
 retried. The elapsed budget, counted from the first failure of an episode, decides
 whether another attempt is made and bounds the waits between attempts; it never cuts off
 a request that has been sent. A request runs until it completes or fails, or the host
-cancels or suspends the task, however long the model reasons; a failure after the budget
-is spent then ends recovery. Attempt limits count the first request, and zero counts as one. With the
+cancels or suspends the task, however long the model reasons. Once the provider accepts a
+request (its response starts), the outage is over and the budget stops counting: a
+failure later in that response starts a new one, while the attempt count goes on. Attempt limits count the first request, and zero counts as one. With the
 defaults, retries back off from about 2 seconds to the 64-second cap, so an outage is
 retried for up to the 5-minute elapsed budget before the task pauses.
 

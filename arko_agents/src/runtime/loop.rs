@@ -2422,6 +2422,12 @@ impl AgentLoop {
             let Some(mut response_stream) = self.run_llm_attempt(request).await? else {
                 continue 'main_loop;
             };
+            // The provider accepted the request, so an outage is over: its
+            // elapsed budget stops counting, and a failure later in this
+            // stream, however long the response ran, starts a new one
+            // (attempts still count).
+            self.recovery_started = None;
+            self.paused_recovery_elapsed = None;
 
             let mut raw_events_for_turn: Vec<RawParserEvent> = Vec::new();
             let mut parser = if !self.is_native_mode() {
@@ -3637,8 +3643,8 @@ impl AgentLoop {
     }
 
     /// The position of `call` in the turn it belongs to (the conversation's
-    /// last assistant message), matched by its provider id; calls without
-    /// one sort last, in the order given.
+    /// last assistant message), matched by its provider id, or without one
+    /// by its name and arguments; a call not found sorts last.
     fn turn_position(&self, call: &ai::ToolCall) -> usize {
         self.task
             .conversation
@@ -3647,10 +3653,15 @@ impl AgentLoop {
             .rev()
             .find(|message| message.role == ai::Role::Assistant)
             .and_then(|turn| {
-                call.id.as_ref().and_then(|id| {
-                    turn.tool_calls
-                        .iter()
-                        .position(|turn_call| turn_call.id.as_ref() == Some(id))
+                turn.tool_calls.iter().position(|turn_call| match &call.id {
+                    Some(id) => turn_call.id.as_ref() == Some(id),
+                    // Without an id, the call with the same name and
+                    // arguments.
+                    None => {
+                        turn_call.id.is_none()
+                            && turn_call.name == call.name
+                            && turn_call.arguments == call.arguments
+                    }
                 })
             })
             .unwrap_or(usize::MAX)

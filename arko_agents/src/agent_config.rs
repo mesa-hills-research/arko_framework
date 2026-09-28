@@ -595,7 +595,9 @@ impl Default for LLMErrorPolicy {
 /// Timing limits shared by model-call and proactive token-refresh recovery.
 /// The elapsed budget starts at the first failure of an episode and limits
 /// the waits between attempts and the decision to make another: a failure
-/// after it is spent ends recovery. It never cuts off a request in flight,
+/// after it is spent ends recovery. A request the provider accepts (its
+/// response starts) ends the budget; a failure later in that response starts
+/// a new one. It never cuts off a request in flight,
 /// which runs until it completes, fails, or the host cancels or suspends the
 /// task (the opt-in `stream_idle_timeout_ms` is the only limit on a quiet
 /// stream). Explicit capacity errors may opt into a separate indefinite wait
