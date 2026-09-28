@@ -610,7 +610,11 @@ the timing:
 | `PauseAndAwaitApproval` | Waits in `AwaitingErrorRecoveryApproval` after the first failure. |
 
 Recovery ends when the attempts or the elapsed budget run out or the error cannot be
-retried. Attempt limits count the first request, and zero counts as one. With the
+retried. The elapsed budget, counted from the first failure of an episode, decides
+whether another attempt is made and bounds the waits between attempts; it never cuts off
+a request that has been sent. A request runs until it completes or fails, or the host
+cancels or suspends the task, however long the model reasons; a failure after the budget
+is spent then ends recovery. Attempt limits count the first request, and zero counts as one. With the
 defaults, retries back off from about 2 seconds to the 64-second cap, so an outage is
 retried for up to the 5-minute elapsed budget before the task pauses.
 
@@ -637,7 +641,7 @@ provider codes (such as quota exhaustion and invalid refresh grants) end recover
 | --- | --- | --- |
 | `initial_delay_ms` | 2,000 | First backoff delay. |
 | `max_delay_ms` | 64,000 | Cap of the exponential backoff. |
-| `max_elapsed_ms` | 300,000 | Recovery budget from the first failure, including waits, token refreshes, requests, and streams. |
+| `max_elapsed_ms` | 300,000 | Recovery budget from the first failure: it limits the waits between attempts and the decision to try again, never a request in flight. |
 | `jitter` | `true` | Each backoff delay is drawn between half and all of its capped value. |
 | `rate_limit_retry` | On | Waits for short rate limits and capacity errors; see below. |
 | `capacity_retry` | `None` | Opt-in indefinite waits for capacity errors. |

@@ -1255,21 +1255,18 @@ impl AgentLoop {
         Ok(true)
     }
 
-    /// Refresh and model stream initialization share one attempt and deadline.
+    /// Refresh and model stream initialization share one attempt. A request
+    /// once sent runs until it completes or fails, or the host cancels or
+    /// suspends the task: the elapsed recovery budget never cuts it off.
     async fn run_llm_attempt<T>(
         &mut self,
         operation: impl std::future::Future<Output = Result<T, ai::Error>>,
     ) -> Result<Option<T>, ArkoAgentsError> {
         self.llm_interaction_attempts = self.llm_interaction_attempts.saturating_add(1);
-        let deadline = self.recovery_deadline();
         tokio::pin!(operation);
         loop {
             tokio::select! {
                 biased;
-                _ = wait_for_recovery_deadline(deadline) => {
-                    self.finish_llm_recovery("Elapsed model recovery budget exhausted during request.".into(), None).await?;
-                    return Ok(None);
-                }
                 command = self.command_receiver.recv() => {
                     if self.handle_recovery_command(command).await? { return Ok(None); }
                 }
@@ -2415,19 +2412,12 @@ impl AgentLoop {
             let mut native_stream_call_ids: HashMap<usize, (Uuid, String)> = HashMap::new();
             let mut streamed_refusal: Option<ai::Refusal> = None;
 
-            let stream_recovery_deadline = self.recovery_deadline();
+            // The stream runs until it ends or fails, or the host stops the
+            // task; no recovery budget cuts it off (only arko_ai's opt-in
+            // stream idle timeout can).
             loop {
                 tokio::select! {
                     biased;
-                    _ = wait_for_recovery_deadline(stream_recovery_deadline) => {
-                        if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
-                            self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
-                        }
-                        self.reject_announced_calls(&mut native_stream_call_ids, INTERRUPTED_CALL).await?;
-                        self.finish_llm_recovery("Elapsed model recovery budget exhausted during stream.".into(), None).await?;
-                        had_stream_error = true;
-                        break;
-                    }
                     maybe_cmd = self.command_receiver.recv() => {
                         match maybe_cmd {
                             Some(UserCommand::CancelTask) => {
@@ -4158,7 +4148,8 @@ impl AgentLoop {
 
     /// Waits until `retry_at` before a retry, handling commands; the task is
     /// then in progress again. An ordinary recovery deadline that passes
-    /// first ends recovery.
+    /// first ends recovery: the elapsed budget limits the waits between
+    /// attempts and the decision to make another, never a request in flight.
     async fn wait_before_retry(
         &mut self,
         retry_at: tokio::time::Instant,

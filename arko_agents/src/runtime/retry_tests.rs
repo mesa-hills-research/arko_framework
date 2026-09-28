@@ -407,23 +407,41 @@ async fn excessive_server_delay_stops_without_retrying_early() {
     ));
 }
 
-#[tokio::test(start_paused = true)]
-async fn elapsed_budget_interrupts_a_hung_retry_and_includes_request_time() {
+/// The elapsed budget never cuts off a request in flight: a retried request
+/// that runs past it completes. It still decides whether to try again: a
+/// failure after it is spent ends recovery. (Real time, short durations.)
+#[tokio::test]
+async fn a_retried_request_past_the_elapsed_budget_still_completes() {
     let (mut agent, _events, _commands) = harness();
-    agent.task.agent_config.llm_retry_config.max_elapsed_ms = 1000;
-    let started = tokio::time::Instant::now();
+    let retry = &mut agent.task.agent_config.llm_retry_config;
+    retry.max_elapsed_ms = 200;
+    retry.initial_delay_ms = 10;
+    retry.max_delay_ms = 10;
     agent
         .run_llm_attempt::<()>(async { Err(provider_failure(503, None)) })
         .await
         .unwrap();
-    agent
-        .run_llm_attempt(std::future::pending::<Result<(), ai::Error>>())
+    assert!(matches!(agent.task.current_state, TaskState::InProgress));
+    let started = std::time::Instant::now();
+    let answered = agent
+        .run_llm_attempt(async {
+            tokio_sleep(Duration::from_millis(500)).await;
+            Ok("answered")
+        })
         .await
         .unwrap();
-    assert_eq!(started.elapsed(), Duration::from_secs(1));
+    assert_eq!(answered, Some("answered"));
+    assert!(started.elapsed() >= Duration::from_millis(500));
+    assert!(matches!(agent.task.current_state, TaskState::InProgress));
+    // Past the budget, another failure ends recovery without a retry.
+    agent
+        .run_llm_attempt::<()>(async { Err(provider_failure(503, None)) })
+        .await
+        .unwrap();
     assert!(matches!(
         agent.task.current_state,
-        TaskState::AwaitingErrorRecoveryApproval { .. }
+        TaskState::AwaitingErrorRecoveryApproval { ref error_message }
+            if error_message.contains("elapsed recovery budget")
     ));
 }
 
@@ -795,60 +813,54 @@ async fn full_runtime_capacity_recovers_after_old_limits_and_completes_once() {
     assert_eq!((retries, tools), (12, 1));
 }
 
-#[tokio::test(start_paused = true)]
-async fn full_runtime_bounds_a_retry_stream_and_preserves_partial_text() {
+/// In the full runtime, a retried stream that runs past the elapsed budget
+/// is not cut off: it completes and the task goes on. (Real time, short
+/// durations.)
+#[tokio::test]
+async fn full_runtime_lets_a_retried_stream_run_past_the_elapsed_budget() {
     use futures::StreamExt;
-    let (mut agent, mut events, commands) = harness();
-    agent.task.agent_config.llm_retry_config.max_elapsed_ms = 1000;
+    let (mut agent, mut events, _commands) = harness();
+    agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
     agent
-        .scripted_responses
-        .get_mut()
-        .unwrap()
-        .push_back(Err(provider_failure(503, None)));
-    agent
-        .scripted_responses
-        .get_mut()
-        .unwrap()
-        .push_back(Ok(futures::stream::iter([Ok(ai::StreamEvent::TextChunk(
-            "partial work".into(),
-        ))])
-        .chain(futures::stream::pending())
-        .boxed()));
-    let started = tokio::time::Instant::now();
-    let runner = tokio::spawn(agent.run());
-    timeout(Duration::from_secs(2), async {
-        loop {
-            match events.recv().await.unwrap() {
-                AgentEvent::ErrorEncountered {
-                    requires_approval_to_retry: true,
-                    error_message,
-                    ..
-                } => {
-                    assert!(error_message.contains("budget exhausted during stream"));
-                    break;
-                }
-                AgentEvent::ToolResult { .. } | AgentEvent::UsageReported(_) => {
-                    panic!("incomplete stream must not execute tools or invent usage")
-                }
-                _ => {}
-            }
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(started.elapsed(), Duration::from_secs(1));
-    commands.send(UserCommand::SuspendTask).await.unwrap();
-    let task = timeout(Duration::from_secs(1), runner)
+        .task
+        .agent_config
+        .tool_config
+        .default_auto_approve_tool_use = true;
+    let retry = &mut agent.task.agent_config.llm_retry_config;
+    retry.max_elapsed_ms = 200;
+    retry.initial_delay_ms = 10;
+    retry.max_delay_ms = 10;
+    let scripted = agent.scripted_responses.get_mut().unwrap();
+    scripted.push_back(Err(provider_failure(503, None)));
+    scripted.push_back(Ok(futures::stream::iter([Ok(ai::StreamEvent::TextChunk(
+        "reasoning at length".into(),
+    ))])
+    .chain(futures::stream::once(async {
+        tokio_sleep(Duration::from_millis(600)).await;
+        Ok(complete_response())
+    }))
+    .boxed()));
+    let started = std::time::Instant::now();
+    let task = timeout(Duration::from_secs(10), agent.run())
         .await
         .unwrap()
-        .unwrap()
         .unwrap();
-    assert!(task.conversation.messages.iter().any(|message| {
-        message
-            .content
-            .iter()
-            .any(|content| content.as_text() == Some("partial work"))
-    }));
+    assert!(started.elapsed() >= Duration::from_millis(600));
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    while let Ok(event) = events.try_recv() {
+        if let AgentEvent::ErrorEncountered {
+            requires_approval_to_retry: true,
+            error_message,
+            ..
+        } = event
+        {
+            panic!("recovery ended: {error_message}");
+        }
+    }
 }
 
 #[tokio::test(start_paused = true)]

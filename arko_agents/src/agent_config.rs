@@ -591,8 +591,13 @@ impl Default for LLMErrorPolicy {
 }
 
 /// Timing limits shared by model-call and proactive token-refresh recovery.
-/// The elapsed budget starts at the first failure and includes subsequent requests.
-/// Explicit capacity errors may opt into a separate indefinite wait under RetryThen* policies.
+/// The elapsed budget starts at the first failure of an episode and limits
+/// the waits between attempts and the decision to make another: a failure
+/// after it is spent ends recovery. It never cuts off a request in flight,
+/// which runs until it completes, fails, or the host cancels or suspends the
+/// task (the opt-in `stream_idle_timeout_ms` is the only limit on a quiet
+/// stream). Explicit capacity errors may opt into a separate indefinite wait
+/// under RetryThen* policies.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct LLMRetryConfig {

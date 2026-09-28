@@ -1132,10 +1132,11 @@ async fn a_pending_fallback_survives_a_restart() {
     assert!(task.fallback_for.is_none());
 }
 
-/// A recovery deadline that ends the fallback request names the refusal it
-/// was to answer.
+/// The elapsed recovery budget of an earlier failure doesn't cut off the
+/// fallback request: it waits for its answer until the host stops the task,
+/// and a suspended task keeps the fallback to make.
 #[tokio::test(start_paused = true)]
-async fn a_deadline_during_the_fallback_names_the_refusal() {
+async fn the_recovery_budget_does_not_cut_off_the_fallback_request() {
     let (mut agent, mut events, commands) = harness();
     native(&mut agent);
     agent.task.agent_config.llm_retry_config.max_elapsed_ms = 1000;
@@ -1146,28 +1147,27 @@ async fn a_deadline_during_the_fallback_names_the_refusal() {
     scripted.push_back(Ok(futures::stream::pending().boxed()));
     let runner = tokio::spawn(agent.run());
     loop {
-        if let AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
-            error_message,
-        }) = timeout(Duration::from_secs(60), events.recv())
+        if let AgentEvent::RefusalFallback { .. } = timeout(Duration::from_secs(60), events.recv())
             .await
             .unwrap()
             .unwrap()
         {
-            assert!(error_message.contains("refused"), "{error_message}");
-            assert!(
-                error_message.contains("fallback model could not answer"),
-                "{error_message}"
-            );
-            assert!(
-                error_message.contains("budget exhausted"),
-                "{error_message}"
-            );
             break;
         }
     }
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    while let Ok(event) = events.try_recv() {
+        assert!(
+            !matches!(
+                event,
+                AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+            ),
+            "{event:?}"
+        );
+    }
     commands.send(UserCommand::SuspendTask).await.unwrap();
     let task = runner.await.unwrap().unwrap();
-    assert!(task.fallback_for.is_none());
+    assert!(task.fallback_for.is_some());
     assert!(task.refused_input.is_some());
 }
 
