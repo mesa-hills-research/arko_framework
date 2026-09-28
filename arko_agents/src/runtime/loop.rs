@@ -310,6 +310,16 @@ impl AgentLoop {
     ) -> Self {
         let parsing_config = task.agent_config.get_tool_parsing_config();
         let throttle_ms = event_throttle_ms.unwrap_or(0);
+        // The opt-in stream idle timeout applies to this agent's requests
+        // only; clones of a client share its credentials.
+        let llm_client = match task.agent_config.llm_retry_config.stream_idle_timeout_ms {
+            Some(timeout) if timeout > 0 => Arc::new(
+                (*llm_client)
+                    .clone()
+                    .with_stream_idle_timeout(Duration::from_millis(timeout)),
+            ),
+            _ => llm_client,
+        };
         let now = Instant::now();
         // The tools offered are the only tools that run: a call to any other
         // one is answered as unavailable, in either tool calling mode.
@@ -4744,3 +4754,7 @@ mod tool_call_tests;
 #[cfg(test)]
 #[path = "injection_tests.rs"]
 mod injection_tests;
+
+#[cfg(test)]
+#[path = "network_tests.rs"]
+mod network_tests;

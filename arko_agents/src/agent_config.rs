@@ -417,6 +417,20 @@ pub struct LLMRetryConfig {
     /// `usage_limit_reached`, or a rate limit whose reset is further off than
     /// [`LLMRateLimitRetryConfig::max_wait_ms`]). Pauses by default.
     pub usage_limit_policy: UsageLimitPolicy,
+    /// Opt-in: cut a streamed model response off once no data has arrived
+    /// for this long (arko_ai's
+    /// [`LLMClient::with_stream_idle_timeout`](arko_ai::LLMClient::with_stream_idle_timeout),
+    /// applied to this agent's requests). `None`, the default, waits as long
+    /// as the connection stays open, and that is deliberate: models can
+    /// reason silently for a long time (GPT Pro models for over an hour),
+    /// and a stream may carry nothing until the reasoning ends. A value
+    /// shorter than that cuts healthy responses off; the cut surfaces as a
+    /// truncated stream, which ordinary recovery sends again, paying for the
+    /// work again. If you set one, make it generous (for example two hours).
+    /// Only the gaps between data count: there is no total deadline. Never
+    /// sent to the model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_idle_timeout_ms: Option<u64>,
 }
 
 impl Default for LLMRetryConfig {
@@ -429,6 +443,7 @@ impl Default for LLMRetryConfig {
             capacity_retry: None,
             rate_limit_retry: Some(LLMRateLimitRetryConfig::default()),
             usage_limit_policy: UsageLimitPolicy::default(),
+            stream_idle_timeout_ms: None,
         }
     }
 }
@@ -509,6 +524,15 @@ impl LLMRetryConfig {
         }
         if let Some(rate_limit) = &self.rate_limit_retry {
             rate_limit.validate()?;
+        }
+        if self
+            .stream_idle_timeout_ms
+            .is_some_and(|timeout| timeout == 0 || !representable_ms(timeout))
+        {
+            return Err(ArkoAgentsError::BuilderError {
+                struct_name: "LLMRetryConfig".into(),
+                message: "stream_idle_timeout_ms must be positive and representable.".into(),
+            });
         }
         if let UsageLimitPolicy::WaitUntilReset { max_wait_ms } = self.usage_limit_policy
             && !representable_ms(max_wait_ms)

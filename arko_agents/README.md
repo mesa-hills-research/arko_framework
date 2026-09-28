@@ -529,6 +529,7 @@ provider codes (such as quota exhaustion and invalid refresh grants) end recover
 | `rate_limit_retry` | On | Waits for short rate limits and capacity errors; see below. |
 | `capacity_retry` | `None` | Opt-in indefinite waits for capacity errors. |
 | `usage_limit_policy` | `Pause` | Handling of plan usage limits. |
+| `stream_idle_timeout_ms` | `None` | Opt-in: the longest gap between data on a streamed response before it is cut off; see below. |
 
 For example, ten attempts with indefinite capacity waits:
 
@@ -577,6 +578,17 @@ recovery under every error policy. The opt-in `WaitUntilReset { max_wait_ms }` w
 under every error policy and cancellably, until the reported reset plus one second and,
 with jitter, up to 30 seconds more, then resends the request unchanged. If no reset time
 is reported, or the whole wait would not fit in `max_wait_ms`, recovery still ends.
+
+**Stream idle timeout.** Model requests have no timeout by default: a response is
+waited for as long as its connection stays open. This is deliberate. Models can reason
+silently for a long time, GPT Pro models for over an hour, and a stream may carry nothing
+until the reasoning ends. The opt-in `stream_idle_timeout_ms` (arko_ai's
+`LLMClient::with_stream_idle_timeout`, applied to this agent's requests) cuts a streamed
+response off once no data has arrived for that long. The cut is a truncated stream, which
+recovery sends again, and the provider may bill the work that was cut off. A value
+shorter than the longest silent stretch of the models you use cuts healthy responses off,
+so make it generous (for example two hours, 7,200,000). Only the gaps between data count;
+there is no total deadline. It is never sent to the model.
 
 **Streams.** Output a failed stream delivered is kept, followed by the error note, when
 recovery adds a message, and dropped when the request is resent unchanged. A request
