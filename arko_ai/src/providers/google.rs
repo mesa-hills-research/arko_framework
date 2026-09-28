@@ -637,7 +637,7 @@ impl GoogleClient {
         // spec). Reject rather than silently ignore an explicit value.
         // https://ai.google.dev/gemini-api/docs/changelog
         // https://ai.google.dev/static/api/interactions-v1.openapi.json
-        if config.temperature_specified {
+        if config.temperature.is_some() {
             return Err(Error::UnsupportedFeature(
                 "The Gemini Interactions API does not accept a temperature.".to_string(),
             ));
@@ -1835,7 +1835,11 @@ mod tests {
         let client = GoogleClient::new("test");
         let conversation = Conversation::new(Model::google_gemini_3_5_flash());
         assert!(matches!(
-            client.build_request(&conversation, &GenerationConfig::new(0.5), false),
+            client.build_request(
+                &conversation,
+                &GenerationConfig::default().with_temperature(0.5),
+                false
+            ),
             Err(Error::UnsupportedFeature(_))
         ));
         let request = client

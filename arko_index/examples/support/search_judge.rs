@@ -66,19 +66,21 @@ fn generation_config(overrides: Option<Value>) -> AnyResult<GenerationConfig> {
         return Err("judge owns tool_config; configure selection preferences with --judge-instructions-file".into());
     }
     // Omitted fields take their defaults (GenerationConfig is serde-defaulted).
-    let mut config: GenerationConfig = serde_json::from_value(overrides.clone())?;
+    let config: GenerationConfig = serde_json::from_value(overrides.clone())?;
     // A recognized, non-null field always serializes back, so anything missing
-    // from the round trip is a typo or an unknown field.
+    // from the round trip is a typo or an unknown field. The exceptions are
+    // the legacy `temperature_specified` flag, which is read but not written,
+    // and a `temperature` that flag turns off.
     let known = serde_json::to_value(&config)?;
+    let legacy = |key: &str| matches!(key, "temperature" | "temperature_specified");
     if let Some(key) = fields
         .iter()
-        .find(|(key, value)| !value.is_null() && known.get(key.as_str()).is_none())
+        .find(|(key, value)| {
+            !value.is_null() && !legacy(key.as_str()) && known.get(key.as_str()).is_none()
+        })
         .map(|(key, _)| key)
     {
         return Err(format!("unknown judge configuration field: {key}").into());
-    }
-    if fields.contains_key("temperature") && !fields.contains_key("temperature_specified") {
-        config.temperature_specified = true;
     }
     Ok(config)
 }
@@ -253,7 +255,10 @@ mod tests {
     #[test]
     fn config_merges_defaults_and_rejects_mistakes() {
         let config = generation_config(Some(json!({"temperature":0.2,"max_tokens":4096}))).unwrap();
-        assert!(config.temperature_specified);
+        assert_eq!(config.temperature, Some(0.2));
+        // Judge configs written with the legacy flag still load.
+        let legacy = json!({"temperature": 0.2, "temperature_specified": false});
+        assert_eq!(generation_config(Some(legacy)).unwrap().temperature, None);
         assert_eq!(config.max_tokens, Some(4096));
         assert!(generation_config(Some(json!({"temprature":0.2}))).is_err());
         assert!(generation_config(Some(json!({"tool_config":null}))).is_err());

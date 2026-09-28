@@ -365,7 +365,7 @@ async fn catalogs_are_fetched_only_on_request_and_validate_later_calls() {
             .unwrap_err();
         assert!(matches!(unknown, Error::ModelNotSupported(_)), "{unknown}");
         let temperature = client
-            .generate_text(&conversation("openai/gpt-6-sol"), &GenerationConfig::new(0.5))
+            .generate_text(&conversation("openai/gpt-6-sol"), &GenerationConfig::default().with_temperature(0.5))
             .await
             .unwrap_err();
         assert!(temperature.to_string().contains("temperature"), "{temperature}");

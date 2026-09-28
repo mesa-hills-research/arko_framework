@@ -1235,7 +1235,7 @@ impl ProviderClient for OpenAIClient {
             ));
         }
 
-        if conversation.model.model_type == ModelType::Reasoning && config.temperature_specified {
+        if conversation.model.model_type == ModelType::Reasoning && config.temperature.is_some() {
             return Err(Error::InvalidRequest(
                 "OpenAI reasoning models do not support temperature configuration.".to_string(),
             ));
@@ -1313,7 +1313,7 @@ impl ProviderClient for OpenAIClient {
             ));
         }
 
-        if conversation.model.model_type == ModelType::Reasoning && config.temperature_specified {
+        if conversation.model.model_type == ModelType::Reasoning && config.temperature.is_some() {
             return Err(Error::InvalidRequest(
                 "OpenAI reasoning models do not support temperature configuration.".to_string(),
             ));
@@ -1941,9 +1941,9 @@ impl OpenAIClient {
             max_output_tokens: resolved_max_tokens,
             // Omitted unless set, so the model default applies. Reasoning
             // models reject it (checked before building).
-            temperature: (conversation.model.model_type != ModelType::Reasoning
-                && config.temperature_specified)
-                .then_some(config.temperature),
+            temperature: config
+                .temperature
+                .filter(|_| conversation.model.model_type != ModelType::Reasoning),
             // The ChatGPT backend is always streamed, as Codex does.
             stream: Some(is_chatgpt_oauth),
             tools: None,
@@ -3516,7 +3516,11 @@ mod tests {
         );
 
         let request = client
-            .build_request(&conversation, &GenerationConfig::new(0.3), false)
+            .build_request(
+                &conversation,
+                &GenerationConfig::default().with_temperature(0.3),
+                false,
+            )
             .unwrap();
         assert_eq!(serde_json::to_value(request).unwrap()["temperature"], 0.3);
     }
@@ -3787,7 +3791,7 @@ mod input_capability_tests {
         let config: GenerationConfig =
             serde_json::from_value(serde_json::json!({"max_tokens": 4096})).unwrap();
         assert_eq!(config.max_tokens, Some(4096));
-        assert!(!config.temperature_specified);
+        assert!(config.temperature.is_none());
         assert!(config.reasoning.is_none());
         let empty: GenerationConfig = serde_json::from_str("{}").unwrap();
         assert!(empty.max_tokens.is_none());

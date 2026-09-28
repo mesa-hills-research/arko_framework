@@ -515,7 +515,7 @@ impl OpenRouterClient {
             }
         }
 
-        let temperature = config.temperature_specified.then_some(config.temperature);
+        let temperature = config.temperature;
         if temperature.is_some() {
             ensure_parameter(info, slug, "temperature", &["temperature"])?;
         }

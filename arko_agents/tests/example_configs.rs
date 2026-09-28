@@ -27,7 +27,7 @@ fn every_example_agent_configuration_loads_validates_and_builds_its_prompt() {
         // disabled thinking.
         let generation = &config.llm_config.generation_config;
         if model.omits_anthropic_sampling_parameters() {
-            assert!(!generation.temperature_specified, "{name}");
+            assert!(generation.temperature.is_none(), "{name}");
         }
         if model.rejects_anthropic_manual_thinking() {
             assert!(

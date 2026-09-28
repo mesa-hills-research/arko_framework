@@ -354,8 +354,9 @@ impl AnthropicClient {
 
         if has_reasoning
             && !conversation.model.omits_anthropic_sampling_parameters()
-            && config.temperature_specified
-            && config.temperature != 1.0
+            && config
+                .temperature
+                .is_some_and(|temperature| temperature != 1.0)
         {
             return Err(Error::InvalidRequest(
                 "Anthropic models with reasoning enabled must use temperature=1.0.".to_string(),
@@ -901,9 +902,9 @@ impl AnthropicClient {
         super::ensure_supported_inputs(conversation)?;
         // Omitted unless set, so the provider default applies (1.0, which is
         // also what thinking requires; validate_config rejects anything else).
-        let temperature = (config.temperature_specified
-            && !conversation.model.omits_anthropic_sampling_parameters())
-        .then_some(config.temperature);
+        let temperature = config
+            .temperature
+            .filter(|_| !conversation.model.omits_anthropic_sampling_parameters());
 
         let mut request = AnthropicRequest {
             model: conversation.model.id.clone(),
@@ -2016,7 +2017,10 @@ mod tests {
         );
 
         let request = client
-            .build_request(&conversation, &GenerationConfig::new(0.2))
+            .build_request(
+                &conversation,
+                &GenerationConfig::default().with_temperature(0.2),
+            )
             .unwrap();
         assert_eq!(serde_json::to_value(request).unwrap()["temperature"], 0.2);
 
@@ -2327,7 +2331,7 @@ mod model_rule_tests {
         invalid(request(model.clone(), &forced(GenerationConfig::default())));
 
         // Non-default sampling parameters return 400 on Opus 5.5, so none is sent.
-        let value = request(model, &GenerationConfig::new(0.3)).unwrap();
+        let value = request(model, &GenerationConfig::default().with_temperature(0.3)).unwrap();
         assert!(value.get("temperature").is_none());
     }
 

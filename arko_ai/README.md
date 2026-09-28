@@ -109,10 +109,14 @@ and the OpenRouter catalog supplies limits and prices on request; see
 
 ## Generation settings and tool calls
 
-`GenerationConfig` holds the per-request settings, built with methods such as
-`with_max_tokens`, `with_temperature` (sent only when set, otherwise the model's default
-applies; rejected for Gemini), `with_reasoning`, `with_verbosity`, `with_prompt_caching`,
-and `with_tool_config`. Each provider takes its own `ReasoningConfig` variant:
+`GenerationConfig` holds the per-request settings, built from
+`GenerationConfig::default()` with methods such as `with_max_tokens`, `with_temperature`,
+`with_reasoning`, `with_verbosity`, `with_prompt_caching`, and `with_tool_config`. The
+default sends no temperature: `temperature` is an `Option<f64>`, and `None` lets the
+model's default apply. A set temperature is rejected for OpenAI reasoning models and
+Gemini, and dropped for Claude models that take no sampling parameters. Configs saved
+with the earlier `temperature_specified` flag still load (`false` means no temperature).
+A config deserializes from partial JSON or YAML, with omitted fields at their defaults. Each provider takes its own `ReasoningConfig` variant:
 `ReasoningConfig::openai(effort, include_summaries)`, `anthropic(budget_tokens)` or
 `anthropic_adaptive()`, `gemini(thinking_level, include_summaries)` or
 `google(thinking_budget, include_summaries)` (mapped to a thinking level), and

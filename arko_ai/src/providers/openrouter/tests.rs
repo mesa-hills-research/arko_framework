@@ -255,7 +255,8 @@ fn session_id_is_always_sent_and_caching_adds_the_cache_key_and_claude_cache_con
 fn sampling_limits_and_verbosity_are_sent_only_when_set() {
     let value = body(
         GPT,
-        &GenerationConfig::new(0.3)
+        &GenerationConfig::default()
+            .with_temperature(0.3)
             .with_max_tokens(900)
             .with_verbosity(Verbosity::Low),
     );
@@ -1073,12 +1074,12 @@ fn a_loaded_catalog_validates_slugs_parameters_images_and_mandatory_reasoning() 
 
     // Parameters the catalog doesn't list would be silently dropped.
     assert!(
-        check(CLAUDE, &GenerationConfig::new(0.2))
+        check(CLAUDE, &GenerationConfig::default().with_temperature(0.2))
             .unwrap_err()
             .to_string()
             .contains("temperature")
     );
-    check(GEMINI, &GenerationConfig::new(0.2)).unwrap();
+    check(GEMINI, &GenerationConfig::default().with_temperature(0.2)).unwrap();
     assert!(
         check(
             "openai/gpt-6-astra",

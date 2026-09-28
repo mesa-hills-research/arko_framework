@@ -12,14 +12,20 @@ pub enum Verbosity {
 
 /// Omitted fields take their defaults when deserializing, so a partial JSON or
 /// YAML config (for example `{"max_tokens": 4096}`) is valid.
+///
+/// Configs saved by earlier versions carry a `temperature_specified` flag next
+/// to `temperature`; they still load: `temperature_specified: false` means no
+/// temperature, whatever `temperature` holds.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[serde(remote = "Self", default)]
 pub struct GenerationConfig {
-    /// Sent only when `temperature_specified` is set; otherwise the model's
-    /// default applies. Google's Interactions API has no temperature, so a
-    /// specified one is an error for requests to Google.
-    pub temperature: f64,
-    pub temperature_specified: bool,
+    /// Sampling temperature. `None` (the default) sends none, so the model's
+    /// default applies. OpenAI reasoning models and Google's Interactions API
+    /// take no temperature, so a set one is an error for requests to them;
+    /// Claude models that take no sampling parameters (Fable 5.x, Opus 4.7 and
+    /// later, Sonnet 5) drop it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
     pub max_tokens: Option<usize>,
     pub verbosity: Option<Verbosity>,
     pub reasoning: Option<ReasoningConfig>,
@@ -185,27 +191,97 @@ impl OpenAIServiceTier {
     }
 }
 
-impl GenerationConfig {
-    pub fn new(temperature: f64) -> Self {
-        Self {
-            temperature,
-            temperature_specified: true,
-            max_tokens: None,
-            verbosity: None,
-            reasoning: None,
-            openai_reasoning_mode: None,
-            anthropic_thinking_enabled: None,
-            prompt_caching: None,
-            anthropic_summarized_thinking: None,
-            long_context: None,
-            tool_config: None,
-            interleaved_thinking: None,
-            openai_service_tier: None,
-            anthropic_cache_ttl: None,
-            anthropic_fast_mode: None,
-            anthropic_inference_geo: None,
-            openrouter: None,
+impl Serialize for GenerationConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        GenerationConfig::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for GenerationConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ConfigVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ConfigVisitor {
+            type Value = GenerationConfig;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a generation config")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<GenerationConfig, A::Error> {
+                let mut flag = None;
+                let mut config = GenerationConfig::deserialize(
+                    serde::de::value::MapAccessDeserializer::new(WithoutTemperatureFlag {
+                        inner: map,
+                        flag: &mut flag,
+                    }),
+                )?;
+                match flag {
+                    Some(false) => config.temperature = None,
+                    // The old field defaulted to 0.0.
+                    Some(true) => {
+                        config.temperature.get_or_insert(0.0);
+                    }
+                    None => {}
+                }
+                Ok(config)
+            }
         }
+
+        deserializer.deserialize_map(ConfigVisitor)
+    }
+}
+
+/// The map of a config, minus the `temperature_specified` flag that configs
+/// saved by earlier versions carry next to `temperature` (which was sent only
+/// with the flag set). The flag's value is kept in `flag`. Values pass through
+/// unbuffered, so YAML tags and other format features keep working.
+struct WithoutTemperatureFlag<'a, A> {
+    inner: A,
+    flag: &'a mut Option<bool>,
+}
+
+impl<'de, A: serde::de::MapAccess<'de>> serde::de::MapAccess<'de>
+    for WithoutTemperatureFlag<'_, A>
+{
+    type Error = A::Error;
+
+    fn next_key_seed<K: serde::de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, A::Error> {
+        while let Some(key) = self.inner.next_key::<String>()? {
+            if key == "temperature_specified" {
+                *self.flag = self.inner.next_value()?;
+                continue;
+            }
+            return seed
+                .deserialize(serde::de::value::StringDeserializer::new(key))
+                .map(Some);
+        }
+        Ok(None)
+    }
+
+    fn next_value_seed<V: serde::de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: V,
+    ) -> Result<V::Value, A::Error> {
+        self.inner.next_value_seed(seed)
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        self.inner.size_hint()
+    }
+}
+
+impl GenerationConfig {
+    /// A config that sends `temperature`.
+    #[deprecated(note = "use `GenerationConfig::default().with_temperature(temperature)`")]
+    pub fn new(temperature: f64) -> Self {
+        Self::default().with_temperature(temperature)
     }
 
     /// Sets per-request OpenRouter options (merged over the client defaults).
@@ -223,9 +299,10 @@ impl GenerationConfig {
         self
     }
 
+    /// Sends `temperature`. Set [`temperature`](Self::temperature) to `None`
+    /// to send none again.
     pub fn with_temperature(mut self, temperature: f64) -> Self {
-        self.temperature = temperature;
-        self.temperature_specified = true;
+        self.temperature = Some(temperature);
         self
     }
 
@@ -307,5 +384,102 @@ impl GenerationConfig {
     pub fn with_interleaved_thinking(mut self, enabled: bool) -> Self {
         self.interleaved_thinking = Some(enabled);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn load(value: serde_json::Value) -> GenerationConfig {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn configs_saved_with_the_temperature_flag_still_load() {
+        // What earlier versions wrote for a default config and for one made
+        // with `GenerationConfig::new(0.4)` plus a few settings.
+        let saved_default = json!({
+            "temperature": 0.0, "temperature_specified": false, "max_tokens": null,
+            "verbosity": null, "reasoning": null, "openai_reasoning_mode": null,
+            "anthropic_thinking_enabled": null, "prompt_caching": null,
+            "anthropic_summarized_thinking": null, "long_context": null,
+            "tool_config": null, "interleaved_thinking": null
+        });
+        let config = load(saved_default);
+        assert_eq!(config.temperature, None);
+        assert_eq!(config.max_tokens, None);
+
+        let saved = json!({
+            "temperature": 0.4, "temperature_specified": true, "max_tokens": 2048,
+            "verbosity": "low", "reasoning": {"OpenAI": {"effort": "high", "include_summaries": true}},
+            "openai_reasoning_mode": null, "anthropic_thinking_enabled": null,
+            "prompt_caching": false, "anthropic_summarized_thinking": null,
+            "long_context": null, "tool_config": null, "interleaved_thinking": null,
+            "openai_service_tier": "flex"
+        });
+        let config = load(saved);
+        assert_eq!(config.temperature, Some(0.4));
+        assert_eq!(config.max_tokens, Some(2048));
+        assert_eq!(config.verbosity, Some(Verbosity::Low));
+        assert!(matches!(
+            config.reasoning,
+            Some(ReasoningConfig::OpenAI {
+                include_summaries: true,
+                ..
+            })
+        ));
+        assert_eq!(config.prompt_caching, Some(false));
+        assert_eq!(config.openai_service_tier, Some(OpenAIServiceTier::Flex));
+
+        // An unspecified temperature is never sent, whatever value it held.
+        let config = load(json!({"temperature": 0.7, "temperature_specified": false}));
+        assert_eq!(config.temperature, None);
+        // The old field defaulted to 0.0.
+        let config = load(json!({"temperature_specified": true}));
+        assert_eq!(config.temperature, Some(0.0));
+    }
+
+    #[test]
+    fn a_written_temperature_is_sent() {
+        // Before, a hand-written temperature without the flag was dropped.
+        assert_eq!(load(json!({"temperature": 0.2})).temperature, Some(0.2));
+        assert_eq!(load(json!({"temperature": 1})).temperature, Some(1.0));
+        assert_eq!(load(json!({"temperature": null})).temperature, None);
+        assert_eq!(load(json!({})).temperature, None);
+    }
+
+    #[test]
+    fn configs_round_trip_without_the_flag() {
+        let default = serde_json::to_value(GenerationConfig::default()).unwrap();
+        assert!(default.get("temperature").is_none(), "{default}");
+        assert!(default.get("temperature_specified").is_none(), "{default}");
+
+        let config = GenerationConfig::default()
+            .with_temperature(0.3)
+            .with_max_tokens(100)
+            .with_prompt_caching(false);
+        let saved = serde_json::to_value(&config).unwrap();
+        assert_eq!(saved["temperature"], 0.3);
+        assert!(saved.get("temperature_specified").is_none(), "{saved}");
+        let restored: GenerationConfig = serde_json::from_value(saved).unwrap();
+        assert_eq!(restored.temperature, Some(0.3));
+        assert_eq!(restored.max_tokens, Some(100));
+        assert_eq!(restored.prompt_caching, Some(false));
+    }
+
+    #[test]
+    fn the_default_sends_no_temperature() {
+        assert_eq!(GenerationConfig::default().temperature, None);
+        #[allow(deprecated)]
+        let old = GenerationConfig::new(0.5);
+        assert_eq!(old.temperature, Some(0.5));
+        assert_eq!(
+            GenerationConfig::default()
+                .with_temperature(0.5)
+                .temperature,
+            Some(0.5)
+        );
     }
 }
