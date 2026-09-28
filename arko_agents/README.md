@@ -245,7 +245,10 @@ finish. A call awaiting approval counts as not finished; see
 `complete_task` after an earlier call of its turn was rejected or failed does not complete
 the task, since the model chose to finish before it saw those results: its result says the
 task was not completed and asks the model to review the results and call `complete_task`
-again if the task is done. (An output-based response can't call `complete_task` after
+again if the task is done. This holds even when `complete_task` needs approval: when the
+failure is known before the approval would be asked, it isn't asked, and an approval given
+before a failure became known doesn't complete the task either. `complete_task` always
+runs alone, after the calls before it, whatever a per-tool setting says. (An output-based response can't call `complete_task` after
 another tool: it holds one call or one batch of calls to the same tool.)
 
 `tool_config.one_tool_call_per_turn: true` (off by default) asks for one call per
@@ -540,7 +543,7 @@ and `Cancelled` are terminal.
 | `AssistantResponseChunk`, `ReasoningChunk` | Response text and reasoning; `event_throttle_ms` coalesces chunks. |
 | `ToolCallInitiated`, `ToolCallFormatted` | A tool call was announced, then parsed. Output-based mode with `simplified_tool_events` off also emits `ToolParamName`, `ToolParamValueChunk`, and `ToolParamEnd`. |
 | `ToolCallAwaitingApproval`, `BatchToolCallAwaitingApproval`, `UserQuestionsAsked` | The task waits for a command. |
-| `ToolResult`, `ToolResultIntercepted`, `ToolRejected`, `UnavailableToolAttempted` | Tool outcomes. |
+| `ToolResult`, `ToolResultIntercepted`, `ToolRejected`, `UnavailableToolAttempted` | Tool outcomes. `ToolRejected` also reports calls that did not run: stopped, held, not reached, or a `complete_task` refused after an earlier call of its turn was rejected or failed. |
 | `ErrorEncountered`, `RetryScheduled`, `UsageLimitReached` | Errors and recovery. `requires_approval_to_retry` marks a pause; `RetryScheduled` carries the attempt, delay, and elapsed milliseconds, and `rate_limit` when the retry waits out a provider rate limit. |
 | `OutputTokenLimitReached` | A response ended at its output-token limit, so its text may be cut short and a call still being written was dropped. The response is handled as usual; a host can tell the user, who can ask the agent to continue. |
 | `RefusalReceived`, `RefusedInput`, `RefusalFallback` | Refusals. |
@@ -623,9 +626,10 @@ Recovery ends when the attempts or the elapsed budget run out or the error canno
 retried. The elapsed budget, counted from the first failure of an episode, decides
 whether another attempt is made and bounds the waits between attempts; it never cuts off
 a request that has been sent. A request runs until it completes or fails, or the host
-cancels or suspends the task, however long the model reasons. Once the provider accepts a
-request (its response starts), the outage is over and the budget stops counting: a
-failure later in that response starts a new one, while the attempt count goes on. Attempt limits count the first request, and zero counts as one. With the
+cancels or suspends the task, however long the model reasons. While a response the
+provider accepted runs, the budget stops counting; it resumes if the response fails, so a
+failure late in a long response is retried, while the waits between attempts still count
+and failures that keep coming stay bounded. Attempt limits count the first request, and zero counts as one. With the
 defaults, retries back off from about 2 seconds to the 64-second cap, so an outage is
 retried for up to the 5-minute elapsed budget before the task pauses.
 

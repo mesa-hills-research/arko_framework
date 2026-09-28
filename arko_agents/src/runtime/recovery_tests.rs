@@ -418,3 +418,39 @@ async fn a_completed_response_ends_the_elapsed_budget_of_a_failure() {
         task.current_state
     );
 }
+
+/// Under `InformAgentAndContinue` (no attempt limit), responses the provider
+/// accepts and then fails at once stay bounded by the elapsed budget: only
+/// the time a response runs is left out of it, not the waits between
+/// attempts.
+#[tokio::test(start_paused = true)]
+async fn streams_that_fail_at_once_stay_bounded_without_an_attempt_limit() {
+    let (mut agent, mut events, _commands) = harness();
+    agent.task.agent_config.tool_config.tool_calling_mode = ToolCallingMode::Native;
+    agent.task.agent_config.llm_error_policy = LLMErrorPolicy::InformAgentAndContinue;
+    let retry = &mut agent.task.agent_config.llm_retry_config;
+    retry.max_elapsed_ms = 10_000;
+    retry.initial_delay_ms = 1_000;
+    retry.max_delay_ms = 1_000;
+    let scripted = agent.scripted_responses.get_mut().unwrap();
+    for _ in 0..100 {
+        scripted.push_back(Ok(futures::stream::iter([Err(
+            ai::Error::StreamTruncated("cut".into()),
+        )])
+        .boxed()));
+    }
+    let task = timeout(Duration::from_secs(3600), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(task.current_state, TaskState::Interrupted { ref reason } if reason.contains("elapsed recovery budget")),
+        "{:?}",
+        task.current_state
+    );
+    let retries = events_of(&mut events)
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::RetryScheduled { .. }))
+        .count();
+    assert!(retries < 15, "{retries} retries");
+}

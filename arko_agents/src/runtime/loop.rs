@@ -658,7 +658,11 @@ impl AgentLoop {
     /// turn.
     fn runs_in_parallel(&self, definition: &ToolDefinition) -> bool {
         let config = &self.task.agent_config;
-        !config.asks_one_tool_call_per_turn() && config.is_parallel_safe(definition)
+        // `complete_task` ends the turn, so it always runs alone, after the
+        // calls before it (whatever an override says).
+        definition.name != COMPLETE_TASK_TOOL_NAME
+            && !config.asks_one_tool_call_per_turn()
+            && config.is_parallel_safe(definition)
     }
 
     /// A call to `tool` to run, under the agent's time limit and
@@ -2480,12 +2484,11 @@ impl AgentLoop {
             let Some(mut response_stream) = self.run_llm_attempt(request).await? else {
                 continue 'main_loop;
             };
-            // The provider accepted the request, so an outage is over: its
-            // elapsed budget stops counting, and a failure later in this
-            // stream, however long the response ran, starts a new one
-            // (attempts still count).
-            self.recovery_started = None;
-            self.paused_recovery_elapsed = None;
+            // The provider accepted the request: the elapsed budget stops
+            // counting while the response runs, however long that is, and
+            // resumes if it fails (the waits between attempts still count,
+            // so failures that keep coming stay bounded).
+            self.pause_ordinary_recovery_clock();
 
             let mut raw_events_for_turn: Vec<RawParserEvent> = Vec::new();
             let mut parser = if !self.is_native_mode() {
@@ -2899,6 +2902,59 @@ impl AgentLoop {
                         .await?;
                         results[native.index] =
                             Some(ai::ToolResult::error_from_tool_call(&native.call, &not_run));
+                    }
+                }
+                if matches!(self.task.current_state, TaskState::InProgress) && !self.stop_requested
+                {
+                    // complete_task awaiting approval after a call that was
+                    // rejected or failed is answered now, not asked about.
+                    let mut still_awaiting = Vec::new();
+                    for (index, pending) in calls_needing_approval.drain(..) {
+                        let after_failure = results[..index]
+                            .iter()
+                            .any(|result| result.as_ref().is_some_and(|result| result.is_error));
+                        if pending.tool_name != COMPLETE_TASK_TOOL_NAME || !after_failure {
+                            still_awaiting.push((index, pending));
+                            continue;
+                        }
+                        if let Some(call) = self
+                            .task
+                            .pending_native_tool_calls
+                            .remove(&pending.tool_call_id)
+                        {
+                            self.emit_event(AgentEvent::ToolRejected {
+                                tool_call_id: pending.tool_call_id,
+                                tool_name: pending.tool_name,
+                                reason: Some(COMPLETION_AFTER_FAILURE.to_string()),
+                            })
+                            .await?;
+                            results[index] = Some(ai::ToolResult::from_tool_call(
+                                &call,
+                                COMPLETION_AFTER_FAILURE,
+                            ));
+                        }
+                    }
+                    calls_needing_approval = still_awaiting;
+                    // With no approval left to wait for, held calls run now.
+                    if calls_needing_approval.is_empty() && !held.is_empty() {
+                        let failed = results
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, result)| {
+                                result.as_ref().is_some_and(|result| result.is_error)
+                            })
+                            .map(|(index, _)| index)
+                            .collect();
+                        for (index, result) in self
+                            .run_native_calls(
+                                std::mem::take(&mut held),
+                                |state| matches!(state, TaskState::InProgress),
+                                failed,
+                            )
+                            .await?
+                        {
+                            results[index] = Some(result);
+                        }
                     }
                 }
                 // Held calls wait with the calls awaiting approval (and are

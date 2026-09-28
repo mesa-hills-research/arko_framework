@@ -482,6 +482,86 @@ async fn complete_task_after_a_failed_or_rejected_call_does_not_complete() {
     }
 }
 
+/// `complete_task` that would need approval, after a call that already
+/// failed, is answered at once instead of asking the host, and a call held
+/// behind it then runs.
+#[tokio::test]
+async fn complete_task_after_a_known_failure_is_not_put_to_approval() {
+    let workspace = workspace();
+    let record = Arc::new(Record::default());
+    let mut config = config(ToolCallingMode::Native, &["probe_write", "read_file"]);
+    config.tool_config.tool_specific_configs.insert(
+        COMPLETE_TASK_TOOL_NAME.into(),
+        PerToolConfigOverride {
+            auto_approve_tool_use: Some(false),
+            ..Default::default()
+        },
+    );
+    let (mut agent, mut events, commands) = agent(config, probes(&record), &workspace);
+    agent.scripted_responses.get_mut().unwrap().extend([
+        turn(vec![
+            native_call(
+                "r1",
+                "read_file",
+                serde_json::json!({"path": "missing.txt"}),
+            ),
+            native_call(
+                "early",
+                "complete_task",
+                serde_json::json!({"summary": "too early"}),
+            ),
+            probe_call("w1", "probe_write"),
+        ]),
+        complete(),
+    ]);
+    let run = tokio::spawn(agent.run());
+    let mut batches = 0;
+    loop {
+        let event = timeout(Duration::from_secs(10), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match event {
+            AgentEvent::BatchToolCallAwaitingApproval { .. } => batches += 1,
+            // The next turn's complete_task is asked about as usual.
+            AgentEvent::ToolCallAwaitingApproval { tool_call_id, .. } => {
+                commands
+                    .send(UserCommand::ApproveToolUse {
+                        tool_call_id,
+                        custom_tool_output: None,
+                        message_to_agent: None,
+                    })
+                    .await
+                    .unwrap();
+            }
+            AgentEvent::TaskStreamEnd => break,
+            _ => {}
+        }
+    }
+    let task = timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        batches, 0,
+        "the first turn's completion is not put to approval"
+    );
+    assert_calls_paired(&task.conversation);
+    assert_eq!(
+        result_for(&task.conversation, "early")[0].output,
+        COMPLETION_AFTER_FAILURE
+    );
+    assert_eq!(result_for(&task.conversation, "w1")[0].output, "w1 done");
+    assert_eq!(
+        task.current_state,
+        TaskState::Completed {
+            summary: "done".into()
+        }
+    );
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
 /// A call held behind a call awaiting approval gets its one result when the
 /// wait ends another way: a cancellation answers both as not run.
 #[tokio::test]
