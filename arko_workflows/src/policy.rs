@@ -41,6 +41,11 @@ pub enum ApprovalPolicy {
     /// [`Workflow::resume_agent`](crate::Workflow::resume_agent) and
     /// [`AgentResume::ToolApprovals`].
     ///
+    /// An agent running inside another agent's tool call (a completion
+    /// verifier or a delegated run) can't pause: its `complete_task` is
+    /// approved, and any other call it needs approved stops it with a
+    /// reason.
+    ///
     /// [`WorkflowError::AgentPaused`]: crate::WorkflowError::AgentPaused
     RespectAgentConfig,
     /// Honor the agent's configuration, with this handler deciding each

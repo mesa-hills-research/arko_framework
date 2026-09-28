@@ -926,41 +926,62 @@ async fn fail_fast_stops_the_other_agents_at_the_first_failure() {
 }
 
 /// An agent running inside another agent's tool call (here a completion
-/// verifier) can't be paused for the caller: under `RespectAgentConfig` a
-/// call it needs approved (even its own `complete_task`, which a default
-/// configuration doesn't auto-approve) stops it with a reason, so the review
-/// fails, a bounded number of times, and the call returns `VerifierFailed`
-/// (the target is left paused for its caller). No paused verifier is left
-/// behind, and the verifier isn't asked again and again. The same holds for
-/// its question without a user input handler.
+/// verifier with a default configuration, which auto-approves no call)
+/// can't be paused for the caller. Under `RespectAgentConfig` its
+/// `complete_task` is approved, so its review completes; another call it
+/// needs approved, or its question without a user input handler, stops it
+/// with a reason, so the review fails, a bounded number of times, and the
+/// call returns `VerifierFailed` (the target is left paused for its
+/// caller). No paused verifier is left behind, and the verifier isn't asked
+/// again and again.
 #[tokio::test]
-async fn a_nested_run_that_needs_a_decision_is_stopped_not_paused() {
-    for question in [false, true] {
+async fn a_nested_run_completes_under_its_own_config_and_is_stopped_on_other_decisions() {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Verifier {
+        Completes,
+        Asks,
+        ReadsAFile,
+    }
+    for case in [Verifier::Completes, Verifier::Asks, Verifier::ReadsAFile] {
         let workspace = Workspace::new();
+        std::fs::write(workspace.0.join("a.txt"), "contents").unwrap();
         let server = ResponsesServer::start(move |index, body| {
             Some(if body.contains("You are a completion verifier") {
-                if question {
-                    tool_call_turn(
+                match case {
+                    Verifier::Completes => complete_turn(&format!("v{index}"), "ACCEPTED"),
+                    Verifier::Asks => tool_call_turn(
                         &format!("q{index}"),
                         "ask_user",
                         json!({"questions": "Which file?"}),
-                    )
-                } else {
-                    complete_turn(&format!("v{index}"), "ACCEPTED")
+                    ),
+                    Verifier::ReadsAFile => {
+                        tool_call_turn(&format!("r{index}"), "read_file", json!({"path": "a.txt"}))
+                    }
                 }
             } else {
                 complete_turn(&format!("c{index}"), "done")
             })
         })
         .await;
-        let mut reviewer = agent_config("Friendly Reviewer");
         // A default configuration: every call needs approval, complete_task
         // included (ask_user is exempt).
-        reviewer.tool_config.default_auto_approve_tool_use = false;
+        let mut reviewer = AgentConfig::builder(
+            "reviewer".to_string(),
+            "Friendly Reviewer".to_string(),
+            arko_agents::AgentLLMConfig {
+                model: arko_ai::Model::openai_gpt_5_6_luna(),
+                generation_config: Default::default(),
+            },
+        )
+        .role_description("test reviewer".to_string())
+        .instructions("test instructions".to_string())
+        .build()
+        .unwrap();
+        assert!(!reviewer.should_auto_approve_tool("complete_task"));
         reviewer
             .tool_config
             .available_tool_names
-            .push("ask_user".into());
+            .extend(["ask_user".to_string(), "read_file".to_string()]);
         let hooks = HookCounts::default();
         let workflow = hooks
             .register(
@@ -982,32 +1003,46 @@ async fn a_nested_run_that_needs_a_decision_is_stopped_not_paused() {
             )
             .build()
             .unwrap();
-        let error = within(workflow.run_agent("coder", "Write it."))
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(&error, WorkflowError::VerifierFailed { reason, .. } if reason.contains("can't be paused")),
-            "{error:?}"
-        );
-        // Two reviews (one retry), one verifier request each.
+        let outcome = within(workflow.run_agent("coder", "Write it.")).await;
         let verifier_requests = server
             .bodies()
             .iter()
             .filter(|body| body.contains("You are a completion verifier"))
             .count();
-        assert_eq!(verifier_requests, 2, "question: {question}");
+        let results = workflow.result().agent_results;
+        let reviews = results
+            .iter()
+            .filter(|result| result.agent_name == "reviewer")
+            .collect::<Vec<_>>();
+        if case == Verifier::Completes {
+            let result = outcome.unwrap();
+            assert_eq!(result.status, AgentRunStatus::Completed);
+            assert_eq!(verifier_requests, 1);
+            assert_eq!(reviews.len(), 1);
+            assert_eq!(reviews[0].status, AgentRunStatus::Completed);
+            assert_eq!(hooks.get(HookPoint::OnAgentPaused), 0);
+            continue;
+        }
+        let error = outcome.unwrap_err();
+        assert!(
+            matches!(&error, WorkflowError::VerifierFailed { reason, .. } if reason.contains("can't be paused")),
+            "{error:?}"
+        );
+        if case == Verifier::ReadsAFile {
+            assert!(
+                error.to_string().contains("approval for 'read_file'"),
+                "{error}"
+            );
+        }
+        // Two reviews (one retry), one verifier request each.
+        assert_eq!(verifier_requests, 2, "{case:?}");
         assert_eq!(hooks.get(HookPoint::OnAgentPaused), 1, "the coder");
         assert_eq!(hooks.get(HookPoint::OnUserInputRequired), 0);
-        let results = workflow.result().agent_results;
         assert!(
             results
                 .iter()
                 .all(|result| result.status.is_paused() == (result.agent_name == "coder"))
         );
-        let reviews = results
-            .iter()
-            .filter(|result| result.agent_name == "reviewer")
-            .collect::<Vec<_>>();
         assert_eq!(reviews.len(), 2);
         assert!(reviews.iter().all(|review| {
             review.status == AgentRunStatus::Cancelled

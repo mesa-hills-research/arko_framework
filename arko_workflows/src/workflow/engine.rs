@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use arko_agents::skill::{SkillManager, SkillPromptContext};
+use arko_agents::tool::builtins::COMPLETE_TASK_TOOL_NAME;
 use arko_agents::{
     AgentConfig, AgentRuntime, InterceptedResult, InterceptionFailurePolicy, InterceptorConfig,
     PendingToolCallInfo, Task, ToolCallContext, ToolError, ToolExecutionContext,
@@ -372,8 +373,10 @@ fn nested_cannot_pause(ctx: &SharedContext, agent_name: &str, needs: &str) -> Wo
 /// Decides tool calls awaiting approval under the workflow's approval
 /// policy: a decision per call, or `None` to pause the agent for its
 /// caller. A `nested` run (inside another agent's tool call) can't pause:
-/// it is stopped instead. Each approved call's approval reason is kept for
-/// the tool hooks until it has run.
+/// under `RespectAgentConfig` its `complete_task` is approved (its caller
+/// waits for its result), and a call left undecided stops it instead. Each
+/// approved call's approval reason is kept for the tool hooks until it has
+/// run.
 async fn decide_tool_calls(
     agent_name: &str,
     agent_run_id: uuid::Uuid,
@@ -381,11 +384,19 @@ async fn decide_tool_calls(
     nested: bool,
     ctx: &Arc<SharedContext>,
 ) -> Result<Option<Vec<(uuid::Uuid, ToolApprovalDecision)>>, WorkflowError> {
-    let Some(decisions) = decide_tool_calls_by_policy(agent_name, agent_run_id, calls, ctx).await?
-    else {
+    let decisions = if nested && matches!(ctx.approval_policy, ApprovalPolicy::RespectAgentConfig) {
+        approve_nested_completions(calls)
+    } else {
+        decide_tool_calls_by_policy(agent_name, agent_run_id, calls, ctx).await?
+    };
+    let Some(decisions) = decisions else {
         if nested {
             let tools = calls
                 .iter()
+                .filter(|call| {
+                    !matches!(ctx.approval_policy, ApprovalPolicy::RespectAgentConfig)
+                        || call.tool_name != COMPLETE_TASK_TOOL_NAME
+                })
                 .map(|call| format!("'{}'", call.tool_name))
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -399,6 +410,28 @@ async fn decide_tool_calls(
     };
     record_approval_reasons(ctx, agent_run_id, calls, &decisions);
     Ok(Some(decisions))
+}
+
+/// A nested run's calls under `RespectAgentConfig`: `complete_task` is
+/// approved; any other call is left undecided (`None`), since no one can
+/// be asked.
+fn approve_nested_completions(
+    calls: &[PendingToolCallInfo],
+) -> Option<Vec<(uuid::Uuid, ToolApprovalDecision)>> {
+    calls
+        .iter()
+        .map(|call| {
+            (call.tool_name == COMPLETE_TASK_TOOL_NAME).then(|| {
+                (
+                    call.tool_call_id,
+                    ToolApprovalDecision::Approve {
+                        custom_tool_output: None,
+                        message_to_agent: None,
+                    },
+                )
+            })
+        })
+        .collect()
 }
 
 /// [`decide_tool_calls`] by the policy alone.
@@ -2826,7 +2859,7 @@ impl WorkflowExecutionMiddleware {
             }
         }
 
-        if call.tool_name == arko_agents::tool::builtins::COMPLETE_TASK_TOOL_NAME {
+        if call.tool_name == COMPLETE_TASK_TOOL_NAME {
             let summary = call
                 .parameters
                 .get("summary")
@@ -2874,9 +2907,7 @@ impl ToolExecutionMiddleware for WorkflowExecutionMiddleware {
             ToolExecutionOutcome::Error(_) => None,
         };
 
-        if successful_output.is_some()
-            && call.tool_name == arko_agents::tool::builtins::COMPLETE_TASK_TOOL_NAME
-        {
+        if successful_output.is_some() && call.tool_name == COMPLETE_TASK_TOOL_NAME {
             self.context
                 .verification_baselines
                 .lock()
