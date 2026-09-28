@@ -612,6 +612,9 @@ and `list_memories` if either; `list_memories` hides tiers it can't access.
 
 ### Messaging, services and voting
 
+`WorkflowServicesConfig` is built with `Default` and its setters; a struct literal
+(`..Default::default()` included) doesn't compile outside the crate.
+
 | Setting | Default | Notes |
 |---|---|---|
 | `MessagingPolicy` | Every agent may message every other | `can_message(agent, recipients)` limits one agent; `cannot_message(agent)`. `send_message` and `list_recipients` go to agents with a permitted recipient, `wait_for_message` to agents another may message. `send_message` reaches only running or waiting agents. |
@@ -686,6 +689,9 @@ from the run directory's `durable/journal.jsonl`. See
 [Durable steps](../arko_workflows/INDEX.md#durable-steps).
 
 ### Persistence
+
+`PersistenceConfig` is built with `new(dir)` and its setters; a struct literal doesn't
+compile outside the crate.
 
 | `PersistenceConfig::new(dir)` | Default | Notes |
 |---|---|---|

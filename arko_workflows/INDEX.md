@@ -483,7 +483,7 @@ Without a handler, the managed driver suspends the task on `ask_user` and return
 
 Source: [services/mod.rs](src/services/mod.rs), [builder integration](src/workflow/mod.rs).
 
-`WorkflowServicesConfig` (`Debug`, `Clone`, `Default`) configures agent-callable delegation:
+`WorkflowServicesConfig` (`Debug`, `Clone`, `Default`) configures agent-callable delegation. Build it with `Default` and the setters below (its public fields can be read and assigned afterwards); it has a private field, so a struct literal, `..Default::default()` included, doesn't compile outside the crate:
 
 | Field | Type | Default and meaning |
 | --- | --- | --- |
@@ -1159,7 +1159,7 @@ Source: [persistence/mod.rs](src/persistence/mod.rs), [persistence/state.rs](src
 
 ### PersistenceConfig and PersistenceManager
 
-`PersistenceConfig` implements `Debug` and `Clone`. It has no `Default` implementation; `new` sets the defaults below. `PersistenceManager` implements `Clone` and has private fields; clones share the durable store, write lock, and event log.
+`PersistenceConfig` implements `Debug` and `Clone`. It has no `Default` implementation; `new` sets the defaults below. Build it with `new` and the setters (its public fields can be read and assigned afterwards); it has a private field, so a struct literal doesn't compile outside the crate. `PersistenceManager` implements `Clone` and has private fields; clones share the durable store, write lock, and event log.
 
 | Public field | Type | Meaning and default from `new` |
 |---|---|---|
