@@ -360,15 +360,16 @@ impl Task {
         serde_json::from_str(&file_content).map_err(ArkoAgentsError::Json)
     }
 
-    /// Saves the task to a JSON file.
+    /// Saves the task to a JSON file, replacing it in one step (see
+    /// [`write_file_atomically`](crate::utils::write_file_atomically)), so
+    /// that a crash during the save leaves the previous file whole.
     pub fn save_to_path(&self, path: &Path) -> Result<(), ArkoAgentsError> {
         let json_string = serde_json::to_string_pretty(self)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(path, json_string).map_err(|e| ArkoAgentsError::FileOperation {
-            path: path.to_path_buf(),
-            source: e,
+        crate::utils::write_file_atomically(path, json_string.as_bytes()).map_err(|e| {
+            ArkoAgentsError::FileOperation {
+                path: path.to_path_buf(),
+                source: e,
+            }
         })
     }
 

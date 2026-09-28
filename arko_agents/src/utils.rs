@@ -179,9 +179,83 @@ pub fn get_file_tree(
         .map(|snapshot| snapshot.full())
 }
 
+/// Replaces the file at `path` with `bytes` in one step, creating its parent
+/// directory: the bytes go to a new temporary file in the same directory,
+/// are flushed to disk through that file's own write handle, and the file is
+/// then renamed over `path`. A crash or a full disk during the save leaves
+/// the previous file whole. (Windows can flush only a handle opened for
+/// writing, which is why the flush uses the handle that wrote.) On failure
+/// the temporary file is removed.
+pub fn write_file_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} does not name a file", path.display()),
+        )
+    })?;
+    let directory = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    std::fs::create_dir_all(directory)?;
+    let mut temporary_name = std::ffi::OsString::from(".");
+    temporary_name.push(name);
+    temporary_name.push(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
+    let temporary = directory.join(temporary_name);
+    let written = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The save replaces the file rather than rewriting it in place: a
+    /// reader of the old file (here a hard link to it) keeps the old
+    /// content whole, and no temporary file is left behind.
+    #[test]
+    fn atomic_writes_replace_the_file_whole() {
+        let directory = std::env::temp_dir().join(format!("arko-atomic-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("nested").join("task.json");
+        write_file_atomically(&path, b"old").unwrap();
+        let reader = directory.join("reader.json");
+        std::fs::hard_link(&path, &reader).unwrap();
+        write_file_atomically(&path, b"new").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(std::fs::read(&reader).unwrap(), b"old");
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from("task.json")]);
+
+        // A save that fails (the path is a directory) leaves nothing behind.
+        let blocked = directory.join("blocked");
+        std::fs::create_dir_all(blocked.join("inside")).unwrap();
+        assert!(write_file_atomically(&blocked, b"x").is_err());
+        let names: Vec<_> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.iter().all(|name| !name.ends_with(".tmp")),
+            "{names:?}"
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]
