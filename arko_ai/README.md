@@ -503,7 +503,9 @@ cap and equal jitter, treating a server hint as a minimum with jitter above it.
 
 The shared model HTTP client has no total request deadline, since a response can stream
 for a long time; connection setup and idle pool connections are bounded separately, and
-a request is cancelled by dropping its future.
+a request is cancelled by dropping its future. It follows no redirects: a 3xx response
+is returned as an error, so API keys and other credential headers never reach another
+host.
 
 ## Voyage embeddings
 

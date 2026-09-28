@@ -47,7 +47,8 @@ fn tls_config() -> rustls::ClientConfig {
 /// A [`reqwest::ClientBuilder`] with the setup this crate's providers use:
 /// rustls with the *ring* crypto provider passed explicitly (nothing is
 /// installed process-wide), the operating system's trust store, HTTP/1.1, a
-/// 30-second connect timeout and no total request deadline. Use it, or
+/// 30-second connect timeout, no total request deadline, and no redirects
+/// (a 3xx response is returned as it is). Use it, or
 /// [`http_client`], to build a client passed to this crate, such as to
 /// [`refresh_chatgpt_oauth_token`](openai::refresh_chatgpt_oauth_token).
 ///
@@ -61,8 +62,14 @@ pub fn http_client_builder() -> reqwest::ClientBuilder {
     // No total request deadline: a connected generation may take arbitrarily
     // long. Keep connection establishment and idle connection-pool cleanup
     // bounded.
+    //
+    // Redirects are never followed: provider APIs don't redirect, and reqwest
+    // strips only standard credential headers on a redirect, so `x-api-key`,
+    // `x-goog-api-key` or `chatgpt-account-id`, and a re-sent refresh-token
+    // body, would reach the redirect target.
     reqwest::Client::builder()
         .tls_backend_preconfigured(tls_config())
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(30))
         .tcp_keepalive(Duration::from_secs(30))
         .pool_idle_timeout(Duration::from_secs(90))
@@ -370,6 +377,42 @@ mod transport_tests {
         assert_eq!(body.await.unwrap().unwrap(), "ok");
         server.await.unwrap();
     }
+    #[tokio::test]
+    async fn redirects_are_returned_not_followed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            assert!(socket.read(&mut bytes).await.unwrap() > 0);
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{address}/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            // A followed redirect would connect again.
+            tokio::time::timeout(Duration::from_millis(500), listener.accept())
+                .await
+                .is_ok()
+        });
+        let response = http_client_builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!("http://{address}/v1/messages"))
+            .header("x-api-key", "secret")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        assert!(!server.await.unwrap(), "the redirect was followed");
+    }
+
     // Network checks for the TLS setup: `cargo test -p arko_ai -- --ignored tls_`.
     #[tokio::test]
     #[ignore = "requires network access"]
