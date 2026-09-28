@@ -2902,3 +2902,78 @@ async fn databases_of_the_first_schema_migrate_without_losing_data() {
         .unwrap();
     assert_eq!(page.hits.len(), 2);
 }
+
+#[tokio::test]
+async fn duplicate_texts_are_one_result_and_pages_match_the_full_ranking() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("copy1.txt"), "alpha same text here\n").unwrap();
+    std::fs::write(root.path().join("copy2.txt"), "alpha same text here\n").unwrap();
+    for n in 0..4 {
+        std::fs::write(
+            root.path().join(format!("{n}.txt")),
+            format!("alpha {} {n}\n", "word ".repeat(n + 1)),
+        )
+        .unwrap();
+    }
+    let fake = Arc::new(Fake::new());
+    let (index, job, status) =
+        build_spec(&fake, db.path(), BuildSpec::new("test", root.path())).await;
+    assert_eq!(status.phase, "ready", "{:?}", status.problem);
+    for mode in [
+        SearchMode::Lexical,
+        SearchMode::Semantic,
+        SearchMode::Hybrid,
+    ] {
+        let all = SearchOptions {
+            mode: mode.clone(),
+            top_k: None,
+            min_chunk_bytes: 0,
+            ..Default::default()
+        };
+        let full = index
+            .search(&job.index, "alpha same", all.clone())
+            .await
+            .unwrap();
+        assert_eq!(full.candidate_count, 5, "{mode:?}");
+        let copies: Vec<_> = full
+            .hits
+            .iter()
+            .filter(|h| h.path.starts_with("copy"))
+            .collect();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(copies[0].other_locations, 1);
+        let mut paged = vec![];
+        let mut cursor = None;
+        loop {
+            let page = index
+                .search(
+                    &job.index,
+                    "alpha same",
+                    SearchOptions {
+                        top_k: Some(2),
+                        cursor,
+                        ..all.clone()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(page.candidate_count, 5);
+            paged.extend(
+                page.hits
+                    .iter()
+                    .map(|h| (h.id.clone(), h.text.clone(), h.score)),
+            );
+            cursor = page.next;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        let whole: Vec<_> = full
+            .hits
+            .iter()
+            .map(|h| (h.id.clone(), h.text.clone(), h.score))
+            .collect();
+        assert_eq!(paged, whole, "{mode:?}");
+    }
+}

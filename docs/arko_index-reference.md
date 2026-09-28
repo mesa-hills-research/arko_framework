@@ -451,7 +451,8 @@ retrieval:
 | `rebuild_file_limit` | `None` | Caps the paths listed in the rebuild notice. |
 
 Filters apply before ranking in every mode, every remaining chunk is scored, and every
-query term is used. `min_chunk_bytes` affects search only; `read_chunks` still returns
+query term is used. Ranking reads only the ranking rows; chunk text and locations are
+loaded for the returned page alone, so `top_k` bounds the work of building a page. `min_chunk_bytes` affects search only; `read_chunks` still returns
 short chunks.
 
 Each `SearchHit` carries the complete chunk `text`, its `path`, `snapshot` hash,

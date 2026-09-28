@@ -138,6 +138,7 @@ impl Ord for Rank {
 pub(crate) struct MatrixCache {
     key: String,
     ids: Vec<String>,
+    payloads: Vec<String>,
     vectors: Vec<f32>,
 }
 pub(crate) fn identifier_terms(text: &str) -> String {
@@ -280,11 +281,15 @@ impl ArkoIndex {
         );
         let matrix = self.inner.matrix.clone();
         let cache_budget = self.inner.config.vector_cache_bytes;
-        let ranked=self.inner.db.call(move|c|{
-            let mut lexical=vec![];let mut semantic=vec![];
+        let (page_offset, page_size) = (offset, options.top_k.unwrap_or(usize::MAX));
+        // Ranks every eligible chunk from the ranking rows alone, then loads
+        // text and locations only for the page returned.
+        let (available, page_hits)=self.inner.db.call(move|c|{
+            // (chunk id, score, payload)
+            let mut lexical:Vec<(String,f64,String)>=vec![];let mut semantic:Vec<(String,f64,String)>=vec![];
             if mode!=SearchMode::Semantic&&!fts.is_empty(){
-                let mut statement=c.prepare("SELECT ch.id,bm25(chunk_text_fts) FROM chunk_text_fts f JOIN chunks ch ON ch.text_id=f.rowid WHERE chunk_text_fts MATCH ?1 AND ch.job=?2 AND substr(ch.path,1,length(?3))=?3 AND (?4='' OR instr(f.body,?4)>0) AND ch.end-ch.start>=?5 ORDER BY bm25(chunk_text_fts),ch.id")?;
-                lexical=statement.query_map(params![fts,g,prefix,literal,min_chunk_bytes],|r|Ok((r.get::<_,String>(0)?,r.get::<_,f64>(1)?)))?.collect::<std::result::Result<_,_>>()?;
+                let mut statement=c.prepare("SELECT ch.id,bm25(chunk_text_fts),ch.payload FROM chunk_text_fts f JOIN chunks ch ON ch.text_id=f.rowid WHERE chunk_text_fts MATCH ?1 AND ch.job=?2 AND substr(ch.path,1,length(?3))=?3 AND (?4='' OR instr(f.body,?4)>0) AND ch.end-ch.start>=?5 ORDER BY bm25(chunk_text_fts),ch.id")?;
+                lexical=statement.query_map(params![fts,g,prefix,literal,min_chunk_bytes],|r|Ok((r.get::<_,String>(0)?,r.get::<_,f64>(1)?,r.get::<_,String>(2)?)))?.collect::<std::result::Result<_,_>>()?;
             }
             if let Some(vector)=vector{
                 // SQLite streams vector-only rows; source bodies are fetched only for finalists.
@@ -292,43 +297,49 @@ impl ArkoIndex {
                 let cache_key=crate::source::hash(serde_json::to_vec(&(&g,&prefix,&literal,min_chunk_bytes))?);
                 let mut cache=matrix.lock().map_err(|_|invalid("vector cache lock poisoned"))?;
                 let mut ranks=Vec::new();
-                let mut score_row=|id:String,values:&[f32]|->Result<()> {
+                let mut score_row=|id:String,payload:String,values:&[f32]|->Result<()> {
                     if values.len()!=vector.len(){return Err(invalid("stored vector dimension mismatch"));}
                     let score:f64=values.iter().zip(&vector).map(|(&v,&q)|v as f64*q as f64).sum();
                     if !score.is_finite(){return Err(invalid("nonfinite stored vector score"));}
-                    ranks.push(Rank{score,id});Ok(())
+                    ranks.push((Rank{score,id},payload));Ok(())
                 };
                 if let Some(cached)=cache.as_ref().filter(|c|c.key==cache_key){
-                    for(id,values)in cached.ids.iter().zip(cached.vectors.chunks_exact(vector.len())){score_row(id.clone(),values)?;}
+                    for((id,payload),values)in cached.ids.iter().zip(&cached.payloads).zip(cached.vectors.chunks_exact(vector.len())){score_row(id.clone(),payload.clone(),values)?;}
                 }else{
-                    let mut statement=c.prepare("SELECT min(ch.id),v.vector FROM chunks ch JOIN vectors v ON v.id=ch.payload JOIN snapshots s ON s.hash=ch.hash WHERE ch.job=?1 AND substr(ch.path,1,length(?2))=?2 AND (?3='' OR instr(CAST(substr(CAST(s.content AS BLOB),ch.start+1,ch.end-ch.start) AS TEXT),?3)>0) AND ch.end-ch.start>=?4 GROUP BY ch.payload")?;
+                    let mut statement=c.prepare("SELECT min(ch.id),v.vector,ch.payload FROM chunks ch JOIN vectors v ON v.id=ch.payload JOIN snapshots s ON s.hash=ch.hash WHERE ch.job=?1 AND substr(ch.path,1,length(?2))=?2 AND (?3='' OR instr(CAST(substr(CAST(s.content AS BLOB),ch.start+1,ch.end-ch.start) AS TEXT),?3)>0) AND ch.end-ch.start>=?4 GROUP BY ch.payload")?;
                     let mut rows=statement.query(params![g,prefix,literal,min_chunk_bytes])?;
-                    let mut candidate=Some(MatrixCache{key:cache_key,ids:vec![],vectors:vec![]});let mut bytes_used=0usize;
+                    let mut candidate=Some(MatrixCache{key:cache_key,ids:vec![],payloads:vec![],vectors:vec![]});let mut bytes_used=0usize;
                     while let Some(row)=rows.next()?{
-                        let id:String=row.get(0)?;let bytes:Vec<u8>=row.get(1)?;
+                        let id:String=row.get(0)?;let bytes:Vec<u8>=row.get(1)?;let payload:String=row.get(2)?;
                         if bytes.len()!=vector.len()*4{return Err(invalid("stored vector dimension mismatch"));}
-                        let values:Vec<_>=bytes.chunks_exact(4).map(|b|f32::from_le_bytes(b.try_into().unwrap())).collect();score_row(id.clone(),&values)?;
-                        bytes_used=bytes_used.saturating_add(bytes.len()+id.len()+std::mem::size_of::<String>());
+                        let values:Vec<_>=bytes.chunks_exact(4).map(|b|f32::from_le_bytes(b.try_into().unwrap())).collect();score_row(id.clone(),payload.clone(),&values)?;
+                        bytes_used=bytes_used.saturating_add(bytes.len()+id.len()+payload.len()+2*std::mem::size_of::<String>());
                         if bytes_used>cache_budget{candidate=None;}
-                        if let Some(candidate)=&mut candidate{candidate.ids.push(id);candidate.vectors.extend(values);}
+                        if let Some(candidate)=&mut candidate{candidate.ids.push(id);candidate.payloads.push(payload);candidate.vectors.extend(values);}
                     }
                     *cache=candidate;
                 }
-                ranks.sort_by(|a,b|b.cmp(a));semantic=ranks.into_iter().map(|r|(r.id,r.score)).collect();
+                ranks.sort_by(|a,b|b.0.cmp(&a.0));semantic=ranks.into_iter().map(|(r,payload)|(r.id,r.score,payload)).collect();
             }
+            let mut payloads=HashMap::<String,String>::new();
+            for (id,_,payload) in lexical.iter().chain(&semantic) {payloads.insert(id.clone(),payload.clone());}
             let mut scores=HashMap::<String,f64>::new();
             match mode{
-                SearchMode::Lexical=>{for(id,s)in lexical{scores.insert(id,-s);}},
-                SearchMode::Semantic=>{scores.extend(semantic);},
-                SearchMode::Hybrid=>{for list in [&lexical,&semantic]{for(rank,(id,_))in list.iter().enumerate(){*scores.entry(id.clone()).or_default()+=1.0/(61.0+rank as f64);}}},
+                SearchMode::Lexical=>{for(id,s,_)in lexical{scores.insert(id,-s);}},
+                SearchMode::Semantic=>{scores.extend(semantic.into_iter().map(|(id,s,_)|(id,s)));},
+                SearchMode::Hybrid=>{for list in [&lexical,&semantic]{for(rank,(id,_,_))in list.iter().enumerate(){*scores.entry(id.clone()).or_default()+=1.0/(61.0+rank as f64);}}},
             }
             let mut ranks:Vec<_>=scores.into_iter().map(|(id,score)|Rank{id,score}).collect();ranks.sort_by(|a,b|b.cmp(a));
-            let mut hits=vec![];let mut seen=HashSet::new();
-            for rank in ranks{
-                let (mut hit,payload,text):(SearchHit,String,String)=c.query_row("SELECT ch.id,ch.path,ch.hash,ch.start,ch.end,ch.first_line,ch.last_line,ch.structure,ch.payload,CAST(substr(CAST(s.content AS BLOB),ch.start+1,ch.end-ch.start) AS TEXT) FROM chunks ch JOIN snapshots s ON s.hash=ch.hash WHERE ch.id=?1 AND ch.job=?2",params![rank.id,g],|r|Ok((SearchHit{id:r.get(0)?,path:r.get(1)?,snapshot:r.get(2)?,start_byte:r.get(3)?,end_byte:r.get(4)?,first_line:r.get(5)?,last_line:r.get(6)?,structure:r.get(7)?,score:rank.score,score_type:match mode{SearchMode::Hybrid=>"rrf",SearchMode::Semantic=>"cosine",SearchMode::Lexical=>"negative_bm25"}.into(),text:String::new(),other_locations:0},r.get(8)?,r.get(9)?)))?;
-                if !seen.insert(payload.clone()){continue;}
+            // A text found at several locations is one result, at its best rank.
+            let mut seen=HashSet::new();
+            let ranked:Vec<(Rank,String)>=ranks.into_iter().filter_map(|rank|{let payload=payloads.get(&rank.id)?.clone();seen.insert(payload.clone()).then_some((rank,payload))}).collect();
+            let available=ranked.len();
+            let mut hits=vec![];
+            for (rank,payload) in ranked.into_iter().skip(page_offset).take(page_size){
+                let (mut hit,text):(SearchHit,String)=c.query_row("SELECT ch.id,ch.path,ch.hash,ch.start,ch.end,ch.first_line,ch.last_line,ch.structure,CAST(substr(CAST(s.content AS BLOB),ch.start+1,ch.end-ch.start) AS TEXT) FROM chunks ch JOIN snapshots s ON s.hash=ch.hash WHERE ch.id=?1 AND ch.job=?2",params![rank.id,g],|r|Ok((SearchHit{id:r.get(0)?,path:r.get(1)?,snapshot:r.get(2)?,start_byte:r.get(3)?,end_byte:r.get(4)?,first_line:r.get(5)?,last_line:r.get(6)?,structure:r.get(7)?,score:rank.score,score_type:match mode{SearchMode::Hybrid=>"rrf",SearchMode::Semantic=>"cosine",SearchMode::Lexical=>"negative_bm25"}.into(),text:String::new(),other_locations:0},r.get(8)?)))?;
                 let count:usize=c.query_row("SELECT count(*) FROM chunks WHERE job=?1 AND payload=?2",params![g,payload],|r|r.get(0))?;hit.other_locations=count.saturating_sub(1);hits.push((hit,text));
-            }Ok(hits)
+            }
+            Ok((available,hits))
         }).await?;
         let mut rebuild = rebuild;
         if let (Some(notice), Some(cap)) = (&mut rebuild, options.rebuild_file_limit) {
@@ -340,7 +351,6 @@ impl ArkoIndex {
         } else {
             0
         };
-        let available = ranked.len();
         let mut page = SearchPage {
             generation: generation.clone(),
             mode: options.mode.clone(),
@@ -355,11 +365,7 @@ impl ArkoIndex {
             tokenizer: self.inner.backend.output_tokenizer(),
             judge: None,
         };
-        for (mut hit, text) in ranked
-            .into_iter()
-            .skip(offset)
-            .take(options.top_k.unwrap_or(usize::MAX))
-        {
+        for (mut hit, text) in page_hits {
             page.search_tokens += self.inner.backend.tokens(&text)?;
             hit.text = text;
             page.hits.push(hit);
