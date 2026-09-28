@@ -124,7 +124,9 @@ impl Workflow {
     /// Continue a completed agent with its prior conversation and stable run
     /// identity instead of starting again from an empty context, or answer
     /// an agent waiting for input (`AgentRunStatus::WaitingForInput`) with
-    /// `prompt`.
+    /// `prompt`. An agent whose completion a verifier could not review
+    /// ([`WorkflowError::VerifierFailed`]) continues with `prompt` as its
+    /// next message.
     pub async fn continue_agent(
         &self,
         previous: &AgentResult,

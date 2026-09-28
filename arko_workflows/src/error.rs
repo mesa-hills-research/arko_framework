@@ -49,8 +49,14 @@ pub enum WorkflowError {
 
     /// A completion verifier couldn't review the agent's completion (its run
     /// failed, or its verdict stayed unusable) more times than its
-    /// `max_review_retries` allow. The agent's task was stopped (status
-    /// `Cancelled`), not failed: its work was not judged.
+    /// `max_review_retries` allow. The completion was neither accepted nor
+    /// rejected: the agent's task is paused (status `Paused`, an
+    /// error-recovery pause with the cause `Middleware`). Continue it with
+    /// [`Workflow::continue_agent`](crate::Workflow::continue_agent) on
+    /// [`Workflow::agent_result`](crate::Workflow::agent_result)`(task_id)`:
+    /// the prompt is its next message, and its next `complete_task` is
+    /// reviewed again. [`Workflow::resume_agent`](crate::Workflow::resume_agent)
+    /// can also continue or fail it.
     #[error("Completion verifier '{verifier}' could not review agent '{agent}': {reason}")]
     VerifierFailed {
         verifier: String,

@@ -44,6 +44,21 @@ pub enum ToolExecutionDecision {
     CancelTask {
         reason: String,
     },
+    /// Don't run the call, and pause the task for its host's decision: the
+    /// call is answered with `message_to_agent` (and reported rejected), and
+    /// once the other calls of its batch have run the task awaits
+    /// error-recovery approval
+    /// ([`AwaitingErrorRecoveryApproval`](crate::task::TaskState::AwaitingErrorRecoveryApproval))
+    /// with the cause
+    /// [`ErrorRecoveryCause::Middleware`](crate::task::ErrorRecoveryCause::Middleware)
+    /// and `reason` as its error. `ContinueAfterError` goes on (the agent
+    /// reads its note next), `RejectErrorRecovery` fails the task. For a
+    /// decision the middleware can't make, such as a completion check that
+    /// could not be carried out: the call is neither run nor refused.
+    PauseTask {
+        message_to_agent: String,
+        reason: String,
+    },
 }
 
 /// The observed outcome of a tool execution.

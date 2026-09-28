@@ -1279,6 +1279,122 @@ async fn a_native_batch_a_middleware_stops_answers_the_calls_it_did_not_run() {
     }
 }
 
+/// Pauses the task at a call to `b.txt`, as a workflow does for a
+/// completion its verifier could not review.
+struct PauseAtB;
+
+#[async_trait]
+impl ToolExecutionMiddleware for PauseAtB {
+    async fn before(
+        &self,
+        _: &ToolExecutionContext<'_>,
+        call: &ToolCallContext<'_>,
+    ) -> Result<ToolExecutionDecision, ToolError> {
+        Ok(
+            if call.parameters.get("path").and_then(Value::as_str) == Some("b.txt") {
+                ToolExecutionDecision::PauseTask {
+                    message_to_agent: "Not decided; paused for the host.".into(),
+                    reason: "The check could not run.".into(),
+                }
+            } else {
+                ToolExecutionDecision::Continue
+            },
+        )
+    }
+
+    async fn after(
+        &self,
+        _: &ToolExecutionContext<'_>,
+        _: &ToolCallContext<'_>,
+        _: ToolExecutionOutcome<'_>,
+    ) -> Result<(), ToolError> {
+        Ok(())
+    }
+}
+
+/// A middleware's `PauseTask` answers its call with its message without
+/// running it; the batch's other calls run, and then the task awaits the
+/// host's decision with the cause `Middleware`. Continuing with a note goes
+/// on with the results and the note.
+#[tokio::test]
+async fn a_middleware_pause_answers_the_call_and_pauses_after_the_batch() {
+    for mode in [ToolCallingMode::Native, ToolCallingMode::OutputBased] {
+        let workspace = batch_workspace();
+        std::fs::write(workspace.join("b.txt"), "B-CONTENTS").unwrap();
+        let mut config = config(mode.clone(), &["read_file"]);
+        if mode == ToolCallingMode::Native {
+            one_read_at_a_time(&mut config);
+        }
+        let (mut agent, mut events, commands) = agent(config, ToolRegistry::new(), &workspace);
+        agent.execution_middleware = Some(Arc::new(PauseAtB));
+        let scripted = agent.scripted_responses.get_mut().unwrap();
+        if mode == ToolCallingMode::Native {
+            scripted.push_back(turn(vec![
+                read_a(),
+                native_call("b", "read_file", serde_json::json!({"path": "b.txt"})),
+                native_call("c", "read_file", serde_json::json!({"path": "c.txt"})),
+            ]));
+            scripted.push_back(complete());
+        } else {
+            scripted.push_back(text_turn(
+                "<batched_tool_call>\n<read_file>\n<path>a.txt</path>\n</read_file>\n<read_file>\n<path>b.txt</path>\n</read_file>\n<read_file>\n<path>c.txt</path>\n</read_file>\n</batched_tool_call>",
+            ));
+            scripted.push_back(text_turn(
+                "<complete_task>\n<summary>done</summary>\n</complete_task>",
+            ));
+        }
+        let run = tokio::spawn(agent.run());
+        let mut seen = Vec::new();
+        let (error, cause) = wait_for(&mut events, &mut seen, |event| match event {
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
+                error_message,
+                cause,
+            }) => Some((error_message.clone(), cause.clone())),
+            _ => None,
+        })
+        .await;
+        assert_eq!(error, "The check could not run.");
+        assert_eq!(cause, ErrorRecoveryCause::Middleware);
+        assert!(seen.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolRejected { reason: Some(reason), .. }
+                if reason == "Not decided; paused for the host."
+        )));
+        commands
+            .send(UserCommand::ContinueAfterError {
+                note: Some("Go on, please.".into()),
+            })
+            .await
+            .unwrap();
+        let task = timeout(Duration::from_secs(10), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(task.current_state, TaskState::Completed { .. }),
+            "{mode:?}: {:?}",
+            task.current_state
+        );
+        let conversation = serde_json::to_string(&task.conversation).unwrap();
+        assert!(conversation.contains("A-CONTENTS"), "{mode:?}");
+        assert!(
+            conversation.contains("C-CONTENTS"),
+            "{mode:?}: the batch ran on"
+        );
+        assert!(!conversation.contains("B-CONTENTS"), "{mode:?}: not run");
+        assert!(
+            conversation.contains("Not decided; paused for the host."),
+            "{mode:?}"
+        );
+        assert!(conversation.contains("Go on, please."), "{mode:?}");
+        if mode == ToolCallingMode::Native {
+            assert_calls_paired(&task.conversation);
+        }
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+}
+
 #[tokio::test]
 async fn cancelling_during_an_approval_wait_answers_the_waiting_calls() {
     let workspace = batch_workspace();

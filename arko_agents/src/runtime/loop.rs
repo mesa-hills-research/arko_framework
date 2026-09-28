@@ -918,6 +918,11 @@ impl AgentLoop {
                     .await?;
                 Ok(ai::ToolResult::error_from_tool_call(call, &reason))
             }
+            RunOutcome::Pause { message, reason } => {
+                self.pause_by_middleware(tool_call_id, tool_name, &message, reason)
+                    .await?;
+                Ok(ai::ToolResult::error_from_tool_call(call, &message))
+            }
             RunOutcome::Failed(error) => {
                 let error_text = format!("Tool '{}' execution failed: {}", tool_name, error);
                 self.handle_tool_exec_error(tool_name, error, Some(tool_call_id))
@@ -1018,6 +1023,55 @@ impl AgentLoop {
         };
         self.stop_at_tool_call(tool_call_id, tool_name, reason, state)
             .await
+    }
+
+    /// A middleware paused the task at a call, which it answered with
+    /// `message`: the call is reported rejected, and the task awaits
+    /// error-recovery approval with `reason` once the other calls of its
+    /// batch have run (at once outside a batch), unless it already ended.
+    async fn pause_by_middleware(
+        &mut self,
+        tool_call_id: Uuid,
+        tool_name: &str,
+        message: &str,
+        reason: String,
+    ) -> Result<(), ArkoAgentsError> {
+        self.emit_event(AgentEvent::ToolRejected {
+            tool_call_id,
+            tool_name: tool_name.to_string(),
+            reason: Some(message.to_string()),
+        })
+        .await?;
+        if self.task.current_state.is_terminal() {
+            return Ok(());
+        }
+        log::info!(
+            "Task {}: execution middleware paused the task at '{tool_name}': {reason}",
+            self.task.id
+        );
+        if self.deferring_tool_errors {
+            self.task.deferred_tool_errors.push(DeferredToolError {
+                message: reason,
+                tool_call_id: Some(tool_call_id),
+                middleware_pause: true,
+            });
+            return Ok(());
+        }
+        self.task
+            .set_state(TaskState::AwaitingErrorRecoveryApproval {
+                error_message: reason.clone(),
+                cause: ErrorRecoveryCause::Middleware,
+            });
+        self.emit_event(AgentEvent::TaskStateChanged(
+            self.task.current_state.clone(),
+        ))
+        .await?;
+        self.emit_event(AgentEvent::ErrorEncountered {
+            error_message: reason,
+            requires_approval_to_retry: true,
+            tool_call_id: Some(tool_call_id),
+        })
+        .await
     }
 
     fn is_native_mode(&self) -> bool {
@@ -3664,10 +3718,17 @@ impl AgentLoop {
             .map(|error| error.message.as_str())
             .collect::<Vec<_>>()
             .join("\n");
+        // A decision the middleware left to the host is the host's, whatever
+        // tool errors come with it.
+        let cause = if errors.iter().any(|error| error.middleware_pause) {
+            ErrorRecoveryCause::Middleware
+        } else {
+            ErrorRecoveryCause::ToolError
+        };
         self.task
             .set_state(TaskState::AwaitingErrorRecoveryApproval {
                 error_message: error_message.clone(),
-                cause: ErrorRecoveryCause::ToolError,
+                cause,
             });
         self.emit_event(AgentEvent::TaskStateChanged(
             self.task.current_state.clone(),
@@ -4740,6 +4801,7 @@ impl AgentLoop {
                 self.task.deferred_tool_errors.push(DeferredToolError {
                     message: error_message_for_event,
                     tool_call_id,
+                    middleware_pause: false,
                 });
                 Ok(error_message_for_llm)
             }
@@ -4873,6 +4935,12 @@ impl AgentLoop {
             RunOutcome::Stop { reason, cancel } => {
                 let formatted = format_error(self, &reason);
                 self.stop_by_middleware(tool_call_id, tool_name, &reason, cancel)
+                    .await?;
+                Ok(formatted)
+            }
+            RunOutcome::Pause { message, reason } => {
+                let formatted = format_error(self, &message);
+                self.pause_by_middleware(tool_call_id, tool_name, &message, reason)
                     .await?;
                 Ok(formatted)
             }

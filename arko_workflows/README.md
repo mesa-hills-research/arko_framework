@@ -579,7 +579,8 @@ prior verdict and findings (`include_prior_findings(false)` opts out). A review 
 fails (the verifier's run errors, or its verdict stays unusable after
 `format_retries`) doesn't fail the target: the agent is asked to call
 `complete_task` again, up to `review_retries` times, and then the run call returns
-`WorkflowError::VerifierFailed`. See
+`WorkflowError::VerifierFailed` with the task paused, neither accepted nor rejected:
+`continue_agent` on its result (`Workflow::agent_result(task_id)`) goes on. See
 [completion verification](INDEX.md#completion-verification).
 
 ## Tool-result distillation

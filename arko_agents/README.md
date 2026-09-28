@@ -464,12 +464,17 @@ The last two `run_task` arguments wrap tool execution:
   `SkillsConfig::load_skill_interception` opts in (see [Skills](#skills)).
 - A `ToolExecutionMiddleware` runs `before` and `after` every execution, whether
   approved or auto-approved, native or output-based. `before` returns `Continue`,
-  `Reject { message_to_agent }`, `FailTask { reason }`, or `CancelTask { reason }`,
+  `Reject { message_to_agent }`, `FailTask { reason }`, `CancelTask { reason }`,
   which ends the task as `Cancelled { reason }` (arko_workflows uses it when a run is
-  cancelled). The rejected call gets `reason` as its result, and the calls of the
-  response the stopped task did not run get a result saying so ("This call was not run:
-  Workflow cancelled."). A call answered with `custom_tool_output` skips `before`, and
-  `after` receives `CallerProvided`.
+  cancelled), or `PauseTask { message_to_agent, reason }`. The rejected call gets
+  `reason` as its result, and the calls of the response the stopped task did not run
+  get a result saying so ("This call was not run: Workflow cancelled."). `PauseTask`
+  leaves a decision to the host: the call doesn't run and gets `message_to_agent` as
+  its result, and once the other calls of its batch have run the task awaits
+  error-recovery approval with the cause `Middleware` and `reason` as its error
+  (arko_workflows uses it for a completion its verifier could not review). A call
+  answered with `custom_tool_output` skips `before`, and `after` receives
+  `CallerProvided`.
 
 ### MCP servers
 
@@ -547,7 +552,8 @@ the delay the provider asked for, or the wait the runtime had scheduled, when kn
 credential, or the configuration must change), `UnusableResponses` (responses the runtime
 couldn't use, up to the attempt limit), `UsageLimit { resets_at_unix_ms }`, `Refusal`
 (after the opt-in refusal fallback, if configured, could not answer), `ToolError` (under
-`PauseAndAwaitApproval`), or `Monitor` (an opt-in monitor paused it). A task saved before
+`PauseAndAwaitApproval`), `Monitor` (an opt-in monitor paused it), or `Middleware` (the
+execution middleware paused it with `PauseTask`). A task saved before
 causes were recorded loads with `Unknown`.
 
 | Events | Meaning |

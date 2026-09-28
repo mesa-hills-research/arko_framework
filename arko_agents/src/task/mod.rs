@@ -105,6 +105,11 @@ pub enum ErrorRecoveryCause {
     /// An opt-in monitor paused the task before a request: the plan usage
     /// threshold or the cache-efficiency monitor.
     Monitor,
+    /// The tool execution middleware paused the task at a call
+    /// ([`ToolExecutionDecision::PauseTask`](crate::tool::ToolExecutionDecision::PauseTask)),
+    /// for a decision it leaves to the host (for example, a workflow's
+    /// completion verifier that could not review a completion).
+    Middleware,
 }
 
 /// The reason a task stopped by [`UserCommand::CancelTask`](crate::runtime::command::UserCommand::CancelTask) records.
@@ -337,7 +342,9 @@ pub struct Task {
     pub pending_text_tool_results: Vec<String>,
     /// Tool errors the task pauses on under
     /// `ToolErrorPolicy::PauseAndAwaitApproval` once the other calls of
-    /// their turn are done, including calls still awaiting approval.
+    /// their turn are done, including calls still awaiting approval, and
+    /// the pauses the execution middleware asked for
+    /// ([`ToolExecutionDecision::PauseTask`](crate::tool::ToolExecutionDecision::PauseTask)).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_tool_errors: Vec<DeferredToolError>,
 
@@ -395,6 +402,11 @@ pub struct DeferredToolError {
     /// The error, as `AgentEvent::ErrorEncountered` reports it.
     pub message: String,
     pub tool_call_id: Option<Uuid>,
+    /// A pause the execution middleware asked for
+    /// ([`ErrorRecoveryCause::Middleware`]) rather than a tool error. The
+    /// pause has that cause when any of its entries is one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub middleware_pause: bool,
 }
 
 /// A plan-usage window and its reset; see

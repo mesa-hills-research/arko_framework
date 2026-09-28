@@ -136,6 +136,9 @@ pub enum ErrorRecoveryPolicy {
     ///   action, the cache monitor's `pause_below`) stops for the
     ///   application as configured: the agent pauses and the run call
     ///   returns [`WorkflowError::AgentPaused`](crate::WorkflowError::AgentPaused).
+    /// - A completion its verifier could not review (cause `Middleware`)
+    ///   pauses for the caller too: the run call returns
+    ///   [`WorkflowError::VerifierFailed`](crate::WorkflowError::VerifierFailed).
     ///
     /// Continuing adds nothing to the conversation: the model is never told
     /// that a user approved.
@@ -253,6 +256,7 @@ pub(crate) fn cause_name(cause: &ErrorRecoveryCause) -> &'static str {
         ErrorRecoveryCause::Refusal => "refusal",
         ErrorRecoveryCause::ToolError => "tool_error",
         ErrorRecoveryCause::Monitor => "monitor",
+        ErrorRecoveryCause::Middleware => "middleware",
     }
 }
 
@@ -391,9 +395,12 @@ impl ErrorRecoveryPolicy {
                     "The model's responses could not be used: {error}"
                 ));
             }
-            // A monitor's pause stops for the application, as configured;
-            // a cause not recorded is left to it too.
-            ErrorRecoveryCause::Monitor | ErrorRecoveryCause::Unknown => {
+            // A monitor's pause stops for the application, as configured; so
+            // does a pause the execution middleware asked for (a completion
+            // a verifier could not review), and a cause not recorded.
+            ErrorRecoveryCause::Monitor
+            | ErrorRecoveryCause::Middleware
+            | ErrorRecoveryCause::Unknown => {
                 return RecoveryAction::ReturnToCaller;
             }
         };
@@ -543,7 +550,11 @@ mod tests {
                 "{cause:?}"
             );
         }
-        for cause in [ErrorRecoveryCause::Monitor, ErrorRecoveryCause::Unknown] {
+        for cause in [
+            ErrorRecoveryCause::Monitor,
+            ErrorRecoveryCause::Middleware,
+            ErrorRecoveryCause::Unknown,
+        ] {
             assert_eq!(action(&automatic, cause, 0), RecoveryAction::ReturnToCaller);
         }
 

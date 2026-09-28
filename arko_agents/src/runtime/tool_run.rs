@@ -77,6 +77,9 @@ pub(super) enum RunOutcome {
     /// The middleware failed (or, with `cancel`, cancelled) the task at the
     /// call; it did not run.
     Stop { reason: String, cancel: bool },
+    /// The middleware paused the task at the call, answering it with
+    /// `message`; it did not run.
+    Pause { message: String, reason: String },
     /// The tool returned, or the host supplied its output. `effective` is
     /// the text after interception.
     Finished {
@@ -130,6 +133,15 @@ pub(super) async fn run_tool(
                         return Ok(RunOutcome::Stop {
                             reason,
                             cancel: true,
+                        });
+                    }
+                    ToolExecutionDecision::PauseTask {
+                        message_to_agent,
+                        reason,
+                    } => {
+                        return Ok(RunOutcome::Pause {
+                            message: message_to_agent,
+                            reason,
                         });
                     }
                 }

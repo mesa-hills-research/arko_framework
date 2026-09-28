@@ -87,8 +87,9 @@ async fn a_re_review_is_given_the_prior_findings_unless_opted_out() {
 /// A review that fails (here, a verdict that never follows the contract)
 /// doesn't fail the task: the completion is rejected so the agent calls
 /// `complete_task` again, up to `max_review_retries`; then the task is
-/// stopped and the call returns `VerifierFailed`. The verdict is asked for
-/// again `max_format_retries` times per review.
+/// paused, neither accepted nor rejected, and the call returns
+/// `VerifierFailed`. The verdict is asked for again `max_format_retries`
+/// times per review.
 #[tokio::test]
 async fn a_failed_review_is_retried_then_reported_as_verifier_failed() {
     for (format_retries, review_retries) in [(1, 1), (0, 0)] {
@@ -127,7 +128,14 @@ async fn a_failed_review_is_retried_then_reported_as_verifier_failed() {
         assert_eq!((verifier.as_str(), agent.as_str()), ("check", "coder"));
         assert!(reason.contains("unusable"), "{reason}");
         let coder = workflow.agent_result(task_id).unwrap();
-        assert_eq!(coder.status, AgentRunStatus::Cancelled);
+        assert_eq!(coder.status, AgentRunStatus::Paused);
+        assert!(matches!(
+            coder.task.current_state,
+            arko_agents::TaskState::AwaitingErrorRecoveryApproval {
+                cause: arko_agents::ErrorRecoveryCause::Middleware,
+                ..
+            }
+        ));
         assert_eq!(hooks_failed.load(Ordering::SeqCst), 0, "not failed");
         let reviews = (review_retries as usize + 1) * (format_retries as usize + 1);
         assert_eq!(verifier_bodies(&server).len(), reviews);
@@ -149,4 +157,75 @@ async fn a_failed_review_is_retried_then_reported_as_verifier_failed() {
             );
         }
     }
+}
+
+/// A task whose completion a verifier could not review is left paused,
+/// not cancelled: `continue_agent` gives it the prompt as its next message,
+/// and its next completion is reviewed again (with the full count of
+/// retries). (The task was once cancelled, and could not be continued.)
+#[tokio::test]
+async fn a_task_a_verifier_could_not_review_is_continued_with_continue_agent() {
+    let workspace = Workspace::new();
+    // Unusable until the third review.
+    let server = server(|review| {
+        if review < 2 {
+            "Looks good to me."
+        } else {
+            "ACCEPTED"
+        }
+    })
+    .await;
+    let workflow = builder(
+        &server,
+        &workspace,
+        CompletionVerifierConfig::correctness("check", "reviewer")
+            .target("coder")
+            .format_retries(0)
+            .review_retries(0),
+    )
+    .build()
+    .unwrap();
+    let error = workflow.run_agent("coder", "Write it.").await.unwrap_err();
+    let WorkflowError::VerifierFailed { task_id, .. } = error else {
+        panic!("{error:?}");
+    };
+    let paused = workflow.agent_result(task_id).unwrap();
+    assert_eq!(paused.status, AgentRunStatus::Paused);
+
+    // Continued, it completes again; the review fails again (the count
+    // started over), and the task is paused again.
+    let error = workflow
+        .continue_agent(&paused, "The verifier is back; complete again.")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, WorkflowError::VerifierFailed { task_id: id, .. } if id == task_id),
+        "{error:?}"
+    );
+    let coder_bodies = || {
+        server
+            .bodies()
+            .into_iter()
+            .filter(|body| !body.contains(VERIFIER))
+            .collect::<Vec<_>>()
+    };
+    let continued = coder_bodies().last().unwrap().clone();
+    assert!(
+        continued.contains("Nothing was decided about your work; the task is paused"),
+        "{continued}"
+    );
+    assert!(
+        continued.contains("The verifier is back; complete again."),
+        "{continued}"
+    );
+
+    let paused = workflow.agent_result(task_id).unwrap();
+    let result = workflow
+        .continue_agent(&paused, "Complete once more.")
+        .await
+        .unwrap();
+    assert_eq!(result.status, AgentRunStatus::Completed);
+    assert_eq!(result.agent_run_id, task_id);
+    assert_eq!(verifier_bodies(&server).len(), 3);
+    assert_eq!(coder_bodies().len(), 3);
 }

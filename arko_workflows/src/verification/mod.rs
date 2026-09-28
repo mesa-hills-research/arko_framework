@@ -41,10 +41,11 @@ pub struct CompletionVerifierConfig {
     pub max_format_retries: u32,
     /// How many failed reviews (the verifier's run failed, or its verdict
     /// stayed unusable) of one task are answered by asking the agent to call
-    /// `complete_task` again, which starts a new review. The next failure
-    /// stops the task and the run call returns
+    /// `complete_task` again, which starts a new review. On the next failure
+    /// the completion is neither accepted nor rejected: the task pauses and
+    /// the run call returns
     /// [`WorkflowError::VerifierFailed`](crate::WorkflowError::VerifierFailed);
-    /// the task itself isn't failed. Default 1.
+    /// continuing it starts the count again. Default 1.
     #[serde(default = "default_review_retries")]
     pub max_review_retries: u32,
 }

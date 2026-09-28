@@ -585,14 +585,21 @@ async fn answer_recovery_pause(
                 .await;
             Ok(())
         }
-        RecoveryAction::ReturnToCaller if nested => Err(nested_cannot_pause(
-            ctx,
-            agent_name,
-            &format!(
-                "an error-recovery decision ({}): {error}",
-                crate::policy::cause_name(&cause)
-            ),
-        )),
+        // A completion a verifier could not review is left paused even inside
+        // another agent's call: the run call returns `VerifierFailed` at
+        // once, so nothing waits on the pause.
+        RecoveryAction::ReturnToCaller
+            if nested && cause != arko_agents::ErrorRecoveryCause::Middleware =>
+        {
+            Err(nested_cannot_pause(
+                ctx,
+                agent_name,
+                &format!(
+                    "an error-recovery decision ({}): {error}",
+                    crate::policy::cause_name(&cause)
+                ),
+            ))
+        }
         RecoveryAction::ReturnToCaller => {
             pause_for_caller(
                 agent_name,
@@ -1215,7 +1222,7 @@ pub(crate) async fn drive_to_result(
         Err(error) => Err(error),
     };
     ctx.run_control.unregister(agent_run_id);
-    // Set when a verifier that failed stopped the task.
+    // Set when a verifier that failed paused the task.
     let verifier_failure = ctx.verifier_failures.lock().remove(&agent_run_id);
 
     if let Some(stop) = ctx.run_control.error() {
@@ -1225,6 +1232,23 @@ pub(crate) async fn drive_to_result(
         return Err(stop);
     }
     let result = result?;
+    // Paused, neither accepted nor rejected, for its caller.
+    if let Some((verifier, reason)) = verifier_failure
+        && matches!(
+            result.task.current_state,
+            TaskState::AwaitingErrorRecoveryApproval {
+                cause: arko_agents::ErrorRecoveryCause::Middleware,
+                ..
+            }
+        )
+    {
+        return Err(WorkflowError::VerifierFailed {
+            verifier,
+            agent: agent_name,
+            task_id: result.agent_run_id,
+            reason,
+        });
+    }
     drive_result?;
     match result.status {
         AgentRunStatus::Completed => Ok(result),
@@ -1243,17 +1267,9 @@ pub(crate) async fn drive_to_result(
             agent: agent_name,
             reason: result.error.clone().unwrap_or_default(),
         }),
-        AgentRunStatus::Cancelled => Err(match verifier_failure {
-            Some((verifier, reason)) => WorkflowError::VerifierFailed {
-                verifier,
-                agent: agent_name,
-                task_id: result.agent_run_id,
-                reason,
-            },
-            None => WorkflowError::AgentCancelled {
-                agent: agent_name,
-                reason: result.error.clone().unwrap_or_default(),
-            },
+        AgentRunStatus::Cancelled => Err(WorkflowError::AgentCancelled {
+            agent: agent_name,
+            reason: result.error.clone().unwrap_or_default(),
         }),
         AgentRunStatus::Failed => Err(WorkflowError::Agent(
             arko_agents::ArkoAgentsError::TaskExecution(
@@ -2124,6 +2140,27 @@ impl WorkflowEngine {
         continuation_prompt: &str,
         ctx: &Arc<SharedContext>,
     ) -> Result<AgentResult, WorkflowError> {
+        // A completion a verifier could not review (`VerifierFailed`): the
+        // prompt is the agent's next message.
+        if previous.status == AgentRunStatus::Paused
+            && matches!(
+                previous.task.current_state,
+                TaskState::AwaitingErrorRecoveryApproval {
+                    cause: arko_agents::ErrorRecoveryCause::Middleware,
+                    ..
+                }
+            )
+        {
+            return self
+                .resume_agent(
+                    previous,
+                    AgentResume::ContinueAfterError {
+                        note: Some(continuation_prompt.to_string()),
+                    },
+                    ctx,
+                )
+                .await;
+        }
         self.continue_at(previous, continuation_prompt, ctx, 0)
             .await
     }
@@ -2148,7 +2185,7 @@ impl WorkflowEngine {
         };
         if !resumable {
             return Err(WorkflowError::BuilderInvalid(
-                "only a completed or user-input-suspended agent run can be continued; resume a paused one with resume_agent".to_string(),
+                "only a completed or user-input-suspended agent run, or one a completion verifier could not review, can be continued; resume a paused one with resume_agent".to_string(),
             ));
         }
         let agent_name = &previous.agent_name;
@@ -2409,8 +2446,10 @@ impl WorkflowExecutionMiddleware {
     /// Answers a review that failed (the verifier's run failed, or its
     /// verdict stayed unusable): within the verifier's `max_review_retries`,
     /// the completion is rejected so the agent calls `complete_task` again
-    /// and a new review runs; after that, the task is stopped (not failed)
-    /// and the run call returns `VerifierFailed`.
+    /// and a new review runs; after that, the completion is neither accepted
+    /// nor rejected: the task is paused for its caller (continuable with
+    /// `continue_agent`) and the run call returns `VerifierFailed`. The
+    /// count starts again after the pause.
     fn review_failed(
         &self,
         execution: &ToolExecutionContext<'_>,
@@ -2440,12 +2479,20 @@ impl WorkflowExecutionMiddleware {
             };
         }
         self.context
+            .verification_failures
+            .lock()
+            .remove(&(execution.task_id, verifier.name.clone()));
+        self.context
             .verifier_failures
             .lock()
             .insert(execution.task_id, (verifier.name.clone(), reason.clone()));
-        ToolExecutionDecision::CancelTask {
+        ToolExecutionDecision::PauseTask {
+            message_to_agent: format!(
+                "Completion verifier '{}' could not review this completion ({reason}). Nothing was decided about your work; the task is paused until the caller decides how to go on.",
+                verifier.name
+            ),
             reason: format!(
-                "Stopped: completion verifier '{}' could not review the completion: {reason}",
+                "Completion verifier '{}' could not review the completion: {reason}",
                 verifier.name
             ),
         }

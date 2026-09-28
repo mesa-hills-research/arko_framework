@@ -929,9 +929,10 @@ async fn fail_fast_stops_the_other_agents_at_the_first_failure() {
 /// verifier) can't be paused for the caller: under `RespectAgentConfig` a
 /// call it needs approved (even its own `complete_task`, which a default
 /// configuration doesn't auto-approve) stops it with a reason, so the review
-/// fails, a bounded number of times, and the call returns `VerifierFailed`.
-/// No paused result is left behind, and the verifier isn't asked again and
-/// again. The same holds for its question without a user input handler.
+/// fails, a bounded number of times, and the call returns `VerifierFailed`
+/// (the target is left paused for its caller). No paused verifier is left
+/// behind, and the verifier isn't asked again and again. The same holds for
+/// its question without a user input handler.
 #[tokio::test]
 async fn a_nested_run_that_needs_a_decision_is_stopped_not_paused() {
     for question in [false, true] {
@@ -995,10 +996,14 @@ async fn a_nested_run_that_needs_a_decision_is_stopped_not_paused() {
             .filter(|body| body.contains("You are a completion verifier"))
             .count();
         assert_eq!(verifier_requests, 2, "question: {question}");
-        assert_eq!(hooks.get(HookPoint::OnAgentPaused), 0);
+        assert_eq!(hooks.get(HookPoint::OnAgentPaused), 1, "the coder");
         assert_eq!(hooks.get(HookPoint::OnUserInputRequired), 0);
         let results = workflow.result().agent_results;
-        assert!(results.iter().all(|result| !result.status.is_paused()));
+        assert!(
+            results
+                .iter()
+                .all(|result| result.status.is_paused() == (result.agent_name == "coder"))
+        );
         let reviews = results
             .iter()
             .filter(|result| result.agent_name == "reviewer")
