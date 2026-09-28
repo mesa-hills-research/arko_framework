@@ -443,12 +443,12 @@ retrieval:
 | `SearchOptions` field | Default | Effect |
 |---|---|---|
 | `mode` | `Hybrid` | Retrieval mode. |
-| `top_k` | `None` | `None` returns every eligible chunk; `Some(n)` returns a page of `n` hits with a cursor for the rest. `Some(0)` is an error; there is no upper bound. In hybrid mode, it applies to the combined ranking. |
-| `min_chunk_bytes` | 0 | Skips chunks shorter than this many bytes. |
+| `top_k` | `Some(10)` | A page of `n` hits with a cursor for the rest; `None` returns every eligible chunk. `Some(0)` is an error; there is no upper bound. In hybrid mode, it applies to the combined ranking. |
+| `min_chunk_bytes` | 40 | Skips chunks shorter than this many bytes; 0 keeps every chunk. |
 | `path_prefix` | `None` | Keeps chunks whose root-relative path starts with this string. |
 | `literal` | `None` | Keeps chunks that contain this exact, case-sensitive text. |
 | `cursor` | `None` | Continues from a previous page's `next`. |
-| `rebuild_file_limit` | `None` | Caps the paths listed in the rebuild notice. |
+| `rebuild_file_limit` | `Some(100)` | Caps the paths listed in the rebuild notice; `None` lists every one. |
 
 Filters apply before ranking in every mode, every remaining chunk is scored, and every
 query term is used. Ranking reads only the ranking rows; chunk text and locations are
@@ -459,6 +459,13 @@ Each `SearchHit` carries the complete chunk `text`, its `path`, `snapshot` hash,
 `start_byte` and `end_byte`, `first_line` and `last_line`, `structure`, `score` and
 `score_type`. A chunk whose text appears at several locations is returned once, and
 `other_locations` counts the others.
+
+`may_be_stale` marks a hit whose file may have changed since it was indexed: an unfinished
+update (running, paused or blocked) lists the file as affected, or the file under the
+index root no longer matches the chunk's snapshot, because it changed, was removed, can't
+be read or now exceeds `max_file_bytes`. Search reads the files of the returned hits to
+check; when the index root is not accessible, only unfinished updates mark hits. The
+text of a marked hit is still the indexed text; read the file for its current content.
 
 `candidate_count` is the number of eligible results, and `omitted_hits` the number after
 this page. `next` is a cursor pinned to the page's generation, so later pages come from
@@ -574,9 +581,10 @@ process at a time, so other commands on the same database fail while one of thes
 `watch`, is running.
 
 `search` returns the top 10 results by default (`--top-k N`) and hides chunks shorter than
-40 bytes (`--min-chunk-bytes 0` includes them). `--lexical` selects full-text retrieval
-only and `--semantic` vector retrieval only; otherwise search is hybrid.
-`--rebuild-file-limit N` caps the paths listed in a rebuild notice.
+40 bytes (`--min-chunk-bytes 0` includes them), as the library defaults do. `--lexical`
+selects full-text retrieval only and `--semantic` vector retrieval only; otherwise search
+is hybrid. `--rebuild-file-limit N` caps the paths listed in a rebuild notice (default
+100).
 
 `VOYAGE_API_KEY` must be set. OpenAI credentials come from `--oauth-file`, or else from the
 environment: `OPENAI_OAUTH_ACCESS_TOKEN` and `OPENAI_OAUTH_ACCOUNT_ID` (with an optional

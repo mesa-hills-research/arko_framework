@@ -54,8 +54,9 @@ enum Command {
         /// Return this many complete results from the final combined ranking.
         #[arg(long, default_value_t = 10)]
         top_k: usize,
-        #[arg(long)]
-        rebuild_file_limit: Option<usize>,
+        /// The most affected paths a rebuild notice lists.
+        #[arg(long, default_value_t = 100)]
+        rebuild_file_limit: usize,
         #[command(flatten)]
         judging: JudgeArgs,
     },
@@ -149,7 +150,7 @@ async fn main() -> AnyResult<()> {
                 } else {
                     SearchMode::Hybrid
                 },
-                rebuild_file_limit,
+                rebuild_file_limit: Some(rebuild_file_limit),
                 min_chunk_bytes,
                 top_k: Some(top_k),
                 ..Default::default()

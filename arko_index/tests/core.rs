@@ -253,9 +253,13 @@ async fn settle(index: &ArkoIndex, job: &str) -> JobStatus {
     .await
     .expect("test job hung")
 }
+/// Every eligible result in `mode`, with no size filter.
 fn options(mode: SearchMode) -> SearchOptions {
     SearchOptions {
         mode,
+        top_k: None,
+        min_chunk_bytes: 0,
+        rebuild_file_limit: None,
         ..Default::default()
     }
 }
@@ -2976,4 +2980,107 @@ async fn duplicate_texts_are_one_result_and_pages_match_the_full_ranking() {
             .collect();
         assert_eq!(paged, whole, "{mode:?}");
     }
+}
+
+#[tokio::test]
+async fn searches_return_ten_substantial_results_by_default() {
+    let defaults = SearchOptions::default();
+    assert_eq!(
+        (
+            defaults.top_k,
+            defaults.min_chunk_bytes,
+            defaults.rebuild_file_limit
+        ),
+        (Some(10), 40, Some(100))
+    );
+    // Saved options without these fields load with the same defaults.
+    let saved: SearchOptions = serde_json::from_value(json!({"mode": "lexical"})).unwrap();
+    assert_eq!(
+        (saved.top_k, saved.min_chunk_bytes, saved.rebuild_file_limit),
+        (Some(10), 40, Some(100))
+    );
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    for n in 0..15 {
+        std::fs::write(
+            root.path().join(format!("{n:02}.txt")),
+            format!("alpha {n} with enough words to pass the size filter\n"),
+        )
+        .unwrap();
+    }
+    std::fs::write(root.path().join("tiny.txt"), "alpha\n").unwrap();
+    let fake = Arc::new(Fake::new());
+    let (index, job, status) =
+        build_spec(&fake, db.path(), BuildSpec::new("test", root.path())).await;
+    assert_eq!(status.phase, "ready", "{:?}", status.problem);
+    let page = index
+        .search(&job.index, "alpha", SearchOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(page.hits.len(), 10);
+    assert_eq!(page.candidate_count, 15);
+    assert!(page.next.is_some());
+    assert!(page.hits.iter().all(|h| h.path != "tiny.txt"));
+}
+#[tokio::test]
+async fn hits_from_files_changed_since_indexing_may_be_stale() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    for name in ["kept", "edited", "removed", "pending"] {
+        std::fs::write(
+            root.path().join(format!("{name}.txt")),
+            format!("alpha {name}\nbeta\n"),
+        )
+        .unwrap();
+    }
+    let mut fake = Fake::new();
+    fake.rejection = Rejection::WrongCallRetryLater;
+    let fake = Arc::new(fake);
+    let (index, job, status) =
+        build_spec(&fake, db.path(), BuildSpec::new("test", root.path())).await;
+    assert_eq!(status.phase, "ready", "{:?}", status.problem);
+    let stale = |page: &SearchPage| -> Vec<(String, bool)> {
+        let mut marks: Vec<_> = page
+            .hits
+            .iter()
+            .map(|h| (h.path.clone(), h.may_be_stale))
+            .collect();
+        marks.sort();
+        marks
+    };
+    let search = || index.search(&job.index, "alpha", options(SearchMode::Lexical));
+    assert!(
+        stale(&search().await.unwrap())
+            .iter()
+            .all(|(_, stale)| !stale)
+    );
+    // Edited or removed on disk, not yet reindexed.
+    std::fs::write(root.path().join("edited.txt"), "alpha edited again\nbeta\n").unwrap();
+    std::fs::remove_file(root.path().join("removed.txt")).unwrap();
+    assert_eq!(
+        stale(&search().await.unwrap()),
+        [
+            ("edited.txt".to_string(), true),
+            ("kept.txt".to_string(), false),
+            ("pending.txt".to_string(), false),
+            ("removed.txt".to_string(), true),
+        ]
+    );
+    // An unfinished update lists its affected files, even ones restored since.
+    std::fs::write(
+        root.path().join("pending.txt"),
+        "alpha pending changed\nbeta\n",
+    )
+    .unwrap();
+    fake.rejected_chunks.store(usize::MAX, Ordering::SeqCst);
+    let update = index.start_update(&job.index).await.unwrap();
+    wait_for_retry(&index, &update.job).await;
+    std::fs::write(root.path().join("pending.txt"), "alpha pending\nbeta\n").unwrap();
+    let marks = stale(&search().await.unwrap());
+    assert!(
+        marks.contains(&("pending.txt".to_string(), true)),
+        "{marks:?}"
+    );
+    index.cancel(&update.job).await.unwrap();
+    settle(&index, &update.job).await;
 }

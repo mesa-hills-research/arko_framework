@@ -53,9 +53,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // The ten best results; page.next continues with the rest.
     let page = index.search(&job.index, "how are retries scheduled?", SearchOptions::default()).await?;
     for hit in &page.hits {
-        // hit.text is the complete chunk; the hit also carries its byte and line ranges.
+        // hit.text is the complete chunk; the hit also carries its byte and line ranges,
+        // and may_be_stale when its file changed since it was indexed.
         println!("{}:{}-{}\n{}", hit.path, hit.first_line, hit.last_line, hit.text);
     }
     Ok(())
@@ -103,7 +105,9 @@ the subscription (see [Usage and cost](../docs/arko_index-reference.md#usage-and
   [Watching for changes](../docs/arko_index-reference.md#watching-for-changes).
 - **Search.** Hybrid search combines SQLite FTS5 (BM25) and exact cosine-similarity
   rankings with reciprocal rank fusion; lexical and semantic modes use one of them. Path,
-  literal-text and size filters apply before ranking, and results page with cursors.
+  literal-text and size filters apply before ranking, and results page with cursors: ten
+  per page by default, skipping chunks under 40 bytes. Hits from files changed since they
+  were indexed are marked `may_be_stale`.
   `search_with_judge` asks a model to filter and rank a candidate pool. See
   [Search](../docs/arko_index-reference.md#search) and
   [LLM judge](../docs/arko_index-reference.md#llm-judge).

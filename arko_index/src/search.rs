@@ -24,27 +24,30 @@ pub enum SearchMode {
 #[serde(default)]
 pub struct SearchOptions {
     pub mode: SearchMode,
-    /// Optional caller-requested number of complete results per page. None returns all.
+    /// Complete results per page: 10 by default. `None` returns every
+    /// eligible result.
     pub top_k: Option<usize>,
-    /// Exclude source chunks shorter than this many UTF-8 bytes before ranking.
-    /// Zero keeps every chunk. Source reads are unaffected.
+    /// Exclude source chunks shorter than this many UTF-8 bytes before
+    /// ranking: 40 by default. Zero keeps every chunk. Source reads are
+    /// unaffected.
     pub min_chunk_bytes: usize,
     pub path_prefix: Option<String>,
     pub literal: Option<String>,
     pub cursor: Option<SearchCursor>,
-    /// None includes every affected path. Limiting rebuild metadata is opt-in.
+    /// The most affected paths a rebuild notice lists: 100 by default.
+    /// `None` lists every one.
     pub rebuild_file_limit: Option<usize>,
 }
 impl Default for SearchOptions {
     fn default() -> Self {
         Self {
             mode: SearchMode::Hybrid,
-            top_k: None,
-            min_chunk_bytes: 0,
+            top_k: Some(10),
+            min_chunk_bytes: 40,
             path_prefix: None,
             literal: None,
             cursor: None,
-            rebuild_file_limit: None,
+            rebuild_file_limit: Some(100),
         }
     }
 }
@@ -77,6 +80,11 @@ pub struct SearchHit {
     pub score_type: String,
     pub text: String,
     pub other_locations: usize,
+    /// The file may have changed since this chunk was indexed: an unfinished
+    /// update lists it as affected, or the file on disk no longer matches
+    /// the chunk's snapshot (it changed, was removed or can't be read).
+    #[serde(default)]
+    pub may_be_stale: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchPage {
@@ -177,6 +185,32 @@ fn fts_query(query: &str) -> String {
         .collect::<Vec<_>>()
         .join(" OR ")
 }
+/// The paths of `hits` (path, snapshot) whose file under the index root no
+/// longer matches the snapshot: changed, removed, unreadable, or now over
+/// the size ceiling. None when the root itself is not accessible (an index
+/// used away from its source).
+fn changed_on_disk(spec: &crate::BuildSpec, hits: Vec<(String, String)>) -> HashSet<String> {
+    if !spec.root.is_dir() {
+        return HashSet::new();
+    }
+    let mut checked = HashMap::new();
+    for (path, snapshot) in hits {
+        checked.entry(path).or_insert_with_key(|path| {
+            let file = spec.root.join(path);
+            let current = std::fs::metadata(&file)
+                .ok()
+                .filter(|metadata| metadata.len() <= spec.max_file_bytes)
+                .and_then(|_| std::fs::read(&file).ok())
+                .and_then(|bytes| crate::source::Snapshot::new(path.clone(), &bytes).ok());
+            current.is_none_or(|current| current.hash != snapshot)
+        });
+    }
+    checked
+        .into_iter()
+        .filter(|(_, changed)| *changed)
+        .map(|(path, _)| path)
+        .collect()
+}
 impl ArkoIndex {
     pub async fn search(
         &self,
@@ -189,8 +223,9 @@ impl ArkoIndex {
         }
         let idx = index.to_owned();
         let requested = options.cursor.as_ref().map(|c| c.generation.clone());
-        let(generation,fresh,rebuild)=self.inner.db.call(move|c|{
-            let active:Option<String>=required(c.query_row("SELECT active FROM indexes WHERE id=?1",[&idx],|r|r.get(0)).optional()?,"index")?;
+        let(generation,fresh,rebuild,spec)=self.inner.db.call(move|c|{
+            let (active,spec):(Option<String>,String)=required(c.query_row("SELECT active,spec FROM indexes WHERE id=?1",[&idx],|r|Ok((r.get(0)?,r.get(1)?))).optional()?,"index")?;
+            let spec:crate::BuildSpec=decode(&spec)?;
             let from_cursor=requested.is_some();
             let generation=requested.or(active).ok_or_else(||Error::Blocked("initial index build has no complete searchable generation yet".into()))?;
             let fresh:Option<bool>=c.query_row("SELECT fresh FROM jobs WHERE id=?1 AND index_id=?2 AND phase='ready'",params![generation,idx],|r|r.get(0)).optional()?;
@@ -202,8 +237,13 @@ impl ArkoIndex {
             };
             let pending:Option<(String,String,String,Option<String>)>=c.query_row("SELECT id,phase,affected,manifest FROM jobs WHERE index_id=?1 AND phase IN ('snapshotting','chunking','embedding','paused','blocked') ORDER BY rowid DESC LIMIT 1",[idx],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
             let rebuild=pending.map(|(job,phase,affected,manifest)|Ok::<_,Error>(RebuildNotice{message:"Index is being rebuilt; results use the last complete generation.".into(),job,phase,affected_files:decode(&affected)?,omitted_files:0,determining_changes:manifest.is_none()})).transpose()?;
-            Ok((generation,fresh,rebuild))
+            Ok((generation,fresh,rebuild,spec))
         }).await?;
+        // Files an unfinished update found changed.
+        let affected: HashSet<String> = rebuild
+            .as_ref()
+            .map(|notice| notice.affected_files.iter().cloned().collect())
+            .unwrap_or_default();
         let query_hash = crate::source::hash(serde_json::to_vec(&(
             query,
             &options.mode,
@@ -336,7 +376,7 @@ impl ArkoIndex {
             let available=ranked.len();
             let mut hits=vec![];
             for (rank,payload) in ranked.into_iter().skip(page_offset).take(page_size){
-                let (mut hit,text):(SearchHit,String)=c.query_row("SELECT ch.id,ch.path,ch.hash,ch.start,ch.end,ch.first_line,ch.last_line,ch.structure,CAST(substr(CAST(s.content AS BLOB),ch.start+1,ch.end-ch.start) AS TEXT) FROM chunks ch JOIN snapshots s ON s.hash=ch.hash WHERE ch.id=?1 AND ch.job=?2",params![rank.id,g],|r|Ok((SearchHit{id:r.get(0)?,path:r.get(1)?,snapshot:r.get(2)?,start_byte:r.get(3)?,end_byte:r.get(4)?,first_line:r.get(5)?,last_line:r.get(6)?,structure:r.get(7)?,score:rank.score,score_type:match mode{SearchMode::Hybrid=>"rrf",SearchMode::Semantic=>"cosine",SearchMode::Lexical=>"negative_bm25"}.into(),text:String::new(),other_locations:0},r.get(8)?)))?;
+                let (mut hit,text):(SearchHit,String)=c.query_row("SELECT ch.id,ch.path,ch.hash,ch.start,ch.end,ch.first_line,ch.last_line,ch.structure,CAST(substr(CAST(s.content AS BLOB),ch.start+1,ch.end-ch.start) AS TEXT) FROM chunks ch JOIN snapshots s ON s.hash=ch.hash WHERE ch.id=?1 AND ch.job=?2",params![rank.id,g],|r|Ok((SearchHit{id:r.get(0)?,path:r.get(1)?,snapshot:r.get(2)?,start_byte:r.get(3)?,end_byte:r.get(4)?,first_line:r.get(5)?,last_line:r.get(6)?,structure:r.get(7)?,score:rank.score,score_type:match mode{SearchMode::Hybrid=>"rrf",SearchMode::Semantic=>"cosine",SearchMode::Lexical=>"negative_bm25"}.into(),text:String::new(),other_locations:0,may_be_stale:false},r.get(8)?)))?;
                 let count:usize=c.query_row("SELECT count(*) FROM chunks WHERE job=?1 AND payload=?2",params![g,payload],|r|r.get(0))?;hit.other_locations=count.saturating_sub(1);hits.push((hit,text));
             }
             Ok((available,hits))
@@ -365,7 +405,13 @@ impl ArkoIndex {
             tokenizer: self.inner.backend.output_tokenizer(),
             judge: None,
         };
+        let on_disk: Vec<(String, String)> = page_hits
+            .iter()
+            .map(|(hit, _)| (hit.path.clone(), hit.snapshot.clone()))
+            .collect();
+        let changed = tokio::task::spawn_blocking(move || changed_on_disk(&spec, on_disk)).await?;
         for (mut hit, text) in page_hits {
+            hit.may_be_stale = affected.contains(&hit.path) || changed.contains(&hit.path);
             page.search_tokens += self.inner.backend.tokens(&text)?;
             hit.text = text;
             page.hits.push(hit);
