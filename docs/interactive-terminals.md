@@ -61,6 +61,16 @@ calling, for example `{"job_id":"…","revision":"3","text":"Y\n"}`.
 | Execution deadline (`default_timeout`) | None |
 | Shell (`shell`, `shell_args`) | `/bin/sh -c` on Unix, `cmd.exe /D /S /C` on Windows |
 | Prompt rules (`prompt_rules`) | Y/N, password/passphrase, and "press a key" prompts |
+| Quiet environment for PTY jobs (`quiet_terminal_environment`) | On |
+
+PTY jobs run with the host's environment plus `TERM=dumb`, `NO_COLOR=1`,
+`PAGER=cat`, `GIT_PAGER=cat`, and `LANG`, `LC_CTYPE`, and `LC_ALL` set to
+`C.UTF-8` (`QUIET_TERMINAL_ENVIRONMENT`), on every platform. Programs that see a
+terminal then print plain text instead of colours, progress redraws, and pagers,
+which would otherwise fill the output window. Full-screen programs such as
+editors, `top`, and `less` refuse to run or degrade under `TERM=dumb`; set
+`quiet_terminal_environment: false` to give PTY jobs the host's environment
+unchanged. Pipe jobs always get it unchanged.
 
 Prompt rules are named regular expressions. The number of jobs is not limited,
 running or finished. Jobs run with the host process's permissions; the terminal
@@ -124,6 +134,11 @@ Each job's `output.log` (at `log_path`) keeps the combined output in arrival ord
 up to `max_log_bytes`; `log_truncated` reports that the limit was reached. In PTY
 mode stdout and stderr share one terminal, and Windows ConPTY emits a rendered
 terminal stream; use pipe mode when the original stdout and stderr bytes matter.
+On Windows, the text a PTY job's status and notices show the agent has its
+escape sequences removed, since ConPTY adds cursor moves, window titles, and
+colour resets whatever the program prints; cursor-forward moves become the
+spaces they stand for. The byte offsets (`start`, `end`, `available_end`,
+`after_output`), `raw_hex`, and `output.log` keep the raw output.
 The prompt matcher handles line prompts and ANSI decoration, not full-screen
 terminal interfaces.
 

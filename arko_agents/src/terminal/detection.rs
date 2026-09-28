@@ -42,6 +42,24 @@ impl Detector {
     }
 }
 
+/// `text` without terminal escape sequences (CSI, OSC and the other
+/// `ESC`-introduced controls), with cursor-forward moves (`CSI n C`, which
+/// ConPTY uses for runs of spaces) replaced by the spaces they stand for.
+pub(super) fn strip_escapes(text: &str) -> String {
+    static CURSOR_FORWARD: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static ESCAPES: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let cursor_forward =
+        CURSOR_FORWARD.get_or_init(|| Regex::new(r"\x1b\[(\d{0,4})C").expect("valid pattern"));
+    let escapes = ESCAPES.get_or_init(|| {
+        Regex::new(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[ -/]*[0-~])")
+            .expect("valid pattern")
+    });
+    let spaced = cursor_forward.replace_all(text, |c: &regex::Captures| {
+        " ".repeat(c[1].parse::<usize>().unwrap_or(1).clamp(1, 256))
+    });
+    escapes.replace_all(&spaced, "").into_owned()
+}
+
 pub(super) fn default_rules() -> Vec<PromptRule> {
     vec![
         PromptRule {
@@ -91,5 +109,16 @@ mod tests {
             Some("Pick a region: ".into())
         );
         assert_eq!(detector.detect(b"Pick a region:\x1b[1K"), None);
+    }
+
+    #[test]
+    fn escape_sequences_are_stripped_and_cursor_moves_become_spaces() {
+        let conpty = "\x1b[?25l\x1b[2J\x1b[m\x1b[HPick a region:\x1b[1C\x1b]0;C:\\Windows\\SYSTEM32\\cmd.exe\x07\x1b[?25h";
+        assert_eq!(strip_escapes(conpty), "Pick a region: ");
+        assert_eq!(
+            strip_escapes("\x1b[32mok\x1b[0m a\x1b[3Cb\x1b(B\x1b=\x1b]2;title\x1b\\ done"),
+            "ok a   b done"
+        );
+        assert_eq!(strip_escapes("plain text\r\n"), "plain text\r\n");
     }
 }

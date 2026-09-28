@@ -108,7 +108,8 @@ pub(super) fn spawn(
         .current_dir(cwd)
         .kill_on_drop(true)
         .env("ARKO_INPUT_REQUEST_PATH", &paths.requests)
-        .env("ARKO_INPUT_REPLY_PATH", &paths.replies);
+        .env("ARKO_INPUT_REPLY_PATH", &paths.replies)
+        .envs(config.job_environment(terminal).iter().copied());
     let mut pty_output = None;
     let mut pty_input = None;
     if terminal {

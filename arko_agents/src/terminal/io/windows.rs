@@ -94,13 +94,19 @@ fn command_line(config: &TerminalConfig, command: &str) -> io::Result<Vec<u16>> 
     }
     wide(&line)
 }
-fn environment(paths: &ControlPaths) -> io::Result<Vec<u16>> {
+fn environment(paths: &ControlPaths, extra: &[(&str, &str)]) -> io::Result<Vec<u16>> {
     let mut vars: Vec<_> = std::env::vars_os()
         .filter(|(name, _)| {
             !name.eq_ignore_ascii_case("ARKO_INPUT_REQUEST_PATH")
                 && !name.eq_ignore_ascii_case("ARKO_INPUT_REPLY_PATH")
+                && !extra.iter().any(|(set, _)| name.eq_ignore_ascii_case(set))
         })
         .collect();
+    vars.extend(
+        extra
+            .iter()
+            .map(|(name, value)| (OsString::from(name), OsString::from(value))),
+    );
     vars.push((
         "ARKO_INPUT_REQUEST_PATH".into(),
         paths.requests.as_os_str().to_owned(),
@@ -364,7 +370,7 @@ pub(super) fn spawn(
     paths: &ControlPaths,
 ) -> io::Result<ChildProcess> {
     let mut command = command_line(config, command)?;
-    let environment = environment(paths)?;
+    let environment = environment(paths, config.job_environment(terminal))?;
     let cwd = wide(cwd.as_os_str())?;
     let (input_read, input_write) = pipe()?;
     let (output_read, output_write) = pipe()?;

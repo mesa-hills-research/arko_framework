@@ -52,8 +52,42 @@ pub struct TerminalConfig {
     pub prompt_quiet_ms: u64,
     pub prompt_rules: Vec<PromptRule>,
     pub default_timeout: Option<Duration>,
+    /// PTY jobs get [`QUIET_TERMINAL_ENVIRONMENT`] on top of the host's
+    /// environment (default `true`), so programs that see a terminal print
+    /// plain text: no colours, no pagers, UTF-8 output. Full-screen programs
+    /// (editors, `top`, `less`) refuse to run or degrade under `TERM=dumb`;
+    /// set `false` to give PTY jobs the host's environment unchanged. Pipe
+    /// jobs always get it unchanged.
+    pub quiet_terminal_environment: bool,
 }
+
+/// The variables PTY jobs get when
+/// [`TerminalConfig::quiet_terminal_environment`] is on (the default), on
+/// every platform: no colour (`TERM=dumb`, `NO_COLOR=1`), no pager
+/// (`PAGER=cat`, `GIT_PAGER=cat`), and a UTF-8 locale.
+pub const QUIET_TERMINAL_ENVIRONMENT: [(&str, &str); 7] = [
+    ("TERM", "dumb"),
+    ("NO_COLOR", "1"),
+    ("PAGER", "cat"),
+    ("GIT_PAGER", "cat"),
+    ("LANG", "C.UTF-8"),
+    ("LC_CTYPE", "C.UTF-8"),
+    ("LC_ALL", "C.UTF-8"),
+];
+
 impl TerminalConfig {
+    /// The variables a job gets on top of the host's environment.
+    pub(super) fn job_environment(
+        &self,
+        terminal: bool,
+    ) -> &'static [(&'static str, &'static str)] {
+        if terminal && self.quiet_terminal_environment {
+            &QUIET_TERMINAL_ENVIRONMENT
+        } else {
+            &[]
+        }
+    }
+
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
             directory: directory.into(),
@@ -72,6 +106,7 @@ impl TerminalConfig {
             prompt_quiet_ms: 150,
             prompt_rules: detection::default_rules(),
             default_timeout: None,
+            quiet_terminal_environment: true,
         }
     }
 }
@@ -123,6 +158,24 @@ pub struct InputNotice {
     pub prompt_truncated: bool,
 }
 
+/// Whether PTY output shown to the agent loses its escape sequences: on
+/// Windows, where ConPTY adds its own (cursor moves, window titles, colour
+/// resets) whatever the program prints. The log and byte offsets keep the
+/// raw output.
+const STRIPS_ESCAPES: bool = cfg!(windows);
+
+/// The display text of an output window: its bytes as UTF-8 (invalid or
+/// split sequences replaced), without escape sequences when `strip` is set
+/// (cursor-forward moves become the spaces they stand for).
+fn window_text(bytes: &[u8], strip: bool) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    if strip {
+        detection::strip_escapes(&text)
+    } else {
+        text.into_owned()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputWindow {
     pub start: u64,
@@ -130,7 +183,9 @@ pub struct OutputWindow {
     pub available_end: u64,
     /// True when the requested beginning is no longer in the output buffer.
     pub gap: bool,
-    /// UTF-8 display of this byte range, replacing invalid/incomplete sequences.
+    /// UTF-8 display of this byte range, replacing invalid/incomplete
+    /// sequences. On Windows, PTY output is shown without escape sequences;
+    /// `start`, `end` and the log still count the raw bytes.
     pub text: String,
     /// Exact bytes when the display range contains invalid/incomplete UTF-8.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -208,7 +263,7 @@ impl JobData {
                 end: start + take as u64,
                 available_end: end,
                 gap: requested < base,
-                text: String::from_utf8_lossy(&bytes).into_owned(),
+                text: window_text(&bytes, STRIPS_ESCAPES && self.record.terminal),
                 raw_hex: std::str::from_utf8(&bytes)
                     .is_err()
                     .then(|| bytes.iter().map(|byte| format!("{byte:02x}")).collect()),

@@ -668,3 +668,81 @@ async fn control_stream_handles_partial_utf8_frames_and_rejects_overflow_or_trun
     }
     f.manager.shutdown().await;
 }
+
+/// PTY jobs get the quiet environment on every platform; pipe jobs, and PTY
+/// jobs with it turned off, get the host's.
+#[tokio::test]
+async fn pty_jobs_get_a_quiet_environment_unless_turned_off() {
+    let names = [
+        "TERM",
+        "NO_COLOR",
+        "PAGER",
+        "GIT_PAGER",
+        "LANG",
+        "LC_CTYPE",
+        "LC_ALL",
+    ];
+    let show = format!("print('ENV=' + '|'.join(os.environ.get(name, '-') for name in {names:?}))");
+    let host = names
+        .iter()
+        .map(|name| std::env::var(name).unwrap_or_else(|_| "-".into()))
+        .collect::<Vec<_>>()
+        .join("|");
+    let pipes = StartOptions {
+        terminal: false,
+        detect_prompts: false,
+        timeout: None,
+    };
+    let f = Fixture::new(|_| {});
+    let pty = f.python(&show, Default::default());
+    let text = f.finished(pty.job_id).await.output.text;
+    assert!(
+        text.contains("ENV=dumb|1|cat|cat|C.UTF-8|C.UTF-8|C.UTF-8"),
+        "{text:?}"
+    );
+    let pipe = f.python(&show, pipes);
+    let text = f.finished(pipe.job_id).await.output.text;
+    assert!(text.contains(&format!("ENV={host}")), "{text:?}");
+
+    let f = Fixture::new(|config| config.quiet_terminal_environment = false);
+    let pty = f.python(&show, Default::default());
+    let text = f.finished(pty.job_id).await.output.text;
+    assert!(text.contains(&format!("ENV={host}")), "{text:?}");
+}
+
+/// Output shown to the agent loses escape sequences only where they are
+/// stripped (Windows PTYs); the byte offsets always count the raw output.
+#[test]
+fn stripped_windows_keep_raw_offsets() {
+    let raw = b"\x1b[32mgreen\x1b[0m done";
+    assert_eq!(window_text(raw, true), "green done");
+    assert_eq!(window_text(raw, false), String::from_utf8_lossy(raw));
+    let data = JobData {
+        record: Record {
+            job_id: Uuid::new_v4(),
+            owner: Uuid::new_v4(),
+            revision: 0,
+            state: JobState::Running,
+            input: None,
+            exit_code: None,
+            error: None,
+            terminal: true,
+            output_end: raw.len() as u64,
+            log_truncated: false,
+        },
+        output: raw.iter().copied().collect(),
+        last_event: None,
+    };
+    let config = TerminalConfig::new(std::env::temp_dir());
+    let snapshot = data.snapshot(&config, None, 2_000).unwrap();
+    assert_eq!(
+        (snapshot.output.start, snapshot.output.end),
+        (0, raw.len() as u64)
+    );
+    let expected = if cfg!(windows) {
+        "green done".to_string()
+    } else {
+        String::from_utf8_lossy(raw).into_owned()
+    };
+    assert_eq!(snapshot.output.text, expected);
+}
