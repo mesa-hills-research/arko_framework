@@ -12,23 +12,53 @@ pyo3::create_exception!(
 );
 
 #[cfg(feature = "python")]
+pyo3::create_exception!(
+    arko_workflows,
+    UserInputRequired,
+    pyo3::exceptions::PyException,
+    "An agent asked a question and waits for an answer: args are (message, agent_run_id). Answer with PyWorkflow.continue_agent."
+);
+
+#[cfg(feature = "python")]
+pyo3::create_exception!(
+    arko_workflows,
+    AgentPaused,
+    pyo3::exceptions::PyException,
+    "An agent paused for a tool approval or error-recovery decision: args are (message, agent_run_id). Decide with PyWorkflow.resume_agent."
+);
+
+#[cfg(feature = "python")]
 #[pymodule]
 fn arko_workflows(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWorkflowBuilder>()?;
     m.add_class::<PyWorkflow>()?;
     m.add_class::<PyAgentResult>()?;
     m.add("WorkflowCancelled", m.py().get_type::<WorkflowCancelled>())?;
+    m.add("UserInputRequired", m.py().get_type::<UserInputRequired>())?;
+    m.add("AgentPaused", m.py().get_type::<AgentPaused>())?;
     Ok(())
 }
 
-/// A cancelled run raises `WorkflowCancelled`; other errors raise
-/// `RuntimeError`.
+/// A cancelled run raises `WorkflowCancelled`; an agent waiting for input
+/// `UserInputRequired` and a paused agent `AgentPaused`, each with the
+/// agent run ID as the second argument; other errors raise `RuntimeError`.
 #[cfg(feature = "python")]
 fn run_error(error: crate::WorkflowError) -> PyErr {
     match error {
         crate::WorkflowError::Cancelled => WorkflowCancelled::new_err(error.to_string()),
+        crate::WorkflowError::UserInputRequired { task_id, .. } => {
+            UserInputRequired::new_err((error.to_string(), task_id.to_string()))
+        }
+        crate::WorkflowError::AgentPaused { task_id, .. } => {
+            AgentPaused::new_err((error.to_string(), task_id.to_string()))
+        }
         error => pyo3::exceptions::PyRuntimeError::new_err(format!("Workflow error: {error}")),
     }
+}
+
+#[cfg(feature = "python")]
+fn value_error(message: impl Into<String>) -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(message.into())
 }
 
 #[cfg(feature = "python")]
@@ -40,8 +70,16 @@ pub struct PyWorkflowBuilder {
     budget: Option<f64>,
     persistence_dir: Option<String>,
     auto_checkpoint: bool,
+    retain_checkpoints: Option<usize>,
+    event_log: crate::persistence::EventLog,
     resume_from: Option<String>,
     memory_tiers: Vec<(String, Option<usize>)>,
+    memory_renames: Vec<(String, String)>,
+    dropped_memory_tiers: Vec<String>,
+    approval_policy: crate::policy::ApprovalPolicy,
+    error_recovery_policy: crate::policy::ErrorRecoveryPolicy,
+    max_parallel_agents: Option<usize>,
+    fail_fast: bool,
     cancel_grace_period: Option<f64>,
     /// `None`: the automatic limit.
     wait_for_message_timeout: Option<f64>,
@@ -81,9 +119,17 @@ impl PyWorkflowBuilder {
             agents: Vec::new(),
             budget: None,
             persistence_dir: None,
-            auto_checkpoint: false,
+            auto_checkpoint: true,
+            retain_checkpoints: None,
+            event_log: crate::persistence::EventLog::Full,
             resume_from: None,
             memory_tiers: Vec::new(),
+            memory_renames: Vec::new(),
+            dropped_memory_tiers: Vec::new(),
+            approval_policy: crate::policy::ApprovalPolicy::ApproveAll,
+            error_recovery_policy: crate::policy::ErrorRecoveryPolicy::Automatic,
+            max_parallel_agents: None,
+            fail_fast: false,
             cancel_grace_period: None,
             wait_for_message_timeout: None,
             agent_wait_for_message_timeouts: Vec::new(),
@@ -110,10 +156,95 @@ impl PyWorkflowBuilder {
         Ok(())
     }
 
-    #[pyo3(signature = (checkpoint_dir, auto_checkpoint=false))]
-    fn persistence(&mut self, checkpoint_dir: String, auto_checkpoint: bool) -> PyResult<()> {
+    /// Persist the run in `checkpoint_dir`. As in Rust: a checkpoint after
+    /// every finalized agent run (`auto_checkpoint=True`), every checkpoint
+    /// kept (`retain_checkpoints=None`), and every event logged
+    /// (`event_log="full"`; `"lifecycle_only"` leaves out streamed
+    /// fragments).
+    #[pyo3(signature = (checkpoint_dir, auto_checkpoint=true, retain_checkpoints=None, event_log="full"))]
+    fn persistence(
+        &mut self,
+        checkpoint_dir: String,
+        auto_checkpoint: bool,
+        retain_checkpoints: Option<usize>,
+        event_log: &str,
+    ) -> PyResult<()> {
+        self.event_log = match event_log {
+            "full" => crate::persistence::EventLog::Full,
+            "lifecycle_only" => crate::persistence::EventLog::LifecycleOnly,
+            other => {
+                return Err(value_error(format!(
+                    "event_log must be \"full\" or \"lifecycle_only\", not {other:?}"
+                )));
+            }
+        };
         self.persistence_dir = Some(checkpoint_dir);
         self.auto_checkpoint = auto_checkpoint;
+        self.retain_checkpoints = retain_checkpoints;
+        Ok(())
+    }
+
+    /// On resume, restore the checkpoint's memory tier `old` into the
+    /// configured tier `new`.
+    fn rename_memory_tier_on_resume(&mut self, old: String, new: String) -> PyResult<()> {
+        self.memory_renames.push((old, new));
+        Ok(())
+    }
+
+    /// On resume, discard the checkpoint's memory tier `name`.
+    fn drop_memory_tier_on_resume(&mut self, name: String) -> PyResult<()> {
+        self.dropped_memory_tiers.push(name);
+        Ok(())
+    }
+
+    /// `"approve_all"` (the default: every tool call is approved) or
+    /// `"respect_agent_config"` (a call the agent's configuration marks for
+    /// approval pauses the agent: `AgentPaused`, decided with
+    /// `resume_agent`).
+    fn approval_policy(&mut self, policy: &str) -> PyResult<()> {
+        self.approval_policy = match policy {
+            "approve_all" => crate::policy::ApprovalPolicy::ApproveAll,
+            "respect_agent_config" => crate::policy::ApprovalPolicy::RespectAgentConfig,
+            other => {
+                return Err(value_error(format!(
+                    "the approval policy must be \"approve_all\" or \"respect_agent_config\", not {other:?}"
+                )));
+            }
+        };
+        Ok(())
+    }
+
+    /// `"automatic"` (the default: recover without an attempt limit from
+    /// errors that may pass), `"limited"` with `max` automatic recoveries,
+    /// or `"return_to_caller"` (every error-recovery pause raises
+    /// `AgentPaused`).
+    #[pyo3(signature = (policy, max=None))]
+    fn error_recovery_policy(&mut self, policy: &str, max: Option<u32>) -> PyResult<()> {
+        self.error_recovery_policy = match (policy, max) {
+            ("automatic", None) => crate::policy::ErrorRecoveryPolicy::Automatic,
+            ("limited", Some(max)) => crate::policy::ErrorRecoveryPolicy::Limited { max },
+            ("return_to_caller", None) => crate::policy::ErrorRecoveryPolicy::ReturnToCaller,
+            ("limited", None) => return Err(value_error("\"limited\" needs max")),
+            (other, _) => {
+                return Err(value_error(format!(
+                    "the error recovery policy must be \"automatic\", \"limited\" (with max), or \"return_to_caller\", not {other:?}"
+                )));
+            }
+        };
+        Ok(())
+    }
+
+    /// Run at most `max` agents of a `run_agents_parallel` call at once
+    /// (default: no cap).
+    fn max_parallel_agents(&mut self, max: usize) -> PyResult<()> {
+        self.max_parallel_agents = Some(max);
+        Ok(())
+    }
+
+    /// In `run_agents_parallel`, stop the other agents at the first failure
+    /// (default off).
+    fn fail_fast(&mut self, enabled: bool) -> PyResult<()> {
+        self.fail_fast = enabled;
         Ok(())
     }
 
@@ -185,10 +316,26 @@ impl PyWorkflowBuilder {
         }
 
         if let Some(ref directory) = self.persistence_dir {
-            builder = builder.persistence(
-                crate::persistence::PersistenceConfig::new(directory)
-                    .auto_checkpoint(self.auto_checkpoint),
-            );
+            let mut config = crate::persistence::PersistenceConfig::new(directory)
+                .auto_checkpoint(self.auto_checkpoint)
+                .event_log(self.event_log);
+            if let Some(count) = self.retain_checkpoints {
+                config = config.retain_checkpoints(count);
+            }
+            builder = builder.persistence(config);
+        }
+        for (old, new) in &self.memory_renames {
+            builder = builder.rename_memory_tier_on_resume(old.clone(), new.clone());
+        }
+        for name in &self.dropped_memory_tiers {
+            builder = builder.drop_memory_tier_on_resume(name.clone());
+        }
+        builder = builder
+            .approval_policy(self.approval_policy.clone())
+            .error_recovery_policy(self.error_recovery_policy.clone())
+            .fail_fast(self.fail_fast);
+        if let Some(max) = self.max_parallel_agents {
+            builder = builder.max_parallel_agents(max);
         }
         if let Some(ref checkpoint) = self.resume_from {
             builder = builder.resume_from(checkpoint);
@@ -283,6 +430,105 @@ impl PyWorkflow {
         })
     }
 
+    /// Continue a completed agent run with a follow-up `prompt`, or answer an
+    /// agent waiting for input (`UserInputRequired`) with it.
+    fn continue_agent<'py>(
+        &self,
+        py: Python<'py>,
+        previous: PyAgentResult,
+        prompt: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let workflow = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            workflow
+                .continue_agent(&previous.inner, &prompt)
+                .await
+                .map(PyAgentResult::from)
+                .map_err(run_error)
+        })
+    }
+
+    /// Continue a paused agent (`AgentPaused`): `"approve"` or `"reject"`
+    /// every call awaiting approval, or `"continue"` (the failed request is
+    /// sent again; `note`, when given, is added for the model first) or
+    /// `"fail"` (`note` is the reason) after an error-recovery pause.
+    #[pyo3(signature = (previous, decision, note=None))]
+    fn resume_agent<'py>(
+        &self,
+        py: Python<'py>,
+        previous: PyAgentResult,
+        decision: String,
+        note: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        use arko_agents::runtime::command::ToolApprovalDecision;
+        let calls = match crate::policy::AgentPause::of(&previous.inner.task.current_state) {
+            Some(crate::policy::AgentPause::ToolApproval { calls }) => calls,
+            _ => Vec::new(),
+        };
+        let resume = match decision.as_str() {
+            "approve" | "reject" => crate::policy::AgentResume::ToolApprovals(
+                calls
+                    .iter()
+                    .map(|call| {
+                        let decision = if decision == "approve" {
+                            ToolApprovalDecision::Approve {
+                                custom_tool_output: None,
+                                message_to_agent: note.clone(),
+                            }
+                        } else {
+                            ToolApprovalDecision::Reject {
+                                reason: note.clone(),
+                            }
+                        };
+                        (call.tool_call_id, decision)
+                    })
+                    .collect(),
+            ),
+            "continue" => crate::policy::AgentResume::ContinueAfterError { note },
+            "fail" => crate::policy::AgentResume::FailAfterError { reason: note },
+            other => {
+                return Err(value_error(format!(
+                    "the decision must be \"approve\", \"reject\", \"continue\", or \"fail\", not {other:?}"
+                )));
+            }
+        };
+        let workflow = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            workflow
+                .resume_agent(&previous.inner, resume)
+                .await
+                .map(PyAgentResult::from)
+                .map_err(run_error)
+        })
+    }
+
+    /// The recorded result of agent run `agent_run_id` (as `UserInputRequired`
+    /// and `AgentPaused` give it), or None.
+    fn agent_result(&self, agent_run_id: String) -> PyResult<Option<PyAgentResult>> {
+        let id =
+            uuid::Uuid::parse_str(&agent_run_id).map_err(|error| value_error(error.to_string()))?;
+        Ok(self.inner.agent_result(id).map(PyAgentResult::from))
+    }
+
+    /// Finish the run: fire `PostWorkflow`, save a checkpoint, and return
+    /// the recorded agent results.
+    fn finish<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let workflow = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            workflow
+                .finish()
+                .await
+                .map(|result| {
+                    result
+                        .agent_results
+                        .into_iter()
+                        .map(PyAgentResult::from)
+                        .collect::<Vec<_>>()
+                })
+                .map_err(run_error)
+        })
+    }
+
     /// Cancels the run: running agents stop, and pending and later runs
     /// raise `WorkflowCancelled`. Returns False when it was already stopped.
     fn cancel(&self) -> bool {
@@ -355,22 +601,30 @@ pub struct PyAgentResult {
     pub summary: String,
     #[pyo3(get)]
     pub total_cost: f64,
+    /// `"Completed"`, `"Failed"`, `"Interrupted"`, `"Cancelled"`,
+    /// `"WaitingForInput"`, or `"Paused"`.
     #[pyo3(get)]
     pub status: String,
     #[pyo3(get)]
     pub agent_run_id: String,
+    /// The failure or cancellation reason, the questions, or the pause.
+    #[pyo3(get)]
+    pub error: Option<String>,
+    /// The full result, to continue or resume the run.
+    inner: crate::AgentResult,
 }
 
 #[cfg(feature = "python")]
 impl From<crate::AgentResult> for PyAgentResult {
     fn from(result: crate::AgentResult) -> Self {
-        let total_cost = result.total_cost();
         Self {
-            agent_name: result.agent_name,
-            summary: result.summary,
-            total_cost,
+            agent_name: result.agent_name.clone(),
+            summary: result.summary.clone(),
+            total_cost: result.total_cost(),
             status: format!("{:?}", result.status),
             agent_run_id: result.agent_run_id.to_string(),
+            error: result.error.clone(),
+            inner: result,
         }
     }
 }

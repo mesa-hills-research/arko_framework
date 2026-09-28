@@ -1279,7 +1279,7 @@ impl BallotStore {
 
 ## Python bindings
 
-Source: [python/mod.rs](src/python/mod.rs). Cargo feature: `python`. The Python module `arko_workflows` exports three classes, `PyWorkflowBuilder`, `PyWorkflow`, and `PyAgentResult`, and the exception `WorkflowCancelled`, a subclass of `Exception`. The three class names are public Rust wrapper types in `arko_workflows::python`; their Python methods are not public Rust methods. `PyAgentResult` implements `From<arko_workflows::AgentResult>`.
+Source: [python/mod.rs](src/python/mod.rs). Cargo feature: `python`. The Python module `arko_workflows` exports three classes, `PyWorkflowBuilder`, `PyWorkflow`, and `PyAgentResult`, and the exceptions `WorkflowCancelled`, `UserInputRequired`, and `AgentPaused`, subclasses of `Exception`. `UserInputRequired` and `AgentPaused` carry `(message, agent_run_id)` as their arguments. The three class names are public Rust wrapper types in `arko_workflows::python`; their Python methods are not public Rust methods. `PyAgentResult` implements `From<arko_workflows::AgentResult>`.
 
 The tables use Python-facing signatures: `self` and PyO3 interpreter arguments are omitted, and awaitable methods are written as `async def`. Builder setters mutate the builder and return `None`, so they cannot be chained like the Rust builder. Numbers map to the underlying Rust `f64` and `usize` types.
 
@@ -1292,7 +1292,13 @@ The tables use Python-facing signatures: `self` and PyO3 interpreter arguments a
 | `workspace(path: str) -> None` | Set the existing workspace directory. |
 | `agent(name: str, config_path: str) -> None` | Add an agent whose configuration file is loaded during `build`. |
 | `budget(limit: float) -> None` | Set the workflow budget in dollars; validated at build. |
-| `persistence(checkpoint_dir: str, auto_checkpoint: bool = False) -> None` | Enable persistence in `checkpoint_dir`. `auto_checkpoint` defaults to `False` here, unlike `PersistenceConfig::new`. |
+| `persistence(checkpoint_dir: str, auto_checkpoint: bool = True, retain_checkpoints: int \| None = None, event_log: str = "full") -> None` | Enable persistence in `checkpoint_dir`, with the Rust defaults: a checkpoint after every finalized agent run, every checkpoint kept (`retain_checkpoints` keeps the newest that many), and every event logged (`"lifecycle_only"` leaves out streamed fragments; other values raise `ValueError`). |
+| `rename_memory_tier_on_resume(old: str, new: str) -> None` | As `WorkflowBuilder::rename_memory_tier_on_resume`. |
+| `drop_memory_tier_on_resume(name: str) -> None` | As `WorkflowBuilder::drop_memory_tier_on_resume`. |
+| `approval_policy(policy: str) -> None` | `"approve_all"` (the default) or `"respect_agent_config"`; other values raise `ValueError`. A handler is Rust-only. |
+| `error_recovery_policy(policy: str, max: int \| None = None) -> None` | `"automatic"` (the default), `"limited"` with `max`, or `"return_to_caller"`; other combinations raise `ValueError`. |
+| `max_parallel_agents(max: int) -> None` | As `WorkflowBuilder::max_parallel_agents`; `build()` raises `ValueError` for zero. |
+| `fail_fast(enabled: bool) -> None` | As `WorkflowBuilder::fail_fast` (default off). |
 | `resume_from(checkpoint: str) -> None` | Restore a checkpoint JSON file at build; requires `persistence`. |
 | `global_memory_tier(name: str, max_bytes: int \| None = None) -> None` | Add an append-only tier every agent can read and write, with an optional byte limit. |
 | `cancel_grace_period(seconds: float) -> None` | Seconds a stopped run waits for each running agent to stop before aborting it; default 30. A negative or non-finite value raises `ValueError`, and so does `build()` for a value too large for a duration. |
@@ -1300,7 +1306,7 @@ The tables use Python-facing signatures: `self` and PyO3 interpreter arguments a
 | `agent_wait_for_message_timeout(agent: str, seconds: float \| None = None) -> None` | The same for one agent, in place of the workflow's setting; `None` selects the automatic limit for it. `build()` raises `ValueError` for an unknown agent. |
 | `build() -> PyWorkflow` | Create the LLM client, load the agent files, and build the workflow. Load and build failures raise `ValueError`. The builder is not consumed and can be reused. |
 
-`build` creates the client with `LLMClient::from_env()`, which configures every provider whose credentials are in the process environment, ignoring blank values: OpenAI with ChatGPT OAuth from `OPENAI_OAUTH_ACCESS_TOKEN` and `OPENAI_OAUTH_ACCOUNT_ID` (plus optional `OPENAI_OAUTH_REFRESH_TOKEN`), otherwise with an OpenAI API key from `OPENAI_API_KEY`; Anthropic from `ANTHROPIC_API_KEY`; Google Gemini from `GOOGLE_API_KEY`, else `GEMINI_API_KEY`; and OpenRouter from `OPENROUTER_API_KEY`. Setting only some of the `OPENAI_OAUTH_*` variables fails the build. When `OPENAI_OAUTH_REFRESH_TOKEN` is the refresh token in the Codex `auth.json` (`$CODEX_HOME/auth.json`, else `~/.codex/auth.json`), that file is used as the credential store, so refreshed tokens are written back to it; otherwise refreshed tokens are kept only in memory, and the first refresh logs a warning. The Python API accepts no custom client, custom tools, hooks, verifiers, distillers, or service settings; those require the Rust API.
+`build` creates the client with `LLMClient::from_env()`, which configures every provider whose credentials are in the process environment, ignoring blank values: OpenAI with ChatGPT OAuth from `OPENAI_OAUTH_ACCESS_TOKEN` and `OPENAI_OAUTH_ACCOUNT_ID` (plus optional `OPENAI_OAUTH_REFRESH_TOKEN`), otherwise with an OpenAI API key from `OPENAI_API_KEY`; Anthropic from `ANTHROPIC_API_KEY`; Google Gemini from `GOOGLE_API_KEY`, else `GEMINI_API_KEY`; and OpenRouter from `OPENROUTER_API_KEY`. Setting only some of the `OPENAI_OAUTH_*` variables fails the build. When `OPENAI_OAUTH_REFRESH_TOKEN` is the refresh token in the Codex `auth.json` (`$CODEX_HOME/auth.json`, else `~/.codex/auth.json`), that file is used as the credential store, so refreshed tokens are written back to it; otherwise refreshed tokens are kept only in memory, and the first refresh logs a warning. The Python API accepts no custom client, custom tools, hooks, approval handlers, verifiers, distillers, or service settings; those require the Rust API.
 
 ### PyWorkflow
 
@@ -1309,7 +1315,11 @@ Obtained from `PyWorkflowBuilder.build()`; there is no Python constructor.
 | Python signature | Parameters, result, and behavior |
 | --- | --- |
 | `async def run_agent(agent_name: str, prompt: str) -> PyAgentResult` | Run a registered agent with the managed driver. |
-| `async def run_agents_parallel(agents: list[tuple[str, str]]) -> list[PyAgentResult]` | Run `(name, prompt)` pairs concurrently; results in input order when all succeed. |
+| `async def run_agents_parallel(agents: list[tuple[str, str]]) -> list[PyAgentResult]` | Run `(name, prompt)` pairs concurrently; results in input order when none fails (an agent that paused is in the list, with its status). |
+| `async def continue_agent(previous: PyAgentResult, prompt: str) -> PyAgentResult` | As `Workflow::continue_agent`: a follow-up for a completed run, or the answer for one waiting for input. |
+| `async def resume_agent(previous: PyAgentResult, decision: str, note: str \| None = None) -> PyAgentResult` | As `Workflow::resume_agent` for a paused run: `"approve"` or `"reject"` every call awaiting approval (`note` is the message or reason), or `"continue"` (`note` is added for the model) or `"fail"` (`note` is the reason) after an error-recovery pause. Other values raise `ValueError`. |
+| `agent_result(agent_run_id: str) -> PyAgentResult \| None` | The recorded result of a run, as `UserInputRequired` and `AgentPaused` give its ID. A malformed ID raises `ValueError`. |
+| `async def finish() -> list[PyAgentResult]` | As `Workflow::finish`: fire `PostWorkflow`, save a checkpoint, and return the recorded agent results. |
 | `cancel() -> bool` | Cancel the run, as `Workflow::cancel`: running agents stop, and pending and later runs raise `WorkflowCancelled`. Returns `False` when the run was already stopped. |
 | `is_cancelled() -> bool` | Whether the run is stopped. |
 | `add_manual_cost(amount: float, description: str, metadata: str \| None = None) -> float` | Record a dollar cost and return the new workflow total. A budget error still leaves the charge recorded. |
@@ -1318,11 +1328,11 @@ Obtained from `PyWorkflowBuilder.build()`; there is no Python constructor.
 | `read_memory(agent_name: str, tier: str, max_chars: int \| None = None) -> str` | Access-checked plain-text read of a tier, or of its trailing `max_chars` characters (`MemoryStore::read_window`). Not the agent tool's versioned JSON. |
 | `write_memory(agent_name: str, tier: str, content: str) -> None` | Access-checked write using the tier's mode, through the store directly: no task ID, freshness notifications, or hooks. |
 
-`run_agent` and `run_agents_parallel` raise `arko_workflows.WorkflowCancelled` once the run is cancelled; their other errors raise `RuntimeError` with the message `Workflow error: <error>`. Accounting, checkpoint, and memory errors raise `RuntimeError`. Continuation, raw handles, cancel handles, event subscription, pause and resume, `finish`, the aggregate `WorkflowResult`, durable steps, and ballots are not available from Python.
+The run methods raise `arko_workflows.WorkflowCancelled` once the run is cancelled, `UserInputRequired` for an agent waiting for input, and `AgentPaused` for a paused agent; their other errors raise `RuntimeError` with the message `Workflow error: <error>`. Accounting, checkpoint, and memory errors raise `RuntimeError`. Raw handles, cancel handles, event subscription, workflow pause and resume, the aggregate `WorkflowResult`, durable steps, and ballots are not available from Python.
 
 ### PyAgentResult
 
-Read-only properties: `agent_name: str`, `summary: str`, `total_cost: float` (the billed amount, zero for ChatGPT OAuth calls), `status: str`, and `agent_run_id: str`. `status` is the Rust variant name (`Completed`, `Failed`, `Interrupted`, `Cancelled`, or `WaitingForInput`); `agent_run_id` is a UUID string. The Rust wrapper's five matching fields are public (`String`, `String`, `f64`, `String`, `String`). The task, token totals, and error text are not exposed. There is no Python constructor.
+Read-only properties: `agent_name: str`, `summary: str`, `total_cost: float` (the billed amount, zero for ChatGPT OAuth calls), `status: str`, `agent_run_id: str`, and `error: str | None` (the failure or cancellation reason, the questions, or the pause). `status` is the Rust variant name (`Completed`, `Failed`, `Interrupted`, `Cancelled`, `WaitingForInput`, or `Paused`); `agent_run_id` is a UUID string. The Rust wrapper's six matching fields are public; it also keeps the full `AgentResult` (private) for `continue_agent` and `resume_agent`. The task and token totals are not exposed. There is no Python constructor.
 
 ## Workflow errors
 
