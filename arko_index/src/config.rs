@@ -79,6 +79,12 @@ fn default_skipped_directories() -> Vec<String> {
         .map(|name| (*name).to_owned())
         .collect()
 }
+/// Files larger than this many bytes are never read by default; see
+/// [`BuildSpec::max_file_bytes`].
+pub const DEFAULT_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+fn default_max_file_bytes() -> u64 {
+    DEFAULT_MAX_FILE_BYTES
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BuildSpec {
     pub name: String,
@@ -93,6 +99,15 @@ pub struct BuildSpec {
     /// custom list). Ignore files and `exclude` patterns apply as well.
     #[serde(default = "default_skipped_directories")]
     pub skip_directories: Vec<String>,
+    /// Files larger than this are excluded without being read, with the
+    /// reason "too large". [`DEFAULT_MAX_FILE_BYTES`] (16 MiB) by default,
+    /// also for specs saved before this field existed.
+    #[serde(default = "default_max_file_bytes")]
+    pub max_file_bytes: u64,
+    /// How chunk-model requests are sized, and what happens to files that
+    /// exceed that size.
+    #[serde(default)]
+    pub chunking: ChunkingOptions,
 }
 impl BuildSpec {
     pub fn new(name: impl Into<String>, root: impl Into<PathBuf>) -> Self {
@@ -102,7 +117,25 @@ impl BuildSpec {
             include: vec![],
             exclude: vec![],
             skip_directories: default_skipped_directories(),
+            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+            chunking: ChunkingOptions::default(),
         }
+    }
+    /// Replaces [`BuildSpec::chunking`].
+    pub fn with_chunking(mut self, chunking: ChunkingOptions) -> Self {
+        self.chunking = chunking;
+        self
+    }
+    /// Replaces [`BuildSpec::max_file_bytes`].
+    pub fn with_max_file_bytes(mut self, bytes: u64) -> Self {
+        self.max_file_bytes = bytes;
+        self
+    }
+    pub fn validate(&self) -> Result<()> {
+        if self.max_file_bytes == 0 {
+            return Err(invalid("max_file_bytes must be positive"));
+        }
+        self.chunking.validate()
     }
     /// Replaces [`BuildSpec::skip_directories`].
     pub fn with_skip_directories(
@@ -112,4 +145,76 @@ impl BuildSpec {
         self.skip_directories = names.into_iter().map(Into::into).collect();
         self
     }
+}
+
+/// How chunk-model requests are sized ([`BuildSpec::chunking`]).
+///
+/// A request's size is its rendered file content: each file's header line
+/// and its numbered rows, as the chunk model sees them. The fixed
+/// instructions and tool schema, under 1,000 tokens, come on top. Chunk
+/// models of the OpenAI provider are measured in `o200k_base` tokens, the
+/// encoding GPT-5.x and GPT-6 use; other models are measured in bytes.
+///
+/// By default a request may take 10% of the chunk model's input limit on the
+/// client's auth path ([`arko_ai::LLMClient::max_input_tokens`]): 92,200
+/// tokens for GPT-5.6 and GPT-6 with an API key, 27,200 over ChatGPT OAuth,
+/// and 4 bytes per token of that share for models measured in bytes (about
+/// 400 KB for a 1M-token Claude model). A model whose limit is unknown is
+/// assumed to accept [`FALLBACK_MAX_INPUT_TOKENS`](crate::budget::FALLBACK_MAX_INPUT_TOKENS).
+/// Initial requests hold up to [`Config::batch_count`] files within the same
+/// budget. A job resolves its budget when it scans the source and keeps it
+/// through resumes.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ChunkingOptions {
+    /// The most `o200k_base` tokens one request may hold, for chunk models
+    /// measured in tokens; `None` uses the default share. For models
+    /// measured in bytes it applies as 4 bytes per token unless
+    /// `max_request_bytes` is set.
+    pub max_request_tokens: Option<usize>,
+    /// The most bytes one request may hold. `None` uses the default for
+    /// models measured in bytes, and no byte limit for models measured in
+    /// tokens. When both limits are set, both apply.
+    pub max_request_bytes: Option<usize>,
+    /// What happens to a file that doesn't fit in one request.
+    pub oversize: OversizePolicy,
+}
+impl Default for ChunkingOptions {
+    fn default() -> Self {
+        Self {
+            max_request_tokens: None,
+            max_request_bytes: None,
+            oversize: OversizePolicy::Split,
+        }
+    }
+}
+impl ChunkingOptions {
+    pub fn validate(&self) -> Result<()> {
+        if self.max_request_tokens == Some(0) || self.max_request_bytes == Some(0) {
+            return Err(invalid("chunk request limits must be positive"));
+        }
+        Ok(())
+    }
+}
+/// What happens to a file that doesn't fit in one chunk request
+/// ([`ChunkingOptions::oversize`]).
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OversizePolicy {
+    /// Split the file into windows that fit, at the strongest boundaries
+    /// available: Markdown headings (level 1 first), then top-level blocks;
+    /// in Rust, items, then members of impls, traits and modules, then
+    /// statements; in other files, blank lines and lines at the outermost
+    /// bracket depth and indentation, then deeper ones; then single lines.
+    /// Pieces are of similar size, and boundaries that cut through a guarded
+    /// unit are used only when no other fits. A window edge is also a chunk
+    /// edge. A single line that exceeds the budget becomes one chunk without
+    /// a model request (an `oversize` event lists it).
+    #[default]
+    Split,
+    /// Leave the file out of the index, as an exclusion with the reason "too
+    /// large (over the chunk request budget)".
+    Skip,
+    /// Block the job before any model request, naming the files.
+    Block,
 }

@@ -1,5 +1,6 @@
 //! Durable source snapshots, validated boundaries, and local hybrid retrieval.
 pub mod backend;
+pub mod budget;
 pub mod chunker;
 pub mod config;
 pub mod error;

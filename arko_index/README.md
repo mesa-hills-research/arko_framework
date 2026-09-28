@@ -82,7 +82,10 @@ the subscription (see [Usage and cost](../docs/arko_index-reference.md#usage-and
   otherwise. See [Which files are indexed](../docs/arko_index-reference.md#which-files-are-indexed).
 - **Chunk boundaries.** The chunk model partitions each file into coherent chunks with no
   size limit, keeping functions, impl blocks, type definitions and documentation sections
-  whole. Every cut is checked against the source, and in Rust files that parse and in
+  whole. Requests are limited to 10% of the chunk model's input limit by default (27,200
+  `o200k_base` tokens for GPT-5.6 Luna over ChatGPT OAuth); a larger file is split into
+  windows at headings, items or blank lines, or skipped or blocked if configured. See
+  [Request budget and large files](../docs/arko_index-reference.md#request-budget-and-large-files). Every cut is checked against the source, and in Rust files that parse and in
   Markdown files also against guarded units such as functions, statements, code blocks
   and list items; invalid cuts are repaired. A file's chunks cover it exactly, and source
   files are never modified. See [Chunking and validation](../docs/arko_index-reference.md#chunking-and-validation).

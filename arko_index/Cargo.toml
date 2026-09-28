@@ -24,6 +24,7 @@ notify = "8.2"
 syn = { version = "2", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 pulldown-cmark = "0.13"
+tiktoken-rs = "0.12"
 
 [dev-dependencies]
 tempfile.workspace = true

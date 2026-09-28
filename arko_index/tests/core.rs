@@ -43,6 +43,8 @@ struct Fake {
     rejected_embeds: AtomicUsize,
     /// Report a NaN cost with each chunk reply.
     nan_cost: bool,
+    /// What the backend reports about the chunk model.
+    chunk_input: ChunkInput,
 }
 impl Fake {
     fn new() -> Self {
@@ -66,6 +68,7 @@ impl Fake {
             rejection: Rejection::WrongCall,
             rejected_embeds: AtomicUsize::new(0),
             nan_cost: false,
+            chunk_input: ChunkInput::default(),
         }
     }
 }
@@ -215,6 +218,9 @@ impl Backend for Fake {
             model: "fake-chunker".into(),
             reasoning: json!("none"),
         })
+    }
+    async fn chunk_input(&self) -> ChunkInput {
+        self.chunk_input
     }
 }
 /// What each fake chunk call reports: a subscription call with a list-price estimate.
@@ -1975,10 +1981,12 @@ async fn only_actual_embedding_limits_split_large_impls_and_keep_fitting_methods
     let index = ArkoIndex::open(db.path().join("i.db"), fake.clone(), config(&fake))
         .await
         .unwrap();
-    let job = index
-        .start_build(BuildSpec::new("test", root.path()))
-        .await
-        .unwrap();
+    // The whole file fits one chunk request.
+    let spec = BuildSpec::new("test", root.path()).with_chunking(ChunkingOptions {
+        max_request_bytes: Some(1_000_000),
+        ..Default::default()
+    });
+    let job = index.start_build(spec).await.unwrap();
     assert_eq!(settle(&index, &job.job).await.phase, "ready");
     let page = index
         .search(&job.index, "Thing", options(SearchMode::Lexical))
@@ -2044,4 +2052,234 @@ fn job_status_saved_with_the_former_field_name_still_loads() {
     .unwrap();
     assert_eq!(status.active_chunking, 2);
     assert_eq!(status.usage, JobUsage::default());
+}
+
+/// Builds `spec` with `fake` in a new database under `db`.
+async fn build_spec(
+    fake: &Arc<Fake>,
+    db: &std::path::Path,
+    spec: BuildSpec,
+) -> (ArkoIndex, JobHandle, JobStatus) {
+    let index = ArkoIndex::open(db.join("i.db"), fake.clone(), config(fake))
+        .await
+        .unwrap();
+    let job = index.start_build(spec).await.unwrap();
+    let status = settle(&index, &job.job).await;
+    (index, job, status)
+}
+fn o200k(text: &str) -> usize {
+    tiktoken_rs::o200k_base_singleton().count_ordinary(text)
+}
+#[tokio::test]
+async fn oversize_files_are_split_into_windows_within_the_token_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let large: String = (0..40)
+        .map(|n| {
+            format!(
+                "/// Function {n}.\nfn f{n}() {{\n{}}}\n\n",
+                "    let value = compute(1, 2, 3);\n".repeat(10)
+            )
+        })
+        .collect();
+    std::fs::write(root.path().join("large.rs"), &large).unwrap();
+    std::fs::write(root.path().join("small.txt"), "alpha\nbeta\n").unwrap();
+    // A GPT-family chunk model with a 20,000-token input limit: requests
+    // may hold 2,000 o200k tokens.
+    let mut fake = Fake::new();
+    fake.chunk_input = ChunkInput {
+        tokenizer: Some(ChunkTokenizer::O200kBase),
+        max_input_tokens: Some(20_000),
+    };
+    let fake = Arc::new(fake);
+    let (index, job, status) =
+        build_spec(&fake, db.path(), BuildSpec::new("test", root.path())).await;
+    assert_eq!(status.phase, "ready", "{:?}", status.problem);
+    let calls = fake.calls.lock().unwrap().clone();
+    let windows: Vec<_> = calls
+        .iter()
+        .filter(|r| r.prompt.contains("path=large.rs"))
+        .collect();
+    assert!(windows.len() >= 4, "{} requests", windows.len());
+    for request in &calls {
+        assert!(
+            o200k(&request.prompt) <= 2_000,
+            "{}",
+            o200k(&request.prompt)
+        );
+        // Windows begin at a function, never inside one.
+        for block in request.prompt.split("FILE ").skip(1) {
+            if block.contains("path=large.rs") {
+                let first_row = block.lines().nth(1).unwrap();
+                assert!(
+                    first_row.ends_with("| /// Function") || first_row.contains("| /// Function "),
+                    "{first_row}"
+                );
+            }
+        }
+    }
+    let events = index.events(&job.job, 0, 10_000).await.unwrap();
+    let snapshot = events.iter().find(|e| e.kind == "snapshot").unwrap();
+    assert_eq!(snapshot.detail["chunk_budget"]["tokenizer"], "o200k_base");
+    assert_eq!(snapshot.detail["chunk_budget"]["max_tokens"], 2_000);
+    assert_eq!(snapshot.detail["oversize_files"], 1);
+    let oversize = events.iter().find(|e| e.kind == "oversize").unwrap();
+    assert_eq!(oversize.detail["path"], "large.rs");
+    assert_eq!(oversize.detail["action"], "split");
+    assert_eq!(
+        oversize.detail["windows"].as_u64().unwrap() as usize,
+        windows.len()
+    );
+    // The chunks reproduce the file.
+    let c = rusqlite::Connection::open(db.path().join("i.db")).unwrap();
+    let ids: Vec<String> = c
+        .prepare("SELECT id FROM chunks WHERE job=?1 AND path='large.rs' ORDER BY start")
+        .unwrap()
+        .query_map([&job.job], |r| r.get(0))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    let chunks = index
+        .read_chunks(&job.index, &job.job, &ids, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        chunks.into_iter().map(|c| c.text).collect::<String>(),
+        large
+    );
+}
+#[tokio::test]
+async fn initial_requests_hold_files_within_the_byte_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    for n in 0..6 {
+        std::fs::write(
+            root.path().join(format!("{n}.txt")),
+            format!("alpha {n}\n{}", "some context\n".repeat(40)),
+        )
+        .unwrap();
+    }
+    let fake = Arc::new(Fake::new());
+    let spec = BuildSpec::new("test", root.path()).with_chunking(ChunkingOptions {
+        max_request_bytes: Some(2_500),
+        ..Default::default()
+    });
+    let (_index, _job, status) = build_spec(&fake, db.path(), spec).await;
+    assert_eq!(status.phase, "ready", "{:?}", status.problem);
+    let calls = fake.calls.lock().unwrap().clone();
+    // Each file renders to about 1,000 bytes: two per request, not six.
+    assert_eq!(calls.len(), 3);
+    for request in &calls {
+        assert_eq!(request.schema["properties"].as_object().unwrap().len(), 2);
+        assert!(request.prompt.len() <= 2_500);
+    }
+}
+#[tokio::test]
+async fn oversize_files_can_be_skipped_or_block_the_job() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("big.txt"), "zulu line\n".repeat(1_000)).unwrap();
+    std::fs::write(root.path().join("small.txt"), "alpha\nbeta\n").unwrap();
+    let spec = |oversize| {
+        BuildSpec::new("test", root.path()).with_chunking(ChunkingOptions {
+            max_request_bytes: Some(2_000),
+            oversize,
+            ..Default::default()
+        })
+    };
+    // Skip: the file is left out and reported; the rest is indexed.
+    let db = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::new());
+    let (index, job, status) = build_spec(&fake, db.path(), spec(OversizePolicy::Skip)).await;
+    assert_eq!(status.phase, "ready", "{:?}", status.problem);
+    assert_eq!((status.files, status.skipped), (2, 1));
+    assert!(
+        fake.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| !r.prompt.contains("big.txt"))
+    );
+    let events = index.events(&job.job, 0, 1000).await.unwrap();
+    let oversize = events.iter().find(|e| e.kind == "oversize").unwrap();
+    assert_eq!(oversize.detail["action"], "skipped");
+    let c = rusqlite::Connection::open(db.path().join("i.db")).unwrap();
+    let excluded: String = c
+        .query_row("SELECT excluded FROM jobs WHERE id=?1", [&job.job], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&excluded).unwrap(),
+        json!([{"path": "big.txt", "reason": arko_index::source::TOO_LARGE_FOR_A_REQUEST}])
+    );
+    let page = index
+        .search(&job.index, "zulu", options(SearchMode::Lexical))
+        .await
+        .unwrap();
+    assert!(page.hits.is_empty());
+    // An update with no changes finds nothing to do.
+    let calls = fake.calls.lock().unwrap().len();
+    let update = index.start_update(&job.index).await.unwrap();
+    assert_eq!(settle(&index, &update.job).await.phase, "ready");
+    assert_eq!(fake.calls.lock().unwrap().len(), calls);
+    assert!(index.changes(&update.job).await.unwrap().is_empty());
+    // Block: the job stops before any model request, naming the file.
+    let db = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::new());
+    let (_index, _job, status) = build_spec(&fake, db.path(), spec(OversizePolicy::Block)).await;
+    assert_eq!(status.phase, "blocked");
+    let problem = status.problem.unwrap();
+    assert!(
+        problem.contains("big.txt") && problem.contains("block"),
+        "{problem}"
+    );
+    assert!(fake.calls.lock().unwrap().is_empty());
+}
+#[test]
+fn repairs_show_only_their_window() {
+    let text: String = (1..=1000).map(|i| format!("source-{i}\n")).collect();
+    let s = Snapshot::new("x.txt", text.as_bytes()).unwrap();
+    let guard = structure(&s);
+    let w = Window::new(s.line_starts[99], s.line_end(200).unwrap());
+    let cuts = vec![Cut {
+        after_line: 150,
+        tail: "wrong".into(),
+    }];
+    let r = repair(&s, &guard, &w, &cuts).unwrap();
+    assert!(
+        r.request
+            .prompt
+            .contains("(rows 100-200 of 1000, absolute rows)")
+    );
+    assert!(r.request.prompt.contains("0100 | source-100\n"));
+    assert!(r.request.prompt.contains("0200 | source-200\n"));
+    assert!(!r.request.prompt.contains("0099 | "));
+    assert!(!r.request.prompt.contains("0201 | "));
+    let ids = &r.regions["r0"].candidates;
+    assert!(ids.contains_key("L100") && ids.contains_key("L199"));
+    assert!(!ids.contains_key("L99") && !ids.contains_key("L200"));
+}
+#[test]
+fn chunking_settings_saved_before_they_existed_load_with_defaults() {
+    let spec: BuildSpec = serde_json::from_value(json!({
+        "name": "docs", "root": "/src", "include": [], "exclude": []
+    }))
+    .unwrap();
+    assert_eq!(spec.max_file_bytes, DEFAULT_MAX_FILE_BYTES);
+    assert_eq!(spec.chunking, ChunkingOptions::default());
+    assert_eq!(spec.chunking.oversize, OversizePolicy::Split);
+    let window: Window = serde_json::from_value(json!({
+        "start": 0, "end": 10, "cuts": null, "repair_rounds": 0, "forced": false, "problem": null
+    }))
+    .unwrap();
+    assert_eq!(window.tokens, None);
+    assert!(
+        BuildSpec::new("x", "/src")
+            .with_chunking(ChunkingOptions {
+                max_request_tokens: Some(0),
+                ..Default::default()
+            })
+            .validate()
+            .is_err()
+    );
 }

@@ -165,6 +165,11 @@ fn recognized(path: &Path) -> bool {
             | "tf"
     )
 }
+/// The exclusion reason of a file over [`BuildSpec::max_file_bytes`].
+pub const TOO_LARGE_TO_READ: &str = "too large (over max_file_bytes)";
+/// The exclusion reason of a file left out under
+/// [`OversizePolicy::Skip`](crate::OversizePolicy::Skip).
+pub const TOO_LARGE_FOR_A_REQUEST: &str = "too large (over the chunk request budget)";
 pub fn scan(spec: &BuildSpec) -> Result<Manifest> {
     let root = std::fs::canonicalize(&spec.root)?;
     if !root.is_dir() {
@@ -217,6 +222,11 @@ pub fn scan(spec: &BuildSpec) -> Result<Manifest> {
             Some("outside include patterns")
         } else if includes.is_empty() && !recognized(entry.path()) {
             Some("unsupported extension")
+        } else if entry
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() > spec.max_file_bytes)
+        {
+            Some(TOO_LARGE_TO_READ)
         } else {
             None
         };

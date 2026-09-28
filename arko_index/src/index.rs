@@ -1,5 +1,6 @@
 use crate::{
     backend::{Backend, ModelRequest},
+    budget::{self, Budget},
     chunker::{self, Cuts, Window},
     packing::{self, Payload},
     scheduler::{Control, Operation, Reply, Scheduler},
@@ -33,6 +34,10 @@ pub struct JobStatus {
     pub validated: usize,
     pub bypassed: usize,
     pub unchecked: usize,
+    /// Files left out because they exceed the chunk request budget under
+    /// [`OversizePolicy::Skip`]; the job's `excluded` list names them.
+    #[serde(default)]
+    pub skipped: usize,
     /// Chunk-model requests in flight, across all jobs of this index service.
     #[serde(alias = "active_luna")]
     pub active_chunking: usize,
@@ -65,6 +70,9 @@ pub(crate) struct FileState {
     pub structure: Structure,
     pub bypass: bool,
     pub complete: bool,
+    /// Why the file is left out of the generation (it has no windows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
 }
 #[derive(Clone)]
 pub struct ArkoIndex {
@@ -115,6 +123,7 @@ impl ArkoIndex {
         })
     }
     pub async fn start_build(&self, mut spec: BuildSpec) -> Result<JobHandle> {
+        spec.validate()?;
         spec.root = std::fs::canonicalize(&spec.root)?;
         let index = uuid::Uuid::new_v4().to_string();
         let job = uuid::Uuid::new_v4().to_string();
@@ -291,6 +300,7 @@ impl ArkoIndex {
                     validated: 0,
                     bypassed: 0,
                     unchecked: 0,
+                    skipped: 0,
                     active_chunking: 0,
                     active_embeddings: 0,
                     usage,
@@ -300,6 +310,7 @@ impl ArkoIndex {
                     result.validated += usize::from(s.complete);
                     result.bypassed += usize::from(s.bypass);
                     result.unchecked += usize::from(s.structure.status == "unchecked");
+                    result.skipped += usize::from(s.skipped.is_some());
                 }
                 Ok(result)
             })
@@ -372,10 +383,19 @@ impl ArkoIndex {
         if manifest.is_some() {
             return Ok(());
         }
-        let manifest = tokio::task::spawn_blocking(move || source::scan(&spec)).await??;
-        let (j, config) = (job.to_owned(), self.inner.config.clone());
-        let chunk_model = self.inner.backend.chunk_model_info();
-        self.inner.db.call(move|c|{
+        let scan_spec = spec.clone();
+        let manifest = tokio::task::spawn_blocking(move || source::scan(&scan_spec)).await??;
+        let budget = Budget::resolve(&spec.chunking, &self.inner.backend.chunk_input().await);
+        if !budget.max_input_known {
+            log::warn!(
+                "job {job}: the chunk model's input limit is unknown; chunk requests are limited to {} ({}% of an assumed {} tokens)",
+                budget.describe(),
+                crate::budget::DEFAULT_BUDGET_PERCENT,
+                crate::budget::FALLBACK_MAX_INPUT_TOKENS
+            );
+        }
+        let config = self.inner.config.clone();
+        let (old, reuse, policy_changed) = self.inner.db.call(move|c|{
             let mut old=BTreeMap::<String,String>::new();let mut reuse=HashMap::<(String,String),FileState>::new();
             let policy=chunker::policy_hash();
             let mut policy_changed=true;
@@ -383,24 +403,54 @@ impl ArkoIndex {
                 let previous_policy:Option<String>=c.query_row("SELECT json_extract(detail,'$.chunking_policy') FROM events WHERE job=?1 AND kind='snapshot' ORDER BY sequence DESC LIMIT 1",[&previous],|r|r.get(0)).optional()?.flatten();
                 policy_changed=previous_policy.as_deref()!=Some(policy.as_str());
                 let old_config:String=c.query_row("SELECT config FROM jobs WHERE id=?1",[&previous],|r|r.get(0))?;
+                let reusable=!policy_changed && decode::<Config>(&old_config)?.embedding==config.embedding;
                 let rows:Vec<(String,String,String)>=c.prepare("SELECT path,hash,state FROM files WHERE job=?1")?.query_map([previous],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect::<std::result::Result<_,_>>()?;
-                for(path,hash,state)in rows{old.insert(path.clone(),hash.clone());if !policy_changed && decode::<Config>(&old_config)?.embedding==config.embedding{let state:FileState=decode(&state)?;if state.complete{reuse.insert((hash,Path::new(&path).extension().and_then(|e|e.to_str()).unwrap_or("").into()),state);}}}
+                for(path,hash,state)in rows{
+                    old.insert(path.clone(),hash.clone());
+                    if reusable{let state:FileState=decode(&state)?;if state.complete&&state.skipped.is_none(){reuse.insert((hash,extension(&path)),state);}}
+                }
             }
-            let current:BTreeMap<_,_>=manifest.files.iter().map(|s|(s.path.clone(),s.hash.clone())).collect();
+            Ok((old,reuse,policy_changed))
+        }).await?;
+        let plan_budget = budget.clone();
+        let (files, oversize) =
+            tokio::task::spawn_blocking(move || plan_files(manifest.files, &reuse, &plan_budget))
+                .await?;
+        if budget.oversize == OversizePolicy::Block && !oversize.is_empty() {
+            let paths: Vec<_> = oversize.iter().filter_map(|o| o["path"].as_str()).collect();
+            return Err(Error::Blocked(format!(
+                "{} file(s) exceed the chunk request budget of {} and the oversize policy is block: {}",
+                paths.len(),
+                budget.describe(),
+                paths.join(", ")
+            )));
+        }
+        let mut excluded = manifest.excluded;
+        excluded.extend(files.iter().filter_map(|(s, state)| {
+            state.skipped.as_ref().map(|reason| source::Exclusion {
+                path: s.path.clone(),
+                reason: reason.clone(),
+            })
+        }));
+        excluded.sort_by(|a, b| a.path.cmp(&b.path));
+        let j = job.to_owned();
+        let chunk_model = self.inner.backend.chunk_model_info();
+        let manifest_hash = manifest.hash;
+        self.inner.db.call(move|c|{
+            let policy=chunker::policy_hash();
+            let current:BTreeMap<_,_>=files.iter().map(|(s,_)|(s.path.clone(),s.hash.clone())).collect();
             let affected:BTreeSet<_>=old.keys().chain(current.keys()).filter(|path|policy_changed || old.get(*path)!=current.get(*path)).cloned().collect();
             let tx=c.transaction()?;
-            for s in &manifest.files {
-                let state=if let Some(state)=reuse.get(&(s.hash.clone(),Path::new(&s.path).extension().and_then(|e|e.to_str()).unwrap_or("").into())){state.clone()}else{
-                    let structure=source::structure(s);
-                    let bypass=s.text.trim().is_empty() || !(1..s.rows()).any(|row|s.line_end(row).is_ok_and(|end|structure.legal(end)) && s.line(row).is_ok_and(|line|!line.trim().is_empty()));
-                    let windows=if s.text.trim().is_empty(){vec![]}else if bypass{let mut w=Window::new(0,s.text.len());w.cuts=Some(vec![]);vec![w]}else{chunker::windows(s)};
-                    FileState{windows,structure,bypass,complete:bypass}
-                };
+            for (s,state) in &files {
                 tx.execute("INSERT OR IGNORE INTO snapshots VALUES(?1,?2)",params![s.hash,s.text])?;
-                tx.execute("INSERT INTO files VALUES(?1,?2,?3,?4,?5)",params![j,s.path,s.hash,s.original_hash,encode(&state)?])?;
+                tx.execute("INSERT INTO files VALUES(?1,?2,?3,?4,?5)",params![j,s.path,s.hash,s.original_hash,encode(state)?])?;
             }
-            tx.execute("UPDATE jobs SET manifest=?2,excluded=?3,affected=?4,changes=?5 WHERE id=?1",params![j,manifest.hash,encode(&manifest.excluded)?,encode(&affected)?,encode(&crate::coalesce(&old,&current))?])?;
-            tx.execute("INSERT INTO events(job,kind,detail) VALUES(?1,'snapshot',?2)",params![j,encode(&json!({"manifest":manifest.hash,"files":manifest.files.len(),"excluded":manifest.excluded.len(),"affected":affected.len(),"prompt_hash":source::hash(chunker::initial_prompt()),"chunking_policy":policy,"policy_changed":policy_changed,"source_format":"lf-v1","extractors":"syn-2/pulldown-cmark-0.13","model":chunk_model.as_ref().map(|m|&m.model),"reasoning":chunk_model.as_ref().map(|m|&m.reasoning)}))?])?;
+            let skipped=files.iter().filter(|(_,state)|state.skipped.is_some()).count();
+            tx.execute("UPDATE jobs SET manifest=?2,excluded=?3,affected=?4,changes=?5 WHERE id=?1",params![j,manifest_hash,encode(&excluded)?,encode(&affected)?,encode(&crate::coalesce(&old,&current))?])?;
+            tx.execute("INSERT INTO events(job,kind,detail) VALUES(?1,'snapshot',?2)",params![j,encode(&json!({"manifest":manifest_hash,"files":files.len(),"excluded":excluded.len(),"affected":affected.len(),"prompt_hash":source::hash(chunker::initial_prompt()),"chunking_policy":policy,"policy_changed":policy_changed,"source_format":"lf-v1","extractors":"syn-2/pulldown-cmark-0.13","model":chunk_model.as_ref().map(|m|&m.model),"reasoning":chunk_model.as_ref().map(|m|&m.reasoning),"chunk_budget":budget,"oversize_files":oversize.len(),"skipped":skipped}))?])?;
+            for detail in &oversize {
+                tx.execute("INSERT INTO events(job,kind,detail) VALUES(?1,'oversize',?2)",params![j,encode(detail)?])?;
+            }
             tx.commit()?;Ok(())}).await
     }
     async fn files(&self, job: &str) -> Result<Vec<(Snapshot, FileState)>> {
@@ -549,8 +599,14 @@ impl ArkoIndex {
             }
             self.inner.db.file(job, &s.path, state).await?;
         }
+        let j = job.to_owned();
+        let budget: Option<Budget> = self.inner.db.call(move |c| {
+            let saved: Option<String> = c.query_row("SELECT json_extract(detail,'$.chunk_budget') FROM events WHERE job=?1 AND kind='snapshot' ORDER BY sequence DESC LIMIT 1", [j], |r| r.get(0)).optional()?.flatten();
+            saved.map(|saved| decode(&saved)).transpose()
+        }).await?;
         let mut work = FuturesUnordered::new();
         let mut group = vec![];
+        let mut group_size = budget::Size::default();
         for (i, (s, state)) in files.iter().enumerate() {
             for (w, window) in state.windows.iter().enumerate() {
                 if let Some(cuts) = &window.cuts {
@@ -578,7 +634,14 @@ impl ArkoIndex {
                                 .collect::<Vec<_>>(),
                         )
                     };
-                    if group.len() == self.inner.config.batch_count {
+                    // Initial requests hold up to batch_count windows
+                    // within the request budget.
+                    let size = budget::window_size(s, window);
+                    let full = group.len() == self.inner.config.batch_count
+                        || budget.as_ref().is_some_and(|budget| {
+                            !group.is_empty() && !budget.fits(group_size + size)
+                        });
+                    if full {
                         let request = build(&group);
                         work.push(self.dispatch(
                             job,
@@ -587,8 +650,14 @@ impl ArkoIndex {
                             None,
                             control.clone(),
                         ));
+                        group_size = budget::Size::default();
                     }
                     group.push((i, w));
+                    group_size = if group.len() == 1 {
+                        size
+                    } else {
+                        group_size + size
+                    };
                 }
             }
         }
@@ -881,6 +950,70 @@ impl ArkoIndex {
         Ok(())
     }
 }
+fn extension(path: &str) -> String {
+    Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .into()
+}
+/// The state of every scanned file: reused from an earlier job when its
+/// content and extension match a complete one, otherwise planned under
+/// `budget`. Also returns the `oversize` event of each file over the budget.
+fn plan_files(
+    files: Vec<Snapshot>,
+    reuse: &HashMap<(String, String), FileState>,
+    budget: &Budget,
+) -> (Vec<(Snapshot, FileState)>, Vec<Value>) {
+    let mut oversize = vec![];
+    let planned = files
+        .into_iter()
+        .map(|s| {
+            if let Some(state) = reuse.get(&(s.hash.clone(), extension(&s.path))) {
+                return (s, state.clone());
+            }
+            let structure = source::structure(&s);
+            let empty = s.text.trim().is_empty();
+            let bypass = empty
+                || !(1..s.rows()).any(|row| {
+                    s.line_end(row).is_ok_and(|end| structure.legal(end))
+                        && s.line(row).is_ok_and(|line| !line.trim().is_empty())
+                });
+            let mut state = FileState {
+                windows: vec![],
+                structure,
+                bypass,
+                complete: bypass,
+                skipped: None,
+            };
+            if bypass {
+                // No legal internal boundary: one chunk without a model request.
+                if !empty {
+                    let mut window = Window::new(0, s.text.len());
+                    window.cuts = Some(vec![]);
+                    state.windows.push(window);
+                }
+                return (s, state);
+            }
+            let plan = budget::plan(&s, &state.structure, budget);
+            if plan.oversize {
+                let action = match budget.oversize {
+                    OversizePolicy::Split => "split",
+                    OversizePolicy::Skip => "skipped",
+                    OversizePolicy::Block => "blocked",
+                };
+                oversize.push(json!({"path":s.path,"bytes":plan.size.bytes,"tokens":plan.size.tokens,"budget":budget.describe(),"action":action,"windows":plan.windows.len(),"forced_rows":plan.forced_rows}));
+                if budget.oversize == OversizePolicy::Skip {
+                    state.skipped = Some(source::TOO_LARGE_FOR_A_REQUEST.into());
+                    state.complete = true;
+                }
+            }
+            state.windows = plan.windows;
+            (s, state)
+        })
+        .collect();
+    (planned, oversize)
+}
 struct PreparedChunk {
     id: String,
     path: String,
@@ -900,6 +1033,9 @@ fn prepare_chunks(
     let mut chunks = vec![];
     let mut payloads = BTreeMap::new();
     for (s, state) in files {
+        if state.skipped.is_some() {
+            continue;
+        }
         let embedding_structure = Structure {
             status: state.structure.status.clone(),
             protected: state

@@ -2,9 +2,9 @@
 use crate::{EmbeddingProfile, Error, Result, error::invalid};
 use arko_ai::{
     EmbeddingClient, EmbeddingConfig, EmbeddingModelDetails, EmbeddingProviderIdentifier,
-    GenerationConfig, GenerationResponse, LLMClient, Model, OpenAIEffort, ReasoningConfig,
-    StopReason, StreamEvent, TokenCounter, ToolCall, ToolChoice, ToolConfig, ToolDefinition,
-    UsageInfo, Verbosity, VoyageInputType,
+    GenerationConfig, GenerationResponse, LLMClient, Model, OpenAIEffort, Provider,
+    ReasoningConfig, StopReason, StreamEvent, TokenCounter, ToolCall, ToolChoice, ToolConfig,
+    ToolDefinition, UsageInfo, Verbosity, VoyageInputType,
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,22 @@ pub struct VectorReply {
     /// Summed into [`JobUsage`](crate::JobUsage).
     pub usage_info: Option<UsageInfo>,
 }
+/// The tokenizer that measures chunk requests for a chunk model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChunkTokenizer {
+    /// OpenAI's `o200k_base` encoding, used by GPT-4o and later, GPT-5.x and
+    /// GPT-6. Counted locally with the encoding built into the crate.
+    O200kBase,
+}
+/// What sizes chunk requests: the chunk model's tokenizer, and the most
+/// input tokens it accepts on the auth path in use. Either may be unknown;
+/// see [`ChunkingOptions`](crate::ChunkingOptions).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChunkInput {
+    pub tokenizer: Option<ChunkTokenizer>,
+    pub max_input_tokens: Option<usize>,
+}
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub item_tokens: usize,
@@ -61,6 +77,13 @@ pub trait Backend: Send + Sync + 'static {
     /// model.
     fn chunk_model_info(&self) -> Option<ChunkModelInfo> {
         None
+    }
+    /// The chunk model's tokenizer and input limit, which size chunk
+    /// requests. The default reports neither: requests are measured in bytes
+    /// against a share of
+    /// [`FALLBACK_MAX_INPUT_TOKENS`](crate::budget::FALLBACK_MAX_INPUT_TOKENS).
+    async fn chunk_input(&self) -> ChunkInput {
+        ChunkInput::default()
     }
 }
 
@@ -118,6 +141,13 @@ fn chunk_generation_config(
         tools = tools.with_parallel_tool_calls(false);
     }
     config.clone().with_tool_config(tools)
+}
+
+/// The tokenizer that measures requests to `model`: `o200k_base` for the
+/// OpenAI provider (every registry model there uses it; GPT-6 reports the
+/// same input tokens as GPT-5.6), none for other providers.
+pub fn chunk_tokenizer(model: &Model) -> Option<ChunkTokenizer> {
+    (model.provider == Provider::OpenAI).then_some(ChunkTokenizer::O200kBase)
 }
 
 /// The model a backend selects chunk boundaries with, recorded as `model` and
@@ -250,6 +280,15 @@ impl Backend for ArkoBackend {
     }
     fn chunk_model_info(&self) -> Option<ChunkModelInfo> {
         Some(ChunkModelInfo::new(&self.chunk_model, &self.chunk_config))
+    }
+    /// OpenAI chunk models are measured in `o200k_base` tokens; others in
+    /// bytes. The input limit is the model's on the client's auth path
+    /// ([`LLMClient::max_input_tokens`]).
+    async fn chunk_input(&self) -> ChunkInput {
+        ChunkInput {
+            tokenizer: chunk_tokenizer(&self.chunk_model),
+            max_input_tokens: self.llm.max_input_tokens(&self.chunk_model).await,
+        }
     }
     async fn embed(&self, texts: Vec<String>, query: bool) -> Result<VectorReply> {
         let config = EmbeddingConfig::new(EmbeddingProviderIdentifier::Voyage, &self.profile.model)
@@ -412,6 +451,24 @@ mod tests {
         );
         let plain = ChunkModelInfo::new(&Model::openai_gpt_5_5(), &GenerationConfig::default());
         assert_eq!(plain.reasoning, Value::Null);
+    }
+
+    #[test]
+    fn openai_chunk_models_are_measured_in_o200k_tokens() {
+        for model in [
+            Model::openai_gpt_5_6_luna(),
+            Model::openai_gpt_6_luna(),
+            Model::openai_gpt_5_5(),
+        ] {
+            assert_eq!(chunk_tokenizer(&model), Some(ChunkTokenizer::O200kBase));
+        }
+        for model in [
+            Model::anthropic_claude_opus_5_5(),
+            Model::google_gemini_3_5_flash(),
+            Model::openrouter("openai/gpt-5.6-luna"),
+        ] {
+            assert_eq!(chunk_tokenizer(&model), None, "{}", model.id);
+        }
     }
 
     #[test]

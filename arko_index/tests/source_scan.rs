@@ -1,4 +1,7 @@
-use arko_index::{BuildSpec, DEFAULT_SKIPPED_DIRECTORIES, source::scan};
+use arko_index::{
+    BuildSpec, DEFAULT_SKIPPED_DIRECTORIES,
+    source::{TOO_LARGE_TO_READ, scan},
+};
 
 #[test]
 fn authored_docs_in_build_directories_are_indexed_unless_explicitly_ignored() {
@@ -49,4 +52,26 @@ fn skipped_directory_names_are_configurable() {
     .unwrap();
     assert_eq!(saved.skip_directories, DEFAULT_SKIPPED_DIRECTORIES);
     assert_eq!(paths(&saved), ["src/notes.md"]);
+}
+
+#[test]
+fn files_over_the_size_ceiling_are_excluded_unread() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("big.json"), "[1]\n".repeat(1_000)).unwrap();
+    std::fs::write(root.path().join("small.json"), "[1]\n").unwrap();
+    let spec = BuildSpec::new("data", root.path()).with_max_file_bytes(1_000);
+    let manifest = scan(&spec).unwrap();
+    assert_eq!(manifest.files.len(), 1);
+    assert_eq!(manifest.files[0].path, "small.json");
+    assert_eq!(manifest.excluded.len(), 1);
+    assert_eq!(manifest.excluded[0].path, "big.json");
+    assert_eq!(manifest.excluded[0].reason, TOO_LARGE_TO_READ);
+    // The default ceiling admits it.
+    assert_eq!(
+        scan(&BuildSpec::new("data", root.path()))
+            .unwrap()
+            .files
+            .len(),
+        2
+    );
 }

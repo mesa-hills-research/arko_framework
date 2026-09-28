@@ -83,7 +83,9 @@ indexed when its name is `Dockerfile`, `Makefile`, `CMakeLists.txt`, `Justfile`,
 `hs`, `scala`, `vue`, `svelte`, `html`, `css`, `scss`, `md`, `mdx`, `rst`, `txt`, `adoc`,
 `toml`, `yaml`, `yml`, `json`, `xml`, `proto`, `graphql` or `tf`.
 
-Files that are not valid UTF-8 or that contain NUL bytes are skipped; a path that is not
+Files larger than `BuildSpec::max_file_bytes` (default 16 MiB, `DEFAULT_MAX_FILE_BYTES`)
+are skipped without being read, with the reason "too large (over max_file_bytes)". Files
+that are not valid UTF-8 or that contain NUL bytes are skipped; a path that is not
 valid UTF-8 stops the scan with an error. `source::scan` reports symbolic links and
 skipped files with a reason in `Manifest::excluded`, and each job's `snapshot` event
 counts them; skipped directories are not reported. The spec is saved with the index, so
@@ -99,9 +101,8 @@ it. The guidance also asks the model to keep import blocks, related module decla
 re-exports and constants, and adjacent helpers with the code they support. That grouping
 is model-guided; the structural guards below are what the index enforces.
 
-Each initial request carries up to `batch_count` complete files, normalized to LF line
-endings and shown with absolute line numbers. Because files are sent whole, the model's
-context window must hold each batch; lower `batch_count` for very large files. The model
+Each initial request carries up to `batch_count` files, normalized to LF line endings and
+shown with absolute line numbers, within the chunk request budget below. The model
 answers with cuts: an absolute line number and an exact suffix of the text ending on that
 line. A cut is valid when the suffix matches, the line is not blank, the cuts are in
 strictly increasing order, and the cut does not fall inside a guarded unit:
@@ -112,10 +113,54 @@ strictly increasing order, and the cut does not fall inside a guarded unit:
 | `.md` and `.mdx` files | `markdown-guarded` | Paragraphs, code blocks, list items, headings, and each heading together with the block that follows it. |
 | Other files, and Rust files that do not parse | `unchecked` | None; cuts are checked against the line text only. |
 
+### Request budget and large files
+
+`BuildSpec::chunking` (`ChunkingOptions`) sizes chunk-model requests. A request's size is
+its rendered file content, each file's header line and numbered rows as the model sees
+them; the fixed instructions and tool schema (under 1,000 tokens) come on top.
+
+- **What is measured.** Chunk models of the OpenAI provider are measured in `o200k_base`
+  tokens, the encoding GPT-4o and later, GPT-5.x and GPT-6 use. It is built into the
+  crate, so counting needs no download, and special-token text such as `<|endoftext|>`
+  counts as ordinary text, as the API counts it. Other chunk models are measured in bytes.
+  Lines longer than 128 KiB count as their byte length, which is never less than their
+  token count.
+- **Default budget.** 10% of the chunk model's input limit on the client's auth path
+  (`LLMClient::max_input_tokens`): 92,200 tokens for GPT-5.6 and GPT-6 with an API key,
+  27,200 over ChatGPT OAuth (whose limit is 272,000), and 4 bytes per token of that share
+  for models measured in bytes (about 400 KB for a 1M-token Claude model). A model whose
+  limit is unknown, such as an OpenRouter model built without the catalog or a custom
+  backend, is assumed to accept 128,000 tokens (`budget::FALLBACK_MAX_INPUT_TOKENS`), so
+  its default is 51,200 bytes; the job logs a warning.
+- **Explicit limits.** `max_request_tokens` sets the token limit (for models measured in
+  bytes, it applies as 4 bytes per token), and `max_request_bytes` a byte limit; when both
+  are set, both apply.
+- **Batches.** Initial requests are filled with up to `batch_count` files as long as their
+  combined size fits the budget.
+- **Resumes.** A job resolves its budget when it scans the source, records it as
+  `chunk_budget` in its `snapshot` event, and keeps it when resumed, even if the client's
+  auth path has changed since.
+
+A file whose rendering exceeds the budget is handled by `ChunkingOptions::oversize`
+(`OversizePolicy`):
+
+| Policy | Effect |
+|---|---|
+| `Split` (default) | The file is split into windows that fit, each sent as its own part of a request. Boundaries are tried from strongest to weakest: Markdown headings (level 1, then level 2, and so on), then top-level blocks, never inside a fenced code block; in Rust files that parse, top-level items, then members of impls, traits and modules, then statements of function bodies; in other files, lines after a blank line and lines at the smallest indentation, at the outermost bracket depth first; then single lines. Boundaries that cut no guarded unit are preferred. Pieces are of similar size, and a small remainder, such as a lone closing brace, joins its neighbor. A window edge is also a chunk edge. A single line that exceeds the budget on its own becomes one chunk without a model request. |
+| `Skip` | The file is left out of the index. The job's exclusions list it with the reason "too large (over the chunk request budget)", and `JobStatus::skipped` counts it. |
+| `Block` | The job is blocked before any model request, with a problem that names the files. |
+
+Each file over the budget gets an `oversize` event with its size, the budget, the action
+taken, the number of windows and any single lines made into their own chunks. Files with
+no legal internal boundary are never measured: they become one chunk without a request.
+
+### Repairs
+
 Invalid cuts are repaired without changing accepted ones. If there is no legal boundary
 between the neighboring accepted cuts, the disputed cuts are removed without a model
-request (a `deterministic_repair` event). Otherwise a repair request sends the complete
-file with the legal boundary IDs of each disputed region, and the model returns an ordered
+request (a `deterministic_repair` event). Otherwise a repair request sends the window's
+rows (the complete file when it is one window) with the legal boundary IDs of each
+disputed region, and the model returns an ordered
 selection of boundaries, or `[]` to merge the region into one chunk. Repairs continue
 until every cut is valid, and a repair applies only to the snapshot and cut set it was
 requested for. A file with no legal internal boundary becomes a single chunk without a
@@ -134,7 +179,7 @@ every file.
 `start_build(spec)` and `start_update(index)` return a `JobHandle` (`index` and `job`
 IDs) at once and run the job in the background. `status(job)` returns a `JobStatus` with
 the phase, the last `problem`, file counts (`files`, `validated`, `bypassed`,
-`unchecked`), the requests in flight and the job's usage. A job moves through
+`unchecked`, `skipped`), the requests in flight and the job's usage. A job moves through
 `snapshotting`, `chunking` and `embedding` to `ready`, or stops as:
 
 - `paused`: after `pause(job)`, or when its process stopped mid-run (detected when the
@@ -152,7 +197,7 @@ blocked.
 
 | `Config` field | Default | Meaning |
 |---|---|---|
-| `batch_count` | 6 | Files per initial chunk-model request. |
+| `batch_count` | 6 | Most files per initial chunk-model request, within the request budget. |
 | `concurrency` | 2 | Chunk-model requests in flight, shared by all jobs of the `ArkoIndex`. |
 | `embedding_concurrency` | 2 | Embedding requests in flight, including search query embeddings. |
 | `embedding` | `voyage-4`, 1,024 dimensions | Embedding profile; see [Embeddings](#embeddings). |
@@ -184,7 +229,8 @@ JSON `detail`:
 | Kind | Detail |
 |---|---|
 | `phase` | The new `phase` and `problem`. |
-| `snapshot` | Counts of scanned, excluded and affected files; the manifest hash; `chunking_policy` and `policy_changed`; the chunk `model` and `reasoning`. |
+| `snapshot` | Counts of scanned, excluded and affected files; the manifest hash; `chunking_policy` and `policy_changed`; the chunk `model` and `reasoning`; the resolved `chunk_budget` (`tokenizer`, `max_tokens`, `max_bytes`, the model's `max_input_tokens`, whether it was known, and the `oversize` policy); the number of `oversize_files` and `skipped` files. |
+| `oversize` | A file over the chunk request budget: its `path`, rendered `bytes` and `tokens`, the `budget`, the `action` (`split`, `skipped` or `blocked`), its `windows` and the `forced_rows` made into their own chunks. |
 | `request_attempt` | `artifact` (request ID), `repair`, and `event`: `phase` (`started`, `failed`, `retry_wait`, `retries_exhausted` or `completed`), `attempt`, `unix_ms` and a phase-specific `detail`, such as `error` and `usage` for a failure or `delay_ms` and `capacity` for a retry wait. |
 | `request_finished` | `artifact`, `repair` and the `usage` of the accepted reply. |
 | `deterministic_repair` | Cuts removed without a model request. |

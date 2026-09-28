@@ -37,14 +37,22 @@ pub struct Cut {
 pub struct Cuts {
     pub cuts: Vec<Cut>,
 }
+/// A contiguous, line-aligned part of a file that one chunk request covers.
+/// A file within the chunk request budget is one window; a larger file is
+/// split into several (see [`ChunkingOptions`](crate::ChunkingOptions)).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Window {
     pub start: usize,
     pub end: usize,
     pub cuts: Option<Vec<Cut>>,
     pub repair_rounds: usize,
+    /// One chunk without a model request: a single line over the budget.
     pub forced: bool,
     pub problem: Option<String>,
+    /// The window's rendered size in the chunk model's tokens, when a
+    /// tokenizer measured it. Windows saved before it was recorded have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<usize>,
 }
 impl Window {
     pub fn new(start: usize, end: usize) -> Self {
@@ -55,11 +63,11 @@ impl Window {
             repair_rounds: 0,
             forced: false,
             problem: None,
+            tokens: None,
         }
     }
 }
-/// Whole source files are presented to the chunker. Only embedding payloads may
-/// need subdivision, and only when Voyage's actual token limit requires it.
+/// One window covering the whole file, or none for an empty file.
 pub fn windows(source: &Snapshot) -> Vec<Window> {
     if source.text.is_empty() {
         vec![]
@@ -72,14 +80,8 @@ pub fn request(files: &[(String, &Snapshot, &Window)]) -> ModelRequest {
     let prompt = files
         .iter()
         .map(|(id, s, w)| {
-            format!(
-                "FILE {id} path={} snapshot={} bytes={}..{} (absolute rows)\n{}",
-                s.path,
-                s.hash,
-                w.start,
-                w.end,
-                s.numbered(s.row_at(w.start), s.row_at(w.end.saturating_sub(1)))
-            )
+            crate::budget::header(id, s, w.start, w.end)
+                + &s.numbered(s.row_at(w.start), s.row_at(w.end.saturating_sub(1)))
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -215,18 +217,26 @@ fn candidate_ids(candidates: &BTreeMap<String, Vec<Cut>>) -> Vec<&str> {
     entries.into_iter().map(|(id, _)| id.as_str()).collect()
 }
 
+/// A repair request for the invalid cuts of window `w`. It shows the
+/// window's rows: the complete source when the window is the whole file.
 pub fn repair(s: &Snapshot, guard: &Structure, w: &Window, cuts: &[Cut]) -> Result<Repair> {
     let mut regions = BTreeMap::new();
+    let (first_row, last_row) = (s.row_at(w.start), s.row_at(w.end.saturating_sub(1)));
+    let scope = if w.start == 0 && w.end == s.text.len() {
+        "complete source".to_owned()
+    } else {
+        format!("rows {first_row}-{last_row} of {}", s.rows())
+    };
     let mut prompt = format!(
-        "FILE path={} snapshot={} (complete source, absolute rows)\n{}\n",
+        "FILE path={} snapshot={} ({scope}, absolute rows)\n{}\n",
         s.path,
         s.hash,
-        s.numbered(1, s.rows())
+        s.numbered(first_row, last_row)
     );
     for (first, last) in bad_groups(failures(s, guard, w, cuts)) {
         let (lower, upper) = neighbors(s, w, cuts, first, last)?;
         let mut candidates = BTreeMap::new();
-        for row in 1..=s.rows() {
+        for row in first_row..=last_row {
             let end = s.line_end(row)?;
             if lower < end && end < upper && guard.legal(end) && !s.line(row)?.trim().is_empty() {
                 candidates.insert(
