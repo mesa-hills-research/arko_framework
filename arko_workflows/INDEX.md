@@ -1180,7 +1180,8 @@ impl PersistenceConfig {
 }
 impl PersistenceManager {
     pub fn resolve_run_id(config: &PersistenceConfig) -> Result<uuid::Uuid, WorkflowError>;
-    pub fn new(config: PersistenceConfig, workflow_run_id: uuid::Uuid) -> Self;
+    pub fn new(config: PersistenceConfig, workflow_run_id: uuid::Uuid)
+        -> Result<Self, WorkflowError>; // BuilderInvalid for keep_last_checkpoints(0)
     pub fn config(&self) -> &PersistenceConfig;
     pub fn durable_store(&self) -> std::sync::Arc<crate::durable::DurableStore>;
     pub async fn save_checkpoint(
@@ -1208,7 +1209,7 @@ impl PersistenceManager {
 | `PersistenceConfig::new` | Use the given run directory. |
 | `PersistenceConfig::user_data` | A new run directory `<user-data>/arko/workflows/<workflow_name>/<new UUID>`, not yet created. The user-data base is `LOCALAPPDATA` on Windows, `$HOME/Library/Application Support` on macOS, and `XDG_DATA_HOME` or `$HOME/.local/share` elsewhere. Returns `Persistence` when no base can be determined. |
 | `PersistenceManager::resolve_run_id` | Create the run directory if needed and return the UUID in its `workflow-run-id` file, creating and syncing a new one when the file is absent. A malformed UUID returns `Persistence`. |
-| `PersistenceManager::new` | Associate a configuration with a run identity; when reopening a run, pass the identity from `resolve_run_id`. |
+| `PersistenceManager::new` | Associate a configuration with a run identity; when reopening a run, pass the identity from `resolve_run_id`. Returns `BuilderInvalid`, as `WorkflowBuilder::build` does, for a configuration that asked to keep the last zero checkpoints. |
 | `config` | The configuration it persists with. |
 | `durable_store` | Shared handle to the run's durable-step store. |
 | `save_checkpoint` | Write the buffered events, then snapshot `ctx` into a new pretty-printed `checkpoint-<UUID>.json` (written to a temporary file, synced, and renamed), point `latest-checkpoint` at its file name, apply `retain_checkpoints`, and return its path. Each agent result refers to the version of its task the checkpoint saw (see [Task versions](#task-versions)); a version not saved yet (a task restored from a checkpoint that held it, or one whose save failed) is written first. If that write fails, the checkpoint is still written: it refers to the task's last saved version (leaving out a run never saved), lists the run in `missing_task_states`, and logs a warning naming it; the next checkpoint tries again. Only a failure to write the checkpoint file itself returns an error. |

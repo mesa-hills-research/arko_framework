@@ -272,7 +272,14 @@ impl PersistenceManager {
         }
     }
 
-    pub fn new(config: PersistenceConfig, workflow_run_id: uuid::Uuid) -> Self {
+    /// A manager persisting run `workflow_run_id` with `config`. Fails, as
+    /// `WorkflowBuilder::build` does, on a setting the config rejects
+    /// (`keep_last_checkpoints(0)`).
+    pub fn new(
+        config: PersistenceConfig,
+        workflow_run_id: uuid::Uuid,
+    ) -> Result<Self, WorkflowError> {
+        config.validate()?;
         let durable_store = Arc::new(crate::durable::DurableStore::new(
             workflow_run_id,
             config.checkpoint_dir.clone(),
@@ -283,7 +290,7 @@ impl PersistenceManager {
             config.event_log,
             config.event_flush_interval,
         ));
-        Self {
+        Ok(Self {
             config,
             durable_store,
             write_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -292,7 +299,7 @@ impl PersistenceManager {
             written: Arc::new(parking_lot::Mutex::new(VecDeque::new())),
             #[cfg(test)]
             fail_task_writes: Arc::new(AtomicBool::new(false)),
-        }
+        })
     }
 
     /// The configuration it persists with.
@@ -940,7 +947,31 @@ mod tests {
     }
 
     fn manager(config: PersistenceConfig) -> PersistenceManager {
-        PersistenceManager::new(config, uuid::Uuid::new_v4())
+        PersistenceManager::new(config, uuid::Uuid::new_v4()).unwrap()
+    }
+
+    /// A manager made directly (not through `WorkflowBuilder::build`)
+    /// rejects keeping zero checkpoints too, with the same error (it once
+    /// kept every checkpoint silently).
+    #[test]
+    fn a_manager_rejects_keeping_zero_checkpoints() {
+        let workspace = crate::test_support::Workspace::new();
+        let error = PersistenceManager::new(
+            PersistenceConfig::new(&workspace.0).keep_last_checkpoints(0),
+            uuid::Uuid::new_v4(),
+        )
+        .err()
+        .unwrap();
+        assert!(
+            matches!(&error, WorkflowError::BuilderInvalid(message)
+                if message == "keep_last_checkpoints needs at least 1; every checkpoint is kept by default"),
+            "{error}"
+        );
+        let kept = manager(PersistenceConfig::new(&workspace.0).keep_last_checkpoints(2));
+        assert_eq!(
+            kept.config().retain_checkpoints,
+            CheckpointRetention::KeepLast(NonZeroUsize::new(2).unwrap())
+        );
     }
 
     fn state_change() -> AgentEvent {

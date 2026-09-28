@@ -1369,7 +1369,8 @@ impl WorkflowBuilder {
         };
         let persistence = self
             .persistence_config
-            .map(|config| PersistenceManager::new(config, workflow_run_id));
+            .map(|config| PersistenceManager::new(config, workflow_run_id))
+            .transpose()?;
         if let (Some(persistence), Some(state), Some(path)) =
             (&persistence, &resume_state, &self.resume_from)
         {
