@@ -75,14 +75,30 @@ fn watch_server(
     let reader = stderr.map(|stderr| {
         let (name, tail) = (name.clone(), tail.clone());
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                log::info!("MCP server '{name}' stderr: {line}");
-                let mut tail = tail.lock().unwrap();
-                if tail.len() == STDERR_LINES_KEPT {
-                    tail.pop_front();
+            // Read until the pipe closes, whatever the bytes: a reader that
+            // stopped early would close the pipe, and the server's next
+            // write to stderr would fail.
+            let mut reader = BufReader::new(stderr);
+            let mut bytes = Vec::new();
+            loop {
+                bytes.clear();
+                match reader.read_until(b'\n', &mut bytes).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let line = String::from_utf8_lossy(&bytes);
+                        let line = line.trim_end_matches(['\n', '\r']).to_string();
+                        log::info!("MCP server '{name}' stderr: {line}");
+                        let mut tail = tail.lock().unwrap();
+                        if tail.len() == STDERR_LINES_KEPT {
+                            tail.pop_front();
+                        }
+                        tail.push_back(line);
+                    }
+                    Err(error) => {
+                        log::info!("MCP server '{name}' stderr could not be read: {error}");
+                        break;
+                    }
                 }
-                tail.push_back(line);
             }
         })
     });
@@ -270,9 +286,9 @@ impl McpManager {
         self.tools.iter().map(|t| t.definition().name).collect()
     }
 
-    /// Gracefully shuts down every MCP server connection, terminating child
-    /// processes. This is called automatically on drop but calling it
-    /// explicitly allows awaiting the result.
+    /// Gracefully shuts down every MCP server connection: each server gets
+    /// three seconds to exit once its connection closes, and is then
+    /// killed. Dropping the manager instead kills the servers at once.
     pub async fn shutdown(mut self) {
         for server in &mut self.servers {
             log::info!("Shutting down MCP server '{}'", server.name);
@@ -311,6 +327,26 @@ mod tests {
             .expect("an exit on its own is reported");
         assert_eq!(exit.status.unwrap().code(), Some(3));
         assert_eq!(exit.stderr_tail, ["starting", "fatal: no config"]);
+    }
+
+    /// Bytes that aren't UTF-8 don't stop the reading: the server can keep
+    /// writing to stderr, and its lines are logged with replacements.
+    #[tokio::test]
+    async fn stderr_that_is_not_utf8_is_still_read() {
+        let (child, stderr) = server(
+            "printf 'bad \\377 byte\\n' >&2; i=0; while [ $i -lt 2000 ]; do echo more output $i >&2; i=$((i+1)); done; exit 4",
+        );
+        let (_stop, stopped) = oneshot::channel();
+        let exit = watch_server("files".into(), child, stderr, stopped)
+            .await
+            .unwrap()
+            .unwrap();
+        // The server kept writing after the bad byte, and exited on its own.
+        assert_eq!(exit.status.unwrap().code(), Some(4));
+        assert_eq!(
+            exit.stderr_tail.last().map(String::as_str),
+            Some("more output 1999")
+        );
     }
 
     /// Only the last lines are kept.
