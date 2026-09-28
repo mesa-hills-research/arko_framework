@@ -261,7 +261,8 @@ async fn forward(
     }
 }
 
-fn injection(message: &AgentMessage) -> String {
+/// The context injection that delivers `message` to a running agent.
+pub(crate) fn injection(message: &AgentMessage) -> String {
     let attachments = if message.attachments.is_empty() {
         String::new()
     } else {
@@ -274,6 +275,12 @@ fn injection(message: &AgentMessage) -> String {
         "Message {} from agent '{}':\n{}{}",
         message.id, message.from, message.content, attachments
     )
+}
+
+/// Whether `content`, an injected context payload, is message `id`'s
+/// [`injection`].
+pub(crate) fn is_injection_of(content: &str, id: Uuid) -> bool {
+    content.starts_with(&format!("Message {id} from agent '"))
 }
 
 fn acknowledge(state: &mut BusState, agent_name: &str, message_ids: &[Uuid]) {

@@ -666,6 +666,47 @@ async fn agents_started_together_see_each_other_running() {
     let _ = tokio::time::timeout(Duration::from_secs(10), run).await;
 }
 
+/// A continued run gets a message its task took from the channel but never
+/// added (it stopped first, `Task::pending_context_injections`) once: in
+/// the continuation prompt, with the other messages not yet acknowledged.
+/// Other context the task kept comes, once, at its first turn boundary.
+#[tokio::test]
+async fn a_continued_run_gets_the_context_its_task_kept_once() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|_, body| {
+        is_request_of(body, "Lead the work.").then(|| complete_turn("done", "led"))
+    })
+    .await;
+    let workflow = builder_with(server.client(), &workspace, &["lead", "worker"])
+        .build()
+        .unwrap();
+    let mut lead = workflow.run_agent("lead", "Lead the work.").await.unwrap();
+    // Taken in the lead's final turn, too late for the model to read.
+    let message = workflow
+        .context()
+        .messages
+        .send("worker", None, "lead", "Check the parser.".into(), vec![])
+        .await
+        .unwrap();
+    lead.task.pending_context_injections = vec![
+        crate::messaging::injection(&message),
+        "Terminal 3 finished.".into(),
+    ];
+    let continued = workflow.continue_agent(&lead, "Carry on.").await.unwrap();
+    let bodies = server.bodies();
+    let request = user_text(bodies.last().unwrap());
+    assert!(request.contains("Carry on."), "{request}");
+    assert_eq!(request.matches("Check the parser.").count(), 1, "{request}");
+    assert_eq!(
+        request.matches("Terminal 3 finished.").count(),
+        1,
+        "{request}"
+    );
+    assert!(continued.task.pending_context_injections.is_empty());
+    // Acknowledged with the continuation prompt's messages.
+    assert!(workflow.context().messages.pending("lead").is_empty());
+}
+
 /// Resuming restores statuses and what each run was told: a continued run
 /// learns once of a recipient that started again after the resume, and
 /// nothing twice.

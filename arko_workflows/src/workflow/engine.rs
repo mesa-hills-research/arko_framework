@@ -1488,6 +1488,14 @@ impl WorkflowEngine {
         // No roster: the task's initial prompt has one. Start notices tell it
         // about recipients that started since it last ran.
         let (messages, pending_message_ids) = self.pending_messages(agent_name, ctx);
+        // The prompt presents again every message not acknowledged, among
+        // them any the task took from its channel but stopped before adding
+        // (`Task::pending_context_injections`): it doesn't get those twice.
+        task.pending_context_injections.retain(|content| {
+            !pending_message_ids
+                .iter()
+                .any(|id| crate::messaging::is_injection_of(content, *id))
+        });
         let prompt = format!("{continuation_prompt}{messages}");
         match previous.status {
             AgentRunStatus::Completed => {
