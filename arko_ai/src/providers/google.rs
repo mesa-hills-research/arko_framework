@@ -566,22 +566,6 @@ impl GoogleClient {
         }
     }
 
-    /// Per-model defaults from
-    /// https://ai.google.dev/gemini-api/docs/thinking
-    fn default_thinking_level(model: &crate::model::Model) -> GeminiThinkingLevel {
-        if model.is_gemini_3_5_flash()
-            || model.is_gemini_3_6_flash()
-            || model.is_gemini_3_7_flash()
-            || model.is_gemini_3_8_flash()
-        {
-            GeminiThinkingLevel::Medium
-        } else if model.is_gemini_3_1_flash_lite() || model.is_gemini_3_5_flash_lite() {
-            GeminiThinkingLevel::Minimal
-        } else {
-            GeminiThinkingLevel::High
-        }
-    }
-
     fn thinking_level_request_value(level: GeminiThinkingLevel) -> &'static str {
         match level {
             GeminiThinkingLevel::Minimal => "minimal",
@@ -717,6 +701,14 @@ impl GoogleClient {
         )?)?)
     }
 
+    /// The `thinking_level` and `thinking_summaries` to send. Both are
+    /// optional in the Interactions API, so without a reasoning configuration
+    /// neither is sent and the model's own defaults apply: thinking at its
+    /// documented default level (medium on Gemini 3.5 to 3.8 Flash, minimal
+    /// on 3.1 and 3.5 Flash-Lite, high on 3 Pro, 3 Flash and 3.1 Pro; dynamic
+    /// on 2.5) and no thought summaries.
+    /// https://ai.google.dev/gemini-api/docs/thinking
+    /// https://ai.google.dev/static/api/interactions-v1.openapi.json
     fn resolve_thinking(
         &self,
         conversation: &Conversation,
@@ -752,15 +744,8 @@ impl GoogleClient {
                         summaries_value(*include_summaries),
                     ))
                 }
-                _ => Ok((
-                    Some(
-                        Self::thinking_level_request_value(Self::default_thinking_level(
-                            &conversation.model,
-                        ))
-                        .to_string(),
-                    ),
-                    summaries_value(false),
-                )),
+                // The model's default level, and no summaries.
+                _ => Ok((None, None)),
             }
         } else {
             let thinking_config = matches!(
@@ -1892,26 +1877,34 @@ mod model_rule_tests {
         thinking(model, config).unwrap().0
     }
 
+    /// Without a reasoning configuration nothing about thinking is sent, so
+    /// each model thinks at its documented default level.
     #[test]
-    fn new_gemini_models_use_their_documented_default_levels() {
+    fn unconfigured_gemini_models_think_at_their_own_default() {
         let default = GenerationConfig::default();
-        for model in [
-            Model::google_gemini_3_8_flash(),
-            Model::google_gemini_3_7_flash(),
-            Model::google_gemini_3_6_flash(),
-            Model::google_gemini_3_5_flash(),
-        ] {
-            assert_eq!(level(model, &default).as_deref(), Some("medium"));
+        let models: Vec<Model> = Model::list(crate::model::Provider::Google)
+            .into_iter()
+            .filter(Model::uses_gemini_thinking_levels)
+            .collect();
+        assert!(models.len() >= 8, "{}", models.len());
+        for model in models {
+            assert_eq!(
+                thinking(model.clone(), &default).unwrap(),
+                (None, None),
+                "{}",
+                model.id
+            );
+            let body = GoogleClient::new("test")
+                .request_body(&Conversation::new(model.clone()), &default)
+                .unwrap();
+            assert!(!body.contains("thinking_level"), "{}: {body}", model.id);
+            assert!(!body.contains("thinking_summaries"), "{}: {body}", model.id);
         }
-        for model in [
-            Model::google_gemini_3_5_flash_lite(),
-            Model::google_gemini_3_1_flash_lite_stable(),
-            Model::google_gemini_3_1_flash_lite(),
-        ] {
-            assert_eq!(level(model, &default).as_deref(), Some("minimal"));
-        }
+        // An explicit level is still sent and validated.
+        let high = GenerationConfig::default()
+            .with_reasoning(ReasoningConfig::gemini(GeminiThinkingLevel::High, false));
         assert_eq!(
-            level(Model::google_gemini_3_1_pro(), &default).as_deref(),
+            level(Model::google_gemini_3_5_flash(), &high).as_deref(),
             Some("high")
         );
     }

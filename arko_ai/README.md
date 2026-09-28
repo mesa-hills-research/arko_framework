@@ -127,7 +127,11 @@ Each provider takes its own `ReasoningConfig` variant:
 `ReasoningConfig::openai(effort, include_summaries)`, `anthropic(budget_tokens)` or
 `anthropic_adaptive()`, `gemini(thinking_level, include_summaries)` or
 `google(thinking_budget, include_summaries)` (mapped to a thinking level), and
-`openrouter_effort(effort)`.
+`openrouter_effort(effort)`. Without a reasoning configuration, Gemini requests send no
+`thinking_level` or `thinking_summaries`, so each model thinks at its documented default
+(medium on Gemini 3.5 to 3.8 Flash, minimal on 3.1 and 3.5 Flash-Lite, high on 3 Pro,
+3 Flash and 3.1 Pro, dynamic on 2.5) and returns no thought summaries; an explicit level
+is validated against the model.
 
 One config can serve models of several providers. Settings the model's provider has no
 use for are dropped from the request, with a warning logged once per provider and
