@@ -249,7 +249,7 @@ async fn cancelling_a_ballot_keeps_the_votes_already_cast() {
     .await;
     let workflow = Arc::new(
         builder(&server, &workspace)
-            .enable_voting()
+            .enable_voting(["coder", "reviewer"])
             .build()
             .unwrap(),
     );
@@ -604,7 +604,11 @@ async fn a_stuck_delegated_agent_is_aborted_and_recorded_before_its_parent() {
     let workflow = Arc::new(
         builder(&server, &workspace)
             .agent_tool("reviewer", block.clone())
-            .workflow_services(crate::services::WorkflowServicesConfig::default())
+            .workflow_services(
+                crate::services::WorkflowServicesConfig::default()
+                    .allow_caller("coder")
+                    .allow_target("reviewer"),
+            )
             .cancel_grace_period(Duration::from_millis(400))
             .build()
             .unwrap(),

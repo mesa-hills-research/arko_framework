@@ -248,7 +248,10 @@ let workflow = Workflow::builder()
     .build()?;
 ```
 
-Agents use the injected `read_memory`, `write_memory`, and `list_memories` tools.
+Agents use the injected memory tools, each offered by access: `read_memory` to an
+agent that can read at least one tier, `write_memory` to one that can write one, and
+`list_memories` (which lists only the tiers the agent can access) to either. `build`
+rejects an access set naming an unregistered agent.
 Each write records its author, task, timestamp, and entry ID. Reads can request a
 trailing window, and a tier can enforce a byte limit. After the first full read,
 `read_memory` returns exact versioned changes; see
@@ -553,7 +556,8 @@ for the outcome. Durable steps require persistence. See
 
 ## Completion verification
 
-Completion verifiers gate an agent's `complete_task` call. A correctness verifier
+Completion verifiers gate the `complete_task` call of the agents they name with
+`target(..)`; a verifier without a target fails to build. A correctness verifier
 approves, requests a minor repair, or rejects with a major finding, within
 configurable repair limits. An efficiency verifier is advisory: a major rejection
 from it counts as a minor repair request, so efficiency alone cannot fail a task.
@@ -566,9 +570,10 @@ re-inspection. See
 ## Tool-result distillation
 
 Distillers are opt-in interceptors that replace large tool outputs with a
-model-written summary. They are scoped to selected agents (by the names they are
-registered under) and tools and configure the size threshold, model, and
-reasoning. Their calls count against the budget and are recorded. A summary
+model-written summary. Each names the agents (by the names they are registered
+under) and the tools it distills, at least one of each, `read_file` included when
+wanted; a distiller without targets fails to build. It sets the size threshold,
+model, and reasoning. Their calls count against the budget and are recorded. A summary
 replaces the output only when the model finished it; a refusal or a summary cut
 off by its output limit keeps the raw output.
 `complete_task` and `ask_user` results are never distilled, and `load_skill` results
@@ -578,11 +583,16 @@ configuration example.
 
 ## Workflow services and voting
 
-Workflow services let selected agents run other configured agents through the
-`run_workflow_agent` tool, with separate caller and target allowlists and a limit
-on concurrent calls. Delegated runs share the workflow's memory, budget, hooks,
-verification, and persistence. Voting provides named ballots with eligibility,
-quorum, consensus thresholds, weights, and tie handling. See
+Workflow services let named agents run other configured agents through the
+`run_workflow_agent` tool, with separate caller and target lists and a limit on
+concurrent calls. Callers and targets are named explicitly (`allow_caller`,
+`allow_target`); with none named, no agent is offered the tool. The opt-ins
+`allow_all_callers` and `allow_all_targets` admit every agent except
+completion-verifier agents and, as a target, the caller itself. Delegated runs share
+the workflow's memory, budget, hooks, verification, and persistence. Voting
+(`enable_voting(voters)`, which offers `cast_vote` to those agents only) provides
+named ballots with eligibility, quorum, consensus thresholds, weights, and tie
+handling. See
 [workflow services](INDEX.md#workflow-services-and-custom-tools) and
 [structured voting](INDEX.md#structured-voting).
 

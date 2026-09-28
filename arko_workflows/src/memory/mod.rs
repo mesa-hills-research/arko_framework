@@ -222,19 +222,37 @@ impl MemoryStore {
         Ok(tier.entries.clone())
     }
 
-    /// Returns (tier_name, can_read, can_write) for each tier accessible to the agent.
+    /// `(tier_name, can_read, can_write)` for each tier the agent can read
+    /// or write, sorted by name; tiers it can't access are left out.
     pub fn list_accessible(&self, agent_name: &str) -> Vec<(String, bool, bool)> {
-        self.tiers
+        let mut accessible = self
+            .tiers
             .iter()
-            .map(|(name, lock)| {
+            .filter_map(|(name, lock)| {
                 let tier = lock.read();
-                (
-                    name.clone(),
+                let (read, write) = (
                     tier.readers.allows(agent_name),
                     tier.writers.allows(agent_name),
+                );
+                (read || write).then(|| (name.clone(), read, write))
+            })
+            .collect::<Vec<_>>();
+        accessible.sort();
+        accessible
+    }
+
+    /// Whether the agent can read any tier, and whether it can write any:
+    /// which memory tools it is offered.
+    pub fn access_of(&self, agent_name: &str) -> (bool, bool) {
+        self.tiers
+            .values()
+            .fold((false, false), |(read, write), lock| {
+                let tier = lock.read();
+                (
+                    read || tier.readers.allows(agent_name),
+                    write || tier.writers.allows(agent_name),
                 )
             })
-            .collect()
     }
 
     /// Snapshot all tiers for persistence.
@@ -304,6 +322,39 @@ impl MemoryConfig {
             entries: Vec::new(),
             max_bytes: Some(max_bytes),
         })
+    }
+
+    /// The configured tiers.
+    pub fn tiers(&self) -> &[MemoryTier] {
+        &self.tiers
+    }
+
+    /// Tier names must be unique, and every agent an access set names must
+    /// be registered.
+    pub(crate) fn validate(&self, agents: &HashSet<String>) -> Result<(), WorkflowError> {
+        let mut names = HashSet::new();
+        for tier in &self.tiers {
+            if !names.insert(tier.name.as_str()) {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "duplicate memory tier '{}'",
+                    tier.name
+                )));
+            }
+            for (role, scope) in [("readers", &tier.readers), ("writers", &tier.writers)] {
+                if let AccessScope::Only(named) = scope {
+                    let mut named = named.iter().collect::<Vec<_>>();
+                    named.sort();
+                    if let Some(unknown) = named.into_iter().find(|agent| !agents.contains(*agent))
+                    {
+                        return Err(WorkflowError::BuilderInvalid(format!(
+                            "memory tier '{}' {role} name unknown agent '{unknown}'",
+                            tier.name
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Builds the MemoryStore from this configuration.

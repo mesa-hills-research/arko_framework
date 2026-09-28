@@ -68,6 +68,8 @@ impl CompletionVerifierConfig {
         }
     }
 
+    /// Gate this agent's completions (by registration name). A verifier
+    /// needs at least one target: `build` rejects one without.
     pub fn target(mut self, agent: impl Into<String>) -> Self {
         self.target_agents.insert(agent.into());
         self
@@ -103,9 +105,11 @@ impl CompletionVerifierConfig {
         self
     }
 
+    /// Whether the verifier gates `agent`'s completions: one of its named
+    /// targets (`build` requires at least one), never its own verifier
+    /// agent.
     pub(crate) fn applies_to(&self, agent: &str) -> bool {
-        agent != self.verifier_agent
-            && (self.target_agents.is_empty() || self.target_agents.contains(agent))
+        agent != self.verifier_agent && self.target_agents.contains(agent)
     }
 
     pub(crate) fn efficiency_repair_budget_exhausted(&self, rejected: u32) -> bool {

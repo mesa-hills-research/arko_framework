@@ -40,6 +40,8 @@ pub(crate) mod tests {
     #[test]
     fn reasoning_reaches_generation_config_and_legacy_configs_still_load() {
         let config = DistillationConfig::new("bulk", Model::openai_gpt_5_6_luna())
+            .target_agent("researcher")
+            .target_tool("search")
             .reasoning(ReasoningConfig::openai(OpenAIEffort::High, false))
             .max_output_tokens(2_000);
         let mut json = serde_json::to_value(&config).unwrap();
@@ -66,15 +68,39 @@ pub(crate) mod tests {
 
     #[test]
     fn invalid_distillers_are_rejected_during_workflow_build() {
-        for config in [
-            DistillationConfig::new("zero", Model::openai_gpt_5_6_luna()).max_output_tokens(0),
-            DistillationConfig::new("mismatch", Model::openai_gpt_5_6_luna())
-                .reasoning(ReasoningConfig::anthropic(1_024)),
+        let targeted = |name: &str| {
+            DistillationConfig::new(name, Model::openai_gpt_5_6_luna())
+                .target_agent("researcher")
+                .target_tool("search")
+        };
+        for (config, expected) in [
+            (targeted("zero").max_output_tokens(0), "must be positive"),
+            (
+                targeted("mismatch").reasoning(ReasoningConfig::anthropic(1_024)),
+                "reasoning provider",
+            ),
+            // Targets are required: agents and tools, read_file included.
+            (
+                DistillationConfig::new("untargeted", Model::openai_gpt_5_6_luna()),
+                "needs at least one target agent and one target tool",
+            ),
+            (
+                DistillationConfig::new("no-tool", Model::openai_gpt_5_6_luna())
+                    .target_agent("researcher"),
+                "needs at least one target agent and one target tool",
+            ),
+            (
+                DistillationConfig::new("no-agent", Model::openai_gpt_5_6_luna())
+                    .target_tool("read_file"),
+                "needs at least one target agent and one target tool",
+            ),
         ] {
-            assert!(matches!(
-                crate::Workflow::builder().distiller(config).build(),
-                Err(crate::WorkflowError::BuilderInvalid(_))
-            ));
+            let error = crate::Workflow::builder().distiller(config).build();
+            assert!(
+                matches!(&error, Err(crate::WorkflowError::BuilderInvalid(message)) if message.contains(expected)),
+                "{:?}",
+                error.err()
+            );
         }
     }
 
@@ -88,10 +114,19 @@ pub(crate) mod tests {
         assert!(config.applies("researcher", "search", "ééééé".chars().count()));
         assert!(!config.applies("builder", "search", 100));
         assert!(!config.applies("researcher", "read_file", 100));
+        // No targets match nothing (and don't build).
         assert!(
-            DistillationConfig::new("all", Model::openai_gpt_5_6_luna())
+            !DistillationConfig::new("none", Model::openai_gpt_5_6_luna())
                 .min_chars(0)
                 .applies("any", "any", 0)
+        );
+        // read_file is not exempt.
+        assert!(
+            DistillationConfig::new("reads", Model::openai_gpt_5_6_luna())
+                .min_chars(0)
+                .target_agent("researcher")
+                .target_tool("read_file")
+                .applies("researcher", "read_file", 0)
         );
     }
 
@@ -417,7 +452,10 @@ pub(crate) mod tests {
         let workflow = workflow(client.clone());
         let interceptor = DistillationInterceptor {
             agent_name: "researcher".to_string(),
-            config: DistillationConfig::new("bulk", model).min_chars(10),
+            config: DistillationConfig::new("bulk", model)
+                .min_chars(10)
+                .target_agent("researcher")
+                .target_tool("search"),
             client: Arc::new(client),
             context: workflow.context().clone(),
         };
@@ -597,15 +635,19 @@ impl DistillationConfig {
         }
     }
 
-    /// Distill only this agent's tool results (by default, every agent's).
-    /// `agent` is the name the agent is registered under with
+    /// Distill this agent's tool results. `agent` is the name the agent is
+    /// registered under with
     /// [`WorkflowBuilder::agent`](crate::WorkflowBuilder::agent), not its
-    /// `AgentConfig::name`.
+    /// `AgentConfig::name`. A distiller needs at least one target agent and
+    /// one target tool: `build` rejects one without.
     pub fn target_agent(mut self, agent: impl Into<String>) -> Self {
         self.target_agents.insert(agent.into());
         self
     }
 
+    /// Distill this tool's results (for the target agents). Any tool whose
+    /// results may be intercepted can be named, `read_file` included, for a
+    /// large file the agent wants specific details from.
     pub fn target_tool(mut self, tool: impl Into<String>) -> Self {
         self.target_tools.insert(tool.into());
         self
@@ -645,6 +687,12 @@ impl DistillationConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), crate::WorkflowError> {
+        if self.target_agents.is_empty() || self.target_tools.is_empty() {
+            return Err(crate::WorkflowError::BuilderInvalid(format!(
+                "distiller '{}' needs at least one target agent and one target tool (target_agent, target_tool)",
+                self.name
+            )));
+        }
         if self.max_output_tokens == Some(0) {
             return Err(crate::WorkflowError::BuilderInvalid(format!(
                 "distiller '{}' output token limit must be positive",
@@ -717,13 +765,11 @@ impl DistillationConfig {
 
     /// Whether the distiller targets the agent registered as `agent`.
     pub(crate) fn targets_agent(&self, agent: &str) -> bool {
-        self.target_agents.is_empty() || self.target_agents.contains(agent)
+        self.target_agents.contains(agent)
     }
 
     fn applies(&self, agent: &str, tool: &str, chars: usize) -> bool {
-        chars >= self.min_chars
-            && self.targets_agent(agent)
-            && (self.target_tools.is_empty() || self.target_tools.contains(tool))
+        chars >= self.min_chars && self.targets_agent(agent) && self.target_tools.contains(tool)
     }
 }
 

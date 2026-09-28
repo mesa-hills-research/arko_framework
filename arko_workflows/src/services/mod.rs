@@ -20,10 +20,24 @@ use crate::workflow::result::AgentResult;
 
 pub const RUN_WORKFLOW_AGENT_TOOL_NAME: &str = "run_workflow_agent";
 
+/// Which agents may run which other agents with `run_workflow_agent`.
+///
+/// Callers and targets are named explicitly: with none named, no agent is
+/// offered the tool, and a caller may run no agent. The opt-ins
+/// [`allow_all_callers`](Self::allow_all_callers) and
+/// [`allow_all_targets`](Self::allow_all_targets) admit every agent except
+/// completion-verifier agents (and, as a target, the caller itself).
 #[derive(Debug, Clone)]
 pub struct WorkflowServicesConfig {
+    /// Agents offered `run_workflow_agent`.
     pub allowed_callers: HashSet<String>,
+    /// Agents a caller may run.
     pub allowed_targets: HashSet<String>,
+    /// Opt-in: every agent is a caller, except verifier agents.
+    pub all_callers: bool,
+    /// Opt-in: a caller may run every agent, except itself and verifier
+    /// agents.
+    pub all_targets: bool,
     pub max_active_calls: u32,
 }
 
@@ -32,27 +46,60 @@ impl Default for WorkflowServicesConfig {
         Self {
             allowed_callers: HashSet::new(),
             allowed_targets: HashSet::new(),
+            all_callers: false,
+            all_targets: false,
             max_active_calls: 4,
         }
     }
 }
 
 impl WorkflowServicesConfig {
+    /// Offer `run_workflow_agent` to `agent`.
     pub fn allow_caller(mut self, agent: impl Into<String>) -> Self {
         self.allowed_callers.insert(agent.into());
         self
     }
 
-    /// Restrict workflow-agent delegation to explicitly named targets.
-    /// An empty target set preserves the backwards-compatible allow-all policy.
+    /// Let callers run `agent`.
     pub fn allow_target(mut self, agent: impl Into<String>) -> Self {
         self.allowed_targets.insert(agent.into());
+        self
+    }
+
+    /// Opt-in: offer `run_workflow_agent` to every agent except
+    /// completion-verifier agents.
+    pub fn allow_all_callers(mut self) -> Self {
+        self.all_callers = true;
+        self
+    }
+
+    /// Opt-in: let a caller run every agent except itself and
+    /// completion-verifier agents.
+    pub fn allow_all_targets(mut self) -> Self {
+        self.all_targets = true;
         self
     }
 
     pub fn max_active_calls(mut self, max: u32) -> Self {
         self.max_active_calls = max.max(1);
         self
+    }
+
+    /// Every agent the configuration names must be registered.
+    pub(crate) fn validate(&self, agents: &HashSet<String>) -> Result<(), WorkflowError> {
+        for (role, names) in [
+            ("caller", &self.allowed_callers),
+            ("target", &self.allowed_targets),
+        ] {
+            let mut names = names.iter().collect::<Vec<_>>();
+            names.sort();
+            if let Some(unknown) = names.into_iter().find(|name| !agents.contains(*name)) {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "workflow services {role} '{unknown}' is not a registered agent"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -81,40 +128,67 @@ impl WorkflowServices {
         }
     }
 
+    /// Whether `agent` is a completion-verifier agent of the workflow.
+    fn is_verifier(&self, agent: &str) -> bool {
+        self.context.upgrade().is_some_and(|context| {
+            context
+                .completion_verifiers
+                .iter()
+                .any(|verifier| verifier.verifier_agent == agent)
+        })
+    }
+
+    /// Whether `caller` is offered `run_workflow_agent`: named, or every
+    /// agent but verifier agents under `allow_all_callers`.
     pub fn is_allowed(&self, caller: &str) -> bool {
-        self.config.allowed_callers.is_empty() || self.config.allowed_callers.contains(caller)
+        self.config.allowed_callers.contains(caller)
+            || (self.config.all_callers && !self.is_verifier(caller))
     }
 
-    pub fn is_target_allowed(&self, target: &str) -> bool {
-        self.config.allowed_targets.is_empty() || self.config.allowed_targets.contains(target)
+    /// Whether `caller` may run `target`: named, or every agent but the
+    /// caller and verifier agents under `allow_all_targets`.
+    pub fn is_target_allowed(&self, caller: &str, target: &str) -> bool {
+        self.config.allowed_targets.contains(target)
+            || (self.config.all_targets && target != caller && !self.is_verifier(target))
     }
 
-    /// The `agent` parameter's description: the agents it may run, with
-    /// their roles (every registered agent unless targets are restricted).
-    /// Configuration only, so it doesn't change during a task.
-    fn target_guidance(&self) -> String {
+    /// The agents `caller` may run, sorted.
+    fn allowed_target_names(&self, caller: &str) -> Vec<String> {
         let Some(context) = self.context.upgrade() else {
-            return "Use only a configured agent name.".to_string();
+            return Vec::new();
         };
         let mut targets = context
             .agent_configs
-            .iter()
-            .filter(|(name, _)| self.is_target_allowed(name))
-            .map(|(name, config)| format!("`{name}` ({})", config.role_description))
-            .collect::<Vec<_>>();
-        targets.sort();
-        format!("The agent to run, one of: {}.", targets.join("; "))
-    }
-
-    fn allowed_target_names(&self) -> Vec<String> {
-        let mut targets = self
-            .config
-            .allowed_targets
-            .iter()
+            .keys()
+            .filter(|name| self.is_target_allowed(caller, name))
             .cloned()
             .collect::<Vec<_>>();
         targets.sort();
         targets
+    }
+
+    /// The `agent` parameter's description for `caller`: the agents it may
+    /// run, with their roles. Configuration only, so it doesn't change
+    /// during a task.
+    fn target_guidance(&self, caller: &str) -> String {
+        let Some(context) = self.context.upgrade() else {
+            return "Use only a configured agent name.".to_string();
+        };
+        let targets = self
+            .allowed_target_names(caller)
+            .into_iter()
+            .map(|name| {
+                let role = context
+                    .agent_configs
+                    .get(&name)
+                    .map_or("", |config| config.role_description.as_str());
+                format!("`{name}` ({role})")
+            })
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            return "No agent is configured for you to run.".to_string();
+        }
+        format!("The agent to run, one of: {}.", targets.join("; "))
     }
 
     pub async fn run_agent(
@@ -140,8 +214,8 @@ impl WorkflowServices {
                 "agent '{caller}' is not authorized to invoke workflow services"
             )));
         }
-        if !self.is_target_allowed(agent_name) {
-            let allowed = self.allowed_target_names();
+        if !self.is_target_allowed(caller, agent_name) {
+            let allowed = self.allowed_target_names(caller);
             let suffix = if allowed.is_empty() {
                 String::new()
             } else {
@@ -204,7 +278,7 @@ impl RunWorkflowAgentTool {
 #[async_trait]
 impl Tool for RunWorkflowAgentTool {
     fn definition(&self) -> ToolDefinition {
-        let target_guidance = self.services.target_guidance();
+        let target_guidance = self.services.target_guidance(&self.caller);
         ToolDefinition {
             name: RUN_WORKFLOW_AGENT_TOOL_NAME.to_string(),
             description: "Run another configured workflow agent for a bounded subtask and return its verified completion summary. Use only when delegation is materially useful.".to_string(),
@@ -259,33 +333,93 @@ impl Tool for RunWorkflowAgentTool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn target_allowlist_is_opt_in_and_independent_from_callers() {
-        let unrestricted = WorkflowServicesConfig::default();
-        assert!(unrestricted.allowed_targets.is_empty());
-        let unrestricted_services = WorkflowServices::new(
-            Weak::new(),
-            Arc::new(arko_ai::LLMClient::new()),
-            None,
-            unrestricted,
-        );
-        assert!(unrestricted_services.is_target_allowed("any-agent"));
+    fn agent(name: &str) -> arko_agents::AgentConfig {
+        crate::test_support::agent_config(name)
+    }
 
-        let restricted = WorkflowServicesConfig::default()
-            .allow_caller("orchestrator")
-            .allow_target("coder")
-            .allow_target("researcher");
-        assert!(restricted.allowed_callers.contains("orchestrator"));
-        assert!(restricted.allowed_targets.contains("coder"));
-        assert!(restricted.allowed_targets.contains("researcher"));
-        assert!(!restricted.allowed_targets.contains("final_verifier"));
-        let restricted_services = WorkflowServices::new(
-            Weak::new(),
-            Arc::new(arko_ai::LLMClient::new()),
-            None,
-            restricted,
+    fn build(services: WorkflowServicesConfig) -> crate::Workflow {
+        crate::Workflow::builder()
+            .name("services-test")
+            .workspace(std::env::temp_dir())
+            .llm_client(Arc::new(arko_ai::LLMClient::new()))
+            .agent("orchestrator", agent("Orchestrator"))
+            .agent("coder", agent("Coder"))
+            .agent("reviewer", agent("Reviewer"))
+            .completion_verifier(
+                crate::verification::CompletionVerifierConfig::correctness("check", "reviewer")
+                    .target("coder"),
+            )
+            .workflow_services(services)
+            .build()
+            .unwrap()
+    }
+
+    /// Callers and targets are named explicitly: none named means nobody.
+    #[test]
+    fn empty_caller_and_target_sets_mean_nobody() {
+        let workflow = build(WorkflowServicesConfig::default());
+        let services = workflow.context().workflow_services.get().unwrap();
+        for agent in ["orchestrator", "coder", "reviewer"] {
+            assert!(!services.is_allowed(agent));
+            assert!(!services.is_target_allowed("orchestrator", agent));
+        }
+
+        let workflow = build(
+            WorkflowServicesConfig::default()
+                .allow_caller("orchestrator")
+                .allow_target("coder"),
         );
-        assert!(restricted_services.is_target_allowed("coder"));
-        assert!(!restricted_services.is_target_allowed("final_verifier"));
+        let services = workflow.context().workflow_services.get().unwrap();
+        assert!(services.is_allowed("orchestrator"));
+        assert!(!services.is_allowed("coder"));
+        assert!(services.is_target_allowed("orchestrator", "coder"));
+        assert!(!services.is_target_allowed("orchestrator", "reviewer"));
+        assert_eq!(services.allowed_target_names("orchestrator"), ["coder"]);
+    }
+
+    /// The opt-ins admit every agent but verifier agents, and as a target
+    /// not the caller itself.
+    #[test]
+    fn allow_all_admits_every_agent_but_self_and_verifiers() {
+        let workflow = build(
+            WorkflowServicesConfig::default()
+                .allow_all_callers()
+                .allow_all_targets(),
+        );
+        let services = workflow.context().workflow_services.get().unwrap();
+        assert!(services.is_allowed("orchestrator"));
+        assert!(services.is_allowed("coder"));
+        assert!(!services.is_allowed("reviewer"));
+        assert_eq!(
+            services.allowed_target_names("orchestrator"),
+            ["coder"],
+            "not itself, not the verifier"
+        );
+        assert_eq!(services.allowed_target_names("coder"), ["orchestrator"]);
+        assert!(services.target_guidance("orchestrator").contains("`coder`"));
+    }
+
+    /// Names must be registered agents.
+    #[test]
+    fn unknown_callers_and_targets_are_rejected_at_build() {
+        for config in [
+            WorkflowServicesConfig::default().allow_caller("orchestator"),
+            WorkflowServicesConfig::default().allow_target("cdoer"),
+        ] {
+            let error = crate::Workflow::builder()
+                .name("services-test")
+                .workspace(std::env::temp_dir())
+                .llm_client(Arc::new(arko_ai::LLMClient::new()))
+                .agent("orchestrator", agent("Orchestrator"))
+                .agent("coder", agent("Coder"))
+                .workflow_services(config)
+                .build()
+                .err()
+                .unwrap();
+            assert!(
+                matches!(&error, WorkflowError::BuilderInvalid(message) if message.contains("is not a registered agent")),
+                "{error}"
+            );
+        }
     }
 }

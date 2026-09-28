@@ -296,8 +296,9 @@ impl Tool for ListMemoriesTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: LIST_MEMORIES_TOOL_NAME.to_string(),
-            description: "List all workflow memory tiers and your access level for each."
-                .to_string(),
+            description:
+                "List the workflow memory tiers you can read or write, with your access to each."
+                    .to_string(),
             output_based_example: None,
             parameters: vec![],
             parallel_safe: true,
@@ -313,15 +314,14 @@ impl Tool for ListMemoriesTool {
     ) -> Result<String, ToolError> {
         let accessible = self.context.memory.list_accessible(&self.agent_name);
         if accessible.is_empty() {
-            return Ok("No memory tiers are configured in this workflow.".to_string());
+            return Ok("No memory tiers are available to you.".to_string());
         }
         let mut output = String::from("Available memory tiers:\n");
         for (name, can_read, can_write) in accessible {
             let access = match (can_read, can_write) {
                 (true, true) => "read/write",
                 (true, false) => "read-only",
-                (false, true) => "write-only",
-                (false, false) => "no access",
+                _ => "write-only",
             };
             output.push_str(&format!("- {} ({})\n", name, access));
         }

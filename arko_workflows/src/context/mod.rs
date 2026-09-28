@@ -68,6 +68,8 @@ pub struct SharedContext {
     pub(crate) approval_warnings:
         parking_lot::Mutex<std::collections::HashSet<(String, String, String)>>,
     pub ballots: Option<Arc<crate::voting::BallotStore>>,
+    /// The agents offered `cast_vote` (see `WorkflowBuilder::enable_voting`).
+    pub voters: std::collections::HashSet<String>,
     pub event_tx: tokio::sync::broadcast::Sender<crate::workflow::result::WorkflowEvent>,
 }
 

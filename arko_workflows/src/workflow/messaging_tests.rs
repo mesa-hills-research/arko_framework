@@ -334,10 +334,14 @@ async fn statuses_follow_a_rate_limited_run() {
 fn delegation_targets_are_named_in_the_delegation_tool() {
     let workspace = Workspace::new();
     for services in [
-        crate::services::WorkflowServicesConfig::default(),
-        crate::services::WorkflowServicesConfig::default().allow_target("reviewer"),
+        crate::services::WorkflowServicesConfig::default()
+            .allow_caller("coder")
+            .allow_all_targets(),
+        crate::services::WorkflowServicesConfig::default()
+            .allow_caller("coder")
+            .allow_target("reviewer"),
     ] {
-        let restricted = !services.allowed_targets.is_empty();
+        let restricted = !services.all_targets;
         let workflow = builder(&workspace, &["coder", "reviewer", "writer"])
             .disable_messaging()
             .workflow_services(services)
@@ -568,7 +572,11 @@ async fn a_running_agent_is_told_once_when_a_recipient_starts() {
     let workflow = Arc::new(
         builder_with(server.client(), &workspace, &["lead", "worker"])
             .agent_tool("lead", ProbeTool::new("probe", false))
-            .workflow_services(crate::services::WorkflowServicesConfig::default())
+            .workflow_services(
+                crate::services::WorkflowServicesConfig::default()
+                    .allow_caller("lead")
+                    .allow_target("worker"),
+            )
             .build()
             .unwrap(),
     );

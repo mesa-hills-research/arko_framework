@@ -419,15 +419,27 @@ impl Workflow {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
-    pub fn begin_ballot(&self, config: BallotConfig) -> Result<uuid::Uuid, WorkflowError> {
-        self.context
-            .ballots
-            .as_ref()
-            .ok_or_else(|| {
-                WorkflowError::BuilderInvalid("structured voting is not enabled".to_string())
-            })?
-            .begin(config)
-            .map_err(WorkflowError::Deliberation)
+    /// Open a ballot. Its eligible voters must be among the workflow's
+    /// voters ([`WorkflowBuilder::enable_voting`]), the agents offered
+    /// `cast_vote`; with none named, every workflow voter is eligible.
+    pub fn begin_ballot(&self, mut config: BallotConfig) -> Result<uuid::Uuid, WorkflowError> {
+        let ballots = self.context.ballots.as_ref().ok_or_else(|| {
+            WorkflowError::BuilderInvalid("structured voting is not enabled".to_string())
+        })?;
+        let mut eligible = config.eligible_voters.iter().collect::<Vec<_>>();
+        eligible.sort();
+        if let Some(voter) = eligible
+            .into_iter()
+            .find(|voter| !self.context.voters.contains(*voter))
+        {
+            return Err(WorkflowError::Deliberation(format!(
+                "eligible voter '{voter}' is not offered cast_vote; name it in WorkflowBuilder::enable_voting"
+            )));
+        }
+        if config.eligible_voters.is_empty() {
+            config.eligible_voters = self.context.voters.clone();
+        }
+        ballots.begin(config).map_err(WorkflowError::Deliberation)
     }
 
     pub fn finish_ballot(&self, ballot_id: uuid::Uuid) -> Result<BallotResult, WorkflowError> {
@@ -695,7 +707,8 @@ pub struct WorkflowBuilder {
     approval_policy: crate::policy::ApprovalPolicy,
     error_recovery_policy: crate::policy::ErrorRecoveryPolicy,
     recovery_waits: crate::policy::RecoveryWaits,
-    voting_enabled: bool,
+    /// `Some(voters)` once voting is enabled.
+    voters: Option<HashSet<String>>,
     interception_failure_policy: Option<InterceptionFailurePolicy>,
     cancel_grace_period: std::time::Duration,
 }
@@ -729,7 +742,7 @@ impl WorkflowBuilder {
             approval_policy: crate::policy::ApprovalPolicy::default(),
             error_recovery_policy: crate::policy::ErrorRecoveryPolicy::default(),
             recovery_waits: crate::policy::RecoveryWaits::default(),
-            voting_enabled: false,
+            voters: None,
             interception_failure_policy: None,
             cancel_grace_period: DEFAULT_CANCEL_GRACE_PERIOD,
         }
@@ -975,8 +988,15 @@ impl WorkflowBuilder {
         self
     }
 
-    pub fn enable_voting(mut self) -> Self {
-        self.voting_enabled = true;
+    /// Enable structured ballots, with `voters` (registration names) offered
+    /// the `cast_vote` tool; other agents are not. A ballot's eligible
+    /// voters must be among them.
+    pub fn enable_voting<I, S>(mut self, voters: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.voters = Some(voters.into_iter().map(Into::into).collect());
         self
     }
 
@@ -1024,12 +1044,7 @@ impl WorkflowBuilder {
             )));
         }
 
-        if !workspace.is_dir() {
-            return Err(WorkflowError::BuilderInvalid(format!(
-                "workspace '{}' does not exist or is not a directory",
-                workspace.display()
-            )));
-        }
+        let workspace = normalize_workspace(&workspace)?;
 
         for (label, value) in [
             ("budget limit", self.budget_limit),
@@ -1084,6 +1099,12 @@ impl WorkflowBuilder {
                     verifier.name, verifier.verifier_agent
                 )));
             }
+            if verifier.target_agents.is_empty() {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "completion verifier '{}' has no target: name the agents it verifies with target(..)",
+                    verifier.name
+                )));
+            }
             for target in &verifier.target_agents {
                 if !agent_names.contains(target) {
                     return Err(WorkflowError::BuilderInvalid(format!(
@@ -1106,6 +1127,38 @@ impl WorkflowBuilder {
                 )));
             }
         }
+
+        if let Some(config) = &self.memory_config {
+            config.validate(&agent_names)?;
+        }
+        if let Some(services) = &self.services_config {
+            services.validate(&agent_names)?;
+            if services.allowed_callers.is_empty() && !services.all_callers {
+                log::warn!(
+                    "Workflow '{name}': workflow services name no caller, so no agent is offered run_workflow_agent (WorkflowServicesConfig::allow_caller)"
+                );
+            }
+        }
+        if let Some(voters) = &self.voters {
+            let mut voters = voters.iter().collect::<Vec<_>>();
+            voters.sort();
+            if let Some(unknown) = voters
+                .into_iter()
+                .find(|voter| !agent_names.contains(*voter))
+            {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "voting names unknown agent '{unknown}'"
+                )));
+            }
+        }
+        warn_unknown_tool_names(
+            &name,
+            &self.agents,
+            &self.global_tools,
+            &self.agent_tools,
+            self.freshness_config.as_ref(),
+            &self.distillation_configs,
+        );
 
         // Agents offered the workflow's send_message tool: those with a
         // permitted recipient.
@@ -1339,8 +1392,10 @@ impl WorkflowBuilder {
             approval_reasons: parking_lot::Mutex::new(HashMap::new()),
             approval_warnings: parking_lot::Mutex::new(HashSet::new()),
             ballots: self
-                .voting_enabled
+                .voters
+                .is_some()
                 .then(|| Arc::new(BallotStore::default())),
+            voters: self.voters.clone().unwrap_or_default(),
             event_tx,
         });
 
@@ -1377,6 +1432,92 @@ impl Default for WorkflowBuilder {
     }
 }
 
+/// The workspace as an absolute path with `.` and `..` resolved lexically
+/// (symbolic links are kept), so paths the agents and freshness tracking
+/// derive from it compare equal. `std::fs::canonicalize` is not used: on
+/// Windows it returns a verbatim `\\?\` path, which other tools and
+/// comparisons treat as a different path. The directory must exist.
+fn normalize_workspace(workspace: &std::path::Path) -> Result<PathBuf, WorkflowError> {
+    let absolute = std::path::absolute(workspace).map_err(|error| {
+        WorkflowError::BuilderInvalid(format!(
+            "workspace '{}' can't be made absolute: {error}",
+            workspace.display()
+        ))
+    })?;
+    let normalized = arko_agents::utils::normalize_path(&absolute);
+    if !normalized.is_dir() {
+        return Err(WorkflowError::BuilderInvalid(format!(
+            "workspace '{}' does not exist or is not a directory",
+            workspace.display()
+        )));
+    }
+    Ok(normalized)
+}
+
+/// Logs a warning for each tool name the freshness mapping or a distiller
+/// names that no agent is configured with, no workflow tool has, and no
+/// built-in tool has. Only a warning: MCP servers and skills add tools
+/// whose names aren't known at build.
+fn warn_unknown_tool_names(
+    workflow: &str,
+    agents: &[(String, AgentConfig)],
+    global_tools: &[Arc<dyn arko_agents::tool::Tool>],
+    agent_tools: &HashMap<String, Vec<Arc<dyn arko_agents::tool::Tool>>>,
+    freshness: Option<&ContextFreshnessConfig>,
+    distillers: &[DistillationConfig],
+) {
+    let mut known = arko_agents::ToolRegistry::new()
+        .list_tool_names()
+        .into_iter()
+        .collect::<HashSet<_>>();
+    known.extend(
+        [
+            crate::memory::tools::READ_MEMORY_TOOL_NAME,
+            crate::memory::tools::WRITE_MEMORY_TOOL_NAME,
+            crate::memory::tools::LIST_MEMORIES_TOOL_NAME,
+            SEND_MESSAGE_TOOL_NAME,
+            LIST_RECIPIENTS_TOOL_NAME,
+            WAIT_FOR_MESSAGE_TOOL_NAME,
+            RUN_WORKFLOW_AGENT_TOOL_NAME,
+            CAST_VOTE_TOOL_NAME,
+            arko_agents::LOAD_SKILL_TOOL_NAME,
+        ]
+        .map(str::to_string),
+    );
+    known.extend(
+        agents
+            .iter()
+            .flat_map(|(_, config)| config.tool_config.available_tool_names.iter().cloned()),
+    );
+    known.extend(global_tools.iter().map(|tool| tool.name()));
+    known.extend(agent_tools.values().flatten().map(|tool| tool.name()));
+    let mut named = Vec::new();
+    if let Some(freshness) = freshness {
+        named.extend(
+            freshness
+                .tool_effects
+                .keys()
+                .map(|tool| ("the context freshness configuration".to_string(), tool)),
+        );
+    }
+    for distiller in distillers {
+        named.extend(
+            distiller
+                .target_tools
+                .iter()
+                .map(|tool| (format!("distiller '{}'", distiller.name), tool)),
+        );
+    }
+    named.sort();
+    for (source, tool) in named {
+        if !known.contains(tool) {
+            log::warn!(
+                "Workflow '{workflow}': {source} names tool '{tool}', which no agent is configured with and no workflow or built-in tool has; check the name (an MCP or skill tool can't be checked before it runs)."
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "messaging_tests.rs"]
 mod messaging_tests;
@@ -1388,3 +1529,7 @@ mod wait_tests;
 #[cfg(test)]
 #[path = "policy_tests.rs"]
 mod policy_tests;
+
+#[cfg(test)]
+#[path = "build_tests.rs"]
+mod build_tests;

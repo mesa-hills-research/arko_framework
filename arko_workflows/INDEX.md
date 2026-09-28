@@ -82,7 +82,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 | Signature | Parameters, purpose, and default |
 | --- | --- |
 | `name(self, name: impl Into<String>) -> Self` | Workflow identity used in results, hooks, and checkpoint name checks. Required. |
-| `workspace(self, path: impl Into<PathBuf>) -> Self` | Working directory for every agent. Required; must already exist (the builder does not create it). |
+| `workspace(self, path: impl Into<PathBuf>) -> Self` | Working directory for every agent. Required; must already exist (the builder does not create it). `build` stores it absolute, with `.` and `..` resolved lexically (`std::path::absolute`, then `arko_agents::utils::normalize_path`); symbolic links are kept, and on Windows no verbatim `\\?\` form is produced (`std::fs::canonicalize` is not used). |
 | `llm_client(self, client: Arc<LLMClient>) -> Self` | Model client shared by agents, verifiers, and distillers. Required. The builder reads no credentials itself; `LLMClient::from_env()` configures every provider found in the environment. |
 | `agent(self, name: impl Into<String>, config: AgentConfig) -> Self` | Register an agent under a unique workflow registration name. At least one is required. |
 | `metadata(self, metadata: WorkflowMetadata) -> Self` | Replace discovery metadata, including supported-host restrictions. |
@@ -110,7 +110,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 | `user_input_handler(self, handler: Arc<dyn UserInputHandler>) -> Self` | Answer agents' `ask_user` questions asynchronously. Without a handler, the run suspends and returns `UserInputRequired`. |
 | `approval_policy(self, policy: ApprovalPolicy) -> Self` | How tool-approval requests are answered. **Default `ApprovalPolicy::ApproveAll`: every call is approved**, including calls an agent's configuration marks for approval. See [Approvals and error recovery](#approvals-and-error-recovery). |
 | `error_recovery_policy(self, policy: ErrorRecoveryPolicy) -> Self` | How error-recovery pauses are answered. **Default `ErrorRecoveryPolicy::Automatic`: recover without an attempt limit** from errors that may pass, and fail clearly on those that won't. |
-| `enable_voting(self) -> Self` | Create an in-memory ballot store and give every agent the `cast_vote` tool. |
+| `enable_voting<I, S>(self, voters: I) -> Self` (`I: IntoIterator<Item = S>`, `S: Into<String>`) | Create an in-memory ballot store and offer the `cast_vote` tool to `voters` (registration names) only. |
 | `cancel_grace_period(self, grace_period: std::time::Duration) -> Self` | How long a stopped run waits for each running agent to stop before aborting it. Default `workflow::cancel::DEFAULT_CANCEL_GRACE_PERIOD`, 30 seconds. See [Stopping a run](#stopping-a-run). |
 | `build(self) -> Result<Workflow, WorkflowError>` | Validate, initialize or restore state, and fire `PreWorkflow`. May create persistence files; runs no agent. |
 
@@ -122,16 +122,18 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 - a host that matches none of a nonempty `metadata.supported_platforms` list;
 - duplicate agent names;
 - a negative or non-finite workflow budget, warning threshold, or agent budget;
-- an unknown agent name in `agent_tool`, `agent_tool_result_interceptor`, `agent_budget`, a completion verifier's verifier or targets, a distiller's targets (`distiller '<name>' targets unknown agent '<target>'`), the messaging policy (`messaging policy references unknown agent '<name>'`), or `agent_wait_for_message_timeout` (`wait_for_message timeout references unknown agent '<name>'`);
+- an unknown agent name in `agent_tool`, `agent_tool_result_interceptor`, `agent_budget`, a completion verifier's verifier or targets, a distiller's targets (`distiller '<name>' targets unknown agent '<target>'`), the messaging policy (`messaging policy references unknown agent '<name>'`), `agent_wait_for_message_timeout` (`wait_for_message timeout references unknown agent '<name>'`), a memory tier's `AccessScope::Only` readers or writers (`memory tier '<tier>' readers name unknown agent '<name>'`), workflow services callers or targets (`workflow services caller '<name>' is not a registered agent`), or the voters (`voting names unknown agent '<name>'`);
+- a completion verifier without a target (`completion verifier '<name>' has no target`), or a distiller without a target agent or a target tool;
+- two memory tiers with the same name;
 - a fixed `wait_for_message` limit of zero or more than 24 hours, for the workflow or an agent;
 - a distiller whose `max_output_tokens` is zero or whose `reasoning` configuration is for a different provider than its model;
 - `resume_from` without `persistence`, a checkpoint for a different workflow name, or a checkpoint run ID that differs from the persistence directory's.
 
-Checkpoint read and parse failures return `Io` or `Json`. A warning threshold may exceed the budget limit. Metadata dependencies are descriptive: the builder neither installs nor checks executables.
+Checkpoint read and parse failures return `Io` or `Json`. A warning threshold may exceed the budget limit. Tool names are only warned about, since MCP servers and skills add tools whose names aren't known at build: a tool the context freshness mapping or a distiller's targets name that no agent is configured with (`available_tool_names`), no workflow or custom tool has, and no `arko_agents` built-in has is logged as a warning. Workflow services that name no caller are logged as a warning too: no agent is offered `run_workflow_agent`. Metadata dependencies are descriptive: the builder neither installs nor checks executables.
 
 Tool names: duplicate global tool names, duplicate names within one agent's tools, and a name shared by a global and an agent-local tool are rejected. Global tools cannot use the reserved names `complete_task`, `ask_user`, `read_memory`, `write_memory`, `list_memories`, `run_workflow_agent`, or `cast_vote`, nor `send_message` or `list_recipients` while any agent is offered the workflow's messaging tools, nor `wait_for_message` while any agent is offered it; an agent-local tool with one of these names is rejected for an agent that is offered the workflow's tool. Agent-local tools are not checked against reserved names: an agent-local tool with a reserved name replaces that workflow or built-in tool for its agent, except `complete_task`, which `arko_agents` never lets a non-built-in tool replace. Custom tools are registered after the workflow tools, so a custom tool named like an `arko_agents` built-in (for example `read_file`) replaces it for the agents that receive it.
 
-Tools added automatically: `send_message` and `list_recipients` for each agent with at least one permitted recipient under the messaging policy; `wait_for_message` for each agent that another agent may message; `read_memory`, `write_memory`, and `list_memories` when at least one memory tier exists; `run_workflow_agent` for permitted callers when services are enabled; `cast_vote` when voting is enabled. The agent's pending messages are appended to the prompt of each new run and continuation, under `# Messages from other agents:`. A new run's initial prompt also lists the agents it may message; see [What agents are told about their recipients](#what-agents-are-told-about-their-recipients). Skills configured on an agent are initialized against the workspace. There is no separate graph or scheduler configuration.
+Tools added automatically: `send_message` and `list_recipients` for each agent with at least one permitted recipient under the messaging policy; `wait_for_message` for each agent that another agent may message; `read_memory` for each agent that can read at least one memory tier, `write_memory` for each that can write at least one, and `list_memories` for each that can do either; `run_workflow_agent` for permitted callers when services are enabled; `cast_vote` for the voters named in `enable_voting`. The agent's pending messages are appended to the prompt of each new run and continuation, under `# Messages from other agents:`. A new run's initial prompt also lists the agents it may message; see [What agents are told about their recipients](#what-agents-are-told-about-their-recipients). Skills configured on an agent are initialized against the workspace. There is no separate graph or scheduler configuration.
 
 Interceptors run in this order: global interceptors, the agent's own interceptors, then the distillers that target the agent, each group in registration order. Each stage receives the previous stage's result. The agent runtime applies the interception failure policy to the agent's interceptors as one: an interceptor that fails fails the chain, and the policy's retries resume at that interceptor (the output of those before it is reused, not produced or paid for again). After the last attempt the agent gets the original tool output, followed under `InformAgent` and `RetryThenInformAgent` by a note that it is the full result because the interceptor failed. `load_skill` results are intercepted only when the agent's `SkillsConfig::load_skill_interception` opts in, under the policy it sets. Every agent's tool calls pass through the workflow's execution middleware, which enforces a stopped run and runs tool hooks, freshness checks, and completion verification at tool execution, so these also apply to automatically approved and batched calls.
 
@@ -262,7 +264,7 @@ fn finish_ballot(&self, ballot_id: Uuid) -> Result<BallotResult, WorkflowError>;
 
 The resource methods require freshness tracking and return `BuilderInvalid` otherwise. `actor` is the observing or writing actor; `resource` identifies the context. `register_resource_read` records the actor's observation of the current version. `mark_resource_dirty` increments the version, returns the actors whose reads became stale, queues a notice for each active stale reader, and fires `OnFreshnessConflict` once per stale reader; a hook `Abort` stops the run and returns the stop's error. The version change is recorded before any notification or hook error is returned. See [Resource tracker](#resource-tracker) for identity and overlap rules.
 
-The ballot methods require `enable_voting` and return `BuilderInvalid` otherwise. `begin_ballot` validates and stores the configuration and returns the new ballot's UUID. `finish_ballot` tallies the current votes without closing the ballot. Validation and tally errors are returned as `WorkflowError::Deliberation`.
+The ballot methods require `enable_voting` and return `BuilderInvalid` otherwise. `begin_ballot` validates and stores the configuration and returns the new ballot's UUID; its eligible voters must be among the workflow's voters (`Deliberation` otherwise), and an empty set becomes all of them. `finish_ballot` tallies the current votes without closing the ballot. Validation and tally errors are returned as `WorkflowError::Deliberation`.
 
 ### Workflow-facing durable operations
 
@@ -476,24 +478,28 @@ Source: [services/mod.rs](src/services/mod.rs), [builder integration](src/workfl
 
 | Field | Type | Default and meaning |
 | --- | --- | --- |
-| `allowed_callers` | `HashSet<String>` | Empty: every agent may delegate. Nonempty: only listed agents receive the tool. |
-| `allowed_targets` | `HashSet<String>` | Empty: any registered agent may be a target. Nonempty: only listed targets, independent of the caller list. |
+| `allowed_callers` | `HashSet<String>` | The agents offered `run_workflow_agent`. Empty (default): none, unless `all_callers`. |
+| `allowed_targets` | `HashSet<String>` | The agents a caller may run, independent of the caller list. Empty (default): none, unless `all_targets`. |
+| `all_callers` | `bool` | Opt-in, default `false`: every agent is a caller, except completion-verifier agents. |
+| `all_targets` | `bool` | Opt-in, default `false`: a caller may run every agent, except itself and completion-verifier agents. |
 | `max_active_calls` | `u32` | `4`. Limit on simultaneous service calls, including nested delegation. |
 
 ```rust
 // WorkflowServicesConfig
 fn allow_caller(self, agent: impl Into<String>) -> Self;
 fn allow_target(self, agent: impl Into<String>) -> Self;
+fn allow_all_callers(self) -> Self;
+fn allow_all_targets(self) -> Self;
 fn max_active_calls(self, max: u32) -> Self;
 
 // WorkflowServices: Clone
 fn is_allowed(&self, caller: &str) -> bool;
-fn is_target_allowed(&self, target: &str) -> bool;
+fn is_target_allowed(&self, caller: &str, target: &str) -> bool;
 async fn run_agent(&self, caller: &str, agent_name: &str, prompt: &str)
     -> Result<AgentResult, WorkflowError>;
 ```
 
-The `allow_*` setters add a name. `max_active_calls` clamps to at least one; assigning the public field directly bypasses the clamp. Allowlist names are not checked at build time; a target must still resolve to a registered agent when called. `WorkflowServices` has no public constructor; after enabling services, `workflow.context().workflow_services.get()` returns it. It holds a weak reference to the workflow context and returns `Channel` once the workflow has been dropped.
+Callers and targets must be named explicitly (`allow_caller`, `allow_target`), or admitted with the opt-ins, which leave out completion-verifier agents (and, as a target, the caller itself); an explicitly named agent is admitted either way. `max_active_calls` clamps to at least one; assigning the public field directly bypasses the clamp. `build` rejects a caller or target that is not a registered agent. The tool's `agent` parameter lists the caller's targets with their roles. `WorkflowServices` has no public constructor; after enabling services, `workflow.context().workflow_services.get()` returns it. It holds a weak reference to the workflow context and returns `Channel` once the workflow has been dropped.
 
 `run_agent` checks the caller and target policies, then runs the target with the workflow's shared memory, budget, hooks, persistence, and completion verifiers. Once the run is stopped, it returns the stop's error. A disallowed caller or target returns `BuilderInvalid`; reaching the active-call limit returns `Channel` immediately instead of queuing. `caller` is a host-supplied identity, not authentication. Apart from the active-call limit, there is no call-depth or cycle limit.
 
@@ -583,7 +589,8 @@ Methods on `MemoryStore`. Read and write methods check the named agent's access 
 | `fn entries(&self, agent_name: &str, tier_name: &str) -> Result<Vec<MemoryEntry>, WorkflowError>` | Clone of the write history (requires read access). Full-edit writes keep earlier history. |
 | `fn write(&self, agent_name: &str, tier_name: &str, content: &str) -> Result<(), WorkflowError>` | Apply the tier's write mode and add a history entry without a task ID. |
 | `fn write_with_context(&self, agent_name: &str, task_id: Option<Uuid>, tier_name: &str, content: &str) -> Result<(), WorkflowError>` | As `write`, recording the task ID in history. |
-| `fn list_accessible(&self, agent_name: &str) -> Vec<(String, bool, bool)>` | `(tier_name, can_read, can_write)` for **every** tier, including `(false, false)`. Order is unspecified. |
+| `fn list_accessible(&self, agent_name: &str) -> Vec<(String, bool, bool)>` | `(tier_name, can_read, can_write)` for each tier the agent can read or write, sorted by name; tiers it can't access are left out. |
+| `fn access_of(&self, agent_name: &str) -> (bool, bool)` | Whether the agent can read any tier, and whether it can write any: which memory tools it is offered. |
 | `fn snapshot(&self) -> Vec<MemoryTier>` | Clone of all tiers, policies, content, and history, without access checks. Order is unspecified. |
 
 An unknown tier returns `MemoryTierNotFound`; a denied operation returns `MemoryAccessDenied`; a write whose resulting content would exceed the tier's byte limit returns `MemoryLimitExceeded` and changes nothing. The newline added by an append counts toward the limit; history size is not limited. Direct store calls perform no freshness checks and send no notifications; the memory tools provide that integration.
@@ -605,7 +612,7 @@ async fn execute(
 | --- | --- | --- |
 | `READ_MEMORY_TOOL_NAME = "read_memory"` | Required `tier: string`; optional `full: boolean` (default `false`; the strings `"true"` and `"false"` are also accepted); optional `max_chars: string` holding a positive integer. | Versioned JSON, described below. Batch-safe. Requires read access. When freshness tracking is enabled, a complete read records a read of the tier. |
 | `WRITE_MEMORY_TOOL_NAME = "write_memory"` | Required `tier: string` and `content: string`. | `Successfully wrote to memory tier '{tier}'.` Applies the tier's policy and records the current task ID. With freshness tracking, a write based on a stale read is rejected when `block_on_conflict` is set and allowed otherwise; after a successful write, each stale reader gets a notice if active, and `OnFreshnessConflict` fires for every stale reader, active or not. Not batch-safe. |
-| `LIST_MEMORIES_TOOL_NAME = "list_memories"` | None. | `Available memory tiers:` followed by each tier with `read/write`, `read-only`, `write-only`, or `no access`; or `No memory tiers are configured in this workflow.` Batch-safe. |
+| `LIST_MEMORIES_TOOL_NAME = "list_memories"` | None. | `Available memory tiers:` followed by each tier the agent can access, sorted by name, with `read/write`, `read-only`, or `write-only`; tiers it can't access are left out. `No memory tiers are available to you.` when there are none. Batch-safe. |
 
 Every successful `read_memory` response is a JSON object with `tier: string`, `version: integer`, and `kind`; the other fields depend on `kind`:
 
@@ -852,7 +859,7 @@ Resources overlap when they are identical, or when a directory tree that was rea
 
 Source: [verification/mod.rs](src/verification/mod.rs); execution: [engine](src/workflow/engine.rs). All public types and the protocol constant are in the prelude.
 
-A `CompletionVerifierConfig` registered with `WorkflowBuilder::completion_verifier` gates an agent's `complete_task` call on a review by another registered agent. Configurations run in registration order. A rejection returns the verifier's feedback to the agent for repair; a correctness gate fails the task once its cap is exceeded. Targets are registration names. A configuration never reviews its own verifier agent, even when that agent is listed as a target; empty targets select every other agent, so with several verifiers, explicit targets keep verifiers from reviewing one another. Use distinct configuration names: repair counts and conversation reuse are keyed by target task ID and configuration name. A review in progress when the run is stopped decides nothing: the target agent is cancelled with the run, not failed.
+A `CompletionVerifierConfig` registered with `WorkflowBuilder::completion_verifier` gates an agent's `complete_task` call on a review by another registered agent. Configurations run in registration order. A rejection returns the verifier's feedback to the agent for repair; a correctness gate fails the task once its cap is exceeded. Targets are registration names. A configuration never reviews its own verifier agent, even when that agent is listed as a target. Targets are required: `build` rejects a configuration without one, so a verifier never attaches to agents it wasn't aimed at (or to other verifiers). Use distinct configuration names: repair counts and conversation reuse are keyed by target task ID and configuration name. A review in progress when the run is stopped decides nothing: the target agent is cancelled with the run, not failed.
 
 ### `CompletionVerifierConfig`, `VerificationKind`, and `RepairContextConfig`
 
@@ -862,7 +869,7 @@ A `CompletionVerifierConfig` registered with `WorkflowBuilder::completion_verifi
 | --- | --- | --- |
 | `name` | `String` | Configuration name; appears in records and feedback. |
 | `verifier_agent` | `String` | Registered agent that reviews the completion. |
-| `target_agents` | `HashSet<String>` | Target registration names; empty (every agent except the verifier). |
+| `target_agents` | `HashSet<String>` | Target registration names; empty from the constructors, and at least one is required by `build`. |
 | `kind` | `VerificationKind` | `Correctness`, or advisory `Efficiency`; set by the constructor. |
 | `instructions` | `String` | Reviewer instructions; defaults below. |
 | `max_minor_rejections` | `u32` | `3` for correctness, `2` for efficiency. |
@@ -918,7 +925,7 @@ A record identifies the reviewed task and agent, the configuration, the reviewin
 
 Source: [distillation/mod.rs](src/distillation/mod.rs); registration and order: [engine](src/workflow/engine.rs). Both public types implement `Clone` and Serde and are in the prelude.
 
-A `DistillationConfig` registered with `WorkflowBuilder::distiller` replaces large matching tool results with an LLM-written summary. Each distiller is installed only for the agents it targets (every agent when its target set is empty). Distillers run after the global and per-agent interceptors, in registration order; each sees the result of the stages before it, and all of a distiller's filters must match. Once the run is stopped, a distiller makes no request and returns the tool output unchanged. A distiller calls the workflow's LLM client with its model, reasoning, and output-token limit, in a fresh conversation with prompt caching turned off where the provider allows it (each request is a one-off ending with a tool output no later request repeats, so a cache write would never be read; ChatGPT OAuth caches implicitly and is asked nothing), giving the agent's initial task prompt, the tool name and parameters, and the current tool output as context. Results of tools that opt out of interception (`Tool::allow_result_interception`, for example `read_memory`) are never distilled.
+A `DistillationConfig` registered with `WorkflowBuilder::distiller` replaces large matching tool results with an LLM-written summary. Each distiller is installed only for the agents it targets, and distills only the tools it targets; `build` requires at least one of each. Any tool whose results may be intercepted can be targeted, `read_file` included (for a large file the agent wants specific details from). Distillers run after the global and per-agent interceptors, in registration order; each sees the result of the stages before it, and all of a distiller's filters must match. Once the run is stopped, a distiller makes no request and returns the tool output unchanged. A distiller calls the workflow's LLM client with its model, reasoning, and output-token limit, in a fresh conversation with prompt caching turned off where the provider allows it (each request is a one-off ending with a tool output no later request repeats, so a cache write would never be read; ChatGPT OAuth caches implicitly and is asked nothing), giving the agent's initial task prompt, the tool name and parameters, and the current tool output as context. Results of tools that opt out of interception (`Tool::allow_result_interception`, for example `read_memory`) are never distilled.
 
 ### `DistillationConfig`
 
@@ -926,8 +933,8 @@ A `DistillationConfig` registered with `WorkflowBuilder::distiller` replaces lar
 | --- | --- | --- |
 | `name` | `String` | Configuration name used in records, errors, and cost descriptions. |
 | `model` | `arko_ai::Model` | Distillation model supplied by the caller. |
-| `target_agents` | `HashSet<String>` | Registration names to match, as given to `WorkflowBuilder::agent` (not `AgentConfig::name`); empty matches all. |
-| `target_tools` | `HashSet<String>` | Tool names to match; empty matches all. |
+| `target_agents` | `HashSet<String>` | Registration names to match, as given to `WorkflowBuilder::agent` (not `AgentConfig::name`). Required: `build` rejects an empty set. |
+| `target_tools` | `HashSet<String>` | Tool names to match. Required: `build` rejects an empty set. |
 | `min_chars` | `usize` | Minimum input size in Unicode scalar values, inclusive; default `8_000`. |
 | `max_output_tokens` | `Option<usize>` | Generation limit, including reasoning tokens. Default `None`: `default_max_output_tokens()` (`16_000`, or the model's `Model::max_output_tokens` when that is known and smaller) is sent where the provider takes a limit, and no limit on ChatGPT OAuth, whose backend rejects one. A set value is sent on every request (arko_ai drops it on ChatGPT OAuth, with a warning logged once). Must be positive. A JSON configuration with a number loads as that set value. |
 | `instructions` | `String` | Content-preservation instructions; default below. |
@@ -944,7 +951,7 @@ A `DistillationConfig` registered with `WorkflowBuilder::distiller` replaces lar
 | `pub fn instructions(mut self, instructions: impl Into<String>) -> Self` | Replace the instructions. |
 | `pub fn reasoning(mut self, reasoning: arko_ai::ReasoningConfig) -> Self` | Set reasoning; `build` rejects a reasoning configuration for a different provider than the model's. |
 
-`DistillationConfig` has no `Default` implementation. `build` validates the token limit, the reasoning provider, and the target agents (each must be a registered agent); target tool names are not checked. A summary replaces the tool result only when the response has no refusal, stops with `StopReason::EndTurn` or `StopReason::StopSequence`, and contains non-empty text. Otherwise the raw result is kept:
+`DistillationConfig` has no `Default` implementation. `build` validates the token limit, the reasoning provider, and the targets (at least one agent and one tool; each agent must be registered); a target tool no agent is configured with is logged as a warning. A summary replaces the tool result only when the response has no refusal, stops with `StopReason::EndTurn` or `StopReason::StopSequence`, and contains non-empty text. Otherwise the raw result is kept:
 
 - A refusal (`GenerationResponse::refusal` from any source, even with accompanying text, or an `arko_ai::Error::Refusal` such as an OpenRouter moderation 403) or a truncated response (`StopReason::is_truncated`: `MaxTokens`, when the summary reached `max_output_tokens`, or `ContextWindowExceeded`) would likely repeat, so the distiller logs a warning and returns `InterceptedResult::Unchanged`; the failure policy does not retry it.
 - Model errors, empty text, and any other stop reason are interceptor errors, which the interception failure policy may retry before the raw result is kept. This includes `StopReason::Other("unknown")`, a response that reported no stop reason (OpenRouter `finish_reason: null`, Anthropic `stop_reason: null`), whose completeness cannot be determined.
@@ -1214,7 +1221,7 @@ Unknown fields are ignored on load, so checkpoints written by earlier versions w
 
 ## Structured voting
 
-Source: [voting/mod.rs](src/voting/mod.rs). Module: `arko_workflows::voting`; the prelude re-exports `VoteOption`, `TieBreak`, `BallotConfig`, `CastVote`, and `BallotResult`. To run a ballot: call `WorkflowBuilder::enable_voting`, begin a ballot, give its UUID and options to the participating agents, and finish it after they vote.
+Source: [voting/mod.rs](src/voting/mod.rs). Module: `arko_workflows::voting`; the prelude re-exports `VoteOption`, `TieBreak`, `BallotConfig`, `CastVote`, and `BallotResult`. To run a ballot: call `WorkflowBuilder::enable_voting` with the agents that vote (only they are offered `cast_vote`), begin a ballot, give its UUID and options to the participating agents, and finish it after they vote.
 
 | Type | Public fields or variants | Purpose and constraints |
 |---|---|---|

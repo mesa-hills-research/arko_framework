@@ -77,8 +77,10 @@ selects its model, reasoning, target agents and tools, minimum input size (in
 Unicode characters), maximum output tokens, and instructions. Target agents are
 the names the agents are registered under with `WorkflowBuilder::agent`, not
 their `AgentConfig::name`, and `build` rejects a target that is not a registered
-agent. An empty target set matches every agent or tool; name targets explicitly
-for predictable behavior.
+agent. A distiller needs at least one target agent and one target tool: `build`
+rejects one without. Any tool whose results may be intercepted can be a target,
+`read_file` included, for a large file an agent wants specific details from; the
+agent then works from the summary, so target it only where that suits.
 
 ```rust,ignore
 use arko_ai::{Model, OpenAIEffort, ReasoningConfig};
@@ -99,16 +101,19 @@ let workflow = Workflow::builder()
     .build()?;
 ```
 
-Defaults are 8,000 input characters and 16,000 output tokens (or the model's output
-limit, when smaller). Without an explicit reasoning setting, the provider's default
-applies. The reasoning configuration must match the model's provider, and the
-output limit must be positive.
+Defaults are 8,000 input characters and, without a set output limit, 16,000 output
+tokens (or the model's output limit, when smaller) where the provider takes a limit.
+Without an explicit reasoning setting, the provider's default applies. The reasoning
+configuration must match the model's provider, and the output limit must be
+positive. Prompt caching is turned off for distillation requests where the provider
+allows it, since each is a one-off; on ChatGPT OAuth, which caches implicitly and
+rejects an output limit, neither setting is sent unless the limit is set
+explicitly.
 
 Reasoning tokens count against the output limit with OpenAI API keys and on
 Anthropic, and some models reason by default (for example GPT-5.5 and later, and
 Claude Opus 5.5). Leave room for reasoning as well as the summary: a limit that is
-too small produces truncated summaries, which are billed but not used. ChatGPT
-OAuth requests send no output limit.
+too small produces truncated summaries, which are billed but not used.
 
 A distiller sees the task prompt, the tool name and parameters, and the raw
 result. Its output is model-written, not a guaranteed-accurate transformation, so
@@ -122,7 +127,8 @@ Only a finished summary replaces the tool result, and every call is billed:
   without a retry, because a retry would most likely end the same way.
 - Any other early stop (including an unreported stop reason) or an empty summary
   is an interceptor error. The workflow's interception failure policy may retry it
-  before falling back to the raw result.
+  before falling back to the raw result (resuming at the distiller when it follows
+  other interceptors).
 
 Once the workflow run is stopped, cancelled or aborted by a hook, distillers make
 no further requests and leave tool output unchanged.

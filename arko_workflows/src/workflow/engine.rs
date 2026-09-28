@@ -1383,15 +1383,20 @@ impl WorkflowEngine {
     ) -> ToolRegistry {
         let mut registry = ToolRegistry::new();
 
-        if !ctx.memory.is_empty() {
+        let (reads, writes) = ctx.memory.access_of(agent_name);
+        if reads {
             registry.register(Arc::new(ReadMemoryTool::new(
                 ctx.clone(),
                 agent_name.to_string(),
             )));
+        }
+        if writes {
             registry.register(Arc::new(WriteMemoryTool::new(
                 ctx.clone(),
                 agent_name.to_string(),
             )));
+        }
+        if reads || writes {
             registry.register(Arc::new(ListMemoriesTool::new(
                 ctx.clone(),
                 agent_name.to_string(),
@@ -1424,7 +1429,9 @@ impl WorkflowEngine {
                 depth,
             )));
         }
-        if let Some(ballots) = &ctx.ballots {
+        if let Some(ballots) = &ctx.ballots
+            && ctx.voters.contains(agent_name)
+        {
             registry.register(Arc::new(CastVoteTool::new(
                 ballots.clone(),
                 agent_name.to_string(),
@@ -1510,9 +1517,14 @@ impl WorkflowEngine {
     ) -> AgentConfig {
         let mut config = base_config.clone();
 
-        if !ctx.memory.is_empty() {
+        let (reads, writes) = ctx.memory.access_of(agent_name);
+        if reads {
             ensure_tool_name(&mut config, READ_MEMORY_TOOL_NAME);
+        }
+        if writes {
             ensure_tool_name(&mut config, WRITE_MEMORY_TOOL_NAME);
+        }
+        if reads || writes {
             ensure_tool_name(&mut config, LIST_MEMORIES_TOOL_NAME);
         }
         if !ctx.message_recipients(agent_name).is_empty() {
@@ -1527,7 +1539,7 @@ impl WorkflowEngine {
         {
             ensure_tool_name(&mut config, RUN_WORKFLOW_AGENT_TOOL_NAME);
         }
-        if ctx.ballots.is_some() {
+        if ctx.ballots.is_some() && ctx.voters.contains(agent_name) {
             ensure_tool_name(&mut config, CAST_VOTE_TOOL_NAME);
         }
 
@@ -2831,7 +2843,8 @@ mod tests {
                 .distiller(
                     DistillationConfig::new("bulk", model.clone())
                         .min_chars(10)
-                        .target_agent(target),
+                        .target_agent(target)
+                        .target_tool("search"),
                 )
                 .build()
         };
