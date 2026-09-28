@@ -530,9 +530,9 @@ The paused task is saved with checkpoints, so it can be resumed after a restart.
 pause by an opt-in agent monitor (the plan-usage threshold's `Pause` action or the
 cache monitor's `pause_below`) always returns to the caller. An agent running inside
 another agent's tool call (a completion verifier or a delegated run) can't pause:
-there a call that needs approval is rejected and the agent is told, and an
-error-recovery pause left to the caller fails that run. Give such agents
-configurations that auto-approve the tools they need, or use a `Handler`. See
+where it would, it is stopped with a reason (a verifier's review then fails). Under
+`RespectAgentConfig`, give such agents configurations that auto-approve the tools
+they use, `complete_task` included, or use a `Handler`. See
 [Approvals and error recovery](INDEX.md#approvals-and-error-recovery) for every cause
 and option.
 

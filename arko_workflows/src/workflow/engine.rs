@@ -348,13 +348,26 @@ fn warn_auto_approved(ctx: &SharedContext, agent_name: &str, call: &PendingToolC
     }
 }
 
-/// Why a nested run's call that would pause is rejected.
-const NESTED_APPROVAL_REJECTED: &str = "Not run: this call needs approval, and an agent running inside another agent's tool call (a completion verifier or a delegated run) can't be paused for it. Continue without it, or report what you need.";
+/// Stops a nested run (inside another agent's tool call: a completion
+/// verifier or a delegated run) that needs a decision the workflow leaves
+/// to the caller: its parent waits on the call, so it can't be paused.
+/// Ending it keeps the outcome bounded: a verifier's failed review, or a
+/// tool error for the delegating agent.
+fn nested_cannot_pause(ctx: &SharedContext, agent_name: &str, needs: &str) -> WorkflowError {
+    let reason = format!(
+        "Stopped: agent '{agent_name}' runs inside another agent's tool call and can't be paused, but it needs {needs}. Configure it to auto-approve the tools it uses, or decide such calls with ApprovalPolicy::Handler."
+    );
+    log::warn!("Workflow '{}': {reason}", ctx.workflow_name);
+    WorkflowError::AgentCancelled {
+        agent: agent_name.to_string(),
+        reason,
+    }
+}
 
 /// Decides tool calls awaiting approval under the workflow's approval
 /// policy: a decision per call, or `None` to pause the agent for its
 /// caller. A `nested` run (inside another agent's tool call) can't pause:
-/// its calls are rejected instead. Each call's approval reason is kept for
+/// it is stopped instead. Each approved call's approval reason is kept for
 /// the tool hooks until it has run.
 async fn decide_tool_calls(
     agent_name: &str,
@@ -365,26 +378,19 @@ async fn decide_tool_calls(
 ) -> Result<Option<Vec<(uuid::Uuid, ToolApprovalDecision)>>, WorkflowError> {
     let Some(decisions) = decide_tool_calls_by_policy(agent_name, agent_run_id, calls, ctx).await?
     else {
-        if !nested {
-            return Ok(None);
-        }
-        log::warn!(
-            "Workflow '{}': agent '{agent_name}' runs inside another agent's tool call, so its calls that need approval can't pause for the caller; rejected",
-            ctx.workflow_name
-        );
-        return Ok(Some(
-            calls
+        if nested {
+            let tools = calls
                 .iter()
-                .map(|call| {
-                    (
-                        call.tool_call_id,
-                        ToolApprovalDecision::Reject {
-                            reason: Some(NESTED_APPROVAL_REJECTED.to_string()),
-                        },
-                    )
-                })
-                .collect(),
-        ));
+                .map(|call| format!("'{}'", call.tool_name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(nested_cannot_pause(
+                ctx,
+                agent_name,
+                &format!("approval for {tools}"),
+            ));
+        }
+        return Ok(None);
     };
     record_approval_reasons(ctx, agent_run_id, calls, &decisions);
     Ok(Some(decisions))
@@ -574,17 +580,14 @@ async fn answer_recovery_pause(
                 .await;
             Ok(())
         }
-        RecoveryAction::ReturnToCaller if nested => {
-            let _ = cmd_tx
-                .send(UserCommand::RejectErrorRecovery {
-                    message: Some(format!(
-                        "The error-recovery pause ({}) is left to the caller, but an agent running inside another agent's tool call (a completion verifier or a delegated run) can't be paused: {error}",
-                        crate::policy::cause_name(&cause)
-                    )),
-                })
-                .await;
-            Ok(())
-        }
+        RecoveryAction::ReturnToCaller if nested => Err(nested_cannot_pause(
+            ctx,
+            agent_name,
+            &format!(
+                "an error-recovery decision ({}): {error}",
+                crate::policy::cause_name(&cause)
+            ),
+        )),
         RecoveryAction::ReturnToCaller => {
             pause_for_caller(
                 agent_name,
@@ -822,6 +825,12 @@ async fn drive_events(
                         .send(UserCommand::SubmitUserResponse { response })
                         .await
                         .map_err(|error| WorkflowError::Channel(error.to_string()))?;
+                } else if nested {
+                    return Err(nested_cannot_pause(
+                        ctx,
+                        agent_name,
+                        "an answer to its question (no user input handler is set)",
+                    ));
                 } else {
                     let _ = cmd_tx.send(UserCommand::SuspendTask).await;
                     return Err(WorkflowError::UserInputRequired {
@@ -2246,7 +2255,6 @@ impl WorkflowEngine {
                     TaskState::AwaitingBatchToolApproval { batch_id, .. } => Some(*batch_id),
                     _ => None,
                 };
-                record_approval_reasons(ctx, previous.agent_run_id, calls, &decisions);
                 Decision::Tools(batch_id, decisions)
             }
             (AgentPause::ErrorRecovery { .. }, AgentResume::ContinueAfterError { note }) => {
@@ -2312,6 +2320,9 @@ impl WorkflowEngine {
         }
         match decision {
             Decision::Tools(batch_id, decisions) => {
+                if let AgentPause::ToolApproval { calls } = &pause {
+                    record_approval_reasons(ctx, previous.agent_run_id, calls, &decisions);
+                }
                 send_tool_decisions(&run.cmd_tx, batch_id, decisions).await
             }
             Decision::Command(command) => {

@@ -926,58 +926,92 @@ async fn fail_fast_stops_the_other_agents_at_the_first_failure() {
 }
 
 /// An agent running inside another agent's tool call (here a completion
-/// verifier) can't be paused for the caller: under `RespectAgentConfig` its
-/// call that needs approval is rejected, and it goes on; no paused result is
-/// left behind.
+/// verifier) can't be paused for the caller: under `RespectAgentConfig` a
+/// call it needs approved (even its own `complete_task`, which a default
+/// configuration doesn't auto-approve) stops it with a reason, so the review
+/// fails, a bounded number of times, and the call returns `VerifierFailed`.
+/// No paused result is left behind, and the verifier isn't asked again and
+/// again. The same holds for its question without a user input handler.
 #[tokio::test]
-async fn a_nested_run_rejects_a_call_it_cant_pause_for() {
-    let workspace = Workspace::new();
-    let server = ResponsesServer::start(|_, body| {
-        Some(if body.contains("You are a completion verifier") {
-            if body.contains("can't be paused for it") {
-                complete_turn("v2", "ACCEPTED")
+async fn a_nested_run_that_needs_a_decision_is_stopped_not_paused() {
+    for question in [false, true] {
+        let workspace = Workspace::new();
+        let server = ResponsesServer::start(move |index, body| {
+            Some(if body.contains("You are a completion verifier") {
+                if question {
+                    tool_call_turn(
+                        &format!("q{index}"),
+                        "ask_user",
+                        json!({"questions": "Which file?"}),
+                    )
+                } else {
+                    complete_turn(&format!("v{index}"), "ACCEPTED")
+                }
             } else {
-                tool_call_turn("v1", "probe", json!({}))
-            }
-        } else {
-            complete_turn("c", "done")
+                complete_turn(&format!("c{index}"), "done")
+            })
         })
-    })
-    .await;
-    let probe = ProbeTool::new("probe", false);
-    let hooks = HookCounts::default();
-    let workflow = hooks
-        .register(
-            Workflow::builder()
-                .name("nested-approval-test")
-                .workspace(&workspace.0)
-                .llm_client(Arc::new(server.client()))
-                .agent("coder", approving_agent(&[]))
-                .agent("reviewer", approving_agent(&[]))
-                .agent_tool("reviewer", probe.clone())
-                .completion_verifier(
-                    crate::verification::CompletionVerifierConfig::correctness("check", "reviewer")
-                        .target("coder"),
-                )
-                .approval_policy(ApprovalPolicy::RespectAgentConfig)
-                .recovery_waits(instant()),
-        )
-        .build()
-        .unwrap();
-    // The coder's own complete_task is auto-approved (approving_agent).
-    let result = within(workflow.run_agent("coder", "Write it."))
-        .await
-        .unwrap();
-    assert_eq!(result.status, AgentRunStatus::Completed);
-    assert_eq!(probe.calls(), 0);
-    assert_eq!(hooks.get(HookPoint::OnAgentPaused), 0);
-    assert!(
-        workflow
-            .result()
-            .agent_results
+        .await;
+        let mut reviewer = agent_config("Friendly Reviewer");
+        // A default configuration: every call needs approval, complete_task
+        // included (ask_user is exempt).
+        reviewer.tool_config.default_auto_approve_tool_use = false;
+        reviewer
+            .tool_config
+            .available_tool_names
+            .push("ask_user".into());
+        let hooks = HookCounts::default();
+        let workflow = hooks
+            .register(
+                Workflow::builder()
+                    .name("nested-approval-test")
+                    .workspace(&workspace.0)
+                    .llm_client(Arc::new(server.client()))
+                    .agent("coder", approving_agent(&[]))
+                    .agent("reviewer", reviewer)
+                    .completion_verifier(
+                        crate::verification::CompletionVerifierConfig::correctness(
+                            "check", "reviewer",
+                        )
+                        .target("coder")
+                        .review_retries(1),
+                    )
+                    .approval_policy(ApprovalPolicy::RespectAgentConfig)
+                    .recovery_waits(instant()),
+            )
+            .build()
+            .unwrap();
+        let error = within(workflow.run_agent("coder", "Write it."))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, WorkflowError::VerifierFailed { reason, .. } if reason.contains("can't be paused")),
+            "{error:?}"
+        );
+        // Two reviews (one retry), one verifier request each.
+        let verifier_requests = server
+            .bodies()
             .iter()
-            .all(|result| result.status != AgentRunStatus::Paused)
-    );
+            .filter(|body| body.contains("You are a completion verifier"))
+            .count();
+        assert_eq!(verifier_requests, 2, "question: {question}");
+        assert_eq!(hooks.get(HookPoint::OnAgentPaused), 0);
+        assert_eq!(hooks.get(HookPoint::OnUserInputRequired), 0);
+        let results = workflow.result().agent_results;
+        assert!(results.iter().all(|result| !result.status.is_paused()));
+        let reviews = results
+            .iter()
+            .filter(|result| result.agent_name == "reviewer")
+            .collect::<Vec<_>>();
+        assert_eq!(reviews.len(), 2);
+        assert!(reviews.iter().all(|review| {
+            review.status == AgentRunStatus::Cancelled
+                && review
+                    .error
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("can't be paused"))
+        }));
+    }
 }
 
 /// A run waiting for input in a checkpoint saved before messages recorded

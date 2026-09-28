@@ -107,7 +107,11 @@ impl WorkflowState {
                     ))
                 })?;
             let now = AgentRunStatus::of_state(&task.current_state);
-            if now != record.status {
+            // A cancellation older versions recorded as a failure loads as
+            // cancelled: the same outcome.
+            let same = now == record.status
+                || (record.status == AgentRunStatus::Failed && now == AgentRunStatus::Cancelled);
+            if !same {
                 log::warn!(
                     "The task file {} of agent '{}' holds a later state ({now:?}) than the checkpoint recorded ({:?}): a task file holds a task's latest state, so an older checkpoint reads the task as it is now",
                     path.display(),
