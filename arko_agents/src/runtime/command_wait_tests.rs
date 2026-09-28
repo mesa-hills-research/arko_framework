@@ -264,3 +264,68 @@ async fn a_saved_task_with_a_zero_timeout_loads_but_does_not_start() {
     );
     std::fs::remove_dir_all(workspace).unwrap();
 }
+
+/// While the run's `HostDecisions` is set (as a workflow sets it for the
+/// runs it drives), no wait is timed; it isn't saved with the task, so the
+/// same task run without it is timed as configured.
+#[tokio::test(start_paused = true)]
+async fn a_run_whose_host_decides_its_waits_is_not_timed() {
+    let (mut agent, _events, commands, workspace) = waiting_for_recovery(false);
+    agent.host_decisions = super::super::HostDecisions::new(true);
+    let saved = serde_json::to_value(&agent.task).unwrap();
+    let start = TokioInstant::now();
+    let _script = tokio::spawn(async move {
+        sleep_until(start, 5 * TIMEOUT).await;
+        let _ = commands
+            .send(UserCommand::ApproveErrorRecovery { message: None })
+            .await;
+        std::future::pending::<()>().await;
+    });
+    let task = agent.run().await.unwrap();
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert_eq!(start.elapsed(), Duration::from_secs(5 * TIMEOUT));
+
+    let (mut agent, _events, _commands, workspace_again) = waiting_for_recovery(false);
+    agent.task = serde_json::from_value(saved).unwrap();
+    let start = TokioInstant::now();
+    let task = agent.run().await.unwrap();
+    assert!(
+        matches!(task.current_state, TaskState::Interrupted { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert_eq!(start.elapsed(), Duration::from_secs(TIMEOUT));
+    std::fs::remove_dir_all(workspace).unwrap();
+    std::fs::remove_dir_all(workspace_again).unwrap();
+}
+
+/// Set during a wait (as `AgentHandle::wait` does for a spawned agent), the
+/// wait is no longer timed: its deadline passes without interrupting it.
+#[tokio::test(start_paused = true)]
+async fn host_decisions_set_during_a_wait_stop_its_timeout() {
+    let (mut agent, _events, commands, workspace) = waiting_for_recovery(false);
+    let decisions = super::super::HostDecisions::new(false);
+    agent.host_decisions = decisions.clone();
+    let start = TokioInstant::now();
+    let _script = tokio::spawn(async move {
+        sleep_until(start, TIMEOUT / 2).await;
+        decisions.set(true);
+        sleep_until(start, 3 * TIMEOUT).await;
+        let _ = commands
+            .send(UserCommand::ApproveErrorRecovery { message: None })
+            .await;
+        std::future::pending::<()>().await;
+    });
+    let task = agent.run().await.unwrap();
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert_eq!(start.elapsed(), Duration::from_secs(3 * TIMEOUT));
+    std::fs::remove_dir_all(workspace).unwrap();
+}

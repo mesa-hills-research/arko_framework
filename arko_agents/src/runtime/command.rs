@@ -31,10 +31,10 @@ pub enum UserCommand {
     /// answer, or error recovery), for example with an approval handler or
     /// by waiting out a usage limit before it continues:
     /// [`user_command_timeout_seconds`](crate::agent_config::AgentConfig::user_command_timeout_seconds)
-    /// doesn't end this wait. The next wait is timed again. A workflow
-    /// sends it at the start of every wait of the agents it drives, since
-    /// it decides each of them (or pauses the agent for its caller). Ignored
-    /// outside a wait.
+    /// doesn't end this wait. The next wait is timed again. Ignored outside
+    /// a wait. For a host that decides every wait of a run (as a workflow
+    /// does for the runs it drives), see
+    /// [`HostDecisions`](crate::runtime::HostDecisions).
     HostDeciding,
 
     /// Approve the use of a single tool that was awaiting approval.

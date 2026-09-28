@@ -27,7 +27,7 @@ pub use parsing::{
     ToolParsingConfig, assemble_tool_calls, strip_output_based_only_blocks,
 };
 pub use runtime::{
-    AgentRuntime, TurnContextSource,
+    AgentRuntime, HostDecisions, TurnContextSource,
     command::{ToolApprovalDecision, UserCommand},
     event::AgentEvent,
 };

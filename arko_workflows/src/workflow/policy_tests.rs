@@ -406,26 +406,35 @@ async fn automatic_recovery_sends_the_request_again_after_retries_run_out() {
 }
 
 /// The agent's opt-in `user_command_timeout_seconds` doesn't cut short a
-/// decision the workflow owns: automatic recovery's wait before it
-/// continues may be longer. (Real time: a 2 s timeout, a 3 s wait.)
+/// decision the workflow owns: the workflow decides every wait of the runs
+/// it drives, so their waits aren't timed at all (a run-level setting,
+/// `HostDecisions`, not saved with the task). Here automatic recovery's
+/// wait before it continues is longer than the timeout. (Real time; the
+/// outcome doesn't depend on timing: no wait of the run is timed.)
 #[tokio::test]
 async fn the_agents_command_timeout_does_not_cut_a_recovery_wait_short() {
     let workspace = Workspace::new();
     let server = scripted(failing_then_done(503)).await;
     let mut config = failing_once_agent();
-    config.user_command_timeout_seconds = Some(2);
+    config.user_command_timeout_seconds = Some(1);
     let workflow = builder(&server, &workspace, config)
         .recovery_waits(RecoveryWaits {
-            initial: Duration::from_secs(3),
-            max: Duration::from_secs(3),
+            initial: Duration::from_secs(2),
+            max: Duration::from_secs(2),
             reset_margin: Duration::ZERO,
             max_jitter: Duration::ZERO,
         })
         .build()
         .unwrap();
     let result = within(workflow.run_agent("coder", "Write it.")).await;
-    assert_eq!(result.unwrap().summary, "done");
+    let result = result.unwrap();
+    assert_eq!(result.summary, "done");
     assert_eq!(server.bodies().len(), 2);
+    // The saved task keeps its timeout.
+    assert_eq!(
+        result.task.agent_config.user_command_timeout_seconds,
+        Some(1)
+    );
 }
 
 /// Approves every call after `0`.
@@ -439,25 +448,91 @@ impl ToolApprovalHandler for SlowApproval {
     }
 }
 
-/// Nor does it cut short an approval handler deciding. (Real time: a 2 s
-/// timeout, a 3 s decision.)
+/// Nor does it cut short an approval handler deciding. (Real time; the
+/// outcome doesn't depend on timing.)
 #[tokio::test]
 async fn the_agents_command_timeout_does_not_cut_an_approval_handler_short() {
     let workspace = Workspace::new();
     let server = scripted(probe_then_done).await;
     let probe = ProbeTool::new("probe", false);
     let mut config = approving_agent(&[]);
-    config.user_command_timeout_seconds = Some(2);
+    config.user_command_timeout_seconds = Some(1);
     let workflow = builder(&server, &workspace, config)
         .global_tool(probe.clone())
         .approval_policy(ApprovalPolicy::Handler(Arc::new(SlowApproval(
-            Duration::from_secs(3),
+            Duration::from_secs(2),
         ))))
         .build()
         .unwrap();
     let result = within(workflow.run_agent("coder", "Probe.")).await;
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(probe.calls(), 1);
+}
+
+/// Nor does it end a wait while the workflow is paused, before the driver
+/// has even seen the wait: the workflow still owns the decision, and
+/// decides once resumed. (The agent waits for approval from when its first
+/// response arrives; the workflow resumes 2 s after that, past the agent's
+/// 1 s timeout. The outcome doesn't depend on timing.)
+#[tokio::test]
+async fn the_agents_command_timeout_does_not_end_a_wait_while_the_workflow_is_paused() {
+    for spawned in [false, true] {
+        let workspace = Workspace::new();
+        let server = scripted(probe_then_done).await;
+        let probe = ProbeTool::new("probe", false);
+        let mut config = approving_agent(&[]);
+        config.user_command_timeout_seconds = Some(1);
+        let workflow = builder(&server, &workspace, config)
+            .global_tool(probe.clone())
+            .build()
+            .unwrap();
+        workflow.pause().unwrap();
+        let control = async {
+            while server.bodies().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            workflow.resume().unwrap();
+        };
+        let run = async {
+            if spawned {
+                // Driven by `wait` once the agent may already be waiting.
+                let handle = workflow.spawn_agent("coder", "Probe.").await.unwrap();
+                handle.wait().await
+            } else {
+                workflow.run_agent("coder", "Probe.").await
+            }
+        };
+        let (result, ()) = within(async { tokio::join!(run, control) }).await;
+        assert!(result.is_ok(), "spawned: {spawned}: {result:?}");
+        assert_eq!(probe.calls(), 1);
+    }
+}
+
+/// An agent whose events the caller handles itself (`into_parts`) keeps its
+/// command timeout: the caller decides its waits, not the workflow.
+#[tokio::test]
+async fn an_agent_driven_through_into_parts_keeps_its_command_timeout() {
+    let workspace = Workspace::new();
+    let server = scripted(probe_then_done).await;
+    let mut config = approving_agent(&[]);
+    config.user_command_timeout_seconds = Some(1);
+    let workflow = builder(&server, &workspace, config)
+        .global_tool(ProbeTool::new("probe", false))
+        .build()
+        .unwrap();
+    let handle = workflow.spawn_agent("coder", "Probe.").await.unwrap();
+    let (mut events, _commands, join, _name) = handle.into_parts();
+    let task = within(async {
+        while events.recv().await.is_some() {}
+        join.await.unwrap().unwrap()
+    })
+    .await;
+    assert!(
+        matches!(&task.current_state, arko_agents::TaskState::Interrupted { reason } if reason.starts_with("Timeout (1s)")),
+        "{:?}",
+        task.current_state
+    );
 }
 
 /// `Automatic` fails a run clearly on an error retrying can't fix, without

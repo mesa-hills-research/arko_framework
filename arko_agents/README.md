@@ -157,7 +157,7 @@ runtime validates them again when a task starts. The quick start's agent as JSON
 | `environment_details_config` | Nothing included | Working directory, file tree, date and time, and operating system, each placed in the system prompt, the task prompt, or every user message. |
 | `error_recovery_config` | `InformAgentAndContinue` | What a failed tool execution does. |
 | `llm_error_policy`, `llm_retry_config` | 10 attempts over up to 5 minutes, then pause | What a failed model request does; see [Model-call recovery](#model-call-recovery). |
-| `user_command_timeout_seconds` | None (waits indefinitely) | Opt-in: how long an awaiting task waits for a decision before it is returned `Interrupted`, counted from when the wait starts: `InjectContext` and commands the wait ignores don't restart it, and a wait the host is deciding (`HostDeciding`) isn't timed. At least 1. |
+| `user_command_timeout_seconds` | None (waits indefinitely) | Opt-in: how long an awaiting task waits for a decision before it is returned `Interrupted`, counted from when the wait starts: `InjectContext` and commands the wait ignores don't restart it, and a wait the host is deciding (`HostDeciding`, or every wait of a run with `HostDecisions` set, as in a workflow) isn't timed. At least 1. |
 | `user_reminder` | None | Text appended as `# Reminder` to the task prompt, every user message, or every Nth message (N at least 1). |
 | `skills_config` | None | Skill sources; see [Skills](#skills). |
 | `monitoring` | Nothing monitored | Plan-usage and prompt-cache monitors; see [Monitoring](#monitoring). |
@@ -585,8 +585,11 @@ Besides answers to the waiting states, a running task accepts:
   before each model request, and its answer joins that message.
 - `HostDeciding`: while the task awaits a command, the host is deciding that wait itself
   (an approval handler, or a wait before it continues after a usage limit), so
-  `user_command_timeout_seconds` doesn't end it; the next wait is timed again. A workflow
-  sends it at the start of every wait of the agents it drives. Ignored outside a wait.
+  `user_command_timeout_seconds` doesn't end it; the next wait is timed again. Ignored
+  outside a wait. A host that decides every wait of a run gives the runtime a
+  `HostDecisions` set to `true` instead (`AgentRuntime::with_host_decisions`): no wait of
+  the run is timed. It is a run-level setting, not saved with the task, and a workflow sets
+  it for the runs it drives.
 - `CancelTask`: the task ends as `Cancelled { reason }` with `CANCELLED_BY_USER` ("Task
   cancelled by user."). Tool calls running when it arrives are stopped, and calls it
   waited on or that had not run yet get a result saying they were not run. A task saved

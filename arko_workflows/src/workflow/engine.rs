@@ -7,8 +7,8 @@ use serde_json::Value;
 use arko_agents::skill::{SkillManager, SkillPromptContext};
 use arko_agents::tool::builtins::COMPLETE_TASK_TOOL_NAME;
 use arko_agents::{
-    AgentConfig, AgentRuntime, InterceptedResult, InterceptionFailurePolicy, InterceptorConfig,
-    PendingToolCallInfo, Task, ToolCallContext, ToolError, ToolExecutionContext,
+    AgentConfig, AgentRuntime, HostDecisions, InterceptedResult, InterceptionFailurePolicy,
+    InterceptorConfig, PendingToolCallInfo, Task, ToolCallContext, ToolError, ToolExecutionContext,
     ToolExecutionDecision, ToolExecutionMiddleware, ToolExecutionOutcome, ToolRegistry,
     ToolResultInterceptor,
     runtime::{
@@ -740,15 +740,6 @@ async fn drive_events(
                 None => break,
             },
         };
-        // The workflow decides every wait of the agent, under its policies
-        // and handlers (which may take long: a person deciding, a usage
-        // limit waited out, the workflow paused) or by pausing the agent
-        // for its caller, so the agent's own command timeout doesn't apply.
-        if let AgentEvent::TaskStateChanged(state) = &event
-            && state.is_awaiting_approval()
-        {
-            let _ = cmd_tx.send(UserCommand::HostDeciding).await;
-        }
         wait_while_paused(ctx).await?;
         publish_event(agent_name, agent_run_id, &event, ctx, persistence).await;
         ctx.registry.observe(agent_run_id, &event);
@@ -965,6 +956,10 @@ pub(crate) struct StartOptions {
     pub depth: u32,
     /// Already admitted (`PreAgentSpawn` fired, budget and stop checked).
     pub admitted: bool,
+    /// The workflow drives the run from its start, so it decides every wait
+    /// (see [`StartedRun::host_decisions`]). Off for `spawn_agent`, whose
+    /// caller chooses: `AgentHandle::wait` turns it on.
+    pub driven: bool,
 }
 
 impl Default for StartOptions {
@@ -974,6 +969,7 @@ impl Default for StartOptions {
             roster: true,
             depth: 0,
             admitted: false,
+            driven: true,
         }
     }
 }
@@ -1041,6 +1037,13 @@ pub(crate) struct StartedRun {
     /// Stops the run when set, with the reason (fail-fast in
     /// `run_agents_parallel`).
     pub batch_stop: Option<tokio::sync::watch::Receiver<Option<String>>>,
+    /// Set while the workflow drives the run: it decides every wait the
+    /// agent reaches (under its policies and handlers, however long they
+    /// take, also while the workflow is paused) or suspends the agent for
+    /// its caller, so the agent's own command timeout doesn't apply. Not
+    /// saved with the task: resumed outside a workflow, it is timed as
+    /// configured.
+    pub host_decisions: HostDecisions,
 }
 
 /// What an agent runtime's task returned.
@@ -1189,7 +1192,9 @@ async fn drive_run_to_result(
         pending_message_ids,
         depth,
         batch_stop,
+        host_decisions,
     } = run;
+    host_decisions.set(true);
     // Until the end is recorded below: if this future is dropped (and with
     // it, the agent's task aborted), the run is recorded as abandoned.
     let mut abandoned = Abandoned {
@@ -1888,6 +1893,7 @@ impl WorkflowEngine {
             pending_message_ids,
             ctx,
             options.depth,
+            options.driven,
         ))
     }
 
@@ -1903,6 +1909,7 @@ impl WorkflowEngine {
         pending_message_ids: Vec<uuid::Uuid>,
         ctx: &Arc<SharedContext>,
         depth: u32,
+        driven: bool,
     ) -> StartedRun {
         let load_skill_policy = task
             .agent_config
@@ -1913,11 +1920,13 @@ impl WorkflowEngine {
         let execution_middleware = self.build_execution_middleware(agent_name, ctx, depth);
         let agent_run_id = task.id;
         let started_task = task.clone();
-        let runtime =
-            AgentRuntime::new(self.llm_client.clone()).with_turn_context(Arc::new(StartNotices {
+        let host_decisions = HostDecisions::new(driven);
+        let runtime = AgentRuntime::new(self.llm_client.clone())
+            .with_turn_context(Arc::new(StartNotices {
                 context: ctx.clone(),
                 agent_name: agent_name.to_string(),
-            }));
+            }))
+            .with_host_decisions(host_decisions.clone());
         let (event_rx, cmd_tx, join_handle) = runtime.run_task(
             task,
             Arc::new(registry),
@@ -1944,6 +1953,7 @@ impl WorkflowEngine {
             pending_message_ids,
             depth,
             batch_stop: None,
+            host_decisions,
         }
     }
 
@@ -2207,7 +2217,13 @@ impl WorkflowEngine {
         prompt: &str,
         ctx: &Arc<SharedContext>,
     ) -> Result<AgentHandle, WorkflowError> {
-        let run = self.start_agent(agent_name, prompt, ctx, StartOptions::default())?;
+        // The caller chooses who drives it: `AgentHandle::wait` hands it to
+        // the workflow.
+        let options = StartOptions {
+            driven: false,
+            ..StartOptions::default()
+        };
+        let run = self.start_agent(agent_name, prompt, ctx, options)?;
         Ok(AgentHandle::new(run, ctx.clone(), self.persistence.clone()))
     }
 
@@ -2324,6 +2340,7 @@ impl WorkflowEngine {
             pending_message_ids,
             ctx,
             depth,
+            true,
         );
         // Now registered, it is notified of writes; one made while it
         // started is told now.
@@ -2428,6 +2445,7 @@ impl WorkflowEngine {
             Vec::new(),
             ctx,
             0,
+            true,
         );
         // Messages queued while it was paused, and what changed since it
         // read it, go ahead of the decision, so they are added at the turn

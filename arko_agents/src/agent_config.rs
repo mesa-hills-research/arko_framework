@@ -1012,8 +1012,10 @@ pub struct AgentConfig {
     /// once per wait: `InjectContext` and commands the wait ignores don't
     /// move it, and a decision ends the wait (the next wait gets its own).
     /// A wait the host says it is deciding
-    /// ([`UserCommand::HostDeciding`](crate::runtime::command::UserCommand::HostDeciding),
-    /// which a workflow sends for every wait of its agents) isn't timed.
+    /// ([`UserCommand::HostDeciding`](crate::runtime::command::UserCommand::HostDeciding))
+    /// isn't timed, nor is any wait of a run whose host decides all of them
+    /// ([`HostDecisions`](crate::runtime::HostDecisions), which a workflow
+    /// sets for the runs it drives; it isn't saved with the task).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_command_timeout_seconds: Option<u64>,
     /// Optional user-provided reminder to reinforce instructions the agent may stray from.

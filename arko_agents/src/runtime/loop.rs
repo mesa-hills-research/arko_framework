@@ -196,8 +196,9 @@ enum CommandWait {
     NotStarted,
     /// Waiting until this deadline (`None`: no timeout).
     Until(Option<tokio::time::Instant>),
-    /// The host is deciding this wait itself ([`UserCommand::HostDeciding`]):
-    /// no deadline.
+    /// The host is deciding this wait itself ([`UserCommand::HostDeciding`],
+    /// or the run's [`HostDecisions`](super::HostDecisions) when it
+    /// started): no deadline.
     HostDeciding,
 }
 
@@ -356,6 +357,8 @@ pub struct AgentLoop {
     last_reported_state: std::sync::Mutex<Option<TaskState>>,
     /// The wait for a command the task is in, with its deadline.
     command_wait: CommandWait,
+    /// While set, the host decides every wait of the run and none is timed.
+    pub(super) host_decisions: super::HostDecisions,
     #[cfg(test)]
     scripted_responses: std::sync::Mutex<VecDeque<ScriptedStreamResult>>,
     /// The model of every request made, in order.
@@ -444,6 +447,7 @@ impl AgentLoop {
             details_sent_with: None,
             last_reported_state: std::sync::Mutex::new(None),
             command_wait: CommandWait::NotStarted,
+            host_decisions: super::HostDecisions::default(),
             #[cfg(test)]
             scripted_responses: std::sync::Mutex::new(VecDeque::new()),
             #[cfg(test)]
@@ -1808,6 +1812,12 @@ impl AgentLoop {
                 let deadline = match self.command_wait {
                     CommandWait::Until(deadline) => deadline,
                     CommandWait::HostDeciding => None,
+                    // A wait that starts while the host decides the run's
+                    // waits is not timed, even if that changes.
+                    CommandWait::NotStarted if self.host_decisions.get() => {
+                        self.command_wait = CommandWait::HostDeciding;
+                        None
+                    }
                     CommandWait::NotStarted => {
                         let deadline = self
                             .task
@@ -1821,6 +1831,8 @@ impl AgentLoop {
                         deadline
                     }
                 };
+                // Not timed while the host decides the run's waits.
+                let deadline = deadline.filter(|_| !self.host_decisions.get());
                 let command_future = self.command_receiver.recv();
                 let command_result = match deadline {
                     Some(deadline) => tokio::time::timeout_at(deadline, command_future).await,
@@ -2577,6 +2589,9 @@ impl AgentLoop {
                         .await?;
                         break 'main_loop;
                     }
+                    // The host took over the run's decisions during the
+                    // wait: it isn't timed any more.
+                    Err(_) if self.host_decisions.get() => continue 'main_loop,
                     Err(_timeout_err) => {
                         let seconds = self
                             .task
