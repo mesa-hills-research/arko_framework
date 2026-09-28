@@ -229,6 +229,10 @@ pub struct ResourceTracker {
     workspace: PathBuf,
     config: ContextFreshnessConfig,
     state: RwLock<FreshnessSnapshot>,
+    /// Actors whose task has stopped but can be continued: their reads are
+    /// kept, but no write notifies them. Not saved: after a resume no task
+    /// runs, so every actor of the snapshot starts here.
+    finished: RwLock<HashSet<ActorId>>,
 }
 
 impl ResourceTracker {
@@ -237,18 +241,24 @@ impl ResourceTracker {
             workspace,
             config,
             state: RwLock::new(FreshnessSnapshot::default()),
+            finished: RwLock::new(HashSet::new()),
         }
     }
 
+    /// A tracker restored from a checkpoint. No task runs after a resume, so
+    /// every actor the snapshot recorded counts as finished (see
+    /// [`finish_actor`](Self::finish_actor)) until its task is continued.
     pub fn from_snapshot(
         workspace: PathBuf,
         config: ContextFreshnessConfig,
         snapshot: FreshnessSnapshot,
     ) -> Self {
+        let finished = snapshot.reads.keys().cloned().collect();
         Self {
             workspace,
             config,
             state: RwLock::new(snapshot),
+            finished: RwLock::new(finished),
         }
     }
 
@@ -355,9 +365,12 @@ impl ResourceTracker {
             .collect()
     }
 
-    /// Record a successful mutation and return readers whose observed context
-    /// has just become stale.
+    /// Record a successful mutation and return the readers whose observed
+    /// context has just become stale and who are to be told: not actors
+    /// whose task has finished (their reads are kept for a continuation,
+    /// which is told what changed; see [`resume_actor`](Self::resume_actor)).
     pub fn record_write(&self, actor: &ActorId, resource: ResourceId) -> Vec<ActorId> {
+        let finished = self.finished.read();
         let mut state = self.state.write();
         state
             .writes
@@ -396,6 +409,7 @@ impl ResourceTracker {
             .iter()
             .filter(|(reader, reads)| {
                 *reader != actor
+                    && !finished.contains(*reader)
                     && reads.keys().any(|read| {
                         affected
                             .iter()
@@ -408,6 +422,80 @@ impl ResourceTracker {
 
     pub fn clear_actor(&self, actor: &ActorId) {
         self.state.write().reads.remove(actor);
+        self.finished.write().remove(actor);
+    }
+
+    /// Records that `actor`'s task stopped. A task that can be `continued`
+    /// (completed, waiting for input, or paused) keeps its reads, so a
+    /// continuation still sees what changed, but no longer gets freshness
+    /// notices or fires conflict hooks; the reads of any other task are
+    /// forgotten.
+    pub fn finish_actor(&self, actor: &ActorId, continued: bool) {
+        if continued {
+            self.finished.write().insert(actor.clone());
+        } else {
+            self.clear_actor(actor);
+        }
+    }
+
+    /// Records that `actor`'s finished task runs again, and returns the
+    /// resources it read that another actor changed since, sorted.
+    pub fn resume_actor(&self, actor: &ActorId) -> Vec<ResourceId> {
+        self.finished.write().remove(actor);
+        let state = self.state.read();
+        let Some(reads) = state.reads.get(actor) else {
+            return Vec::new();
+        };
+        let mut changed = reads
+            .iter()
+            .filter(|(resource, read)| {
+                state.resources.get(*resource).is_some_and(|current| {
+                    current.version > read.version
+                        && current
+                            .last_writer
+                            .as_ref()
+                            .is_some_and(|writer| writer != actor)
+                })
+            })
+            .map(|(resource, _)| resource.clone())
+            .collect::<Vec<_>>();
+        changed.sort_by_key(resource_sort_key);
+        changed
+    }
+
+    /// The message a continued task gets about `changed` resources it had
+    /// read, or `None` when there are none.
+    pub(crate) fn changed_notice(&self, changed: &[ResourceId]) -> Option<String> {
+        if changed.is_empty() {
+            return None;
+        }
+        let lines = changed
+            .iter()
+            .map(|resource| format!("- {}", self.describe(resource)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some(format!(
+            "Changed since you last read them (another agent wrote them after your read):\n{lines}\nRe-read any of these before you edit it or rely on its content."
+        ))
+    }
+
+    /// A resource as an agent is told about it: a path relative to the
+    /// workspace when inside it.
+    fn describe(&self, resource: &ResourceId) -> String {
+        let path = |path: &std::path::Path| {
+            path.strip_prefix(&self.workspace)
+                .unwrap_or(path)
+                .display()
+                .to_string()
+        };
+        match resource {
+            ResourceId::File(file) => format!("file `{}`", path(file)),
+            ResourceId::DirectoryTree(directory) => {
+                format!("the listing of directory `{}`", path(directory))
+            }
+            ResourceId::MemoryTier(tier) => format!("memory tier `{tier}`"),
+            ResourceId::Custom { namespace, key } => format!("`{namespace}:{key}`"),
+        }
     }
 
     /// The resource key for a tool's path parameter: the path the built-in
@@ -419,6 +507,15 @@ impl ResourceTracker {
     /// resolved, which no tool opens.
     fn resolve_path(&self, input: &str) -> Option<PathBuf> {
         arko_agents::utils::resolve_path(input, &self.workspace).ok()
+    }
+}
+
+fn resource_sort_key(resource: &ResourceId) -> (u8, String) {
+    match resource {
+        ResourceId::File(path) => (0, path.display().to_string()),
+        ResourceId::DirectoryTree(path) => (1, path.display().to_string()),
+        ResourceId::MemoryTier(tier) => (2, tier.clone()),
+        ResourceId::Custom { namespace, key } => (3, format!("{namespace}:{key}")),
     }
 }
 
@@ -558,6 +655,65 @@ mod tests {
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].last_writer.as_ref(), Some(&writer));
         assert_eq!(restored.written_resources(&writer), vec![resource]);
+    }
+
+    /// A finished reader is not told of a write (no notice, no conflict
+    /// hook), but its reads are kept: when its task is continued it learns
+    /// what changed, and a write it attempts without reading again still
+    /// conflicts. A task that can't be continued forgets its reads.
+    #[test]
+    fn a_finished_reader_is_told_what_changed_when_it_is_continued() {
+        let workspace = PathBuf::from("/workspace");
+        let tracker = ResourceTracker::new(workspace.clone(), ContextFreshnessConfig::default());
+        let reader = ActorId::new(Uuid::new_v4(), "reviewer");
+        let writer = ActorId::new(Uuid::new_v4(), "coder");
+        let file = ResourceId::File(workspace.join("src/lib.rs"));
+        let untouched = ResourceId::File(workspace.join("README.md"));
+        let tier = ResourceId::MemoryTier("notes".into());
+        for resource in [&file, &untouched, &tier] {
+            tracker.record_read(&reader, resource.clone());
+        }
+        tracker.finish_actor(&reader, true);
+        assert!(tracker.record_write(&writer, file.clone()).is_empty());
+        assert!(tracker.record_write(&writer, tier.clone()).is_empty());
+        // Its own writes don't count.
+        tracker.record_write(&reader, untouched.clone());
+        let changed = tracker.resume_actor(&reader);
+        assert_eq!(changed, [file.clone(), tier.clone()]);
+        let notice = tracker.changed_notice(&changed).unwrap();
+        assert!(notice.contains("- file `src/lib.rs`"), "{notice}");
+        assert!(notice.contains("- memory tier `notes`"), "{notice}");
+        assert!(!notice.contains("README"), "{notice}");
+        assert!(tracker.changed_notice(&[]).is_none());
+        // Running again, it is told of writes and blocked until it rereads.
+        assert!(!tracker.check_write(&reader, &file).is_empty());
+        assert_eq!(
+            tracker.record_write(&writer, file.clone()),
+            std::slice::from_ref(&reader)
+        );
+
+        tracker.finish_actor(&reader, false);
+        assert!(tracker.observed_resources(&reader).is_empty());
+        assert!(tracker.resume_actor(&reader).is_empty());
+    }
+
+    /// After a resume no task runs: every actor of the checkpoint counts as
+    /// finished until its task is continued.
+    #[test]
+    fn restored_readers_count_as_finished() {
+        let workspace = PathBuf::from("/workspace");
+        let tracker = ResourceTracker::new(workspace.clone(), ContextFreshnessConfig::default());
+        let reader = ActorId::new(Uuid::new_v4(), "reviewer");
+        let writer = ActorId::new(Uuid::new_v4(), "coder");
+        let file = ResourceId::File(workspace.join("src/lib.rs"));
+        tracker.record_read(&reader, file.clone());
+        let restored = ResourceTracker::from_snapshot(
+            workspace,
+            ContextFreshnessConfig::default(),
+            tracker.snapshot(),
+        );
+        assert!(restored.record_write(&writer, file.clone()).is_empty());
+        assert_eq!(restored.resume_actor(&reader), [file]);
     }
 
     #[test]

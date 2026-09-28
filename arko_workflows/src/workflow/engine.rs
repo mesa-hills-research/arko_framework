@@ -1212,6 +1212,19 @@ pub(crate) async fn finalize_agent_task(
         &task.pending_context_injections,
         matches!(task.current_state, TaskState::Completed { .. }),
     );
+    // A task that can be continued keeps its reads; freshness no longer
+    // notifies it (a continuation is told what changed).
+    if let Some(tracker) = &ctx.resource_tracker {
+        let continued = matches!(
+            task.current_state,
+            TaskState::Completed { .. }
+                | TaskState::AwaitingUserResponse { .. }
+                | TaskState::AwaitingToolApproval { .. }
+                | TaskState::AwaitingBatchToolApproval { .. }
+                | TaskState::AwaitingErrorRecoveryApproval { .. }
+        );
+        tracker.finish_actor(&ActorId::new(agent_run_id, &agent_name), continued);
+    }
     let pause = AgentPause::of(&task.current_state);
     let (status, summary, error, hook_point) = match &task.current_state {
         TaskState::Completed { summary } => (
@@ -1911,7 +1924,17 @@ impl WorkflowEngine {
                 .iter()
                 .any(|id| crate::messaging::is_injection_of(content, *id))
         });
-        let prompt = format!("{continuation_prompt}{messages}");
+        // The resources it read that changed since, when freshness is on.
+        let changed = ctx
+            .resource_tracker
+            .as_ref()
+            .and_then(|tracker| {
+                tracker.changed_notice(
+                    &tracker.resume_actor(&ActorId::new(task.id, agent_name.as_str())),
+                )
+            })
+            .map_or_else(String::new, |notice| format!("\n\n{notice}"));
+        let prompt = format!("{continuation_prompt}{messages}{changed}");
         match previous.status {
             AgentRunStatus::Completed => {
                 task.prepare_for_resumption_from_completed(prompt)?;
@@ -2013,12 +2036,23 @@ impl WorkflowEngine {
             ctx,
             0,
         );
-        // Messages queued while it was paused go ahead of the decision, so
-        // they are added at the turn boundary the decision leads to.
+        // Messages queued while it was paused, and what changed since it
+        // read it, go ahead of the decision, so they are added at the turn
+        // boundary the decision leads to.
         tokio::select! {
             biased;
             _ = ctx.run_control.stopped() => {}
             _ = ctx.messages.forwarded(agent_name, run.agent_run_id) => {}
+        }
+        if let Some(notice) = ctx.resource_tracker.as_ref().and_then(|tracker| {
+            tracker.changed_notice(
+                &tracker.resume_actor(&ActorId::new(run.agent_run_id, agent_name.as_str())),
+            )
+        }) {
+            let _ = run
+                .cmd_tx
+                .send(UserCommand::InjectContext { content: notice })
+                .await;
         }
         match decision {
             Decision::Tools(batch_id, decisions) => {
@@ -2922,6 +2956,72 @@ mod tests {
             );
             assert_eq!(first.calls(), 1, "the interceptor before it ran once");
         }
+    }
+
+    /// A reader whose task finished is not notified of a write (no notice,
+    /// no conflict hook); continuing it sends one message listing what
+    /// changed since it read it, advising a reread before editing.
+    #[tokio::test]
+    async fn a_continued_reader_learns_what_changed_since_it_read() {
+        use crate::freshness::{ContextFreshnessConfig, ResourceId};
+        use crate::test_support::{
+            ResponsesServer, Workspace, agent_config, complete_turn, tool_call_turn,
+        };
+        let workspace = Workspace::new();
+        std::fs::write(workspace.0.join("a.txt"), "first").unwrap();
+        let server = ResponsesServer::start(|index, _| {
+            Some(match index {
+                0 => tool_call_turn("r", "read_file", serde_json::json!({"path": "a.txt"})),
+                _ => complete_turn("done", "done"),
+            })
+        })
+        .await;
+        let mut reader = agent_config("Friendly Reader");
+        reader
+            .tool_config
+            .available_tool_names
+            .push("read_file".into());
+        let conflicts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let workflow = Workflow::builder()
+            .name("freshness-continue-test")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(server.client()))
+            .agent("reader", reader)
+            .context_freshness(ContextFreshnessConfig::default())
+            .hook(HookPoint::OnFreshnessConflict, {
+                let conflicts = conflicts.clone();
+                Arc::new(move |_| {
+                    conflicts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    HookResult::Continue
+                })
+            })
+            .build()
+            .unwrap();
+        let first = workflow.run_agent("reader", "Read a.txt.").await.unwrap();
+        let file =
+            arko_agents::utils::resolve_path("a.txt", &workflow.context().workspace).unwrap();
+        let stale = workflow
+            .mark_resource_dirty(
+                ActorId::new(uuid::Uuid::new_v4(), "writer"),
+                ResourceId::File(file),
+            )
+            .await
+            .unwrap();
+        assert!(stale.is_empty(), "a finished reader is not notified");
+        assert_eq!(conflicts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(workflow.context().messages.pending("reader").is_empty());
+
+        workflow.continue_agent(&first, "Carry on.").await.unwrap();
+        let last = server.bodies().last().unwrap().clone();
+        assert!(last.contains("Carry on."), "{last}");
+        assert!(last.contains("Changed since you last read them"), "{last}");
+        assert!(last.contains("- file `a.txt`"), "{last}");
+        assert!(
+            last.contains("Re-read any of these before you edit it"),
+            "{last}"
+        );
+        // Told once: the first request of the continuation only.
+        assert_eq!(server.requests(), 3);
     }
 
     /// Counts its calls; replaces the result with `replacement`, if any.

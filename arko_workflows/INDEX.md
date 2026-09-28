@@ -826,6 +826,8 @@ All six types implement `Debug`, `Clone`, `Serialize`, and `Deserialize`; `Resou
 
 With a tracker configured, the workflow checks each mapped write before the tool runs. When it overlaps context the agent read that another actor has since changed, the call is rejected with feedback to re-read if `block_on_conflict` is set, and allowed otherwise. After a successful mapped tool call, the read or write is recorded; for a write, every active stale reader receives a notice, and `OnFreshnessConflict` fires once per stale reader. An `Abort` from that hook stops the run; the write's own result stands.
 
+**Finished readers.** When a task stops, a task that can still be continued (completed, waiting for input, or paused) keeps its reads but no longer receives notices or fires `OnFreshnessConflict`, and a notice queued for it and not yet read is dropped; any other task's reads are forgotten. When it is continued (`continue_agent`) or resumed (`resume_agent`), it gets one message listing the resources it read that another actor changed since, advising it to re-read any of them before editing it or relying on it: at the end of the continuation prompt, or as a context update before the resumed turn. Its kept reads still block a stale write under `block_on_conflict` until it reads again. After a restart from a checkpoint no task runs, so every recorded reader counts as finished until its task is continued.
+
 ### Resource tracker
 
 Methods on `ResourceTracker`.
@@ -833,14 +835,16 @@ Methods on `ResourceTracker`.
 | Signature | Purpose and behavior |
 | --- | --- |
 | `fn new(workspace: PathBuf, config: ContextFreshnessConfig) -> Self` | Empty tracker rooted at the workspace. |
-| `fn from_snapshot(workspace: PathBuf, config: ContextFreshnessConfig, snapshot: FreshnessSnapshot) -> Self` | Restore tracking state with the given workspace and configuration. |
+| `fn from_snapshot(workspace: PathBuf, config: ContextFreshnessConfig, snapshot: FreshnessSnapshot) -> Self` | Restore tracking state with the given workspace and configuration. Every recorded reader counts as finished. |
 | `fn snapshot(&self) -> FreshnessSnapshot` | Clone of all tracking state. |
 | `fn config(&self) -> &ContextFreshnessConfig` | The configuration. |
 | `fn resource_for_tool(&self, tool_name: &str, parameters: &HashMap<String, Value>) -> Option<(ResourceId, bool)>` | Resolve a mapped tool's path argument; the boolean is `true` for a write. `None` for an unmapped tool, a missing or non-string argument, or a path no tool can open (one with a NUL byte). Paths resolve as the built-in file tools open them and the agent runtime's workspace check judges them, with `arko_agents::utils::resolve_path`: surrounding whitespace is trimmed, `~` and `$VAR` are not expanded, a relative path is joined to the workspace, and `.` and `..` are resolved lexically. Symlinks are not resolved. |
 | `fn record_read(&self, actor: &ActorId, resource: ResourceId)` | Record the resource's current version as the actor's observation, replacing an earlier one. A new resource starts at version zero. |
 | `fn check_write(&self, actor: &ActorId, resource: &ResourceId) -> Vec<FreshnessConflict>` | The actor's overlapping observations whose resource has since reached a newer version last written by another actor. No prior read means no conflict. Reports only; it does not block anything. |
-| `fn record_write(&self, actor: &ActorId, resource: ResourceId) -> Vec<ActorId>` | Record a successful mutation: increment the affected versions, set the last writer, and return the other actors with affected reads. A file write also increments already tracked directory trees that contain it. |
+| `fn record_write(&self, actor: &ActorId, resource: ResourceId) -> Vec<ActorId>` | Record a successful mutation: increment the affected versions, set the last writer, and return the other actors with affected reads, except finished ones (see `finish_actor`). A file write also increments already tracked directory trees that contain it. |
 | `fn clear_actor(&self, actor: &ActorId)` | Remove the actor's observations; its writes and the resource versions remain. |
+| `fn finish_actor(&self, actor: &ActorId, continued: bool)` | The actor's task stopped: with `continued`, keep its reads but leave it out of `record_write`'s result (no notices); otherwise `clear_actor`. The engine calls this when it records a task. |
+| `fn resume_actor(&self, actor: &ActorId) -> Vec<ResourceId>` | The actor's task runs again: it is included in `record_write` again, and the resources it read that another actor changed since are returned, sorted (files, directory trees, memory tiers, custom). |
 
 Resources overlap when they are identical, or when a directory tree that was read contains a written file. Memory and custom resources overlap only by exact identity. `record_read` and `record_write` use their arguments as supplied, so resources constructed manually need consistently normalized paths.
 

@@ -327,7 +327,11 @@ let workflow = Workflow::builder()
 writes. The mapping from tool names to resources is configurable. Notices state
 that a resource changed; they do not include the change. A write that makes
 another agent's read stale also fires the `OnFreshnessConflict` hook once per
-stale reader. See [context freshness](INDEX.md#context-freshness).
+stale reader. A reader whose task has finished is neither notified nor reported
+to the hook; its reads are kept while the task can be continued, and
+`continue_agent` (or `resume_agent`) then tells it, in one message, which resources
+it read have changed since, advising a reread before editing them. See
+[context freshness](INDEX.md#context-freshness).
 
 ## Budgets
 
