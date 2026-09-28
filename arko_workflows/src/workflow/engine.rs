@@ -1173,6 +1173,10 @@ pub(crate) fn abandon_run(run: &StartedRun, ctx: &SharedContext) {
 
 fn abandon(ctx: &SharedContext, agent_name: &str, agent_run_id: uuid::Uuid) {
     ctx.registry.finish(agent_run_id, AgentRunStatus::Cancelled);
+    // Not recorded, so it can't be continued: freshness forgets its reads.
+    if let Some(tracker) = &ctx.resource_tracker {
+        tracker.finish_actor(&ActorId::new(agent_run_id, agent_name), false);
+    }
     ctx.messages.unregister_active(agent_name, agent_run_id);
     ctx.run_control.unregister(agent_run_id);
 }
@@ -2027,7 +2031,7 @@ impl WorkflowEngine {
         };
         if !resumable {
             return Err(WorkflowError::BuilderInvalid(
-                "only a completed or user-input-suspended agent run can be continued".to_string(),
+                "only a completed or user-input-suspended agent run can be continued; resume a paused one with resume_agent".to_string(),
             ));
         }
         let agent_name = &previous.agent_name;
