@@ -841,7 +841,7 @@ All six types implement `Debug`, `Clone`, `Serialize`, and `Deserialize`; `Resou
 | `list_files` | `ReadDirectoryTree { parameter: "directory" }` |
 | `write_file`, `apply_diff` | `WriteFile { parameter: "path" }` |
 
-`ContextFreshnessConfig::tool_effect(self, tool_name: impl Into<String>, effect: ToolResourceEffect) -> Self` adds or replaces a mapping; assign `tool_effects` to replace them all. Fields omitted in JSON do not take the Rust defaults.
+`ContextFreshnessConfig::tool_effect(self, tool_name: impl Into<String>, effect: ToolResourceEffect) -> Self` adds or replaces a mapping; assign `tool_effects` to replace them all. Fields omitted in JSON take the `Default` values; a given `tool_effects` replaces the default mappings whole.
 
 With a tracker configured, the workflow checks each mapped write before the tool runs. When it overlaps context the agent read that another actor has since changed, the call is rejected with feedback to re-read if `block_on_conflict` is set, and allowed otherwise. After a successful mapped tool call, the read or write is recorded; for a write, every active stale reader receives a notice, and `OnFreshnessConflict` fires once per stale reader. An `Abort` from that hook stops the run; the write's own result stands.
 

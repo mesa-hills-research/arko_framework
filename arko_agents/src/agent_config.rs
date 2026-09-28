@@ -19,9 +19,11 @@ pub enum EnvironmentDetailPlacement {
     EachUserMessage,
 }
 
-/// Configuration for a built-in environment detail.
+/// Configuration for a built-in environment detail. A field omitted in
+/// JSON or YAML takes its [`Default`] value (`include: false`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct BuiltInEnvironmentDetail {
+    #[serde(default)]
     pub include: bool,
     #[serde(default)]
     pub placement: EnvironmentDetailPlacement,
@@ -1565,5 +1567,24 @@ mod validation_tests {
             ReminderInjectionFrequency::EveryNUserMessages(0)
         );
         assert!(task.agent_config.validate().is_err());
+    }
+
+    /// An omitted `include` takes the default, `false` (it was required).
+    #[test]
+    fn an_omitted_include_takes_the_default() {
+        let detail =
+            serde_json::from_str::<BuiltInEnvironmentDetail>(r#"{"placement": "EachUserMessage"}"#)
+                .unwrap();
+        assert!(!detail.include);
+        assert_eq!(
+            detail.placement,
+            EnvironmentDetailPlacement::EachUserMessage
+        );
+        let details: EnvironmentDetailsConfig =
+            serde_yaml::from_str("file_tree:\n  depth: 2\ncurrent_datetime:\n  include: true\n")
+                .unwrap();
+        assert!(!details.file_tree.include);
+        assert_eq!(details.file_tree.depth, Some(2));
+        assert!(details.current_datetime.include);
     }
 }

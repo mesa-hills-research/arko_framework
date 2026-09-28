@@ -39,7 +39,9 @@ pub enum ToolResourceEffect {
     WriteFile { parameter: String },
 }
 
+/// A field omitted in JSON or YAML takes its [`Default`] value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ContextFreshnessConfig {
     pub block_on_conflict: bool,
     pub tool_effects: HashMap<String, ToolResourceEffect>,
@@ -537,6 +539,34 @@ fn resources_overlap_for_write(observed: &ResourceId, written: &ResourceId) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fields omitted in JSON take the `Default` values (both were
+    /// required); given ones replace them whole.
+    #[test]
+    fn omitted_freshness_fields_take_the_defaults() {
+        let defaults = ContextFreshnessConfig::default();
+        let effects = |config: &ContextFreshnessConfig| {
+            let mut names = config.tool_effects.keys().cloned().collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        let loaded: ContextFreshnessConfig =
+            serde_json::from_str(r#"{"block_on_conflict": false}"#).unwrap();
+        assert!(!loaded.block_on_conflict);
+        assert_eq!(effects(&loaded), effects(&defaults));
+        let empty: ContextFreshnessConfig = serde_json::from_str("{}").unwrap();
+        assert!(empty.block_on_conflict);
+        assert_eq!(effects(&empty), effects(&defaults));
+        let custom: ContextFreshnessConfig = serde_json::from_str(
+            r#"{"tool_effects": {"edit": {"WriteFile": {"parameter": "file"}}}}"#,
+        )
+        .unwrap();
+        assert!(custom.block_on_conflict);
+        assert_eq!(effects(&custom), ["edit"]);
+        let saved = serde_json::to_string(&defaults).unwrap();
+        let reloaded: ContextFreshnessConfig = serde_json::from_str(&saved).unwrap();
+        assert_eq!(effects(&reloaded), effects(&defaults));
+    }
 
     #[cfg(unix)]
     #[test]

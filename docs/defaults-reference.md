@@ -296,7 +296,7 @@ validate; the runtime validates again when a task starts. There is no `Default`.
 | `monitoring` | Nothing monitored | See [Monitoring](#monitoring). |
 | `refusal_fallback` | `None` | Opt-in `AgentLLMConfig` on the same provider (another provider is rejected): the refused input goes to it once. |
 | `complete_task_summary_prompt_override` | `None`: the built-in description | Replaces the description of `complete_task`'s `summary` parameter. |
-| `parsing_config_override` | `None`: tags `<`, `>`, `batched_tool_call`, escape prefix `!!--!!` | Output-based mode only. In JSON the three tag fields are required, and an omitted `escape_prefix` means no escaping. |
+| `parsing_config_override` | `None`: tags `<`, `>`, `batched_tool_call`, escape prefix `!!--!!` | Output-based mode only. A field omitted in JSON or YAML takes its default (the escape prefix too); `escape_prefix: null` turns escaping off. |
 
 `AgentLLMConfig` saves `provider`, `model_id`, a snapshot of the model, and
 `generation_config` (omitted: `GenerationConfig::default()`). On load, a model the
@@ -382,7 +382,7 @@ results only with `SkillsConfig::load_skill_interception`. See
 
 | Setting | Default | Notes |
 |---|---|---|
-| `BuiltInEnvironmentDetail::include` | `false` | Required in JSON when the detail is given. |
+| `BuiltInEnvironmentDetail::include` | `false` | Also when omitted in JSON or YAML. |
 | `placement` | `SystemPrompt` | `InitialTaskPrompt`, `EachUserMessage`. The system prompt is written once, when the task starts, so a date there is the task's start time. `EachUserMessage` details go with every user message, tool results included (in native mode as text after the results). |
 | `depth` | `None`: 3 | File tree only. |
 | `file_tree_mode` | `Diff`: a full snapshot, then a message listing changes before a model request | JSON `"diff"`, `"full"`. `placement` is ignored in `Diff` mode; `Full` puts the whole tree at `placement`. |
@@ -663,8 +663,8 @@ is refused or cut off. See
 
 `ContextFreshnessConfig::default()`: `block_on_conflict: true`, and `read_file`,
 `list_files` (a directory-tree read), `write_file` and `apply_diff` mapped to their path
-parameters; `tool_effect(name, effect)` maps other tools. When loaded from JSON, both
-fields are required. A write is blocked when the writer read that file, or listed a
+parameters; `tool_effect(name, effect)` maps other tools. When loaded from JSON, an
+omitted field takes its default; a given `tool_effects` replaces the default map whole. A write is blocked when the writer read that file, or listed a
 directory containing it, and another agent run (another run of the same agent included)
 has since written it (for a listing, any file under the directory). With
 `block_on_conflict: false` the write is allowed. In both modes, active readers whose

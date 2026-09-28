@@ -15,12 +15,17 @@ pub const DEFAULT_BATCHED_TOOL_CALL_TAG: &str = "batched_tool_call";
 /// Default escape prefix for literal tags.
 pub const DEFAULT_ESCAPE_PREFIX: &str = "!!--!!";
 
-/// Configuration for parsing tool calls from LLM output.
+/// Configuration for parsing tool calls from LLM output. A field omitted
+/// in JSON or YAML takes its [`Default`] value.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct ToolParsingConfig {
     pub tag_open: String,
     pub tag_close: String,
     pub batched_tool_call_tag: String,
+    /// Marks a tag the model writes literally, not as a tool call. Default
+    /// [`DEFAULT_ESCAPE_PREFIX`] (also when omitted in JSON); `None`
+    /// (explicit `null`) turns escaping off.
     pub escape_prefix: Option<String>,
 }
 
@@ -681,6 +686,39 @@ pub fn assemble_tool_calls(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fields omitted in JSON or YAML take the `Default` values (an omitted
+    /// `escape_prefix` once meant no escaping); an explicit `null` still
+    /// turns escaping off, and configs saved with every field load as
+    /// saved.
+    #[test]
+    fn omitted_parsing_fields_take_the_defaults() {
+        let tags =
+            r#"{"tag_open": "<", "tag_close": ">", "batched_tool_call_tag": "batched_tool_call"}"#;
+        let loaded: ToolParsingConfig = serde_json::from_str(tags).unwrap();
+        assert_eq!(loaded, ToolParsingConfig::default());
+        assert_eq!(loaded.escape_prefix.as_deref(), Some(DEFAULT_ESCAPE_PREFIX));
+        let empty: ToolParsingConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty, ToolParsingConfig::default());
+        let yaml: ToolParsingConfig = serde_yaml::from_str("tag_open: \"[\"\n").unwrap();
+        assert_eq!(yaml.tag_open, "[");
+        assert_eq!(yaml.escape_prefix.as_deref(), Some(DEFAULT_ESCAPE_PREFIX));
+        let off: ToolParsingConfig = serde_json::from_str(r#"{"escape_prefix": null}"#).unwrap();
+        assert_eq!(off.escape_prefix, None);
+        assert_eq!(off.tag_open, DEFAULT_TAG_OPEN);
+        let saved = ToolParsingConfig {
+            tag_open: "{".into(),
+            tag_close: "}".into(),
+            batched_tool_call_tag: "calls".into(),
+            escape_prefix: None,
+        };
+        let json = serde_json::to_string(&saved).unwrap();
+        assert!(json.contains(r#""escape_prefix":null"#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<ToolParsingConfig>(&json).unwrap(),
+            saved
+        );
+    }
 
     #[test]
     fn tool_calls_parse_independently_of_stream_chunk_boundaries() {
