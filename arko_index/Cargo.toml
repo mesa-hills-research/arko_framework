@@ -28,6 +28,7 @@ pulldown-cmark = "0.13"
 tiktoken-rs = "0.12"
 
 [dev-dependencies]
+env_logger.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 clap.workspace = true

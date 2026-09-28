@@ -1,6 +1,11 @@
 //! Run from the workspace root; see arko_index/README.md.
-use arko_ai::{EmbeddingClient, LLMClient};
-use arko_index::{backend::ArkoBackend, *};
+use arko_ai::{EmbeddingClient, EmbeddingModelDetails, EmbeddingProviderIdentifier, LLMClient};
+use arko_index::{
+    backend::{
+        ArkoBackend, Backend, Limits, ModelReply, ModelRequest, VectorReply, embedding_limits,
+    },
+    *,
+};
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 #[path = "support/search_judge.rs"]
@@ -27,8 +32,9 @@ struct Args {
 enum Command {
     Build {
         root: PathBuf,
-        #[arg(long, default_value = "source")]
-        name: String,
+        /// The index name; defaults to the root directory's name.
+        #[arg(long)]
+        name: Option<String>,
     },
     Update {
         index: String,
@@ -69,7 +75,75 @@ enum Command {
         index: String,
         #[arg(long, default_value_t = 500)]
         debounce_ms: u64,
+        /// Seconds between full scans that catch missed file-system events;
+        /// 0 scans only at start and after events.
+        #[arg(long, default_value_t = 30)]
+        reconcile_secs: u64,
     },
+}
+impl Command {
+    /// Whether the command sends model or embedding requests, or counts
+    /// tokens, and so needs the provider backend.
+    fn needs_backend(&self) -> bool {
+        !matches!(self, Self::Status { .. } | Self::List | Self::Read { .. })
+    }
+}
+/// The backend of commands that make no provider requests: `list`, `status`
+/// and `read` need neither credentials nor a tokenizer.
+struct NoProviders {
+    profile: EmbeddingProfile,
+    limits: Limits,
+}
+impl NoProviders {
+    fn new(profile: EmbeddingProfile) -> Self {
+        let limits =
+            EmbeddingModelDetails::get(EmbeddingProviderIdentifier::Voyage, &profile.model)
+                .ok()
+                .and_then(|details| embedding_limits(&details).ok())
+                .unwrap_or(Limits {
+                    item_tokens: 32_000,
+                    batch_tokens: 120_000,
+                    batch_items: 1_000,
+                });
+        Self { profile, limits }
+    }
+}
+fn no_providers() -> Error {
+    Error::Invalid("this command makes no provider requests".into())
+}
+#[async_trait::async_trait]
+impl Backend for NoProviders {
+    async fn chunk(&self, _: ModelRequest) -> Result<ModelReply> {
+        Err(no_providers())
+    }
+    async fn embed(&self, _: Vec<String>, _: bool) -> Result<VectorReply> {
+        Err(no_providers())
+    }
+    fn tokens(&self, _: &str) -> Result<usize> {
+        Err(no_providers())
+    }
+    fn limits(&self) -> Limits {
+        self.limits
+    }
+    fn profile(&self) -> &EmbeddingProfile {
+        &self.profile
+    }
+    fn output_tokenizer(&self) -> String {
+        format!(
+            "voyageai/{}@{}",
+            self.profile.model, self.profile.tokenizer_revision
+        )
+    }
+}
+/// The default index name: the root directory's name.
+fn default_name(root: &std::path::Path) -> String {
+    std::fs::canonicalize(root)
+        .ok()
+        .and_then(|root| {
+            root.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "index".into())
 }
 /// Credentials from an OAuth file when given, kept in step with the file,
 /// else from the environment.
@@ -101,19 +175,36 @@ async fn observe(index: &ArkoIndex, job: &str) -> AnyResult<()> {
 }
 #[tokio::main]
 async fn main() -> AnyResult<()> {
+    // Warnings from every crate, and the index's progress (such as the
+    // updates `watch` starts); RUST_LOG overrides it.
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("warn,arko_index=info"),
+    )
+    .init();
     let args = Args::parse();
-    let client = load_client(args.oauth_file.clone())?;
-    let embeddings = EmbeddingClient::from_env();
     let config = Config {
         batch_count: args.batch_count,
         concurrency: args.concurrency,
         ..Default::default()
     };
-    let backend =
-        Arc::new(ArkoBackend::new(client.clone(), embeddings, config.embedding.clone()).await?);
+    // Only commands that call providers or count tokens load credentials and
+    // the tokenizer.
+    let (client, backend): (Option<LLMClient>, Arc<dyn Backend>) = if args.command.needs_backend() {
+        let client = load_client(args.oauth_file.clone())?;
+        let backend = ArkoBackend::new(
+            client.clone(),
+            EmbeddingClient::from_env(),
+            config.embedding.clone(),
+        )
+        .await?;
+        (Some(client), Arc::new(backend))
+    } else {
+        (None, Arc::new(NoProviders::new(config.embedding.clone())))
+    };
     let index = ArkoIndex::open(args.database, backend, config).await?;
     match args.command {
         Command::Build { root, name } => {
+            let name = name.unwrap_or_else(|| default_name(&root));
             let job = index.start_build(BuildSpec::new(name, root)).await?;
             println!("{}", serde_json::to_string(&job)?);
             observe(&index, &job.job).await?;
@@ -156,7 +247,8 @@ async fn main() -> AnyResult<()> {
                 ..Default::default()
             };
             let result = if judging.judge {
-                let judge = judging.build_judge(&client, args.oauth_file.as_deref())?;
+                let client = client.as_ref().ok_or("search needs a client")?;
+                let judge = judging.build_judge(client, args.oauth_file.as_deref())?;
                 index
                     .search_with_judge(&id, &query, options, &judge, judging.options())
                     .await
@@ -176,21 +268,35 @@ async fn main() -> AnyResult<()> {
         Command::Watch {
             index: id,
             debounce_ms,
+            reconcile_secs,
         } => {
+            let reconcile = (reconcile_secs > 0).then(|| Duration::from_secs(reconcile_secs));
             let watcher = index
                 .watch(
                     &id,
-                    WatchOptions::new(Duration::from_millis(debounce_ms))
-                        .with_reconcile(Some(Duration::from_secs(30))),
+                    WatchOptions::new(Duration::from_millis(debounce_ms)).with_reconcile(reconcile),
                 )
                 .await?;
+            // Each watcher event as a JSON line: scans, and the updates it
+            // starts, resumes or leaves paused or blocked.
+            let mut events = watcher.subscribe();
+            let printer = tokio::spawn(async move {
+                while let Ok(event) = events.recv().await {
+                    if let Ok(line) = serde_json::to_string(&event) {
+                        println!("{line}");
+                    }
+                }
+            });
             let _ = tokio::signal::ctrl_c().await;
             watcher.stop().await?;
+            printer.abort();
         }
     }
     // An update job can still be running (watch starts them); a token
     // refresh in flight holds the credentials until its new tokens are
     // saved, so wait for it before the runtime shuts down.
-    client.openai_chatgpt_oauth_credentials().await;
+    if let Some(client) = client {
+        client.openai_chatgpt_oauth_credentials().await;
+    }
     Ok(())
 }

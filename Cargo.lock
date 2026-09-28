@@ -192,6 +192,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "env_logger",
  "futures",
  "glob",
  "ignore",

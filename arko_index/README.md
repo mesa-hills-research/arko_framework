@@ -135,8 +135,10 @@ cargo run -p arko_index --example arko_index_cli -- \
   --database /path/to/index.db search INDEX_ID 'retry scheduling'
 ```
 
-`VOYAGE_API_KEY` must be set. OpenAI credentials come from `--oauth-file` (a Codex
-`auth.json`) or from the environment. See [Example CLI](../docs/arko_index-reference.md#example-cli)
+Commands that embed need `VOYAGE_API_KEY`; those that chunk or judge take OpenAI
+credentials from `--oauth-file` (a Codex `auth.json`) or from the environment. `list`,
+`status` and `read` need neither. `build` names the index after the root directory unless
+`--name` is given. See [Example CLI](../docs/arko_index-reference.md#example-cli)
 for every command and option, including the LLM judge.
 
 ## Requirements and testing

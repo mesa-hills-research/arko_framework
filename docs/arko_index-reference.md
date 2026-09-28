@@ -614,21 +614,24 @@ cargo run -p arko_index --example arko_index_cli -- \
 
 | Command | Action |
 |---|---|
-| `build ROOT [--name NAME]` | Build a new index (name defaults to `source`) and stream its events. |
+| `build ROOT [--name NAME]` | Build a new index (the name defaults to the root directory's name) and stream its events. |
 | `update INDEX_ID` | Start an update and stream its events. |
 | `resume JOB_ID` | Resume a paused, blocked or failed job and stream its events. |
 | `status JOB_ID` | Print the job's status, including usage. |
 | `list` | List indexes and their active generations. |
 | `search INDEX_ID QUERY` | Search; see the options below and [Judge options](#judge-options). |
 | `read INDEX_ID GENERATION CHUNK_ID...` | Print chunks from a generation (the `generation` of a search result). |
-| `watch INDEX_ID [--debounce-ms MS]` | Start updates when the source changes (500 ms debounce, a reconciliation scan every 30 s) until Ctrl+C. |
+| `watch INDEX_ID [--debounce-ms MS] [--reconcile-secs S]` | Keep the index up to date until Ctrl+C (500 ms debounce; a reconciliation scan every 30 s, or only at start and after events with `--reconcile-secs 0`), printing each watcher event as a JSON line. |
 
 Options before the command: `--database PATH` (required), `--oauth-file PATH`,
 `--batch-count N` (default 6) and `--concurrency N` (default 2). A resumed job uses the
 values given to `resume`.
 
 `build`, `update` and `resume` print events as JSON lines until the job is ready; Ctrl+C
-pauses the job so that `resume` can continue it later. The database lock admits one
+pauses the job so that `resume` can continue it later. `watch` prints the watcher's events
+(`scanned`, `update_started`, `resumed`, `held`, `failed`). Log messages go to standard
+error: warnings from every crate and the index's progress at info level, such as the
+updates the watcher starts; set `RUST_LOG` to change that. The database lock admits one
 process at a time, so other commands on the same database fail while one of these, or
 `watch`, is running.
 
@@ -638,8 +641,10 @@ selects full-text retrieval only and `--semantic` vector retrieval only; otherwi
 is hybrid. `--rebuild-file-limit N` caps the paths listed in a rebuild notice (default
 100).
 
-`VOYAGE_API_KEY` must be set. OpenAI credentials come from `--oauth-file`, or else from the
-environment: `OPENAI_OAUTH_ACCESS_TOKEN` and `OPENAI_OAUTH_ACCOUNT_ID` (with an optional
+`list`, `status` and `read` make no provider requests, so they need no credentials and
+load no tokenizer. The other commands load the Voyage tokenizer; those that embed need
+`VOYAGE_API_KEY`, and those that chunk or judge need OpenAI credentials, from
+`--oauth-file`, or else from the environment: `OPENAI_OAUTH_ACCESS_TOKEN` and `OPENAI_OAUTH_ACCOUNT_ID` (with an optional
 `OPENAI_OAUTH_REFRESH_TOKEN`) for ChatGPT OAuth, or `OPENAI_API_KEY`. The OAuth file uses
 the Codex `auth.json` layout, with `access_token`, `refresh_token` and `account_id` at the
 top level or under `tokens`, and can be the one Codex uses: every token refresh reads the
