@@ -547,6 +547,7 @@ impl ArkoIndex {
         // One prompt-cache key per job: its initial requests and repairs
         // share the instructions prefix, before and after a resume.
         request.cache_key = Some(job.clone());
+        request.stream_idle_timeout_ms = self.inner.config.stream_idle_timeout_ms;
         Box::pin(async move {
             let outcome = async {
                 let (j, r) = (job.clone(), encode(&request)?);

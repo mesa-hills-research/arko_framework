@@ -167,6 +167,16 @@ impl LlmSearchJudge {
         self.instructions = instructions.into();
         self
     }
+    /// Opt-in: cut the judge's response off once no data has arrived for
+    /// `timeout` (arko_ai's
+    /// [`LLMClient::with_stream_idle_timeout`](arko_ai::LLMClient::with_stream_idle_timeout)).
+    /// Off by default, deliberately: models can reason silently for a long
+    /// time (GPT Pro models for over an hour), so a short value cuts healthy
+    /// responses off. Make it generous.
+    pub fn with_stream_idle_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.client = self.client.with_stream_idle_timeout(timeout);
+        self
+    }
 }
 
 #[async_trait]

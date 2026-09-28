@@ -579,6 +579,7 @@ mod tests {
                 Operation::Chunk(ModelRequest {
                     system: String::new(),
                     cache_key: None,
+                    stream_idle_timeout_ms: None,
                     prompt: id.to_string(),
                     tool: "test".into(),
                     schema: json!({}),
@@ -716,6 +717,7 @@ mod tests {
         let request = Operation::Chunk(ModelRequest {
             system: String::new(),
             cache_key: None,
+            stream_idle_timeout_ms: None,
             prompt: "0".into(),
             tool: "test".into(),
             schema: json!({}),
@@ -791,6 +793,7 @@ mod tests {
         Operation::Chunk(ModelRequest {
             system: String::new(),
             cache_key: None,
+            stream_idle_timeout_ms: None,
             prompt: "0".into(),
             tool: "test".into(),
             schema: json!({}),
@@ -1022,6 +1025,7 @@ mod tests {
                 let operation = Operation::Chunk(ModelRequest {
                     system: String::new(),
                     cache_key: None,
+                    stream_idle_timeout_ms: None,
                     prompt: "2".into(),
                     tool: "test".into(),
                     schema: json!({}),

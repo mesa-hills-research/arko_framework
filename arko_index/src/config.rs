@@ -45,6 +45,21 @@ pub struct Config {
     pub keep_generations: Option<usize>,
     /// How SQLite syncs commits to disk. [`Synchronous::Full`] by default.
     pub synchronous: Synchronous,
+    /// Opt-in: cut a chunk-model response off once no data has arrived for
+    /// this many milliseconds (arko_ai's
+    /// [`LLMClient::with_stream_idle_timeout`](arko_ai::LLMClient::with_stream_idle_timeout),
+    /// applied by [`ArkoBackend`](crate::backend::ArkoBackend) to each chunk
+    /// request). `None`, the default, waits as long as the connection stays
+    /// open, and that is deliberate: models can reason silently for a long
+    /// time (GPT Pro models for over an hour), and a stream may carry nothing
+    /// until the reasoning ends. A value shorter than that cuts healthy
+    /// responses off; the cut is a truncated stream, a transient failure the
+    /// request is retried for, paying for the work again. If you set one,
+    /// make it generous (for example two hours). Only the gaps between data
+    /// count: there is no total deadline. A runtime setting: a resumed job
+    /// takes it from the current configuration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_idle_timeout_ms: Option<u64>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -62,6 +77,7 @@ impl Default for Config {
             embedding_batch_items: None,
             keep_generations: None,
             synchronous: Synchronous::Full,
+            stream_idle_timeout_ms: None,
         }
     }
 }
@@ -115,6 +131,9 @@ impl Config {
         }
         if self.keep_generations == Some(0) {
             return Err(invalid("keep_generations must be positive when set"));
+        }
+        if self.stream_idle_timeout_ms == Some(0) {
+            return Err(invalid("stream_idle_timeout_ms must be positive when set"));
         }
         if self.embedding.tokenizer_revision.is_empty() {
             return Err(invalid("pin a tokenizer revision"));

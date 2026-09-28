@@ -237,6 +237,7 @@ build or update of the index is running, paused or blocked.
 | `embedding_batch_items` | `None` | Opt-in: fewer inputs per embedding request than the model allows. |
 | `keep_generations` | `None` | Opt-in: prune complete generations beyond the newest `n`; see [Storage and updates](#storage-and-updates). |
 | `synchronous` | `Full` | SQLite `synchronous` mode; `Normal` is an opt-in; see [Storage and updates](#storage-and-updates). |
+| `stream_idle_timeout_ms` | `None` | Opt-in: the longest gap between data on a chunk-model response before it is cut off; see below. |
 
 `batch_count`, both concurrency limits and `max_transient_attempts` must be positive, and
 `query_max_transient_attempts` too when set. A finished request slot is refilled
@@ -252,6 +253,18 @@ capacity signals (overloaded or unavailable) are retried on the same schedule wi
 consuming attempts, until one request has waited `max_capacity_wait_ms` (15 minutes by
 default) for them in all; then it fails the same way. Other errors, such as
 authentication failures, invalid requests and refusals, are not retried.
+
+Chunk-model requests have no timeout by default: a response is waited for as long as its
+connection stays open. This is deliberate. Models can reason silently for a long time,
+GPT Pro models for over an hour, and a stream may carry nothing until the reasoning ends.
+The opt-in `Config::stream_idle_timeout_ms` cuts a response off once no data has arrived
+for that long (arko_ai's `LLMClient::with_stream_idle_timeout`, which `ArkoBackend`
+applies to each chunk request). The cut is a truncated stream, a transient failure that
+is retried, and the provider may bill the work that was cut off. A value shorter than the
+longest silent stretch of the chunk model cuts healthy responses off, so make it generous
+(for example two hours, 7,200,000). Only the gaps between data count; there is no total
+deadline. It is a runtime setting: a resumed job takes it from the current configuration.
+`LlmSearchJudge::with_stream_idle_timeout` does the same for the judge.
 
 A plan usage limit (ChatGPT `usage_limit_reached`) is not retried: the request records a
 `usage_limit` attempt event, the job's queued requests stop before another one is sent,
@@ -630,7 +643,10 @@ cargo run -p arko_index --example arko_index_cli -- \
 | `watch INDEX_ID [--debounce-ms MS] [--reconcile-secs S]` | Keep the index up to date until Ctrl+C (500 ms debounce; a reconciliation scan every 30 s, or only at start and after events with `--reconcile-secs 0`), printing each watcher event as a JSON line. |
 
 Options before the command: `--database PATH` (required), `--oauth-file PATH`,
-`--batch-count N` (default 6) and `--concurrency N` (default 2). A resumed job uses the
+`--batch-count N` (default 6), `--concurrency N` (default 2), and the opt-in
+`--stream-idle-timeout-secs S` (`Config::stream_idle_timeout_ms`, also applied to the
+judge; off by default, and if set, make it generous: see
+[Jobs, scheduling and retries](#jobs-scheduling-and-retries)). A resumed job uses the
 values given to `resume`.
 
 `build`, `update` and `resume` print events as JSON lines until the job is ready; Ctrl+C

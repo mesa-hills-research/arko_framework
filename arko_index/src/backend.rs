@@ -23,6 +23,11 @@ pub struct ModelRequest {
     /// cache affinity by. `None` gives each request a new key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_key: Option<String>,
+    /// The index's opt-in [`Config::stream_idle_timeout_ms`](crate::Config::stream_idle_timeout_ms):
+    /// [`ArkoBackend`] cuts the response off once no data has arrived for
+    /// this long. `None` waits as long as the connection stays open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_idle_timeout_ms: Option<u64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelReply {
@@ -280,6 +285,16 @@ async fn chunk_with(
         )));
     }
     let config = chunk_generation_config(model, chunk_config, &request);
+    let timed;
+    let llm = match request.stream_idle_timeout_ms {
+        Some(timeout) => {
+            timed = llm
+                .clone()
+                .with_stream_idle_timeout(std::time::Duration::from_millis(timeout));
+            &timed
+        }
+        None => llm,
+    };
     let mut conversation = llm
         .new_conversation(model.clone())
         .with_system_message(&request.system);
@@ -409,6 +424,7 @@ mod tests {
             tool: "submit_cuts".into(),
             schema: json!({"type": "object"}),
             cache_key: None,
+            stream_idle_timeout_ms: None,
         }
     }
 
@@ -463,6 +479,65 @@ mod tests {
                 .eq_ignore_ascii_case(name)
                 .then(|| value.trim().to_owned())
         })
+    }
+
+    /// Serves one request with the head of an event stream and a comment,
+    /// then sends nothing while the connection stays open.
+    async fn stalling_server() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0u8; 65536];
+            let _ = socket.read(&mut buffer).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n: thinking\n\n",
+                )
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+        url
+    }
+
+    /// The index's opt-in stream idle timeout reaches the chunk request: a
+    /// response that goes quiet is cut off as a transient failure; without
+    /// one it is waited for. (Real sockets on a real clock.)
+    #[tokio::test]
+    async fn a_chunk_request_takes_the_stream_idle_timeout() {
+        let luna = Model::openai_gpt_5_6_luna();
+        let client = |url: &str| {
+            LLMClient::new().with_openai_client(
+                arko_ai::providers::openai::OpenAIClient::new("test").with_base_url(url),
+            )
+        };
+        let url = stalling_server().await;
+        let timed = ModelRequest {
+            stream_idle_timeout_ms: Some(200),
+            ..request()
+        };
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            chunk_with(&client(&url), &luna, &default_chunk_config(), timed),
+        )
+        .await
+        .expect("the quiet response is cut off")
+        .unwrap_err();
+        assert_eq!(error.retry_class(), Some(RetryClass::Transient), "{error}");
+
+        let url = stalling_server().await;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                chunk_with(&client(&url), &luna, &default_chunk_config(), request()),
+            )
+            .await
+            .is_err(),
+            "without a timeout the request is still waiting"
+        );
     }
 
     #[tokio::test]

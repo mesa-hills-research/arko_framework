@@ -25,6 +25,12 @@ struct Args {
     batch_count: usize,
     #[arg(long, default_value_t = 2)]
     concurrency: usize,
+    /// Opt-in: cut a chunk-model or judge response off after this many
+    /// seconds without data. Off by default: models can reason silently for
+    /// a long time (GPT Pro models for over an hour), so a short value cuts
+    /// healthy responses off. Make it generous.
+    #[arg(long)]
+    stream_idle_timeout_secs: Option<u64>,
     #[command(subcommand)]
     command: Command,
 }
@@ -185,6 +191,9 @@ async fn main() -> AnyResult<()> {
     let config = Config {
         batch_count: args.batch_count,
         concurrency: args.concurrency,
+        stream_idle_timeout_ms: args
+            .stream_idle_timeout_secs
+            .map(|seconds| seconds.saturating_mul(1000)),
         ..Default::default()
     };
     // Only commands that call providers or count tokens load credentials and
@@ -248,7 +257,10 @@ async fn main() -> AnyResult<()> {
             };
             let result = if judging.judge {
                 let client = client.as_ref().ok_or("search needs a client")?;
-                let judge = judging.build_judge(client, args.oauth_file.as_deref())?;
+                let mut judge = judging.build_judge(client, args.oauth_file.as_deref())?;
+                if let Some(seconds) = args.stream_idle_timeout_secs {
+                    judge = judge.with_stream_idle_timeout(Duration::from_secs(seconds));
+                }
                 index
                     .search_with_judge(&id, &query, options, &judge, judging.options())
                     .await

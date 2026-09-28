@@ -2722,9 +2722,18 @@ async fn resume_takes_runtime_settings_from_the_current_configuration() {
     assert_eq!(settle(&index, &job.job).await.phase, "paused");
     drop(index);
     fake.rejected_chunks.store(0, Ordering::SeqCst);
+    let before = fake.calls.lock().unwrap().len();
+    assert!(
+        fake.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.stream_idle_timeout_ms.is_none())
+    );
     let changed = Config {
         batch_count: 3,
         concurrency: 1,
+        stream_idle_timeout_ms: Some(7_200_000),
         ..config(&fake)
     };
     let index = ArkoIndex::open(&path, fake.clone(), changed.clone())
@@ -2742,9 +2751,17 @@ async fn resume_takes_runtime_settings_from_the_current_configuration() {
         settings.detail["changes"],
         json!([
             {"setting": "batch_count", "from": 6, "to": 3},
-            {"setting": "concurrency", "from": 2, "to": 1}
+            {"setting": "concurrency", "from": 2, "to": 1},
+            {"setting": "stream_idle_timeout_ms", "from": null, "to": 7_200_000}
         ])
     );
+    // The resumed job's requests carry the current stream idle timeout.
+    let resumed: Vec<_> = fake.calls.lock().unwrap()[before..]
+        .iter()
+        .map(|request| request.stream_idle_timeout_ms)
+        .collect();
+    assert!(!resumed.is_empty());
+    assert!(resumed.iter().all(|timeout| *timeout == Some(7_200_000)));
     drop(index);
     // Another embedding profile would mix vectors, so resume refuses it.
     std::fs::write(root.path().join("a.txt"), "alpha\ngamma\n").unwrap();
