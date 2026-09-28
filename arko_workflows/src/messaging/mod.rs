@@ -814,6 +814,51 @@ mod tests {
         assert!(arrivals.changed().await.is_err());
     }
 
+    /// A message sent while a run registers reaches it once: with the late
+    /// messages its registration queues, or through the send, never both.
+    /// (With registration and the search for late messages in two critical
+    /// sections, a send between them was delivered twice.)
+    #[test]
+    fn a_message_sent_while_a_run_registers_is_delivered_once() {
+        for _ in 0..2_000 {
+            let bus = Arc::new(MessageBus::new(["lead".to_string(), "worker".to_string()]));
+            let run = Uuid::new_v4();
+            let (sender, _receiver) = mpsc::channel(4);
+            let start = Arc::new(std::sync::Barrier::new(2));
+            let registering = std::thread::spawn({
+                let (bus, start) = (bus.clone(), start.clone());
+                move || {
+                    start.wait();
+                    bus.register_run("lead", run, sender, &[]);
+                }
+            });
+            let sending = std::thread::spawn({
+                let (bus, start) = (bus.clone(), start.clone());
+                move || {
+                    start.wait();
+                    let send = bus.send("worker", None, "lead", "hello".into(), vec![]);
+                    let mut send = std::pin::pin!(send);
+                    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+                    let std::task::Poll::Ready(sent) = send.as_mut().poll(&mut context) else {
+                        panic!("a send never waits");
+                    };
+                    sent.unwrap().id
+                }
+            });
+            registering.join().unwrap();
+            let id = sending.join().unwrap();
+            // Outside a Tokio runtime no delivery worker runs: every delivery
+            // stays in the run's outbound queue.
+            let state = bus.state.lock();
+            let deliveries = state.active["lead"][&run]
+                .outbound
+                .iter()
+                .filter(|(queued, _)| *queued == id)
+                .count();
+            assert_eq!(deliveries, 1);
+        }
+    }
+
     /// A message the delivery worker has not forwarded yet (the command
     /// channel is full) is unseen but not forwarded.
     #[tokio::test]

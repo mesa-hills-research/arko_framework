@@ -435,6 +435,96 @@ async fn an_automatic_limit_counts_from_the_last_model_request() {
     }
 }
 
+/// However long ago the run's last model request was, an automatic limit
+/// leaves a wait a second.
+#[tokio::test(start_paused = true)]
+async fn an_automatic_limit_leaves_a_wait_at_least_a_second() {
+    let workspace = Workspace::new();
+    let workflow = builder(&workspace, &["lead", "worker"]).build().unwrap();
+    let context = workflow.context();
+    let lead = run(&workflow, "lead");
+    let tool = WaitForMessageTool::new(
+        context.clone(),
+        "lead".to_string(),
+        Arc::new(LLMClient::new()),
+    );
+    // The limit is 270 s; the model took longer than that to call the tool.
+    tool.observe_context(lead.id, &arko_ai::Message::new_user("Go."));
+    tokio::time::advance(Duration::from_secs(300)).await;
+    let task_context = TaskContext {
+        task_id: lead.id,
+        agent_name: "lead",
+        initial_task_prompt: "",
+        current_working_directory: &context.workspace,
+    };
+    let started = tokio::time::Instant::now();
+    let result = tool.execute(&task_context, HashMap::new()).await.unwrap();
+    assert_eq!(result, "No messages after 1 s.");
+    assert_eq!(started.elapsed(), Duration::from_secs(1));
+}
+
+/// A wait that found a message not yet forwarded (the run's command channel
+/// is full), which the conversation then turns out to hold, waits on to its
+/// limit without spinning: its wait for the forward ends with the message.
+#[tokio::test(start_paused = true)]
+async fn a_wait_whose_message_is_seen_before_its_forward_does_not_spin() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let workspace = Workspace::new();
+    let workflow = builder(&workspace, &["lead", "worker"])
+        .wait_for_message_timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
+    let context = workflow.context().clone();
+    let lead = uuid::Uuid::new_v4();
+    context.registry.start(&[(lead, "lead")]);
+    let (sender, _commands) = mpsc::channel(1);
+    sender.try_send(UserCommand::SuspendTask).unwrap();
+    context
+        .messages
+        .register_run("lead", lead, sender.clone(), &[]);
+    context.run_control.register(lead, &sender);
+    let worker = run(&workflow, "worker");
+    send(&workflow, &worker, "worker", "lead", "Seen already.").await;
+    let payload = crate::messaging::injection(&context.messages.pending("lead")[0]);
+
+    let tool = tool(&workflow, "lead", WAIT_FOR_MESSAGE_TOOL_NAME).unwrap();
+    let polls = Arc::new(AtomicUsize::new(0));
+    let waiting = {
+        let (tool, polls, cwd) = (tool.clone(), polls.clone(), context.workspace.clone());
+        let mut wait = Box::pin(async move {
+            let task_context = TaskContext {
+                task_id: lead,
+                agent_name: "lead",
+                initial_task_prompt: "",
+                current_working_directory: &cwd,
+            };
+            tool.execute(&task_context, HashMap::new()).await
+        });
+        tokio::spawn(std::future::poll_fn(move |cx| {
+            polls.fetch_add(1, Ordering::SeqCst);
+            wait.as_mut().poll(cx)
+        }))
+    };
+    // The wait found the message and waits a second at most for its forward.
+    while polls.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    tool.observe_context(lead, &update(&payload));
+    let before = polls.load(Ordering::SeqCst);
+    for _ in 0..40 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+    }
+    let result = tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.unwrap(), "No messages after 30 s.");
+    // Woken when the forward deadline passed and at the limit; spinning on
+    // the passed deadline, it would be polled again at every step.
+    let polls = polls.load(Ordering::SeqCst) - before;
+    assert!(polls <= 4, "polled {polls} times");
+}
+
 /// A message sent while an agent waits ends the wait at once, is in the
 /// agent's command channel by then (so the runtime adds it at its next turn
 /// boundary), and others see the agent waiting meanwhile.
