@@ -254,8 +254,8 @@ default) for them in all; then it fails the same way. Other errors, such as
 authentication failures, invalid requests and refusals, are not retried.
 
 A plan usage limit (ChatGPT `usage_limit_reached`) is not retried: the request records a
-`usage_limit` attempt event, queued requests stop, requests already in flight finish, and
-the job becomes `paused` with a problem such as "usage limit reached; resets at
+`usage_limit` attempt event, the job's queued requests stop before another one is sent,
+requests already in flight finish, and the job becomes `paused` with a problem such as "usage limit reached; resets at
 2026-09-28T14:05:00Z (in about 3h 12m). Resume the job after the reset." followed by the
 provider's error. The watcher leaves such a job for the host; `resume(job)` continues it.
 

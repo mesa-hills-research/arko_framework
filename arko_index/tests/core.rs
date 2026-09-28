@@ -3360,9 +3360,9 @@ async fn a_usage_limit_pauses_the_job_until_it_is_resumed() {
             && problem.contains("Resume the job after the reset."),
         "{problem}"
     );
-    // Queued requests stopped with the job instead of failing; one the
-    // scheduler had already started may finish.
-    assert!(fake.calls.lock().unwrap().len() < 3);
+    // With one request slot, the job's other requests stopped with it: the
+    // scheduler pauses the job before it takes the next request.
+    assert_eq!(fake.calls.lock().unwrap().len(), 1);
     index.resume(&job.job).await.unwrap();
     let done = settle(&index, &job.job).await;
     assert_eq!(done.phase, "ready", "{:?}", done.problem);

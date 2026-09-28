@@ -117,6 +117,9 @@ struct Task {
     rejected: Vec<UsageInfo>,
     ready: Instant,
     control: watch::Receiver<u8>,
+    /// The caller's control, so that the scheduler can pause the caller's
+    /// other requests itself, before it dispatches another one.
+    job: Control,
     reply: oneshot::Sender<Outcome>,
     progress: Option<mpsc::UnboundedSender<serde_json::Value>>,
 }
@@ -272,20 +275,41 @@ impl Scheduler {
                     let backend = backend.clone();
                     count.fetch_add(1, Ordering::SeqCst);
                     running.spawn(async move {
+                        let mut task = task;
                         let mut control = task.control.clone();
                         let cancelled = async {
                             loop {
-                                if *control.borrow_and_update() == 2 { break; }
-                                if control.changed().await.is_err() { break; }
+                                if *control.borrow_and_update() == 2 {
+                                    break;
+                                }
+                                if control.changed().await.is_err() {
+                                    break;
+                                }
                             }
                         };
-                        let operation = async { match &task.operation {
-                            Operation::Chunk(r)=>backend.chunk(r.clone()).await.map(Reply::Chunk),
-                            Operation::Embed(texts, query)=>backend.embed(texts.clone(),*query).await.map(Reply::Embed),
-                        } };
-                        // Dropping the transport future is explicit cancellation, never a timer.
-                        let result = tokio::select! { result = operation => result, _ = cancelled => Err(Error::Cancelled) };
-                        (task,result)
+                        let result = {
+                            let Task {
+                                operation, reply, ..
+                            } = &mut task;
+                            let operation = async {
+                                match &*operation {
+                                    Operation::Chunk(r) => {
+                                        backend.chunk(r.clone()).await.map(Reply::Chunk)
+                                    }
+                                    Operation::Embed(texts, query) => {
+                                        backend.embed(texts.clone(), *query).await.map(Reply::Embed)
+                                    }
+                                }
+                            };
+                            // Dropping the transport future is explicit cancellation, never a
+                            // timer: on cancel, or when the caller has gone.
+                            tokio::select! {
+                                result = operation => result,
+                                _ = cancelled => Err(Error::Cancelled),
+                                _ = reply.closed() => Err(Error::Cancelled),
+                            }
+                        };
+                        (task, result)
                     });
                 }
                 // Provider slots have been refilled before callers start validation/I/O.
@@ -328,7 +352,11 @@ impl Scheduler {
                                     && *task.control.borrow() == 0 {
                                         let class = error.retry_class();
                                         if class == Some(arko_ai::RetryClass::UsageLimit) {
-                                            // A plan limit resets hours or days later: the job pauses.
+                                            // A plan limit resets hours or days later: the job
+                                            // pauses. Its queued requests stop here, before the
+                                            // slot is refilled, rather than when the caller
+                                            // handles this reply.
+                                            task.job.pause();
                                             task.event("usage_limit",serde_json::json!({"resets_in_ms":retry_after.map(|d|d.as_millis())}));
                                         } else {
                                             // Capacity signals wait without consuming the attempt
@@ -416,6 +444,7 @@ impl Scheduler {
             rejected: vec![],
             ready: Instant::now(),
             control: control.0.subscribe(),
+            job: control.clone(),
             reply,
             progress,
         };
@@ -462,6 +491,10 @@ mod tests {
                 tries[id]
             };
             if id == 0 && attempt <= self.retry_attempts {
+                if self.usage_limit {
+                    // Holds its slot until released, then reports the limit.
+                    self.gates[id].acquire().await.unwrap().forget();
+                }
                 let source = if self.usage_limit {
                     Some(Box::new(arko_ai::Error::ProviderError {
                         message: "usage limit".into(),
@@ -857,6 +890,7 @@ mod tests {
             rejected: vec![],
             ready,
             control: control.0.subscribe(),
+            job: control.clone(),
             reply,
             progress: None,
         };
@@ -870,6 +904,7 @@ mod tests {
             retry_delay: Duration::from_secs(3 * 3600),
             ..Arc::into_inner(gate).unwrap()
         });
+        gate.gates[0].add_permits(1);
         let scheduler = Scheduler::new(gate.clone(), 1, RetryPolicy::attempts(10));
         let (progress, mut events) = mpsc::unbounded_channel();
         let result = scheduler
@@ -885,6 +920,67 @@ mod tests {
         }
         assert!(phases.contains(&"usage_limit".to_owned()));
         assert!(!phases.contains(&"retry_wait".to_owned()));
+    }
+    #[tokio::test]
+    async fn a_usage_limit_stops_the_callers_queued_requests_before_the_next_dispatch() {
+        let (started, mut started_rx) = mpsc::unbounded_channel();
+        let gate = Arc::new(Gate {
+            profile: Default::default(),
+            gates: (0..4).map(|_| tokio::sync::Semaphore::new(0)).collect(),
+            started,
+            tries: Mutex::new(vec![0; 4]),
+            retry_attempts: 1,
+            retry_delay: Duration::from_secs(3 * 3600),
+            capacity: false,
+            usage_limit: true,
+            usage: None,
+        });
+        let s = Scheduler::new(gate.clone(), 1, RetryPolicy::attempts(10));
+        let (job, other) = (Control::new(), Control::new());
+        // The job's first request holds the only slot until released.
+        let first = {
+            let (s, job) = (s.clone(), job.clone());
+            tokio::spawn(async move { s.call(chunk_request(), true, &job).await.result })
+        };
+        assert_eq!(started_rx.recv().await, Some(0));
+        // Two more of the job's requests and another caller's wait behind it.
+        let queued: Vec<_> = (1..3).map(|id| enqueue(&s, id, true, &job)).collect();
+        let unrelated = enqueue(&s, 3, true, &other);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Request 0 now reports the usage limit.
+        gate.gates[0].add_permits(1);
+        let error = first.await.unwrap().err().unwrap();
+        assert_eq!(error.retry_class(), Some(arko_ai::RetryClass::UsageLimit));
+        // The job's queued requests never reach the backend...
+        for request in queued {
+            let stopped = tokio::time::timeout(Duration::from_secs(5), request)
+                .await
+                .expect("a queued request of the job was dispatched");
+            assert!(matches!(stopped.unwrap(), Err(Error::Paused)));
+        }
+        assert_eq!(gate.tries.lock().unwrap()[1..3], [0, 0]);
+        assert!(matches!(job.check(), Err(Error::Paused)));
+        // ...while another caller's request takes the slot.
+        assert_eq!(started_rx.recv().await, Some(3));
+        gate.gates[3].add_permits(1);
+        unrelated.await.unwrap().unwrap();
+    }
+    #[tokio::test]
+    async fn a_request_whose_caller_has_gone_is_cancelled() {
+        let (gate, s, mut started) = setup(1, 1, false);
+        let c = Control::new();
+        let call = enqueue(&s, 0, true, &c);
+        assert_eq!(started.recv().await, Some(0));
+        assert_eq!(s.active.load(Ordering::SeqCst), 1);
+        call.abort();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while s.active.load(Ordering::SeqCst) != 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the abandoned request kept its slot");
+        assert_eq!(gate.tries.lock().unwrap()[0], 1);
     }
     #[tokio::test(start_paused = true)]
     async fn capacity_waits_stop_at_the_capacity_wait_limit() {
