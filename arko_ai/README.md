@@ -675,8 +675,11 @@ request, and 256, 512, 1024 (default), or 2048 output dimensions:
 `voyage-3.5`, `voyage-3.5-lite`, `voyage-3-large`, and `voyage-code-3` are also accepted.
 For `voyage-code-4`, `max_batch_total_tokens` is `None`: the provider validates the
 aggregate limit, and the per-input and item-count limits still apply locally.
-Use `VoyageInputType::Query` when embedding a search query. Truncation is off unless
-`with_voyage_truncation(true)` turns it on. Cost estimates use standard endpoint rates,
+Use `VoyageInputType::Query` when embedding a search query. arko never truncates
+silently: `truncation: false` is sent unless `with_voyage_truncation(true)` asks for Voyage's
+truncation, and either way an input over the per-input limit fails locally with
+`Error::TokenLimitExceeded` before any request, so none reaches Voyage to be truncated;
+split long inputs first. Cost estimates use standard endpoint rates,
 before account credits or discounts.
 
 Requests are checked against these limits before sending. Tokens are counted with the

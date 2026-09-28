@@ -22,7 +22,11 @@ pub struct EmbeddingConfig {
     pub model_id: String,
     pub output_dimensionality: Option<usize>,
     pub voyage_input_type: Option<VoyageInputType>,
-    /// If `None`, the provider default is used (false for our implementation).
+    /// Voyage's `truncation` flag. `None` sends `false` (Voyage's own
+    /// default is `true`). arko never truncates silently: an input over the
+    /// model's per-input token limit fails locally with
+    /// `Error::TokenLimitExceeded` before any request, whatever this is set
+    /// to, so no input over the limit reaches Voyage to be truncated.
     pub voyage_truncation: Option<bool>,
     /// Hugging Face access token for tokenizers that require authentication.
     /// Never serialized, so a saved config doesn't hold the secret (`Debug`

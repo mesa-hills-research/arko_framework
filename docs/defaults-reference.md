@@ -222,7 +222,7 @@ all as separate user input. See [Tool images](../arko_ai/README.md#tool-images).
 | `EmbeddingConfig::new(provider, model_id)` | No default model | An unsupported model is `Error::ModelNotSupported` when embedding or counting tokens. |
 | `EmbeddingConfig::output_dimensionality` | `None`: the model's default, 1,024 | 256, 512, 1,024, 2,048; another value is an error before sending. |
 | `voyage_input_type` | `None`: not sent | `Document`, `Query` (for search queries). |
-| `voyage_truncation` | `None`: `truncation: false` is sent | Voyage's own default is `true`. Either way an input over the 32,000-token limit fails locally with `Error::TokenLimitExceeded` before sending; split long inputs first. |
+| `voyage_truncation` | `None`: `truncation: false` is sent | Voyage's own default is `true`. arko never truncates silently: whatever this is set to, an input over the 32,000-token limit fails locally with `Error::TokenLimitExceeded` before sending, so none reaches Voyage to be truncated; split long inputs first. |
 | `tokenizer_revision` | `None`: `main`, unpinned | Inputs are counted locally before sending, with the `voyageai/<model>` tokenizer downloaded from the Hugging Face Hub on first use (`HF_HOME`, `HF_ENDPOINT`). A failed download is an error, and nothing is sent; a revision the repository doesn't have (the Hub answers 404) is an error naming the repository and revision. |
 | `hf_token` | `None`: the Hugging Face token saved on the machine, if any | Never serialized (and redacted in `Debug`): after loading a config, set it again with `with_hf_token`, in code or from an environment variable the application reads. A config saved with it by an earlier version still loads it. |
 
