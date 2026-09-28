@@ -128,7 +128,9 @@ Once the workflow run is stopped, cancelled or aborted by a hook, distillers mak
 no further requests and leave tool output unchanged.
 
 If a raw fallback would be unsuitable for very large outputs, bound the output in
-the tool that produces it. `complete_task` results are never distilled. The
+the tool that produces it. `complete_task` and `ask_user` results are never
+distilled, and `load_skill` results only when the agent's skills configuration
+opts in (`SkillsConfig::load_skill_interception` in arko_agents). The
 [API index](../arko_workflows/INDEX.md#tool-result-distillation) documents
 configuration fields, records, and cost accounting.
 

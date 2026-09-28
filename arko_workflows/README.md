@@ -502,7 +502,8 @@ registered under) and tools and configure the size threshold, model, and
 reasoning. Their calls count against the budget and are recorded. A summary
 replaces the output only when the model finished it; a refusal or a summary cut
 off by its output limit keeps the raw output.
-`complete_task` results are never distilled. See
+`complete_task` and `ask_user` results are never distilled, and `load_skill` results
+only when the agent's `SkillsConfig::load_skill_interception` opts in. See
 [context management](../docs/context-efficiency.md#tool-result-distillation) for a
 configuration example.
 
