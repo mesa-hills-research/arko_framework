@@ -32,14 +32,16 @@ struct McpServerHandle {
 }
 
 impl McpServerHandle {
-    /// Closes the connection, then stops the process (see [`watch_server`])
-    /// and waits until it has exited.
+    /// Stops the process (see [`watch_server`]) and closes the connection,
+    /// then waits until the process has exited. The watcher is told first,
+    /// so the exit that closing the connection causes isn't reported as an
+    /// unexpected one.
     async fn stop(&mut self) {
-        if let Err(e) = self.service.close().await {
-            log::warn!("Error closing MCP server '{}': {:?}", self.name, e);
-        }
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
+        }
+        if let Err(e) = self.service.close().await {
+            log::warn!("Error closing MCP server '{}': {:?}", self.name, e);
         }
         if let Some(watcher) = self.watcher.take() {
             let _ = watcher.await;
@@ -67,7 +69,7 @@ fn watch_server(
     name: String,
     mut child: Child,
     stderr: Option<ChildStderr>,
-    stop: oneshot::Receiver<()>,
+    mut stop: oneshot::Receiver<()>,
 ) -> JoinHandle<Option<ServerExit>> {
     let tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_LINES_KEPT)));
     let reader = stderr.map(|stderr| {
@@ -86,8 +88,8 @@ fn watch_server(
     });
     tokio::spawn(async move {
         let exited = tokio::select! {
-            status = child.wait() => Some(status),
-            graceful = stop => {
+            biased;
+            graceful = &mut stop => {
                 let status = if graceful.is_ok() {
                     tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await.ok()
                 } else {
@@ -106,6 +108,7 @@ fn watch_server(
                 }
                 None
             }
+            status = child.wait() => Some(status),
         };
         let status = exited?;
         if let Some(reader) = reader {
