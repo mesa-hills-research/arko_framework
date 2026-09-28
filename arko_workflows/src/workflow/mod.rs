@@ -707,6 +707,7 @@ pub struct WorkflowBuilder {
     approval_policy: crate::policy::ApprovalPolicy,
     error_recovery_policy: crate::policy::ErrorRecoveryPolicy,
     recovery_waits: crate::policy::RecoveryWaits,
+    parallel: crate::context::ParallelSettings,
     /// `Some(voters)` once voting is enabled.
     voters: Option<HashSet<String>>,
     interception_failure_policy: Option<InterceptionFailurePolicy>,
@@ -742,6 +743,7 @@ impl WorkflowBuilder {
             approval_policy: crate::policy::ApprovalPolicy::default(),
             error_recovery_policy: crate::policy::ErrorRecoveryPolicy::default(),
             recovery_waits: crate::policy::RecoveryWaits::default(),
+            parallel: crate::context::ParallelSettings::default(),
             voters: None,
             interception_failure_policy: None,
             cancel_grace_period: DEFAULT_CANCEL_GRACE_PERIOD,
@@ -981,6 +983,25 @@ impl WorkflowBuilder {
         self
     }
 
+    /// Runs at most `max` agents of a `run_agents_parallel` call at once;
+    /// the others start as places free up, in input order. Default: no cap,
+    /// every agent starts at once. `build` rejects zero. Workflow services
+    /// have their own limit (`WorkflowServicesConfig::max_active_calls`).
+    pub fn max_parallel_agents(mut self, max: usize) -> Self {
+        self.parallel.max_agents = Some(max);
+        self
+    }
+
+    /// Opt-in (default off): in `run_agents_parallel`, the first agent that
+    /// fails stops the others (each is cancelled, winding down within the
+    /// cancel grace period), agents not started yet don't start, and the
+    /// call returns that failure. A pause is not a failure. Off, every agent
+    /// runs to its end and the first failure in input order is returned.
+    pub fn fail_fast(mut self, enabled: bool) -> Self {
+        self.parallel.fail_fast = enabled;
+        self
+    }
+
     /// Shortens automatic recovery's waits (tests only).
     #[cfg(test)]
     pub(crate) fn recovery_waits(mut self, waits: crate::policy::RecoveryWaits) -> Self {
@@ -1045,6 +1066,11 @@ impl WorkflowBuilder {
         }
 
         let workspace = normalize_workspace(&workspace)?;
+        if self.parallel.max_agents == Some(0) {
+            return Err(WorkflowError::BuilderInvalid(
+                "max_parallel_agents must be at least 1".to_string(),
+            ));
+        }
 
         for (label, value) in [
             ("budget limit", self.budget_limit),
@@ -1391,6 +1417,7 @@ impl WorkflowBuilder {
             approval_policy: self.approval_policy,
             error_recovery_policy: self.error_recovery_policy,
             recovery_waits: self.recovery_waits,
+            parallel: self.parallel,
             approval_reasons: parking_lot::Mutex::new(HashMap::new()),
             approval_warnings: parking_lot::Mutex::new(HashSet::new()),
             ballots: self

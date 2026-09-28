@@ -60,6 +60,8 @@ pub struct SharedContext {
     /// Whether and why the run was stopped (cancelled or aborted by a hook).
     pub(crate) run_control: Arc<crate::workflow::cancel::RunControl>,
     pub user_input_handler: Option<Arc<dyn crate::user_input::UserInputHandler>>,
+    /// `run_agents_parallel`'s concurrency cap and fail-fast setting.
+    pub(crate) parallel: ParallelSettings,
     /// How agents' tool-approval requests are answered.
     pub approval_policy: crate::policy::ApprovalPolicy,
     /// How agents' error-recovery pauses are answered.
@@ -76,6 +78,15 @@ pub struct SharedContext {
     /// The agents offered `cast_vote` (see `WorkflowBuilder::enable_voting`).
     pub voters: std::collections::HashSet<String>,
     pub event_tx: tokio::sync::broadcast::Sender<crate::workflow::result::WorkflowEvent>,
+}
+
+/// How `run_agents_parallel` runs its agents.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ParallelSettings {
+    /// At most this many at once; `None`: all at once.
+    pub max_agents: Option<usize>,
+    /// The first failure stops the others.
+    pub fail_fast: bool,
 }
 
 impl SharedContext {

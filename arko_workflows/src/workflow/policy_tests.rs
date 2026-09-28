@@ -795,3 +795,131 @@ async fn a_message_taken_but_not_added_reaches_the_continued_run_once() {
     assert_eq!(last.matches("Check the parser.").count(), 1, "{last}");
     assert!(context.messages.pending("lead").is_empty());
 }
+
+/// A server answering by prompt: `Fail.` with a 401 (the run fails),
+/// `Hold.` never (until `release` is notified), anything else completing.
+async fn by_prompt(release: Arc<tokio::sync::Notify>) -> ResponsesServer {
+    ResponsesServer::start_async(move |_, body| {
+        let release = release.clone();
+        Box::pin(async move {
+            let text = user_text(&body);
+            if text.contains("Fail.") {
+                Some(status(401))
+            } else if text.contains("Hold.") {
+                release.notified().await;
+                Some(done())
+            } else {
+                Some(done())
+            }
+        })
+    })
+    .await
+}
+
+fn two_agents(server: &ResponsesServer, workspace: &Workspace) -> WorkflowBuilder {
+    Workflow::builder()
+        .name("parallel-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("lead", agent_config("Friendly Lead"))
+        .agent("worker", agent_config("Friendly Worker"))
+}
+
+/// With `max_parallel_agents(1)` the second agent starts only when the
+/// first has finished (it is not running meanwhile); results keep input
+/// order.
+#[tokio::test]
+async fn a_concurrency_cap_starts_agents_as_places_free_up() {
+    let workspace = Workspace::new();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let server = by_prompt(release.clone()).await;
+    let workflow = Arc::new(
+        two_agents(&server, &workspace)
+            .max_parallel_agents(1)
+            .build()
+            .unwrap(),
+    );
+    let run = tokio::spawn({
+        let workflow = workflow.clone();
+        async move {
+            workflow
+                .run_agents_parallel(vec![
+                    ("lead", "Hold.".to_string()),
+                    ("worker", "Work.".to_string()),
+                ])
+                .await
+        }
+    });
+    server.wait_for_requests(1).await;
+    assert_eq!(
+        workflow.agent_status("worker"),
+        Some(crate::messaging::registry::AgentStatus::NotStarted)
+    );
+    release.notify_one();
+    let results = within(run).await.unwrap().unwrap();
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.agent_name.as_str())
+            .collect::<Vec<_>>(),
+        ["lead", "worker"]
+    );
+    assert_eq!(server.requests(), 2);
+    // Zero is refused.
+    assert!(matches!(
+        two_agents(&server, &workspace)
+            .max_parallel_agents(0)
+            .build(),
+        Err(WorkflowError::BuilderInvalid(_))
+    ));
+}
+
+/// With `fail_fast(true)` the first failure stops the other agents (a
+/// running one is cancelled, one not started never starts), and the call
+/// returns that failure.
+#[tokio::test]
+async fn fail_fast_stops_the_other_agents_at_the_first_failure() {
+    for cap in [None, Some(1)] {
+        let workspace = Workspace::new();
+        let server = by_prompt(Arc::new(tokio::sync::Notify::new())).await;
+        let mut builder = two_agents(&server, &workspace).fail_fast(true);
+        if let Some(cap) = cap {
+            builder = builder.max_parallel_agents(cap);
+        }
+        let workflow = builder.build().unwrap();
+        let (first, second) = if cap.is_some() {
+            // The failing agent takes the only place.
+            (("lead", "Fail."), ("worker", "Hold."))
+        } else {
+            (("worker", "Hold."), ("lead", "Fail."))
+        };
+        let error = within(workflow.run_agents_parallel(vec![
+            (first.0, first.1.to_string()),
+            (second.0, second.1.to_string()),
+        ]))
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("can't succeed without a change"),
+            "{error}"
+        );
+        let held = workflow
+            .result()
+            .agent_results
+            .into_iter()
+            .find(|result| result.agent_name == "worker");
+        match cap {
+            None => {
+                let held = held.expect("the held agent is recorded");
+                assert_eq!(held.status, AgentRunStatus::Cancelled);
+                assert!(
+                    held.error.as_deref().unwrap().contains("fail_fast"),
+                    "{:?}",
+                    held.error
+                );
+            }
+            // It never started.
+            Some(_) => assert!(held.is_none()),
+        }
+    }
+}

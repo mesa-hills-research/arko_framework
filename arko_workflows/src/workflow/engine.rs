@@ -551,7 +551,42 @@ async fn answer_recovery_pause(
 /// with another error when the workflow must stop it (including the stop's
 /// error once the run is cancelled or aborted), and the caller then stops
 /// the agent.
+///
+/// A `batch_stop` (fail-fast in `run_agents_parallel`) that is set stops the
+/// agent too: the loop returns `AgentCancelled` with its reason.
 pub(crate) async fn drive_event_loop(
+    agent_name: &str,
+    agent_run_id: uuid::Uuid,
+    event_rx: &mut tokio::sync::mpsc::Receiver<AgentEvent>,
+    cmd_tx: &tokio::sync::mpsc::Sender<UserCommand>,
+    ctx: &Arc<SharedContext>,
+    persistence: Option<&Arc<PersistenceManager>>,
+    batch_stop: Option<tokio::sync::watch::Receiver<Option<String>>>,
+) -> Result<(), WorkflowError> {
+    let Some(mut batch_stop) = batch_stop else {
+        return drive_events(agent_name, agent_run_id, event_rx, cmd_tx, ctx, persistence).await;
+    };
+    let stopped = tokio::select! {
+        biased;
+        stopped = batch_stop.wait_for(Option::is_some) => {
+            stopped.map(|reason| reason.clone().unwrap_or_default())
+        }
+        result = drive_events(agent_name, agent_run_id, event_rx, cmd_tx, ctx, persistence) => {
+            return result;
+        }
+    };
+    match stopped {
+        Ok(reason) => Err(WorkflowError::AgentCancelled {
+            agent: agent_name.to_string(),
+            reason,
+        }),
+        // The call that could stop it is gone: drive on.
+        Err(_) => drive_events(agent_name, agent_run_id, event_rx, cmd_tx, ctx, persistence).await,
+    }
+}
+
+/// [`drive_event_loop`] without a batch stop.
+async fn drive_events(
     agent_name: &str,
     agent_run_id: uuid::Uuid,
     event_rx: &mut tokio::sync::mpsc::Receiver<AgentEvent>,
@@ -846,6 +881,9 @@ pub(crate) struct StartedRun {
     /// How many agent runs this one runs inside (a verifier or a delegated
     /// agent runs inside the tool call of the agent that started it).
     pub depth: u32,
+    /// Stops the run when set, with the reason (fail-fast in
+    /// `run_agents_parallel`).
+    pub batch_stop: Option<tokio::sync::watch::Receiver<Option<String>>>,
 }
 
 /// What an agent runtime's task returned.
@@ -982,6 +1020,7 @@ pub(crate) async fn drive_to_result(
         started_task,
         pending_message_ids,
         depth,
+        batch_stop,
     } = run;
     // Until the end is recorded below: if this future is dropped (and with
     // it, the agent's task aborted), the run is recorded as abandoned.
@@ -998,6 +1037,7 @@ pub(crate) async fn drive_to_result(
         &cmd_tx,
         ctx,
         persistence,
+        batch_stop,
     )
     .await;
 
@@ -1180,6 +1220,8 @@ fn run_status(state: &TaskState) -> AgentRunStatus {
 fn stop_reason(ctx: &SharedContext, drive_result: &Result<(), WorkflowError>) -> String {
     match (ctx.run_control.cancellation(), drive_result) {
         (Some(cancellation), _) => cancellation.cause.agent_reason(),
+        // A stop the workflow already worded (fail-fast).
+        (None, Err(WorkflowError::AgentCancelled { reason, .. })) => reason.clone(),
         (None, Err(error)) => format!("Stopped by the workflow: {error}"),
         (None, Ok(())) => "Stopped by the workflow.".to_string(),
     }
@@ -1734,6 +1776,7 @@ impl WorkflowEngine {
             started_task,
             pending_message_ids,
             depth,
+            batch_stop: None,
         }
     }
 
@@ -1785,45 +1828,95 @@ impl WorkflowEngine {
     /// Run multiple agents in parallel.
     ///
     /// The agents are marked running together before any of them is
-    /// prompted, so each one's roster shows the others as running.
+    /// prompted, so each one's roster shows the others as running. With a
+    /// concurrency cap (`WorkflowBuilder::max_parallel_agents`), at most that
+    /// many run at once: each is marked running when it starts. With
+    /// fail-fast (`WorkflowBuilder::fail_fast`), the first failure stops the
+    /// others, and agents not started yet don't start.
     pub async fn run_agents_parallel(
         &self,
         agents: Vec<(&str, String)>,
         ctx: &Arc<SharedContext>,
     ) -> Result<Vec<AgentResult>, WorkflowError> {
         ctx.run_control.check()?;
+        let limit = ctx.parallel.max_agents;
         // Each agent is admitted (PreAgentSpawn, budget, the run's stop)
         // before any is marked running; one refused is that agent's error.
         let admitted = agents
             .iter()
             .map(|(name, _)| self.admit(name, None, ctx))
             .collect::<Vec<_>>();
-        let reserved = agents
-            .iter()
-            .zip(&admitted)
-            .filter(|(_, admission)| admission.is_ok())
-            .map(|((name, _), _)| (uuid::Uuid::new_v4(), *name))
-            .collect::<Vec<_>>();
-        ctx.registry.start(&reserved);
-        let mut reserved = reserved.into_iter();
+        // Without a cap every admitted agent starts now, marked running
+        // together.
+        let mut reserved = if limit.is_none() {
+            let reserved = agents
+                .iter()
+                .zip(&admitted)
+                .filter(|(_, admission)| admission.is_ok())
+                .map(|((name, _), _)| (uuid::Uuid::new_v4(), *name))
+                .collect::<Vec<_>>();
+            ctx.registry.start(&reserved);
+            reserved.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        }
+        .into_iter();
+        let permits = limit.map(|limit| Arc::new(tokio::sync::Semaphore::new(limit)));
+        let (stop, _) = tokio::sync::watch::channel(None::<String>);
+        // The index of the agent whose failure stopped the others.
+        let trigger = Arc::new(std::sync::OnceLock::<usize>::new());
         // Dropping this call stops its agents.
         let mut join_handles = AbortAll(Vec::new());
 
-        for ((name, prompt), admission) in agents.into_iter().zip(admitted) {
+        for (index, ((name, prompt), admission)) in agents.into_iter().zip(admitted).enumerate() {
             let engine = WorkflowEngine {
                 llm_client: self.llm_client.clone(),
                 persistence: self.persistence.clone(),
             };
             let ctx_clone = ctx.clone();
             let name_owned = name.to_string();
-            let reservation = admission.map(|()| Reservation {
-                ctx: ctx.clone(),
-                task_id: reserved.next().expect("an admitted agent is reserved").0,
-                armed: true,
+            let reservation = admission.map(|()| {
+                reserved.next().map(|task_id| Reservation {
+                    ctx: ctx.clone(),
+                    task_id,
+                    armed: true,
+                })
             });
+            let permits = permits.clone();
+            let mut stopped = stop.subscribe();
+            let stop = stop.clone();
+            let trigger = trigger.clone();
 
             let handle = tokio::spawn(async move {
-                let reservation = reservation?;
+                // A capped batch's place, held until this agent's run ends.
+                let mut _place = None;
+                let reservation = match reservation? {
+                    Some(reservation) => reservation,
+                    None => {
+                        // Capped: wait for a place, unless the batch stops.
+                        let permits = permits.expect("a capped batch has permits");
+                        let place = tokio::select! {
+                            biased;
+                            reason = stopped.wait_for(Option::is_some) => {
+                                return Err(WorkflowError::AgentCancelled {
+                                    agent: name_owned,
+                                    reason: reason
+                                        .map(|reason| reason.clone().unwrap_or_default())
+                                        .unwrap_or_default(),
+                                });
+                            }
+                            place = permits.acquire_owned() => place,
+                        };
+                        _place = place.ok();
+                        let task_id = uuid::Uuid::new_v4();
+                        ctx_clone.registry.start(&[(task_id, name_owned.as_str())]);
+                        Reservation {
+                            ctx: ctx_clone.clone(),
+                            task_id,
+                            armed: true,
+                        }
+                    }
+                };
                 let options = StartOptions {
                     reserved: Some(reservation.task_id),
                     admitted: true,
@@ -1831,14 +1924,28 @@ impl WorkflowEngine {
                 };
                 let run = engine.start_agent(&name_owned, &prompt, &ctx_clone, options);
                 reservation.release();
-                drive_to_result(run?, &ctx_clone, engine.persistence.as_ref()).await
+                let mut run = run?;
+                run.batch_stop = Some(stopped);
+                let result = drive_to_result(run, &ctx_clone, engine.persistence.as_ref()).await;
+                if ctx_clone.parallel.fail_fast
+                    && let Err(error) = &result
+                    && !is_pause(error)
+                    && trigger.set(index).is_ok()
+                {
+                    stop.send_replace(Some(format!(
+                        "Stopped because agent '{name_owned}' failed in the same parallel run (fail_fast): {error}"
+                    )));
+                }
+                // The place frees up as this returns, after a failure has
+                // stopped the batch, so a waiting agent doesn't start then.
+                result
             });
             join_handles.0.push(handle);
         }
 
         let mut results = Vec::new();
-        let mut first_error = None;
-        for handle in &mut join_handles.0 {
+        let mut errors = Vec::new();
+        for (index, handle) in join_handles.0.iter_mut().enumerate() {
             match handle.await {
                 Ok(Ok(result)) => results.push(result),
                 Ok(Err(error)) => {
@@ -1856,23 +1963,26 @@ impl WorkflowEngine {
                     };
                     match paused {
                         Some(result) => results.push(result),
-                        None if first_error.is_none() => first_error = Some(error),
-                        None => {}
+                        None => errors.push((index, error)),
                     }
                 }
-                Err(error) => {
-                    if first_error.is_none() {
-                        first_error = Some(WorkflowError::Channel(format!(
-                            "Parallel agent join error: {error}"
-                        )));
-                    }
-                }
+                Err(error) => errors.push((
+                    index,
+                    WorkflowError::Channel(format!("Parallel agent join error: {error}")),
+                )),
             }
         }
         ctx.run_control.check()?;
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(results),
+        // The failure that stopped the others, else the first in input
+        // order.
+        let first = trigger
+            .get()
+            .and_then(|trigger| errors.iter().position(|(index, _)| index == trigger))
+            .unwrap_or(0);
+        if errors.is_empty() {
+            Ok(results)
+        } else {
+            Err(errors.swap_remove(first).1)
         }
     }
 
@@ -2681,6 +2791,7 @@ mod tests {
                 &mut event_rx,
                 &command_tx,
                 workflow.context(),
+                None,
                 None,
             ),
         )
