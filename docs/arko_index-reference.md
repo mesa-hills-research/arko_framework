@@ -141,7 +141,8 @@ them; the fixed instructions and tool schema (under 1,000 tokens) come on top.
   for models measured in bytes (about 400 KB for a 1M-token Claude model). A model whose
   limit is unknown, such as an OpenRouter model built without the catalog or a custom
   backend, is assumed to accept 128,000 tokens (`budget::FALLBACK_MAX_INPUT_TOKENS`), so
-  its default is 51,200 bytes; the job logs a warning.
+  its default is 51,200 bytes; the job logs a warning. A custom `Backend` reports its
+  model's tokenizer and input limit with `Backend::chunk_input`.
 - **Explicit limits.** `max_request_tokens` sets the token limit (for models measured in
   bytes, it applies as 4 bytes per token), and `max_request_bytes` a byte limit; when both
   are set, both apply.
@@ -160,9 +161,11 @@ A file whose rendering exceeds the budget is handled by `ChunkingOptions::oversi
 | `Skip` | The file is left out of the index. The job's exclusions list it with the reason "too large (over the chunk request budget)", and `JobStatus::skipped` counts it. |
 | `Block` | The job is blocked before any model request, with a problem that names the files. |
 
-Each file over the budget gets an `oversize` event with its size, the budget, the action
-taken, the number of windows and any single lines made into their own chunks. Files with
-no legal internal boundary are never measured: they become one chunk without a request.
+A file that is split or skipped gets an `oversize` event with its size, the budget, the
+action taken, the number of windows and any single lines made into their own chunks.
+A file with no legal internal boundary becomes one chunk without a model request (counted
+in `JobStatus::bypassed`), so `Split` leaves it whole; `Skip` and `Block` apply to it too
+when it exceeds the budget. Empty and whitespace-only files produce no chunks.
 
 ### Repairs
 
@@ -170,9 +173,9 @@ Invalid cuts are repaired without changing accepted ones. If there is no legal b
 between the neighboring accepted cuts, the disputed cuts are removed without a model
 request (a `deterministic_repair` event). Otherwise a repair request sends the window's
 rows (the complete file when it is one window) with the legal boundary IDs of each
-disputed region, and the model returns an ordered
-selection of boundaries, or `[]` to merge the region into one chunk. A repair applies
-only to the snapshot and cut set it was requested for.
+disputed region, and the model returns an ordered selection of boundaries, or `[]` to
+merge the region into one chunk. A repair applies only to the snapshot and cut set it was
+requested for.
 
 A window gets up to `ChunkingOptions::max_repair_rounds` repair requests (5 by default;
 `None` repairs until every cut is valid). When its cuts are still invalid after that,
@@ -182,9 +185,7 @@ A window gets up to `ChunkingOptions::max_repair_rounds` repair requests (5 by d
   neighboring chunk, which is always valid; accepted cuts stay, and a
   `deterministic_repair` event records the merge.
 - `Block`: the file stays unfinished and the job is blocked, naming it; resuming the job
-  allows as many repairs again. A file with no legal internal boundary becomes a single chunk without a
-model request (counted in `JobStatus::bypassed`); empty and whitespace-only files produce
-no chunks.
+  allows as many repairs again.
 
 Source files are never modified. All stored text comes from the normalized snapshot, and
 a file's chunks cover it exactly, in order, with no gaps or overlaps.
@@ -203,7 +204,7 @@ the phase, the last `problem`, file counts (`files`, `validated`, `bypassed`,
 
 - `paused`: after `pause(job)`, when a plan usage limit was reached, or when its process
   stopped mid-run (detected when the database is next opened, with the problem "process
-  interrupted; resume persisted work");
+  interrupted; resume persisted work", or "paused" if a pause had been requested);
 - `blocked`: after a provider error, an invalid response, or with files whose boundaries
   still need repair. When only transient provider failures that ran out of attempts
   blocked it, its `phase` event has `retryable: true`;
@@ -216,10 +217,10 @@ its chunking policy and request budget, which the job saved when it scanned the 
 (the budget is reused as saved). Every other `Config` field is a runtime setting and is
 taken from the current configuration; a change is logged, recorded as a
 `settings_changed` event and saved with the job. If the embedding profile differs, resume
-fails; if the chunking policy has changed, resume fails too. In either case, cancel the
-job and start a new update. An index has at most one unfinished
-job: `start_update` fails while a build or update of the index is running, paused or
-blocked.
+fails; if the chunking policy has changed, or a newer generation of the index was
+published since the job started, resume fails too. In these cases, cancel the job and
+start a new update. An index has at most one unfinished job: `start_update` fails while a
+build or update of the index is running, paused or blocked.
 
 | `Config` field | Default | Meaning |
 |---|---|---|
@@ -270,7 +271,7 @@ JSON `detail`:
 |---|---|
 | `phase` | The new `phase` and `problem`, and `retryable: true` for a job blocked only by transient provider failures. |
 | `snapshot` | Counts of scanned, excluded and affected files; the manifest hash; `chunking_policy` and `policy_changed`; the chunk `model` and `reasoning`; the resolved `chunk_budget` (`tokenizer`, `max_tokens`, `max_bytes`, the model's `max_input_tokens`, whether it was known, and the `oversize` policy); the number of `oversize_files` and `skipped` files. |
-| `oversize` | A file over the chunk request budget: its `path`, rendered `bytes` and `tokens`, the `budget`, the `action` (`split`, `skipped` or `blocked`), its `windows` and the `forced_rows` made into their own chunks. |
+| `oversize` | A file over the chunk request budget that was split or skipped: its `path`, rendered `bytes` and `tokens`, the `budget`, the `action` (`split` or `skipped`), its `windows` and the `forced_rows` made into their own chunks. Under `Block` no events are written; the problem names the files. |
 | `request_attempt` | `artifact` (request ID), `repair`, and `event`: `phase` (`started`, `failed`, `retry_wait`, `retries_exhausted`, `usage_limit` or `completed`), `attempt`, `unix_ms` and a phase-specific `detail`, such as `error` and `usage` for a failure or `delay_ms` and `capacity` for a retry wait. |
 | `request_finished` | `artifact`, `repair` and the `usage` of the accepted reply. |
 | `deterministic_repair` | Cuts removed without a model request. |
@@ -450,8 +451,11 @@ the next one. An unfinished update found paused or blocked is handled as follows
 - **Blocked by transient provider failures** (rate limits, server errors or capacity
   waits that ran out of attempts; its `phase` event has `retryable: true`): resumed after
   `retry_blocked_after` when that is set.
-- **Otherwise** (paused with `pause(job)` or by a usage limit, or blocked for another
-  reason): left for the host, and no other update starts until it is resumed or cancelled.
+- **Otherwise** (paused with `pause(job)` or by a usage limit, blocked for another
+  reason, or one the watcher failed to resume): left for the host, and no other update
+  starts until it is resumed or cancelled. Without periodic scans (`reconcile: None`) the
+  watcher still looks at a held update every twenty debounce periods, so edits made in
+  the meantime are indexed once the host resumes or cancels it.
 
 | `WatchEvent` | Meaning |
 |---|---|
@@ -490,9 +494,9 @@ retrieval:
 | `rebuild_file_limit` | `Some(100)` | Caps the paths listed in the rebuild notice; `None` lists every one. |
 
 Filters apply before ranking in every mode, every remaining chunk is scored, and every
-query term is used. Ranking reads only the ranking rows; chunk text and locations are
-loaded for the returned page alone, so `top_k` bounds the work of building a page. `min_chunk_bytes` affects search only; `read_chunks` still returns
-short chunks.
+query term is used. Ranking reads only the ranking rows from the database; chunk text and
+locations are loaded for the returned page alone. `min_chunk_bytes` affects search only;
+`read_chunks` still returns short chunks.
 
 Each `SearchHit` carries the complete chunk `text`, its `path`, `snapshot` hash,
 `start_byte` and `end_byte`, `first_line` and `last_line`, `structure`, `score` and
@@ -525,12 +529,12 @@ Semantic and hybrid searches embed the query with the configured Voyage profile;
 over the per-input token limit is rejected. Query embeddings share the embedding request
 slots with running jobs and wait behind queued build embeddings; `Config::query_priority`
 dispatches them first, and `Config::query_max_transient_attempts` gives them a smaller
-retry budget. They return `Error::Invalid` when the
-generation was embedded with another profile (model, dimensions or tokenizer revision),
-since its vectors can't be compared with the query's; lexical search still works, and an
-update publishes a generation with the configured profile. Query embeddings are cached in memory. The
-vectors of the most recent generation and filter set are cached when they fit in
-`vector_cache_bytes`; larger sets are streamed from the database, with identical results.
+retry budget. They return `Error::Invalid` when the generation was embedded with another
+profile (model, dimensions or tokenizer revision), since its vectors can't be compared
+with the query's; lexical search still works, and an update publishes a generation with
+the configured profile. Query embeddings are cached in memory. The vectors of the most
+recent generation and filter set are cached when they fit in `vector_cache_bytes`; larger
+sets are streamed from the database, with identical results.
 
 `read_chunks(index, generation, ids, neighbors)` returns the named chunks of a complete
 generation, plus up to `neighbors` adjacent chunks on each side within the same file,
@@ -573,7 +577,9 @@ let page = index.search_with_judge(&index_id, "how do I retry a failed workflow 
   refused or incomplete reply counts as invalid. Transient provider failures (rate limits,
   server errors, capacity) are retried with the index's backoff, never sooner than a
   delay the provider asks for, until `max_transient_attempts` (default 3) have failed.
-  Other provider errors, plan usage limits included, are returned at once. When the
+  A provider asking for a wait longer than 60 seconds (`MAX_JUDGE_RETRY_WAIT`) fails the
+  search instead. Other provider errors, plan usage limits included, are returned at once.
+  When the
   attempts run out, the search returns the error rather than unjudged results.
 - Candidates are sent in full, so choose a model and `candidate_limit` whose context
   window fits them. The judge applies no timeout of its own.
@@ -582,20 +588,20 @@ let page = index.search_with_judge(&index_id, "how do I retry a failed workflow 
 retries included), the summed `usage` of the judge's responses (rejected replies included,
 when the judge reports usage), the examined and unexamined candidate counts, the number
 selected and the number selected beyond `top_k`, and every exclusion with its reason. The
-judge's usage is not part of any job's usage. `candidate_count` still counts every eligible result,
-and `omitted_hits` every one missing from the response. Judged searches neither
-accept nor return cursors, because each judgment covers one candidate pool; use `search`
-for paging.
+judge's usage is not part of any job's usage. `candidate_count` still counts every
+eligible result, and `omitted_hits` every one missing from the response. Judged searches
+neither accept nor return cursors, because each judgment covers one candidate pool; use
+`search` for paging.
 
 `LlmSearchJudge::new(client, model)` accepts any `arko_ai` model and uses its default
 generation settings; set reasoning and other settings with `with_generation_config`, and
 add selection preferences with `with_instructions` (appended to the built-in instructions
-under "Additional retrieval preferences"; nothing is appended without them). Like the chunk model, the judge owns
-the tool configuration: where a model cannot be forced to call the tool (for example,
-Anthropic models with manual extended thinking), it uses automatic tool choice and
-validates the reply in the same way. Credentials and generation settings stay with the
-client and the judge, never in the index database. To use another provider, transport or
-selection policy, implement the `SearchJudge` trait; implement
+under "Additional retrieval preferences"; nothing is appended without them). Like the
+chunk model, the judge owns the tool configuration: where a model cannot be forced to call
+the tool (for example, Anthropic models with manual extended thinking), it uses automatic
+tool choice and validates the reply in the same way. Credentials and generation settings
+stay with the client and the judge, never in the index database. To use another provider,
+transport or selection policy, implement the `SearchJudge` trait; implement
 `SearchJudge::select_with_usage` as well to report usage.
 
 ## Example CLI
@@ -644,14 +650,15 @@ is hybrid. `--rebuild-file-limit N` caps the paths listed in a rebuild notice (d
 `list`, `status` and `read` make no provider requests, so they need no credentials and
 load no tokenizer. The other commands load the Voyage tokenizer; those that embed need
 `VOYAGE_API_KEY`, and those that chunk or judge need OpenAI credentials, from
-`--oauth-file`, or else from the environment: `OPENAI_OAUTH_ACCESS_TOKEN` and `OPENAI_OAUTH_ACCOUNT_ID` (with an optional
-`OPENAI_OAUTH_REFRESH_TOKEN`) for ChatGPT OAuth, or `OPENAI_API_KEY`. The OAuth file uses
-the Codex `auth.json` layout, with `access_token`, `refresh_token` and `account_id` at the
-top level or under `tokens`, and can be the one Codex uses: every token refresh reads the
-file again first, adopting tokens another process refreshed in the meantime, and rotated
-tokens are saved to it at once, atomically (the previous contents are kept in
-`<file>.bak`); see [ChatGPT OAuth credentials](../arko_ai/README.md#chatgpt-oauth-credentials).
-Rotated tokens from environment credentials are not saved.
+`--oauth-file`, or else from the environment: `OPENAI_OAUTH_ACCESS_TOKEN` and
+`OPENAI_OAUTH_ACCOUNT_ID` (with an optional `OPENAI_OAUTH_REFRESH_TOKEN`) for ChatGPT
+OAuth, or `OPENAI_API_KEY`. The OAuth file uses the Codex `auth.json` layout, with
+`access_token`, `refresh_token` and `account_id` at the top level or under `tokens`, and
+can be the one Codex uses: every token refresh reads the file again first, adopting tokens
+another process refreshed in the meantime, and rotated tokens are saved to it at once,
+atomically (the previous contents are kept in `<file>.bak`); see [ChatGPT OAuth
+credentials](../arko_ai/README.md#chatgpt-oauth-credentials). Rotated tokens from
+environment credentials are not saved.
 
 ### Judge options
 

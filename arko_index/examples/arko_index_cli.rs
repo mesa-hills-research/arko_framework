@@ -281,9 +281,16 @@ async fn main() -> AnyResult<()> {
             // starts, resumes or leaves paused or blocked.
             let mut events = watcher.subscribe();
             let printer = tokio::spawn(async move {
-                while let Ok(event) = events.recv().await {
-                    if let Ok(line) = serde_json::to_string(&event) {
-                        println!("{line}");
+                loop {
+                    match events.recv().await {
+                        Ok(event) => {
+                            if let Ok(line) = serde_json::to_string(&event) {
+                                println!("{line}");
+                            }
+                        }
+                        // Events missed while printing fell behind.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
             });

@@ -449,7 +449,8 @@ impl ArkoIndex {
         Ok(page)
     }
     /// Exact snapshot text for selected IDs, optionally including neighboring chunks.
-    /// Old complete generations remain readable until the index is explicitly deleted.
+    /// Old complete generations remain readable until the index is deleted or
+    /// they are pruned ([`Config::keep_generations`](crate::Config::keep_generations)).
     pub async fn read_chunks(
         &self,
         index: &str,

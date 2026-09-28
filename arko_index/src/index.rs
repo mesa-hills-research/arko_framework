@@ -251,6 +251,17 @@ impl ArkoIndex {
                     c.query_row("SELECT config FROM jobs WHERE id=?1", [&job_key], |r| {
                         r.get(0)
                     })?;
+                // Publishing it would replace newer content with older.
+                let superseded: bool = c.query_row(
+                    "SELECT j.rowid < a.rowid FROM jobs j JOIN indexes i ON i.id=j.index_id JOIN jobs a ON a.id=i.active WHERE j.id=?1",
+                    [&job_key],
+                    |r| r.get(0),
+                ).optional()?.unwrap_or(false);
+                if superseded {
+                    return Err(error::invalid(
+                        "a newer generation of the index was published since this job started; start an update instead",
+                    ));
+                }
                 let saved: Config = decode(&config)?;
                 // Only the embedding profile shapes stored output; the other
                 // settings are runtime settings, taken from the current
@@ -353,7 +364,7 @@ impl ArkoIndex {
                 };
                 for s in states {
                     let s: FileState = decode(&s)?;
-                    result.validated += usize::from(s.complete);
+                    result.validated += usize::from(s.complete && s.skipped.is_none());
                     result.bypassed += usize::from(s.bypass);
                     result.unchecked += usize::from(s.structure.status == "unchecked");
                     result.skipped += usize::from(s.skipped.is_some());
@@ -1247,16 +1258,19 @@ fn plan_files(
                 complete: bypass,
                 skipped: None,
             };
-            if bypass {
-                // No legal internal boundary: one chunk without a model request.
-                if !empty {
-                    let mut window = Window::new(0, s.text.len());
-                    window.cuts = Some(vec![]);
-                    state.windows.push(window);
-                }
+            if empty {
                 return (s, state);
             }
-            let plan = budget::plan(&s, &state.structure, budget);
+            // A file without a legal internal boundary needs no model
+            // request; it is measured only for the skip and block policies.
+            let plan = (!bypass || budget.oversize != OversizePolicy::Split)
+                .then(|| budget::plan(&s, &state.structure, budget));
+            let Some(plan) = plan else {
+                let mut window = Window::new(0, s.text.len());
+                window.cuts = Some(vec![]);
+                state.windows.push(window);
+                return (s, state);
+            };
             if plan.oversize {
                 let action = match budget.oversize {
                     OversizePolicy::Split => "split",
@@ -1269,12 +1283,23 @@ fn plan_files(
                     state.complete = true;
                 }
             }
-            state.windows = plan.windows;
+            if bypass && state.skipped.is_none() {
+                // One chunk without a model request.
+                let mut window = Window::new(0, s.text.len());
+                window.cuts = Some(vec![]);
+                state.windows = vec![window];
+            } else {
+                state.windows = plan.windows;
+            }
             (s, state)
         })
         .collect();
     (planned, oversize)
 }
+/// Bytes per token above which text is certain to exceed an embedding input
+/// in practice: splitting considers at most this many bytes per token of
+/// the input limit at a time.
+const PROBE_BYTES_PER_TOKEN: usize = 16;
 struct PreparedChunk {
     id: String,
     path: String,
@@ -1297,22 +1322,30 @@ fn prepare_chunks(
         if state.skipped.is_some() {
             continue;
         }
+        let item_tokens = backend.limits().item_tokens;
+        // Text longer than this is split without tokenizing all of it, so
+        // splitting a huge chunk stays linear in its size.
+        let probe_bytes = item_tokens.saturating_mul(PROBE_BYTES_PER_TOKEN);
         let embedding_structure = Structure {
             status: state.structure.status.clone(),
             protected: state
                 .structure
                 .protected
                 .iter()
-                .filter_map(
-                    |range| match backend.input_tokens(&s.text[range.clone()], false) {
-                        Ok(tokens) if tokens <= backend.limits().item_tokens => {
-                            Some(Ok(range.clone()))
-                        }
+                .filter_map(|range| {
+                    if range.len() > probe_bytes {
+                        return None;
+                    }
+                    match backend.input_tokens(&s.text[range.clone()], false) {
+                        Ok(tokens) if tokens <= item_tokens => Some(Ok(range.clone())),
                         Ok(_) => None,
                         Err(e) => Some(Err(e)),
-                    },
-                )
+                    }
+                })
                 .collect::<Result<Vec<_>>>()?,
+        };
+        let fits = |start: usize, end: usize| -> Result<bool> {
+            Ok(backend.input_tokens(&s.text[start..end], false)? <= item_tokens)
         };
         let mut covered = 0;
         for w in &state.windows {
@@ -1326,25 +1359,42 @@ fn prepare_chunks(
                 while start < range.end {
                     let mut end = range.end;
                     let mut forced = w.forced;
-                    while backend.input_tokens(&s.text[start..end], false)?
-                        > backend.limits().item_tokens
-                    {
+                    // Far more text than one input can hold: consider only a
+                    // prefix of it.
+                    if end - start > probe_bytes {
                         forced = true;
-                        // Prefer the last whole-component boundary that actually fits.
-                        // Byte midpoints must not force a split inside a component that fits.
-                        let mut legal_end = None;
-                        for &candidate in s.line_starts.iter().rev() {
-                            if start < candidate
-                                && candidate < end
-                                && embedding_structure.legal(candidate)
-                                && backend.input_tokens(&s.text[start..candidate], false)?
-                                    <= backend.limits().item_tokens
-                            {
-                                legal_end = Some(candidate);
-                                break;
+                        end = start + probe_bytes;
+                        while !s.text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                    }
+                    while !fits(start, end)? {
+                        forced = true;
+                        // Prefer the last whole-component boundary that actually fits
+                        // (a binary search: longer prefixes have more tokens). Byte
+                        // midpoints must not force a split inside a component that fits.
+                        let (from, to) = (
+                            s.line_starts.partition_point(|&c| c <= start),
+                            s.line_starts.partition_point(|&c| c < end),
+                        );
+                        let candidates: Vec<usize> = s.line_starts[from..to]
+                            .iter()
+                            .copied()
+                            .filter(|&c| embedding_structure.legal(c))
+                            .collect();
+                        let (mut low, mut high) = (0, candidates.len());
+                        while low < high {
+                            let middle = (low + high) / 2;
+                            if fits(start, candidates[middle])? {
+                                low = middle + 1;
+                            } else {
+                                high = middle;
                             }
                         }
-                        end = legal_end.unwrap_or(start + (end - start) / 2);
+                        end = match low.checked_sub(1) {
+                            Some(index) => candidates[index],
+                            None => start + (end - start) / 2,
+                        };
                         while end > start && !s.text.is_char_boundary(end) {
                             end -= 1;
                         }

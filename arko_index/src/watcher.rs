@@ -429,7 +429,7 @@ impl Watching {
             }
             _ if self.unresumable.contains(&job) => {
                 self.hold(job, phase, problem);
-                None
+                self.held_recheck(now)
             }
             "paused"
                 if self.options.resume_interrupted && problem.as_deref() == Some(INTERRUPTED) =>
@@ -448,9 +448,20 @@ impl Watching {
             }
             _ => {
                 self.hold(job, phase, problem);
-                None
+                self.held_recheck(now)
             }
         }
+    }
+
+    /// When to look again at a held job: at the next reconcile tick, or,
+    /// without periodic scans, after twenty debounce periods, so that edits
+    /// made while it was held are picked up once the host resumes or cancels
+    /// it.
+    fn held_recheck(&self, now: Instant) -> Option<Instant> {
+        self.options
+            .reconcile
+            .is_none()
+            .then(|| now + self.options.debounce.saturating_mul(20))
     }
 
     fn hold(&mut self, job: String, phase: String, problem: Option<String>) {

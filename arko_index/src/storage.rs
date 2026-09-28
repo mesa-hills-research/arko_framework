@@ -44,8 +44,11 @@ impl Db {
                 _ => return Err(invalid("unsupported/legacy index database; use a new database path")),
             }
             c.execute_batch(SCHEMA)?;
-            // A terminated process cannot leave a generation apparently active forever.
-            c.execute("UPDATE jobs SET phase='paused', problem=?1 WHERE phase IN ('snapshotting','chunking','embedding')",[INTERRUPTED])?;
+            // A terminated process cannot leave a generation apparently active
+            // forever. A job the host asked to pause (its last pause request is
+            // newer than its last phase change) stays paused as asked; the others
+            // are marked interrupted, which a watcher resumes.
+            c.execute("UPDATE jobs SET phase='paused', problem=CASE WHEN (SELECT kind FROM events WHERE job=jobs.id AND kind IN ('pause_requested','phase') ORDER BY sequence DESC LIMIT 1)='pause_requested' THEN 'paused' ELSE ?1 END WHERE phase IN ('snapshotting','chunking','embedding')",[INTERRUPTED])?;
             Ok(Self(Arc::new(Database{connection:Mutex::new(c),_lock:lock})))
         }).await?
     }

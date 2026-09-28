@@ -47,6 +47,10 @@ struct Fake {
     nan_cost: bool,
     /// What the backend reports about the chunk model.
     chunk_input: ChunkInput,
+    /// Characters counted by `tokens`, in all.
+    tokenized: AtomicUsize,
+    /// Query embeddings that fail with a transient error, before normal replies.
+    failing_queries: AtomicUsize,
 }
 impl Fake {
     fn new() -> Self {
@@ -71,6 +75,8 @@ impl Fake {
             rejected_embeds: AtomicUsize::new(0),
             nan_cost: false,
             chunk_input: ChunkInput::default(),
+            tokenized: AtomicUsize::new(0),
+            failing_queries: AtomicUsize::new(0),
         }
     }
 }
@@ -166,6 +172,19 @@ impl Backend for Fake {
     async fn embed(&self, texts: Vec<String>, query: bool) -> Result<VectorReply> {
         if query {
             self.queries.fetch_add(1, Ordering::SeqCst);
+            if self
+                .failing_queries
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(Error::Provider {
+                    message: "server error".into(),
+                    transient: true,
+                    retry_after: None,
+                    source: None,
+                    usage: None,
+                });
+            }
         } else {
             self.embeds.fetch_add(texts.len(), Ordering::SeqCst);
         }
@@ -208,6 +227,7 @@ impl Backend for Fake {
         })
     }
     fn tokens(&self, text: &str) -> Result<usize> {
+        self.tokenized.fetch_add(text.len(), Ordering::SeqCst);
         Ok(text.chars().count().div_ceil(4))
     }
     fn limits(&self) -> Limits {
@@ -2323,6 +2343,8 @@ async fn oversize_files_can_be_skipped_or_block_the_job() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("big.txt"), "zulu line\n".repeat(1_000)).unwrap();
     std::fs::write(root.path().join("small.txt"), "alpha\nbeta\n").unwrap();
+    // One line: no internal boundary, and still over the budget.
+    std::fs::write(root.path().join("line.txt"), "zulu ".repeat(1_000)).unwrap();
     let spec = |oversize| {
         BuildSpec::new("test", root.path()).with_chunking(ChunkingOptions {
             max_request_bytes: Some(2_000),
@@ -2335,7 +2357,7 @@ async fn oversize_files_can_be_skipped_or_block_the_job() {
     let fake = Arc::new(Fake::new());
     let (index, job, status) = build_spec(&fake, db.path(), spec(OversizePolicy::Skip)).await;
     assert_eq!(status.phase, "ready", "{:?}", status.problem);
-    assert_eq!((status.files, status.skipped), (2, 1));
+    assert_eq!((status.files, status.skipped, status.validated), (3, 2, 1));
     assert!(
         fake.calls
             .lock()
@@ -2344,8 +2366,9 @@ async fn oversize_files_can_be_skipped_or_block_the_job() {
             .all(|r| !r.prompt.contains("big.txt"))
     );
     let events = index.events(&job.job, 0, 1000).await.unwrap();
-    let oversize = events.iter().find(|e| e.kind == "oversize").unwrap();
-    assert_eq!(oversize.detail["action"], "skipped");
+    let oversize: Vec<_> = events.iter().filter(|e| e.kind == "oversize").collect();
+    assert_eq!(oversize.len(), 2);
+    assert!(oversize.iter().all(|e| e.detail["action"] == "skipped"));
     let c = rusqlite::Connection::open(db.path().join("i.db")).unwrap();
     let excluded: String = c
         .query_row("SELECT excluded FROM jobs WHERE id=?1", [&job.job], |r| {
@@ -2354,7 +2377,10 @@ async fn oversize_files_can_be_skipped_or_block_the_job() {
         .unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&excluded).unwrap(),
-        json!([{"path": "big.txt", "reason": arko_index::source::TOO_LARGE_FOR_A_REQUEST}])
+        json!([
+            {"path": "big.txt", "reason": arko_index::source::TOO_LARGE_FOR_A_REQUEST},
+            {"path": "line.txt", "reason": arko_index::source::TOO_LARGE_FOR_A_REQUEST}
+        ])
     );
     let page = index
         .search(&job.index, "zulu", options(SearchMode::Lexical))
@@ -2374,7 +2400,7 @@ async fn oversize_files_can_be_skipped_or_block_the_job() {
     assert_eq!(status.phase, "blocked");
     let problem = status.problem.unwrap();
     assert!(
-        problem.contains("big.txt") && problem.contains("block"),
+        problem.contains("big.txt") && problem.contains("line.txt") && problem.contains("block"),
         "{problem}"
     );
     assert!(fake.calls.lock().unwrap().is_empty());
@@ -2914,11 +2940,20 @@ async fn databases_of_the_first_schema_migrate_without_losing_data() {
     let root = tempfile::tempdir().unwrap();
     let db = tempfile::tempdir().unwrap();
     let path = db.path().join("i.db");
-    let text = "alpha original\n";
+    let text = "alpha original\nsecond line\n";
     std::fs::write(root.path().join("a.txt"), text).unwrap();
     let fake = Arc::new(Fake::new());
     let snapshot = Snapshot::new("a.txt", text.as_bytes()).unwrap();
     let payload = payload(&*fake, text.to_owned()).unwrap();
+    // The first generation split the file in two, and its full-text rows
+    // are missing.
+    let parts = [(0, 15), (15, text.len())];
+    let part_payloads: Vec<_> = parts
+        .iter()
+        .map(|&(start, end)| {
+            arko_index::packing::payload(&*fake, text[start..end].to_owned()).unwrap()
+        })
+        .collect();
     let root_path = std::fs::canonicalize(root.path()).unwrap();
     // As the first version saved them: two complete generations with the
     // same chunk, each with its own full-text copy.
@@ -2942,16 +2977,18 @@ async fn databases_of_the_first_schema_migrate_without_losing_data() {
             rusqlite::params![snapshot.hash, text],
         )
         .unwrap();
-        c.execute(
-            "INSERT INTO vectors VALUES(?1,?2,?3,?4)",
-            rusqlite::params![
-                payload.id,
-                serde_json::to_string(&fake.profile).unwrap(),
-                payload.tokens,
-                vector
-            ],
-        )
-        .unwrap();
+        for p in std::iter::once(&payload).chain(&part_payloads) {
+            c.execute(
+                "INSERT INTO vectors VALUES(?1,?2,?3,?4)",
+                rusqlite::params![
+                    p.id,
+                    serde_json::to_string(&fake.profile).unwrap(),
+                    p.tokens,
+                    vector
+                ],
+            )
+            .unwrap();
+        }
         for generation in ["g1", "g2"] {
             c.execute(
                 "INSERT INTO jobs(id,index_id,phase,config,manifest) VALUES(?1,'i','ready',?2,'m')",
@@ -2968,17 +3005,26 @@ async fn databases_of_the_first_schema_migrate_without_losing_data() {
                 ],
             )
             .unwrap();
-            let chunk = format!("chunk-{generation}");
-            c.execute(
-                "INSERT INTO chunks VALUES(?1,?2,'a.txt',?3,0,?4,1,1,?5,'unchecked')",
-                rusqlite::params![chunk, generation, snapshot.hash, text.len(), payload.id],
-            )
-            .unwrap();
-            c.execute(
-                "INSERT INTO chunk_fts(id,job,path,terms,body) VALUES(?1,?2,'a.txt','alpha original',?3)",
-                rusqlite::params![chunk, generation, text],
-            )
-            .unwrap();
+            if generation == "g1" {
+                for ((start, end), p) in parts.iter().zip(&part_payloads) {
+                    c.execute(
+                        "INSERT INTO chunks VALUES(?1,'g1','a.txt',?2,?3,?4,1,1,?5,'unchecked')",
+                        rusqlite::params![format!("part-{start}"), snapshot.hash, start, end, p.id],
+                    )
+                    .unwrap();
+                }
+            } else {
+                c.execute(
+                    "INSERT INTO chunks VALUES('chunk-g2','g2','a.txt',?1,0,?2,1,2,?3,'unchecked')",
+                    rusqlite::params![snapshot.hash, text.len(), payload.id],
+                )
+                .unwrap();
+                c.execute(
+                    "INSERT INTO chunk_fts(id,job,path,terms,body) VALUES('chunk-g2','g2','a.txt','alpha original',?1)",
+                    rusqlite::params![text],
+                )
+                .unwrap();
+            }
             c.execute(
                 "INSERT INTO events(job,kind,detail) VALUES(?1,'snapshot',?2)",
                 rusqlite::params![
@@ -3013,9 +3059,18 @@ async fn databases_of_the_first_schema_migrate_without_losing_data() {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(linked, 2);
+        assert_eq!(linked, 3);
+        // Texts without a full-text row come from the snapshot.
+        let bodies: Vec<String> = c
+            .prepare("SELECT f.body FROM chunks ch JOIN chunk_text_fts f ON f.rowid=ch.text_id WHERE ch.job='g1' ORDER BY ch.start")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(bodies, ["alpha original\n", "second line\n"]);
     }
-    assert_eq!(rows(&path, "chunk_texts"), 1);
+    assert_eq!(rows(&path, "chunk_texts"), 3);
     // Both generations stay searchable and readable.
     for mode in [
         SearchMode::Lexical,
@@ -3027,13 +3082,16 @@ async fn databases_of_the_first_schema_migrate_without_losing_data() {
         assert_eq!(page.hits.len(), 1);
         assert_eq!(page.hits[0].text, text);
     }
-    for generation in ["g1", "g2"] {
-        let read = index
-            .read_chunks("i", generation, &[format!("chunk-{generation}")], 0)
-            .await
-            .unwrap();
-        assert_eq!(read[0].text, text);
-    }
+    let read = index
+        .read_chunks("i", "g2", &["chunk-g2".to_string()], 0)
+        .await
+        .unwrap();
+    assert_eq!(read[0].text, text);
+    let read = index
+        .read_chunks("i", "g1", &["part-0".to_string()], 1)
+        .await
+        .unwrap();
+    assert_eq!(read.into_iter().map(|r| r.text).collect::<String>(), text);
     // An unchanged file keeps its boundaries; a changed one is chunked.
     std::fs::write(root.path().join("b.txt"), "alpha new\nbeta\n").unwrap();
     let update = index.start_update("i").await.unwrap();
@@ -3620,4 +3678,241 @@ fn a_watcher_tries_to_resume_a_job_once() {
         }
         watch.stop().await.unwrap();
     });
+}
+
+#[tokio::test]
+async fn splitting_a_huge_chunk_for_embedding_stays_linear() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    // One 4 MB line: one chunk without a model request, then about 32
+    // embedding inputs of 32,000 fake tokens.
+    let text = "x".repeat(4 << 20);
+    std::fs::write(root.path().join("line.txt"), &text).unwrap();
+    let fake = Arc::new(Fake::new());
+    let (index, job, status) =
+        build_spec(&fake, db.path(), BuildSpec::new("test", root.path())).await;
+    assert_eq!(status.phase, "ready", "{:?}", status.problem);
+    assert!(fake.calls.lock().unwrap().is_empty());
+    // Tokenizing the rest of the text for every piece would count about
+    // 30 times the text; bounded probes count well under 12 times.
+    let tokenized = fake.tokenized.load(Ordering::SeqCst);
+    assert!(tokenized < 12 * text.len(), "{tokenized}");
+    let c = rusqlite::Connection::open(db.path().join("i.db")).unwrap();
+    let ids: Vec<String> = c
+        .prepare("SELECT id FROM chunks WHERE job=?1 ORDER BY start")
+        .unwrap()
+        .query_map([&job.job], |r| r.get(0))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert!(ids.len() >= 32);
+    let chunks = index
+        .read_chunks(&job.index, &job.job, &ids, 0)
+        .await
+        .unwrap();
+    assert!(chunks.iter().all(|c| c.text.len() <= 4 * 32_000));
+    assert_eq!(chunks.into_iter().map(|c| c.text).collect::<String>(), text);
+}
+#[test]
+fn a_job_paused_by_the_host_stays_paused_after_a_crash() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let path = db.path().join("i.db");
+    let mut fake = Fake::new();
+    fake.delay = Duration::from_secs(3600);
+    let fake = Arc::new(fake);
+    let runtime = || {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    };
+    let first = runtime();
+    let job = first.block_on(async {
+        let (index, job) = start_one_file(&fake, &path, root.path()).await;
+        while fake.active.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        // The pause waits for the request in flight; the process dies first.
+        index.pause(&job.job).await.unwrap();
+        job
+    });
+    drop(first);
+    runtime().block_on(async {
+        let index = ArkoIndex::open(&path, fake.clone(), config(&fake))
+            .await
+            .unwrap();
+        let status = index.status(&job.job).await.unwrap();
+        assert_eq!(status.phase, "paused");
+        assert_eq!(status.problem.as_deref(), Some("paused"));
+    });
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn edits_made_while_a_job_is_held_are_indexed_after_it_is_resumed() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let mut fake = Fake::new();
+    fake.rejection = Rejection::WrongCallRetryLater;
+    let fake = Arc::new(fake);
+    let (index, build) = start_one_file(&fake, &db.path().join("i.db"), root.path()).await;
+    assert_eq!(settle(&index, &build.job).await.phase, "ready");
+    fake.rejected_chunks.store(usize::MAX, Ordering::SeqCst);
+    std::fs::write(root.path().join("a.txt"), "alpha\ngamma\n").unwrap();
+    let update = index.start_update(&build.index).await.unwrap();
+    wait_for_retry(&index, &update.job).await;
+    index.pause(&update.job).await.unwrap();
+    assert_eq!(settle(&index, &update.job).await.phase, "paused");
+    // Without periodic scans, the watcher still looks at the held job again.
+    let watch = index
+        .watch(
+            &build.index,
+            WatchOptions::new(Duration::from_millis(50)).with_reconcile(None),
+        )
+        .await
+        .unwrap();
+    let mut events = watch.subscribe();
+    next_watch_event(&mut events, |e| matches!(e, WatchEvent::Held { .. })).await;
+    std::fs::write(root.path().join("b.txt"), "alpha later\nbeta\n").unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    fake.rejected_chunks.store(0, Ordering::SeqCst);
+    index.resume(&update.job).await.unwrap();
+    assert_eq!(settle(&index, &update.job).await.phase, "ready");
+    let started = next_watch_event(&mut events, |e| {
+        matches!(e, WatchEvent::UpdateStarted { .. })
+    })
+    .await;
+    let WatchEvent::UpdateStarted { job } = started else {
+        unreachable!()
+    };
+    assert_eq!(settle(&index, &job).await.phase, "ready");
+    assert!(
+        index
+            .changes(&job)
+            .await
+            .unwrap()
+            .contains(&FileChange::Added {
+                path: "b.txt".into()
+            })
+    );
+    watch.stop().await.unwrap();
+}
+#[tokio::test]
+async fn a_judged_search_does_not_wait_out_a_long_retry_after() {
+    let (_root, _db, index, job, _) = judge_fixture().await;
+    let judge = TestJudge::new(|_, _: &[SearchHit]| {
+        Err(Error::Provider {
+            message: "rate limit".into(),
+            transient: true,
+            retry_after: Some(Duration::from_secs(3600)),
+            source: None,
+            usage: None,
+        })
+    });
+    let started = std::time::Instant::now();
+    let result = index
+        .search_with_judge(
+            &job.index,
+            "alpha",
+            options(SearchMode::Lexical),
+            &judge,
+            JudgeOptions::default(),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(Error::Provider {
+            transient: true,
+            ..
+        })
+    ));
+    assert_eq!(judge.calls.load(Ordering::SeqCst), 1);
+    assert!(started.elapsed() < Duration::from_secs(10));
+}
+#[tokio::test]
+async fn a_job_older_than_the_active_generation_is_not_resumed() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let path = db.path().join("i.db");
+    let fake = Arc::new(Fake::new());
+    let (index, build) = start_one_file(&fake, &path, root.path()).await;
+    assert_eq!(settle(&index, &build.job).await.phase, "ready");
+    std::fs::write(root.path().join("a.txt"), "alpha\ngamma\n").unwrap();
+    let old = index.start_update(&build.index).await.unwrap();
+    assert_eq!(settle(&index, &old.job).await.phase, "ready");
+    // As if the older update had failed, and a newer one published since.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute("UPDATE jobs SET phase='failed' WHERE id=?1", [&old.job])
+        .unwrap();
+    std::fs::write(root.path().join("a.txt"), "alpha\ndelta\n").unwrap();
+    let newer = index.start_update(&build.index).await.unwrap();
+    assert_eq!(settle(&index, &newer.job).await.phase, "ready");
+    let refused = index.resume(&old.job).await.unwrap_err();
+    assert!(
+        refused.to_string().contains("newer generation"),
+        "{refused}"
+    );
+}
+#[tokio::test]
+async fn delete_keeps_vectors_while_another_job_is_unfinished() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let path = db.path().join("i.db");
+    std::fs::write(a.path().join("a.txt"), "alpha a\n").unwrap();
+    std::fs::write(b.path().join("b.txt"), "alpha b\nbeta\n").unwrap();
+    let mut fake = Fake::new();
+    fake.rejection = Rejection::WrongCallRetryLater;
+    let fake = Arc::new(fake);
+    let index = ArkoIndex::open(&path, fake.clone(), config(&fake))
+        .await
+        .unwrap();
+    let first = index
+        .start_build(BuildSpec::new("a", a.path()))
+        .await
+        .unwrap();
+    assert_eq!(settle(&index, &first.job).await.phase, "ready");
+    // Index b's build waits to retry: unfinished.
+    fake.rejected_chunks.store(usize::MAX, Ordering::SeqCst);
+    let second = index
+        .start_build(BuildSpec::new("b", b.path()))
+        .await
+        .unwrap();
+    wait_for_retry(&index, &second.job).await;
+    index.pause(&second.job).await.unwrap();
+    assert_eq!(settle(&index, &second.job).await.phase, "paused");
+    assert_eq!(rows(&path, "vectors"), 1);
+    index.delete(&first.index).await.unwrap();
+    // Its text and snapshot are gone; the vector stays for now.
+    assert_eq!(rows(&path, "chunk_texts"), 0);
+    assert_eq!(rows(&path, "vectors"), 1);
+    index.cancel(&second.job).await.unwrap();
+    index.delete(&second.index).await.unwrap();
+    assert_eq!((rows(&path, "vectors"), rows(&path, "snapshots")), (0, 0));
+}
+#[tokio::test]
+async fn search_queries_can_have_a_smaller_retry_budget() {
+    let (_root, _db, _index, job, fake) = judge_fixture().await;
+    drop(_index);
+    let config = Config {
+        query_max_transient_attempts: Some(1),
+        query_priority: true,
+        ..config(&fake)
+    };
+    let index = ArkoIndex::open(_db.path().join("i.db"), fake.clone(), config)
+        .await
+        .unwrap();
+    fake.failing_queries.store(usize::MAX, Ordering::SeqCst);
+    let before = fake.queries.load(Ordering::SeqCst);
+    let result = index
+        .search(&job.index, "alpha query", options(SearchMode::Semantic))
+        .await;
+    assert!(matches!(
+        result,
+        Err(Error::Provider {
+            transient: true,
+            ..
+        })
+    ));
+    assert_eq!(fake.queries.load(Ordering::SeqCst), before + 1);
 }
