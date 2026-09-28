@@ -46,8 +46,6 @@ pub struct TerminalConfig {
     pub shell: PathBuf,
     /// Arguments before the command string (default: sh -c or cmd /D /S /C).
     pub shell_args: Vec<String>,
-    pub max_jobs: usize,
-    pub max_running: usize,
     pub output_buffer_bytes: usize,
     pub max_log_bytes: u64,
     pub excerpt_bytes: usize,
@@ -68,8 +66,6 @@ impl TerminalConfig {
             .into_iter()
             .map(str::to_string)
             .collect(),
-            max_jobs: 64,
-            max_running: 4,
             output_buffer_bytes: 65_536,
             max_log_bytes: 4 * 1024 * 1024,
             excerpt_bytes: 2_000,
@@ -283,9 +279,7 @@ impl std::fmt::Debug for TerminalManager {
 
 impl TerminalManager {
     pub fn new(mut config: TerminalConfig) -> Result<Arc<Self>> {
-        if config.max_jobs == 0
-            || config.max_running == 0
-            || config.output_buffer_bytes < 1024
+        if config.output_buffer_bytes < 1024
             || config.excerpt_bytes == 0
             || config.excerpt_bytes > config.output_buffer_bytes
             || config.max_log_bytes == 0
@@ -476,17 +470,6 @@ impl TerminalManager {
         if self.closing.load(std::sync::atomic::Ordering::Acquire) {
             return Err(TerminalError::Invalid(
                 "terminal manager is shut down".into(),
-            ));
-        }
-        if jobs.len() >= self.config.max_jobs
-            || jobs
-                .values()
-                .filter(|job| job.data.lock().unwrap().record.state == JobState::Running)
-                .count()
-                >= self.config.max_running
-        {
-            return Err(TerminalError::Invalid(
-                "terminal job limit reached; finish jobs or forget completed records".into(),
             ));
         }
         let id = Uuid::new_v4();

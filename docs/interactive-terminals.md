@@ -54,8 +54,6 @@ calling, for example `{"job_id":"…","revision":"3","text":"Y\n"}`.
 
 | Setting | Default |
 | --- | --- |
-| Concurrently running jobs (`max_running`) | 4 |
-| Retained job records (`max_jobs`) | 64 |
 | Buffered output per job (`output_buffer_bytes`) | 64 KiB |
 | Log file size per job (`max_log_bytes`) | 4 MiB |
 | Output window per status read or notice (`excerpt_bytes`) | 2,000 bytes |
@@ -64,8 +62,9 @@ calling, for example `{"job_id":"…","revision":"3","text":"Y\n"}`.
 | Shell (`shell`, `shell_args`) | `/bin/sh -c` on Unix, `cmd.exe /D /S /C` on Windows |
 | Prompt rules (`prompt_rules`) | Y/N, password/passphrase, and "press a key" prompts |
 
-Prompt rules are named regular expressions. Jobs run with the host process's
-permissions; the terminal tools do not provide a filesystem or network sandbox.
+Prompt rules are named regular expressions. The number of jobs is not limited,
+running or finished. Jobs run with the host process's permissions; the terminal
+tools do not provide a filesystem or network sandbox.
 
 ## Input requests
 

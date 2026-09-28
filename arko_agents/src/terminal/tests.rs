@@ -581,10 +581,8 @@ async fn request_ids_allow_a_program_to_reject_a_reply_after_its_question_change
 }
 
 #[tokio::test]
-async fn custom_prompt_rules_and_job_limits_are_configurable() {
+async fn custom_prompt_rules_are_configurable_and_jobs_are_not_limited() {
     let f = Fixture::new(|config| {
-        config.max_jobs = 1;
-        config.max_running = 1;
         config.prompt_rules = vec![PromptRule {
             name: "region".into(),
             pattern: "Pick a region: $".into(),
@@ -594,11 +592,21 @@ async fn custom_prompt_rules_and_job_limits_are_configurable() {
         "print('Pick a region: ',end='',flush=True); print(input())",
         Default::default(),
     );
-    assert!(
-        f.manager
-            .start(&f.context(), "true", Default::default())
-            .is_err()
-    );
+    // Neither running jobs nor finished records limit new jobs (there were
+    // limits of 4 and 64).
+    let pipes = StartOptions {
+        terminal: false,
+        detect_prompts: false,
+        timeout: None,
+    };
+    let others: Vec<_> = (0..65)
+        .map(|_| {
+            f.manager
+                .start(&f.context(), "exit 0", pipes)
+                .unwrap()
+                .job_id
+        })
+        .collect();
     let prompt = f.until(job.job_id, |s| s.input.is_some()).await;
     assert!(
         matches!(prompt.input.as_ref().unwrap().source,InputSource::PromptRule{ref rule} if rule=="region")
@@ -607,15 +615,17 @@ async fn custom_prompt_rules_and_job_limits_are_configurable() {
         .await
         .unwrap();
     assert_eq!(f.finished(job.job_id).await.state, JobState::Succeeded);
+    for id in others {
+        assert_eq!(f.finished(id).await.state, JobState::Succeeded);
+    }
     f.manager.forget(f.owner, job.job_id).unwrap();
     let next = f.python("pass", Default::default());
     assert_eq!(f.finished(next.job_id).await.state, JobState::Succeeded);
 }
 
 #[tokio::test]
-async fn failed_spawns_are_recorded_and_count_toward_the_job_limit() {
+async fn failed_spawns_are_recorded() {
     let f = Fixture::new(|config| {
-        config.max_jobs = 1;
         config.shell = "/nonexistent/arko-shell".into();
     });
     assert!(
@@ -631,11 +641,6 @@ async fn failed_spawns_are_recorded_and_count_toward_the_job_limit() {
         f.manager.status(f.owner, id, None).unwrap().state,
         JobState::Failed
     );
-    let error = f
-        .manager
-        .start(&f.context(), "true", Default::default())
-        .unwrap_err();
-    assert!(error.to_string().contains("job limit"));
     f.manager.forget(f.owner, id).unwrap();
     assert!(f.manager.jobs.lock().unwrap().is_empty());
 }
