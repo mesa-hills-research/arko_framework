@@ -299,11 +299,13 @@ where
 ///
 /// # Several calls in one response
 ///
-/// A response's tool calls all run, and each gets exactly one result. Calls
-/// to parallel-safe tools run at the same time as the parallel-safe calls
-/// next to them; any other call runs alone, after the calls before it and
-/// before the calls after it, so calls run in the order the model made them
-/// wherever that matters. A tool is parallel-safe when its definition says
+/// A response's tool calls all run, and each gets exactly one result. They
+/// run in call order as under a fair read/write lock, as Codex runs them: a
+/// parallel-safe call starts once every earlier call that isn't
+/// parallel-safe has finished, and any other call once every earlier call
+/// has finished. So `[read, read]` run together, and `[read, write, read]`
+/// runs the first read, then the write, then the second read. A tool is
+/// parallel-safe when its definition says
 /// so ([`ToolDefinition::parallel_safe`](crate::tool::ToolDefinition::parallel_safe);
 /// the built-in reads are, the built-in writes are not, and an MCP tool is
 /// when its server marks it `readOnlyHint`) unless its
@@ -311,15 +313,21 @@ where
 /// [`one_tool_call_per_turn`](Self::one_tool_call_per_turn) asks for one
 /// call per response instead.
 ///
-/// Approvals keep that order: a call that isn't parallel-safe doesn't run
-/// before an earlier call of its response that awaits approval. It waits
-/// (saved with the task) until that call is decided, then runs with the
-/// approved calls, in call order under the same rule; a rejected call's
-/// followers run all the same. Parallel-safe calls run ahead. Calls of the
-/// response after one that ends the turn (`complete_task`, `ask_user`, or a
-/// tool error that fails the task) are not run, and their results say so;
-/// among the calls that run once approvals are decided, only one that ends
-/// the task stops the others.
+/// Approvals keep that order: a call awaiting approval counts as not
+/// finished, and so does a call held behind one. A call that must wait for
+/// one is held (saved with the task) until the approvals are decided, and
+/// then runs with the approved calls, in call order under the same rule;
+/// the calls after a rejected call run all the same. If the wait ends
+/// without a decision, a held call's result says an earlier call was still
+/// waiting for approval. Calls of the response after one that ends the turn
+/// (`complete_task`, `ask_user`, or a tool error that fails the task) are
+/// not run, and their results say so; among the calls that run once
+/// approvals are decided, only one that ends the task stops the others.
+///
+/// `complete_task` after an earlier call of its turn was rejected or failed
+/// doesn't complete the task: the model chose to finish before it saw those
+/// results, so its result says the task was not completed and asks it to
+/// review the results and call `complete_task` again if the task is done.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "AgentToolConfigRepr")]
 pub struct AgentToolConfig {

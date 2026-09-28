@@ -929,7 +929,8 @@ async fn a_failed_call_in_a_native_batch_gets_its_own_error_result_and_the_other
 
 #[tokio::test]
 async fn under_pause_a_native_batch_finishes_before_pausing_once() {
-    // write_file waits for approval, read_file runs without it, and the
+    // write_file waits for approval; the reads after it need none but wait
+    // for it (they come after a call that isn't parallel-safe), and the
     // missing file's read fails.
     for timed_out in [false, true] {
         let workspace = batch_workspace();
@@ -958,8 +959,8 @@ async fn under_pause_a_native_batch_finishes_before_pausing_once() {
             .extend([failing_batch(write), complete()]);
         let run = tokio::spawn(agent.run());
         let mut seen = Vec::new();
-        // The rest of the batch ran; the pause waits for write_file's
-        // approval.
+        // The reads wait with write_file for its approval, and so does the
+        // pause.
         let (batch_id, pending) = wait_for(&mut events, &mut seen, |event| match event {
             AgentEvent::BatchToolCallAwaitingApproval {
                 batch_id,
@@ -1035,13 +1036,23 @@ async fn under_pause_a_native_batch_finishes_before_pausing_once() {
         assert_calls_paired(&task.conversation);
         assert_eq!(paused(&seen), usize::from(!timed_out), "{seen:#?}");
         assert!(result_for(&task.conversation, "missing")[0].is_error);
-        assert!(
-            result_for(&task.conversation, "c")[0]
-                .output
-                .contains("C-CONTENTS")
-        );
+        let read = &result_for(&task.conversation, "c")[0];
+        if timed_out {
+            // The wait ended before the write was decided: the reads held
+            // behind it didn't run, and say why.
+            assert_eq!(read.output, HELD_CALL_NOT_RUN);
+            assert_eq!(
+                result_for(&task.conversation, "missing")[0].output,
+                HELD_CALL_NOT_RUN
+            );
+        } else {
+            assert!(read.output.contains("C-CONTENTS"));
+        }
         let write = &result_for(&task.conversation, "write")[0];
         assert_eq!(write.is_error, timed_out, "{write:?}");
+        if timed_out {
+            assert!(write.output.contains("Human approval timed out"));
+        }
         std::fs::remove_dir_all(workspace).unwrap();
     }
 }

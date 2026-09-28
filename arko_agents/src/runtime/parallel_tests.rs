@@ -173,12 +173,13 @@ async fn every_call_of_a_response_runs_parallel_safe_ones_together() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
-/// A call that isn't parallel-safe doesn't run before an earlier call of
-/// its turn that awaits approval: it waits until that call is decided (and
-/// has run, if approved), also across a suspension and a save. Parallel-safe
-/// calls run ahead. Every call gets one result.
+/// A call waiting for approval counts as not finished, as the calls held
+/// behind it do: a call that isn't parallel-safe waits for every earlier
+/// call, and a parallel-safe one for every earlier call that isn't, also
+/// across a suspension and a save. Parallel-safe calls before it, or behind
+/// only parallel-safe calls, run at once. Every call gets one result.
 #[tokio::test]
-async fn a_call_waits_for_an_earlier_call_awaiting_approval() {
+async fn calls_after_a_call_awaiting_approval_keep_call_order() {
     for approve in [true, false] {
         let workspace = workspace();
         let record = Arc::new(Record::default());
@@ -196,11 +197,14 @@ async fn a_call_waits_for_an_earlier_call_awaiting_approval() {
             },
         );
         let (mut agent, mut events, commands) = agent(config, registry, &workspace);
+        // A read before the gate runs at once; the write and the read after
+        // the gate wait for it.
         agent
             .scripted_responses
             .get_mut()
             .unwrap()
             .push_back(turn(vec![
+                probe_call("r0", "probe_read"),
                 probe_call("g1", "probe_gate"),
                 probe_call("w1", "probe_write"),
                 probe_call("r1", "probe_read"),
@@ -220,9 +224,8 @@ async fn a_call_waits_for_an_earlier_call_awaiting_approval() {
             }
         };
         assert_eq!(pending.len(), 1);
-        // The parallel-safe read ran ahead; the write waits.
         let log = record.log.lock().unwrap().clone();
-        assert_eq!(log, ["start r1", "end r1"]);
+        assert_eq!(log, ["start r0", "end r0"]);
 
         // Suspended and saved while waiting, then run again.
         commands.send(UserCommand::SuspendTask).await.unwrap();
@@ -269,16 +272,212 @@ async fn a_call_waits_for_an_earlier_call_awaiting_approval() {
             assert_eq!(
                 log,
                 [
-                    "start r1", "end r1", "start g1", "end g1", "start w1", "end w1"
+                    "start r0", "end r0", "start g1", "end g1", "start w1", "end w1", "start r1",
+                    "end r1"
                 ]
             );
             assert_eq!(result_for(&task.conversation, "g1")[0].output, "g1 done");
         } else {
-            assert_eq!(log, ["start r1", "end r1", "start w1", "end w1"]);
+            assert_eq!(
+                log,
+                [
+                    "start r0", "end r0", "start w1", "end w1", "start r1", "end r1"
+                ]
+            );
             assert_eq!(result_for(&task.conversation, "g1")[0].output, "Not now.");
         }
-        assert_eq!(result_for(&task.conversation, "w1")[0].output, "w1 done");
-        assert_eq!(result_for(&task.conversation, "r1")[0].output, "r1 done");
+        for id in ["r0", "w1", "r1"] {
+            assert_eq!(
+                result_for(&task.conversation, id)[0].output,
+                format!("{id} done")
+            );
+        }
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+}
+
+/// `[write needing approval, read]`: the read waits for the write to be
+/// decided and to run, or to be rejected.
+#[tokio::test]
+async fn a_read_after_a_write_awaiting_approval_waits_for_it() {
+    for approve in [true, false] {
+        let workspace = workspace();
+        let record = Arc::new(Record::default());
+        let mut config = config(ToolCallingMode::Native, &["probe_write", "probe_read"]);
+        config.tool_config.tool_specific_configs.insert(
+            "probe_write".into(),
+            PerToolConfigOverride {
+                auto_approve_tool_use: Some(false),
+                ..Default::default()
+            },
+        );
+        let (mut agent, mut events, commands) = agent(config, probes(&record), &workspace);
+        agent.scripted_responses.get_mut().unwrap().extend([
+            turn(vec![
+                probe_call("w1", "probe_write"),
+                probe_call("r1", "probe_read"),
+            ]),
+            complete(),
+        ]);
+        let run = tokio::spawn(agent.run());
+        let (batch_id, pending) = loop {
+            let event = timeout(Duration::from_secs(10), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let AgentEvent::BatchToolCallAwaitingApproval {
+                batch_id,
+                pending_calls,
+            } = event
+            {
+                break (batch_id, pending_calls);
+            }
+        };
+        assert!(record.log.lock().unwrap().is_empty(), "the read waits");
+        let decision = if approve {
+            ToolApprovalDecision::Approve {
+                custom_tool_output: None,
+                message_to_agent: None,
+            }
+        } else {
+            ToolApprovalDecision::Reject { reason: None }
+        };
+        commands
+            .send(UserCommand::SubmitBatchToolApprovals {
+                batch_id,
+                decisions: HashMap::from([(pending[0].tool_call_id, decision)]),
+            })
+            .await
+            .unwrap();
+        let task = timeout(Duration::from_secs(10), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(task.current_state, TaskState::Completed { .. }));
+        assert_calls_paired(&task.conversation);
+        let log = record.log.lock().unwrap().clone();
+        if approve {
+            assert_eq!(log, ["start w1", "end w1", "start r1", "end r1"]);
+        } else {
+            assert_eq!(log, ["start r1", "end r1"]);
+        }
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+}
+
+/// Without approvals too, a read after a write waits for it: `[read, write,
+/// read]` runs read, write, read.
+#[tokio::test]
+async fn read_write_read_runs_in_call_order() {
+    let workspace = workspace();
+    let record = Arc::new(Record::default());
+    let (mut agent, _events, _commands) = agent(
+        config(ToolCallingMode::Native, &["probe_read", "probe_write"]),
+        probes(&record),
+        &workspace,
+    );
+    agent.scripted_responses.get_mut().unwrap().extend([
+        turn(vec![
+            probe_call("r1", "probe_read"),
+            probe_call("w1", "probe_write"),
+            probe_call("r2", "probe_read"),
+        ]),
+        complete(),
+    ]);
+    timeout(Duration::from_secs(10), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        record.log.lock().unwrap().clone(),
+        [
+            "start r1", "end r1", "start w1", "end w1", "start r2", "end r2"
+        ]
+    );
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+/// `complete_task` after an earlier call of its turn was rejected or failed
+/// doesn't complete the task: its result says why, and the agent goes on.
+#[tokio::test]
+async fn complete_task_after_a_failed_or_rejected_call_does_not_complete() {
+    for reject in [false, true] {
+        let workspace = workspace();
+        let record = Arc::new(Record::default());
+        let mut config = config(ToolCallingMode::Native, &["probe_write", "read_file"]);
+        if reject {
+            config.tool_config.tool_specific_configs.insert(
+                "probe_write".into(),
+                PerToolConfigOverride {
+                    auto_approve_tool_use: Some(false),
+                    ..Default::default()
+                },
+            );
+        }
+        let (mut agent, mut events, commands) = agent(config, probes(&record), &workspace);
+        let first = if reject {
+            probe_call("w1", "probe_write")
+        } else {
+            // Fails: the file doesn't exist.
+            native_call(
+                "w1",
+                "read_file",
+                serde_json::json!({"path": "missing.txt"}),
+            )
+        };
+        agent.scripted_responses.get_mut().unwrap().extend([
+            turn(vec![
+                first,
+                native_call(
+                    "done",
+                    "complete_task",
+                    serde_json::json!({"summary": "too early"}),
+                ),
+            ]),
+            complete(),
+        ]);
+        let run = tokio::spawn(agent.run());
+        if reject {
+            let (batch_id, pending) = loop {
+                let event = timeout(Duration::from_secs(10), events.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if let AgentEvent::BatchToolCallAwaitingApproval {
+                    batch_id,
+                    pending_calls,
+                } = event
+                {
+                    break (batch_id, pending_calls);
+                }
+            };
+            commands
+                .send(UserCommand::SubmitBatchToolApprovals {
+                    batch_id,
+                    decisions: HashMap::from([(
+                        pending[0].tool_call_id,
+                        ToolApprovalDecision::Reject { reason: None },
+                    )]),
+                })
+                .await
+                .unwrap();
+        }
+        let task = timeout(Duration::from_secs(10), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_calls_paired(&task.conversation);
+        let early = &result_for(&task.conversation, "done")[0];
+        assert_eq!(early.output, COMPLETION_AFTER_FAILURE);
+        // The agent went on and completed with its next turn.
+        assert_eq!(
+            task.current_state,
+            TaskState::Completed {
+                summary: "done".into()
+            }
+        );
         std::fs::remove_dir_all(workspace).unwrap();
     }
 }
