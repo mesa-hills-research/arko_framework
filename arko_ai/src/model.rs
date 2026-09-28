@@ -2027,6 +2027,26 @@ impl Model {
         )
     }
 
+    /// Whether images can go inside a tool result for this model
+    /// ([`ToolResult::images`]): OpenAI (API key and ChatGPT OAuth) and
+    /// Anthropic models, and Gemini 3 and later, whose `function_result` takes
+    /// image content ("For Gemini 3 series models",
+    /// https://ai.google.dev/gemini-api/docs/function-calling#multimodal).
+    /// Gemini 2.x rejects images in function responses, and OpenRouter
+    /// doesn't document how each upstream receives them, so those models,
+    /// Gemini ids whose version can't be read, and models without image
+    /// input get `false`: their result images follow the turn's results.
+    ///
+    /// [`ToolResult::images`]: crate::tool::ToolResult::images
+    pub fn accepts_tool_result_images(&self) -> bool {
+        self.supports_image_input
+            && match self.provider {
+                Provider::OpenAI | Provider::Anthropic => true,
+                Provider::Google => gemini_major_version(&self.id).is_some_and(|major| major >= 3),
+                Provider::OpenRouter => false,
+            }
+    }
+
     pub fn supports_openai_prompt_cache_options(&self) -> bool {
         self.provider == Provider::OpenAI
             && (self.is_openai_gpt_5_6()
@@ -2306,9 +2326,52 @@ impl Model {
     }
 }
 
+/// The major version of a `gemini-<major>…` model id (`gemini-3.5-flash` → 3,
+/// `gemini-3-pro-preview` → 3); `None` for ids of another form.
+fn gemini_major_version(id: &str) -> Option<u32> {
+    let rest = id.strip_prefix("gemini-")?;
+    let digits = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    match rest[digits..].chars().next() {
+        None | Some('.' | '-') if digits > 0 => rest[..digits].parse().ok(),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_result_images_are_accepted_by_openai_anthropic_and_gemini_3_and_later() {
+        for model in Model::list(Provider::OpenAI)
+            .into_iter()
+            .chain(Model::list(Provider::Anthropic))
+        {
+            assert!(model.accepts_tool_result_images(), "{}", model.id);
+        }
+        for model in Model::list(Provider::Google) {
+            let gemini_3 = model.id.starts_with("gemini-3");
+            assert_eq!(model.accepts_tool_result_images(), gemini_3, "{}", model.id);
+        }
+        let with_id = |id: &str| {
+            let mut model = Model::google_gemini_3_5_flash();
+            model.id = id.into();
+            model.accepts_tool_result_images()
+        };
+        assert!(with_id("gemini-4-flash"));
+        assert!(with_id("gemini-4.0-pro-preview"));
+        assert!(with_id("gemini-10.1-flash"));
+        assert!(!with_id("gemini-2.5-flash"));
+        assert!(!with_id("gemini-exp-1206"));
+        assert!(!with_id("gemini-3x"));
+        assert!(!with_id("learnlm-2.0-flash"));
+        assert!(!Model::openrouter("anthropic/claude-opus-5.5").accepts_tool_result_images());
+        let mut blind = Model::openai_gpt_6_astra();
+        blind.supports_image_input = false;
+        assert!(!blind.accepts_tool_result_images());
+    }
     use crate::{config::GenerationConfig, reasoning::ReasoningConfig};
     use std::collections::HashSet;
 

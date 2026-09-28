@@ -41,7 +41,7 @@ pub use reasoning::{
 };
 pub use retry::BackoffPolicy;
 pub use stop::{Refusal, RefusalSource, StopReason};
-pub use tool::{ToolCall, ToolChoice, ToolConfig, ToolDefinition, ToolResult};
+pub use tool::{ToolCall, ToolChoice, ToolConfig, ToolDefinition, ToolResult, ToolResultImage};
 pub use trace::RequestTrace;
 pub use usage::{
     BillingKind, ContextEvent, ContextEventType, ModelCallUsage, PlanUsage, PlanUsageWindow,

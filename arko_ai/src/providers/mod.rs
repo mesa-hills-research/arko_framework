@@ -6,6 +6,9 @@ pub mod voyage;
 
 mod foreign;
 pub(crate) use foreign::without_foreign_settings;
+#[cfg(test)]
+mod tool_image_tests;
+mod tool_images;
 
 use crate::{
     config::GenerationConfig,
@@ -165,9 +168,9 @@ impl GenerationResponse {
     }
 }
 
-/// Rejects content the model can't take before anything is sent: images for
-/// models without image input, and mid-conversation configuration updates for
-/// providers that can't send them.
+/// Rejects content the model can't take before anything is sent: images
+/// (including those inside tool results) for models without image input, and
+/// mid-conversation configuration updates for providers that can't send them.
 pub(crate) fn ensure_supported_inputs(conversation: &Conversation) -> Result<(), Error> {
     if conversation.model.provider != crate::model::Provider::OpenRouter
         && conversation
@@ -180,12 +183,7 @@ pub(crate) fn ensure_supported_inputs(conversation: &Conversation) -> Result<(),
             conversation.model.provider, conversation.model.id
         )));
     }
-    let has_images = conversation.messages.iter().any(|message| {
-        message
-            .content
-            .iter()
-            .any(|content| content.as_image().is_some())
-    });
+    let has_images = conversation.messages.iter().any(Message::has_images);
     if has_images && !conversation.model.supports_image_input {
         return Err(Error::UnsupportedFeature(format!(
             "Model '{}' does not accept image input.",

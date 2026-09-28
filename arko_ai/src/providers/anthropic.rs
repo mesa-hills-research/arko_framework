@@ -1085,10 +1085,11 @@ impl AnthropicClient {
             });
         }
 
+        let inline = conversation.model.accepts_tool_result_images();
         for message in &conversation.messages {
             request
                 .messages
-                .push(self.convert_message_to_anthropic(message)?);
+                .push(self.convert_message_to_anthropic(message, inline)?);
         }
 
         Ok(request)
@@ -1107,7 +1108,13 @@ impl AnthropicClient {
         )?)
     }
 
-    fn convert_message_to_anthropic(&self, message: &Message) -> Result<AnthropicMessage, Error> {
+    /// `inline`: tool-result images go inside their `tool_result` blocks
+    /// (otherwise after the message's other content).
+    fn convert_message_to_anthropic(
+        &self,
+        message: &Message,
+        inline: bool,
+    ) -> Result<AnthropicMessage, Error> {
         let role = match message.role {
             Role::User => "user",
             Role::Assistant => "assistant",
@@ -1185,11 +1192,25 @@ impl AnthropicClient {
                         AnthropicToolResultContent {
                             type_: "tool_result".to_string(),
                             tool_use_id: result.call_id.clone().unwrap_or_default(),
-                            content: result.output.clone(),
+                            content: self.tool_result_content(result, inline)?,
                             is_error: result.is_error.then_some(true),
                         },
                     ));
                 }
+            }
+        }
+
+        if !inline {
+            for content in super::tool_images::moved_result_images(message) {
+                converted.content.push(match &content {
+                    Content::Image(image) => {
+                        AnthropicContent::Image(self.convert_image_to_anthropic(image)?)
+                    }
+                    _ => AnthropicContent::Text(AnthropicTextContent {
+                        type_: "text".to_string(),
+                        text: content.as_text().unwrap_or_default().to_string(),
+                    }),
+                });
             }
         }
 
@@ -1220,6 +1241,39 @@ impl AnthropicClient {
         }
 
         Ok(converted)
+    }
+
+    /// A `tool_result`'s `content`: the output text, or with images the
+    /// model takes inside the result, `text` blocks (the output, then each
+    /// image's label) and `image` blocks. Empty text blocks are left out,
+    /// since the API rejects them.
+    fn tool_result_content(
+        &self,
+        result: &crate::tool::ToolResult,
+        inline: bool,
+    ) -> Result<AnthropicToolResultBody, Error> {
+        if !inline || result.images.is_empty() {
+            return Ok(AnthropicToolResultBody::Text(result.output.clone()));
+        }
+        let text = |text: &str| {
+            AnthropicContent::Text(AnthropicTextContent {
+                type_: "text".to_string(),
+                text: text.to_string(),
+            })
+        };
+        let mut blocks = Vec::new();
+        if !result.output.is_empty() {
+            blocks.push(text(&result.output));
+        }
+        for image in &result.images {
+            if !image.label.is_empty() {
+                blocks.push(text(&image.label));
+            }
+            blocks.push(AnthropicContent::Image(
+                self.convert_image_to_anthropic(&image.image)?,
+            ));
+        }
+        Ok(AnthropicToolResultBody::Blocks(blocks))
     }
 
     fn convert_image_to_anthropic(&self, image: &Image) -> Result<AnthropicImageContent, Error> {
@@ -1475,9 +1529,17 @@ struct AnthropicToolResultContent {
     #[serde(rename = "type")]
     type_: String,
     tool_use_id: String,
-    content: String,
+    content: AnthropicToolResultBody,
     #[serde(skip_serializing_if = "Option::is_none")]
     is_error: Option<bool>,
+}
+
+/// A `tool_result`'s content: a string, or content blocks.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum AnthropicToolResultBody {
+    Text(String),
+    Blocks(Vec<AnthropicContent>),
 }
 
 #[derive(Debug, Deserialize)]

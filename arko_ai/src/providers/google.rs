@@ -863,6 +863,7 @@ impl GoogleClient {
         conversation: &Conversation,
     ) -> Result<Vec<InteractionInputStep>, Error> {
         let mut steps = Vec::new();
+        let inline = conversation.model.accepts_tool_result_images();
 
         for message in &conversation.messages {
             match message.role {
@@ -884,16 +885,12 @@ impl GoogleClient {
                                 blocks.push(self.convert_image_block(image)?);
                             }
                             Content::ToolResult(result) => {
-                                steps.push(InteractionInputStep::FunctionResult {
-                                    name: result.name.clone(),
-                                    call_id: result.call_id.clone().unwrap_or_default(),
-                                    is_error: result.is_error.then_some(true),
-                                    result: vec![InteractionContentBlock::Text {
-                                        text: result.output.clone(),
-                                    }],
-                                });
+                                steps.push(self.function_result_step(result, inline)?);
                             }
                         }
+                    }
+                    if !inline {
+                        blocks.extend(self.moved_result_images(message)?);
                     }
 
                     if !blocks.is_empty() {
@@ -942,16 +939,12 @@ impl GoogleClient {
                                 blocks.push(self.convert_image_block(image)?);
                             }
                             Content::ToolResult(result) => {
-                                steps.push(InteractionInputStep::FunctionResult {
-                                    name: result.name.clone(),
-                                    call_id: result.call_id.clone().unwrap_or_default(),
-                                    is_error: result.is_error.then_some(true),
-                                    result: vec![InteractionContentBlock::Text {
-                                        text: result.output.clone(),
-                                    }],
-                                });
+                                steps.push(self.function_result_step(result, inline)?);
                             }
                         }
+                    }
+                    if !inline {
+                        blocks.extend(self.moved_result_images(message)?);
                     }
 
                     if !blocks.is_empty() {
@@ -974,6 +967,66 @@ impl GoogleClient {
         }
 
         Ok(steps)
+    }
+
+    /// A `function_result` step. With images the model takes inside the
+    /// result (Gemini 3 and later), `result` holds the output text, then each
+    /// image after its label: Google advises against sending a function's
+    /// images outside its response ("This can lead to unexpected model
+    /// behavior (e.g. thought leakage)",
+    /// https://ai.google.dev/gemini-api/docs/whats-new-gemini-3.5#multimodal-function-responses).
+    /// An empty output text is left out when images follow.
+    fn function_result_step(
+        &self,
+        result: &crate::tool::ToolResult,
+        inline: bool,
+    ) -> Result<InteractionInputStep, Error> {
+        let mut blocks = Vec::new();
+        if inline {
+            for image in &result.images {
+                if !image.label.is_empty() {
+                    blocks.push(InteractionContentBlock::Text {
+                        text: image.label.clone(),
+                    });
+                }
+                blocks.push(self.convert_image_block(&image.image)?);
+            }
+        }
+        if !result.output.is_empty() || blocks.is_empty() {
+            blocks.insert(
+                0,
+                InteractionContentBlock::Text {
+                    text: result.output.clone(),
+                },
+            );
+        }
+        Ok(InteractionInputStep::FunctionResult {
+            name: result.name.clone(),
+            call_id: result.call_id.clone().unwrap_or_default(),
+            is_error: result.is_error.then_some(true),
+            result: blocks,
+        })
+    }
+
+    /// `message`'s tool-result images as content blocks after its results,
+    /// for models that don't take them inside a result (Gemini 2.x: "The
+    /// Gemini models including 2.5 Pro model do not currently support
+    /// receiving images or other binary data directly within the
+    /// FunctionResponse part", Google's workaround being the image after the
+    /// function response).
+    fn moved_result_images(
+        &self,
+        message: &Message,
+    ) -> Result<Vec<InteractionContentBlock>, Error> {
+        super::tool_images::moved_result_images(message)
+            .iter()
+            .map(|content| match content {
+                Content::Image(image) => self.convert_image_block(image),
+                other => Ok(InteractionContentBlock::Text {
+                    text: other.as_text().unwrap_or_default().to_string(),
+                }),
+            })
+            .collect()
     }
 
     fn convert_image_block(&self, image: &Image) -> Result<InteractionContentBlock, Error> {

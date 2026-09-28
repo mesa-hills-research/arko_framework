@@ -1,3 +1,4 @@
+use crate::message::Image;
 use serde::{Deserialize, Serialize};
 
 /// Defines a tool that the model can invoke during generation.
@@ -132,6 +133,38 @@ pub struct ToolResult {
     /// and Google Gemini surface this to the model via `is_error`; for
     /// OpenAI the error details in `output` convey the failure.
     pub is_error: bool,
+    /// Images the tool returned with its output (a screenshot, a rendered
+    /// chart). Where the model accepts images inside a tool result
+    /// ([`Model::accepts_tool_result_images`]) they are sent inside this
+    /// result, after the output text; otherwise they follow all of the
+    /// turn's results, each after the text
+    /// `"Image from tool {name}, call {call_id}: {label}"`. Results without
+    /// images are sent exactly as before this field existed, and results
+    /// saved before it load with none.
+    ///
+    /// [`Model::accepts_tool_result_images`]: crate::model::Model::accepts_tool_result_images
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ToolResultImage>,
+}
+
+/// An image returned with a [`ToolResult`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResultImage {
+    /// Short text sent before the image, such as its file name and size.
+    /// Empty sends none (inside a result) or only the tool and call names
+    /// (after the results).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    pub image: Image,
+}
+
+impl ToolResultImage {
+    pub fn new(label: impl Into<String>, image: Image) -> Self {
+        Self {
+            label: label.into(),
+            image,
+        }
+    }
 }
 
 impl ToolResult {
@@ -141,6 +174,7 @@ impl ToolResult {
             name: name.to_string(),
             output: output.to_string(),
             is_error: false,
+            images: Vec::new(),
         }
     }
 
@@ -150,6 +184,7 @@ impl ToolResult {
             name: name.to_string(),
             output: output.to_string(),
             is_error: true,
+            images: Vec::new(),
         }
     }
 
@@ -161,7 +196,14 @@ impl ToolResult {
             name: tool_call.name.clone(),
             output: output.to_string(),
             is_error: false,
+            images: Vec::new(),
         }
+    }
+
+    /// Attaches images the tool returned; see [`images`](Self::images).
+    pub fn with_images(mut self, images: Vec<ToolResultImage>) -> Self {
+        self.images = images;
+        self
     }
 
     /// Creates an error result from the originating `ToolCall`.
@@ -171,6 +213,7 @@ impl ToolResult {
             name: tool_call.name.clone(),
             output: output.to_string(),
             is_error: true,
+            images: Vec::new(),
         }
     }
 }

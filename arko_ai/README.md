@@ -223,6 +223,31 @@ in `ToolCall::invalid_arguments`, with `arguments` set to `null`, and
 asked for, or an error saying whether the response was refused, cut off by a limit, or
 called something else, or whether the call's arguments are not valid JSON.
 
+### Tool images
+
+A tool can return images with its result: `ToolResult::with_images(vec![ToolResultImage::new(label, image)])`,
+where the label is short text such as a file name and size. Where the model takes images
+inside a tool result (`Model::accepts_tool_result_images()`), they go inside that result,
+after its output text; otherwise they follow all of the turn's results, each after the
+text `"Image from tool {name}, call {call_id}: {label}"` (`unidentified` when the result
+has no call id), the layout arko_agents has always used for tool images:
+
+| Provider and model | Result images |
+| --- | --- |
+| OpenAI, API key and ChatGPT OAuth | Inside `function_call_output.output`: `input_text` items (the output, then each label) and `input_image` items |
+| Anthropic | Inside `tool_result.content`: `text` blocks (the output, then each label) and `image` blocks |
+| Gemini 3 and later | Inside `function_result.result`: text (the output, then each label) and image blocks, as Google advises for Gemini 3.x |
+| Gemini 2.x, and Gemini IDs whose version can't be read | After the results, in a `user_input` step; Gemini 2.5 rejects images in function responses |
+| OpenRouter | After the `tool` messages, in a user message; how each upstream receives images in a tool message is not documented |
+
+Empty texts (an empty output with images, an empty label) are left out of the result. A
+result without images is sent exactly as before result images existed, and conversations
+saved before then (with tool images as sibling content of the message) load and are sent
+unchanged. Result images count as image input: a model without it rejects them before
+sending. `Message::has_images()`, `image_count()` and `remove_images()` cover images both
+as content and inside results; `Conversation::redact_tool_result` replaces only a
+result's text and keeps its images.
+
 ## Stop reasons and refusals
 
 Every `GenerationResponse` carries a normalized `stop_reason` (`EndTurn`, `ToolUse`,

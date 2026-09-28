@@ -296,12 +296,15 @@ fn convert_messages(conversation: &Conversation) -> Result<Vec<Value>, Error> {
                         }));
                     }
                 }
-                let rest: Vec<&Content> = message
+                // Result images follow the results (OpenRouter doesn't
+                // document how each upstream takes images inside a tool
+                // message).
+                let rest = super::super::tool_images::content_after_results(message, false);
+                let rest: Vec<&Content> = rest.iter().map(AsRef::as_ref).collect();
+                let had_results = message
                     .content
                     .iter()
-                    .filter(|content| content.as_tool_result().is_none())
-                    .collect();
-                let had_results = rest.len() < message.content.len();
+                    .any(|content| content.as_tool_result().is_some());
                 if !rest.is_empty() || !had_results {
                     messages.push(json!({"role": "user", "content": user_content(&rest)}));
                 }
@@ -421,12 +424,7 @@ impl OpenRouterClient {
         let model: Cow<Model> = from_catalog.map_or(Cow::Borrowed(requested), Cow::Owned);
         let info = model.openrouter.as_ref();
 
-        let has_images = conversation.messages.iter().any(|message| {
-            message
-                .content
-                .iter()
-                .any(|content| content.as_image().is_some())
-        });
+        let has_images = conversation.messages.iter().any(Message::has_images);
         if has_images && !model.supports_image_input {
             return Err(Error::UnsupportedFeature(format!(
                 "OpenRouter model '{slug}' does not accept image input."

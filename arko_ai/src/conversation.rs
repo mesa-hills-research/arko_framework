@@ -374,6 +374,10 @@ impl Conversation {
     /// `replacement`, keeping its call id, name and error flag, so the call
     /// and its result stay paired. Returns the index of the message holding
     /// it. Messages after it are kept; truncate `messages` to drop them.
+    ///
+    /// Only the text is redacted: images the result holds
+    /// ([`ToolResult::images`]) are kept. Remove those separately, with the
+    /// message's other images, through [`Message::remove_images`].
     pub fn redact_tool_result(&mut self, call_id: &str, replacement: &str) -> Result<usize, Error> {
         for (index, message) in self.messages.iter_mut().enumerate().rev() {
             for content in &mut message.content {

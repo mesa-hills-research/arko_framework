@@ -187,6 +187,42 @@ impl Message {
         }
     }
 
+    /// The images this message holds, as content of their own and inside its
+    /// tool results.
+    pub fn image_count(&self) -> usize {
+        self.content
+            .iter()
+            .map(|content| match content {
+                Content::Image(_) => 1,
+                Content::ToolResult(result) => result.images.len(),
+                Content::Text(_) => 0,
+            })
+            .sum()
+    }
+
+    /// Whether this message holds an image, as content of its own or inside a
+    /// tool result.
+    pub fn has_images(&self) -> bool {
+        self.image_count() > 0
+    }
+
+    /// Removes every image from this message: image content and the images
+    /// inside its tool results (whose output text is kept, so each call and
+    /// its result stay paired). Returns how many were removed. Text that
+    /// labels an image, such as the runtime's `"Image from tool ..."`
+    /// description before a sibling image, is left for the caller.
+    pub fn remove_images(&mut self) -> usize {
+        let before = self.image_count();
+        self.content
+            .retain(|content| !matches!(content, Content::Image(_)));
+        for content in &mut self.content {
+            if let Content::ToolResult(result) = content {
+                result.images.clear();
+            }
+        }
+        before
+    }
+
     /// Returns `true` if this assistant message contains tool calls.
     pub fn has_tool_calls(&self) -> bool {
         !self.tool_calls.is_empty()
@@ -195,5 +231,37 @@ impl Message {
     /// Whether this message is a configuration update rather than a turn.
     pub fn is_configuration_update(&self) -> bool {
         self.configuration_update.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool::{ToolResult, ToolResultImage};
+
+    #[test]
+    fn images_inside_tool_results_count_and_are_removed_too() {
+        let image = || Image::new_base64("cGl4ZWxz", "image/png");
+        let mut message = Message::new_user_with_contents(vec![
+            Content::ToolResult(
+                ToolResult::new(Some("call_a".into()), "view_image", "a.png").with_images(vec![
+                    ToolResultImage::new("a.png", image()),
+                    ToolResultImage::new("", image()),
+                ]),
+            ),
+            Content::ToolResult(ToolResult::new(Some("call_b".into()), "read", "text")),
+            Content::Text("Image from tool view_image, call call_c: c.png".into()),
+            Content::Image(image()),
+        ]);
+        assert!(message.has_images());
+        assert_eq!(message.image_count(), 3);
+        assert_eq!(message.remove_images(), 3);
+        assert!(!message.has_images());
+        // Results stay, with their output; label text is the caller's.
+        assert_eq!(message.content.len(), 3);
+        assert_eq!(message.content[0].as_tool_result().unwrap().output, "a.png");
+        assert!(message.content[2].as_text().is_some());
+        assert_eq!(message.remove_images(), 0);
+        assert!(!Message::new_user("hi").has_images());
     }
 }

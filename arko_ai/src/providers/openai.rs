@@ -2338,23 +2338,21 @@ impl OpenAIClient {
                     .any(|content| content.as_tool_result().is_some());
 
                 if has_tool_results {
+                    let inline = conversation.model.accepts_tool_result_images();
                     for content in &message.content {
                         if let Content::ToolResult(result) = content {
                             request.input.push(OpenAIInputEntry::FunctionCallOutput(
                                 OpenAIInputFunctionCallOutput {
                                     type_: "function_call_output".to_string(),
                                     call_id: result.call_id.clone().unwrap_or_default(),
-                                    output: result.output.clone(),
+                                    output: self.function_call_output(result, inline)?,
                                 },
                             ));
                         }
                     }
 
-                    let filtered: Vec<&Content> = message
-                        .content
-                        .iter()
-                        .filter(|content| content.as_tool_result().is_none())
-                        .collect();
+                    let rest = super::tool_images::content_after_results(message, inline);
+                    let filtered: Vec<&Content> = rest.iter().map(AsRef::as_ref).collect();
 
                     if !filtered.is_empty() {
                         let message = self.convert_filtered_to_openai_message(
@@ -2444,6 +2442,36 @@ impl OpenAIClient {
                 input.push(Self::function_call_entry(tool_call));
             }
         }
+    }
+
+    /// A result's `function_call_output.output`: the output text, or with
+    /// images the model takes inside the result, an array of `input_text`
+    /// (the output, then each image's label) and `input_image` items. Empty
+    /// texts are left out.
+    fn function_call_output(
+        &self,
+        result: &crate::tool::ToolResult,
+        inline: bool,
+    ) -> Result<OpenAIContent, Error> {
+        if !inline || result.images.is_empty() {
+            return Ok(OpenAIContent::Text(result.output.clone()));
+        }
+        let text = |text: &str| OpenAIContentItem {
+            type_: "input_text".to_string(),
+            text: Some(text.to_string()),
+            image_url: None,
+        };
+        let mut items = Vec::new();
+        if !result.output.is_empty() {
+            items.push(text(&result.output));
+        }
+        for image in &result.images {
+            if !image.label.is_empty() {
+                items.push(text(&image.label));
+            }
+            items.push(self.image_item(&image.image)?);
+        }
+        Ok(OpenAIContent::Array(items))
     }
 
     fn function_call_entry(tool_call: &ToolCall) -> OpenAIInputEntry {
@@ -2762,7 +2790,8 @@ struct OpenAIInputFunctionCallOutput {
     #[serde(rename = "type")]
     type_: String,
     call_id: String,
-    output: String,
+    /// A string, or with result images an array of content items.
+    output: OpenAIContent,
 }
 
 #[derive(Debug, Serialize)]
