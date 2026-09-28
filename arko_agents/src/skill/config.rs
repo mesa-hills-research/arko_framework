@@ -51,10 +51,12 @@ pub struct SkillsConfig {
 
     /// Opt-in: let the tool-result interceptor given to the runtime (such as
     /// a workflow's distiller) replace `load_skill` results, with this
-    /// failure policy: retry, fall back to the full result, or give the
-    /// full result with a note that it could not be shortened. `None`, the
-    /// default, sends skills as written: a skill carries exact
-    /// instructions, which a summary would lose.
+    /// failure policy for the failures the interceptor reports: retry, fall
+    /// back to the full result, or give the full result with a note that it
+    /// could not be shortened. `None`, the default, sends skills as written:
+    /// a skill carries exact instructions, which a summary would lose.
+    /// (arko_workflows' distillers currently handle their own failures with
+    /// the workflow's interception failure policy and report none.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_skill_interception: Option<crate::tool::InterceptionFailurePolicy>,
 }

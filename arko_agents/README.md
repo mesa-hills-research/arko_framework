@@ -227,8 +227,8 @@ its tools or call `complete_task` (see [Model-call recovery](#model-call-recover
 
 ### Several calls in one response
 
-Every call of a response runs, and each gets exactly one result, in the order the model
-made the calls; no response is rejected for holding several. Calls to parallel-safe tools
+Every call of a response runs, and each gets exactly one result; no response is rejected
+for holding several. Calls to parallel-safe tools
 run at the same time as the parallel-safe calls next to them. Any other call runs alone,
 after the calls before it and before the calls after it, so calls run in the order the
 model made them wherever that matters. A tool is parallel-safe when its definition sets
@@ -238,7 +238,8 @@ The built-in `read_file`, `list_files`, and `load_skill` are parallel-safe; `wri
 when its server marks it `readOnlyHint: true`. Calls after one that ends the turn
 (`complete_task`, `ask_user`, a tool error under `FailTask`, or a middleware's decision)
 are not run, and their results say so; parallel-safe calls already running beside it
-finish.
+finish. Calls that need approval are the exception to call order; see
+[Approvals and workspace paths](#approvals-and-workspace-paths).
 
 `tool_config.one_tool_call_per_turn: true` (off by default) asks for one call per
 response. Native requests then disable parallel tool calls where the provider can (OpenAI
@@ -286,9 +287,13 @@ emits `BatchToolCallAwaitingApproval` listing those that need approval. Answer w
 `ApproveToolUse`, `RejectToolUse`, or `SubmitBatchToolApprovals`, where a call without a
 decision is rejected. An approval can carry `custom_tool_output`, which is used instead
 of running the tool, and a `message_to_agent`. Calls that need approval don't hold up the
-rest of their response: its auto-approved calls run first, and the calls awaiting
-approval run once decided, the approved calls of a batch under the same parallel-safety
-rule and in the batch's order. Every call gets exactly one result either way.
+rest of their response: its auto-approved calls run first, even those after a call
+awaiting approval, and the calls awaiting approval run once decided, the approved calls of
+a batch under the same parallel-safety rule and in the batch's order, their results after
+the others'. So an auto-approved call does not see the effect of an earlier call that
+still awaits approval. Among approved calls, only a call that ends the task (failing or
+cancelling it, or `complete_task`) leaves the rest unrun. Every call gets exactly one
+result either way.
 
 Parameters marked `is_path` are checked against the task's working directory. A path
 outside it is handled by `default_out_of_workspace_path_policy` or a per-tool override:
@@ -500,8 +505,10 @@ description and loaded on demand.
 A skill carries exact instructions, so `load_skill` results reach the agent as written:
 a result interceptor, such as a workflow's distiller, does not see them. The opt-in
 `SkillsConfig::load_skill_interception: Some(policy)` lets it replace them, with `policy`
-(an `InterceptionFailurePolicy`) deciding what an interceptor failure does: retry, fall
-back to the full result, or give the full result with a note.
+(an `InterceptionFailurePolicy`) deciding what a failure the interceptor reports does:
+retry, fall back to the full result, or give the full result with a note. (arko_workflows'
+distillers currently handle their own failures, with the workflow's interception failure
+policy, and report none.)
 
 ### Interactive terminals
 

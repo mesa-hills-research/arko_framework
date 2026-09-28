@@ -819,7 +819,9 @@ impl WorkflowBuilder {
     /// Set the failure policy for tool result interception.
     ///
     /// Defaults to `UseRawResult` (log warning and continue with the original
-    /// tool output if the interceptor fails).
+    /// tool output if the interceptor fails). The workflow applies only the
+    /// attempt count: after the last failed attempt the original output is
+    /// used, so `InformAgent` and `RetryThenInformAgent` add no note here.
     pub fn interception_failure_policy(mut self, policy: InterceptionFailurePolicy) -> Self {
         self.interception_failure_policy = Some(policy);
         self

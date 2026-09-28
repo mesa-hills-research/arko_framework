@@ -311,11 +311,13 @@ where
 /// [`one_tool_call_per_turn`](Self::one_tool_call_per_turn) asks for one
 /// call per response instead.
 ///
-/// Calls that need approval don't hold up the others: the response's
-/// auto-approved calls run first, and the calls waiting for approval run
-/// once decided, under the same rule. Calls after one that ends the turn
-/// (`complete_task`, `ask_user`, or a tool error that fails the task) are
-/// not run, and their results say so.
+/// Calls that need approval don't hold up the others, which is the one
+/// exception to call order: the response's auto-approved calls run first,
+/// and the calls waiting for approval run once decided, under the same
+/// rule, and their results follow. Calls of the response after one that
+/// ends the turn (`complete_task`, `ask_user`, or a tool error that fails
+/// the task) are not run, and their results say so; among approved calls,
+/// only one that ends the task stops the others.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "AgentToolConfigRepr")]
 pub struct AgentToolConfig {
