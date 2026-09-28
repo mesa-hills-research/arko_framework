@@ -134,10 +134,19 @@ enum ToolsStopped {
 
 /// How a group of calls ended; see [`AgentLoop::run_group`].
 struct GroupRun {
-    /// Each call's outcome, in order; `None` when a stop ended the calls.
-    outcomes: Option<Vec<Result<RunOutcome, crate::tool::ToolError>>>,
+    /// Each call's outcome, in order: `None` for a call a stop ended before
+    /// it finished.
+    outcomes: Vec<Option<Result<RunOutcome, crate::tool::ToolError>>>,
     /// A cancellation or suspension that arrived while the calls ran.
     stop: Option<ToolsStopped>,
+}
+
+/// The result text of a call a stop ended while it ran.
+fn stopped_call_reason(stop: ToolsStopped) -> &'static str {
+    match stop {
+        ToolsStopped::Cancelled => STOPPED_BY_CANCEL,
+        ToolsStopped::Suspended => STOPPED_BY_SUSPEND,
+    }
 }
 
 /// A native call to run, with where its result goes; see
@@ -645,21 +654,27 @@ impl AgentLoop {
     /// the outcomes. A closed channel doesn't stop the calls: the boundary
     /// after them handles it.
     async fn run_group(&mut self, runs: Vec<ToolRun>) -> GroupRun {
+        use futures::StreamExt;
         let interruptible = runs.iter().all(|run| run.interruptible);
         let environment = self.run_environment();
-        let calls = futures::future::join_all(
-            runs.into_iter()
-                .map(|run| tool_run::run_tool(environment.clone(), run)),
-        );
-        tokio::pin!(calls);
+        let mut outcomes: Vec<Option<_>> = runs.iter().map(|_| None).collect();
+        let mut calls: futures::stream::FuturesUnordered<_> = runs
+            .into_iter()
+            .enumerate()
+            .map(|(index, run)| {
+                let environment = environment.clone();
+                async move { (index, tool_run::run_tool(environment, run).await) }
+            })
+            .collect();
         let mut listening = true;
         let mut stop = None;
         loop {
             tokio::select! {
                 biased;
-                outcomes = &mut calls => {
-                    return GroupRun { outcomes: Some(outcomes), stop };
-                }
+                finished = calls.next() => match finished {
+                    Some((index, outcome)) => outcomes[index] = Some(outcome),
+                    None => return GroupRun { outcomes, stop },
+                },
                 command = self.command_receiver.recv(), if listening => {
                     let stopped = match command {
                         Some(UserCommand::InjectContext { content }) => {
@@ -683,7 +698,9 @@ impl AgentLoop {
                     };
                     if let Some(stopped) = stopped {
                         if interruptible {
-                            return GroupRun { outcomes: None, stop: Some(stopped) };
+                            // The calls still running are dropped; those
+                            // that finished keep their outcomes.
+                            return GroupRun { outcomes, stop: Some(stopped) };
                         }
                         // Taken after the calls return; later commands
                         // wait in the channel.
@@ -695,16 +712,16 @@ impl AgentLoop {
         }
     }
 
-    /// Stops the task for a command that stopped running tool calls: a
-    /// cancellation ends it, and a suspension stops the loop after the turn
-    /// (the task keeps its state, reported as it stops). Returns the result
-    /// text of the stopped calls.
-    async fn stop_running_tools(
-        &mut self,
-        stop: ToolsStopped,
-    ) -> Result<&'static str, ArkoAgentsError> {
+    /// Applies a command that stopped running tool calls, once the calls
+    /// that finished are handled: a cancellation ends the task (unless one
+    /// of the calls already ended it), and a suspension stops the loop after
+    /// the turn (the task keeps its state, reported as it stops).
+    async fn stop_after_calls(&mut self, stop: ToolsStopped) -> Result<(), ArkoAgentsError> {
         match stop {
             ToolsStopped::Cancelled => {
+                if self.task.current_state.is_terminal() {
+                    return Ok(());
+                }
                 log::info!("Task {}: Cancelled while tool calls ran.", self.task.id);
                 self.task.set_state(TaskState::Cancelled {
                     reason: CANCELLED_BY_USER.to_string(),
@@ -712,25 +729,14 @@ impl AgentLoop {
                 self.emit_event(AgentEvent::TaskStateChanged(
                     self.task.current_state.clone(),
                 ))
-                .await?;
-                Ok(STOPPED_BY_CANCEL)
+                .await
             }
             ToolsStopped::Suspended => {
                 self.stop_requested = true;
                 self.suspended_tools = true;
-                Ok(STOPPED_BY_SUSPEND)
+                Ok(())
             }
         }
-    }
-
-    /// Applies a stop that arrived while calls that aren't interruptible
-    /// ran, once they have returned: a cancellation ends the task unless a
-    /// call already ended it, and a suspension stops the loop.
-    async fn stop_after_calls(&mut self, stop: ToolsStopped) -> Result<(), ArkoAgentsError> {
-        if stop == ToolsStopped::Cancelled && self.task.current_state.is_terminal() {
-            return Ok(());
-        }
-        self.stop_running_tools(stop).await.map(|_| ())
     }
 
     /// Runs native calls in order under the parallel-safety rule (see
@@ -762,30 +768,29 @@ impl AgentLoop {
                 })
                 .unzip();
             let group = self.run_group(group_runs).await;
-            match group.outcomes {
-                Some(outcomes) => {
-                    for ((index, call, id, message), outcome) in calls.into_iter().zip(outcomes) {
+            let mut stopped = Vec::new();
+            for ((index, call, id, message), outcome) in calls.into_iter().zip(group.outcomes) {
+                match outcome {
+                    Some(outcome) => {
                         let result = self
                             .finish_native_call(&call, id, outcome?, message)
                             .await?;
                         results.push((index, result));
                     }
-                    if let Some(stop) = group.stop {
-                        self.stop_after_calls(stop).await?;
-                    }
+                    None => stopped.push((index, call, id)),
                 }
-                None => {
-                    let stop = group.stop.expect("a group without outcomes was stopped");
-                    let reason = self.stop_running_tools(stop).await?;
-                    for (index, call, id, _) in calls {
-                        self.emit_event(AgentEvent::ToolRejected {
-                            tool_call_id: id,
-                            tool_name: call.name.clone(),
-                            reason: Some(reason.to_string()),
-                        })
-                        .await?;
-                        results.push((index, ai::ToolResult::error_from_tool_call(&call, reason)));
-                    }
+            }
+            if let Some(stop) = group.stop {
+                self.stop_after_calls(stop).await?;
+                let reason = stopped_call_reason(stop);
+                for (index, call, id) in stopped {
+                    self.emit_event(AgentEvent::ToolRejected {
+                        tool_call_id: id,
+                        tool_name: call.name.clone(),
+                        reason: Some(reason.to_string()),
+                    })
+                    .await?;
+                    results.push((index, ai::ToolResult::error_from_tool_call(&call, reason)));
                 }
             }
         }
@@ -4362,12 +4367,13 @@ impl AgentLoop {
             parameters,
             custom_tool_output,
         );
-        let group = self.run_group(vec![run]).await;
-        let outcome = match group.outcomes {
-            Some(mut outcomes) => outcomes.pop().expect("one call, one outcome")?,
+        let mut group = self.run_group(vec![run]).await;
+        let outcome = match group.outcomes.pop().flatten() {
+            Some(outcome) => outcome?,
             None => {
-                let stop = group.stop.expect("a group without outcomes was stopped");
-                let reason = self.stop_running_tools(stop).await?;
+                let stop = group.stop.expect("a call without an outcome was stopped");
+                self.stop_after_calls(stop).await?;
+                let reason = stopped_call_reason(stop);
                 self.emit_event(AgentEvent::ToolRejected {
                     tool_call_id,
                     tool_name: tool_name.to_string(),

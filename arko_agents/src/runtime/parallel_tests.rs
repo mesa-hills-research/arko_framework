@@ -544,6 +544,99 @@ async fn cancelling_or_suspending_stops_a_running_call() {
     }
 }
 
+/// A parallel-safe tool that waits until its task is stopped.
+#[derive(Debug)]
+struct WaitsTogether;
+
+#[async_trait]
+impl Tool for WaitsTogether {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "waits_together".into(),
+            parallel_safe: true,
+            ..Waits.definition()
+        }
+    }
+
+    async fn execute(
+        &self,
+        _: &TaskContext<'_>,
+        _: HashMap<String, Value>,
+    ) -> Result<String, ToolError> {
+        std::future::pending().await
+    }
+}
+
+/// When a stop ends a group of parallel calls, a call that had already
+/// finished keeps its result; only the calls still running are stopped.
+#[tokio::test]
+async fn a_call_that_finished_before_a_stop_keeps_its_result() {
+    let workspace = workspace();
+    let record = Arc::new(Record::default());
+    let mut registry = probes(&record);
+    registry.register(Arc::new(WaitsTogether));
+    let (mut agent, mut events, commands) = agent(
+        config(ToolCallingMode::Native, &["probe_read", "waits_together"]),
+        registry,
+        &workspace,
+    );
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(turn(vec![
+            probe_call("quick", "probe_read"),
+            native_call("stuck", "waits_together", serde_json::json!({})),
+        ]));
+    let run = tokio::spawn(agent.run());
+    // The quick read finishes (it records its end) before the stop.
+    loop {
+        let event = timeout(Duration::from_secs(10), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if matches!(&event, AgentEvent::ToolCallFormatted { tool_name, .. } if tool_name == "waits_together")
+        {
+            break;
+        }
+    }
+    timeout(Duration::from_secs(10), async {
+        while !record
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|entry| entry == "end quick")
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    commands.send(UserCommand::CancelTask).await.unwrap();
+    let task = timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Cancelled { .. }));
+    assert_calls_paired(&task.conversation);
+    assert_eq!(
+        result_for(&task.conversation, "quick")[0].output,
+        "quick done"
+    );
+    assert_eq!(
+        result_for(&task.conversation, "stuck")[0].output,
+        STOPPED_BY_CANCEL
+    );
+    let seen = drain(&mut events);
+    assert!(seen.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolResult { tool_name, .. } if tool_name == "probe_read"
+    )));
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
 /// A tool that winds its own work down when the task stops.
 #[derive(Debug)]
 struct WindsDown(Arc<tokio::sync::Notify>);
