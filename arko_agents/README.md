@@ -114,7 +114,9 @@ cargo run -p arko_agents --example arko_agents_cli -- \
   --workspace-dir /path/to/workspace --prompt "Add a README"
 ```
 
-Its options include `--tool-calling-mode native|output_based`, `--mcp-config PATH`,
+Its options include `--tool-calling-mode native|output_based`,
+`--simplified-tool-events false` (output-based calls also reported parameter by
+parameter; `true` by default), `--mcp-config PATH`,
 `--openai-auth-json PATH` (ChatGPT OAuth from a Codex `auth.json`; the `OPENAI_OAUTH_*`
 variables are then not read), `--save-task-state PATH` (the final task as JSON), and the
 opt-in `--user-command-timeout SECONDS`, after

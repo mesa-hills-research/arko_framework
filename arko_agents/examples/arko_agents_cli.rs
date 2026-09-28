@@ -32,7 +32,10 @@ struct Cli {
     #[arg(long)]
     event_throttle_ms: Option<u64>,
 
-    #[arg(long, default_value_t = true)]
+    /// Output-based tool calls are reported with one event per call (true,
+    /// the default) or also parameter by parameter as they are parsed
+    /// (false). Takes `true` or `false`.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     simplified_tool_events: bool,
 
     #[arg(long)]
@@ -557,4 +560,33 @@ fn print_usage_info(usage: &UsageInfo, last_input_tokens: Option<usize>, accumul
         println!("  Cached: {}", cached);
     }
     println!("---");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simplified_tool_events_default_on_and_can_be_turned_off() {
+        let base = [
+            "arko_agents_cli",
+            "-c",
+            "agent.json",
+            "-w",
+            "work",
+            "-p",
+            "task",
+        ];
+        let parsed = Cli::try_parse_from(base).unwrap();
+        assert!(parsed.simplified_tool_events);
+        for (value, expected) in [("false", false), ("true", true)] {
+            let parsed = Cli::try_parse_from(
+                base.iter()
+                    .copied()
+                    .chain(["--simplified-tool-events", value]),
+            )
+            .unwrap();
+            assert_eq!(parsed.simplified_tool_events, expected);
+        }
+    }
 }
