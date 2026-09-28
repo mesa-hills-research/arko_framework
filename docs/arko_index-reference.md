@@ -191,9 +191,14 @@ the phase, the last `problem`, file counts (`files`, `validated`, `bypassed`,
 - `cancelled`: after `cancel(job)`;
 - `failed`: after a local error, such as an I/O or database failure.
 
-`resume(job)` continues a paused, blocked or failed job from its checkpoints. It requires
-the `Config` the job started with, and fails if the chunking policy has changed since; in
-that case, cancel the job and start a new update. An index has at most one unfinished
+`resume(job)` continues a paused, blocked or failed job from its checkpoints. Settings
+that shape the stored output must match the job's: its `Config::embedding` profile, and
+its chunking policy and request budget, which the job saved when it scanned the source
+(the budget is reused as saved). Every other `Config` field is a runtime setting and is
+taken from the current configuration; a change is logged, recorded as a
+`settings_changed` event and saved with the job. If the embedding profile differs, resume
+fails; if the chunking policy has changed, resume fails too. In either case, cancel the
+job and start a new update. An index has at most one unfinished
 job: `start_update` fails while a build or update of the index is running, paused or
 blocked.
 
@@ -237,6 +242,7 @@ JSON `detail`:
 | `request_finished` | `artifact`, `repair` and the `usage` of the accepted reply. |
 | `deterministic_repair` | Cuts removed without a model request. |
 | `pause_requested` | A pause was requested. |
+| `settings_changed` | A resume with other runtime settings: `changes`, each with the `setting` and its `from` and `to` values. |
 | `embedding_plan` | Embedding `payloads`, `reused` vectors and request `bins`. |
 | `embedded` | An embedding request's `billed_tokens`, `usage` and `rejected_usage`. |
 | `embedding_rejected` | An embedding response whose vectors failed validation, with its `error` and usage. |
@@ -288,7 +294,9 @@ when the generation was published.
 
 - A file whose normalized content and extension match a file of the active generation
   reuses its validated boundaries, including after a rename, as long as the chunking policy
-  and the embedding profile are unchanged.
+  and the embedding profile are unchanged. Files the newest cancelled or failed job of the
+  index finished chunking are reused the same way, so cancelling a blocked build and
+  starting an update pays only for the files that were not finished.
 - Vectors are stored by content, so a chunk whose text was embedded before with the same
   profile reuses its vector.
 
@@ -529,8 +537,8 @@ cargo run -p arko_index --example arko_index_cli -- \
 | `watch INDEX_ID [--debounce-ms MS]` | Start updates when the source changes (500 ms debounce, a reconciliation scan every 30 s) until Ctrl+C. |
 
 Options before the command: `--database PATH` (required), `--oauth-file PATH`,
-`--batch-count N` (default 6) and `--concurrency N` (default 2). Resuming a job requires
-the `--batch-count` and `--concurrency` values it started with.
+`--batch-count N` (default 6) and `--concurrency N` (default 2). A resumed job uses the
+values given to `resume`.
 
 `build`, `update` and `resume` print events as JSON lines until the job is ready; Ctrl+C
 pauses the job so that `resume` can continue it later. The database lock admits one

@@ -2495,3 +2495,104 @@ async fn watch_ignores_events_in_skipped_and_ignored_directories() {
     );
     watch.stop().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_new_update_reuses_the_chunking_of_a_cancelled_build() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    for n in 0..4 {
+        std::fs::write(
+            root.path().join(format!("{n}.txt")),
+            format!("alpha {n}\nbeta\n"),
+        )
+        .unwrap();
+    }
+    // One request per file; the first is refused, so the build is blocked
+    // with three files chunked.
+    let mut fake = Fake::new();
+    fake.rejection = Rejection::Refusal;
+    let fake = Arc::new(fake);
+    fake.rejected_chunks.store(1, Ordering::SeqCst);
+    let config = Config {
+        batch_count: 1,
+        ..config(&fake)
+    };
+    let index = ArkoIndex::open(db.path().join("i.db"), fake.clone(), config)
+        .await
+        .unwrap();
+    let build = index
+        .start_build(BuildSpec::new("test", root.path()))
+        .await
+        .unwrap();
+    let blocked = settle(&index, &build.job).await;
+    assert_eq!(blocked.phase, "blocked");
+    assert_eq!(blocked.validated, 3);
+    assert_eq!(fake.calls.lock().unwrap().len(), 4);
+    index.cancel(&build.job).await.unwrap();
+    // The update chunks only the file the build could not.
+    let update = index.start_update(&build.index).await.unwrap();
+    let done = settle(&index, &update.job).await;
+    assert_eq!(done.phase, "ready", "{:?}", done.problem);
+    assert_eq!(fake.calls.lock().unwrap().len(), 5);
+    assert_eq!(done.validated, 4);
+}
+#[tokio::test]
+async fn resume_takes_runtime_settings_from_the_current_configuration() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let path = db.path().join("i.db");
+    // Every chunk request waits an hour to retry, so the job runs until paused.
+    let mut fake = Fake::new();
+    fake.rejection = Rejection::WrongCallRetryLater;
+    let fake = Arc::new(fake);
+    fake.rejected_chunks.store(usize::MAX, Ordering::SeqCst);
+    let (index, job) = start_one_file(&fake, &path, root.path()).await;
+    wait_for_retry(&index, &job.job).await;
+    index.pause(&job.job).await.unwrap();
+    assert_eq!(settle(&index, &job.job).await.phase, "paused");
+    drop(index);
+    fake.rejected_chunks.store(0, Ordering::SeqCst);
+    let changed = Config {
+        batch_count: 3,
+        concurrency: 1,
+        ..config(&fake)
+    };
+    let index = ArkoIndex::open(&path, fake.clone(), changed.clone())
+        .await
+        .unwrap();
+    index.resume(&job.job).await.unwrap();
+    let done = settle(&index, &job.job).await;
+    assert_eq!(done.phase, "ready", "{:?}", done.problem);
+    let events = index.events(&job.job, 0, 1000).await.unwrap();
+    let settings = events
+        .iter()
+        .find(|e| e.kind == "settings_changed")
+        .unwrap();
+    assert_eq!(
+        settings.detail["changes"],
+        json!([
+            {"setting": "batch_count", "from": 6, "to": 3},
+            {"setting": "concurrency", "from": 2, "to": 1}
+        ])
+    );
+    drop(index);
+    // Another embedding profile would mix vectors, so resume refuses it.
+    std::fs::write(root.path().join("a.txt"), "alpha\ngamma\n").unwrap();
+    fake.rejected_chunks.store(usize::MAX, Ordering::SeqCst);
+    let index = ArkoIndex::open(&path, fake.clone(), config(&fake))
+        .await
+        .unwrap();
+    let update = index.start_update(&job.index).await.unwrap();
+    wait_for_retry(&index, &update.job).await;
+    index.pause(&update.job).await.unwrap();
+    assert_eq!(settle(&index, &update.job).await.phase, "paused");
+    drop(index);
+    let mut other = Fake::new();
+    other.profile.dimensions = 3;
+    let other = Arc::new(other);
+    let index = ArkoIndex::open(&path, other.clone(), config(&other))
+        .await
+        .unwrap();
+    let refused = index.resume(&update.job).await.unwrap_err();
+    assert!(refused.to_string().contains("embeds with"), "{refused}");
+}

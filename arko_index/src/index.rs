@@ -238,17 +238,39 @@ impl ArkoIndex {
         }
         let job_key = job.to_owned();
         let expected = self.inner.config.clone();
-        self.inner
+        let changes = self
+            .inner
             .db
             .call(move |c| {
                 let config: String =
                     c.query_row("SELECT config FROM jobs WHERE id=?1", [&job_key], |r| {
                         r.get(0)
                     })?;
-                if decode::<Config>(&config)? != expected {
-                    return Err(error::invalid(
-                        "resume requires the original resolved configuration",
-                    ));
+                let saved: Config = decode(&config)?;
+                // Only the embedding profile shapes stored output; the other
+                // settings are runtime settings, taken from the current
+                // configuration.
+                if saved.embedding != expected.embedding {
+                    return Err(error::invalid(format!(
+                        "the job embeds with {} at {} dimensions (tokenizer revision {}), but the index is configured with {} at {} dimensions (tokenizer revision {}); resume it with its embedding profile, or cancel it and start an update",
+                        saved.embedding.model,
+                        saved.embedding.dimensions,
+                        saved.embedding.tokenizer_revision,
+                        expected.embedding.model,
+                        expected.embedding.dimensions,
+                        expected.embedding.tokenizer_revision
+                    )));
+                }
+                let changes = runtime_changes(&saved, &expected)?;
+                if !changes.is_empty() {
+                    c.execute(
+                        "UPDATE jobs SET config=?2 WHERE id=?1",
+                        params![job_key, encode(&expected)?],
+                    )?;
+                    c.execute(
+                        "INSERT INTO events(job,kind,detail) VALUES(?1,'settings_changed',?2)",
+                        params![job_key, encode(&json!({"changes": changes}))?],
+                    )?;
                 }
                 let policy:Option<String>=c.query_row("SELECT json_extract(detail,'$.chunking_policy') FROM events WHERE job=?1 AND kind='snapshot' ORDER BY sequence DESC LIMIT 1",[&job_key],|r|r.get(0)).optional()?.flatten();
                 let has_manifest:bool=c.query_row("SELECT manifest IS NOT NULL FROM jobs WHERE id=?1",[&job_key],|r|r.get(0))?;
@@ -270,9 +292,24 @@ impl ArkoIndex {
                         params![job_key, path, encode(&state)?],
                     )?;
                 }
-                Ok(())
+                Ok(changes)
             })
             .await?;
+        if !changes.is_empty() {
+            log::info!(
+                "job {job}: resuming with changed runtime settings: {}",
+                changes
+                    .iter()
+                    .map(|c| format!(
+                        "{} {} -> {}",
+                        c["setting"].as_str().unwrap_or(""),
+                        c["from"],
+                        c["to"]
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         self.launch(job).await
     }
     pub async fn status(&self, job: &str) -> Result<JobStatus> {
@@ -399,20 +436,34 @@ impl ArkoIndex {
             );
         }
         let config = self.inner.config.clone();
+        let this_job = job.to_owned();
         let (old, reuse, policy_changed) = self.inner.db.call(move|c|{
             let mut old=BTreeMap::<String,String>::new();let mut reuse=HashMap::<(String,String),FileState>::new();
             let policy=chunker::policy_hash();
-            let mut policy_changed=true;
-            if let Some(previous)=previous {
-                let previous_policy:Option<String>=c.query_row("SELECT json_extract(detail,'$.chunking_policy') FROM events WHERE job=?1 AND kind='snapshot' ORDER BY sequence DESC LIMIT 1",[&previous],|r|r.get(0)).optional()?.flatten();
-                policy_changed=previous_policy.as_deref()!=Some(policy.as_str());
-                let old_config:String=c.query_row("SELECT config FROM jobs WHERE id=?1",[&previous],|r|r.get(0))?;
-                let reusable=!policy_changed && decode::<Config>(&old_config)?.embedding==config.embedding;
-                let rows:Vec<(String,String,String)>=c.prepare("SELECT path,hash,state FROM files WHERE job=?1")?.query_map([previous],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect::<std::result::Result<_,_>>()?;
+            let job_policy=|job:&str|->Result<Option<String>>{Ok(c.query_row("SELECT json_extract(detail,'$.chunking_policy') FROM events WHERE job=?1 AND kind='snapshot' ORDER BY sequence DESC LIMIT 1",[job],|r|r.get(0)).optional()?.flatten())};
+            // Complete boundaries of `job`, reusable when it ran with the same
+            // chunking policy and embedding profile; also its file hashes.
+            let mut add=|job:&str,old:Option<&mut BTreeMap<String,String>>|->Result<()>{
+                let job_config:String=c.query_row("SELECT config FROM jobs WHERE id=?1",[job],|r|r.get(0))?;
+                let usable=job_policy(job)?.as_deref()==Some(policy.as_str()) && decode::<Config>(&job_config)?.embedding==config.embedding;
+                let rows:Vec<(String,String,String)>=c.prepare("SELECT path,hash,state FROM files WHERE job=?1")?.query_map([job],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect::<std::result::Result<_,_>>()?;
+                let mut old=old;
                 for(path,hash,state)in rows{
-                    old.insert(path.clone(),hash.clone());
-                    if reusable{let state:FileState=decode(&state)?;if state.complete&&state.skipped.is_none(){reuse.insert((hash,extension(&path)),state);}}
+                    if let Some(old)=old.as_deref_mut(){old.insert(path.clone(),hash.clone());}
+                    if usable{let state:FileState=decode(&state)?;if state.complete&&state.skipped.is_none(){reuse.entry((hash,extension(&path))).or_insert(state);}}
                 }
+                Ok(())
+            };
+            let mut policy_changed=true;
+            if let Some(previous)=&previous {
+                policy_changed=job_policy(previous)?.as_deref()!=Some(policy.as_str());
+                add(previous,Some(&mut old))?;
+            }
+            // Finished chunking of the newest cancelled or failed job, such as
+            // a build that was blocked and then cancelled.
+            let unfinished:Option<String>=c.query_row("SELECT id FROM jobs WHERE index_id=(SELECT index_id FROM jobs WHERE id=?1) AND id<>?1 AND phase IN ('cancelled','failed') AND manifest IS NOT NULL ORDER BY rowid DESC LIMIT 1",[&this_job],|r|r.get(0)).optional()?;
+            if let Some(unfinished)=unfinished {
+                add(&unfinished,None)?;
             }
             Ok((old,reuse,policy_changed))
         }).await?;
@@ -987,6 +1038,22 @@ impl ArkoIndex {
         controls.remove(job);
         Ok(())
     }
+}
+/// The runtime settings that differ between a job's saved configuration and
+/// the current one, as `{setting, from, to}`.
+fn runtime_changes(saved: &Config, current: &Config) -> Result<Vec<Value>> {
+    let (Value::Object(saved), Value::Object(current)) =
+        (serde_json::to_value(saved)?, serde_json::to_value(current)?)
+    else {
+        return Ok(vec![]);
+    };
+    Ok(current
+        .iter()
+        .filter(|(setting, value)| *setting != "embedding" && saved.get(*setting) != Some(value))
+        .map(
+            |(setting, value)| json!({"setting": setting, "from": saved.get(setting), "to": value}),
+        )
+        .collect())
 }
 fn extension(path: &str) -> String {
     Path::new(path)
