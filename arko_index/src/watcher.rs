@@ -294,6 +294,7 @@ impl ArkoIndex {
                 events: sender,
                 reported: HashSet::new(),
                 blocked_since: HashMap::new(),
+                unresumable: HashSet::new(),
             };
             let mut interval = options.reconcile.map(tokio::time::interval);
             // The first check scans at once, catching changes made while no
@@ -342,6 +343,8 @@ struct Watching {
     reported: HashSet<(String, String, Option<String>)>,
     /// When the watcher first found each job blocked by transient failures.
     blocked_since: HashMap<String, Instant>,
+    /// Jobs the watcher could not resume; they are held from then on.
+    unresumable: HashSet<String>,
 }
 
 impl Watching {
@@ -419,7 +422,15 @@ impl Watching {
         };
         match phase.as_str() {
             // Another check after the update ends picks up edits made meanwhile.
-            "snapshotting" | "chunking" | "embedding" => recheck,
+            "snapshotting" | "chunking" | "embedding" => {
+                // Resumed by the host: the watcher may resume it again later.
+                self.unresumable.remove(&job);
+                recheck
+            }
+            _ if self.unresumable.contains(&job) => {
+                self.hold(job, phase, problem);
+                None
+            }
             "paused"
                 if self.options.resume_interrupted && problem.as_deref() == Some(INTERRUPTED) =>
             {
@@ -466,6 +477,8 @@ impl Watching {
                 Some(Instant::now() + self.options.debounce)
             }
             Err(error) => {
+                // Not retried on every event: the job is held for the host.
+                self.unresumable.insert(job.to_owned());
                 self.emit(WatchEvent::Failed {
                     error: format!("could not resume update {job}: {error}"),
                 });

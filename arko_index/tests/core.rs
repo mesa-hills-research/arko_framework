@@ -3561,3 +3561,63 @@ async fn every_request_of_a_job_shares_the_jobs_cache_key() {
     let last = fake.calls.lock().unwrap().last().unwrap().clone();
     assert_eq!(last.cache_key.as_deref(), Some(update.job.as_str()));
 }
+
+#[test]
+fn a_watcher_tries_to_resume_a_job_once() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let path = db.path().join("i.db");
+    let mut fake = Fake::new();
+    fake.rejection = Rejection::WrongCallRetryLater;
+    let fake = Arc::new(fake);
+    let runtime = || {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    };
+    let first = runtime();
+    let (index_id, interrupted) = first.block_on(async {
+        let (index, build) = start_one_file(&fake, &path, root.path()).await;
+        assert_eq!(settle(&index, &build.job).await.phase, "ready");
+        fake.rejected_chunks.store(usize::MAX, Ordering::SeqCst);
+        std::fs::write(root.path().join("a.txt"), "alpha\ngamma\n").unwrap();
+        let update = index.start_update(&build.index).await.unwrap();
+        wait_for_retry(&index, &update.job).await;
+        (build.index, update.job)
+    });
+    drop(first);
+    // The interrupted job can't be resumed: its chunking policy changed.
+    let c = rusqlite::Connection::open(&path).unwrap();
+    c.execute(
+        "UPDATE events SET detail=json_set(detail,'$.chunking_policy','old-policy') WHERE job=?1 AND kind='snapshot'",
+        [&interrupted],
+    )
+    .unwrap();
+    drop(c);
+    runtime().block_on(async {
+        let index = ArkoIndex::open(&path, fake.clone(), config(&fake))
+            .await
+            .unwrap();
+        let watch = index
+            .watch(&index_id, WatchOptions::new(Duration::from_millis(50)))
+            .await
+            .unwrap();
+        let mut events = watch.subscribe();
+        let failed =
+            next_watch_event(&mut events, |e| matches!(e, WatchEvent::Failed { .. })).await;
+        assert!(matches!(failed, WatchEvent::Failed { ref error } if error.contains(&interrupted)));
+        // Later events hold the job instead of trying again.
+        for n in 0..3 {
+            std::fs::write(root.path().join("a.txt"), format!("alpha\n{n}\n")).unwrap();
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        let held = next_watch_event(&mut events, |e| matches!(e, WatchEvent::Held { .. })).await;
+        assert!(matches!(held, WatchEvent::Held { ref job, .. } if *job == interrupted));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        while let Ok(event) = events.try_recv() {
+            assert!(!matches!(event, WatchEvent::Failed { .. }), "{event:?}");
+        }
+        watch.stop().await.unwrap();
+    });
+}
