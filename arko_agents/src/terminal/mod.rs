@@ -61,18 +61,28 @@ pub struct TerminalConfig {
     pub quiet_terminal_environment: bool,
 }
 
+/// The UTF-8 locale PTY jobs get: `C.UTF-8`, except on macOS, which may
+/// not have it (a shell would then print locale warnings into the output),
+/// where it is `en_US.UTF-8`.
+pub const QUIET_TERMINAL_LOCALE: &str = if cfg!(target_os = "macos") {
+    "en_US.UTF-8"
+} else {
+    "C.UTF-8"
+};
+
 /// The variables PTY jobs get when
 /// [`TerminalConfig::quiet_terminal_environment`] is on (the default), on
 /// every platform: no colour (`TERM=dumb`, `NO_COLOR=1`), no pager
-/// (`PAGER=cat`, `GIT_PAGER=cat`), and a UTF-8 locale.
+/// (`PAGER=cat`, `GIT_PAGER=cat`), and a UTF-8 locale
+/// ([`QUIET_TERMINAL_LOCALE`] as `LANG`, `LC_CTYPE` and `LC_ALL`).
 pub const QUIET_TERMINAL_ENVIRONMENT: [(&str, &str); 7] = [
     ("TERM", "dumb"),
     ("NO_COLOR", "1"),
     ("PAGER", "cat"),
     ("GIT_PAGER", "cat"),
-    ("LANG", "C.UTF-8"),
-    ("LC_CTYPE", "C.UTF-8"),
-    ("LC_ALL", "C.UTF-8"),
+    ("LANG", QUIET_TERMINAL_LOCALE),
+    ("LC_CTYPE", QUIET_TERMINAL_LOCALE),
+    ("LC_ALL", QUIET_TERMINAL_LOCALE),
 ];
 
 impl TerminalConfig {

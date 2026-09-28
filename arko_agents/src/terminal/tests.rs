@@ -696,8 +696,9 @@ async fn pty_jobs_get_a_quiet_environment_unless_turned_off() {
     let f = Fixture::new(|_| {});
     let pty = f.python(&show, Default::default());
     let text = f.finished(pty.job_id).await.output.text;
+    let locale = QUIET_TERMINAL_LOCALE;
     assert!(
-        text.contains("ENV=dumb|1|cat|cat|C.UTF-8|C.UTF-8|C.UTF-8"),
+        text.contains(&format!("ENV=dumb|1|cat|cat|{locale}|{locale}|{locale}")),
         "{text:?}"
     );
     let pipe = f.python(&show, pipes);

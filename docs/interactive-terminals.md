@@ -66,8 +66,9 @@ calling, for example `{"job_id":"…","revision":"3","text":"Y\n"}`.
 | Quiet environment for PTY jobs (`quiet_terminal_environment`) | On |
 
 PTY jobs run with the host's environment plus `TERM=dumb`, `NO_COLOR=1`,
-`PAGER=cat`, `GIT_PAGER=cat`, and `LANG`, `LC_CTYPE`, and `LC_ALL` set to
-`C.UTF-8` (`QUIET_TERMINAL_ENVIRONMENT`), on every platform. Programs that see a
+`PAGER=cat`, `GIT_PAGER=cat`, and `LANG`, `LC_CTYPE`, and `LC_ALL` set to a UTF-8
+locale, `C.UTF-8` (`en_US.UTF-8` on macOS, which may lack `C.UTF-8`)
+(`QUIET_TERMINAL_ENVIRONMENT`), on every platform. Programs that see a
 terminal then print plain text instead of colours, progress redraws, and pagers,
 which would otherwise fill the output window. Full-screen programs such as
 editors, `top`, and `less` refuse to run or degrade under `TERM=dumb`; set
