@@ -1196,6 +1196,9 @@ impl WorkflowBuilder {
         if let Some(config) = &self.memory_config {
             config.validate(&agent_names)?;
         }
+        if let Some(config) = &self.persistence_config {
+            config.validate()?;
+        }
         if let Some(services) = &self.services_config {
             services.validate(&agent_names)?;
             if services.allowed_callers.is_empty() && !services.all_callers {

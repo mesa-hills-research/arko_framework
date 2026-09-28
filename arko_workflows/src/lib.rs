@@ -79,7 +79,7 @@ pub mod prelude {
     pub use crate::messaging::registry::{AgentStatus, WaitReason};
     pub use crate::messaging::wait::WaitForMessageTimeout;
     pub use crate::messaging::{AgentMessage, MessageAttachment, MessagingPolicy};
-    pub use crate::persistence::{EventLog, PersistenceConfig};
+    pub use crate::persistence::{CheckpointRetention, EventLog, PersistenceConfig};
     pub use crate::policy::{
         AgentPause, AgentResume, ApprovalPolicy, ErrorRecoveryPolicy, ToolApprovalHandler,
         ToolApprovalOutcome, ToolApprovalRequest,

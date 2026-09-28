@@ -7,8 +7,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::persistence::PersistenceConfig;
 use crate::persistence::state::WorkflowState;
+use crate::persistence::{CheckpointRetention, PersistenceConfig};
 use crate::test_support::{ResponsesServer, Workspace, agent_config, complete_turn};
 use crate::workflow::result::AgentRunStatus;
 
@@ -188,7 +188,7 @@ async fn a_checkpoint_holding_its_tasks_still_resumes() {
     );
 }
 
-/// Every checkpoint is kept by default; `retain_checkpoints(n)` keeps the
+/// Every checkpoint is kept by default; `keep_last_checkpoints(n)` keeps the
 /// newest `n`, including those of an earlier process.
 #[tokio::test]
 async fn checkpoints_are_kept_unless_retention_is_set() {
@@ -200,7 +200,7 @@ async fn checkpoints_are_kept_unless_retention_is_set() {
         std::fs::write(run_dir(&workspace).join("checkpoint-earlier.json"), "{}").unwrap();
         let mut config = PersistenceConfig::new(run_dir(&workspace));
         if let Some(retain) = retain {
-            config = config.retain_checkpoints(retain);
+            config = config.keep_last_checkpoints(retain);
         }
         let workflow = builder(&server, &workspace)
             .persistence(config)
@@ -318,7 +318,7 @@ async fn retention_deletes_only_task_versions_no_kept_checkpoint_refers_to() {
         let legacy = run_dir(&workspace).join(format!("agents/{}.json", uuid::Uuid::new_v4()));
         std::fs::write(&legacy, "{}").unwrap();
         let workflow = builder(&server, &workspace)
-            .persistence(PersistenceConfig::new(run_dir(&workspace)).retain_checkpoints(retain))
+            .persistence(PersistenceConfig::new(run_dir(&workspace)).keep_last_checkpoints(retain))
             .build()
             .unwrap();
         let first = workflow.run_agent("coder", "Write it.").await.unwrap();
@@ -592,4 +592,39 @@ async fn resumed_memory_follows_the_configuration() {
         .build_tool_registry("coder", resumed.context(), 0);
     assert!(registry.get("read_memory").is_some());
     assert!(registry.get("write_memory").is_none());
+}
+
+/// Keeping the last zero checkpoints fails the build, so no checkpoint is
+/// deleted. (A zero count on the former public `Option<usize>` field
+/// deleted every checkpoint in the directory after each save: the one just
+/// written and every earlier process's, with their task versions.) Every
+/// checkpoint is kept by default.
+#[tokio::test]
+async fn keeping_the_last_zero_checkpoints_fails_the_build() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let config = PersistenceConfig::new(run_dir(&workspace));
+    assert_eq!(config.retain_checkpoints, CheckpointRetention::KeepAll);
+    let error = builder(&server, &workspace)
+        .persistence(config.clone().keep_last_checkpoints(0))
+        .build()
+        .err()
+        .unwrap();
+    assert!(
+        matches!(&error, WorkflowError::BuilderInvalid(message)
+            if message == "keep_last_checkpoints needs at least 1; every checkpoint is kept by default"),
+        "{error}"
+    );
+    // A later valid count replaces the rejected one.
+    let config = config.keep_last_checkpoints(0).keep_last_checkpoints(1);
+    assert_eq!(
+        config.retain_checkpoints,
+        CheckpointRetention::KeepLast(std::num::NonZeroUsize::MIN)
+    );
+    assert!(
+        builder(&server, &workspace)
+            .persistence(config)
+            .build()
+            .is_ok()
+    );
 }

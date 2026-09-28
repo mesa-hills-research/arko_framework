@@ -617,7 +617,7 @@ and `list_memories` if either; `list_memories` hides tiers it can't access.
 | `MessagingPolicy` | Every agent may message every other | `can_message(agent, recipients)` limits one agent; `cannot_message(agent)`. `send_message` and `list_recipients` go to agents with a permitted recipient, `wait_for_message` to agents another may message. `send_message` reaches only running or waiting agents. |
 | `WorkflowServicesConfig::allowed_callers`, `allowed_targets` | Empty: **nobody** | Name them with `allow_caller` and `allow_target`; an empty caller list is only warned about. |
 | `allow_all_callers()`, `allow_all_targets()` | Off | Every agent except verifier agents (and, as a target, the caller itself). |
-| `max_active_calls` | 4 | Delegated calls running at once, workflow-wide; a call over the limit fails at once. The setter clamps to at least 1. |
+| `max_active_calls` | 4 | Delegated calls running at once, workflow-wide; a call over the limit fails at once. A `NonZeroU32`: `max_active_calls(0)` fails the build. |
 | `BallotConfig` | No default | At least 2 options with nonempty, unique IDs, `quorum` at least 1, `consensus_threshold` from 0 to 1, weights finite and positive. `eligible_voters` empty = every enabled voter; a voter without a weight weighs 1.0; `tie_break` is `RejectTie` or `Lexicographic` (smallest option ID). |
 
 ### Verification and distillation
@@ -690,7 +690,7 @@ from the run directory's `durable/journal.jsonl`. See
 | `PersistenceConfig::new(dir)` | Default | Notes |
 |---|---|---|
 | `auto_checkpoint` | `true` | A checkpoint after every finalized agent run and when a run is stopped. Task versions are saved either way. |
-| `retain_checkpoints` | `None`: every checkpoint and task version is kept | `retain_checkpoints(n)` keeps the newest `n` (at least 1) and the task versions they refer to. |
+| `retain_checkpoints` | `CheckpointRetention::KeepAll`: every checkpoint and task version is kept | `keep_last_checkpoints(n)` (`KeepLast`) keeps the newest `n` and the task versions they refer to; `n` of 0 fails the build. In Python, `retain_checkpoints=n` (0 raises `ValueError`). |
 | `event_log` | `EventLog::Full`: every event, including each streamed fragment | `LifecycleOnly` leaves the fragments out. The event log is never truncated or rotated. |
 | `event_flush_interval` | 1 s | State changes, run ends and errors are written at once. |
 

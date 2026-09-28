@@ -1,6 +1,7 @@
 //! Late-bound services that let explicitly authorized tools call into a live workflow.
 
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
 
@@ -38,8 +39,17 @@ pub struct WorkflowServicesConfig {
     /// Opt-in: a caller may run every agent, except itself and verifier
     /// agents.
     pub all_targets: bool,
-    pub max_active_calls: u32,
+    /// Calls running at once, workflow-wide (nested delegation included);
+    /// a call over the limit fails at once. Default
+    /// [`DEFAULT_MAX_ACTIVE_CALLS`].
+    pub max_active_calls: NonZeroU32,
+    /// `max_active_calls(0)` was asked for; `WorkflowBuilder::build`
+    /// reports it.
+    zero_max_active_calls: bool,
 }
+
+/// The default [`WorkflowServicesConfig::max_active_calls`]: 4.
+pub const DEFAULT_MAX_ACTIVE_CALLS: NonZeroU32 = NonZeroU32::new(4).unwrap();
 
 impl Default for WorkflowServicesConfig {
     fn default() -> Self {
@@ -48,7 +58,8 @@ impl Default for WorkflowServicesConfig {
             allowed_targets: HashSet::new(),
             all_callers: false,
             all_targets: false,
-            max_active_calls: 4,
+            max_active_calls: DEFAULT_MAX_ACTIVE_CALLS,
+            zero_max_active_calls: false,
         }
     }
 }
@@ -80,13 +91,27 @@ impl WorkflowServicesConfig {
         self
     }
 
+    /// How many calls may run at once, workflow-wide (default 4). A `max` of
+    /// 0 makes `WorkflowBuilder::build` fail.
     pub fn max_active_calls(mut self, max: u32) -> Self {
-        self.max_active_calls = max.max(1);
+        match NonZeroU32::new(max) {
+            Some(max) => {
+                self.max_active_calls = max;
+                self.zero_max_active_calls = false;
+            }
+            None => self.zero_max_active_calls = true,
+        }
         self
     }
 
-    /// Every agent the configuration names must be registered.
+    /// Every agent the configuration names must be registered, and the
+    /// call limit must be at least 1.
     pub(crate) fn validate(&self, agents: &HashSet<String>) -> Result<(), WorkflowError> {
+        if self.zero_max_active_calls {
+            return Err(WorkflowError::BuilderInvalid(
+                "max_active_calls needs at least 1; the default is 4".to_string(),
+            ));
+        }
         for (role, names) in [
             ("caller", &self.allowed_callers),
             ("target", &self.allowed_targets),
@@ -226,7 +251,7 @@ impl WorkflowServices {
             )));
         }
         let previous = self.active_calls.fetch_add(1, Ordering::AcqRel);
-        if previous >= self.config.max_active_calls {
+        if previous >= self.config.max_active_calls.get() {
             self.active_calls.fetch_sub(1, Ordering::AcqRel);
             return Err(WorkflowError::Channel(format!(
                 "workflow service active-call limit ({}) reached",
@@ -397,6 +422,39 @@ mod tests {
         );
         assert_eq!(services.allowed_target_names("coder"), ["orchestrator"]);
         assert!(services.target_guidance("orchestrator").contains("`coder`"));
+    }
+
+    /// `max_active_calls(0)` fails the build (it once built a workflow
+    /// whose every call was refused, "active-call limit (0) reached"); the
+    /// field can't hold 0, and the default is 4.
+    #[test]
+    fn zero_max_active_calls_fails_the_build() {
+        assert_eq!(WorkflowServicesConfig::default().max_active_calls.get(), 4);
+        let error = crate::Workflow::builder()
+            .name("services-test")
+            .workspace(std::env::temp_dir())
+            .llm_client(Arc::new(arko_ai::LLMClient::new()))
+            .agent("orchestrator", agent("Orchestrator"))
+            .agent("coder", agent("Coder"))
+            .workflow_services(
+                WorkflowServicesConfig::default()
+                    .allow_caller("orchestrator")
+                    .allow_target("coder")
+                    .max_active_calls(0),
+            )
+            .build()
+            .err()
+            .unwrap();
+        assert!(
+            matches!(&error, WorkflowError::BuilderInvalid(message) if message.contains("max_active_calls needs at least 1")),
+            "{error}"
+        );
+        // A later valid value replaces the rejected one.
+        let config = WorkflowServicesConfig::default()
+            .max_active_calls(0)
+            .max_active_calls(2);
+        assert_eq!(config.max_active_calls.get(), 2);
+        assert!(config.validate(&HashSet::new()).is_ok());
     }
 
     /// Names must be registered agents.

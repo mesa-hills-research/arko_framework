@@ -489,7 +489,7 @@ Source: [services/mod.rs](src/services/mod.rs), [builder integration](src/workfl
 | `allowed_targets` | `HashSet<String>` | The agents a caller may run, independent of the caller list. Empty (default): none, unless `all_targets`. |
 | `all_callers` | `bool` | Opt-in, default `false`: every agent is a caller, except completion-verifier agents. |
 | `all_targets` | `bool` | Opt-in, default `false`: a caller may run every agent, except itself and completion-verifier agents. |
-| `max_active_calls` | `u32` | `4`. Limit on simultaneous service calls, including nested delegation. |
+| `max_active_calls` | `NonZeroU32` | `DEFAULT_MAX_ACTIVE_CALLS`, 4. Limit on simultaneous service calls, including nested delegation. |
 
 ```rust
 // WorkflowServicesConfig
@@ -506,7 +506,7 @@ async fn run_agent(&self, caller: &str, agent_name: &str, prompt: &str)
     -> Result<AgentResult, WorkflowError>;
 ```
 
-Callers and targets must be named explicitly (`allow_caller`, `allow_target`), or admitted with the opt-ins, which leave out completion-verifier agents (and, as a target, the caller itself); an explicitly named agent is admitted either way (so a caller also named as a target may run itself). `max_active_calls` clamps to at least one; assigning the public field directly bypasses the clamp. `build` rejects a caller or target that is not a registered agent. The tool's `agent` parameter lists the caller's targets with their roles. `WorkflowServices` has no public constructor; after enabling services, `workflow.context().workflow_services.get()` returns it. It holds a weak reference to the workflow context and returns `Channel` once the workflow has been dropped.
+Callers and targets must be named explicitly (`allow_caller`, `allow_target`), or admitted with the opt-ins, which leave out completion-verifier agents (and, as a target, the caller itself); an explicitly named agent is admitted either way (so a caller also named as a target may run itself). `max_active_calls(0)` makes `build` fail ("max_active_calls needs at least 1; the default is 4"), and the field can't hold 0. `build` rejects a caller or target that is not a registered agent. The tool's `agent` parameter lists the caller's targets with their roles. `WorkflowServices` has no public constructor; after enabling services, `workflow.context().workflow_services.get()` returns it. It holds a weak reference to the workflow context and returns `Channel` once the workflow has been dropped.
 
 `run_agent` checks the caller and target policies, then runs the target with the workflow's shared memory, budget, hooks, persistence, and completion verifiers. Once the run is stopped, it returns the stop's error. A disallowed caller or target returns `BuilderInvalid`; reaching the active-call limit returns `Channel` immediately instead of queuing. `caller` is a host-supplied identity, not authentication. Apart from the active-call limit, there is no call-depth or cycle limit.
 
@@ -1153,7 +1153,7 @@ A retry happens on a later call; each call runs the closure at most once. When t
 
 ## Persistence and checkpoint state
 
-Source: [persistence/mod.rs](src/persistence/mod.rs), [persistence/state.rs](src/persistence/state.rs). Configuration and manager: `arko_workflows::persistence`; state types: `arko_workflows::persistence::state`. The prelude re-exports `PersistenceConfig`.
+Source: [persistence/mod.rs](src/persistence/mod.rs), [persistence/state.rs](src/persistence/state.rs). Configuration and manager: `arko_workflows::persistence`; state types: `arko_workflows::persistence::state`. The prelude re-exports `PersistenceConfig`, `CheckpointRetention` and `EventLog`.
 
 ### PersistenceConfig and PersistenceManager
 
@@ -1163,7 +1163,7 @@ Source: [persistence/mod.rs](src/persistence/mod.rs), [persistence/state.rs](src
 |---|---|---|
 | `checkpoint_dir` | `std::path::PathBuf` | The run directory. |
 | `auto_checkpoint` | `bool` | Save a checkpoint after each finalized agent result, and once when a run call first returns a stopped run's error. Default `true`. |
-| `retain_checkpoints` | `Option<usize>` | Keep only the newest this many checkpoint files, deleting older ones (earlier processes' first, by modification time) after each save, and then the task versions that neither a kept checkpoint nor a recorded result refers to (none if a kept checkpoint can't be read); a file that can't be deleted is logged and kept. Default `None`: every checkpoint and task version is kept. |
+| `retain_checkpoints` | `CheckpointRetention` | `KeepAll` (default): every checkpoint and task version is kept. `KeepLast(n)` (`n: NonZeroUsize`, set with `keep_last_checkpoints`): only the newest `n` checkpoint files are kept, deleting older ones (earlier processes' first, by modification time) after each save, and then the task versions that neither a kept checkpoint nor a recorded result refers to (none if a kept checkpoint can't be read); a file that can't be deleted is logged and kept. |
 | `event_log` | `EventLog` | `Full` (default): every agent event, including each streamed fragment. `LifecycleOnly`: every event except `AssistantResponseChunk`, `ReasoningChunk`, `ToolParamName`, `ToolParamValueChunk`, and `ToolParamEnd`; the finished responses are in the task files, but streamed reasoning a provider doesn't return with the response is only in a `Full` log. |
 | `event_flush_interval` | `std::time::Duration` | Buffered events are written at least this often; `TaskStateChanged`, `TaskStreamEnd`, `ErrorEncountered`, `RetryScheduled`, `UsageLimitReached`, `RefusalReceived`, and `OutputTokenLimitReached` are written at once, and the buffer before each checkpoint. Default `DEFAULT_EVENT_FLUSH_INTERVAL`, one second. |
 
@@ -1171,7 +1171,7 @@ Source: [persistence/mod.rs](src/persistence/mod.rs), [persistence/state.rs](src
 impl PersistenceConfig {
     pub fn new(checkpoint_dir: impl Into<std::path::PathBuf>) -> Self;
     pub fn auto_checkpoint(self, enabled: bool) -> Self;
-    pub fn retain_checkpoints(self, count: usize) -> Self; // at least 1
+    pub fn keep_last_checkpoints(self, count: usize) -> Self; // 0 fails `WorkflowBuilder::build`
     pub fn event_log(self, event_log: EventLog) -> Self;
     pub fn event_flush_interval(self, interval: std::time::Duration) -> Self;
     pub fn user_data(workflow_name: &str) -> Result<Self, WorkflowError>;
@@ -1220,7 +1220,7 @@ Filesystem and serialization failures are returned as `WorkflowError`, except th
 
 ### Task versions
 
-A checkpoint doesn't hold the tasks of its agent results: it refers to task version files, `agents/<task id>/<content hash>.json`, each a task as the checkpoint recorded it. When a finalized run is recorded its task is saved as a version; a version is written only when the task's content changed, so checkpoints that saw the same task share one file, and a task that runs on (continued or resumed) gets a new version while older checkpoints still refer to, and resume, the task as it was then. Without `retain_checkpoints` every version is kept, so the run directory holds one full task per version; with it, a version is deleted once no kept checkpoint (and no recorded result) refers to it. Task files that earlier versions wrote beside checkpoints holding their tasks (`agents/<task id>.json`) are not referred to or deleted.
+A checkpoint doesn't hold the tasks of its agent results: it refers to task version files, `agents/<task id>/<content hash>.json`, each a task as the checkpoint recorded it. When a finalized run is recorded its task is saved as a version; a version is written only when the task's content changed, so checkpoints that saw the same task share one file, and a task that runs on (continued or resumed) gets a new version while older checkpoints still refer to, and resume, the task as it was then. Under `CheckpointRetention::KeepAll` (the default) every version is kept, so the run directory holds one full task per version; under `KeepLast`, a version is deleted once no kept checkpoint (and no recorded result) refers to it. Task files that earlier versions wrote beside checkpoints holding their tasks (`agents/<task id>.json`) are not referred to or deleted.
 
 `resume_from` restores memory content and history, pending messages, the cost ledger, finalized agent results, verification and distillation records, and the agent status registry. For memory, the new builder's `MemoryConfig` decides each tier's readers, writers, limit, and write mode, and the checkpoint supplies content and history by tier name. A configured tier the checkpoint lacks starts as configured. A checkpoint tier that matches no configured tier makes `build` fail with `BuilderInvalid` naming it, unless `rename_memory_tier_on_resume(from, to)` maps it to a configured tier or `drop_memory_tier_on_resume(name)` discards it; two checkpoint tiers mapped to one configured tier also fail. Content over a tier's configured limit is kept (with a warning); writes that grow it fail until it is smaller. When the write mode changed, each write's text is stored in its entry. Freshness state is restored only when freshness tracking is configured again. Agents, the client, tools, hooks, policies, budget limits, and metadata come from the new builder, not the checkpoint. The pause flag starts cleared, and active message channels, ballots, and verification repair counts and baselines start empty. Restoring does not continue agents or replay workflow control flow. Accounting is rebuilt from `cost_ledger`; `budget_spent` and `completed_agents` are not used on restore. A recorded `cancellation` is not restored: the resumed run starts again, as described under [Stopping a run](#stopping-a-run).
 
@@ -1302,7 +1302,7 @@ The tables use Python-facing signatures: `self` and PyO3 interpreter arguments a
 | `workspace(path: str) -> None` | Set the existing workspace directory. |
 | `agent(name: str, config_path: str) -> None` | Add an agent whose configuration file is loaded during `build`. |
 | `budget(limit: float) -> None` | Set the workflow budget in dollars; validated at build. |
-| `persistence(checkpoint_dir: str, auto_checkpoint: bool = True, retain_checkpoints: int \| None = None, event_log: str = "full") -> None` | Enable persistence in `checkpoint_dir`, with the Rust defaults: a checkpoint after every finalized agent run, every checkpoint kept (`retain_checkpoints` keeps the newest that many), and every event logged (`"lifecycle_only"` leaves out streamed fragments; other values raise `ValueError`). |
+| `persistence(checkpoint_dir: str, auto_checkpoint: bool = True, retain_checkpoints: int \| None = None, event_log: str = "full") -> None` | Enable persistence in `checkpoint_dir`, with the Rust defaults: a checkpoint after every finalized agent run, every checkpoint kept (`retain_checkpoints` keeps the newest that many; 0 raises `ValueError`), and every event logged (`"lifecycle_only"` leaves out streamed fragments; other values raise `ValueError`). |
 | `rename_memory_tier_on_resume(old: str, new: str) -> None` | As `WorkflowBuilder::rename_memory_tier_on_resume`. |
 | `drop_memory_tier_on_resume(name: str) -> None` | As `WorkflowBuilder::drop_memory_tier_on_resume`. |
 | `approval_policy(policy: str) -> None` | `"approve_all"` (the default) or `"respect_agent_config"`; other values raise `ValueError`. A handler is Rust-only. |

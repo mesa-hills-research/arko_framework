@@ -172,10 +172,11 @@ impl PyWorkflowBuilder {
 
     /// Persist the run in `checkpoint_dir`. As in Rust: a checkpoint after
     /// every finalized agent run (`auto_checkpoint=True`), every checkpoint
-    /// and task version kept (`retain_checkpoints=None`; a count keeps the
-    /// newest checkpoints and the task versions they refer to), and every
-    /// event logged (`event_log="full"`; `"lifecycle_only"` leaves out
-    /// streamed fragments).
+    /// and task version kept (`retain_checkpoints=None`; a count of at least
+    /// 1 keeps the newest checkpoints and the task versions they refer to,
+    /// and 0 raises `ValueError`), and every event logged
+    /// (`event_log="full"`; `"lifecycle_only"` leaves out streamed
+    /// fragments).
     #[pyo3(signature = (checkpoint_dir, auto_checkpoint=true, retain_checkpoints=None, event_log="full"))]
     fn persistence(
         &mut self,
@@ -184,6 +185,11 @@ impl PyWorkflowBuilder {
         retain_checkpoints: Option<usize>,
         event_log: &str,
     ) -> PyResult<()> {
+        if retain_checkpoints == Some(0) {
+            return Err(value_error(
+                "retain_checkpoints needs at least 1; every checkpoint is kept by default",
+            ));
+        }
         self.event_log = match event_log {
             "full" => crate::persistence::EventLog::Full,
             "lifecycle_only" => crate::persistence::EventLog::LifecycleOnly,
@@ -335,7 +341,7 @@ impl PyWorkflowBuilder {
                 .auto_checkpoint(self.auto_checkpoint)
                 .event_log(self.event_log);
             if let Some(count) = self.retain_checkpoints {
-                config = config.retain_checkpoints(count);
+                config = config.keep_last_checkpoints(count);
             }
             builder = builder.persistence(config);
         }

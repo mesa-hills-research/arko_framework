@@ -1,5 +1,6 @@
 /// Checkpoint and resume support for workflows.
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -67,6 +68,20 @@ fn is_urgent(event: &arko_agents::runtime::event::AgentEvent) -> bool {
 /// The default [`PersistenceConfig::event_flush_interval`]: one second.
 pub const DEFAULT_EVENT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Which checkpoint files a run directory keeps; see
+/// [`PersistenceConfig::retain_checkpoints`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CheckpointRetention {
+    /// Every checkpoint and task version is kept (the default).
+    #[default]
+    KeepAll,
+    /// Opt-in: only the newest this many checkpoint files are kept. After
+    /// each save, older ones are deleted (earlier processes' first, by
+    /// modification time), then the task versions that neither a kept
+    /// checkpoint nor a recorded result refers to.
+    KeepLast(NonZeroUsize),
+}
+
 /// Configuration for workflow persistence.
 #[derive(Debug, Clone)]
 pub struct PersistenceConfig {
@@ -74,10 +89,11 @@ pub struct PersistenceConfig {
     pub checkpoint_dir: PathBuf,
     /// Automatically checkpoint after each agent completion.
     pub auto_checkpoint: bool,
-    /// Keep only the newest this many checkpoint files, deleting older
-    /// ones after each save, with the task versions only they referred
-    /// to. `None` (the default) keeps every checkpoint and task version.
-    pub retain_checkpoints: Option<usize>,
+    /// Which checkpoint files are kept: every one
+    /// ([`CheckpointRetention::KeepAll`], the default), or the newest few,
+    /// with the task versions they refer to (set with
+    /// [`keep_last_checkpoints`](Self::keep_last_checkpoints)).
+    pub retain_checkpoints: CheckpointRetention,
     /// What the event log records; default [`EventLog::Full`].
     pub event_log: EventLog,
     /// Events are buffered and written at least this often; state changes,
@@ -85,6 +101,9 @@ pub struct PersistenceConfig {
     /// buffer before each checkpoint. Default
     /// [`DEFAULT_EVENT_FLUSH_INTERVAL`].
     pub event_flush_interval: Duration,
+    /// `keep_last_checkpoints(0)` was asked for; `WorkflowBuilder::build`
+    /// reports it.
+    zero_kept_checkpoints: bool,
 }
 
 /// Manages checkpointing and restoration of workflow state.
@@ -129,9 +148,10 @@ impl PersistenceConfig {
         Self {
             checkpoint_dir: checkpoint_dir.into(),
             auto_checkpoint: true,
-            retain_checkpoints: None,
+            retain_checkpoints: CheckpointRetention::KeepAll,
             event_log: EventLog::default(),
             event_flush_interval: DEFAULT_EVENT_FLUSH_INTERVAL,
+            zero_kept_checkpoints: false,
         }
     }
 
@@ -142,13 +162,31 @@ impl PersistenceConfig {
         self
     }
 
-    /// Opt-in: keep only the newest `count` checkpoints (at least one),
-    /// deleting older checkpoint files after each save, with the task
-    /// versions no kept checkpoint refers to. By default every checkpoint
-    /// and task version is kept.
-    pub fn retain_checkpoints(mut self, count: usize) -> Self {
-        self.retain_checkpoints = Some(count.max(1));
+    /// Opt-in: keep only the newest `count` checkpoints
+    /// ([`CheckpointRetention::KeepLast`]), deleting older checkpoint files
+    /// after each save, with the task versions no kept checkpoint refers
+    /// to. By default every checkpoint and task version is kept. A `count`
+    /// of 0 makes `WorkflowBuilder::build` fail.
+    pub fn keep_last_checkpoints(mut self, count: usize) -> Self {
+        match NonZeroUsize::new(count) {
+            Some(count) => {
+                self.retain_checkpoints = CheckpointRetention::KeepLast(count);
+                self.zero_kept_checkpoints = false;
+            }
+            None => self.zero_kept_checkpoints = true,
+        }
         self
+    }
+
+    /// The settings `WorkflowBuilder::build` rejects.
+    pub(crate) fn validate(&self) -> Result<(), WorkflowError> {
+        if self.zero_kept_checkpoints {
+            return Err(WorkflowError::BuilderInvalid(
+                "keep_last_checkpoints needs at least 1; every checkpoint is kept by default"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// What the event log records; see [`EventLog`].
@@ -326,9 +364,9 @@ impl PersistenceManager {
     /// never saved is left out) and lists it in
     /// [`missing_task_states`](state::WorkflowState::missing_task_states),
     /// with a warning. Buffered events are written first as well. With
-    /// [`PersistenceConfig::retain_checkpoints`], older checkpoint files
-    /// beyond the count are then deleted, with the task versions no
-    /// remaining checkpoint refers to.
+    /// [`CheckpointRetention::KeepLast`], older checkpoint files beyond the
+    /// count are then deleted, with the task versions no remaining
+    /// checkpoint refers to.
     pub async fn save_checkpoint(&self, ctx: &SharedContext) -> Result<PathBuf, WorkflowError> {
         self.flush_events().await;
         let _guard = self.write_lock.lock().await;
@@ -440,7 +478,7 @@ impl PersistenceManager {
                 }
             );
         }
-        if let Some(keep) = self.config.retain_checkpoints {
+        if let CheckpointRetention::KeepLast(keep) = self.config.retain_checkpoints {
             self.prune_checkpoints(keep).await;
         }
         log::info!("Checkpoint saved to {}", path.display());
@@ -452,7 +490,7 @@ impl PersistenceManager {
     /// in the order it wrote them; then the task versions no remaining
     /// checkpoint refers to. A file that can't be deleted is logged and
     /// kept. The caller holds the write lock.
-    async fn prune_checkpoints(&self, keep: usize) {
+    async fn prune_checkpoints(&self, keep: NonZeroUsize) {
         let written = self.written.lock().iter().cloned().collect::<Vec<_>>();
         let mut earlier = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&self.config.checkpoint_dir) {
@@ -478,7 +516,7 @@ impl PersistenceManager {
             .map(|(_, path)| path)
             .chain(written)
             .collect::<Vec<_>>();
-        let excess = ordered.len().saturating_sub(keep);
+        let excess = ordered.len().saturating_sub(keep.get());
         let mut retained = Vec::new();
         for (index, path) in ordered.into_iter().enumerate() {
             if index >= excess {
@@ -602,8 +640,8 @@ impl PersistenceManager {
     /// Saves `task` as a version in the run directory, unless that version
     /// is there already, and returns its path. A checkpoint refers to the
     /// versions of its results' tasks; this call doesn't change which, so
-    /// with [`PersistenceConfig::retain_checkpoints`] the next checkpoint
-    /// deletes a version no checkpoint or recorded result refers to.
+    /// with [`CheckpointRetention::KeepLast`] the next checkpoint deletes a
+    /// version no checkpoint or recorded result refers to.
     pub async fn save_agent_task(
         &self,
         task: &arko_agents::Task,

@@ -643,8 +643,8 @@ resumes a task that has since run on as it was then. Files are pretty-printed JS
 written to a temporary file, synced, and renamed into place.
 
 By default a checkpoint is saved after every finalized agent run, and every
-checkpoint and task version is kept: `retain_checkpoints(n)` opts in to keeping only
-the newest `n` checkpoints, and the task versions they refer to. Saving never fails
+checkpoint and task version is kept: `keep_last_checkpoints(n)` opts in to keeping only
+the newest `n` checkpoints, and the task versions they refer to (`n` of 0 fails the build). Saving never fails
 an agent's run: a task or checkpoint that can't be written is logged as a warning
 and the next checkpoint tries again. A checkpoint written meanwhile refers to the
 task's last saved version and lists the run in `missing_task_states`; resuming from it
