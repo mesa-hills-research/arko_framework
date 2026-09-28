@@ -303,15 +303,28 @@ chunk-model request with its response or error and its attempt events.
 ## Embeddings
 
 The default `EmbeddingProfile` is Voyage `voyage-4` with 1,024 float32 dimensions,
-counting tokens with the `voyageai/voyage-4` tokenizer at the pinned revision
-`44f3b2ae4ddf33403ed4dd66bec3fa48ff7dbbf9`. `ArkoBackend::new` loads that tokenizer from
-the Hugging Face Hub. It accepts the Voyage models of the `arko_ai` registry at a
+counting tokens with the model's `voyageai/<model>` tokenizer. `ArkoBackend::new` loads
+that tokenizer from the Hugging Face Hub: at `tokenizer_revision` (a commit, branch or
+tag) when it is set, and at the repository's current version (its `main` branch) when it
+is unset, the default. A revision the repository doesn't have is a clear
+`Error::Provider` naming the repository and revision. It accepts the Voyage models of the `arko_ai` registry at a
 dimension the model supports, with their published limits: for `voyage-4`, 32,000 tokens
 per input, and 320,000 tokens and 1,000 inputs per request. Voyage publishes no
 per-request token limit for `voyage-code-4`, the code retrieval model; requests to it are
 limited to 120,000 tokens (`backend::UNPUBLISHED_BATCH_TOKENS`), the smallest per-request
 limit Voyage publishes for any current model. `ArkoIndex::open` requires the backend's
-profile to equal `Config::embedding`.
+profile to embed as `Config::embedding` does (`EmbeddingProfile::same_embeddings`).
+
+**Indexes built with the former default revision.** Earlier versions pinned the
+tokenizer revision `44f3b2ae4ddf33403ed4dd66bec3fa48ff7dbbf9` of `voyageai/voyage-4` by
+default (`FORMER_DEFAULT_TOKENIZER_REVISION`) and saved it with every job. Wherever
+profiles are compared (opening an index, resuming a job, reusing an earlier generation's
+boundaries and vectors in an update, and the check before a semantic or hybrid search),
+and in the keys of stored vectors, an unset revision counts as that one. So an index
+built with the former default keeps working with an unset revision: nothing fails and
+nothing is chunked or embedded again. An unset revision is omitted from saved profiles
+(jobs' configurations, vectors' `profile`), which earlier versions read as the former
+default; a search's `tokenizer` is then `voyageai/<model>@main`.
 
 `Config::embedding_batch_tokens` and `Config::embedding_batch_items` lower the tokens and
 inputs of one embedding request, for example to stay within an account's rate limit. They

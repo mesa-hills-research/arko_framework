@@ -98,20 +98,73 @@ pub enum Synchronous {
     /// database); jobs resume from their checkpoints.
     Normal,
 }
+/// The tokenizer revision earlier versions pinned by default (a commit of
+/// `voyageai/voyage-4`), which every profile that didn't set one saved. For
+/// comparing profiles and keying stored vectors, an unset revision counts
+/// as this one, so indexes built with that default keep working unchanged
+/// (see [`EmbeddingProfile::same_embeddings`]).
+pub const FORMER_DEFAULT_TOKENIZER_REVISION: &str = "44f3b2ae4ddf33403ed4dd66bec3fa48ff7dbbf9";
+/// What embeds an index: a Voyage model, its output dimensions, and the
+/// revision of the `voyageai/<model>` Hugging Face tokenizer that counts
+/// input tokens locally. Fields omitted in JSON take the defaults.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct EmbeddingProfile {
+    /// Default `voyage-4`.
     pub model: String,
+    /// Default 1,024.
     pub dimensions: usize,
-    pub tokenizer_revision: String,
+    /// A revision (commit, branch or tag) of the model's tokenizer
+    /// repository to load. `None` (the default) loads the repository's
+    /// current version (its `main` branch); a revision the repository
+    /// doesn't have is a clear error. Unset, it is omitted when saved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokenizer_revision: Option<String>,
 }
 impl Default for EmbeddingProfile {
     fn default() -> Self {
         Self {
             model: "voyage-4".into(),
             dimensions: 1024,
-            tokenizer_revision: "44f3b2ae4ddf33403ed4dd66bec3fa48ff7dbbf9".into(),
+            tokenizer_revision: None,
         }
+    }
+}
+/// What identifies the embeddings of a profile, for comparing profiles and
+/// keying stored vectors. It serializes exactly as a profile saved by
+/// earlier versions, whose revision was always set, so the vectors those
+/// stored keep their keys.
+#[derive(Serialize, PartialEq)]
+pub(crate) struct ProfileKey<'a> {
+    model: &'a str,
+    dimensions: usize,
+    tokenizer_revision: &'a str,
+}
+impl EmbeddingProfile {
+    /// Whether vectors embedded under `other` are this profile's: the same
+    /// model, dimensions and tokenizer revision, where an unset revision
+    /// counts as [`FORMER_DEFAULT_TOKENIZER_REVISION`] (the pin earlier
+    /// versions saved by default), so an index built with that default
+    /// matches a profile that sets none: its searches, updates and resumes
+    /// neither fail nor re-embed anything.
+    pub fn same_embeddings(&self, other: &EmbeddingProfile) -> bool {
+        self.key() == other.key()
+    }
+    /// See [`ProfileKey`].
+    pub(crate) fn key(&self) -> ProfileKey<'_> {
+        ProfileKey {
+            model: &self.model,
+            dimensions: self.dimensions,
+            tokenizer_revision: self
+                .tokenizer_revision
+                .as_deref()
+                .unwrap_or(FORMER_DEFAULT_TOKENIZER_REVISION),
+        }
+    }
+    /// The tokenizer revision as messages show it: the revision, or
+    /// `unpinned` when unset.
+    pub fn revision_label(&self) -> &str {
+        self.tokenizer_revision.as_deref().unwrap_or("unpinned")
     }
 }
 impl Config {
@@ -135,8 +188,10 @@ impl Config {
         if self.stream_idle_timeout_ms == Some(0) {
             return Err(invalid("stream_idle_timeout_ms must be positive when set"));
         }
-        if self.embedding.tokenizer_revision.is_empty() {
-            return Err(invalid("pin a tokenizer revision"));
+        if self.embedding.tokenizer_revision.as_deref() == Some("") {
+            return Err(invalid(
+                "tokenizer_revision must not be empty; leave it unset for the tokenizer repository's current version",
+            ));
         }
         Ok(())
     }

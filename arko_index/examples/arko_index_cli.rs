@@ -137,7 +137,8 @@ impl Backend for NoProviders {
     fn output_tokenizer(&self) -> String {
         format!(
             "voyageai/{}@{}",
-            self.profile.model, self.profile.tokenizer_revision
+            self.profile.model,
+            self.profile.tokenizer_revision.as_deref().unwrap_or("main")
         )
     }
 }

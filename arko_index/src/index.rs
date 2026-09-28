@@ -97,7 +97,7 @@ impl ArkoIndex {
         config: Config,
     ) -> Result<Self> {
         config.validate()?;
-        if &config.embedding != backend.profile() {
+        if !config.embedding.same_embeddings(backend.profile()) {
             return Err(error::invalid(
                 "backend embedding profile differs from index configuration",
             ));
@@ -266,15 +266,15 @@ impl ArkoIndex {
                 // Only the embedding profile shapes stored output; the other
                 // settings are runtime settings, taken from the current
                 // configuration.
-                if saved.embedding != expected.embedding {
+                if !saved.embedding.same_embeddings(&expected.embedding) {
                     return Err(error::invalid(format!(
                         "the job embeds with {} at {} dimensions (tokenizer revision {}), but the index is configured with {} at {} dimensions (tokenizer revision {}); resume it with its embedding profile, or cancel it and start an update",
                         saved.embedding.model,
                         saved.embedding.dimensions,
-                        saved.embedding.tokenizer_revision,
+                        saved.embedding.revision_label(),
                         expected.embedding.model,
                         expected.embedding.dimensions,
-                        expected.embedding.tokenizer_revision
+                        expected.embedding.revision_label()
                     )));
                 }
                 let changes = runtime_changes(&saved, &expected)?;
@@ -464,7 +464,7 @@ impl ArkoIndex {
             // chunking policy and embedding profile; also its file hashes.
             let mut add=|job:&str,old:Option<&mut BTreeMap<String,String>>|->Result<()>{
                 let job_config:String=c.query_row("SELECT config FROM jobs WHERE id=?1",[job],|r|r.get(0))?;
-                let usable=job_policy(job)?.as_deref()==Some(policy.as_str()) && decode::<Config>(&job_config)?.embedding==config.embedding;
+                let usable=job_policy(job)?.as_deref()==Some(policy.as_str()) && decode::<Config>(&job_config)?.embedding.same_embeddings(&config.embedding);
                 let rows:Vec<(String,String,String)>=c.prepare("SELECT path,hash,state FROM files WHERE job=?1")?.query_map([job],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect::<std::result::Result<_,_>>()?;
                 let mut old=old;
                 for(path,hash,state)in rows{

@@ -223,7 +223,7 @@ all as separate user input. See [Tool images](../arko_ai/README.md#tool-images).
 | `EmbeddingConfig::output_dimensionality` | `None`: the model's default, 1,024 | 256, 512, 1,024, 2,048; another value is an error before sending. |
 | `voyage_input_type` | `None`: not sent | `Document`, `Query` (for search queries). |
 | `voyage_truncation` | `None`: `truncation: false` is sent | Voyage's own default is `true`. Either way an input over the 32,000-token limit fails locally with `Error::TokenLimitExceeded` before sending; split long inputs first. |
-| `tokenizer_revision` | `None`: `main`, unpinned | Inputs are counted locally before sending, with the `voyageai/<model>` tokenizer downloaded from the Hugging Face Hub on first use (`HF_HOME`, `HF_ENDPOINT`). A failed download is an error, and nothing is sent. |
+| `tokenizer_revision` | `None`: `main`, unpinned | Inputs are counted locally before sending, with the `voyageai/<model>` tokenizer downloaded from the Hugging Face Hub on first use (`HF_HOME`, `HF_ENDPOINT`). A failed download is an error, and nothing is sent; a revision the repository doesn't have (the Hub answers 404) is an error naming the repository and revision. |
 | `hf_token` | `None`: the Hugging Face token saved on the machine, if any | Never serialized (and redacted in `Debug`): after loading a config, set it again with `with_hf_token`, in code or from an environment variable the application reads. A config saved with it by an earlier version still loads it. |
 
 Requests are checked locally against 32,000 tokens per input, 1,000 inputs, and the
@@ -767,7 +767,7 @@ request at its first capacity signal). A resumed job takes every field except
 | `batch_count` | 6 | Most files per initial chunk request (a split file's windows count separately), within the request budget. |
 | `concurrency` | 2 | Chunk-model requests in flight, shared by all jobs. |
 | `embedding_concurrency` | 2 | Embedding requests in flight, search queries included. |
-| `embedding` | `voyage-4`, 1,024 dimensions, a pinned tokenizer revision of `voyageai/voyage-4` | A Voyage model and a dimension it supports; must equal the backend's profile. Set `tokenizer_revision` together with `model`. An update with another profile doesn't reuse the earlier generation's boundaries or vectors. A generation embedded with another profile fails semantic and hybrid search; search it lexically. |
+| `embedding` | `voyage-4`, 1,024 dimensions, `tokenizer_revision: None` | A Voyage model and a dimension it supports; must embed as the backend's profile does. `tokenizer_revision` unset loads the `voyageai/<model>` tokenizer's current version (`main`); set, that revision (a missing one is a clear error). Profiles compare, and vectors are keyed, with an unset revision counting as `44f3b2ae…` (`FORMER_DEFAULT_TOKENIZER_REVISION`), the pin earlier versions saved by default, so indexes built with it keep working and nothing is embedded again. An update with another profile doesn't reuse the earlier generation's boundaries or vectors. A generation embedded with another profile fails semantic and hybrid search; search it lexically. |
 | `vector_cache_bytes` | 64 MiB | 0 caches nothing. |
 | `max_transient_attempts` | 10 | Per request; capacity signals don't count. |
 | `max_capacity_wait_ms` | `Some(900_000)` (15 min) | `None` waits as long as the provider is overloaded. Search query embeddings wait too. |

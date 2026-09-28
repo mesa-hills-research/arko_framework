@@ -89,11 +89,17 @@ pub(crate) fn load_tokenizer(
 
 /// Why a tokenizer failed to load. Tokenizers come from the Hugging Face Hub
 /// on first use and are then read from its cache with no network request, so
-/// a failed download says what to do without network access to the Hub;
-/// other failures (an invalid id, a damaged cached file) are reported as
-/// they are.
+/// a failed download says what to do without network access to the Hub; a
+/// Hub that answers 404 has no such repository or revision (a pinned
+/// revision the repository doesn't have), which is said plainly; other
+/// failures (an invalid id, a damaged cached file) are reported as they are.
 fn load_error(id: &str, revision: &str, error: impl std::fmt::Display) -> Error {
     let error = error.to_string();
+    if is_download_failure(&error) && error.contains("status code 404") {
+        return Error::TokenizerError(format!(
+            "Failed to load the tokenizer {id}@{revision}: the Hugging Face Hub has no tokenizer at this revision of {id} ({error}). Check the model name and the tokenizer revision (a commit, branch or tag of {id}); without a pinned revision the repository's current version is loaded."
+        ));
+    }
     if !is_download_failure(&error) {
         return Error::TokenizerError(format!(
             "Failed to load the tokenizer {id}@{revision}: {error}"
@@ -256,6 +262,20 @@ mod tests {
         )
         .to_string();
         assert!(!corrupt.contains("HF_ENDPOINT"), "{corrupt}");
+
+        // A revision the repository doesn't have: the Hub answers 404.
+        let missing = load_error(
+            "voyageai/voyage-4-lite",
+            "44f3b2ae4ddf33403ed4dd66bec3fa48ff7dbbf9",
+            "request error: https://huggingface.co/voyageai/voyage-4-lite/resolve/44f3b2ae4ddf33403ed4dd66bec3fa48ff7dbbf9/tokenizer.json: status code 404",
+        )
+        .to_string();
+        assert!(
+            missing.contains("voyageai/voyage-4-lite@44f3b2ae4ddf33403ed4dd66bec3fa48ff7dbbf9")
+                && missing.contains("no tokenizer at this revision")
+                && !missing.contains("HF_ENDPOINT"),
+            "{missing}"
+        );
     }
 
     #[test]

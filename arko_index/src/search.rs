@@ -244,8 +244,8 @@ impl ArkoIndex {
             if semantic {
                 let saved:String=c.query_row("SELECT config FROM jobs WHERE id=?1",[&generation],|r|r.get(0))?;
                 let saved=decode::<crate::Config>(&saved)?.embedding;
-                if saved!=embedding {
-                    return Err(invalid(format!("generation {generation} was embedded with {} at {} dimensions (tokenizer revision {}), but the index is configured with {} at {} dimensions (tokenizer revision {}); search lexically, open the index with the generation's embedding profile, or publish an update with the new one",saved.model,saved.dimensions,saved.tokenizer_revision,embedding.model,embedding.dimensions,embedding.tokenizer_revision)));
+                if !saved.same_embeddings(&embedding) {
+                    return Err(invalid(format!("generation {generation} was embedded with {} at {} dimensions (tokenizer revision {}), but the index is configured with {} at {} dimensions (tokenizer revision {}); search lexically, open the index with the generation's embedding profile, or publish an update with the new one",saved.model,saved.dimensions,saved.revision_label(),embedding.model,embedding.dimensions,embedding.revision_label())));
                 }
             }
             let pending:Option<(String,String,String,Option<String>)>=c.query_row("SELECT id,phase,affected,manifest FROM jobs WHERE index_id=?1 AND phase IN ('snapshotting','chunking','embedding','paused','blocked') ORDER BY rowid DESC LIMIT 1",[idx],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;

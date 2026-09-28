@@ -216,8 +216,10 @@ pub struct ArkoBackend {
     chunk_config: GenerationConfig,
 }
 impl ArkoBackend {
-    /// Loads the pinned Hugging Face tokenizer on a blocking worker. Authentication
-    /// and rotated OAuth credential persistence remain with the application.
+    /// Loads the profile's Hugging Face tokenizer (`voyageai/<model>` at its
+    /// `tokenizer_revision`, or the repository's current version when unset)
+    /// on a blocking worker. Authentication and rotated OAuth credential
+    /// persistence remain with the application.
     ///
     /// Chunk boundaries come from GPT-5.6 Luna with [`default_chunk_config`];
     /// use [`ArkoBackend::with_chunk_model`] for another model.
@@ -232,12 +234,10 @@ impl ArkoBackend {
             return Err(invalid("unsupported embedding dimension"));
         }
         let limits = embedding_limits(&details)?;
-        let tokenizer = embeddings
-            .token_counter(
-                &EmbeddingConfig::new(EmbeddingProviderIdentifier::Voyage, &profile.model)
-                    .with_tokenizer_revision(&profile.tokenizer_revision),
-            )
-            .await?;
+        let mut tokenizer_config =
+            EmbeddingConfig::new(EmbeddingProviderIdentifier::Voyage, &profile.model);
+        tokenizer_config.tokenizer_revision = profile.tokenizer_revision.clone();
+        let tokenizer = embeddings.token_counter(&tokenizer_config).await?;
         Ok(Self {
             llm,
             embeddings,
@@ -340,15 +340,16 @@ impl Backend for ArkoBackend {
         }
     }
     async fn embed(&self, texts: Vec<String>, query: bool) -> Result<VectorReply> {
-        let config = EmbeddingConfig::new(EmbeddingProviderIdentifier::Voyage, &self.profile.model)
-            .with_output_dimensionality(self.profile.dimensions)
-            .with_voyage_truncation(false)
-            .with_tokenizer_revision(&self.profile.tokenizer_revision)
-            .with_voyage_input_type(if query {
-                VoyageInputType::Query
-            } else {
-                VoyageInputType::Document
-            });
+        let mut config =
+            EmbeddingConfig::new(EmbeddingProviderIdentifier::Voyage, &self.profile.model)
+                .with_output_dimensionality(self.profile.dimensions)
+                .with_voyage_truncation(false)
+                .with_voyage_input_type(if query {
+                    VoyageInputType::Query
+                } else {
+                    VoyageInputType::Document
+                });
+        config.tokenizer_revision = self.profile.tokenizer_revision.clone();
         let result = self.embeddings.embed(texts, &config).await?;
         Ok(VectorReply {
             vectors: result.embeddings,
@@ -367,10 +368,13 @@ impl Backend for ArkoBackend {
     fn profile(&self) -> &EmbeddingProfile {
         &self.profile
     }
+    /// `voyageai/<model>@<revision>`; `@main` when the revision is unset
+    /// (the branch loaded, the repository's current version).
     fn output_tokenizer(&self) -> String {
         format!(
             "voyageai/{}@{}",
-            self.profile.model, self.profile.tokenizer_revision
+            self.profile.model,
+            self.profile.tokenizer_revision.as_deref().unwrap_or("main")
         )
     }
 }

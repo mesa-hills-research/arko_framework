@@ -689,8 +689,9 @@ initialization. The first load downloads the tokenizer from the Hugging Face Hub
 `~/.cache/huggingface`); later loads, in this and later runs, read the cached copy with no
 network request. Where the Hub is unreachable, set `HF_ENDPOINT` to a mirror or copy the
 cache from a machine that has the tokenizer. A failed download is an
-`Error::TokenizerError` that says so and names these settings (other load failures, such
-as a damaged cached file, are reported as they are), and nothing is sent to Voyage; with
+`Error::TokenizerError` that says so and names these settings; a repository or revision
+the Hub doesn't have (404) is one naming them, without that advice (other load failures,
+such as a damaged cached file, are reported as they are), and nothing is sent to Voyage; with
 no home directory and no `HF_HOME` it is an error too. Responses are reordered by the
 provider's item indexes, and missing, duplicate, wrong-dimension, non-finite, or zero
 vectors are rejected. Provider failures keep the HTTP status and `Retry-After` for

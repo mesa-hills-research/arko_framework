@@ -12,8 +12,10 @@ pub struct Payload {
     pub tokens: usize,
 }
 pub fn payload(backend: &dyn Backend, text: String) -> Result<Payload> {
+    // The profile's key, not the profile: an unset tokenizer revision keys
+    // vectors as the revision earlier versions pinned by default.
     let id = hash(serde_json::to_vec(&(
-        backend.profile(),
+        backend.profile().key(),
         "float32",
         "document",
         "source-v1",

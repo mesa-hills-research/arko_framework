@@ -3946,3 +3946,146 @@ async fn search_queries_can_have_a_smaller_retry_budget() {
     ));
     assert_eq!(fake.queries.load(Ordering::SeqCst), before + 1);
 }
+
+/// The payload id (the key of a stored vector) of a text under the default
+/// profile is the one recorded when the default pinned tokenizer revision
+/// 44f3b2ae… (`FORMER_DEFAULT_TOKENIZER_REVISION`): an unset revision keys
+/// vectors as that pin did, so indexes built with it keep their vectors.
+/// Another pinned revision keys its own.
+#[test]
+fn payload_ids_under_the_default_profile_are_unchanged() {
+    const RECORDED: &str = "49ae6889015adec1bbffc2d419b4bdc4d6a4c54b1670a1693a77dc1d77a15ac9";
+    let id = |revision: Option<&str>| {
+        let mut fake = Fake::new();
+        fake.profile = EmbeddingProfile {
+            tokenizer_revision: revision.map(str::to_owned),
+            ..EmbeddingProfile::default()
+        };
+        packing::payload(&fake, "fn main() {}\n".into()).unwrap().id
+    };
+    assert_eq!(EmbeddingProfile::default().tokenizer_revision, None);
+    assert_eq!(id(None), RECORDED);
+    assert_eq!(id(Some(FORMER_DEFAULT_TOKENIZER_REVISION)), RECORDED);
+    assert_ne!(id(Some("main")), RECORDED);
+}
+
+/// Profiles saved by earlier versions (with the default pin) load as they
+/// were; a partial profile no longer inherits voyage-4's pin; an unset
+/// revision is omitted when saved; profiles compare by what they embed.
+#[test]
+fn saved_embedding_profiles_load_and_compare() {
+    let old = json!({"model": "voyage-4", "dimensions": 1024, "tokenizer_revision": FORMER_DEFAULT_TOKENIZER_REVISION});
+    let loaded: EmbeddingProfile = serde_json::from_value(old).unwrap();
+    assert_eq!(
+        loaded.tokenizer_revision.as_deref(),
+        Some(FORMER_DEFAULT_TOKENIZER_REVISION)
+    );
+    assert!(loaded.same_embeddings(&EmbeddingProfile::default()));
+    let partial: EmbeddingProfile =
+        serde_json::from_value(json!({"model": "voyage-4-lite"})).unwrap();
+    assert_eq!(partial.tokenizer_revision, None);
+    assert_eq!(partial.dimensions, 1024);
+    let saved = serde_json::to_value(&partial).unwrap();
+    assert_eq!(saved, json!({"model": "voyage-4-lite", "dimensions": 1024}));
+    let pinned = EmbeddingProfile {
+        tokenizer_revision: Some("main".into()),
+        ..EmbeddingProfile::default()
+    };
+    assert!(!pinned.same_embeddings(&EmbeddingProfile::default()));
+    assert!(!partial.same_embeddings(&EmbeddingProfile::default()));
+    let old_config: Config = serde_json::from_value(json!({"embedding": {"model": "voyage-4", "dimensions": 1024, "tokenizer_revision": FORMER_DEFAULT_TOKENIZER_REVISION}})).unwrap();
+    assert!(old_config.validate().is_ok());
+    let empty = Config {
+        embedding: EmbeddingProfile {
+            tokenizer_revision: Some(String::new()),
+            ..EmbeddingProfile::default()
+        },
+        ..Config::default()
+    };
+    assert!(empty.validate().is_err());
+}
+
+/// An index built with the tokenizer revision earlier versions pinned by
+/// default (saved in its jobs, and keying their vectors) keeps working
+/// under a profile that sets none: semantic search, resuming an update
+/// that was under way, and a new update, which chunk and embed only the
+/// changed files.
+#[tokio::test]
+async fn an_index_built_with_the_former_default_revision_works_unpinned() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let path = db.path().join("i.db");
+    for n in 0..3 {
+        std::fs::write(
+            root.path().join(format!("{n}.txt")),
+            format!("alpha {n}\nbeta\n"),
+        )
+        .unwrap();
+    }
+    let mut pinned = Fake::new();
+    pinned.profile.tokenizer_revision = Some(FORMER_DEFAULT_TOKENIZER_REVISION.into());
+    pinned.rejection = Rejection::WrongCallRetryLater;
+    let pinned = Arc::new(pinned);
+    let index = ArkoIndex::open(&path, pinned.clone(), config(&pinned))
+        .await
+        .unwrap();
+    let build = index
+        .start_build(BuildSpec::new("test", root.path()))
+        .await
+        .unwrap();
+    assert_eq!(settle(&index, &build.job).await.phase, "ready");
+    // An update under way: its chunk request waits an hour to retry.
+    std::fs::write(root.path().join("0.txt"), "alpha changed\nbeta\n").unwrap();
+    pinned.rejected_chunks.store(usize::MAX, Ordering::SeqCst);
+    let update = index.start_update(&build.index).await.unwrap();
+    wait_for_retry(&index, &update.job).await;
+    index.pause(&update.job).await.unwrap();
+    assert_eq!(settle(&index, &update.job).await.phase, "paused");
+    drop(index);
+    // Saved as earlier versions saved it.
+    let saved: String = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row("SELECT config FROM jobs WHERE id=?1", [&build.job], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(
+        saved.contains(&format!(
+            r#""tokenizer_revision":"{FORMER_DEFAULT_TOKENIZER_REVISION}""#
+        )),
+        "{saved}"
+    );
+    let vectors = rows(&path, "vectors");
+    assert_eq!(vectors, 3);
+
+    let unpinned = Arc::new(Fake::new());
+    assert_eq!(unpinned.profile.tokenizer_revision, None);
+    let index = ArkoIndex::open(&path, unpinned.clone(), config(&unpinned))
+        .await
+        .unwrap();
+    for mode in [SearchMode::Semantic, SearchMode::Hybrid] {
+        let page = index
+            .search(&build.index, "alpha", options(mode))
+            .await
+            .unwrap();
+        assert_eq!(page.hits.len(), 3);
+    }
+    index.resume(&update.job).await.unwrap();
+    let resumed = settle(&index, &update.job).await;
+    assert_eq!(resumed.phase, "ready", "{:?}", resumed.problem);
+    // Only the changed file was chunked and embedded again.
+    assert_eq!(unpinned.calls.lock().unwrap().len(), 1);
+    assert_eq!(unpinned.embeds.load(Ordering::SeqCst), 1);
+    assert_eq!(rows(&path, "vectors"), vectors + 1);
+
+    std::fs::write(root.path().join("1.txt"), "alpha changed too\nbeta\n").unwrap();
+    let next = index.start_update(&build.index).await.unwrap();
+    assert_eq!(settle(&index, &next.job).await.phase, "ready");
+    assert_eq!(unpinned.calls.lock().unwrap().len(), 2);
+    assert_eq!(unpinned.embeds.load(Ordering::SeqCst), 2);
+    let page = index
+        .search(&build.index, "alpha", options(SearchMode::Semantic))
+        .await
+        .unwrap();
+    assert_eq!(page.generation, next.job);
+}
