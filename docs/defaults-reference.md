@@ -106,7 +106,7 @@ Every OpenAI request sets `store: false`, and reasoning models also ask for
 
 | Setting | Default | Notes |
 |---|---|---|
-| `ToolConfig::tool_choice` | `None`: the provider's `auto` (Anthropic sends `auto` explicitly) | `Auto`, `Required`, `None`, `Specific(name)`. The Anthropic provider rejects a forced choice before sending on Fable 5.1 and Opus 5.5 and with a manual thinking budget; `Model::supports_forced_tool_choice(config)` tells in advance, also for Claude on OpenRouter, which doesn't check. |
+| `ToolConfig::tool_choice` | `None`: the provider's `auto` (Anthropic sends `auto` explicitly) | `Auto`, `Required`, `None`, `Specific(name)`. A forced choice is rejected before sending (`Error::InvalidRequest`) on Fable 5.1 and Opus 5.5 and with a manual thinking budget, by the Anthropic provider and, for Claude models, by OpenRouter; `Model::supports_forced_tool_choice(config)` tells in advance. An agent whose configured model (or refusal fallback) wouldn't take its configured forced choice fails validation, at build and at task start. |
 | `ToolConfig::parallel_tool_calls` | `None`: the provider's default, several calls allowed | `Some(false)`: OpenAI and OpenRouter send `parallel_tool_calls: false`, Anthropic `disable_parallel_tool_use`; Gemini fails with `Error::UnsupportedFeature`. |
 | `ToolDefinition::strict` | `None` | Sent to OpenAI, Anthropic and OpenRouter (with the structured-outputs beta header for Claude on OpenRouter); Gemini ignores it. |
 | Arguments that aren't valid JSON | — | Kept as text in `ToolCall::invalid_arguments` with `arguments: null`; replayed verbatim to OpenAI and OpenRouter `openai/` models, as `{}` to the others. |

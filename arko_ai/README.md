@@ -226,8 +226,9 @@ if !calls.is_empty() {
 
 `ToolConfig::with_tool_choice` selects `ToolChoice::Auto` (the default), `Required`,
 `None`, or `Specific(name)`. A forced choice (`Required` or `Specific`) is rejected before
-sending where the model does not accept it: on Claude Fable 5.1 and Opus 5.5, and on
-Claude models with a manual thinking budget; `Model::supports_forced_tool_choice(config)`
+sending (`Error::InvalidRequest`) where the model does not accept it: on Claude Fable 5.1
+and Opus 5.5, and on Claude models with a manual thinking budget, on the Anthropic
+provider and for Claude models on OpenRouter; `Model::supports_forced_tool_choice(config)`
 tells in advance. `with_parallel_tool_calls(false)` asks for one call per response. It
 is available where `Model::supports_disabling_parallel_tool_calls` is true (OpenAI,
 Anthropic, OpenRouter); for Gemini the request fails with `Error::UnsupportedFeature`.

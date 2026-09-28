@@ -1183,7 +1183,10 @@ impl AgentConfig {
     }
 
     /// Checks the settings the builder checks: retry timing, monitors, a
-    /// command timeout and reminder frequency of at least 1, and a refusal
+    /// command timeout and reminder frequency of at least 1, a forced tool
+    /// choice only where the model takes it
+    /// ([`Model::supports_forced_tool_choice`](arko_ai::Model::supports_forced_tool_choice),
+    /// for the configured model and the refusal fallback), and a refusal
     /// fallback on the configured model's provider. The runtime checks them
     /// again when a task starts, since configs can be built or loaded
     /// without the builder (a saved task holding a rejected value loads,
@@ -1205,6 +1208,28 @@ impl AgentConfig {
                 struct_name: "UserReminder".into(),
                 message: "EveryNUserMessages needs n of at least 1 (with 0 the reminder is never injected); to turn the reminder off, leave user_reminder unset (None).".into(),
             });
+        }
+        for (setting, llm) in std::iter::once(("llm_config", &self.llm_config)).chain(
+            self.refusal_fallback
+                .iter()
+                .map(|f| ("refusal_fallback", f)),
+        ) {
+            let config = &llm.generation_config;
+            if let Some(choice @ (arko_ai::ToolChoice::Required | arko_ai::ToolChoice::Specific(_))) =
+                config
+                    .tool_config
+                    .as_ref()
+                    .and_then(|tools| tools.tool_choice.as_ref())
+                && !llm.model.supports_forced_tool_choice(config)
+            {
+                return Err(ArkoAgentsError::BuilderError {
+                    struct_name: "AgentConfig".into(),
+                    message: format!(
+                        "{setting}.generation_config.tool_config.tool_choice forces a tool ({choice:?}), which model '{}' doesn't accept with this generation config (Model::supports_forced_tool_choice); use Auto or None.",
+                        llm.model.id
+                    ),
+                });
+            }
         }
         if let Some(fallback) = &self.refusal_fallback
             && fallback.model.provider != self.llm_config.model.provider
@@ -1586,5 +1611,57 @@ mod validation_tests {
         assert!(!details.file_tree.include);
         assert_eq!(details.file_tree.depth, Some(2));
         assert!(details.current_datetime.include);
+    }
+
+    /// A forced tool choice the configured model (or the refusal fallback)
+    /// doesn't take fails validation, so the builder and a task start
+    /// report it before any request; others pass.
+    #[test]
+    fn a_forced_tool_choice_the_model_rejects_fails_validation() {
+        let with_choice = |choice: arko_ai::ToolChoice| {
+            LLMGenerationConfig::default()
+                .with_tool_config(arko_ai::ToolConfig::new(vec![]).with_tool_choice(choice))
+        };
+        for model in [
+            LLMModel::openrouter("anthropic/claude-opus-5.5"),
+            LLMModel::anthropic_claude_fable_5_1(),
+        ] {
+            for choice in [
+                arko_ai::ToolChoice::Required,
+                arko_ai::ToolChoice::Specific("lookup".into()),
+            ] {
+                let mut config = luna();
+                config.llm_config = AgentLLMConfig {
+                    model: model.clone(),
+                    generation_config: with_choice(choice.clone()),
+                };
+                let error = config.validate().unwrap_err().to_string();
+                assert!(
+                    error.contains("llm_config.generation_config.tool_config.tool_choice")
+                        && error.contains(&model.id),
+                    "{error}"
+                );
+                config.llm_config.generation_config = with_choice(arko_ai::ToolChoice::Auto);
+                assert!(config.validate().is_ok());
+            }
+        }
+        let mut config = luna();
+        config.llm_config.generation_config = with_choice(arko_ai::ToolChoice::Required);
+        assert!(config.validate().is_ok(), "GPT takes a forced choice");
+        let mut fallback = config.llm_config.clone();
+        fallback.model = LLMModel::openai_gpt_6_sol();
+        config.refusal_fallback = Some(fallback);
+        assert!(config.validate().is_ok());
+
+        let mut config = self::config(
+            LLMModel::anthropic_claude_sonnet_4_5(),
+            LLMGenerationConfig::default(),
+        );
+        let mut fallback = config.llm_config.clone();
+        fallback.model = LLMModel::anthropic_claude_opus_5_5();
+        fallback.generation_config = with_choice(arko_ai::ToolChoice::Required);
+        config.refusal_fallback = Some(fallback);
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("refusal_fallback"), "{error}");
     }
 }

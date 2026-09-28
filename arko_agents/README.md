@@ -226,7 +226,9 @@ is sent and the provider's `auto` applies, so tool use is optional and a plain a
 valid response. The system prompt tells the model that the task ends only when it calls
 `complete_task`, and a response without a tool call gets a note asking it to continue with
 its tools or call `complete_task` (see [Model-call recovery](#model-call-recovery)).
-`ToolChoice::Required` forces a call on the models that accept it.
+`ToolChoice::Required` forces a call on the models that accept it; a forced choice the
+configured model (or the refusal fallback) doesn't accept
+(`Model::supports_forced_tool_choice`) fails validation, at build and when a task starts.
 
 ### Several calls in one response
 

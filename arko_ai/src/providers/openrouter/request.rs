@@ -494,6 +494,16 @@ impl OpenRouterClient {
                 if tool_config.tool_choice.is_some() {
                     ensure_parameter(info, slug, "tool_choice", &["tool_choice"])?;
                 }
+                // As the Anthropic provider does for the same Claude models.
+                if matches!(
+                    tool_config.tool_choice,
+                    Some(ToolChoice::Required | ToolChoice::Specific(_))
+                ) && !model.supports_forced_tool_choice(config)
+                {
+                    return Err(invalid(format!(
+                        "Forced tool use is not supported for model '{slug}' with this configuration (a Claude model that rejects it, or manual thinking with a reasoning budget). Use Auto or None tool choice."
+                    )));
+                }
                 if claude
                     && tool_config
                         .tools

@@ -1207,6 +1207,46 @@ fn forced_tool_choice_follows_anthropic_rules_for_claude_slugs() {
     assert!(!alias.supports_forced_tool_choice(&default));
 }
 
+/// A forced tool choice (`Required` or `Specific`) is rejected before
+/// sending where `Model::supports_forced_tool_choice` says the model won't
+/// take it, as the Anthropic provider does (it was sent); `Auto` and `None`
+/// are sent, and so is a forced choice other models take.
+#[test]
+fn a_forced_tool_choice_the_model_rejects_is_rejected_locally() {
+    let forced = |choice: ToolChoice, reasoning: Option<ReasoningConfig>| {
+        let mut config =
+            GenerationConfig::default().with_tool_config(tool_config().with_tool_choice(choice));
+        config.reasoning = reasoning;
+        config
+    };
+    let effort = || Some(ReasoningConfig::openrouter_effort(ReasoningEffort::High));
+    for (slug, reasoning) in [
+        ("anthropic/claude-opus-5.5", None),
+        ("anthropic/claude-fable-5.1:nitro", None),
+        // Older Claude thinks with a manual budget whenever reasoning is on.
+        ("anthropic/claude-sonnet-4.5", effort()),
+    ] {
+        for choice in [ToolChoice::Required, ToolChoice::Specific("lookup".into())] {
+            let config = forced(choice, reasoning.clone());
+            assert!(!Model::openrouter(slug).supports_forced_tool_choice(&config));
+            let result = prepare(&client(), &conversation(slug), &config);
+            assert!(
+                matches!(&result, Err(Error::InvalidRequest(message))
+                    if message.contains("Forced tool use is not supported") && message.contains(slug)),
+                "{slug}: {result:?}"
+            );
+        }
+        for choice in [ToolChoice::Auto, ToolChoice::None] {
+            let value = body(slug, &forced(choice, reasoning.clone()));
+            assert!(value.get("tool_choice").is_some(), "{slug}");
+        }
+    }
+    for slug in [CLAUDE, GPT, "anthropic/claude-sonnet-4.5"] {
+        let value = body(slug, &forced(ToolChoice::Required, None));
+        assert_eq!(value["tool_choice"], "required", "{slug}");
+    }
+}
+
 #[test]
 fn sorting_variants_count_as_explicit_routing() {
     for slug in [
