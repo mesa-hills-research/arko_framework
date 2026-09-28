@@ -1697,25 +1697,31 @@ impl AgentLoop {
 
                                     self.begin_tool_batch();
                                     if self.is_native_mode() {
+                                        let mut approved = Vec::new();
+                                        let mut results = Vec::new();
                                         if let Some(ai_call) = self
                                             .task
                                             .pending_native_tool_calls
                                             .remove(&tool_call_id)
                                         {
-                                            let result = self
-                                                .execute_native_tool_for_approval(
-                                                    &ai_call,
-                                                    tool_call_id,
-                                                    &tool_name,
-                                                    parameters,
-                                                    custom_tool_output.clone(),
-                                                    message_to_agent.clone(),
-                                                )
-                                                .await?;
-                                            if let Some(r) = result {
-                                                self.task.pending_native_tool_results.push(r);
+                                            let index = self.turn_position(&ai_call);
+                                            match self.approved_native_run(
+                                                index,
+                                                &ai_call,
+                                                tool_call_id,
+                                                &tool_name,
+                                                parameters,
+                                                custom_tool_output.clone(),
+                                                message_to_agent.clone(),
+                                            ) {
+                                                Ok(run) => approved.push(run),
+                                                Err(()) => results.push((
+                                                    index,
+                                                    self.unavailable_native_tool(&ai_call).await?,
+                                                )),
                                             }
                                         }
+                                        self.run_decided_native_calls(approved, results).await?;
                                         if matches!(
                                             self.task.current_state,
                                             TaskState::AwaitingToolApproval { .. }
@@ -1779,6 +1785,7 @@ impl AgentLoop {
                                     .await?;
 
                                     if self.is_native_mode() {
+                                        let mut results = Vec::new();
                                         if let Some(ai_call) = self
                                             .task
                                             .pending_native_tool_calls
@@ -1786,14 +1793,26 @@ impl AgentLoop {
                                         {
                                             let reason_str =
                                                 reason.as_deref().unwrap_or("Rejected by user");
-                                            self.task.pending_native_tool_results.push(
+                                            results.push((
+                                                self.turn_position(&ai_call),
                                                 ai::ToolResult::error_from_tool_call(
                                                     &ai_call, reason_str,
                                                 ),
-                                            );
+                                            ));
                                         }
-                                        self.task.set_state(TaskState::InProgress);
-                                        self.flush_native_results_to_conversation(None)?;
+                                        // Calls held for this one run now.
+                                        self.begin_tool_batch();
+                                        self.run_decided_native_calls(Vec::new(), results).await?;
+                                        if matches!(
+                                            self.task.current_state,
+                                            TaskState::AwaitingToolApproval { .. }
+                                        ) {
+                                            self.task.set_state(TaskState::InProgress);
+                                        }
+                                        self.end_tool_batch().await?;
+                                        if self.native_results_are_due() {
+                                            self.flush_native_results_to_conversation(None)?;
+                                        }
                                         native_handled = true;
                                     } else {
                                         let pb = PromptBuilder::new(
@@ -1849,9 +1868,7 @@ impl AgentLoop {
                                         // same time), in the batch's order.
                                         let mut results = Vec::new();
                                         let mut approved = Vec::new();
-                                        for (index, pending_call_info) in
-                                            pending_calls.iter().enumerate()
-                                        {
+                                        for pending_call_info in pending_calls {
                                             let Some(ai_call) = self
                                                 .task
                                                 .pending_native_tool_calls
@@ -1859,6 +1876,7 @@ impl AgentLoop {
                                             else {
                                                 continue;
                                             };
+                                            let index = self.turn_position(&ai_call);
                                             match decisions.get(&pending_call_info.tool_call_id) {
                                                 Some(ToolApprovalDecision::Approve {
                                                     custom_tool_output,
@@ -1908,16 +1926,7 @@ impl AgentLoop {
                                                 )),
                                             }
                                         }
-                                        results.extend(
-                                            self.run_native_calls(approved, |state| {
-                                                !state.is_terminal()
-                                            })
-                                            .await?,
-                                        );
-                                        results.sort_by_key(|(index, _)| *index);
-                                        self.task
-                                            .pending_native_tool_results
-                                            .extend(results.into_iter().map(|(_, result)| result));
+                                        self.run_decided_native_calls(approved, results).await?;
                                         if matches!(
                                             self.task.current_state,
                                             TaskState::AwaitingBatchToolApproval { .. }
@@ -2632,6 +2641,10 @@ impl AgentLoop {
                 let mut results: Vec<Option<ai::ToolResult>> = vec![None; tool_calls.len()];
                 let mut calls_needing_approval: Vec<(usize, PendingToolCallInfo)> = Vec::new();
                 let mut runs: Vec<NativeRun> = Vec::new();
+                // Auto-approved calls that aren't parallel-safe and come after
+                // a call awaiting approval: they run once it is decided, so
+                // calls run in the order the model made them.
+                let mut held: Vec<NativeRun> = Vec::new();
                 for (call_index, ai_tool_call) in tool_calls.iter().enumerate() {
                     let tool_call_id = native_stream_call_ids
                         .remove(&call_index)
@@ -2726,7 +2739,7 @@ impl AgentLoop {
                             },
                         ));
                     } else {
-                        runs.push(NativeRun {
+                        let run = NativeRun {
                             index: call_index,
                             call: ai_tool_call.clone(),
                             run: self.tool_run(
@@ -2737,7 +2750,12 @@ impl AgentLoop {
                                 None,
                             ),
                             message_to_agent: None,
-                        });
+                        };
+                        if !calls_needing_approval.is_empty() && !run.run.parallel_safe {
+                            held.push(run);
+                        } else {
+                            runs.push(run);
+                        }
                     }
                 }
                 for (index, result) in self
@@ -2769,6 +2787,23 @@ impl AgentLoop {
                                 Some(ai::ToolResult::error_from_tool_call(&call, &not_run));
                         }
                     }
+                    for native in held.drain(..) {
+                        self.emit_event(AgentEvent::ToolRejected {
+                            tool_call_id: native.run.tool_call_id,
+                            tool_name: native.call.name.clone(),
+                            reason: Some(not_run.clone()),
+                        })
+                        .await?;
+                        results[native.index] =
+                            Some(ai::ToolResult::error_from_tool_call(&native.call, &not_run));
+                    }
+                }
+                // Held calls wait with the calls awaiting approval (and are
+                // saved with them).
+                for native in held {
+                    self.task
+                        .pending_native_tool_calls
+                        .insert(native.run.tool_call_id, native.call);
                 }
                 self.task
                     .pending_native_tool_results
@@ -3574,8 +3609,66 @@ impl AgentLoop {
         ))
     }
 
+    /// The position of `call` in the turn it belongs to (the conversation's
+    /// last assistant message), matched by its provider id; calls without
+    /// one sort last, in the order given.
+    fn turn_position(&self, call: &ai::ToolCall) -> usize {
+        self.task
+            .conversation
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == ai::Role::Assistant)
+            .and_then(|turn| {
+                call.id.as_ref().and_then(|id| {
+                    turn.tool_calls
+                        .iter()
+                        .position(|turn_call| turn_call.id.as_ref() == Some(id))
+                })
+            })
+            .unwrap_or(usize::MAX)
+    }
+
+    /// Once a turn's approvals are decided: runs the approved calls
+    /// together with the calls held for them (see
+    /// [`AgentToolConfig`](crate::agent_config::AgentToolConfig): auto-approved
+    /// calls that aren't parallel-safe wait for an earlier call's approval),
+    /// in call order under the parallel-safety rule, and adds every result,
+    /// `results` (rejections) included, in call order.
+    async fn run_decided_native_calls(
+        &mut self,
+        mut runs: Vec<NativeRun>,
+        mut results: Vec<(usize, ai::ToolResult)>,
+    ) -> Result<(), ArkoAgentsError> {
+        let held: Vec<(Uuid, ai::ToolCall)> = self.task.pending_native_tool_calls.drain().collect();
+        for (tool_call_id, call) in held {
+            let index = self.turn_position(&call);
+            let params = Self::tool_call_args_to_map(&call);
+            match self.tool_registry.get(&call.name) {
+                Some(tool) => runs.push(NativeRun {
+                    index,
+                    run: self.tool_run(tool_call_id, &call.name, tool, params, None),
+                    call,
+                    message_to_agent: None,
+                }),
+                None => results.push((index, self.unavailable_native_tool(&call).await?)),
+            }
+        }
+        runs.sort_by_key(|run| run.index);
+        results.extend(
+            self.run_native_calls(runs, |state| !state.is_terminal())
+                .await?,
+        );
+        results.sort_by_key(|(index, _)| *index);
+        self.task
+            .pending_native_tool_results
+            .extend(results.into_iter().map(|(_, result)| result));
+        Ok(())
+    }
+
     /// Runs one approved native call (see
     /// [`run_native_calls`](Self::run_native_calls)) and returns its result.
+    #[cfg(test)]
     async fn execute_native_tool_for_approval(
         &mut self,
         ai_call: &ai::ToolCall,

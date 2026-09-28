@@ -311,13 +311,15 @@ where
 /// [`one_tool_call_per_turn`](Self::one_tool_call_per_turn) asks for one
 /// call per response instead.
 ///
-/// Calls that need approval don't hold up the others, which is the one
-/// exception to call order: the response's auto-approved calls run first,
-/// and the calls waiting for approval run once decided, under the same
-/// rule, and their results follow. Calls of the response after one that
-/// ends the turn (`complete_task`, `ask_user`, or a tool error that fails
-/// the task) are not run, and their results say so; among approved calls,
-/// only one that ends the task stops the others.
+/// Approvals keep that order: a call that isn't parallel-safe doesn't run
+/// before an earlier call of its response that awaits approval. It waits
+/// (saved with the task) until that call is decided, then runs with the
+/// approved calls, in call order under the same rule; a rejected call's
+/// followers run all the same. Parallel-safe calls run ahead. Calls of the
+/// response after one that ends the turn (`complete_task`, `ask_user`, or a
+/// tool error that fails the task) are not run, and their results say so;
+/// among the calls that run once approvals are decided, only one that ends
+/// the task stops the others.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "AgentToolConfigRepr")]
 pub struct AgentToolConfig {

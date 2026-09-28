@@ -173,6 +173,116 @@ async fn every_call_of_a_response_runs_parallel_safe_ones_together() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
+/// A call that isn't parallel-safe doesn't run before an earlier call of
+/// its turn that awaits approval: it waits until that call is decided (and
+/// has run, if approved), also across a suspension and a save. Parallel-safe
+/// calls run ahead. Every call gets one result.
+#[tokio::test]
+async fn a_call_waits_for_an_earlier_call_awaiting_approval() {
+    for approve in [true, false] {
+        let workspace = workspace();
+        let record = Arc::new(Record::default());
+        let mut registry = probes(&record);
+        registry.register(Arc::new(Probe::new("probe_gate", false, &record)));
+        let mut config = config(
+            ToolCallingMode::Native,
+            &["probe_gate", "probe_write", "probe_read"],
+        );
+        config.tool_config.tool_specific_configs.insert(
+            "probe_gate".into(),
+            PerToolConfigOverride {
+                auto_approve_tool_use: Some(false),
+                ..Default::default()
+            },
+        );
+        let (mut agent, mut events, commands) = agent(config, registry, &workspace);
+        agent
+            .scripted_responses
+            .get_mut()
+            .unwrap()
+            .push_back(turn(vec![
+                probe_call("g1", "probe_gate"),
+                probe_call("w1", "probe_write"),
+                probe_call("r1", "probe_read"),
+            ]));
+        let run = tokio::spawn(agent.run());
+        let (batch_id, pending) = loop {
+            let event = timeout(Duration::from_secs(10), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let AgentEvent::BatchToolCallAwaitingApproval {
+                batch_id,
+                pending_calls,
+            } = event
+            {
+                break (batch_id, pending_calls);
+            }
+        };
+        assert_eq!(pending.len(), 1);
+        // The parallel-safe read ran ahead; the write waits.
+        let log = record.log.lock().unwrap().clone();
+        assert_eq!(log, ["start r1", "end r1"]);
+
+        // Suspended and saved while waiting, then run again.
+        commands.send(UserCommand::SuspendTask).await.unwrap();
+        let task = timeout(Duration::from_secs(10), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let saved: Task = serde_json::from_str(&serde_json::to_string(&task).unwrap()).unwrap();
+        let mut registry = probes(&record);
+        registry.register(Arc::new(Probe::new("probe_gate", false, &record)));
+        let (mut resumed, _events, commands) =
+            super::tool_call_tests::agent_for(saved, registry, Arc::new(ai::LLMClient::new()));
+        resumed
+            .scripted_responses
+            .get_mut()
+            .unwrap()
+            .push_back(complete());
+        let decision = if approve {
+            ToolApprovalDecision::Approve {
+                custom_tool_output: None,
+                message_to_agent: None,
+            }
+        } else {
+            ToolApprovalDecision::Reject {
+                reason: Some("Not now.".into()),
+            }
+        };
+        commands
+            .send(UserCommand::SubmitBatchToolApprovals {
+                batch_id,
+                decisions: HashMap::from([(pending[0].tool_call_id, decision)]),
+            })
+            .await
+            .unwrap();
+        let task = timeout(Duration::from_secs(10), resumed.run())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(task.current_state, TaskState::Completed { .. }));
+        assert_calls_paired(&task.conversation);
+        let log = record.log.lock().unwrap().clone();
+        if approve {
+            assert_eq!(
+                log,
+                [
+                    "start r1", "end r1", "start g1", "end g1", "start w1", "end w1"
+                ]
+            );
+            assert_eq!(result_for(&task.conversation, "g1")[0].output, "g1 done");
+        } else {
+            assert_eq!(log, ["start r1", "end r1", "start w1", "end w1"]);
+            assert_eq!(result_for(&task.conversation, "g1")[0].output, "Not now.");
+        }
+        assert_eq!(result_for(&task.conversation, "w1")[0].output, "w1 done");
+        assert_eq!(result_for(&task.conversation, "r1")[0].output, "r1 done");
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+}
+
 /// A per-tool override makes a tool parallel-safe or not.
 #[tokio::test]
 async fn a_per_tool_override_decides_parallel_safety() {

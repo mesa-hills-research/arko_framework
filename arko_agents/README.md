@@ -238,8 +238,8 @@ The built-in `read_file`, `list_files`, and `load_skill` are parallel-safe; `wri
 when its server marks it `readOnlyHint: true`. Calls after one that ends the turn
 (`complete_task`, `ask_user`, a tool error under `FailTask`, or a middleware's decision)
 are not run, and their results say so; parallel-safe calls already running beside it
-finish. Calls that need approval are the exception to call order; see
-[Approvals and workspace paths](#approvals-and-workspace-paths).
+finish. Calls awaiting approval hold up the calls after them that aren't parallel-safe;
+see [Approvals and workspace paths](#approvals-and-workspace-paths).
 
 `tool_config.one_tool_call_per_turn: true` (off by default) asks for one call per
 response. Native requests then disable parallel tool calls where the provider can (OpenAI
@@ -287,14 +287,15 @@ approval, the runtime emits `ToolCallAwaitingApproval`; when it holds several ca
 emits `BatchToolCallAwaitingApproval` listing those that need approval. Answer with
 `ApproveToolUse`, `RejectToolUse`, or `SubmitBatchToolApprovals`, where a call without a
 decision is rejected. An approval can carry `custom_tool_output`, which is used instead
-of running the tool, and a `message_to_agent`. Calls that need approval don't hold up the
-rest of their response: its auto-approved calls run first, even those after a call
-awaiting approval, and the calls awaiting approval run once decided, the approved calls of
-a batch under the same parallel-safety rule and in the batch's order, their results after
-the others'. So an auto-approved call does not see the effect of an earlier call that
-still awaits approval. Among approved calls, only a call that ends the task (failing or
-cancelling it, or `complete_task`) leaves the rest unrun. Every call gets exactly one
-result either way.
+of running the tool, and a `message_to_agent`. Approvals keep call order: an
+auto-approved call that isn't parallel-safe does not run before an earlier call of its
+response that awaits approval. It waits, saved with the task, until that call is decided,
+and then runs with the approved calls in call order under the parallel-safety rule; the
+calls after a rejected call run all the same. Auto-approved parallel-safe calls run
+ahead. Among the calls that run once approvals are decided, only a call that ends the
+task (failing or cancelling it, or `complete_task`) leaves the rest unrun. Every call gets
+exactly one result either way, although the results of calls that waited follow the
+others in the message.
 
 Parameters marked `is_path` are checked against the task's working directory. A path
 outside it is handled by `default_out_of_workspace_path_policy` or a per-tool override:
