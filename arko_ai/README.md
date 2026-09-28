@@ -598,7 +598,14 @@ Requests are checked against these limits before sending. Tokens are counted wit
 matching `voyageai/<model_id>` tokenizer from Hugging Face, on a blocking worker; the
 tokenizer is cached per repository and revision (`with_tokenizer_revision` pins a
 revision), with truncation and padding disabled, and concurrent first loads share one
-initialization. Responses are reordered by the
+initialization. The first load downloads the tokenizer from the Hugging Face Hub
+(huggingface.co) into the Hugging Face cache (`HF_HOME`, by default
+`~/.cache/huggingface`); later loads, in this and later runs, read the cached copy with no
+network request. Where the Hub is unreachable, set `HF_ENDPOINT` to a mirror or copy the
+cache from a machine that has the tokenizer. A failed download is an
+`Error::TokenizerError` that says so and names these settings (other load failures, such
+as a damaged cached file, are reported as they are), and nothing is sent to Voyage; with
+no home directory and no `HF_HOME` it is an error too. Responses are reordered by the
 provider's item indexes, and missing, duplicate, wrong-dimension, non-finite, or zero
 vectors are rejected. Provider failures keep the HTTP status and `Retry-After` for
 retries by the caller.

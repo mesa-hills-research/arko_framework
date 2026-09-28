@@ -65,15 +65,19 @@ pub(crate) fn load_tokenizer(
     if let Some(tokenizer) = &*loaded {
         return Ok(tokenizer.clone());
     }
-    let mut tokenizer = Tokenizer::from_pretrained(
-        id,
-        Some(FromPretrainedParameters {
-            revision: revision.into(),
-            token: hf_token.map(str::to_owned),
-            ..Default::default()
-        }),
-    )
-    .map_err(|e| Error::TokenizerError(format!("Failed to load {id}@{revision}: {e}")))?;
+    if let Some(error) = cache_location_error(
+        std::env::var_os("HF_HOME").as_deref(),
+        std::env::home_dir().as_deref(),
+    ) {
+        return Err(error);
+    }
+    let parameters = FromPretrainedParameters {
+        revision: revision.into(),
+        token: hf_token.map(str::to_owned),
+        ..Default::default()
+    };
+    let mut tokenizer = without_panics(|| Tokenizer::from_pretrained(id, Some(parameters)))?
+        .map_err(|e| load_error(id, revision, e))?;
     tokenizer
         .with_truncation(None)
         .map_err(|e| Error::TokenizerError(e.to_string()))?;
@@ -81,6 +85,63 @@ pub(crate) fn load_tokenizer(
     let tokenizer = Arc::new(tokenizer);
     *loaded = Some(tokenizer.clone());
     Ok(tokenizer)
+}
+
+/// Why a tokenizer failed to load. Tokenizers come from the Hugging Face Hub
+/// on first use and are then read from its cache with no network request, so
+/// a failed download says what to do without network access to the Hub;
+/// other failures (an invalid id, a damaged cached file) are reported as
+/// they are.
+fn load_error(id: &str, revision: &str, error: impl std::fmt::Display) -> Error {
+    let error = error.to_string();
+    if !is_download_failure(&error) {
+        return Error::TokenizerError(format!(
+            "Failed to load the tokenizer {id}@{revision}: {error}"
+        ));
+    }
+    Error::TokenizerError(format!(
+        "Failed to download the tokenizer {id}@{revision} from the Hugging Face Hub: {error}. Tokens are counted locally with this tokenizer before a request is sent, so it is downloaded once from the Hub (huggingface.co) and then read from the Hugging Face cache. Without network access to the Hub, set HF_ENDPOINT to a mirror, or copy the cached tokenizer from a machine that has it into the cache (HF_HOME, by default ~/.cache/huggingface)."
+    ))
+}
+
+/// Whether a load error is the Hub client's for a failed download: the
+/// request failed (`request error: ...`, which names the URL and the
+/// network failure), was retried to its limit, or got an answer without the
+/// headers a download needs. These are the messages of hf-hub's `ApiError`,
+/// which the tokenizers crate passes on as they are.
+fn is_download_failure(error: &str) -> bool {
+    ["request error:", "Too many retries", "Header "]
+        .iter()
+        .any(|prefix| error.starts_with(prefix))
+}
+
+/// The Hugging Face cache lives in `HF_HOME`, else in the home directory;
+/// with neither, the Hub client can't place it (it would panic).
+fn cache_location_error(
+    hf_home: Option<&std::ffi::OsStr>,
+    home: Option<&std::path::Path>,
+) -> Option<Error> {
+    (hf_home.is_none() && home.is_none()).then(|| {
+        Error::TokenizerError(
+            "Cannot load a tokenizer: there is no home directory for the Hugging Face cache. Set HF_HOME to a writable directory."
+                .into(),
+        )
+    })
+}
+
+/// Runs `load`, turning a panic in the Hub client (such as a cache directory
+/// that can't be found) into an error.
+fn without_panics<T>(load: impl FnOnce() -> T) -> Result<T, Error> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(load)).map_err(|panic| {
+        let reason = panic
+            .downcast_ref::<&str>()
+            .map(|reason| reason.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown cause".into());
+        Error::TokenizerError(format!(
+            "Loading a tokenizer failed ({reason}). If no home directory is available, set HF_HOME to a writable directory for the Hugging Face cache."
+        ))
+    })
 }
 
 /// Counts raw text tokens without padding, truncation, or special tokens.
@@ -150,6 +211,71 @@ mod tests {
                 "special_tokens": {"[CLS]": {"id": "[CLS]", "ids": [0], "tokens": ["[CLS]"]}}},
             "model": {"type": "WordLevel", "vocab": {"[CLS]": 0, "a": 1, "b": 2, "[UNK]": 3}, "unk_token": "[UNK]"}
         }"#).unwrap())
+    }
+
+    /// A failed download says where tokenizers come from and what to set
+    /// without network access; other failures are reported plainly.
+    #[test]
+    fn only_download_failures_get_network_advice() {
+        let download = load_error(
+            "voyageai/voyage-4",
+            "main",
+            "request error: https://huggingface.co/voyageai/voyage-4/resolve/main/tokenizer.json: Dns Failed: resolve dns name 'huggingface.co:443'",
+        )
+        .to_string();
+        for expected in [
+            "voyageai/voyage-4@main",
+            "huggingface.co",
+            "HF_ENDPOINT",
+            "HF_HOME",
+        ] {
+            assert!(download.contains(expected), "{expected}: {download}");
+        }
+        assert!(
+            load_error(
+                "voyageai/voyage-4",
+                "main",
+                "Too many retries: request error: x"
+            )
+            .to_string()
+            .contains("HF_ENDPOINT")
+        );
+
+        // Rejected before any network request: no network advice.
+        let Err(Error::TokenizerError(message)) =
+            load_tokenizer("not a repository!", Some("main"), None, false)
+        else {
+            panic!("expected a tokenizer error");
+        };
+        assert!(message.contains("not a repository!@main"), "{message}");
+        assert!(!message.contains("HF_ENDPOINT"), "{message}");
+        let corrupt = load_error(
+            "voyageai/voyage-4",
+            "main",
+            "expected value at line 1 column 1",
+        )
+        .to_string();
+        assert!(!corrupt.contains("HF_ENDPOINT"), "{corrupt}");
+    }
+
+    #[test]
+    fn a_missing_home_directory_is_an_error_not_a_panic() {
+        let home = std::path::Path::new("/home/user");
+        let hf_home = std::ffi::OsStr::new("/cache");
+        assert!(cache_location_error(None, Some(home)).is_none());
+        assert!(cache_location_error(Some(hf_home), None).is_none());
+        let error = cache_location_error(None, None).unwrap();
+        assert!(error.to_string().contains("HF_HOME"), "{error}");
+
+        let error =
+            without_panics(|| -> () { panic!("Cache directory cannot be found") }).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Cache directory cannot be found"),
+            "{error}"
+        );
+        assert_eq!(without_panics(|| 7).unwrap(), 7);
     }
 
     #[test]
