@@ -19,6 +19,7 @@ pub struct LLMClient {
     openai_request_hook: Option<Arc<dyn providers::openai::OpenAIRequestHook>>,
     openai_originator: Option<String>,
     openai_user_agent: Option<String>,
+    stream_idle_timeout: Option<std::time::Duration>,
 }
 
 impl LLMClient {
@@ -32,6 +33,7 @@ impl LLMClient {
             openai_request_hook: None,
             openai_originator: None,
             openai_user_agent: None,
+            stream_idle_timeout: None,
         }
     }
 
@@ -196,6 +198,57 @@ impl LLMClient {
         self
     }
 
+    /// Cuts a streamed response off once no data has arrived for `timeout`,
+    /// on every provider, whether configured before or after this call.
+    /// Off by default, and deliberately so: there is no timeout on a
+    /// response while its connection stays open.
+    ///
+    /// Models can reason for a long time without sending anything: GPT Pro
+    /// models can think for over an hour, and a stream may carry no event
+    /// until the reasoning ends. A timeout shorter than that cuts healthy
+    /// responses off; they then fail with [`Error::StreamTruncated`], which
+    /// is transient, so a caller that retries (such as the arko_agents
+    /// runtime) sends them again, paying for the work again. If you set one,
+    /// make it generous, well above the longest silent stretch the models you
+    /// use can have (for example two hours).
+    ///
+    /// Only the time between data on a streamed response counts, from its
+    /// first byte of body on: there is no total deadline, the wait for the
+    /// response to start (its status and headers) is not covered, and
+    /// responses that don't stream (`generate_text`, except over ChatGPT
+    /// OAuth, whose backend always streams) are unaffected. Connecting stays
+    /// bounded by its own 30-second timeout. The setting is never sent to
+    /// the model.
+    pub fn with_stream_idle_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.stream_idle_timeout = Some(timeout);
+        self.openai_client = self
+            .openai_client
+            .take()
+            .map(|client| self.configure_openai(client));
+        self.anthropic_client = self
+            .anthropic_client
+            .take()
+            .map(|client| client.with_stream_idle_timeout(Some(timeout)));
+        self.google_client = self
+            .google_client
+            .take()
+            .map(|client| client.with_stream_idle_timeout(Some(timeout)));
+        self.openrouter_client = self
+            .openrouter_client
+            .take()
+            .map(|client| client.with_stream_idle_timeout(Some(timeout)));
+        self
+    }
+
+    /// Applies the stream idle timeout set on this `LLMClient`, if any, to a
+    /// provider client; otherwise the client keeps its own.
+    fn idle<T>(&self, client: T, apply: impl FnOnce(T, Option<std::time::Duration>) -> T) -> T {
+        match self.stream_idle_timeout {
+            Some(timeout) => apply(client, Some(timeout)),
+            None => client,
+        }
+    }
+
     /// Installs a hook that can adjust each OpenAI request; see
     /// [`OpenAIRequestHook`](providers::openai::OpenAIRequestHook).
     pub fn with_openai_request_hook(
@@ -230,7 +283,10 @@ impl LLMClient {
         if self.openai_user_agent.is_some() {
             client = client.with_user_agent(self.openai_user_agent.clone());
         }
-        client
+        self.idle(
+            client,
+            providers::openai::OpenAIClient::with_stream_idle_timeout,
+        )
     }
 
     pub fn with_openai_api_key(mut self, key: &str) -> Self {
@@ -497,22 +553,19 @@ impl LLMClient {
         }
     }
 
-    pub fn with_anthropic_api_key(mut self, key: &str) -> Self {
-        self.anthropic_client = Some(providers::anthropic::AnthropicClient::new(key));
-        self
+    pub fn with_anthropic_api_key(self, key: &str) -> Self {
+        self.with_anthropic_client(providers::anthropic::AnthropicClient::new(key))
     }
 
-    pub fn with_google_api_key(mut self, key: &str) -> Self {
-        self.google_client = Some(providers::google::GoogleClient::new(key));
-        self
+    pub fn with_google_api_key(self, key: &str) -> Self {
+        self.with_google_client(providers::google::GoogleClient::new(key))
     }
 
     /// Configures OpenRouter with an API key and default options. See
     /// [`with_openrouter_client`](Self::with_openrouter_client) for a client
     /// with default options, attribution or a different base URL.
-    pub fn with_openrouter_api_key(mut self, key: &str) -> Self {
-        self.openrouter_client = Some(providers::openrouter::OpenRouterClient::new(key));
-        self
+    pub fn with_openrouter_api_key(self, key: &str) -> Self {
+        self.with_openrouter_client(providers::openrouter::OpenRouterClient::new(key))
     }
 
     /// Installs a preconfigured OpenRouter client.
@@ -520,7 +573,10 @@ impl LLMClient {
         mut self,
         client: providers::openrouter::OpenRouterClient,
     ) -> Self {
-        self.openrouter_client = Some(client);
+        self.openrouter_client = Some(self.idle(
+            client,
+            providers::openrouter::OpenRouterClient::with_stream_idle_timeout,
+        ));
         self
     }
 
@@ -544,13 +600,19 @@ impl LLMClient {
 
     /// Installs a preconfigured Anthropic client.
     pub fn with_anthropic_client(mut self, client: providers::anthropic::AnthropicClient) -> Self {
-        self.anthropic_client = Some(client);
+        self.anthropic_client = Some(self.idle(
+            client,
+            providers::anthropic::AnthropicClient::with_stream_idle_timeout,
+        ));
         self
     }
 
     /// Installs a preconfigured Google client.
     pub fn with_google_client(mut self, client: providers::google::GoogleClient) -> Self {
-        self.google_client = Some(client);
+        self.google_client = Some(self.idle(
+            client,
+            providers::google::GoogleClient::with_stream_idle_timeout,
+        ));
         self
     }
 

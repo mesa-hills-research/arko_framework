@@ -24,6 +24,7 @@ pub struct GoogleClient {
     api_key: String,
     http_client: reqwest::Client,
     base_url: String,
+    stream_idle_timeout: Option<std::time::Duration>,
 }
 
 impl GoogleClient {
@@ -32,7 +33,19 @@ impl GoogleClient {
             api_key: api_key.to_string(),
             http_client: super::default_http_client(),
             base_url: GOOGLE_BASE_URL.to_string(),
+            stream_idle_timeout: None,
         }
+    }
+
+    /// Cuts a streamed response off, with a transient
+    /// [`Error::StreamTruncated`], once no data has arrived for `timeout`.
+    /// `None` (the default) waits as long as the connection stays open. See
+    /// [`LLMClient::with_stream_idle_timeout`](crate::client::LLMClient::with_stream_idle_timeout)
+    /// before setting one: models can think for a long time without sending
+    /// anything, so a value must be generous.
+    pub fn with_stream_idle_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.stream_idle_timeout = timeout;
+        self
     }
 
     /// Sends requests to `{base_url}/interactions` instead of
@@ -130,10 +143,11 @@ impl ProviderClient for GoogleClient {
             return Err(response_error(response).await);
         }
 
-        Ok(Self::stream_events(
+        let (model, config) = (conversation.model.clone(), config.clone());
+        Ok(super::idle::parse_with_idle_timeout(
             response.bytes_stream(),
-            conversation.model.clone(),
-            config.clone(),
+            self.stream_idle_timeout,
+            move |bytes| Self::stream_events(bytes, model, config),
         ))
     }
 }

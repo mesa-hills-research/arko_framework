@@ -443,6 +443,8 @@ pub struct OpenAIClient {
     originator: Option<String>,
     user_agent: Option<String>,
     credential_store: Option<Arc<dyn ChatGptOAuthStore>>,
+    /// See [`with_stream_idle_timeout`](Self::with_stream_idle_timeout).
+    stream_idle_timeout: Option<Duration>,
     /// Warn (once) when a refresh rotates tokens that no store keeps: set for
     /// credentials taken from the environment by `LLMClient::from_env`.
     warn_unsaved_rotation: bool,
@@ -487,6 +489,7 @@ impl OpenAIClient {
             user_agent: None,
             credential_store: None,
             warn_unsaved_rotation: false,
+            stream_idle_timeout: None,
             auth_epoch: Arc::new(AtomicU64::new(0)),
             oauth_refresh_timeout: Some(OAUTH_REFRESH_TIMEOUT),
             oauth_refresh_retry: OAUTH_REFRESH_RETRY,
@@ -516,6 +519,7 @@ impl OpenAIClient {
             user_agent: None,
             credential_store: None,
             warn_unsaved_rotation: false,
+            stream_idle_timeout: None,
             auth_epoch: Arc::new(AtomicU64::new(0)),
             oauth_refresh_timeout: Some(OAUTH_REFRESH_TIMEOUT),
             oauth_refresh_retry: OAUTH_REFRESH_RETRY,
@@ -535,6 +539,7 @@ impl OpenAIClient {
             user_agent: None,
             credential_store: None,
             warn_unsaved_rotation: false,
+            stream_idle_timeout: None,
             auth_epoch: Arc::new(AtomicU64::new(0)),
             oauth_refresh_timeout: Some(OAUTH_REFRESH_TIMEOUT),
             oauth_refresh_retry: OAUTH_REFRESH_RETRY,
@@ -603,6 +608,18 @@ impl OpenAIClient {
     #[cfg(test)]
     pub(crate) fn warns_unsaved_rotation(&self) -> bool {
         self.warn_unsaved_rotation
+    }
+
+    /// Cuts a streamed response off (including every ChatGPT OAuth response,
+    /// since that backend always streams), with a transient
+    /// [`Error::StreamTruncated`], once no data has arrived for `timeout`.
+    /// `None` (the default) waits as long as the connection stays open. See
+    /// [`LLMClient::with_stream_idle_timeout`](crate::client::LLMClient::with_stream_idle_timeout)
+    /// before setting one: models can think for a long time without sending
+    /// anything, so a value must be generous.
+    pub fn with_stream_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.stream_idle_timeout = timeout;
+        self
     }
 
     /// Writes every request and response to `trace`; see [`RequestTrace`].
@@ -1376,13 +1393,20 @@ impl ProviderClient for OpenAIClient {
             .await?;
         let head = ResponseHead::new(&request.model, response.headers());
 
-        Ok(Self::stream_events_traced(
+        let (model, config) = (conversation.model.clone(), config.clone());
+        Ok(super::idle::parse_with_idle_timeout(
             response.bytes_stream(),
-            conversation.model.clone(),
-            config.clone(),
-            auth.is_chatgpt_oauth(),
-            head,
-            trace,
+            self.stream_idle_timeout,
+            move |bytes| {
+                Self::stream_events_traced(
+                    bytes,
+                    model,
+                    config,
+                    auth.is_chatgpt_oauth(),
+                    head,
+                    trace,
+                )
+            },
         ))
     }
 }

@@ -5,6 +5,9 @@ pub mod openrouter;
 pub mod voyage;
 
 mod foreign;
+mod idle;
+#[cfg(test)]
+mod idle_tests;
 pub(crate) use foreign::without_foreign_settings;
 #[cfg(test)]
 mod tool_image_tests;

@@ -60,6 +60,7 @@ pub struct OpenRouterClient {
     default_options: OpenRouterOptions,
     attribution: Option<AppAttribution>,
     catalog: Arc<RwLock<Option<Arc<OpenRouterCatalog>>>>,
+    stream_idle_timeout: Option<Duration>,
 }
 
 impl std::fmt::Debug for OpenRouterClient {
@@ -81,7 +82,19 @@ impl OpenRouterClient {
             default_options: OpenRouterOptions::default(),
             attribution: None,
             catalog: Arc::new(RwLock::new(None)),
+            stream_idle_timeout: None,
         }
+    }
+
+    /// Cuts a streamed response off, with a transient
+    /// [`Error::StreamTruncated`], once no data has arrived for `timeout`.
+    /// `None` (the default) waits as long as the connection stays open. See
+    /// [`LLMClient::with_stream_idle_timeout`](crate::client::LLMClient::with_stream_idle_timeout)
+    /// before setting one: models can think for a long time without sending
+    /// anything, so a value must be generous.
+    pub fn with_stream_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.stream_idle_timeout = timeout;
+        self
     }
 
     /// Sends requests to `base_url` (for example a regional hostname, a proxy
@@ -348,10 +361,11 @@ impl ProviderClient for OpenRouterClient {
         prepared.body.stream = Some(true);
         let response = self.send_chat(&prepared).await?;
         let fallbacks = prepared.body.models.is_some();
-        Ok(response::stream_events(
+        let context = ResponseContext::new(prepared.model, config.clone(), fallbacks);
+        Ok(super::idle::parse_with_idle_timeout(
             response.bytes_stream(),
-            ResponseContext::new(prepared.model, config.clone(), fallbacks),
-        )
-        .boxed())
+            self.stream_idle_timeout,
+            move |bytes| response::stream_events(bytes, context).boxed(),
+        ))
     }
 }

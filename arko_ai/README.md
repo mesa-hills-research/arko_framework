@@ -591,11 +591,31 @@ arko_ai does not retry model calls itself. `arko_ai::retry::BackoffPolicy` is th
 backoff used by arko_agents, arko_index and the OAuth refresh retries: exponential with a
 cap and equal jitter, treating a server hint as a minimum with jitter above it.
 
+## Long requests
+
 The shared model HTTP client has no total request deadline, since a response can stream
-for a long time; connection setup and idle pool connections are bounded separately, and
-a request is cancelled by dropping its future. It follows no redirects: a 3xx response
-is returned as an error, so API keys and other credential headers never reach another
-host.
+for a long time; connection setup (30 seconds) and idle pool connections are bounded
+separately, and a request is cancelled by dropping its future. It follows no redirects: a
+3xx response is returned as an error, so API keys and other credential headers never
+reach another host.
+
+There is no timeout on a response while its connection stays open, and this is
+deliberate. Models can reason silently for a long time: a stream may carry no event
+until the reasoning ends, and GPT Pro models especially can think for over an hour. A
+short timeout cuts healthy responses off, and since the failure is retryable, a caller
+that retries sends them again and pays for the work again.
+
+`LLMClient::with_stream_idle_timeout(duration)` opts in to a stream idle timeout on every
+provider: a streamed response that receives no data (events, keep-alive comments or
+pings) for `duration` ends with `Error::StreamTruncated`, which is transient, so existing
+retry logic applies. If you enable it, make it generous, well above the longest silent
+stretch your models can have; for example `Duration::from_secs(2 * 60 * 60)`. It counts
+only the time between data on a streamed response once its body has started: there is no
+total deadline, the wait for the response's status and headers is not covered, and
+responses that don't stream (`generate_text`, except over ChatGPT OAuth, whose backend
+always streams) are unaffected. The provider clients take it too
+(`with_stream_idle_timeout(Some(duration))` on `OpenAIClient`, `AnthropicClient`,
+`GoogleClient` and `OpenRouterClient`). The setting is never sent to the model.
 
 ## Voyage embeddings
 
