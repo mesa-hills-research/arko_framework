@@ -238,13 +238,61 @@ async fn a_task_a_verifier_could_not_review_is_continued_with_continue_agent() {
     assert_eq!(coder_bodies().len(), 3);
 }
 
+/// Opens once the test says so; counts the calls that got through.
+#[derive(Debug, Default)]
+struct Gate {
+    open: tokio::sync::Notify,
+    passed: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl arko_agents::Tool for Gate {
+    fn definition(&self) -> arko_agents::ToolDefinition {
+        arko_agents::ToolDefinition {
+            name: "gate".to_string(),
+            description: "Waits for the gate to open.".to_string(),
+            output_based_example: None,
+            parameters: vec![],
+            parallel_safe: false,
+            tool_type_details: arko_agents::ToolTypeDetails::DeveloperDefined,
+            raw_json_schema_override: None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _context: &arko_agents::TaskContext<'_>,
+        _params: std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<String, arko_agents::ToolError> {
+        self.open.notified().await;
+        self.passed.fetch_add(1, Ordering::SeqCst);
+        Ok("gate opened".to_string())
+    }
+}
+
 /// In a parallel run, a task whose completion its verifier could not
 /// review is a pause, not a failure: its paused result comes back with the
-/// others, and `fail_fast` doesn't stop them.
+/// others, and `fail_fast` doesn't stop the agent still running (it waits
+/// until the pause is recorded).
 #[tokio::test]
 async fn a_verifier_failure_in_a_parallel_run_is_a_pause() {
+    use crate::test_support::tool_call_turn;
     let workspace = Workspace::new();
-    let server = server(|_| "Looks good to me.").await;
+    let server = ResponsesServer::start(|index, body| {
+        Some(if body.contains(VERIFIER) {
+            complete_turn(&format!("v{index}"), "Looks good to me.")
+        } else if body.contains("Write the docs.") {
+            if body.contains("gate opened") {
+                complete_turn(&format!("w{index}"), "docs done")
+            } else {
+                tool_call_turn(&format!("g{index}"), "gate", serde_json::json!({}))
+            }
+        } else {
+            complete_turn(&format!("c{index}"), "done")
+        })
+    })
+    .await;
+    let gate = Arc::new(Gate::default());
     let workflow = builder(
         &server,
         &workspace,
@@ -257,6 +305,16 @@ async fn a_verifier_failure_in_a_parallel_run_is_a_pause() {
         "writer",
         crate::test_support::agent_config("Friendly Writer"),
     )
+    .global_tool(gate.clone())
+    .hook(crate::hooks::HookPoint::OnAgentPaused, {
+        let gate = gate.clone();
+        Arc::new(move |hook| {
+            if hook.agent_name.as_deref() == Some("coder") {
+                gate.open.notify_one();
+            }
+            crate::hooks::HookResult::Continue
+        })
+    })
     .fail_fast(true)
     .build()
     .unwrap();
@@ -270,4 +328,6 @@ async fn a_verifier_failure_in_a_parallel_run_is_a_pause() {
     assert_eq!(results[0].agent_name, "coder");
     assert_eq!(results[0].status, AgentRunStatus::Paused);
     assert_eq!(results[1].status, AgentRunStatus::Completed);
+    assert_eq!(results[1].summary, "docs done");
+    assert_eq!(gate.passed.load(Ordering::SeqCst), 1);
 }

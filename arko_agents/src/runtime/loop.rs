@@ -2266,6 +2266,15 @@ impl AgentLoop {
                                             // refused input: no error note, and
                                             // the host's message waits, as
                                             // context, until it has answered.
+                                            if self.is_native_mode() {
+                                                // Calls an older version left
+                                                // without results get them now.
+                                                self.answer_open_native_calls(
+                                                    UNREACHED_CALL,
+                                                    UNREACHED_CALL,
+                                                )
+                                                .await?;
+                                            }
                                             if let Some(text) = user_msg_on_recovery
                                                 .as_deref()
                                                 .filter(|text| !text.is_empty())
