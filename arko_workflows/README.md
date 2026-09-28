@@ -611,20 +611,29 @@ Checkpoint workflow state at agent boundaries:
 use arko_workflows::persistence::PersistenceConfig;
 
 let workflow = Workflow::builder()
-    .persistence(PersistenceConfig {
-        checkpoint_dir: "./checkpoints".into(),
-        auto_checkpoint: true,
-    })
+    .persistence(PersistenceConfig::new("./checkpoints"))
     .build()?;
 
 workflow.checkpoint().await?;
 ```
 
-A checkpoint contains the workflow and run identity, metadata, memory, pending
-messages, the cost ledger, freshness versions, complete agent tasks and results,
-verification and distillation records, and, once the run is stopped, its
-cancellation. Agent tasks and a JSONL event log are also stored separately. Files
-are written to a temporary file, synced, and renamed into place. `WorkflowBuilder::resume_from(path)` restores this state into a new
+A run directory holds the checkpoints, one task file per agent run
+(`agents/<task id>.json`, with its full conversation), the event log
+(`events.jsonl`), and the durable-step journal. A checkpoint contains the workflow
+and run identity, metadata, memory, pending messages, the cost ledger, freshness
+versions, each agent result with a reference to its task file (a conversation is
+stored once, in its task file), verification and distillation records, and, once the
+run is stopped, its cancellation. Files are pretty-printed JSON, written to a
+temporary file, synced, and renamed into place.
+
+By default a checkpoint is saved after every finalized agent run, and every
+checkpoint is kept: `retain_checkpoints(n)` opts in to keeping only the newest `n`.
+The event log records every event, including each streamed text and reasoning
+fragment; `event_log(EventLog::LifecycleOnly)` leaves the fragments out (the
+finished responses stay in the task files). Events are buffered and written at least
+once a second (`event_flush_interval`), and at once for state changes, run ends, and
+error reports. A failed event-log write is logged as a warning and retried; it never
+stops an agent. `WorkflowBuilder::resume_from(path)` restores this state into a new
 workflow; see [persistence](INDEX.md#persistence-and-checkpoint-state) for what is
 restored and what must be configured again.
 

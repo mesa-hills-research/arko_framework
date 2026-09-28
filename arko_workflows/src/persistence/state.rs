@@ -7,7 +7,7 @@ use crate::budget::CostLedger;
 use crate::freshness::FreshnessSnapshot;
 use crate::memory::MemoryTier;
 use crate::messaging::AgentMessage;
-use crate::workflow::result::AgentResult;
+use crate::workflow::result::{AgentResult, AgentRunStatus};
 
 /// A serializable snapshot of the entire workflow state.
 #[derive(Serialize, Deserialize)]
@@ -32,8 +32,14 @@ pub struct WorkflowState {
     // that subscription calls record a billed amount of zero.
     #[serde(default)]
     pub freshness_snapshot: Option<FreshnessSnapshot>,
-    #[serde(default)]
+    /// Finalized agent results with their tasks, as checkpoints before
+    /// [`agent_runs`](Self::agent_runs) held them; empty in newer ones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_results: Vec<AgentResult>,
+    /// Finalized agent results, each referring to its task file instead of
+    /// holding the task (the conversation is stored once, in the task file).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_runs: Vec<AgentRunRecord>,
     #[serde(default)]
     pub verification_records: Vec<crate::verification::VerificationRecord>,
     #[serde(default)]
@@ -48,6 +54,69 @@ pub struct WorkflowState {
     /// agents it may message. Absent in checkpoints from before it existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_registry: Option<crate::messaging::registry::RegistrySnapshot>,
+}
+
+/// A finalized agent result in a checkpoint, with its task in the run
+/// directory's task file.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AgentRunRecord {
+    pub agent_run_id: uuid::Uuid,
+    pub agent_name: String,
+    pub status: AgentRunStatus,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The task file, relative to the run directory:
+    /// `agents/<agent_run_id>.json`.
+    pub task_file: String,
+}
+
+impl AgentRunRecord {
+    pub(crate) fn of(result: &AgentResult) -> Self {
+        Self {
+            agent_run_id: result.agent_run_id,
+            agent_name: result.agent_name.clone(),
+            status: result.status.clone(),
+            summary: result.summary.clone(),
+            error: result.error.clone(),
+            task_file: super::task_file(result.agent_run_id),
+        }
+    }
+}
+
+impl WorkflowState {
+    /// The checkpoint's agent results, with their tasks: those it holds (a
+    /// checkpoint written before task files were referenced), then those
+    /// whose tasks are in the task files of `run_dir`, the directory
+    /// holding the checkpoint.
+    pub fn agent_results_in(
+        &self,
+        run_dir: &std::path::Path,
+    ) -> Result<Vec<AgentResult>, crate::WorkflowError> {
+        let mut results = self.agent_results.clone();
+        for record in &self.agent_runs {
+            let path = run_dir.join(&record.task_file);
+            let task = std::fs::read_to_string(&path)
+                .map_err(crate::WorkflowError::from)
+                .and_then(|json| Ok(serde_json::from_str::<arko_agents::Task>(&json)?))
+                .map_err(|error| {
+                    crate::WorkflowError::Persistence(format!(
+                        "the checkpoint's task file {} for agent '{}' can't be loaded: {error}",
+                        path.display(),
+                        record.agent_name
+                    ))
+                })?;
+            results.push(AgentResult {
+                agent_run_id: record.agent_run_id,
+                agent_name: record.agent_name.clone(),
+                status: record.status.clone(),
+                summary: record.summary.clone(),
+                error: record.error.clone(),
+                task,
+            });
+        }
+        Ok(results)
+    }
 }
 
 /// Lightweight serializable agent result for checkpoints.
@@ -85,6 +154,7 @@ mod tests {
             cost_ledger: CostLedger::default(),
             freshness_snapshot: Some(tracker.snapshot()),
             agent_results: Vec::new(),
+            agent_runs: Vec::new(),
             verification_records: Vec::new(),
             distillation_records: Vec::new(),
             completed_agents: Vec::new(),

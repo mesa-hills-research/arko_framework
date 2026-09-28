@@ -265,7 +265,7 @@ async fn publish_event(
     event: &AgentEvent,
     ctx: &SharedContext,
     persistence: Option<&Arc<PersistenceManager>>,
-) -> Result<(), WorkflowError> {
+) {
     let _ = ctx.event_tx.send(crate::workflow::result::WorkflowEvent {
         timestamp: chrono::Utc::now(),
         workflow_run_id: ctx.workflow_run_id,
@@ -274,11 +274,11 @@ async fn publish_event(
         event: event.clone(),
     });
     if let Some(persistence) = persistence {
+        // Never fails: a failed write is logged and retried.
         persistence
             .append_event(agent_name, agent_run_id, event)
-            .await?;
+            .await;
     }
-    Ok(())
 }
 
 /// Charges reported usage to the budget and fires the budget hooks.
@@ -605,7 +605,7 @@ async fn drive_events(
             },
         };
         wait_while_paused(ctx).await?;
-        publish_event(agent_name, agent_run_id, &event, ctx, persistence).await?;
+        publish_event(agent_name, agent_run_id, &event, ctx, persistence).await;
         ctx.registry.observe(agent_run_id, &event);
         if ctx.budget.is_exceeded() && !matches!(&event, AgentEvent::UsageReported(_)) {
             let _ = cmd_tx.try_send(UserCommand::CancelTask);
@@ -976,11 +976,7 @@ async fn wind_down(
                         }
                         event => event,
                     };
-                    if let Err(error) =
-                        publish_event(agent_name, agent_run_id, &event, ctx, persistence).await
-                    {
-                        log::warn!("Could not record an event of stopping agent '{agent_name}': {error}");
-                    }
+                    publish_event(agent_name, agent_run_id, &event, ctx, persistence).await;
                     ctx.registry.observe(agent_run_id, &event);
                     if let AgentEvent::UsageReported(usage) = &event {
                         charge_usage(agent_name, usage, ctx);
@@ -1061,11 +1057,7 @@ pub(crate) async fn drive_to_result(
             // Suspended for its caller: the agent's last events (its
             // suspension) are still recorded.
             while let Some(event) = event_rx.recv().await {
-                if let Err(error) =
-                    publish_event(&agent_name, agent_run_id, &event, ctx, persistence).await
-                {
-                    log::warn!("Could not record an event of paused agent '{agent_name}': {error}");
-                }
+                publish_event(&agent_name, agent_run_id, &event, ctx, persistence).await;
                 ctx.registry.observe(agent_run_id, &event);
             }
         }

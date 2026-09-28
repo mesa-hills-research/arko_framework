@@ -185,10 +185,10 @@ impl PyWorkflowBuilder {
         }
 
         if let Some(ref directory) = self.persistence_dir {
-            builder = builder.persistence(crate::persistence::PersistenceConfig {
-                checkpoint_dir: std::path::PathBuf::from(directory),
-                auto_checkpoint: self.auto_checkpoint,
-            });
+            builder = builder.persistence(
+                crate::persistence::PersistenceConfig::new(directory)
+                    .auto_checkpoint(self.auto_checkpoint),
+            );
         }
         if let Some(ref checkpoint) = self.resume_from {
             builder = builder.resume_from(checkpoint);

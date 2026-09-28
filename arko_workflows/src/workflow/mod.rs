@@ -1294,6 +1294,15 @@ impl WorkflowBuilder {
             }
             None => None,
         };
+        // The checkpoint's results, their tasks read from the task files it
+        // refers to (in the checkpoint's directory).
+        let resumed_results = match (&resume_state, &self.resume_from) {
+            (Some(state), Some(path)) => {
+                let run_dir = path.parent().unwrap_or(std::path::Path::new("."));
+                state.agent_results_in(run_dir)?
+            }
+            _ => Vec::new(),
+        };
         if resume_state.is_some() && self.persistence_config.is_none() {
             return Err(WorkflowError::BuilderInvalid(
                 "resume_from requires persistence configuration".to_string(),
@@ -1319,6 +1328,10 @@ impl WorkflowBuilder {
         let persistence = self
             .persistence_config
             .map(|config| PersistenceManager::new(config, workflow_run_id));
+        if let (Some(persistence), Some(state)) = (&persistence, &resume_state) {
+            // Their task files hold these tasks already.
+            persistence.mark_tasks_saved(state.agent_runs.iter().map(|run| run.agent_run_id));
+        }
         let durable_store = persistence.as_ref().map(PersistenceManager::durable_store);
 
         let budget = if let Some(state) = &resume_state {
@@ -1376,12 +1389,7 @@ impl WorkflowBuilder {
             agent_configs: self.agents.iter().cloned().collect(),
             global_tools: self.global_tools,
             agent_tools: self.agent_tools,
-            agent_results: parking_lot::RwLock::new(
-                resume_state
-                    .as_ref()
-                    .map(|state| state.agent_results.clone())
-                    .unwrap_or_default(),
-            ),
+            agent_results: parking_lot::RwLock::new(resumed_results.clone()),
             global_interceptors: self.global_interceptors,
             agent_interceptors: self.agent_interceptors,
             interception_failure_policy: self.interception_failure_policy.unwrap_or_default(),
@@ -1409,7 +1417,7 @@ impl WorkflowBuilder {
             run_control: Arc::new(RunControl::new(self.cancel_grace_period)),
             registry: match &resume_state {
                 Some(state) => {
-                    AgentRegistry::restore(state.agent_registry.clone(), &state.agent_results)
+                    AgentRegistry::restore(state.agent_registry.clone(), &resumed_results)
                 }
                 None => AgentRegistry::default(),
             },
@@ -1566,3 +1574,7 @@ mod build_tests;
 #[cfg(test)]
 #[path = "verification_tests.rs"]
 mod verification_tests;
+
+#[cfg(test)]
+#[path = "persistence_tests.rs"]
+mod persistence_tests;

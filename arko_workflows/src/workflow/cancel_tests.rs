@@ -134,10 +134,7 @@ async fn cancelling_a_sequential_run_stops_its_agent_and_every_later_call() {
             .map(|cancellation| cancellation.cause),
         Some(CancelCause::Requested)
     );
-    assert_eq!(
-        checkpoint.agent_results[0].status,
-        AgentRunStatus::Cancelled
-    );
+    assert_eq!(checkpoint.agent_runs[0].status, AgentRunStatus::Cancelled);
 
     // Later calls fail at once without starting anything.
     assert!(matches!(

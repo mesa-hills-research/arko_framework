@@ -44,7 +44,7 @@ Root re-exports: `Workflow`, `WorkflowBuilder`, `AgentHandle`, `WorkflowError`, 
 | `hooks` | `HookCallback`, `HookPoint`, `HookResult` |
 | `memory` | `AccessScope`, `MemoryConfig`, `MemoryEntry`, `MemoryTier`, `WriteMode` |
 | `messaging`, `messaging::registry`, `messaging::wait` | `AgentMessage`, `MessageAttachment`, `MessagingPolicy`, `AgentStatus`, `WaitReason`, `WaitForMessageTimeout` |
-| `persistence` | `PersistenceConfig` |
+| `persistence` | `EventLog`, `PersistenceConfig` |
 | `policy` | `AgentPause`, `AgentResume`, `ApprovalPolicy`, `ErrorRecoveryPolicy`, `ToolApprovalHandler`, `ToolApprovalOutcome`, `ToolApprovalRequest` |
 | `services` | `WorkflowServices`, `WorkflowServicesConfig` |
 | `user_input` | `UserInputHandler`, `UserInputRequest` |
@@ -1149,11 +1149,23 @@ Source: [persistence/mod.rs](src/persistence/mod.rs), [persistence/state.rs](src
 
 ### PersistenceConfig and PersistenceManager
 
-`PersistenceConfig` implements `Debug` and `Clone` and has public fields `checkpoint_dir: std::path::PathBuf` (the run directory) and `auto_checkpoint: bool` (whether a checkpoint is saved after each finalized agent result, and once when a run call first returns a stopped run's error). It has no `Default` implementation; `new` sets `auto_checkpoint = true`. `PersistenceManager` implements `Clone` and has private fields; clones share the durable store and write lock.
+`PersistenceConfig` implements `Debug` and `Clone`. It has no `Default` implementation; `new` sets the defaults below. `PersistenceManager` implements `Clone` and has private fields; clones share the durable store, write lock, and event log.
+
+| Public field | Type | Meaning and default from `new` |
+|---|---|---|
+| `checkpoint_dir` | `std::path::PathBuf` | The run directory. |
+| `auto_checkpoint` | `bool` | Save a checkpoint after each finalized agent result, and once when a run call first returns a stopped run's error. Default `true`. |
+| `retain_checkpoints` | `Option<usize>` | Keep only the newest this many checkpoint files, deleting older ones (earlier processes' first, by modification time) after each save; a file that can't be deleted is logged and kept. Default `None`: every checkpoint is kept. |
+| `event_log` | `EventLog` | `Full` (default): every agent event, including each streamed fragment. `LifecycleOnly`: every event except `AssistantResponseChunk`, `ReasoningChunk`, `ToolParamName`, `ToolParamValueChunk`, and `ToolParamEnd`; the finished responses are in the task files, but streamed reasoning a provider doesn't return with the response is only in a `Full` log. |
+| `event_flush_interval` | `std::time::Duration` | Buffered events are written at least this often; `TaskStateChanged`, `TaskStreamEnd`, `ErrorEncountered`, `RetryScheduled`, `UsageLimitReached`, `RefusalReceived`, and `OutputTokenLimitReached` are written at once, and the buffer before each checkpoint. Default `DEFAULT_EVENT_FLUSH_INTERVAL`, one second. |
 
 ```rust
 impl PersistenceConfig {
     pub fn new(checkpoint_dir: impl Into<std::path::PathBuf>) -> Self;
+    pub fn auto_checkpoint(self, enabled: bool) -> Self;
+    pub fn retain_checkpoints(self, count: usize) -> Self; // at least 1
+    pub fn event_log(self, event_log: EventLog) -> Self;
+    pub fn event_flush_interval(self, interval: std::time::Duration) -> Self;
     pub fn user_data(workflow_name: &str) -> Result<Self, WorkflowError>;
 }
 impl PersistenceManager {
@@ -1166,7 +1178,8 @@ impl PersistenceManager {
     pub async fn append_event(
         &self, agent_name: &str, agent_run_id: uuid::Uuid,
         event: &arko_agents::runtime::event::AgentEvent,
-    ) -> Result<(), WorkflowError>;
+    );
+    pub async fn flush_events(&self);
     pub async fn save_agent_task(
         &self, task: &arko_agents::Task,
     ) -> Result<std::path::PathBuf, WorkflowError>;
@@ -1186,11 +1199,12 @@ impl PersistenceManager {
 | `PersistenceManager::resolve_run_id` | Create the run directory if needed and return the UUID in its `workflow-run-id` file, creating and syncing a new one when the file is absent. A malformed UUID returns `Persistence`. |
 | `PersistenceManager::new` | Associate a configuration with a run identity; when reopening a run, pass the identity from `resolve_run_id`. |
 | `durable_store` | Shared handle to the run's durable-step store. |
-| `save_checkpoint` | Snapshot `ctx` into a new `checkpoint-<UUID>.json` (written to a temporary file, synced, and renamed), point `latest-checkpoint` at its file name, and return its path. |
-| `append_event` | Append `event` to `events.jsonl` with the current UTC time, the workflow run UUID, `agent_name`, and `agent_run_id`. |
+| `save_checkpoint` | Write the buffered events, then snapshot `ctx` into a new pretty-printed `checkpoint-<UUID>.json` (written to a temporary file, synced, and renamed), point `latest-checkpoint` at its file name, apply `retain_checkpoints`, and return its path. Agent results refer to their task files; a task not saved to its file yet (restored from a checkpoint that held it) is written first. |
+| `append_event` | Record `event` in `events.jsonl` as `event_log` selects, with the current UTC time, the workflow run UUID, `agent_name`, and `agent_run_id`: buffered, and written as described for `event_flush_interval`. The file stays open between writes. A failed write is logged as a warning once until writing succeeds again, and the events stay buffered (the oldest are dropped past 64 MiB, with a warning); it never stops an agent. Dropping the last manager writes what is still buffered. |
+| `flush_events` | Write the buffered events now. |
 | `save_agent_task` | Write `task` to `agents/<task.id>.json` (temporary file, sync, rename), replacing the task's earlier snapshot, and return its path. |
 | `auto_checkpoint` | Save a checkpoint only when `config.auto_checkpoint` is `true`; otherwise succeed without writing. |
-| `load_checkpoint` | Read and deserialize the given checkpoint file. Does not follow `latest-checkpoint` or restore a workflow; use `WorkflowBuilder::resume_from` for that. |
+| `load_checkpoint` | Read and deserialize the given checkpoint file. Does not follow `latest-checkpoint` or restore a workflow; use `WorkflowBuilder::resume_from` for that. `WorkflowState::agent_results_in(run_dir)` returns its agent results with their tasks, read from the task files. |
 
 Filesystem and serialization failures are returned as `WorkflowError`. A run directory holds checkpoints, task snapshots, the event log, and the durable journal; running futures and ballots are not persisted.
 
@@ -1214,7 +1228,8 @@ No agent is running after a resume. From `agent_registry`, an agent that was run
 | `budget_spent` | `f64` | Workflow spend at checkpoint time; required. |
 | `cost_ledger` | `crate::budget::CostLedger` | Complete accounting history; empty ledger. |
 | `freshness_snapshot` | `Option<crate::freshness::FreshnessSnapshot>` | Freshness tracking state; `None`. |
-| `agent_results` | `Vec<crate::workflow::result::AgentResult>` | Finalized results, including failures and input suspensions; empty. |
+| `agent_results` | `Vec<crate::workflow::result::AgentResult>` | Finalized results with their tasks, as checkpoints written before `agent_runs` held them; omitted from JSON when empty (always, in new checkpoints); empty. |
+| `agent_runs` | `Vec<AgentRunRecord>` | Finalized results, including failures and pauses, each referring to its task file; omitted from JSON when empty; empty. |
 | `verification_records` | `Vec<crate::verification::VerificationRecord>` | Completion-verification history; empty. |
 | `distillation_records` | `Vec<crate::distillation::DistillationRecord>` | Distillation history; empty. |
 | `completed_agents` | `Vec<SerializableAgentResult>` | Name and summary of each recorded result; empty. |
@@ -1226,6 +1241,8 @@ No agent is running after a resume. From `agent_registry`, an agent that was run
 Unknown fields are ignored on load, so checkpoints written by earlier versions with fields since removed, such as `oauth_exempt_agents`, still load; their ledger entries keep their recorded amounts. A task state saved as `Failed` with exactly the reason `Task cancelled by user.` deserializes as `TaskState::Cancelled`, in checkpoints, task files, and event-log records alike. Budget accounting records `UsageInfo::billed()`, which is zero for subscription calls such as ChatGPT OAuth.
 
 `SerializableAgentResult` has public fields `agent_name: String` and `summary: String` and implements Serde, `Clone`, and `Default` (both strings empty).
+
+`AgentRunRecord` (`Debug`, `Clone`, Serde) has public fields `agent_run_id: Uuid`, `agent_name: String`, `status: AgentRunStatus`, `summary: String`, `error: Option<String>` (omitted from JSON when `None`), and `task_file: String`, the task file relative to the run directory (`agents/<agent_run_id>.json`). A task file always holds the task's latest state, so an older checkpoint that refers to it reads the task as it is now. `WorkflowState::agent_results_in(&self, run_dir: &Path) -> Result<Vec<AgentResult>, WorkflowError>` returns the results `agent_results` holds, then those of `agent_runs` with their tasks read from `run_dir`; a task file that can't be read or parsed returns `Persistence` naming it. `resume_from` reads the task files from the checkpoint's directory. A checkpoint holding its tasks (from an earlier version) still loads; the next checkpoint writes their task files and refers to them.
 
 ## Structured voting
 
