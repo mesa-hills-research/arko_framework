@@ -68,7 +68,9 @@ empty values. `LLMClient` reads no environment variables unless it is called. Se
 some of the `OPENAI_OAUTH_*` variables is an error (`Error::AuthenticationFailed`), not a
 silent switch to `OPENAI_API_KEY` and API billing; see
 [ChatGPT OAuth credentials](#chatgpt-oauth-credentials) for what happens to an
-`OPENAI_OAUTH_REFRESH_TOKEN`.
+`OPENAI_OAUTH_REFRESH_TOKEN`. `LLMClient::from_env_with(lookup)` reads the variables
+through a function instead, for example to hide the `OPENAI_OAUTH_*` variables when the
+OpenAI credentials come from a file.
 
 | Provider | Variables |
 | --- | --- |
@@ -946,7 +948,8 @@ has it. On other models these four Claude settings are dropped with a warning to
 The `llm_client_cli` example sends one prompt or runs an interactive chat with any
 configured provider, reading credentials with `LLMClient::from_env()` (and a `.env`
 file). `--codex-auth` takes the OpenAI credentials from the Codex `auth.json` instead
-(`--codex-auth-json PATH` from another file), through `with_codex_auth_file`:
+(`--codex-auth-json PATH` from another file), through `with_codex_auth_file`; the
+`OPENAI_OAUTH_*` variables are then not read:
 
 ```bash
 cargo run -p arko_ai --example llm_client_cli -- --help
@@ -955,9 +958,12 @@ cargo run -p arko_ai --example llm_client_cli -- text -m gpt-6-astra -p "Hello" 
 cargo run -p arko_ai --example llm_client_cli -- chat -m anthropic/claude-opus-5.5 --reasoning-level high
 ```
 
-`--reasoning` turns reasoning on at the model's defaults: no effort or level is sent, and
-Claude models that need a manual thinking budget get 16,000 tokens (at most half of
-`--max-tokens`). `--reasoning-level` and `--reasoning-effort` set one explicitly.
+`--reasoning` reasons at the model's defaults: no effort or level is sent. On OpenAI that
+means the model's default effort (none on GPT-5.1, 5.2 and 5.4, which then don't reason)
+and no reasoning summaries; pass `--reasoning-level` for an effort and summaries. Claude
+models that need a manual thinking budget get half of `--max-tokens` (or of the model's
+output limit), between 1,024 and 16,000 tokens. `--reasoning-level` and
+`--reasoning-effort` set the effort, level or budget explicitly.
 
 `embeddings_demo` requests Voyage embeddings with `VOYAGE_API_KEY`, and
 `oauth_cache_probe` measures prompt-cache hits on the ChatGPT OAuth path with the

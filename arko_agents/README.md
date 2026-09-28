@@ -115,8 +115,9 @@ cargo run -p arko_agents --example arko_agents_cli -- \
 ```
 
 Its options include `--tool-calling-mode native|output_based`, `--mcp-config PATH`,
-`--openai-auth-json PATH` (ChatGPT OAuth from a Codex `auth.json`), `--save-task-state
-PATH` (the final task as JSON), and the opt-in `--user-command-timeout SECONDS`, after
+`--openai-auth-json PATH` (ChatGPT OAuth from a Codex `auth.json`; the `OPENAI_OAUTH_*`
+variables are then not read), `--save-task-state PATH` (the final task as JSON), and the
+opt-in `--user-command-timeout SECONDS`, after
 which a task waiting for a command is returned `Interrupted`; without it the task waits
 until a command arrives. The example loads a `.env` file and then reads other credentials
 from the environment with `LLMClient::from_env()`.

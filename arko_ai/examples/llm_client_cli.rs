@@ -111,11 +111,15 @@ struct GenerationArgs {
     #[arg(short = 'n', long)]
     max_tokens: Option<usize>,
 
-    /// Turn reasoning on at the model's defaults: no effort or level is
-    /// sent, so OpenAI, OpenRouter and Claude adaptive thinking use the
-    /// model's default effort and Gemini thinks at its default level; Claude
-    /// models that need a manual thinking budget get 16,000 tokens (at most
-    /// half of --max-tokens). Implied by the other reasoning options
+    /// Reason at the model's defaults: no effort or level is sent. OpenAI
+    /// reasoning models use their default effort (none on GPT-5.1, 5.2 and
+    /// 5.4, which then don't reason) and return no summaries; use
+    /// --reasoning-level for an effort and summaries. OpenRouter and Claude
+    /// adaptive thinking use the model's default effort, Gemini its default
+    /// level with thought summaries, and Claude models that need a manual
+    /// thinking budget get half of --max-tokens (or of the model's output
+    /// limit), between 1,024 and 16,000 tokens. Implied by the other
+    /// reasoning options
     #[arg(short, long)]
     reasoning: bool,
 
@@ -149,7 +153,7 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
     env_logger::init();
 
     let cli = Cli::parse();
-    let client = create_client(&cli)?;
+    let client = create_client(&cli, |name| std::env::var(name).ok())?;
 
     match cli.command {
         Commands::Models => print_models(),
@@ -369,8 +373,9 @@ async fn main() -> Result<(), Box<arko_ai::Error>> {
 }
 
 /// `LLMClient::from_env`, with OpenAI from a Codex `auth.json` when asked.
-fn create_client(cli: &Cli) -> Result<LLMClient, Error> {
-    let client = LLMClient::from_env()?;
+/// With an auth file, OpenAI takes its credentials from the file alone: the
+/// `OPENAI_OAUTH_*` variables are not read. `env` reads the environment.
+fn create_client(cli: &Cli, env: impl Fn(&str) -> Option<String>) -> Result<LLMClient, Error> {
     let path = match (&cli.codex_auth_json, cli.codex_auth) {
         (Some(path), _) => path.clone(),
         (None, true) => CodexAuthFile::default_path().ok_or_else(|| {
@@ -378,8 +383,10 @@ fn create_client(cli: &Cli) -> Result<LLMClient, Error> {
                 "No home directory to find ~/.codex/auth.json in; pass --codex-auth-json".into(),
             )
         })?,
-        (None, false) => return Ok(client),
+        (None, false) => return LLMClient::from_env_with(env),
     };
+    let client =
+        LLMClient::from_env_with(|name| env(name).filter(|_| !name.starts_with("OPENAI_OAUTH_")))?;
     let file = CodexAuthFile::load(&path).map_err(|error| {
         Error::AuthenticationFailed(format!("Cannot use {}: {error}", path.display()))
     })?;
@@ -553,8 +560,9 @@ fn build_config(model: &Model, args: &GenerationArgs) -> Result<GenerationConfig
 }
 
 /// The thinking budget `--reasoning` gives Claude models that need a manual
-/// one: 16,000 tokens, at most half of the output limit so the answer has
-/// room, and at least the API's minimum of 1,024.
+/// one: half of the output limit, so the answer has room, between the API's
+/// minimum of 1,024 and 16,000 tokens. (With an output limit of 1,024 or
+/// less the budget can't be below it, and the request is rejected.)
 fn default_claude_budget(model: &Model, max_tokens: Option<usize>) -> usize {
     let limit = max_tokens.unwrap_or(model.max_output_tokens);
     (limit / 2).clamp(1024, 16_000)
@@ -895,6 +903,33 @@ mod tests {
         config(args).unwrap().reasoning
     }
 
+    /// An auth file given explicitly wins: a partial `OPENAI_OAUTH_*`
+    /// environment, an error on its own, is not even read.
+    #[tokio::test]
+    async fn an_auth_file_given_explicitly_ignores_the_oauth_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        std::fs::write(
+            &path,
+            r#"{"tokens": {"access_token": "file-access", "refresh_token": "file-refresh", "account_id": "file-account"}}"#,
+        )
+        .unwrap();
+        let partial =
+            |name: &str| (name == "OPENAI_OAUTH_ACCESS_TOKEN").then(|| "env-access".to_string());
+        let cli = Cli::try_parse_from(["llm_client_cli", "models"]).unwrap();
+        assert!(create_client(&cli, partial).is_err());
+        let cli = Cli::try_parse_from([
+            "llm_client_cli",
+            "--codex-auth-json",
+            path.to_str().unwrap(),
+            "models",
+        ])
+        .unwrap();
+        let client = create_client(&cli, partial).unwrap();
+        let credentials = client.openai_chatgpt_oauth_credentials().await.unwrap();
+        assert_eq!(credentials.access_token, "file-access");
+    }
+
     /// `--reasoning` sends no effort or level: each model's default applies.
     #[test]
     fn reasoning_alone_uses_the_model_defaults() {
@@ -928,8 +963,8 @@ mod tests {
         ));
     }
 
-    /// Claude models on manual thinking need a budget: 16,000 tokens, at most
-    /// half the output limit, at least 1,024.
+    /// Claude models on manual thinking need a budget: half the output limit,
+    /// between 1,024 and 16,000 tokens.
     #[test]
     fn manual_thinking_claude_models_get_a_useful_budget() {
         let budget = |args: &[&str]| match reasoning(args) {

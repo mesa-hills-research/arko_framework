@@ -67,10 +67,15 @@ impl LLMClient {
     /// The library reads no environment variables unless this is called; the
     /// Codex `auth.json` is read only when `OPENAI_OAUTH_REFRESH_TOKEN` is set.
     pub fn from_env() -> Result<Self, Error> {
-        Self::from_lookup(|name| std::env::var(name).ok())
+        Self::from_env_with(|name| std::env::var(name).ok())
     }
 
-    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, Error> {
+    /// [`from_env`](Self::from_env), reading each variable (and, to locate
+    /// the Codex `auth.json`, `CODEX_HOME`, `HOME` and `USERPROFILE`) through
+    /// `lookup`. A lookup that returns `None` for some names hides them: an
+    /// application that takes ChatGPT OAuth credentials from a file can hide
+    /// the `OPENAI_OAUTH_*` variables so they are not read at all.
+    pub fn from_env_with(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, Error> {
         let var = |name: &str| lookup(name).filter(|value| !value.trim().is_empty());
         let mut client = Self::new();
         let oauth = [
@@ -731,7 +736,7 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        LLMClient::from_lookup(|name| vars.get(name).cloned())
+        LLMClient::from_env_with(|name| vars.get(name).cloned())
     }
 
     fn client(vars: &[(&str, &str)]) -> LLMClient {

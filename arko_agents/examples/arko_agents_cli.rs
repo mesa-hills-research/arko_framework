@@ -80,7 +80,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
 
-    let mut llm_client_builder = LLMClient::from_env()?;
+    // An auth file given explicitly supplies the ChatGPT OAuth credentials;
+    // the OPENAI_OAUTH_* variables are then not read.
+    let file_oauth = cli.openai_auth_json.is_some();
+    let mut llm_client_builder = LLMClient::from_env_with(|name| {
+        std::env::var(name)
+            .ok()
+            .filter(|_| !(file_oauth && name.starts_with("OPENAI_OAUTH_")))
+    })?;
 
     if let Some(ref auth_json_path) = cli.openai_auth_json {
         println!("[SYSTEM] Loading OpenAI OAuth from {:?}", auth_json_path);
