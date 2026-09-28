@@ -2940,6 +2940,61 @@ async fn keep_generations_prunes_older_generations_when_asked() {
     let update = index.start_update(&build.index).await.unwrap();
     assert_eq!(settle(&index, &update.job).await.phase, "ready");
 }
+/// `keep_generations` prunes in the transaction that publishes the new
+/// generation, so once a job is `ready` the older generations are already
+/// pruned. (They were pruned in a later transaction, which a caller seeing
+/// `ready` could beat.) Checked at each commit by a deferred foreign key
+/// the test adds: a transaction that makes a job `ready` while an older
+/// generation beyond the kept two is still `ready` must also prune it, or
+/// the commit fails.
+#[tokio::test]
+async fn pruning_commits_with_the_publish_that_makes_a_job_ready() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let path = db.path().join("i.db");
+    std::fs::write(root.path().join("a.txt"), "alpha 0\n").unwrap();
+    let fake = Arc::new(Fake::new());
+    let config = Config {
+        keep_generations: Some(2),
+        ..config(&fake)
+    };
+    let index = ArkoIndex::open(&path, fake.clone(), config).await.unwrap();
+    let build = index
+        .start_build(BuildSpec::new("test", root.path()))
+        .await
+        .unwrap();
+    assert_eq!(settle(&index, &build.job).await.phase, "ready");
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE pruned_marks(job TEXT PRIMARY KEY);
+             CREATE TABLE must_prune(job TEXT NOT NULL REFERENCES pruned_marks(job) DEFERRABLE INITIALLY DEFERRED);
+             CREATE TRIGGER mark_pruned AFTER UPDATE OF phase ON jobs WHEN NEW.phase='pruned'
+             BEGIN INSERT OR IGNORE INTO pruned_marks VALUES(NEW.id); END;
+             CREATE TRIGGER require_pruned AFTER UPDATE OF phase ON jobs WHEN NEW.phase='ready'
+             BEGIN INSERT INTO must_prune SELECT id FROM jobs WHERE index_id=NEW.index_id AND phase='ready' AND id<>NEW.id ORDER BY rowid DESC LIMIT -1 OFFSET 1; END;",
+        )
+        .unwrap();
+    let mut jobs = vec![build.job.clone()];
+    for n in 1..3 {
+        std::fs::write(root.path().join("a.txt"), format!("alpha {n}\n")).unwrap();
+        let update = index.start_update(&build.index).await.unwrap();
+        let done = settle(&index, &update.job).await;
+        assert_eq!(done.phase, "ready", "{:?}", done.problem);
+        jobs.push(update.job);
+    }
+    assert_eq!(index.status(&jobs[0]).await.unwrap().phase, "pruned");
+    // The check ran: the third publish had to prune the first generation.
+    let required: Vec<String> = rusqlite::Connection::open(&path)
+        .unwrap()
+        .prepare("SELECT job FROM must_prune")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert_eq!(required, [jobs[0].clone()]);
+}
 /// The schema of the first index databases (`user_version` 1).
 const V1_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS indexes(id TEXT PRIMARY KEY,name TEXT NOT NULL,spec TEXT NOT NULL,active TEXT,config TEXT NOT NULL);
