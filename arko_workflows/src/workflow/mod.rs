@@ -818,10 +818,17 @@ impl WorkflowBuilder {
 
     /// Set the failure policy for tool result interception.
     ///
-    /// Defaults to `UseRawResult` (log warning and continue with the original
-    /// tool output if the interceptor fails). The workflow applies only the
-    /// attempt count: after the last failed attempt the original output is
-    /// used, so `InformAgent` and `RetryThenInformAgent` add no note here.
+    /// Defaults to `UseRawResult` (log a warning and continue with the
+    /// original tool output if interception fails). The agent runtime applies
+    /// the policy to the agent's interceptors as one: global interceptors,
+    /// then the agent's, then its distillers, chained in that order. An
+    /// interceptor that fails fails the chain; the policy retries the chain
+    /// (resuming at the interceptor that failed, without running those
+    /// before it again) and, after the last attempt, uses the original tool
+    /// output, followed by a note to the agent under `InformAgent` and
+    /// `RetryThenInformAgent`. `load_skill` results are intercepted only
+    /// when the agent's `SkillsConfig::load_skill_interception` opts in,
+    /// under the policy it sets.
     pub fn interception_failure_policy(mut self, policy: InterceptionFailurePolicy) -> Self {
         self.interception_failure_policy = Some(policy);
         self

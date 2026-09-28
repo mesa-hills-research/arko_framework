@@ -36,9 +36,77 @@ use super::AgentHandle;
 
 /// Chains multiple `ToolResultInterceptor` implementations, running them
 /// in sequence. Each interceptor receives the output of the previous one.
+///
+/// A failing interceptor fails the chain, so the agent's
+/// [`InterceptionFailurePolicy`](arko_agents::InterceptionFailurePolicy)
+/// applies to the chain as to a single interceptor: the runtime retries it
+/// and, after the last attempt, uses the raw result (with a note under
+/// `InformAgent`). A retry resumes at the interceptor that failed: the
+/// output of those before it, which succeeded, is reused rather than
+/// produced (and, for a distiller, paid for) again.
 struct ChainedInterceptor {
     interceptors: Vec<Arc<dyn ToolResultInterceptor>>,
-    failure_policy: arko_agents::InterceptionFailurePolicy,
+    /// Per failed call: the stage to resume at and the text so far.
+    resume: parking_lot::Mutex<ChainResume>,
+}
+
+/// Where failed chain calls resume, oldest first, bounded: an entry stays
+/// only until its call is retried, so the bound only matters for calls
+/// whose retries were exhausted.
+#[derive(Default)]
+struct ChainResume {
+    entries: std::collections::VecDeque<(String, ChainProgress)>,
+}
+
+#[derive(Clone)]
+struct ChainProgress {
+    next_stage: usize,
+    current: String,
+    modified: bool,
+}
+
+/// The most failed chain calls remembered for a retry.
+const CHAIN_RESUME_ENTRIES: usize = 64;
+
+impl ChainResume {
+    fn take(&mut self, key: &str) -> Option<ChainProgress> {
+        let position = self.entries.iter().position(|(entry, _)| entry == key)?;
+        self.entries.remove(position).map(|(_, progress)| progress)
+    }
+
+    fn put(&mut self, key: String, progress: ChainProgress) {
+        if self.entries.len() >= CHAIN_RESUME_ENTRIES {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((key, progress));
+    }
+}
+
+impl ChainedInterceptor {
+    fn new(interceptors: Vec<Arc<dyn ToolResultInterceptor>>) -> Self {
+        Self {
+            interceptors,
+            resume: parking_lot::Mutex::new(ChainResume::default()),
+        }
+    }
+
+    /// Identifies one tool call's interception: a retry has the same key.
+    fn call_key(
+        tool_name: &str,
+        raw_result: &str,
+        params: &HashMap<String, Value>,
+        task_context: &TaskContext<'_>,
+    ) -> String {
+        let params = params.iter().collect::<std::collections::BTreeMap<_, _>>();
+        let digest = crate::digest::sha256_hex(
+            format!(
+                "{tool_name}\0{}\0{raw_result}",
+                serde_json::to_string(&params).unwrap_or_default()
+            )
+            .as_bytes(),
+        );
+        format!("{}:{digest}", task_context.task_id)
+    }
 }
 
 impl std::fmt::Debug for ChainedInterceptor {
@@ -58,42 +126,36 @@ impl ToolResultInterceptor for ChainedInterceptor {
         params: &HashMap<String, Value>,
         task_context: &TaskContext<'_>,
     ) -> Result<InterceptedResult, ToolError> {
-        let mut current = raw_result.to_string();
-        let mut was_modified = false;
+        let key = Self::call_key(tool_name, raw_result, params, task_context);
+        let mut progress = self.resume.lock().take(&key).unwrap_or(ChainProgress {
+            next_stage: 0,
+            current: raw_result.to_string(),
+            modified: false,
+        });
 
-        for interceptor in &self.interceptors {
-            let attempts = self.failure_policy.max_attempts();
-            for attempt in 1..=attempts {
-                match interceptor
-                    .intercept(tool_name, &current, params, task_context)
-                    .await
-                {
-                    Ok(InterceptedResult::Unchanged) => break,
-                    Ok(InterceptedResult::Replaced(new_value)) => {
-                        current = new_value;
-                        was_modified = true;
-                        break;
-                    }
-                    Err(error) if attempt < attempts => {
-                        log::warn!(
-                            "Tool result interceptor failed on attempt {attempt}/{attempts}: {error}"
-                        );
-                    }
-                    Err(error) => {
-                        log::warn!(
-                            "Tool result interceptor failed; preserving earlier transformations: {error}"
-                        );
-                        break;
-                    }
+        while let Some(interceptor) = self.interceptors.get(progress.next_stage) {
+            match interceptor
+                .intercept(tool_name, &progress.current, params, task_context)
+                .await
+            {
+                Ok(InterceptedResult::Unchanged) => {}
+                Ok(InterceptedResult::Replaced(new_value)) => {
+                    progress.current = new_value;
+                    progress.modified = true;
+                }
+                Err(error) => {
+                    self.resume.lock().put(key, progress);
+                    return Err(error);
                 }
             }
+            progress.next_stage += 1;
         }
 
-        if was_modified {
-            Ok(InterceptedResult::Replaced(current))
+        Ok(if progress.modified {
+            InterceptedResult::Replaced(progress.current)
         } else {
-            Ok(InterceptedResult::Unchanged)
-        }
+            InterceptedResult::Unchanged
+        })
     }
 }
 
@@ -1055,10 +1117,7 @@ impl WorkflowEngine {
         let interceptor: Arc<dyn ToolResultInterceptor> = if all.len() == 1 {
             all.remove(0)
         } else {
-            Arc::new(ChainedInterceptor {
-                interceptors: all,
-                failure_policy: ctx.interception_failure_policy.clone(),
-            })
+            Arc::new(ChainedInterceptor::new(all))
         };
 
         Some(InterceptorConfig {
@@ -2304,24 +2363,9 @@ mod tests {
         assert_eq!(records[0].agent_name, "coder");
     }
 
-    #[derive(Debug)]
-    struct PassThrough;
-
-    #[async_trait]
-    impl ToolResultInterceptor for PassThrough {
-        async fn intercept(
-            &self,
-            _tool_name: &str,
-            _raw_result: &str,
-            _params: &HashMap<String, Value>,
-            _task_context: &TaskContext<'_>,
-        ) -> Result<InterceptedResult, ToolError> {
-            Ok(InterceptedResult::Unchanged)
-        }
-    }
-
     /// Under a retrying failure policy, a refused or truncated summary is not
-    /// requested (and billed) again; an empty one is.
+    /// requested (and billed) again; an empty one is. The runtime retries a
+    /// failed chain; the retry resumes at the distiller.
     #[tokio::test]
     async fn chained_distillers_retry_only_rejections_that_could_turn_out_differently() {
         use crate::distillation::DistillationConfig;
@@ -2338,12 +2382,19 @@ mod tests {
         .instructions("test instructions".to_string())
         .build()
         .unwrap();
-        for (reply, requests) in [
-            (anthropic_reply("The failing test is in", "max_tokens"), 1),
-            (anthropic_reply("The failing test", "refusal"), 1),
-            (anthropic_reply("", "end_turn"), 3),
+        let policy =
+            arko_agents::InterceptionFailurePolicy::RetryThenUseRawResult { max_attempts: 3 };
+        for (reply, requests, failed) in [
+            (
+                anthropic_reply("The failing test is in", "max_tokens"),
+                1,
+                false,
+            ),
+            (anthropic_reply("The failing test", "refusal"), 1, false),
+            (anthropic_reply("", "end_turn"), 3, true),
         ] {
             let server = MockServer::start(reply).await;
+            let first = Arc::new(Counting::default());
             let workflow = Workflow::builder()
                 .name("distillation-retry-test")
                 .workspace(std::env::temp_dir())
@@ -2351,16 +2402,14 @@ mod tests {
                 .agent("coder", config.clone())
                 .ephemeral()
                 // A second interceptor makes the engine chain them.
-                .tool_result_interceptor(Arc::new(PassThrough))
+                .tool_result_interceptor(first.clone())
                 .distiller(
                     DistillationConfig::new("bulk", Model::anthropic_claude_opus_5_5())
-                        .min_chars(10),
+                        .min_chars(10)
+                        .target_agent("coder")
+                        .target_tool("search"),
                 )
-                .interception_failure_policy(
-                    arko_agents::InterceptionFailurePolicy::RetryThenUseRawResult {
-                        max_attempts: 3,
-                    },
-                )
+                .interception_failure_policy(policy.clone())
                 .build()
                 .unwrap();
             let interceptor = workflow
@@ -2374,21 +2423,129 @@ mod tests {
                 initial_task_prompt: "find the failing test",
                 current_working_directory: &workflow.context().workspace,
             };
-            let outcome = interceptor
-                .intercept(
-                    "search",
-                    &"raw tool output ".repeat(10),
-                    &HashMap::new(),
-                    &task,
-                )
-                .await
-                .unwrap();
-            assert!(matches!(outcome, InterceptedResult::Unchanged));
+            // As the runtime applies the policy.
+            let mut outcome = None;
+            for _ in 0..policy.max_attempts() {
+                if let Ok(result) = interceptor
+                    .intercept(
+                        "search",
+                        &"raw tool output ".repeat(10),
+                        &HashMap::new(),
+                        &task,
+                    )
+                    .await
+                {
+                    outcome = Some(result);
+                    break;
+                }
+            }
+            assert_eq!(outcome.is_none(), failed);
+            assert!(outcome.is_none_or(|outcome| matches!(outcome, InterceptedResult::Unchanged)));
             assert_eq!(server.requests(), requests);
             assert_eq!(
                 workflow.context().distillation_records.read().len(),
                 requests
             );
+            assert_eq!(first.calls(), 1, "the interceptor before it ran once");
         }
+    }
+
+    /// Counts its calls; replaces the result with `replacement`, if any.
+    #[derive(Debug, Default)]
+    struct Counting {
+        calls: std::sync::atomic::AtomicUsize,
+        replacement: Option<&'static str>,
+    }
+
+    impl Counting {
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ToolResultInterceptor for Counting {
+        async fn intercept(
+            &self,
+            _tool_name: &str,
+            _raw_result: &str,
+            _params: &HashMap<String, Value>,
+            _task_context: &TaskContext<'_>,
+        ) -> Result<InterceptedResult, ToolError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(match self.replacement {
+                Some(text) => InterceptedResult::Replaced(text.to_string()),
+                None => InterceptedResult::Unchanged,
+            })
+        }
+    }
+
+    /// Always fails; counts its calls.
+    #[derive(Debug, Default)]
+    struct Failing(std::sync::atomic::AtomicUsize);
+
+    #[async_trait]
+    impl ToolResultInterceptor for Failing {
+        async fn intercept(
+            &self,
+            _tool_name: &str,
+            _raw_result: &str,
+            _params: &HashMap<String, Value>,
+            _task_context: &TaskContext<'_>,
+        ) -> Result<InterceptedResult, ToolError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ToolError::ExecutionFailed("summarizer offline".to_string()))
+        }
+    }
+
+    /// A failing interceptor in a chain fails it, so the agent's failure
+    /// policy applies as it does to one interceptor: retries resume at the
+    /// failing interceptor, and the agent gets the raw result with the
+    /// policy's note. (The chain once swallowed the failure and kept the
+    /// earlier transformation, without the note.)
+    #[tokio::test]
+    async fn a_chain_reports_a_failing_interceptor_to_the_agents_failure_policy() {
+        use crate::test_support::{
+            ProbeTool, ResponsesServer, Workspace, agent_config, complete_turn, tool_call_turn,
+        };
+        let workspace = Workspace::new();
+        let server = ResponsesServer::start(|index, _| {
+            Some(match index {
+                0 => tool_call_turn("1", "probe", serde_json::json!({})),
+                _ => complete_turn("2", "done"),
+            })
+        })
+        .await;
+        let first = Arc::new(Counting {
+            replacement: Some("shortened"),
+            ..Counting::default()
+        });
+        let failing = Arc::new(Failing::default());
+        let workflow = Workflow::builder()
+            .name("chain-failure-test")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(server.client()))
+            .agent("coder", agent_config("Coder"))
+            .global_tool(ProbeTool::new("probe", false))
+            .tool_result_interceptor(first.clone())
+            .tool_result_interceptor(failing.clone())
+            .interception_failure_policy(
+                arko_agents::InterceptionFailurePolicy::RetryThenInformAgent { max_attempts: 3 },
+            )
+            .build()
+            .unwrap();
+        let result = workflow.run_agent("coder", "Probe.").await.unwrap();
+        assert_eq!(result.summary, "done");
+        assert_eq!(first.calls(), 1);
+        assert_eq!(failing.0.load(std::sync::atomic::Ordering::SeqCst), 3);
+        let second = &server.bodies()[1];
+        assert!(
+            second.contains("probed\\n\\n[This is the full result: it was to be shortened, but the tool-result interceptor failed"),
+            "{second}"
+        );
+        assert!(
+            !second.contains("shortened\""),
+            "the raw result, not the first stage's"
+        );
     }
 }

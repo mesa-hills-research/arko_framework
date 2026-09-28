@@ -97,7 +97,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 | `agent_tool(self, agent_name: impl Into<String>, tool: Arc<dyn arko_agents::tool::Tool>) -> Self` | Register a tool for one agent and add its name to that agent's available tools. |
 | `tool_result_interceptor(self, interceptor: Arc<dyn ToolResultInterceptor>) -> Self` | Append an interceptor for every agent's tool results. |
 | `agent_tool_result_interceptor(self, agent_name: impl Into<String>, interceptor: Arc<dyn ToolResultInterceptor>) -> Self` | Append an interceptor for one agent; it runs after the global interceptors. |
-| `interception_failure_policy(self, policy: InterceptionFailurePolicy) -> Self` | Error handling for interceptors and distillers. Default `UseRawResult`. |
+| `interception_failure_policy(self, policy: InterceptionFailurePolicy) -> Self` | Error handling for interceptors and distillers, applied by the agent runtime to each agent's chain as a whole. Default `UseRawResult`. |
 | `completion_verifier(self, config: CompletionVerifierConfig) -> Self` | Append a gate on matching agents' `complete_task` calls. See [Completion verification](#completion-verification). |
 | `distiller(self, config: DistillationConfig) -> Self` | Append an LLM distiller; distillers run after all custom interceptors. See [Tool-result distillation](#tool-result-distillation). |
 | `workflow_services(self, config: WorkflowServicesConfig) -> Self` | Enable bounded agent-to-agent delegation through the `run_workflow_agent` tool. |
@@ -129,7 +129,7 @@ Tool names: duplicate global tool names, duplicate names within one agent's tool
 
 Tools added automatically: `send_message` and `list_recipients` for each agent with at least one permitted recipient under the messaging policy; `wait_for_message` for each agent that another agent may message; `read_memory`, `write_memory`, and `list_memories` when at least one memory tier exists; `run_workflow_agent` for permitted callers when services are enabled; `cast_vote` when voting is enabled. The agent's pending messages are appended to the prompt of each new run and continuation, under `# Messages from other agents:`. A new run's initial prompt also lists the agents it may message; see [What agents are told about their recipients](#what-agents-are-told-about-their-recipients). Skills configured on an agent are initialized against the workspace. There is no separate graph or scheduler configuration.
 
-Interceptors run in this order: global interceptors, the agent's own interceptors, then the distillers that target the agent, each group in registration order. Each stage receives the previous stage's result. An interceptor that still fails after the retries allowed by the failure policy is skipped, and the chain continues with the result so far. Every agent's tool calls pass through the workflow's execution middleware, which enforces a stopped run and runs tool hooks, freshness checks, and completion verification at tool execution, so these also apply to automatically approved and batched calls.
+Interceptors run in this order: global interceptors, the agent's own interceptors, then the distillers that target the agent, each group in registration order. Each stage receives the previous stage's result. The agent runtime applies the interception failure policy to the agent's interceptors as one: an interceptor that fails fails the chain, and the policy's retries resume at that interceptor (the output of those before it is reused, not produced or paid for again). After the last attempt the agent gets the original tool output, followed under `InformAgent` and `RetryThenInformAgent` by a note that it is the full result because the interceptor failed. `load_skill` results are intercepted only when the agent's `SkillsConfig::load_skill_interception` opts in, under the policy it sets. Every agent's tool calls pass through the workflow's execution middleware, which enforces a stopped run and runs tool hooks, freshness checks, and completion verification at tool execution, so these also apply to automatically approved and batched calls.
 
 ### Workflow metadata
 
@@ -872,7 +872,7 @@ A record identifies the reviewed task and agent, the configuration, the reviewin
 
 Source: [distillation/mod.rs](src/distillation/mod.rs); registration and order: [engine](src/workflow/engine.rs). Both public types implement `Clone` and Serde and are in the prelude.
 
-A `DistillationConfig` registered with `WorkflowBuilder::distiller` replaces large matching tool results with an LLM-written summary. Each distiller is installed only for the agents it targets (every agent when its target set is empty). Distillers run after the global and per-agent interceptors, in registration order; each sees the result of the stages before it, and all of a distiller's filters must match. Once the run is stopped, a distiller makes no request and returns the tool output unchanged. A distiller calls the workflow's LLM client with its model, reasoning, and output-token limit, in a fresh conversation with caching disabled, giving the agent's initial task prompt, the tool name and parameters, and the current tool output as context. Results of tools that opt out of interception (`Tool::allow_result_interception`, for example `read_memory`) are never distilled.
+A `DistillationConfig` registered with `WorkflowBuilder::distiller` replaces large matching tool results with an LLM-written summary. Each distiller is installed only for the agents it targets (every agent when its target set is empty). Distillers run after the global and per-agent interceptors, in registration order; each sees the result of the stages before it, and all of a distiller's filters must match. Once the run is stopped, a distiller makes no request and returns the tool output unchanged. A distiller calls the workflow's LLM client with its model, reasoning, and output-token limit, in a fresh conversation with prompt caching turned off where the provider allows it (each request is a one-off ending with a tool output no later request repeats, so a cache write would never be read; ChatGPT OAuth caches implicitly and is asked nothing), giving the agent's initial task prompt, the tool name and parameters, and the current tool output as context. Results of tools that opt out of interception (`Tool::allow_result_interception`, for example `read_memory`) are never distilled.
 
 ### `DistillationConfig`
 
@@ -883,7 +883,7 @@ A `DistillationConfig` registered with `WorkflowBuilder::distiller` replaces lar
 | `target_agents` | `HashSet<String>` | Registration names to match, as given to `WorkflowBuilder::agent` (not `AgentConfig::name`); empty matches all. |
 | `target_tools` | `HashSet<String>` | Tool names to match; empty matches all. |
 | `min_chars` | `usize` | Minimum input size in Unicode scalar values, inclusive; default `8_000`. |
-| `max_output_tokens` | `usize` | Generation limit, including reasoning tokens; default `16_000`, or the model's `Model::max_output_tokens` when that is known and smaller. Must be positive. |
+| `max_output_tokens` | `Option<usize>` | Generation limit, including reasoning tokens. Default `None`: `default_max_output_tokens()` (`16_000`, or the model's `Model::max_output_tokens` when that is known and smaller) is sent where the provider takes a limit, and no limit on ChatGPT OAuth, whose backend rejects one. A set value is sent on every request (arko_ai drops it on ChatGPT OAuth, with a warning logged once). Must be positive. A JSON configuration with a number loads as that set value. |
 | `instructions` | `String` | Content-preservation instructions; default below. |
 | `reasoning` | `Option<arko_ai::ReasoningConfig>` | Default `None`; omitted from JSON when `None` and `None` when omitted. |
 
@@ -893,7 +893,8 @@ A `DistillationConfig` registered with `WorkflowBuilder::distiller` replaces lar
 | `pub fn target_agent(mut self, agent: impl Into<String>) -> Self` | Add an agent registration-name filter; duplicates collapse. |
 | `pub fn target_tool(mut self, tool: impl Into<String>) -> Self` | Add a tool-name filter; duplicates collapse. |
 | `pub fn min_chars(mut self, chars: usize) -> Self` | Inclusive size threshold; `0` also admits empty output. |
-| `pub fn max_output_tokens(mut self, tokens: usize) -> Self` | Token limit; `build` rejects zero. |
+| `pub fn max_output_tokens(mut self, tokens: usize) -> Self` | Set the token limit; `build` rejects zero. |
+| `pub fn default_max_output_tokens(&self) -> usize` | The limit sent when none is set. |
 | `pub fn instructions(mut self, instructions: impl Into<String>) -> Self` | Replace the instructions. |
 | `pub fn reasoning(mut self, reasoning: arko_ai::ReasoningConfig) -> Self` | Set reasoning; `build` rejects a reasoning configuration for a different provider than the model's. |
 

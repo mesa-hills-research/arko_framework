@@ -18,7 +18,14 @@ pub struct DistillationConfig {
     pub target_agents: HashSet<String>,
     pub target_tools: HashSet<String>,
     pub min_chars: usize,
-    pub max_output_tokens: usize,
+    /// The output-token limit, reasoning (thinking) tokens included. `None`
+    /// (the default) sends [`DistillationConfig::default_max_output_tokens`]
+    /// where the provider takes a limit, and no limit on ChatGPT OAuth, whose
+    /// backend rejects one. A value set with
+    /// [`max_output_tokens`](Self::max_output_tokens) is always sent (on
+    /// ChatGPT OAuth arko_ai drops it, with a warning logged once).
+    #[serde(default)]
+    pub max_output_tokens: Option<usize>,
     pub instructions: String,
     /// Optional reasoning configuration for the distillation model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -38,7 +45,7 @@ pub(crate) mod tests {
         let mut json = serde_json::to_value(&config).unwrap();
         let restored: DistillationConfig = serde_json::from_value(json.clone()).unwrap();
         restored.validate().unwrap();
-        let generation = restored.generation_config();
+        let generation = restored.generation_config(false);
         assert_eq!(generation.max_tokens, Some(2_000));
         assert!(matches!(
             generation.reasoning,
@@ -48,8 +55,13 @@ pub(crate) mod tests {
             })
         ));
         json.as_object_mut().unwrap().remove("reasoning");
-        let legacy: DistillationConfig = serde_json::from_value(json).unwrap();
-        assert!(legacy.generation_config().reasoning.is_none());
+        let legacy: DistillationConfig = serde_json::from_value(json.clone()).unwrap();
+        assert!(legacy.generation_config(false).reasoning.is_none());
+        // A configuration saved without a limit (none was ever saved so, but
+        // the field may be left out) takes the default.
+        json.as_object_mut().unwrap().remove("max_output_tokens");
+        let unset: DistillationConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(unset.max_output_tokens, None);
     }
 
     #[test]
@@ -86,28 +98,54 @@ pub(crate) mod tests {
     #[test]
     fn the_default_output_limit_leaves_room_for_reasoning_within_the_model_limit() {
         assert_eq!(
-            DistillationConfig::new("a", Model::anthropic_claude_opus_5_5()).max_output_tokens,
+            DistillationConfig::new("a", Model::anthropic_claude_opus_5_5())
+                .default_max_output_tokens(),
             16_000
         );
         assert_eq!(
             DistillationConfig::new("b", Model::anthropic_claude_3_5_sonnet_20241022())
-                .max_output_tokens,
+                .default_max_output_tokens(),
             8_192
         );
         // An OpenRouter model without catalog metadata has no known limit.
         assert_eq!(
             DistillationConfig::new("c", Model::openrouter("anthropic/claude-sonnet-5"))
-                .max_output_tokens,
+                .default_max_output_tokens(),
             16_000
         );
         for model in Model::all() {
             let config = DistillationConfig::new("d", model.clone());
-            assert!(config.max_output_tokens > 0, "{}", model.id);
+            assert_eq!(config.max_output_tokens, None);
+            let limit = config.default_max_output_tokens();
+            assert!(limit > 0, "{}", model.id);
             assert!(
-                model.max_output_tokens == 0 || config.max_output_tokens <= model.max_output_tokens,
+                model.max_output_tokens == 0 || limit <= model.max_output_tokens,
                 "{}",
                 model.id
             );
+        }
+    }
+
+    /// Only settings the user set, or the provider honours, are sent: on
+    /// ChatGPT OAuth, which rejects an output limit and can't turn caching
+    /// off, a distiller asks for neither (arko_ai would drop each with a
+    /// warning), unless its limit was set explicitly.
+    #[test]
+    fn a_distiller_sends_no_setting_chatgpt_oauth_would_drop_unless_set() {
+        let config = DistillationConfig::new("bulk", Model::openai_gpt_5_6_luna());
+        for (chatgpt_oauth, max_tokens, caching) in
+            [(false, Some(16_000), false), (true, None, true)]
+        {
+            let (conversation, generation) =
+                config.request("task", "search", "{}", "raw", chatgpt_oauth);
+            assert_eq!(generation.max_tokens, max_tokens);
+            assert_eq!(generation.prompt_caching, None);
+            assert_eq!(conversation.enable_cache, caching);
+        }
+        let explicit = config.max_output_tokens(2_000);
+        for chatgpt_oauth in [false, true] {
+            let (_, generation) = explicit.request("task", "search", "{}", "raw", chatgpt_oauth);
+            assert_eq!(generation.max_tokens, Some(2_000));
         }
     }
 
@@ -547,19 +585,13 @@ const DEFAULT_MAX_OUTPUT_TOKENS: usize = 16_000;
 
 impl DistillationConfig {
     pub fn new(name: impl Into<String>, model: arko_ai::Model) -> Self {
-        // 0 means the limit is unknown (an OpenRouter model without catalog
-        // metadata).
-        let max_output_tokens = match model.max_output_tokens {
-            0 => DEFAULT_MAX_OUTPUT_TOKENS,
-            limit => DEFAULT_MAX_OUTPUT_TOKENS.min(limit),
-        };
         Self {
             name: name.into(),
             model,
             target_agents: HashSet::new(),
             target_tools: HashSet::new(),
             min_chars: 8_000,
-            max_output_tokens,
+            max_output_tokens: None,
             instructions: "Preserve every fact relevant to the task, exact errors, paths, identifiers, constraints, and actionable details. Remove repetition and irrelevant bulk. Never invent facts.".to_string(),
             reasoning: None,
         }
@@ -584,9 +616,22 @@ impl DistillationConfig {
         self
     }
 
+    /// Sets the output-token limit, sent with every request (see
+    /// [`max_output_tokens`](Self::max_output_tokens)); `build` rejects zero.
     pub fn max_output_tokens(mut self, tokens: usize) -> Self {
-        self.max_output_tokens = tokens;
+        self.max_output_tokens = Some(tokens);
         self
+    }
+
+    /// The limit sent when none is set: [`DEFAULT_MAX_OUTPUT_TOKENS`], or the
+    /// model's output limit when that is known and smaller.
+    pub fn default_max_output_tokens(&self) -> usize {
+        // 0 means the limit is unknown (an OpenRouter model without catalog
+        // metadata).
+        match self.model.max_output_tokens {
+            0 => DEFAULT_MAX_OUTPUT_TOKENS,
+            limit => DEFAULT_MAX_OUTPUT_TOKENS.min(limit),
+        }
     }
 
     pub fn instructions(mut self, instructions: impl Into<String>) -> Self {
@@ -600,7 +645,7 @@ impl DistillationConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), crate::WorkflowError> {
-        if self.max_output_tokens == 0 {
+        if self.max_output_tokens == Some(0) {
             return Err(crate::WorkflowError::BuilderInvalid(format!(
                 "distiller '{}' output token limit must be positive",
                 self.name
@@ -619,11 +664,54 @@ impl DistillationConfig {
         Ok(())
     }
 
-    fn generation_config(&self) -> arko_ai::GenerationConfig {
-        let mut config =
-            arko_ai::GenerationConfig::default().with_max_tokens(self.max_output_tokens);
+    /// The settings of a distillation request; `chatgpt_oauth` when the
+    /// request goes to the ChatGPT OAuth backend.
+    ///
+    /// Without a set limit, the default limit is sent where the provider
+    /// takes one: a summary is meant to be short, and the cap bounds what a
+    /// runaway response costs (a summary cut off at it is not used). The
+    /// ChatGPT OAuth backend rejects a limit, so none is sent there.
+    fn generation_config(&self, chatgpt_oauth: bool) -> arko_ai::GenerationConfig {
+        let mut config = arko_ai::GenerationConfig::default();
+        config.max_tokens = match self.max_output_tokens {
+            Some(tokens) => Some(tokens),
+            None if chatgpt_oauth => None,
+            None => Some(self.default_max_output_tokens()),
+        };
         config.reasoning = self.reasoning.clone();
         config
+    }
+
+    /// The conversation and settings of a request to distill `raw_result`,
+    /// the output of `tool_name` called with `params` (JSON) by an agent
+    /// working on `task_prompt`.
+    ///
+    /// Prompt caching is turned off where the provider allows it: each
+    /// request is a one-off whose prompt ends with a tool output no later
+    /// request repeats, so a cache write (billed above the input rate on
+    /// Anthropic and on OpenAI models that bill cache writes) would never be
+    /// read. The ChatGPT OAuth backend caches implicitly and can't turn it
+    /// off, so nothing is asked there.
+    fn request(
+        &self,
+        task_prompt: &str,
+        tool_name: &str,
+        params: &str,
+        raw_result: &str,
+        chatgpt_oauth: bool,
+    ) -> (arko_ai::Conversation, arko_ai::GenerationConfig) {
+        let mut conversation =
+            arko_ai::Conversation::new(self.model.clone()).with_system_message(&format!(
+                "You distill tool output for another agent. {}",
+                self.instructions
+            ));
+        if !chatgpt_oauth {
+            conversation = conversation.with_cache_disabled();
+        }
+        conversation.add_user_message(&format!(
+            "Agent task:\n{task_prompt}\n\nTool: {tool_name}\nParameters: {params}\n\nRaw tool result:\n{raw_result}"
+        ));
+        (conversation, self.generation_config(chatgpt_oauth))
     }
 
     /// Whether the distiller targets the agent registered as `agent`.
@@ -734,22 +822,18 @@ impl ToolResultInterceptor for DistillationInterceptor {
             return Ok(InterceptedResult::Unchanged);
         }
 
-        let mut conversation = arko_ai::Conversation::new(self.config.model.clone())
-            .with_system_message(&format!(
-                "You distill tool output for another agent. {}",
-                self.config.instructions
-            ))
-            .with_cache_disabled();
-        conversation.add_user_message(&format!(
-            "Agent task:\n{}\n\nTool: {}\nParameters: {}\n\nRaw tool result:\n{}",
+        let chatgpt_oauth = self.config.model.provider == arko_ai::Provider::OpenAI
+            && self.client.is_openai_chatgpt_oauth().await;
+        let (conversation, generation_config) = self.config.request(
             task_context.initial_task_prompt,
             tool_name,
-            serde_json::to_string(params).unwrap_or_else(|_| "{}".to_string()),
-            raw_result
-        ));
+            &serde_json::to_string(params).unwrap_or_else(|_| "{}".to_string()),
+            raw_result,
+            chatgpt_oauth,
+        );
         let response = match self
             .client
-            .generate_text(&conversation, self.config.generation_config())
+            .generate_text(&conversation, generation_config)
             .await
         {
             Ok(response) => response,
