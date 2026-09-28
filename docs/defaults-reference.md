@@ -850,7 +850,10 @@ See [Jobs, scheduling and retries](arko_index-reference.md#jobs-scheduling-and-r
   job is unfinished.
 - A saved `BuildSpec` without `skip_directories` loads with the default list, so an
   index that used to include `dist/` or another listed directory skips it at its next
-  update; one without `max_file_bytes` loads with 16 MiB.
+  update; one without `max_file_bytes` loads with 16 MiB, so a file over 16 MiB that an
+  index built before that ceiling included is excluded at its next update, with the
+  reason "too large (over max_file_bytes)" (build again with a larger
+  `with_max_file_bytes` to keep it).
 - A job saved without a chunk budget runs without one (batches by `batch_count` only).
 - `JobStatus::active_chunking` also reads the old name `active_luna`.
 

@@ -90,7 +90,12 @@ indexed when its name is `Dockerfile`, `Makefile`, `CMakeLists.txt`, `Justfile`,
 `toml`, `yaml`, `yml`, `json`, `xml`, `proto`, `graphql` or `tf`.
 
 Files larger than `BuildSpec::max_file_bytes` (default 16 MiB, `DEFAULT_MAX_FILE_BYTES`)
-are skipped without being read, with the reason "too large (over max_file_bytes)". Files
+are skipped without being read, with the reason "too large (over max_file_bytes)".
+**Upgrade note:** the ceiling also applies to indexes built before it existed (a saved spec
+without `max_file_bytes` loads with 16 MiB, as one without `skip_directories` loads with
+the default list), so a file over 16 MiB that such an index included is excluded at its
+next update with that reason. To keep it, build the index again with a larger
+`with_max_file_bytes`. Files
 that are not valid UTF-8 or that contain NUL bytes are skipped. An entry the scan can't
 read does not stop it: a directory or file without read permission ("unreadable:
 permission denied"), a file removed while the scan runs ("removed during the scan"), an
