@@ -19,4 +19,4 @@ pub use index::*;
 pub use judge::*;
 pub use search::*;
 pub use usage::JobUsage;
-pub use watcher::{FileChange, WatchHandle, coalesce};
+pub use watcher::{FileChange, WatchEvent, WatchHandle, WatchOptions, coalesce};

@@ -97,7 +97,8 @@ the subscription (see [Usage and cost](../docs/arko_index-reference.md#usage-and
   transaction, and search reads the active generation, so an update that fails, pauses or
   is cancelled leaves the previous one in place. Updates rescan the source with the saved
   spec and reuse the boundaries of unchanged files and the vectors of text embedded
-  before; `watch` starts updates when the source changes. See
+  before; `watch` starts updates when the source changes, resumes updates interrupted by a
+  stopped process, and reports updates it leaves paused or blocked. See
   [Storage and updates](../docs/arko_index-reference.md#storage-and-updates) and
   [Watching for changes](../docs/arko_index-reference.md#watching-for-changes).
 - **Search.** Hybrid search combines SQLite FTS5 (BM25) and exact cosine-similarity

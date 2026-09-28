@@ -183,9 +183,11 @@ the phase, the last `problem`, file counts (`files`, `validated`, `bypassed`,
 `snapshotting`, `chunking` and `embedding` to `ready`, or stops as:
 
 - `paused`: after `pause(job)`, or when its process stopped mid-run (detected when the
-  database is next opened);
+  database is next opened, with the problem "process interrupted; resume persisted
+  work");
 - `blocked`: after a provider error, an invalid response, or with files whose boundaries
-  still need repair;
+  still need repair. When only transient provider failures that ran out of attempts
+  blocked it, its `phase` event has `retryable: true`;
 - `cancelled`: after `cancel(job)`;
 - `failed`: after a local error, such as an I/O or database failure.
 
@@ -228,7 +230,7 @@ JSON `detail`:
 
 | Kind | Detail |
 |---|---|
-| `phase` | The new `phase` and `problem`. |
+| `phase` | The new `phase` and `problem`, and `retryable: true` for a job blocked only by transient provider failures. |
 | `snapshot` | Counts of scanned, excluded and affected files; the manifest hash; `chunking_policy` and `policy_changed`; the chunk `model` and `reasoning`; the resolved `chunk_budget` (`tokenizer`, `max_tokens`, `max_bytes`, the model's `max_input_tokens`, whether it was known, and the `oversize` policy); the number of `oversize_files` and `skipped` files. |
 | `oversize` | A file over the chunk request budget: its `path`, rendered `bytes` and `tokens`, the `budget`, the `action` (`split`, `skipped` or `blocked`), its `windows` and the `forced_rows` made into their own chunks. |
 | `request_attempt` | `artifact` (request ID), `repair`, and `event`: `phase` (`started`, `failed`, `retry_wait`, `retries_exhausted` or `completed`), `attempt`, `unix_ms` and a phase-specific `detail`, such as `error` and `usage` for a failure or `delay_ms` and `capacity` for a retry wait. |
@@ -343,20 +345,51 @@ final event. Non-finite costs count as zero.
 
 ## Watching for changes
 
-`watch(index, debounce, reconcile)` watches the index root and returns a `WatchHandle`;
-`stop().await` ends it. Both intervals must be positive.
+`watch(index, options)` watches the index root and returns a `WatchHandle`;
+`stop().await` ends it, and `subscribe()` receives its `WatchEvent`s. `WatchOptions`:
 
-Every file-system event restarts the `debounce` timer. When it expires, the watcher scans
-the source with the saved spec, compares the normalized content of every file with the
-active generation, and starts an update if anything changed. Repeated writes and
-atomic-save sequences therefore become one modification, and a file created and deleted
-in between leaves no change. Every `reconcile` interval, a scan also runs to catch missed
-events, after any active debounce period.
+| Field | Default | Meaning |
+|---|---|---|
+| `debounce` | 500 ms | How long the source must be quiet after a file-system event before it is scanned. |
+| `reconcile` | 30 s | Interval of full scans that catch events the file system did not report; `None` scans only at start and after events. |
+| `resume_interrupted` | `true` | Resume an update whose process stopped mid-run. |
+| `retry_blocked_after` | `None` | Opt-in: resume an update blocked by transient provider failures this long after the watcher found it blocked. |
 
-While a build or update of the index is running, paused or blocked, the watcher starts
-no other; it checks again after each debounce period. Edits made during an update are
-picked up by the next one. Scan and update errors are logged with the `log` crate, and the
-watcher keeps running.
+Every relevant file-system event restarts the `debounce` timer. When it expires, the
+watcher scans the source with the saved spec, compares the normalized content of every
+file with the active generation, and starts an update if anything changed. Repeated
+writes and atomic-save sequences therefore become one modification, and a file created
+and deleted in between leaves no change. The watcher also scans once at start and every
+`reconcile` interval, after any active debounce period.
+
+Events under directories the scan does not enter are ignored: directories named in
+`skip_directories` (such as `target` or `node_modules`) and directories excluded by ignore
+rules, as found by the last scan. Activity there, such as a build or a package install,
+causes no scan.
+
+Updates stay serialized. While a build or update of the index is running, the watcher
+checks again after each debounce period, so edits made during an update are picked up by
+the next one. An unfinished update found paused or blocked is handled as follows:
+
+- **Interrupted** (paused because its process stopped mid-run, detected when the database
+  was opened): resumed, unless `resume_interrupted` is off.
+- **Blocked by transient provider failures** (rate limits, server errors or capacity
+  waits that ran out of attempts; its `phase` event has `retryable: true`): resumed after
+  `retry_blocked_after` when that is set.
+- **Otherwise** (paused with `pause(job)` or by a usage limit, or blocked for another
+  reason): left for the host, and no other update starts until it is resumed or cancelled.
+
+| `WatchEvent` | Meaning |
+|---|---|
+| `Scanned { files, changes }` | A scan finished; `changes` files differ from the active generation. |
+| `UpdateStarted { job }` | The watcher started an update. |
+| `Resumed { job, reason }` | The watcher resumed an update; `reason` is `interrupted` or `blocked`. |
+| `Held { job, phase, problem }` | A paused or blocked update the watcher leaves alone; reported once per job, phase and problem. |
+| `Failed { error }` | A scan, update or resume failed; the watcher keeps running. |
+
+Events are also logged with the `log` crate: started and resumed updates at info level,
+held updates and failures as warnings. A subscriber that falls more than 64 events behind
+misses the oldest.
 
 ## Search
 

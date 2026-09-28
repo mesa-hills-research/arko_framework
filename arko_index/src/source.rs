@@ -95,6 +95,9 @@ pub struct Manifest {
     pub files: Vec<Snapshot>,
     pub excluded: Vec<Exclusion>,
     pub hash: String,
+    /// The directories the scan entered, root-relative with `/` separators;
+    /// `""` is the root.
+    pub directories: Vec<String>,
 }
 fn recognized(path: &Path) -> bool {
     let name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
@@ -201,9 +204,17 @@ pub fn scan(spec: &BuildSpec) -> Result<Manifest> {
         .build();
     let mut files = vec![];
     let mut excluded = vec![];
+    let mut directories = vec![];
     for entry in walker {
         let entry = entry.map_err(|e| invalid(format!("source enumeration: {e}")))?;
         if entry.file_type().is_some_and(|t| t.is_dir()) {
+            if let Ok(relative) = entry.path().strip_prefix(&root) {
+                directories.push(
+                    relative
+                        .to_string_lossy()
+                        .replace(std::path::MAIN_SEPARATOR, "/"),
+                );
+            }
             continue;
         }
         let relative = entry
@@ -259,6 +270,7 @@ pub fn scan(spec: &BuildSpec) -> Result<Manifest> {
         files,
         excluded,
         hash: manifest_hash,
+        directories,
     })
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

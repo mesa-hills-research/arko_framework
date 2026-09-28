@@ -1608,8 +1608,8 @@ async fn watch_debounces_atomic_save_bursts() {
     let watch = index
         .watch(
             &first.index,
-            Duration::from_millis(150),
-            Duration::from_secs(3),
+            WatchOptions::new(Duration::from_millis(150))
+                .with_reconcile(Some(Duration::from_secs(3))),
         )
         .await
         .unwrap();
@@ -2282,4 +2282,216 @@ fn chunking_settings_saved_before_they_existed_load_with_defaults() {
             .validate()
             .is_err()
     );
+}
+
+/// Waits for the first watcher event that `matches`.
+async fn next_watch_event(
+    events: &mut tokio::sync::broadcast::Receiver<WatchEvent>,
+    matches: impl Fn(&WatchEvent) -> bool,
+) -> WatchEvent {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match events.recv().await {
+                Ok(event) if matches(&event) => return event,
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(error) => panic!("watcher events ended: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("no such watcher event")
+}
+#[test]
+fn watch_resumes_an_interrupted_update_but_holds_a_paused_one() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let path = db.path().join("i.db");
+    let mut fake = Fake::new();
+    fake.rejection = Rejection::WrongCallRetryLater;
+    let fake = Arc::new(fake);
+    let runtime = || {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    };
+    let first = runtime();
+    let (index_id, interrupted) = first.block_on(async {
+        let (index, build) = start_one_file(&fake, &path, root.path()).await;
+        assert_eq!(settle(&index, &build.job).await.phase, "ready");
+        // An update that waits an hour to retry, then a killed process.
+        fake.rejected_chunks.store(usize::MAX, Ordering::SeqCst);
+        std::fs::write(root.path().join("a.txt"), "alpha\ngamma\n").unwrap();
+        let update = index.start_update(&build.index).await.unwrap();
+        wait_for_retry(&index, &update.job).await;
+        (build.index, update.job)
+    });
+    drop(first);
+    runtime().block_on(async {
+        fake.rejected_chunks.store(0, Ordering::SeqCst);
+        let index = ArkoIndex::open(&path, fake.clone(), config(&fake))
+            .await
+            .unwrap();
+        assert_eq!(index.status(&interrupted).await.unwrap().phase, "paused");
+        let watch = index
+            .watch(&index_id, WatchOptions::new(Duration::from_millis(50)))
+            .await
+            .unwrap();
+        let mut events = watch.subscribe();
+        let resumed =
+            next_watch_event(&mut events, |e| matches!(e, WatchEvent::Resumed { .. })).await;
+        assert_eq!(
+            resumed,
+            WatchEvent::Resumed {
+                job: interrupted.clone(),
+                reason: "interrupted".into()
+            }
+        );
+        assert_eq!(settle(&index, &interrupted).await.phase, "ready");
+        // A job the host paused holds further updates and is left alone.
+        watch.stop().await.unwrap();
+        fake.rejected_chunks.store(usize::MAX, Ordering::SeqCst);
+        std::fs::write(root.path().join("a.txt"), "alpha\ndelta\n").unwrap();
+        let update = index.start_update(&index_id).await.unwrap();
+        wait_for_retry(&index, &update.job).await;
+        index.pause(&update.job).await.unwrap();
+        assert_eq!(settle(&index, &update.job).await.phase, "paused");
+        fake.rejected_chunks.store(0, Ordering::SeqCst);
+        let watch = index
+            .watch(&index_id, WatchOptions::new(Duration::from_millis(50)))
+            .await
+            .unwrap();
+        let mut events = watch.subscribe();
+        let held = next_watch_event(&mut events, |e| matches!(e, WatchEvent::Held { .. })).await;
+        assert_eq!(
+            held,
+            WatchEvent::Held {
+                job: update.job.clone(),
+                phase: "paused".into(),
+                problem: Some("paused".into())
+            }
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(index.status(&update.job).await.unwrap().phase, "paused");
+        watch.stop().await.unwrap();
+    });
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn watch_retries_a_blocked_update_only_when_asked() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::new());
+    std::fs::write(root.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+    // One transient failure exhausts a request's attempts.
+    let config = Config {
+        max_transient_attempts: 1,
+        ..config(&fake)
+    };
+    let index = ArkoIndex::open(db.path().join("i.db"), fake.clone(), config)
+        .await
+        .unwrap();
+    let build = index
+        .start_build(BuildSpec::new("test", root.path()))
+        .await
+        .unwrap();
+    assert_eq!(settle(&index, &build.job).await.phase, "ready");
+    fake.rejected_chunks.store(1, Ordering::SeqCst);
+    std::fs::write(root.path().join("a.txt"), "alpha\ngamma\n").unwrap();
+    // By default a blocked update is held.
+    let options = WatchOptions::new(Duration::from_millis(50));
+    let watch = index.watch(&build.index, options.clone()).await.unwrap();
+    let mut events = watch.subscribe();
+    let WatchEvent::UpdateStarted { job } = next_watch_event(&mut events, |e| {
+        matches!(e, WatchEvent::UpdateStarted { .. })
+    })
+    .await
+    else {
+        unreachable!()
+    };
+    let held = next_watch_event(&mut events, |e| matches!(e, WatchEvent::Held { .. })).await;
+    assert!(matches!(held, WatchEvent::Held { ref phase, .. } if phase == "blocked"));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(index.status(&job).await.unwrap().phase, "blocked");
+    watch.stop().await.unwrap();
+    let phase_event = index
+        .events(&job, 0, 1000)
+        .await
+        .unwrap()
+        .into_iter()
+        .rfind(|e| e.kind == "phase")
+        .unwrap();
+    assert_eq!(phase_event.detail["retryable"], true);
+    // With retries on, it is resumed after the delay.
+    let watch = index
+        .watch(
+            &build.index,
+            options.with_retry_blocked_after(Some(Duration::from_millis(200))),
+        )
+        .await
+        .unwrap();
+    let mut events = watch.subscribe();
+    let resumed = next_watch_event(&mut events, |e| matches!(e, WatchEvent::Resumed { .. })).await;
+    assert_eq!(
+        resumed,
+        WatchEvent::Resumed {
+            job: job.clone(),
+            reason: "blocked".into()
+        }
+    );
+    assert_eq!(settle(&index, &job).await.phase, "ready");
+    watch.stop().await.unwrap();
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn watch_ignores_events_in_skipped_and_ignored_directories() {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    for dir in ["src", "target", "build"] {
+        std::fs::create_dir_all(root.path().join(dir)).unwrap();
+    }
+    std::fs::write(root.path().join(".gitignore"), "build/\n").unwrap();
+    std::fs::write(root.path().join("src/a.txt"), "alpha\n").unwrap();
+    let fake = Arc::new(Fake::new());
+    let index = ArkoIndex::open(db.path().join("i.db"), fake.clone(), config(&fake))
+        .await
+        .unwrap();
+    let build = index
+        .start_build(BuildSpec::new("test", root.path()))
+        .await
+        .unwrap();
+    assert_eq!(settle(&index, &build.job).await.phase, "ready");
+    let watch = index
+        .watch(
+            &build.index,
+            WatchOptions::new(Duration::from_millis(100)).with_reconcile(None),
+        )
+        .await
+        .unwrap();
+    let mut events = watch.subscribe();
+    // The scan at start.
+    next_watch_event(&mut events, |e| matches!(e, WatchEvent::Scanned { .. })).await;
+    for n in 0..5 {
+        std::fs::write(root.path().join("target/out.txt"), format!("{n}")).unwrap();
+        std::fs::write(root.path().join("build/out.txt"), format!("{n}")).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    loop {
+        match events.try_recv() {
+            Ok(WatchEvent::Scanned { .. }) => {
+                panic!("an event in a skipped directory caused a scan")
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    std::fs::write(root.path().join("src/b.txt"), "beta\n").unwrap();
+    let scanned = next_watch_event(&mut events, |e| matches!(e, WatchEvent::Scanned { .. })).await;
+    assert_eq!(
+        scanned,
+        WatchEvent::Scanned {
+            files: 2,
+            changes: 1
+        }
+    );
+    watch.stop().await.unwrap();
 }

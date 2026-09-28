@@ -13,7 +13,7 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::Path,
     sync::{Arc, atomic::Ordering},
 };
@@ -185,6 +185,10 @@ impl ArkoIndex {
                     Error::Blocked(_) | Error::Invalid(_) | Error::Provider { .. } => "blocked",
                     _ => "failed",
                 };
+                let retryable = matches!(
+                    error.retry_class(),
+                    Some(arko_ai::RetryClass::Transient | arko_ai::RetryClass::Capacity)
+                );
                 // The final phase and the control's removal are one step
                 // under the controls lock: once a caller sees the phase,
                 // `resume` can relaunch, and no relaunch can come between
@@ -193,7 +197,7 @@ impl ArkoIndex {
                 if let Err(e) = this
                     .inner
                     .db
-                    .phase(&job, phase, Some(error.to_string()))
+                    .stopped(&job, phase, Some(error.to_string()), retryable)
                     .await
                 {
                     log::error!("failed to persist the status of job {job}: {e}");
@@ -607,6 +611,8 @@ impl ArkoIndex {
         let mut work = FuturesUnordered::new();
         let mut group = vec![];
         let mut group_size = budget::Size::default();
+        // Windows whose last failure was a transient provider error.
+        let mut transient = HashSet::new();
         for (i, (s, state)) in files.iter().enumerate() {
             for (w, window) in state.windows.iter().enumerate() {
                 if let Some(cuts) = &window.cuts {
@@ -677,6 +683,7 @@ impl ArkoIndex {
                 let window = &mut state.windows[w];
                 match &result {
                     Ok(reply) => {
+                        transient.remove(&(i, w));
                         if let Some(repair) = &repair {
                             window.repair_rounds = window.repair_rounds.saturating_add(1);
                             match chunker::apply_repair(
@@ -705,7 +712,15 @@ impl ArkoIndex {
                         }
                     }
                     Err(Error::Paused | Error::Cancelled) => {}
-                    Err(e) => window.problem = Some(e.to_string()),
+                    Err(e) => {
+                        window.problem = Some(e.to_string());
+                        if matches!(
+                            e.retry_class(),
+                            Some(arko_ai::RetryClass::Transient | arko_ai::RetryClass::Capacity)
+                        ) {
+                            transient.insert((i, w));
+                        }
+                    }
                 }
                 self.canonicalize_cuts(job, s, &state.structure, window)
                     .await?;
@@ -749,6 +764,29 @@ impl ArkoIndex {
             .filter(|(_, s)| !s.complete)
             .map(|(s, _)| s.path.clone())
             .collect();
+        // Files held up only by transient provider failures (retries ran
+        // out) may succeed when the job is resumed unchanged.
+        let only_transient = files.iter().enumerate().all(|(i, (_, state))| {
+            state.complete
+                || state
+                    .windows
+                    .iter()
+                    .enumerate()
+                    .all(|(w, window)| window.problem.is_none() || transient.contains(&(i, w)))
+        });
+        if !blocked.is_empty() && only_transient && !transient.is_empty() {
+            return Err(Error::Provider {
+                message: format!(
+                    "{} file(s) could not be chunked after transient provider failures; first: {}",
+                    blocked.len(),
+                    blocked[0]
+                ),
+                transient: true,
+                retry_after: None,
+                source: None,
+                usage: None,
+            });
+        }
         if !blocked.is_empty() {
             return Err(Error::Blocked(format!(
                 "{} file(s) need repair; first: {}",

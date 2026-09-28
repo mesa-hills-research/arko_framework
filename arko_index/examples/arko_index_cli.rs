@@ -179,8 +179,8 @@ async fn main() -> AnyResult<()> {
             let watcher = index
                 .watch(
                     &id,
-                    Duration::from_millis(debounce_ms),
-                    Duration::from_secs(30),
+                    WatchOptions::new(Duration::from_millis(debounce_ms))
+                        .with_reconcile(Some(Duration::from_secs(30))),
                 )
                 .await?;
             let _ = tokio::signal::ctrl_c().await;

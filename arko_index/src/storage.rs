@@ -5,6 +5,9 @@ use std::{
     path::Path,
     sync::{Arc, Mutex},
 };
+/// The problem of a job whose process stopped while it ran, set when the
+/// database is next opened.
+pub(crate) const INTERRUPTED: &str = "process interrupted; resume persisted work";
 #[derive(Clone)]
 pub(crate) struct Db(Arc<Database>);
 struct Database {
@@ -36,7 +39,7 @@ impl Db {
             if version!=1 && (version!=0 || tables!=0) {return Err(invalid("unsupported/legacy index database; use a new database path"));}
             c.execute_batch(SCHEMA)?;
             // A terminated process cannot leave a generation apparently active forever.
-            c.execute("UPDATE jobs SET phase='paused', problem='process interrupted; resume persisted work' WHERE phase IN ('snapshotting','chunking','embedding')",[])?;
+            c.execute("UPDATE jobs SET phase='paused', problem=?1 WHERE phase IN ('snapshotting','chunking','embedding')",[INTERRUPTED])?;
             Ok(Self(Arc::new(Database{connection:Mutex::new(c),_lock:lock})))
         }).await?
     }
@@ -66,6 +69,17 @@ impl Db {
         .await
     }
     pub async fn phase(&self, job: &str, phase: &str, problem: Option<String>) -> Result<()> {
+        self.stopped(job, phase, problem, false).await
+    }
+    /// Records a phase; `retryable` marks a stop caused by transient
+    /// provider failures, which may succeed when resumed unchanged.
+    pub async fn stopped(
+        &self,
+        job: &str,
+        phase: &str,
+        problem: Option<String>,
+        retryable: bool,
+    ) -> Result<()> {
         let (job, phase) = (job.to_owned(), phase.to_owned());
         self.call(move |c| {
             let tx = c.transaction()?;
@@ -73,12 +87,13 @@ impl Db {
                 "UPDATE jobs SET phase=?2,problem=?3 WHERE id=?1",
                 params![job, phase, problem],
             )?;
+            let mut detail = serde_json::json!({"phase":phase,"problem":problem});
+            if retryable {
+                detail["retryable"] = true.into();
+            }
             tx.execute(
                 "INSERT INTO events(job,kind,detail) VALUES(?1,'phase',?2)",
-                params![
-                    job,
-                    encode(&serde_json::json!({"phase":phase,"problem":problem}))?
-                ],
+                params![job, encode(&detail)?],
             )?;
             tx.commit()?;
             Ok(())
