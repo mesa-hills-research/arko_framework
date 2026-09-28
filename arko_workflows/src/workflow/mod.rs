@@ -1362,6 +1362,8 @@ impl WorkflowBuilder {
             completion_verifiers: self.completion_verifiers,
             verification_attempts: parking_lot::Mutex::new(HashMap::new()),
             verification_baselines: parking_lot::Mutex::new(HashMap::new()),
+            verification_failures: parking_lot::Mutex::new(HashMap::new()),
+            verifier_failures: parking_lot::Mutex::new(HashMap::new()),
             verification_records: parking_lot::RwLock::new(
                 resume_state
                     .as_ref()
@@ -1533,3 +1535,7 @@ mod policy_tests;
 #[cfg(test)]
 #[path = "build_tests.rs"]
 mod build_tests;
+
+#[cfg(test)]
+#[path = "verification_tests.rs"]
+mod verification_tests;

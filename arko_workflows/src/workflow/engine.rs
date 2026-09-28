@@ -1081,6 +1081,8 @@ pub(crate) async fn drive_to_result(
     };
     ctx.messages.unregister_active(&agent_name, agent_run_id);
     ctx.run_control.unregister(agent_run_id);
+    // Set when a verifier that failed stopped the task.
+    let verifier_failure = ctx.verifier_failures.lock().remove(&agent_run_id);
 
     if let Some(stop) = ctx.run_control.error() {
         if let Err(error) = &result {
@@ -1107,9 +1109,17 @@ pub(crate) async fn drive_to_result(
             agent: agent_name,
             reason: result.error.clone().unwrap_or_default(),
         }),
-        AgentRunStatus::Cancelled => Err(WorkflowError::AgentCancelled {
-            agent: agent_name,
-            reason: result.error.clone().unwrap_or_default(),
+        AgentRunStatus::Cancelled => Err(match verifier_failure {
+            Some((verifier, reason)) => WorkflowError::VerifierFailed {
+                verifier,
+                agent: agent_name,
+                task_id: result.agent_run_id,
+                reason,
+            },
+            None => WorkflowError::AgentCancelled {
+                agent: agent_name,
+                reason: result.error.clone().unwrap_or_default(),
+            },
         }),
         AgentRunStatus::Failed => Err(WorkflowError::Agent(
             arko_agents::ArkoAgentsError::TaskExecution(
@@ -2136,13 +2146,56 @@ impl WorkflowExecutionMiddleware {
             .filter(|config| config.applies_to(&self.agent_name))
     }
 
+    /// Answers a review that failed (the verifier's run failed, or its
+    /// verdict stayed unusable): within the verifier's `max_review_retries`,
+    /// the completion is rejected so the agent calls `complete_task` again
+    /// and a new review runs; after that, the task is stopped (not failed)
+    /// and the run call returns `VerifierFailed`.
+    fn review_failed(
+        &self,
+        execution: &ToolExecutionContext<'_>,
+        verifier: &CompletionVerifierConfig,
+        reason: String,
+    ) -> ToolExecutionDecision {
+        let failures = {
+            let mut failures = self.context.verification_failures.lock();
+            let count = failures
+                .entry((execution.task_id, verifier.name.clone()))
+                .or_default();
+            *count = count.saturating_add(1);
+            *count
+        };
+        log::warn!(
+            "Workflow '{}': completion verifier '{}' could not review agent '{}' (failure {failures}): {reason}",
+            self.context.workflow_name,
+            verifier.name,
+            self.agent_name
+        );
+        if failures <= verifier.max_review_retries {
+            return ToolExecutionDecision::Reject {
+                message_to_agent: format!(
+                    "Completion verifier '{}' could not review this completion ({reason}). Nothing was decided about your work: call complete_task again to have it reviewed again.",
+                    verifier.name
+                ),
+            };
+        }
+        self.context
+            .verifier_failures
+            .lock()
+            .insert(execution.task_id, (verifier.name.clone(), reason.clone()));
+        ToolExecutionDecision::CancelTask {
+            reason: format!(
+                "Stopped: completion verifier '{}' could not review the completion: {reason}",
+                verifier.name
+            ),
+        }
+    }
+
     async fn verify_completion(
         &self,
         execution: &ToolExecutionContext<'_>,
         summary: &str,
     ) -> Option<ToolExecutionDecision> {
-        const MAX_FORMAT_RETRIES: usize = 1;
-
         for verifier in self.applicable_completion_verifiers() {
             if verifier.kind == VerificationKind::Efficiency {
                 let repair_count = self
@@ -2160,29 +2213,34 @@ impl WorkflowExecutionMiddleware {
                 persistence: self.persistence.clone(),
             };
             let session_key = (execution.task_id, verifier.name.clone());
-            let prior_record = verifier
-                .reuse_conversation
-                .then(|| {
+            // The latest verdict on this task by this verifier, if any.
+            let prior_record = self
+                .context
+                .verification_records
+                .read()
+                .iter()
+                .rev()
+                .find(|record| {
+                    record.target_task_id == execution.task_id
+                        && record.verifier_name == verifier.name
+                })
+                .cloned();
+            let prior_decision = |record: &VerificationRecord| match record.decision {
+                VerificationDecision::Approved => "ACCEPTED",
+                VerificationDecision::RejectedMinor => "REJECTED_MINOR",
+                VerificationDecision::RejectedMajor => "REJECTED_MAJOR",
+            };
+            let prior_result = prior_record
+                .as_ref()
+                .filter(|_| verifier.reuse_conversation)
+                .and_then(|record| {
                     self.context
-                        .verification_records
+                        .agent_results
                         .read()
                         .iter()
-                        .rev()
-                        .find(|record| {
-                            record.target_task_id == execution.task_id
-                                && record.verifier_name == verifier.name
-                        })
+                        .find(|result| result.agent_run_id == record.verifier_task_id)
                         .cloned()
-                })
-                .flatten();
-            let prior_result = prior_record.as_ref().and_then(|record| {
-                self.context
-                    .agent_results
-                    .read()
-                    .iter()
-                    .find(|result| result.agent_run_id == record.verifier_task_id)
-                    .cloned()
-            });
+                });
             let prior_baseline = self
                 .context
                 .verification_baselines
@@ -2194,11 +2252,6 @@ impl WorkflowExecutionMiddleware {
             let mut result = if let (Some(record), Some(previous)) =
                 (prior_record.as_ref(), prior_result.as_ref())
             {
-                let prior_decision = match record.decision {
-                    VerificationDecision::Approved => "ACCEPTED",
-                    VerificationDecision::RejectedMinor => "REJECTED_MINOR",
-                    VerificationDecision::RejectedMajor => "REJECTED_MAJOR",
-                };
                 let repair_delta = verifier
                     .repair_context
                     .as_ref()
@@ -2217,7 +2270,7 @@ impl WorkflowExecutionMiddleware {
                 let prompt = format!(
                     "Continue your review of the same '{}' task.\n\nYour prior decision:\n{}\n{}\n\nNew candidate completion summary:\n{}\n\n{}\n\nRe-review instructions:\n- Verify every prior finding and any correctness or efficiency regression materially exposed by the delta.\n- Reuse unchanged passing evidence from your conversation; do not repeat the complete audit or rerun unchanged broad checks.\n- Run focused reproductions and directly affected checks.\n- Report a new issue only when it is material and tied to an explicit requirement or directly exposed by the repair.\n- Batch independent read-only tool calls when useful, but call non-batch-safe tools alone.\n\nVerification instructions remain:\n{}\n\nFinish with complete_task using this exact contract:\n\n{}",
                     self.agent_name,
-                    prior_decision,
+                    prior_decision(record),
                     record.feedback,
                     summary,
                     repair_delta,
@@ -2230,17 +2283,29 @@ impl WorkflowExecutionMiddleware {
                 {
                     Ok(result) => result,
                     Err(error) => {
-                        return Some(ToolExecutionDecision::FailTask {
-                            reason: format!(
-                                "completion verifier '{}' could not continue: {error}",
-                                verifier.name
-                            ),
-                        });
+                        return Some(self.review_failed(
+                            execution,
+                            verifier,
+                            format!("its review could not continue: {error}"),
+                        ));
                     }
                 }
             } else {
+                // A new review, given the prior findings on this task
+                // unless the verifier opts out.
+                let pass = match prior_record
+                    .as_ref()
+                    .filter(|_| verifier.include_prior_findings)
+                {
+                    Some(record) => format!(
+                        "This is a re-review. An earlier review of this task returned:\n{}\n{}\n\nThe agent has since revised its work. Check whether each prior finding is resolved, then inspect the actual workspace and relevant artifacts for any other material issue. Do not approve merely because the summary claims success.",
+                        prior_decision(record),
+                        record.feedback,
+                    ),
+                    None => "This is the first review pass. Inspect the actual workspace and relevant artifacts, systematically cover the applicable requirement and failure classes, and consolidate every evidenced related finding into this verdict rather than drip-feeding one counterexample per repair cycle. Do not approve merely because the summary claims success.".to_string(),
+                };
                 let prompt = format!(
-                    "You are a completion verifier for agent '{}'.\n\nOriginal task:\n{}\n\nCandidate completion summary:\n{}\n\nVerification instructions:\n{}\n\nThis is the first review pass. Inspect the actual workspace and relevant artifacts, systematically cover the applicable requirement and failure classes, and consolidate every evidenced related finding into this verdict rather than drip-feeding one counterexample per repair cycle. Do not approve merely because the summary claims success. Batch independent read-only tool calls when useful, but call non-batch-safe tools alone. Finish by calling complete_task using this exact contract:\n\n{}",
+                    "You are a completion verifier for agent '{}'.\n\nOriginal task:\n{}\n\nCandidate completion summary:\n{}\n\nVerification instructions:\n{}\n\n{pass} Batch independent read-only tool calls when useful, but call non-batch-safe tools alone. Finish by calling complete_task using this exact contract:\n\n{}",
                     self.agent_name,
                     without_roster(execution.initial_task_prompt),
                     summary,
@@ -2258,12 +2323,11 @@ impl WorkflowExecutionMiddleware {
                 {
                     Ok(result) => result,
                     Err(error) => {
-                        return Some(ToolExecutionDecision::FailTask {
-                            reason: format!(
-                                "completion verifier '{}' could not complete: {error}",
-                                verifier.name
-                            ),
-                        });
+                        return Some(self.review_failed(
+                            execution,
+                            verifier,
+                            format!("its review did not complete: {error}"),
+                        ));
                     }
                 }
             };
@@ -2272,7 +2336,7 @@ impl WorkflowExecutionMiddleware {
             let response = loop {
                 match crate::verification::parse_response(&result.summary) {
                     Ok(response) => break response,
-                    Err(error) if format_attempt < MAX_FORMAT_RETRIES => {
+                    Err(error) if format_attempt < verifier.max_format_retries => {
                         format_attempt += 1;
                         let prompt = format!(
                             "Your verification conclusion could not be parsed ({error}). Do not repeat the review or change your conclusion. Re-emit it through complete_task using only this contract:\n\n{}",
@@ -2284,23 +2348,23 @@ impl WorkflowExecutionMiddleware {
                         {
                             Ok(result) => result,
                             Err(retry_error) => {
-                                return Some(ToolExecutionDecision::FailTask {
-                                    reason: format!(
-                                        "completion verifier '{}' could not repair its decision format: {retry_error}",
-                                        verifier.name
-                                    ),
-                                });
+                                return Some(self.review_failed(
+                                    execution,
+                                    verifier,
+                                    format!("it could not restate its verdict: {retry_error}"),
+                                ));
                             }
                         };
                     }
                     Err(error) => {
-                        return Some(ToolExecutionDecision::FailTask {
-                            reason: format!(
-                                "completion verifier '{}' produced an unusable decision after {} attempts: {error}",
-                                verifier.name,
-                                format_attempt + 1,
+                        return Some(self.review_failed(
+                            execution,
+                            verifier,
+                            format!(
+                                "its verdict was unusable after {} attempts: {error}",
+                                format_attempt + 1
                             ),
-                        });
+                        ));
                     }
                 }
             };
@@ -2493,6 +2557,10 @@ impl ToolExecutionMiddleware for WorkflowExecutionMiddleware {
                 .retain(|(task_id, _), _| *task_id != execution.task_id);
             self.context
                 .verification_attempts
+                .lock()
+                .retain(|(task_id, _), _| *task_id != execution.task_id);
+            self.context
+                .verification_failures
                 .lock()
                 .retain(|(task_id, _), _| *task_id != execution.task_id);
         }

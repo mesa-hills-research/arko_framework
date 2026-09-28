@@ -31,6 +31,34 @@ pub struct CompletionVerifierConfig {
     pub reuse_conversation: bool,
     #[serde(default)]
     pub repair_context: Option<RepairContextConfig>,
+    /// A fresh re-review (without `reuse_conversation`) is given the prior
+    /// verdict and findings for the same task. Default `true`.
+    #[serde(default = "default_true")]
+    pub include_prior_findings: bool,
+    /// How many times a verdict that can't be parsed is asked for again in
+    /// the contract's format before the review counts as failed. Default 1.
+    #[serde(default = "default_format_retries")]
+    pub max_format_retries: u32,
+    /// How many failed reviews (the verifier's run failed, or its verdict
+    /// stayed unusable) of one task are answered by asking the agent to call
+    /// `complete_task` again, which starts a new review. The next failure
+    /// stops the task and the run call returns
+    /// [`WorkflowError::VerifierFailed`](crate::WorkflowError::VerifierFailed);
+    /// the task itself isn't failed. Default 1.
+    #[serde(default = "default_review_retries")]
+    pub max_review_retries: u32,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_format_retries() -> u32 {
+    1
+}
+
+fn default_review_retries() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,6 +79,9 @@ impl CompletionVerifierConfig {
             max_major_rejections: 0,
             reuse_conversation: false,
             repair_context: None,
+            include_prior_findings: true,
+            max_format_retries: default_format_retries(),
+            max_review_retries: default_review_retries(),
         }
     }
 
@@ -65,6 +96,9 @@ impl CompletionVerifierConfig {
             max_major_rejections: 0,
             reuse_conversation: false,
             repair_context: None,
+            include_prior_findings: true,
+            max_format_retries: default_format_retries(),
+            max_review_retries: default_review_retries(),
         }
     }
 
@@ -94,6 +128,28 @@ impl CompletionVerifierConfig {
     /// again during its correction loop.
     pub fn reuse_conversation(mut self, enabled: bool) -> Self {
         self.reuse_conversation = enabled;
+        self
+    }
+
+    /// Whether a fresh re-review is given the prior verdict and findings
+    /// (default `true`); `false` makes every review without
+    /// `reuse_conversation` an independent first review.
+    pub fn include_prior_findings(mut self, enabled: bool) -> Self {
+        self.include_prior_findings = enabled;
+        self
+    }
+
+    /// How many times an unparseable verdict is asked for again (default 1).
+    pub fn format_retries(mut self, retries: u32) -> Self {
+        self.max_format_retries = retries;
+        self
+    }
+
+    /// How many failed reviews of one task are retried by asking the agent
+    /// to call `complete_task` again (default 1); see
+    /// [`max_review_retries`](Self::max_review_retries).
+    pub fn review_retries(mut self, retries: u32) -> Self {
+        self.max_review_retries = retries;
         self
     }
 
@@ -506,6 +562,27 @@ mod tests {
             .repair_context(10);
         assert!(sticky.reuse_conversation);
         assert_eq!(sticky.repair_context.unwrap().max_bytes, 1_024);
+    }
+
+    /// A configuration saved before the re-review and retry settings loads
+    /// with their defaults.
+    #[test]
+    fn a_configuration_saved_before_the_retry_settings_loads_with_defaults() {
+        let mut saved = serde_json::to_value(
+            CompletionVerifierConfig::correctness("check", "reviewer").target("coder"),
+        )
+        .unwrap();
+        for field in [
+            "include_prior_findings",
+            "max_format_retries",
+            "max_review_retries",
+        ] {
+            saved.as_object_mut().unwrap().remove(field);
+        }
+        let loaded: CompletionVerifierConfig = serde_json::from_value(saved).unwrap();
+        assert!(loaded.include_prior_findings);
+        assert_eq!(loaded.max_format_retries, 1);
+        assert_eq!(loaded.max_review_retries, 1);
     }
 
     #[test]

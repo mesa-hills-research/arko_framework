@@ -564,7 +564,12 @@ from it counts as a minor repair request, so efficiency alone cannot fail a task
 A verifier can continue its previous conversation on re-review and, with context
 freshness enabled, receive a bounded summary of the tracked file and memory changes
 since its last verdict, so a localized repair does not require a full
-re-inspection. See
+re-inspection. Without conversation reuse, a new review of a task is given the
+prior verdict and findings (`include_prior_findings(false)` opts out). A review that
+fails (the verifier's run errors, or its verdict stays unusable after
+`format_retries`) doesn't fail the target: the agent is asked to call
+`complete_task` again, up to `review_retries` times, and then the run call returns
+`WorkflowError::VerifierFailed`. See
 [completion verification](INDEX.md#completion-verification).
 
 ## Tool-result distillation

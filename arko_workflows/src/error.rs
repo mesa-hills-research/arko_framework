@@ -47,6 +47,18 @@ pub enum WorkflowError {
         pause: crate::policy::AgentPause,
     },
 
+    /// A completion verifier couldn't review the agent's completion (its run
+    /// failed, or its verdict stayed unusable) more times than its
+    /// `max_review_retries` allow. The agent's task was stopped (status
+    /// `Cancelled`), not failed: its work was not judged.
+    #[error("Completion verifier '{verifier}' could not review agent '{agent}': {reason}")]
+    VerifierFailed {
+        verifier: String,
+        agent: String,
+        task_id: uuid::Uuid,
+        reason: String,
+    },
+
     #[error("Memory tier '{0}' not found")]
     MemoryTierNotFound(String),
 

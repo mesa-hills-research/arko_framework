@@ -45,6 +45,11 @@ pub struct SharedContext {
     pub(crate) verification_baselines:
         parking_lot::Mutex<HashMap<(uuid::Uuid, String), crate::verification::RepairBaseline>>,
     pub verification_records: RwLock<Vec<crate::verification::VerificationRecord>>,
+    /// Failed reviews per target task and verifier.
+    pub(crate) verification_failures: parking_lot::Mutex<HashMap<(uuid::Uuid, String), u32>>,
+    /// Target tasks a verifier stopped because it failed: the verifier's
+    /// name and why.
+    pub(crate) verifier_failures: parking_lot::Mutex<HashMap<uuid::Uuid, (String, String)>>,
     pub distillation_configs: Vec<crate::distillation::DistillationConfig>,
     pub distillation_records: RwLock<Vec<crate::distillation::DistillationRecord>>,
     pub workflow_services: std::sync::OnceLock<crate::services::WorkflowServices>,
