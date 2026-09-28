@@ -675,3 +675,73 @@ async fn load_skill_results_are_intercepted_only_when_opted_in() {
         "{informed}"
     );
 }
+
+/// Context injected after tool results doesn't repeat the environment
+/// details the results message already carried in the same turn.
+#[tokio::test]
+async fn a_context_update_after_results_does_not_repeat_the_details() {
+    use crate::agent_config::DeveloperDefinableEnvironmentDetail;
+    let (mut agent, _events, _commands) = harness(ToolCallingMode::Native);
+    agent.task.developer_env_details = Some(vec![DeveloperDefinableEnvironmentDetail::new_static(
+        "Build".into(),
+        "green".into(),
+        EnvironmentDetailPlacement::EachUserMessage,
+    )]);
+    let mut first = ai::Message::new_assistant("");
+    first.tool_calls.push(call("one", "plain_text"));
+    let mut done = ai::Message::new_assistant("");
+    done.tool_calls.push(ai::ToolCall {
+        arguments: serde_json::json!({"summary": "done"}),
+        ..call("done", "complete_task")
+    });
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .extend([response(first), response(done)]);
+    // Given at the boundary after the first turn's results.
+    agent.turn_context = Some(Arc::new(AfterFirst(Default::default())));
+    let task = timeout(Duration::from_secs(10), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    let texts: Vec<&str> = task
+        .conversation
+        .messages
+        .iter()
+        .filter(|message| message.role == ai::Role::User)
+        .flat_map(|message| message.content.iter().filter_map(ai::Content::as_text))
+        .collect();
+    let update = texts
+        .iter()
+        .find(|text| text.starts_with("# Workflow context update"))
+        .expect("the update was added");
+    assert!(!update.contains("Build:"), "{update}");
+    // The results message before it carried the details.
+    let results_index = task
+        .conversation
+        .messages
+        .iter()
+        .position(|message| {
+            message
+                .content
+                .first()
+                .is_some_and(|content| content.as_tool_result().is_some())
+        })
+        .unwrap();
+    let beside: String = task.conversation.messages[results_index]
+        .content
+        .iter()
+        .filter_map(ai::Content::as_text)
+        .collect();
+    assert!(beside.contains("Build:\ngreen"), "{beside}");
+}
+
+/// Gives context from the second boundary on, once.
+struct AfterFirst(std::sync::atomic::AtomicUsize);
+
+impl super::super::TurnContextSource for AfterFirst {
+    fn turn_context(&self, _task_id: Uuid) -> Option<String> {
+        (self.0.fetch_add(1, Ordering::SeqCst) == 1).then(|| "Agent `b` finished.".to_string())
+    }
+}

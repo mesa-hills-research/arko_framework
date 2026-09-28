@@ -169,7 +169,9 @@ in native mode, so one configuration can carry tool-call examples for text-parse
 Details placed in every user message (`EachUserMessage`) and reminders for every user
 message or every Nth go with each message the model receives, tool results included: in
 native mode they are text after the turn's results, in the same user message, which every
-provider accepts. Every such message counts toward `EveryNUserMessages`.
+provider accepts. Every such message counts toward `EveryNUserMessages`. A context update
+that follows another user message of the same turn (tool results, say) doesn't repeat the
+environment details that message carried.
 
 The system prompt is written once, when a task starts, so a date and time placed there
 is labelled `Task Start Datetime (UTC)`; placed in a user message it is labelled

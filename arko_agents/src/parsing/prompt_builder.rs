@@ -206,9 +206,28 @@ impl<'a> PromptBuilder<'a> {
         user_message_content: &str,
         user_message_number: usize,
     ) -> Result<String, ArkoAgentsError> {
+        self.augment_user_message(task, user_message_content, user_message_number, true)
+    }
+
+    /// [`augment_user_message_with_env_details_and_reminder`](Self::augment_user_message_with_env_details_and_reminder),
+    /// without the environment details unless `with_details` (for a message
+    /// that follows one that carried them in the same turn).
+    pub(crate) fn augment_user_message(
+        &self,
+        task: &'a Task,
+        user_message_content: &str,
+        user_message_number: usize,
+        with_details: bool,
+    ) -> Result<String, ArkoAgentsError> {
         let mut full_content = user_message_content.to_string();
-        let env_details_each_turn = self
-            .gather_env_details_for_placement(task, EnvironmentDetailPlacement::EachUserMessage)?;
+        let env_details_each_turn = if with_details {
+            self.gather_env_details_for_placement(
+                task,
+                EnvironmentDetailPlacement::EachUserMessage,
+            )?
+        } else {
+            String::new()
+        };
         if !env_details_each_turn.is_empty() {
             full_content.push_str("\n\n# Current Environment Information (updated this turn)\n");
             full_content.push_str(&env_details_each_turn);

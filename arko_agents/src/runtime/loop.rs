@@ -519,10 +519,19 @@ impl AgentLoop {
         let prompt_builder =
             PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None);
         let next_message_number = self.task.user_message_count + 1;
-        let message = prompt_builder.augment_user_message_with_env_details_and_reminder(
+        // A user message just before this one (tool results, say) already
+        // carried the environment details of this turn.
+        let follows_user_message = self
+            .task
+            .conversation
+            .messages
+            .last()
+            .is_some_and(|message| message.role == ai::Role::User);
+        let message = prompt_builder.augment_user_message(
             &self.task,
             &format!("# Workflow context update\n\n{content}"),
             next_message_number,
+            !follows_user_message,
         )?;
         self.task.conversation.add_user_message(&message);
         self.task.increment_user_message_count();
