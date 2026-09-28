@@ -96,7 +96,7 @@ pub enum ErrorRecoveryCause {
     /// milliseconds, when the provider said.
     UsageLimit { resets_at_unix_ms: Option<u64> },
     /// The model or a filter around it refused the turn, after the opt-in
-    /// refusal fallback, if configured, could not answer. The input is in
+    /// refusal fallback, if configured, also refused. The input is in
     /// [`Task::refused_input`].
     Refusal,
     /// Tool calls failed under `ToolErrorPolicy::PauseAndAwaitApproval`;

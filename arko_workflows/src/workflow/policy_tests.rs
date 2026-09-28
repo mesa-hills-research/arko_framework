@@ -211,6 +211,52 @@ async fn approve_all_is_the_default_and_hooks_get_the_approval_reason() {
     assert!(workflow.context().approval_reasons.lock().is_empty());
 }
 
+/// Under `ApproveAll` one warning per agent: at its first call its
+/// configuration would have held, naming the tool and saying its other such
+/// calls are approved without further warnings. (It was once one per agent,
+/// tool and reason.)
+#[tokio::test]
+async fn approve_all_warns_once_per_agent_naming_the_first_tool() {
+    let workspace = Workspace::new();
+    let server = scripted(probe_then_done).await;
+    let workflow = builder(&server, &workspace, approving_agent(&[]))
+        .build()
+        .unwrap();
+    let call = |tool: &str, outside: bool| arko_agents::PendingToolCallInfo {
+        tool_call_id: uuid::Uuid::new_v4(),
+        tool_name: tool.to_string(),
+        parameters: HashMap::new(),
+        tool_description: String::new(),
+        approval_reason: arko_agents::ApprovalReason {
+            tool_not_auto_approved: !outside,
+            path_outside_workspace: outside.then(|| "../outside.txt".to_string()),
+        },
+    };
+    let context = workflow.context();
+    let warning = super::engine::auto_approval_warning(context, "coder", &call("probe", false))
+        .expect("the first call is warned about");
+    assert!(
+        warning.contains("approving 'probe' for agent 'coder'"),
+        "{warning}"
+    );
+    assert!(
+        warning.contains(
+            "The agent's other calls that need approval are approved too, without further warnings."
+        ),
+        "{warning}"
+    );
+    for (tool, outside) in [("probe", false), ("write_file", false), ("read_file", true)] {
+        assert!(
+            super::engine::auto_approval_warning(context, "coder", &call(tool, outside)).is_none(),
+            "{tool}"
+        );
+    }
+    assert!(
+        super::engine::auto_approval_warning(context, "reviewer", &call("probe", false)).is_some(),
+        "another agent is warned about once too"
+    );
+}
+
 /// `RespectAgentConfig` pauses the agent for its caller instead of running
 /// the call; `OnAgentPaused` fires once and `OnWorkflowFailed` doesn't.
 /// Resuming with a decision runs (or rejects) the call.

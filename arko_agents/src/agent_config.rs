@@ -1016,8 +1016,11 @@ pub struct AgentConfig {
     /// Opt-in: a model (with its generation settings) that a refused turn is
     /// sent to once, unchanged, before the refusal stops the task. The
     /// refused turn is not kept; the fallback's response continues the task,
-    /// and later turns use `llm_config` again. If the fallback request fails
-    /// or also refuses, the refusal stands. Off by default.
+    /// and later turns use `llm_config` again. If the fallback also refuses,
+    /// the refusal stands; a fallback request that fails otherwise is
+    /// recovered from by its own error (retried to the fallback model, or
+    /// paused with that error's cause and the fallback still pending). Off
+    /// by default.
     ///
     /// The fallback must use the configured model's provider ([`validate`](AgentConfig::validate)
     /// rejects others): providers can't replay each other's assistant turns.

@@ -133,7 +133,9 @@ pub enum ErrorRecoveryPolicy {
     /// - A refusal: the agent's refusal settings apply first (the opt-in
     ///   `refusal_fallback` model has already been tried when configured);
     ///   a refusal that stands fails the run with a clear reason, since the
-    ///   same input would be refused again.
+    ///   same input would be refused again. A fallback request that fails
+    ///   for another reason (a dropped connection, a server error) pauses
+    ///   with that failure's cause and is recovered from as such.
     /// - Errors retrying can't fix (a request, credential or configuration
     ///   error) and responses the runtime can't use: the run fails with a
     ///   clear reason.

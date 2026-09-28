@@ -4095,19 +4095,8 @@ impl AgentLoop {
         tool_call_id: Option<Uuid>,
         cause: ErrorRecoveryCause,
     ) -> Result<(), ArkoAgentsError> {
-        // A fallback request that ends here doesn't carry over: the refusal
-        // it was to answer stands, and approving recovery resends to the
-        // configured model.
-        let (message, cause) = match self.task.fallback_for.take() {
-            Some(refusal) if self.current_request_is_fallback => (
-                format!(
-                    "{}. The fallback model could not answer instead: {message}",
-                    ai::Error::Refusal(Box::new(refusal))
-                ),
-                ErrorRecoveryCause::Refusal,
-            ),
-            _ => (message, cause),
-        };
+        // A pending fallback stays pending: continuing sends its request
+        // again, and resolving the refusal drops it.
         self.task.monitor_pause = false;
         let pause = matches!(
             self.task.agent_config.llm_error_policy,
@@ -4143,9 +4132,10 @@ impl AgentLoop {
     /// Reports a refusal and stops recovery: the same input is expected to be
     /// refused again, so it is never retried unchanged. With the opt-in
     /// [`AgentConfig::refusal_fallback`], a refusal from the configured model
-    /// instead sends the same input to the fallback model once; if that
-    /// request fails, the refusal stands (see
-    /// [`handle_llm_error`](Self::handle_llm_error)).
+    /// instead sends the same input to the fallback model once; a failure
+    /// of that request is recovered from by its own error, the fallback
+    /// staying pending, and only the fallback's own refusal makes the
+    /// refusal stand (see [`recover`](Self::recover)).
     ///
     /// A model's own refusal ([`ai::RefusalSource::keeps_turn`]) stays in
     /// history so the model can see what it declined, with the refusal
@@ -4235,6 +4225,9 @@ impl AgentLoop {
             })
             .await?;
             self.task.fallback_for = Some(refusal);
+            // The refusal was a response: the fallback's request starts a
+            // recovery of its own.
+            self.reset_llm_recovery();
             return Ok(());
         }
         self.handle_llm_error(ai::Error::Refusal(Box::new(refusal)), None)
@@ -4380,16 +4373,13 @@ impl AgentLoop {
         tool_call_id: Option<Uuid>,
         note: Option<String>,
     ) -> Result<(), ArkoAgentsError> {
-        if self.task.fallback_for.is_some() && self.current_request_is_fallback {
-            // The fallback model couldn't answer the refused turn: the
-            // refusal stands (finish_llm_recovery names it), and the
-            // fallback's attempts don't count against the configured
-            // model's recovery.
-            self.reset_llm_recovery();
-            return self
-                .finish_llm_recovery(error.to_string(), tool_call_id, ErrorRecoveryCause::Refusal)
-                .await;
-        }
+        // A failed fallback request (the refusal fallback answering a refused
+        // turn) is recovered from like any request, by its own error: a
+        // transient failure is retried, to the fallback model, and a pause
+        // keeps the fallback pending, so continuing sends it again. Only the
+        // fallback's own refusal (see `handle_refusal`) makes the refusal
+        // stand.
+        let fallback = self.task.fallback_for.is_some() && self.current_request_is_fallback;
         let mut config = self.task.agent_config.llm_retry_config.clone();
         let policy = self.task.agent_config.llm_error_policy.clone();
         let wait = self.recovery_wait(&error);
@@ -4470,6 +4460,13 @@ impl AgentLoop {
                 }
                 None => format!("LLM error (attempt {attempt}/{max_attempts}): {error}"),
             },
+        };
+        let message = if fallback {
+            format!(
+                "The refusal fallback model's request failed; it still has the refused input to answer. {message}"
+            )
+        } else {
+            message
         };
         let stop = if !error.is_retryable() {
             Some((
@@ -4660,13 +4657,11 @@ impl AgentLoop {
     }
 
     /// Pauses for a monitor (like exhausted recovery), marking the pause so
-    /// that approving it adds no error note to the conversation.
+    /// that approving it adds no error note to the conversation. A fallback
+    /// still to be made survives the pause.
     async fn finish_monitor_pause(&mut self, message: String) -> Result<(), ArkoAgentsError> {
-        // A fallback still to be made survives the pause.
-        let fallback_for = self.task.fallback_for.clone();
         self.finish_llm_recovery(message, None, ErrorRecoveryCause::Monitor)
             .await?;
-        self.task.fallback_for = fallback_for;
         self.task.monitor_pause = matches!(
             self.task.current_state,
             TaskState::AwaitingErrorRecoveryApproval { .. }

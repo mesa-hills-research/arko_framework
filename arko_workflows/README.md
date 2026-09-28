@@ -483,8 +483,9 @@ happens when an agent would otherwise stop for a person:
   doesn't auto-approve (`default_auto_approve_tool_use` is off by default in
   arko_agents) and for a path outside the workspace under
   `PathSafetyPolicy::RequireApproval`. **The default, `ApprovalPolicy::ApproveAll`,
-  approves every such call**, and logs the first one per agent, tool, and reason as a
-  warning. `RespectAgentConfig` pauses the agent for the caller instead; `Handler`
+  approves every such call**, and logs the first one per agent as a warning (naming
+  the tool, and that the agent's other such calls are approved without further
+  warnings). `RespectAgentConfig` pauses the agent for the caller instead; `Handler`
   gives each call to your `ToolApprovalHandler`, which approves, rejects, or pauses.
   The tool hooks receive why a call needed approval (`HookContext::approval_reason`).
 - `error_recovery_policy`: the agent runtime first retries a failed model request on

@@ -72,9 +72,8 @@ pub struct SharedContext {
     /// hooks.
     pub(crate) approval_reasons:
         parking_lot::Mutex<HashMap<uuid::Uuid, (uuid::Uuid, arko_agents::ApprovalReason)>>,
-    /// The (agent, tool, reason) auto-approvals already warned about.
-    pub(crate) approval_warnings:
-        parking_lot::Mutex<std::collections::HashSet<(String, String, String)>>,
+    /// The agents whose auto-approvals under `ApproveAll` were warned about.
+    pub(crate) approval_warnings: parking_lot::Mutex<std::collections::HashSet<String>>,
     pub ballots: Option<Arc<crate::voting::BallotStore>>,
     /// The agents offered `cast_vote` (see `WorkflowBuilder::enable_voting`).
     pub voters: std::collections::HashSet<String>,

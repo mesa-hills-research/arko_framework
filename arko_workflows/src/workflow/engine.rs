@@ -336,22 +336,30 @@ async fn pause_for_caller(
     })
 }
 
-/// Logs, once per agent, tool and reason, that a call the agent's
-/// configuration marks for approval was approved under `ApproveAll`.
+/// Logs, once per agent, that a call the agent's configuration marks for
+/// approval was approved under `ApproveAll`.
 fn warn_auto_approved(ctx: &SharedContext, agent_name: &str, call: &PendingToolCallInfo) {
-    let reason = call.approval_reason.describe();
-    let first = ctx.approval_warnings.lock().insert((
-        agent_name.to_string(),
-        call.tool_name.clone(),
-        reason.clone(),
-    ));
-    if first {
-        log::warn!(
-            "Workflow '{}': approving '{}' for agent '{agent_name}' under ApprovalPolicy::ApproveAll (the default), although {reason}; set WorkflowBuilder::approval_policy to decide such calls. Logged once per agent, tool and reason.",
-            ctx.workflow_name,
-            call.tool_name
-        );
+    if let Some(warning) = auto_approval_warning(ctx, agent_name, call) {
+        log::warn!("{warning}");
     }
+}
+
+/// The warning for the first call of `agent_name` its configuration marks
+/// for approval that `ApproveAll` approves; `None` for its later ones.
+pub(super) fn auto_approval_warning(
+    ctx: &SharedContext,
+    agent_name: &str,
+    call: &PendingToolCallInfo,
+) -> Option<String> {
+    if !ctx.approval_warnings.lock().insert(agent_name.to_string()) {
+        return None;
+    }
+    Some(format!(
+        "Workflow '{}': approving '{}' for agent '{agent_name}' under ApprovalPolicy::ApproveAll (the default), although {}. The agent's other calls that need approval are approved too, without further warnings. Set WorkflowBuilder::approval_policy to decide such calls.",
+        ctx.workflow_name,
+        call.tool_name,
+        call.approval_reason.describe()
+    ))
 }
 
 /// Stops a nested run (inside another agent's tool call: a completion

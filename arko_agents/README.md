@@ -551,7 +551,7 @@ says why the task paused, as an `ErrorRecoveryCause`: `RetriesExhausted { retry_
 the delay the provider asked for, or the wait the runtime had scheduled, when known), `NonRetryable` (the request, a
 credential, or the configuration must change), `UnusableResponses` (responses the runtime
 couldn't use, up to the attempt limit), `UsageLimit { resets_at_unix_ms }`, `Refusal`
-(after the opt-in refusal fallback, if configured, could not answer), `ToolError` (under
+(after the opt-in refusal fallback, if configured, also refused), `ToolError` (under
 `PauseAndAwaitApproval`), `Monitor` (an opt-in monitor paused it), or `Middleware` (the
 execution middleware paused it with `PauseTask`). A task saved before
 causes were recorded loads with `Unknown`.
@@ -848,8 +848,12 @@ reported (with its `RefusedInput`), and the same input goes once to the fallback
 task, and later turns use the configured model again. The pending fallback is saved with
 the task (`Task::fallback_for`), survives a monitor pause, and holds back context updates
 (saved with the task too) and file-tree changes until it has answered. If the fallback
-also refuses or its request fails, the refusal stands and can be resolved as above;
-approving recovery resends to the configured model.
+also refuses, the refusal stands and can be resolved as above. A fallback request that
+fails otherwise is recovered from like any request, by its own error: a dropped
+connection, server error or rate limit is retried to the fallback model, and when
+recovery ends the task pauses with that error's cause (`RetriesExhausted`,
+`NonRetryable`, ...) with the fallback still pending, so continuing sends its request
+again; resolving the refusal instead sends the changed input to the configured model.
 
 Across the two models, the ChatGPT turn-state token of one is not sent with the other's
 requests. OpenAI reasoning is replayed between them only when both are `Provider::OpenAI`

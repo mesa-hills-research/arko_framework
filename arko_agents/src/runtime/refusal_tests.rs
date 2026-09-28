@@ -545,52 +545,88 @@ async fn a_refusal_from_the_fallback_model_stops_the_task() {
     );
 }
 
-/// A fallback request that fails leaves the refusal standing and
-/// resolvable; approving recovery resends to the configured model.
+/// A failed fallback request is recovered from by its own error, like any
+/// request, and the fallback stays pending: a transient failure (a dropped
+/// stream, a server error, a rate limit) is retried to the fallback model;
+/// once the retries run out the task pauses with `RetriesExhausted`, and on
+/// a request error with `NonRetryable`; continuing sends the fallback's
+/// request again. (Every failure of the fallback request once made the
+/// refusal stand, as `Refusal`, which a workflow's automatic recovery
+/// doesn't retry.)
 #[tokio::test(start_paused = true)]
-async fn a_failed_fallback_request_leaves_the_refusal_resolvable() {
-    let (mut agent, mut events, commands) = harness();
-    native(&mut agent);
-    agent.task.agent_config.refusal_fallback = fallback_config(ai::Model::openai_gpt_6_sol());
-    let requested = Arc::clone(&agent.requested_models);
-    push(&mut agent, refused());
-    agent
-        .scripted_responses
-        .get_mut()
-        .unwrap()
-        .push_back(Err(provider_failure(401, None)));
-    push(&mut agent, complete_response());
-    let runner = tokio::spawn(agent.run());
-    loop {
-        match timeout(Duration::from_secs(60), events.recv())
-            .await
+async fn a_failed_fallback_request_is_recovered_from_by_its_own_error() {
+    let dropped = || ai::Error::StreamTruncated("connection reset".into());
+    let cases: [(fn() -> ai::Error, u32, Option<ErrorRecoveryCause>); 5] = [
+        (dropped, 3, None),
+        (|| provider_failure(503, None), 3, None),
+        (
+            || provider_failure(429, Some(Duration::from_secs(2))),
+            3,
+            None,
+        ),
+        (
+            dropped,
+            1,
+            Some(ErrorRecoveryCause::RetriesExhausted {
+                retry_after_ms: None,
+            }),
+        ),
+        (
+            || provider_failure(401, None),
+            3,
+            Some(ErrorRecoveryCause::NonRetryable),
+        ),
+    ];
+    for (failure, max_attempts, expected_pause) in cases {
+        let (mut agent, mut events, commands) = harness();
+        native(&mut agent);
+        agent.task.agent_config.refusal_fallback = fallback_config(ai::Model::openai_gpt_6_sol());
+        agent.task.agent_config.llm_error_policy =
+            LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts };
+        let requested = Arc::clone(&agent.requested_models);
+        push(&mut agent, refused());
+        agent
+            .scripted_responses
+            .get_mut()
             .unwrap()
-            .unwrap()
-        {
-            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
-                error_message,
-                ..
-            }) => {
-                assert!(error_message.contains("refused"), "{error_message}");
-                assert!(
-                    error_message.contains("fallback model could not answer"),
-                    "{error_message}"
-                );
-                commands
-                    .send(UserCommand::ApproveErrorRecovery { message: None })
-                    .await
-                    .unwrap();
+            .push_back(Err(failure()));
+        push(&mut agent, complete_response());
+        let runner = tokio::spawn(agent.run());
+        let mut paused = None;
+        loop {
+            match timeout(Duration::from_secs(600), events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
+                    error_message,
+                    cause,
+                }) => {
+                    assert!(
+                        error_message.contains("The refusal fallback model's request failed"),
+                        "{error_message}"
+                    );
+                    paused = Some(cause);
+                    commands
+                        .send(UserCommand::ContinueAfterError { note: None })
+                        .await
+                        .unwrap();
+                }
+                AgentEvent::TaskStreamEnd => break,
+                _ => {}
             }
-            AgentEvent::TaskStreamEnd => break,
-            _ => {}
         }
+        let task = runner.await.unwrap().unwrap();
+        assert!(matches!(task.current_state, TaskState::Completed { .. }));
+        assert_eq!(paused, expected_pause, "{max_attempts}");
+        assert_eq!(
+            *requested.lock().unwrap(),
+            ["gpt-5.6-luna", "gpt-6-sol", "gpt-6-sol"],
+            "{expected_pause:?}"
+        );
+        assert!(task.fallback_for.is_none());
     }
-    let task = runner.await.unwrap().unwrap();
-    assert!(matches!(task.current_state, TaskState::Completed { .. }));
-    assert_eq!(
-        *requested.lock().unwrap(),
-        ["gpt-5.6-luna", "gpt-6-sol", "gpt-5.6-luna"]
-    );
 }
 
 #[test]
