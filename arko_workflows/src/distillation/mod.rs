@@ -672,14 +672,15 @@ impl DistillationConfig {
     /// runaway response costs (a summary cut off at it is not used). The
     /// ChatGPT OAuth backend rejects a limit, so none is sent there.
     fn generation_config(&self, chatgpt_oauth: bool) -> arko_ai::GenerationConfig {
-        let mut config = arko_ai::GenerationConfig::default();
-        config.max_tokens = match self.max_output_tokens {
-            Some(tokens) => Some(tokens),
-            None if chatgpt_oauth => None,
-            None => Some(self.default_max_output_tokens()),
-        };
-        config.reasoning = self.reasoning.clone();
-        config
+        arko_ai::GenerationConfig {
+            max_tokens: match self.max_output_tokens {
+                Some(tokens) => Some(tokens),
+                None if chatgpt_oauth => None,
+                None => Some(self.default_max_output_tokens()),
+            },
+            reasoning: self.reasoning.clone(),
+            ..Default::default()
+        }
     }
 
     /// The conversation and settings of a request to distill `raw_result`,

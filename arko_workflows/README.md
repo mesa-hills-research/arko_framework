@@ -141,11 +141,15 @@ loop {
 }
 ```
 
-The managed paths (`run_agent`, `continue_agent`, `run_agents_parallel`, and
-`AgentHandle::wait`) approve tool calls automatically, record costs and results,
-and apply budgets, hooks, verification, and persistence. To handle events yourself,
-split a spawned handle into its channels. The caller then takes over event handling,
-approvals, usage accounting, and result recording:
+The managed paths (`run_agent`, `continue_agent`, `resume_agent`,
+`run_agents_parallel`, and `AgentHandle::wait`) answer tool approvals and
+error-recovery pauses under the workflow's [policies](#approvals-and-error-recovery)
+(by default: approve every call, and recover from errors automatically), record costs
+and results, and apply budgets, hooks, verification, and persistence. In a parallel
+run, an agent that pauses for input or a decision is not a failure: its result comes
+back with the others, to be continued. To handle events yourself, split a spawned
+handle into its channels. The caller then takes over event handling, approvals, usage
+accounting, and result recording:
 
 ```rust
 use arko_agents::{AgentEvent, UserCommand};
@@ -286,9 +290,10 @@ Hook points:
 - `PreAgentSpawn`, `PostAgentCompletion`, `PostAgentFailure`,
   `PostAgentCancellation`, `PostAgentInterruption`
 - `PreToolExecution`, `PostToolExecution`, `PostToolResultInterception`
-- `OnUserInputRequired`
+- `OnUserInputRequired`, `OnAgentPaused`
 - `OnBudgetWarning`, `OnBudgetExceeded`
-- `OnWorkflowFailed`, `OnWorkflowCancelled`, `OnWorkflowPause`, `OnWorkflowResume`
+- `OnWorkflowFailed` (once per failed run call; not for a pause or a cancellation),
+  `OnWorkflowCancelled`, `OnWorkflowPause`, `OnWorkflowResume`
 - `OnAgentMessage`, `OnFreshnessConflict`
 
 A hook returns `Continue`, `Skip`, or `Abort(reason)`. `Skip` rejects the current
@@ -453,6 +458,66 @@ is also saved. To resume, pass that result and the answer to
 `continue_agent(&waiting_result, answer)`.
 
 Suspension stops the live runtime without marking the task failed or cancelled.
+`OnUserInputRequired` fires, and `OnWorkflowFailed` doesn't: a pause is not a
+failure.
+
+## Approvals and error recovery
+
+**By default a workflow runs without human input.** Two builder settings decide what
+happens when an agent would otherwise stop for a person:
+
+- `approval_policy`: an agent asks for approval for a tool call its configuration
+  doesn't auto-approve (`default_auto_approve_tool_use` is off by default in
+  arko_agents) and for a path outside the workspace under
+  `PathSafetyPolicy::RequireApproval`. **The default, `ApprovalPolicy::ApproveAll`,
+  approves every such call**, and logs the first one per agent, tool, and reason as a
+  warning. `RespectAgentConfig` pauses the agent for the caller instead; `Handler`
+  gives each call to your `ToolApprovalHandler`, which approves, rejects, or pauses.
+  The tool hooks receive why a call needed approval (`HookContext::approval_reason`).
+- `error_recovery_policy`: the agent runtime first retries a failed model request on
+  its own (with backoff, a rate limit after the provider's delay, without ever cutting
+  off a request in flight); when those retries run out, the agent pauses. **The
+  default, `ErrorRecoveryPolicy::Automatic`, recovers without an attempt limit**: after
+  an outage it waits (30 seconds, growing to 15 minutes while failures repeat) and
+  sends the request again unchanged; at a plan usage limit it waits until the limit
+  resets; after tool errors it continues. It fails the run with a clear reason on
+  errors that retrying can't fix (authentication, invalid requests), on refusals that
+  stand after the agent's refusal fallback, and on responses the runtime can't use.
+  The model is never told that a user approved anything. `Limited { max }` caps the
+  automatic recoveries per run call; `ReturnToCaller` pauses at every error-recovery
+  pause.
+
+A paused agent is recorded with `AgentRunStatus::Paused`, the call returns
+`WorkflowError::AgentPaused { agent, task_id, pause }`, and `OnAgentPaused` fires.
+Decide and continue with `resume_agent`:
+
+```rust
+use arko_workflows::prelude::*;
+
+match workflow.run_agent("coder", "Deploy the fix").await {
+    Err(WorkflowError::AgentPaused { task_id, pause, .. }) => {
+        let paused = workflow.agent_result(task_id).unwrap();
+        let resume = match pause {
+            AgentPause::ToolApproval { calls } => AgentResume::ToolApprovals(
+                calls.iter().map(|call| (call.tool_call_id, ToolApprovalDecision::Approve {
+                    custom_tool_output: None,
+                    message_to_agent: None,
+                })).collect(),
+            ),
+            AgentPause::ErrorRecovery { .. } => AgentResume::ContinueAfterError { note: None },
+        };
+        workflow.resume_agent(&paused, resume).await?;
+    }
+    other => { other?; }
+}
+```
+
+(`ToolApprovalDecision` is `arko_agents::runtime::command::ToolApprovalDecision`.) The
+paused task is saved with checkpoints, so it can be resumed after a restart. A pause
+by an opt-in agent monitor (the plan-usage threshold's `Pause` action or the cache
+monitor's `pause_below`) always returns to the caller. See
+[Approvals and error recovery](INDEX.md#approvals-and-error-recovery) for every cause
+and option.
 
 ## Durable steps
 

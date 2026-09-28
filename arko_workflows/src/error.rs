@@ -26,11 +26,25 @@ pub enum WorkflowError {
     #[error("Agent '{agent}' was cancelled: {reason}")]
     AgentCancelled { agent: String, reason: String },
 
+    /// The agent asked the user a question and no user input handler is
+    /// set: it is suspended, recorded with status `WaitingForInput`; answer
+    /// with `Workflow::continue_agent`. A pause, not a failure.
     #[error("Agent '{agent}' requires user input: {questions}")]
     UserInputRequired {
         agent: String,
         task_id: uuid::Uuid,
         questions: String,
+    },
+
+    /// The agent paused for a decision the workflow's approval or error
+    /// recovery policy leaves to the caller: it is suspended, recorded with
+    /// status `Paused`; continue it with `Workflow::resume_agent`. A pause,
+    /// not a failure.
+    #[error("Agent '{agent}' paused, {pause}")]
+    AgentPaused {
+        agent: String,
+        task_id: uuid::Uuid,
+        pause: crate::policy::AgentPause,
     },
 
     #[error("Memory tier '{0}' not found")]

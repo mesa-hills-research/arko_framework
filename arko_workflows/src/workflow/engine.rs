@@ -6,10 +6,13 @@ use serde_json::Value;
 
 use arko_agents::skill::{SkillManager, SkillPromptContext};
 use arko_agents::{
-    AgentConfig, AgentRuntime, InterceptedResult, InterceptorConfig, Task, ToolCallContext,
-    ToolError, ToolExecutionContext, ToolExecutionDecision, ToolExecutionMiddleware,
-    ToolExecutionOutcome, ToolRegistry, ToolResultInterceptor,
-    runtime::{command::UserCommand, event::AgentEvent},
+    AgentConfig, AgentRuntime, InterceptedResult, InterceptorConfig, PendingToolCallInfo, Task,
+    ToolCallContext, ToolError, ToolExecutionContext, ToolExecutionDecision,
+    ToolExecutionMiddleware, ToolExecutionOutcome, ToolRegistry, ToolResultInterceptor,
+    runtime::{
+        command::{ToolApprovalDecision, UserCommand},
+        event::AgentEvent,
+    },
     task::{CANCELLED_BY_USER, TaskState},
     tool::TaskContext,
 };
@@ -22,8 +25,13 @@ use crate::freshness::ActorId;
 use crate::hooks::context::HookContext;
 use crate::hooks::{HookPoint, HookResult};
 use crate::memory::tools::*;
+use crate::messaging::registry::WaitReason;
 use crate::messaging::tools::*;
 use crate::persistence::PersistenceManager;
+use crate::policy::{
+    AgentPause, AgentResume, ApprovalPolicy, RecoveryAction, ToolApprovalOutcome,
+    ToolApprovalRequest,
+};
 use crate::services::{RUN_WORKFLOW_AGENT_TOOL_NAME, RunWorkflowAgentTool};
 use crate::verification::{
     CompletionVerifierConfig, VerificationDecision, VerificationKind, VerificationRecord,
@@ -295,15 +303,254 @@ fn charge_usage(
     cost_result
 }
 
+/// The error-recovery state of one drive of an agent.
+#[derive(Default)]
+struct RecoveryState {
+    /// The last error-recovery pause the agent reported, and its cause.
+    pause: Option<(String, arko_agents::ErrorRecoveryCause)>,
+    /// Automatic recoveries in this drive (for `ErrorRecoveryPolicy::Limited`).
+    recovered: u32,
+    /// Pauses in a row without a model response in between.
+    repeat: u32,
+}
+
+/// Suspends the agent for its caller's decision: the run call returns
+/// [`WorkflowError::AgentPaused`].
+async fn pause_for_caller(
+    agent_name: &str,
+    agent_run_id: uuid::Uuid,
+    cmd_tx: &tokio::sync::mpsc::Sender<UserCommand>,
+    pause: AgentPause,
+) -> Result<(), WorkflowError> {
+    let _ = cmd_tx.send(UserCommand::SuspendTask).await;
+    Err(WorkflowError::AgentPaused {
+        agent: agent_name.to_string(),
+        task_id: agent_run_id,
+        pause,
+    })
+}
+
+/// Logs, once per agent, tool and reason, that a call the agent's
+/// configuration marks for approval was approved under `ApproveAll`.
+fn warn_auto_approved(ctx: &SharedContext, agent_name: &str, call: &PendingToolCallInfo) {
+    let reason = call.approval_reason.describe();
+    let first = ctx.approval_warnings.lock().insert((
+        agent_name.to_string(),
+        call.tool_name.clone(),
+        reason.clone(),
+    ));
+    if first {
+        log::warn!(
+            "Workflow '{}': approving '{}' for agent '{agent_name}' under ApprovalPolicy::ApproveAll (the default), although {reason}; set WorkflowBuilder::approval_policy to decide such calls. Logged once per agent, tool and reason.",
+            ctx.workflow_name,
+            call.tool_name
+        );
+    }
+}
+
+/// Decides tool calls awaiting approval under the workflow's approval
+/// policy: a decision per call, or `None` to pause the agent for its
+/// caller. Each call's approval reason is kept for the tool hooks until it
+/// has run.
+async fn decide_tool_calls(
+    agent_name: &str,
+    agent_run_id: uuid::Uuid,
+    calls: &[PendingToolCallInfo],
+    ctx: &Arc<SharedContext>,
+) -> Result<Option<Vec<(uuid::Uuid, ToolApprovalDecision)>>, WorkflowError> {
+    let approve = || ToolApprovalDecision::Approve {
+        custom_tool_output: None,
+        message_to_agent: None,
+    };
+    let decisions = match &ctx.approval_policy {
+        ApprovalPolicy::ApproveAll => {
+            for call in calls {
+                warn_auto_approved(ctx, agent_name, call);
+            }
+            calls
+                .iter()
+                .map(|call| (call.tool_call_id, approve()))
+                .collect()
+        }
+        ApprovalPolicy::RespectAgentConfig => return Ok(None),
+        ApprovalPolicy::Handler(handler) => {
+            let mut decisions = Vec::with_capacity(calls.len());
+            for call in calls {
+                let request = ToolApprovalRequest {
+                    workflow_run_id: ctx.workflow_run_id,
+                    agent_run_id,
+                    agent_name: agent_name.to_string(),
+                    tool_call_id: call.tool_call_id,
+                    tool_name: call.tool_name.clone(),
+                    parameters: call.parameters.clone(),
+                    tool_description: call.tool_description.clone(),
+                    reason: call.approval_reason.clone(),
+                };
+                // The handler may wait on a person; a stop doesn't.
+                let outcome = tokio::select! {
+                    biased;
+                    _ = ctx.run_control.stopped() => return Err(stop_error(ctx)),
+                    outcome = handler.decide(request) => outcome,
+                };
+                decisions.push((
+                    call.tool_call_id,
+                    match outcome {
+                        ToolApprovalOutcome::Approve => approve(),
+                        ToolApprovalOutcome::Reject { reason } => {
+                            ToolApprovalDecision::Reject { reason }
+                        }
+                        ToolApprovalOutcome::Pause => return Ok(None),
+                    },
+                ));
+            }
+            decisions
+        }
+    };
+    record_approval_reasons(ctx, calls, &decisions);
+    Ok(Some(decisions))
+}
+
+/// Keeps the approval reasons of the approved `calls` for the tool hooks,
+/// until each has run.
+fn record_approval_reasons(
+    ctx: &SharedContext,
+    calls: &[PendingToolCallInfo],
+    decisions: &[(uuid::Uuid, ToolApprovalDecision)],
+) {
+    let mut reasons = ctx.approval_reasons.lock();
+    for call in calls {
+        let approved = decisions.iter().any(|(id, decision)| {
+            *id == call.tool_call_id && matches!(decision, ToolApprovalDecision::Approve { .. })
+        });
+        if approved {
+            reasons.insert(call.tool_call_id, call.approval_reason.clone());
+        }
+    }
+}
+
+/// Sends the decisions for `calls`, one call's or a batch's.
+async fn send_tool_decisions(
+    cmd_tx: &tokio::sync::mpsc::Sender<UserCommand>,
+    batch_id: Option<uuid::Uuid>,
+    decisions: Vec<(uuid::Uuid, ToolApprovalDecision)>,
+) {
+    let command = match batch_id {
+        Some(batch_id) => UserCommand::SubmitBatchToolApprovals {
+            batch_id,
+            decisions: decisions.into_iter().collect(),
+        },
+        None => match decisions.into_iter().next() {
+            Some((
+                tool_call_id,
+                ToolApprovalDecision::Approve {
+                    custom_tool_output,
+                    message_to_agent,
+                },
+            )) => UserCommand::ApproveToolUse {
+                tool_call_id,
+                custom_tool_output,
+                message_to_agent,
+            },
+            Some((tool_call_id, ToolApprovalDecision::Reject { reason })) => {
+                UserCommand::RejectToolUse {
+                    tool_call_id,
+                    reason,
+                }
+            }
+            None => return,
+        },
+    };
+    let _ = cmd_tx.send(command).await;
+}
+
+/// Answers an error-recovery pause under the workflow's error recovery
+/// policy: continues (after a wait), fails the task, or pauses the agent
+/// for its caller.
+async fn answer_recovery_pause(
+    agent_name: &str,
+    agent_run_id: uuid::Uuid,
+    fallback_error: String,
+    recovery: &mut RecoveryState,
+    cmd_tx: &tokio::sync::mpsc::Sender<UserCommand>,
+    ctx: &Arc<SharedContext>,
+) -> Result<(), WorkflowError> {
+    let (error, cause) = recovery
+        .pause
+        .clone()
+        .unwrap_or((fallback_error, arko_agents::ErrorRecoveryCause::Unknown));
+    recovery.repeat = recovery.repeat.saturating_add(1);
+    let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+    match ctx.error_recovery_policy.action(
+        &cause,
+        &error,
+        recovery.recovered,
+        recovery.repeat,
+        &ctx.recovery_waits,
+        now_unix_ms,
+    ) {
+        RecoveryAction::ContinueAfter(wait) => {
+            if !wait.is_zero() {
+                let until = chrono::Utc::now()
+                    + chrono::Duration::from_std(wait).unwrap_or(chrono::Duration::MAX);
+                ctx.registry.set_waiting(
+                    agent_run_id,
+                    match cause {
+                        arko_agents::ErrorRecoveryCause::UsageLimit { .. } => {
+                            WaitReason::UsageLimit { until: Some(until) }
+                        }
+                        _ => WaitReason::Retrying { until: Some(until) },
+                    },
+                );
+                log::info!(
+                    "Workflow '{}': agent '{agent_name}' paused ({}); continuing in {wait:?}: {error}",
+                    ctx.workflow_name,
+                    crate::policy::cause_name(&cause)
+                );
+                tokio::select! {
+                    biased;
+                    _ = ctx.run_control.stopped() => return Err(stop_error(ctx)),
+                    _ = tokio::time::sleep(wait) => {}
+                }
+                wait_while_paused(ctx).await?;
+            }
+            recovery.recovered = recovery.recovered.saturating_add(1);
+            let _ = cmd_tx
+                .send(UserCommand::ContinueAfterError { note: None })
+                .await;
+            Ok(())
+        }
+        RecoveryAction::Fail(reason) => {
+            let _ = cmd_tx
+                .send(UserCommand::RejectErrorRecovery {
+                    message: Some(reason),
+                })
+                .await;
+            Ok(())
+        }
+        RecoveryAction::ReturnToCaller => {
+            pause_for_caller(
+                agent_name,
+                agent_run_id,
+                cmd_tx,
+                AgentPause::ErrorRecovery { error, cause },
+            )
+            .await
+        }
+    }
+}
+
 /// Drive the agent event loop with default workflow behavior.
 ///
-/// Handles tool approval, budget tracking, and error recovery automatically.
-/// Tool hooks and freshness policy are enforced by execution middleware, so
-/// auto-approved and batched calls follow the same path.
+/// Answers tool approvals under the workflow's [`ApprovalPolicy`] and
+/// error-recovery pauses under its [`ErrorRecoveryPolicy`], and tracks
+/// budget. Tool hooks and freshness policy are enforced by execution
+/// middleware, so auto-approved and batched calls follow the same path.
 ///
-/// Returns when the agent ends, or with an error when the workflow must stop
-/// it (including the stop's error once the run is cancelled or aborted); the
-/// caller then stops the agent.
+/// Returns when the agent ends; with [`WorkflowError::UserInputRequired`] or
+/// [`WorkflowError::AgentPaused`] once it is suspended for its caller; or
+/// with another error when the workflow must stop it (including the stop's
+/// error once the run is cancelled or aborted), and the caller then stops
+/// the agent.
 pub(crate) async fn drive_event_loop(
     agent_name: &str,
     agent_run_id: uuid::Uuid,
@@ -312,7 +559,7 @@ pub(crate) async fn drive_event_loop(
     ctx: &Arc<SharedContext>,
     persistence: Option<&Arc<PersistenceManager>>,
 ) -> Result<(), WorkflowError> {
-    let mut approved_error_recoveries = 0_u32;
+    let mut recovery = RecoveryState::default();
     loop {
         let event = tokio::select! {
             biased;
@@ -333,39 +580,58 @@ pub(crate) async fn drive_event_loop(
             });
         }
         match event {
-            AgentEvent::ToolCallAwaitingApproval { tool_call_id, .. } => {
-                let _ = cmd_tx
-                    .send(UserCommand::ApproveToolUse {
-                        tool_call_id,
-                        custom_tool_output: None,
-                        message_to_agent: None,
-                    })
-                    .await;
+            AgentEvent::ToolCallAwaitingApproval {
+                tool_call_id,
+                tool_name,
+                parameters,
+                tool_description,
+                approval_reason,
+            } => {
+                let calls = [PendingToolCallInfo {
+                    tool_call_id,
+                    tool_name,
+                    parameters,
+                    tool_description,
+                    approval_reason,
+                }];
+                match decide_tool_calls(agent_name, agent_run_id, &calls, ctx).await? {
+                    Some(decisions) => send_tool_decisions(cmd_tx, None, decisions).await,
+                    None => {
+                        return pause_for_caller(
+                            agent_name,
+                            agent_run_id,
+                            cmd_tx,
+                            AgentPause::ToolApproval {
+                                calls: calls.to_vec(),
+                            },
+                        )
+                        .await;
+                    }
+                }
             }
 
             AgentEvent::BatchToolCallAwaitingApproval {
                 batch_id,
                 pending_calls,
-            } => {
-                let mut decisions = HashMap::new();
-                for call in &pending_calls {
-                    decisions.insert(
-                        call.tool_call_id,
-                        arko_agents::runtime::command::ToolApprovalDecision::Approve {
-                            custom_tool_output: None,
-                            message_to_agent: None,
+            } => match decide_tool_calls(agent_name, agent_run_id, &pending_calls, ctx).await? {
+                Some(decisions) => send_tool_decisions(cmd_tx, Some(batch_id), decisions).await,
+                None => {
+                    return pause_for_caller(
+                        agent_name,
+                        agent_run_id,
+                        cmd_tx,
+                        AgentPause::ToolApproval {
+                            calls: pending_calls,
                         },
-                    );
-                }
-                let _ = cmd_tx
-                    .send(UserCommand::SubmitBatchToolApprovals {
-                        batch_id,
-                        decisions,
-                    })
+                    )
                     .await;
-            }
+                }
+            },
 
             AgentEvent::UsageReported(ref usage) => {
+                // A model call went through: the next pause starts a new
+                // series of automatic waits.
+                recovery.repeat = 0;
                 let cost_result = charge_usage(agent_name, usage, ctx);
                 if cost_result.exceeded {
                     let _ = cmd_tx.try_send(UserCommand::CancelTask);
@@ -392,26 +658,29 @@ pub(crate) async fn drive_event_loop(
                 }
             }
 
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
+                ref error_message,
+                ref cause,
+            }) => {
+                recovery.pause = Some((error_message.clone(), cause.clone()));
+            }
+
+            // The runtime reports every error-recovery pause this way, after
+            // the state change that gives its cause.
             AgentEvent::ErrorEncountered {
-                requires_approval_to_retry,
+                requires_approval_to_retry: true,
+                error_message,
                 ..
             } => {
-                if requires_approval_to_retry {
-                    if approved_error_recoveries == 0 {
-                        approved_error_recoveries += 1;
-                        let _ = cmd_tx
-                            .send(UserCommand::ApproveErrorRecovery { message: None })
-                            .await;
-                    } else {
-                        let _ = cmd_tx
-                            .send(UserCommand::RejectErrorRecovery {
-                                message: Some(
-                                    "Workflow-managed error recovery limit reached".to_string(),
-                                ),
-                            })
-                            .await;
-                    }
-                }
+                answer_recovery_pause(
+                    agent_name,
+                    agent_run_id,
+                    error_message,
+                    &mut recovery,
+                    cmd_tx,
+                    ctx,
+                )
+                .await?;
             }
 
             AgentEvent::UserQuestionsAsked { questions } => {
@@ -482,6 +751,15 @@ pub(crate) async fn drive_event_loop(
     }
 
     Ok(())
+}
+
+/// Whether `error` is an agent suspended for its caller, not a failure: it
+/// waits for input or is paused, and the run can go on.
+pub(crate) fn is_pause(error: &WorkflowError) -> bool {
+    matches!(
+        error,
+        WorkflowError::UserInputRequired { .. } | WorkflowError::AgentPaused { .. }
+    )
 }
 
 /// How a run starts.
@@ -723,9 +1001,7 @@ pub(crate) async fn drive_to_result(
     )
     .await;
 
-    let stopping = drive_result
-        .as_ref()
-        .is_err_and(|error| !matches!(error, WorkflowError::UserInputRequired { .. }));
+    let stopping = drive_result.as_ref().is_err_and(|error| !is_pause(error));
     let wound_down = if stopping {
         let deadline = stop_deadline(ctx, depth);
         wind_down(
@@ -741,6 +1017,18 @@ pub(crate) async fn drive_to_result(
         )
         .await
     } else {
+        if drive_result.is_err() {
+            // Suspended for its caller: the agent's last events (its
+            // suspension) are still recorded.
+            while let Some(event) = event_rx.recv().await {
+                if let Err(error) =
+                    publish_event(&agent_name, agent_run_id, &event, ctx, persistence).await
+                {
+                    log::warn!("Could not record an event of paused agent '{agent_name}': {error}");
+                }
+                ctx.registry.observe(agent_run_id, &event);
+            }
+        }
         Some(join_handle.handle().await)
     };
 
@@ -780,13 +1068,14 @@ pub(crate) async fn drive_to_result(
                     reason: stop_reason(ctx, &drive_result),
                 });
             }
-            let completed = matches!(task.current_state, TaskState::Completed { .. });
-            let finalized = finalize_agent_task(agent_name.clone(), task, ctx, persistence).await;
-            if completed {
-                ctx.messages.acknowledge_active(&agent_name, agent_run_id);
-                ctx.messages.acknowledge(&agent_name, &pending_message_ids);
-            }
-            finalized
+            finalize_agent_task(
+                agent_name.clone(),
+                task,
+                &pending_message_ids,
+                ctx,
+                persistence,
+            )
+            .await
         }
         Err(error) => Err(error),
     };
@@ -807,6 +1096,12 @@ pub(crate) async fn drive_to_result(
             agent: agent_name,
             task_id: result.agent_run_id,
             questions: result.error.clone().unwrap_or_default(),
+        }),
+        AgentRunStatus::Paused => Err(WorkflowError::AgentPaused {
+            agent: agent_name,
+            task_id: result.agent_run_id,
+            pause: AgentPause::of(&result.task.current_state)
+                .expect("a paused task awaits a decision"),
         }),
         AgentRunStatus::Interrupted => Err(WorkflowError::AgentInterrupted {
             agent: agent_name,
@@ -863,6 +1158,9 @@ fn run_status(state: &TaskState) -> AgentRunStatus {
         TaskState::Cancelled { .. } => AgentRunStatus::Cancelled,
         TaskState::Failed { .. } => AgentRunStatus::Failed,
         TaskState::AwaitingUserResponse { .. } => AgentRunStatus::WaitingForInput,
+        TaskState::AwaitingToolApproval { .. }
+        | TaskState::AwaitingBatchToolApproval { .. }
+        | TaskState::AwaitingErrorRecoveryApproval { .. } => AgentRunStatus::Paused,
         _ => AgentRunStatus::Interrupted,
     }
 }
@@ -891,19 +1189,30 @@ pub(crate) async fn save_stop_checkpoint(
     }
 }
 
+/// Records an agent run that stopped: its result (replacing an earlier one
+/// of the same task), the messages it holds (acknowledged when it completed;
+/// `prompt_ids` are the messages its prompt presented), its lifecycle hook,
+/// and, with persistence, its task and a checkpoint.
 pub(crate) async fn finalize_agent_task(
     agent_name: String,
     task: Task,
+    prompt_ids: &[uuid::Uuid],
     ctx: &Arc<SharedContext>,
     persistence: Option<&Arc<PersistenceManager>>,
 ) -> Result<AgentResult, WorkflowError> {
     let agent_run_id = task.id;
-    if matches!(task.current_state, TaskState::Completed { .. }) {
-        // Channel acceptance is not consumption: complete_task may finish with
-        // unread InjectContext commands. Confirm only finalized user context.
-        ctx.messages
-            .confirm_active_context(&agent_name, agent_run_id, &task.conversation);
-    }
+    // Channel acceptance is not consumption: complete_task may finish with
+    // unread InjectContext commands. Only context in the conversation counts
+    // as read; context taken but not added stays with the task.
+    ctx.messages.settle_run(
+        &agent_name,
+        agent_run_id,
+        &task.conversation,
+        prompt_ids,
+        &task.pending_context_injections,
+        matches!(task.current_state, TaskState::Completed { .. }),
+    );
+    let pause = AgentPause::of(&task.current_state);
     let (status, summary, error, hook_point) = match &task.current_state {
         TaskState::Completed { summary } => (
             crate::workflow::result::AgentRunStatus::Completed,
@@ -934,6 +1243,14 @@ pub(crate) async fn finalize_agent_task(
             String::new(),
             Some(questions.clone()),
             HookPoint::OnUserInputRequired,
+        ),
+        TaskState::AwaitingToolApproval { .. }
+        | TaskState::AwaitingBatchToolApproval { .. }
+        | TaskState::AwaitingErrorRecoveryApproval { .. } => (
+            crate::workflow::result::AgentRunStatus::Paused,
+            String::new(),
+            pause.as_ref().map(|pause| format!("Paused, {pause}")),
+            HookPoint::OnAgentPaused,
         ),
         state => (
             crate::workflow::result::AgentRunStatus::Interrupted,
@@ -968,6 +1285,34 @@ pub(crate) async fn finalize_agent_task(
         hook.agent_run_id = Some(agent_run_id);
         hook.agent_summary = (!summary.is_empty()).then_some(summary);
         hook.error_message = error;
+        match &pause {
+            Some(AgentPause::ToolApproval { calls }) => {
+                hook.metadata
+                    .insert("pause".to_string(), serde_json::json!("tool_approval"));
+                hook.metadata.insert(
+                    "tools".to_string(),
+                    serde_json::json!(
+                        calls
+                            .iter()
+                            .map(|call| serde_json::json!({
+                                "tool_call_id": call.tool_call_id,
+                                "tool_name": call.tool_name,
+                                "reason": call.approval_reason.describe(),
+                            }))
+                            .collect::<Vec<_>>()
+                    ),
+                );
+            }
+            Some(AgentPause::ErrorRecovery { cause, .. }) => {
+                hook.metadata
+                    .insert("pause".to_string(), serde_json::json!("error_recovery"));
+                hook.metadata.insert(
+                    "cause".to_string(),
+                    serde_json::json!(crate::policy::cause_name(cause)),
+                );
+            }
+            None => {}
+        }
     });
 
     if let Some(persistence) = persistence {
@@ -1185,23 +1530,24 @@ impl WorkflowEngine {
         config
     }
 
-    /// The prompt section delivering the agent's pending messages, and
-    /// their IDs, acknowledged once the run completes.
+    /// The prompt section delivering the messages queued for the agent that
+    /// run `task_id` doesn't hold yet, and their IDs, acknowledged once the
+    /// run completes.
     fn pending_messages(
         &self,
         agent_name: &str,
+        task_id: uuid::Uuid,
         ctx: &Arc<SharedContext>,
     ) -> (String, Vec<uuid::Uuid>) {
-        let messages = ctx.messages.pending(agent_name);
+        let messages = ctx.messages.pending_for(agent_name, task_id);
         let message_ids = messages.iter().map(|message| message.id).collect();
         let mut section = String::new();
         if !messages.is_empty() {
             section.push_str("\n\n# Messages from other agents:\n");
             for msg in messages {
                 section.push_str(&format!(
-                    "\n--- Message {} from '{}' ---\n{}{}\n--- End message ---\n",
-                    msg.id,
-                    msg.from,
+                    "\n{}\n{}{}\n--- End message ---\n",
+                    crate::messaging::prompt_block_marker(msg.id, &msg.from),
                     msg.content,
                     if msg.attachments.is_empty() {
                         String::new()
@@ -1278,7 +1624,7 @@ impl WorkflowEngine {
             Some(task_id) => task.id = task_id,
             None => ctx.registry.start(&[(task.id, agent_name)]),
         }
-        let (messages, pending_message_ids) = self.pending_messages(agent_name, ctx);
+        let (messages, pending_message_ids) = self.pending_messages(agent_name, task.id, ctx);
         let mut initial_prompt = format!("{prompt}{messages}");
         let recipients = ctx.message_recipients(agent_name);
         if !recipients.is_empty() {
@@ -1461,8 +1807,22 @@ impl WorkflowEngine {
             match handle.await {
                 Ok(Ok(result)) => results.push(result),
                 Ok(Err(error)) => {
-                    if first_error.is_none() {
-                        first_error = Some(error);
+                    // An agent that paused is not a failure: its recorded
+                    // result, to be continued, is returned with the others.
+                    let paused = match &error {
+                        WorkflowError::UserInputRequired { task_id, .. }
+                        | WorkflowError::AgentPaused { task_id, .. } => ctx
+                            .agent_results
+                            .read()
+                            .iter()
+                            .find(|result| result.agent_run_id == *task_id)
+                            .cloned(),
+                        _ => None,
+                    };
+                    match paused {
+                        Some(result) => results.push(result),
+                        None if first_error.is_none() => first_error = Some(error),
+                        None => {}
                     }
                 }
                 Err(error) => {
@@ -1541,10 +1901,11 @@ impl WorkflowEngine {
             Self::setup_skills(&mut task.agent_config, &mut registry, &ctx.workspace)?;
         // No roster: the task's initial prompt has one. Start notices tell it
         // about recipients that started since it last ran.
-        let (messages, pending_message_ids) = self.pending_messages(agent_name, ctx);
-        // The prompt presents again every message not acknowledged, among
-        // them any the task took from its channel but stopped before adding
-        // (`Task::pending_context_injections`): it doesn't get those twice.
+        let (messages, pending_message_ids) = self.pending_messages(agent_name, task.id, ctx);
+        // The prompt presents the messages the task doesn't hold. A task
+        // saved before holding was recorded may still have taken one it
+        // stopped before adding (`Task::pending_context_injections`): it
+        // doesn't get it twice.
         task.pending_context_injections.retain(|content| {
             !pending_message_ids
                 .iter()
@@ -1569,6 +1930,104 @@ impl WorkflowEngine {
             ctx,
             depth,
         );
+        drive_to_result(run, ctx, self.persistence.as_ref()).await
+    }
+
+    /// Continue a paused agent run (see [`Workflow::resume_agent`](super::Workflow::resume_agent)).
+    pub async fn resume_agent(
+        &self,
+        previous: &AgentResult,
+        resume: AgentResume,
+        ctx: &Arc<SharedContext>,
+    ) -> Result<AgentResult, WorkflowError> {
+        let pause = (previous.status == AgentRunStatus::Paused)
+            .then(|| AgentPause::of(&previous.task.current_state))
+            .flatten()
+            .ok_or_else(|| {
+                WorkflowError::BuilderInvalid(
+                    "only a paused agent run can be resumed; continue a completed or input-waiting run with continue_agent".to_string(),
+                )
+            })?;
+        enum Decision {
+            Tools(Option<uuid::Uuid>, Vec<(uuid::Uuid, ToolApprovalDecision)>),
+            Command(UserCommand),
+        }
+        let decision = match (&pause, resume) {
+            (AgentPause::ToolApproval { calls }, AgentResume::ToolApprovals(mut decided)) => {
+                if let Some(unknown) = decided
+                    .keys()
+                    .find(|id| !calls.iter().any(|call| call.tool_call_id == **id))
+                {
+                    return Err(WorkflowError::BuilderInvalid(format!(
+                        "tool call {unknown} is not awaiting approval"
+                    )));
+                }
+                let decisions = calls
+                    .iter()
+                    .map(|call| {
+                        (
+                            call.tool_call_id,
+                            decided
+                                .remove(&call.tool_call_id)
+                                .unwrap_or(ToolApprovalDecision::Reject { reason: None }),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let batch_id = match &previous.task.current_state {
+                    TaskState::AwaitingBatchToolApproval { batch_id, .. } => Some(*batch_id),
+                    _ => None,
+                };
+                record_approval_reasons(ctx, calls, &decisions);
+                Decision::Tools(batch_id, decisions)
+            }
+            (AgentPause::ErrorRecovery { .. }, AgentResume::ContinueAfterError { note }) => {
+                Decision::Command(UserCommand::ContinueAfterError { note })
+            }
+            (AgentPause::ErrorRecovery { .. }, AgentResume::FailAfterError { reason }) => {
+                Decision::Command(UserCommand::RejectErrorRecovery { message: reason })
+            }
+            (AgentPause::ErrorRecovery { .. }, AgentResume::ResolveRefusal(changes)) => {
+                Decision::Command(UserCommand::ResolveRefusal { changes })
+            }
+            (pause, resume) => {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "{resume:?} doesn't answer an agent {pause}"
+                )));
+            }
+        };
+        let agent_name = &previous.agent_name;
+        self.admit(agent_name, Some(previous.agent_run_id), ctx)?;
+        let mut task = previous.task.clone();
+        let mut registry = self.build_tool_registry(agent_name, ctx, 0);
+        let skill_prompt_context =
+            Self::setup_skills(&mut task.agent_config, &mut registry, &ctx.workspace)?;
+        ctx.registry.start(&[(task.id, agent_name.as_str())]);
+        // Resumed without a prompt: the messages it doesn't hold arrive as
+        // context updates.
+        let run = self.launch(
+            agent_name,
+            task,
+            registry,
+            skill_prompt_context,
+            Vec::new(),
+            ctx,
+            0,
+        );
+        // Messages queued while it was paused go ahead of the decision, so
+        // they are added at the turn boundary the decision leads to.
+        tokio::select! {
+            biased;
+            _ = ctx.run_control.stopped() => {}
+            _ = ctx.messages.forwarded(agent_name, run.agent_run_id) => {}
+        }
+        match decision {
+            Decision::Tools(batch_id, decisions) => {
+                send_tool_decisions(&run.cmd_tx, batch_id, decisions).await
+            }
+            Decision::Command(command) => {
+                let _ = run.cmd_tx.send(command).await;
+            }
+        }
         drive_to_result(run, ctx, self.persistence.as_ref()).await
     }
 
@@ -1898,12 +2357,19 @@ impl ToolExecutionMiddleware for WorkflowExecutionMiddleware {
         if let Some(decision) = self.stop_decision() {
             return Ok(decision);
         }
+        let approval_reason = self
+            .context
+            .approval_reasons
+            .lock()
+            .get(&call.tool_call_id)
+            .cloned();
         match fire_hooks(&self.context, &HookPoint::PreToolExecution, |hook| {
             hook.agent_name = Some(self.agent_name.clone());
             hook.agent_run_id = Some(execution.task_id);
             hook.tool_name = Some(call.tool_name.to_string());
             hook.tool_call_id = Some(call.tool_call_id);
             hook.tool_params = Some(call.parameters.clone());
+            hook.approval_reason = approval_reason;
         }) {
             HookResult::Continue => {}
             HookResult::Skip => {
@@ -2028,12 +2494,19 @@ impl ToolExecutionMiddleware for WorkflowExecutionMiddleware {
             | ToolExecutionOutcome::Error(output) => output,
         };
 
+        // The call has run: its approval reason is no longer needed.
+        let approval_reason = self
+            .context
+            .approval_reasons
+            .lock()
+            .remove(&call.tool_call_id);
         let hook_result = fire_hooks(&self.context, &HookPoint::PostToolExecution, |hook| {
             hook.agent_name = Some(self.agent_name.clone());
             hook.agent_run_id = Some(execution.task_id);
             hook.tool_name = Some(call.tool_name.to_string());
             hook.tool_call_id = Some(call.tool_call_id);
             hook.tool_params = Some(call.parameters.clone());
+            hook.approval_reason = approval_reason;
             hook.tool_result = Some(result.to_string());
             hook.original_tool_result = Some(result.to_string());
         });
@@ -2147,9 +2620,10 @@ mod tests {
         ] {
             let mut task = Task::new(config.clone(), "design".into(), ".".into(), None);
             task.set_state(state);
-            let result = finalize_agent_task("designer".into(), task, workflow.context(), None)
-                .await
-                .unwrap();
+            let result =
+                finalize_agent_task("designer".into(), task, &[], workflow.context(), None)
+                    .await
+                    .unwrap();
             assert_eq!(result.status, status);
         }
     }

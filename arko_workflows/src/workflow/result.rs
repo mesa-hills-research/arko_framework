@@ -21,7 +21,21 @@ pub enum AgentRunStatus {
     /// The task ended `TaskState::Cancelled`: stopped with the workflow run
     /// (cancelled, or aborted by a hook), or by the workflow (over budget).
     Cancelled,
+    /// Suspended at an `ask_user` question; `Workflow::continue_agent`
+    /// answers it.
     WaitingForInput,
+    /// Suspended awaiting a tool approval or error-recovery decision the
+    /// workflow's policies leave to the caller (see
+    /// [`AgentPause`](crate::policy::AgentPause));
+    /// `Workflow::resume_agent` continues it.
+    Paused,
+}
+
+impl AgentRunStatus {
+    /// A pause (`WaitingForInput` or `Paused`): the run can go on.
+    pub fn is_paused(&self) -> bool {
+        matches!(self, Self::WaitingForInput | Self::Paused)
+    }
 }
 
 /// Result of a single agent run within a workflow.

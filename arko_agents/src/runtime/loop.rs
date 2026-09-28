@@ -2275,7 +2275,7 @@ impl AgentLoop {
                                             }
                                         }
                                     }
-                                    UserCommand::RejectErrorRecovery { message: _ } => {
+                                    UserCommand::RejectErrorRecovery { ref message } => {
                                         log::info!(
                                             "Task {}: Error recovery rejected by user.",
                                             self.task.id
@@ -2287,12 +2287,18 @@ impl AgentLoop {
                                             UNREACHED_CALL,
                                         )
                                         .await?;
-                                        self.task.set_state(TaskState::Failed {
-                                            reason: format!(
+                                        // The host's reason, when it gives one.
+                                        let reason = match message
+                                            .as_deref()
+                                            .filter(|message| !message.is_empty())
+                                        {
+                                            Some(message) => message.to_string(),
+                                            None => format!(
                                                 "Error recovery rejected by user for error: {}",
                                                 error_message
                                             ),
-                                        });
+                                        };
+                                        self.task.set_state(TaskState::Failed { reason });
                                     }
                                     UserCommand::CancelTask => {}
                                     UserCommand::SuspendTask => {}

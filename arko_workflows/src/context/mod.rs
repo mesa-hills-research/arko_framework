@@ -55,6 +55,18 @@ pub struct SharedContext {
     /// Whether and why the run was stopped (cancelled or aborted by a hook).
     pub(crate) run_control: Arc<crate::workflow::cancel::RunControl>,
     pub user_input_handler: Option<Arc<dyn crate::user_input::UserInputHandler>>,
+    /// How agents' tool-approval requests are answered.
+    pub approval_policy: crate::policy::ApprovalPolicy,
+    /// How agents' error-recovery pauses are answered.
+    pub error_recovery_policy: crate::policy::ErrorRecoveryPolicy,
+    pub(crate) recovery_waits: crate::policy::RecoveryWaits,
+    /// Why each approved call awaited approval, until it has run: for the
+    /// tool hooks.
+    pub(crate) approval_reasons:
+        parking_lot::Mutex<HashMap<uuid::Uuid, arko_agents::ApprovalReason>>,
+    /// The (agent, tool, reason) auto-approvals already warned about.
+    pub(crate) approval_warnings:
+        parking_lot::Mutex<std::collections::HashSet<(String, String, String)>>,
     pub ballots: Option<Arc<crate::voting::BallotStore>>,
     pub event_tx: tokio::sync::broadcast::Sender<crate::workflow::result::WorkflowEvent>,
 }
@@ -147,6 +159,8 @@ impl fmt::Debug for SharedContext {
             )
             .field("completion_verifiers", &self.completion_verifiers.len())
             .field("distillation_configs", &self.distillation_configs.len())
+            .field("approval_policy", &self.approval_policy)
+            .field("error_recovery_policy", &self.error_recovery_policy)
             .field("cancellation", &self.run_control.cancellation())
             .finish_non_exhaustive()
     }

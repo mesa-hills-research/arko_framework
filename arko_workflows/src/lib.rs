@@ -41,6 +41,7 @@ pub mod hooks;
 pub mod memory;
 pub mod messaging;
 pub mod persistence;
+pub mod policy;
 pub mod services;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -77,6 +78,10 @@ pub mod prelude {
     pub use crate::messaging::wait::WaitForMessageTimeout;
     pub use crate::messaging::{AgentMessage, MessageAttachment, MessagingPolicy};
     pub use crate::persistence::PersistenceConfig;
+    pub use crate::policy::{
+        AgentPause, AgentResume, ApprovalPolicy, ErrorRecoveryPolicy, ToolApprovalHandler,
+        ToolApprovalOutcome, ToolApprovalRequest,
+    };
     pub use crate::services::{WorkflowServices, WorkflowServicesConfig};
     pub use crate::user_input::{UserInputHandler, UserInputRequest};
     pub use crate::verification::{

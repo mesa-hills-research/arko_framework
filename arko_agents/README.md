@@ -656,7 +656,8 @@ is made at once, without backoff, and bounded by the attempt limit (10 under
 response ends the elapsed budget a failed request started. From a pause,
 `ApproveErrorRecovery { message }` adds a note that the previous attempt resulted in the
 error and that the user approved continuing (with the message) and starts a new recovery
-episode, and `RejectErrorRecovery` fails the task. `ContinueAfterError { note }` is the
+episode, and `RejectErrorRecovery { message }` fails the task, with the message as its
+reason when given. `ContinueAfterError { note }` is the
 host's own decision to go on, for an unattended host: without a note the failed request
 is sent again unchanged (with any tool results the pause left waiting, which report their
 errors), and a note is added as the runtime's text instead of the user-approval note; it

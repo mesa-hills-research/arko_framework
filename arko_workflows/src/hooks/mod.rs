@@ -20,11 +20,20 @@ pub enum HookPoint {
     /// workflow over its budget.
     PostAgentCancellation,
     OnUserInputRequired,
+    /// An agent paused for a decision the workflow's approval or error
+    /// recovery policy leaves to the caller (`AgentRunStatus::Paused`):
+    /// fires once per pause. `metadata["pause"]` is `"tool_approval"` or
+    /// `"error_recovery"`; an error-recovery pause also sets
+    /// `metadata["cause"]` and `error_message`, a tool-approval pause
+    /// `metadata["tools"]`.
+    OnAgentPaused,
     PreToolExecution,
     PostToolExecution,
     PostToolResultInterception,
     OnWorkflowPause,
     OnWorkflowResume,
+    /// A run call failed. Fires at most once per call, and not for a pause
+    /// (an agent waiting for input or paused), a cancellation, or a stop.
     OnWorkflowFailed,
     /// A [`WorkflowCancelHandle`](crate::workflow::cancel::WorkflowCancelHandle)
     /// cancelled the run; fires once, from the task that cancelled it.

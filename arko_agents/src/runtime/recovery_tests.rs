@@ -550,6 +550,36 @@ async fn run_answering_the_pause(
     )
 }
 
+/// A rejected recovery fails the task with the host's reason, when given.
+#[tokio::test(start_paused = true)]
+async fn a_rejected_recovery_fails_with_the_hosts_reason() {
+    for (message, expected) in [
+        (
+            Some("Declined by the workflow."),
+            "Declined by the workflow.",
+        ),
+        (None, "Error recovery rejected by user for error: "),
+    ] {
+        let (mut agent, events, commands) = harness();
+        agent.task.agent_config.llm_error_policy =
+            LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts: 1 };
+        agent
+            .scripted_responses
+            .get_mut()
+            .unwrap()
+            .push_back(Err(provider_failure(401, None)));
+        let command = UserCommand::RejectErrorRecovery {
+            message: message.map(str::to_string),
+        };
+        let (task, cause) = run_answering_the_pause(agent, events, commands, command).await;
+        assert_eq!(cause, ErrorRecoveryCause::NonRetryable);
+        let TaskState::Failed { reason } = &task.current_state else {
+            panic!("{:?}", task.current_state);
+        };
+        assert!(reason.starts_with(expected), "{reason}");
+    }
+}
+
 /// Continuing after an error-recovery pause as the host's own decision
 /// sends the failed request again unchanged, with no note that a user
 /// approved; a note, when given, is added as the runtime's text. Approving

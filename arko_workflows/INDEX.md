@@ -45,6 +45,7 @@ Root re-exports: `Workflow`, `WorkflowBuilder`, `AgentHandle`, `WorkflowError`, 
 | `memory` | `AccessScope`, `MemoryConfig`, `MemoryEntry`, `MemoryTier`, `WriteMode` |
 | `messaging`, `messaging::registry`, `messaging::wait` | `AgentMessage`, `MessageAttachment`, `MessagingPolicy`, `AgentStatus`, `WaitReason`, `WaitForMessageTimeout` |
 | `persistence` | `PersistenceConfig` |
+| `policy` | `AgentPause`, `AgentResume`, `ApprovalPolicy`, `ErrorRecoveryPolicy`, `ToolApprovalHandler`, `ToolApprovalOutcome`, `ToolApprovalRequest` |
 | `services` | `WorkflowServices`, `WorkflowServicesConfig` |
 | `user_input` | `UserInputHandler`, `UserInputRequest` |
 | `verification` | `CompletionVerifierConfig`, `RepairContextConfig`, `VERIFIER_OUTPUT_CONTRACT`, `VerificationDecision`, `VerificationKind`, `VerificationRecord` |
@@ -67,6 +68,7 @@ Other public modules: `context`, `hooks::context`, `memory::tools`, `messaging::
 | Checkpoint, restore, or reconcile uncertain side effects | `PersistenceConfig`, durable steps |
 | Let agents delegate or vote | `WorkflowServicesConfig`, `enable_voting` |
 | Route human input | `UserInputHandler`, or handle `UserInputRequired` and continue |
+| Decide tool approvals and error recovery | `approval_policy`, `error_recovery_policy`, `ToolApprovalHandler`, or handle `AgentPaused` and `resume_agent` |
 | Add domain tools | `global_tool`, `agent_tool` |
 
 ## Workflow construction
@@ -75,7 +77,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 
 ### Builder signatures and defaults
 
-`Workflow::builder() -> WorkflowBuilder`, `WorkflowBuilder::new() -> Self`, and `WorkflowBuilder::default() -> Self` return an empty builder. Required: a name, an existing workspace directory, an `Arc<LLMClient>`, and at least one uniquely named agent. By default a workflow has no memory tiers, spending limits, hooks, persistence, freshness tracking, custom tools, interceptors, verifiers, distillers, workflow services, input handler, or voting; metadata is empty, the interception failure policy is `InterceptionFailurePolicy::UseRawResult`, the cancel grace period is 30 seconds, and `wait_for_message` waits up to an automatic limit inside each agent's prompt-cache lifetime.
+`Workflow::builder() -> WorkflowBuilder`, `WorkflowBuilder::new() -> Self`, and `WorkflowBuilder::default() -> Self` return an empty builder. Required: a name, an existing workspace directory, an `Arc<LLMClient>`, and at least one uniquely named agent. By default a workflow has no memory tiers, spending limits, hooks, persistence, freshness tracking, custom tools, interceptors, verifiers, distillers, workflow services, input handler, or voting; metadata is empty, the interception failure policy is `InterceptionFailurePolicy::UseRawResult`, the cancel grace period is 30 seconds, and `wait_for_message` waits up to an automatic limit inside each agent's prompt-cache lifetime. **Every tool call is approved** (`ApprovalPolicy::ApproveAll`) and **errors are recovered from automatically without an attempt limit** (`ErrorRecoveryPolicy::Automatic`), so a workflow runs without human input; see [Approvals and error recovery](#approvals-and-error-recovery).
 
 | Signature | Parameters, purpose, and default |
 | --- | --- |
@@ -106,6 +108,8 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 | `wait_for_message_timeout(self, timeout: impl Into<WaitForMessageTimeout>) -> Self` | How long `wait_for_message` waits at most, for agents without their own setting. Default `WaitForMessageTimeout::Auto`, just inside each agent's prompt-cache lifetime (4 min 30 s, or 54 min with Anthropic's 1-hour TTL); a `std::time::Duration` converts to a fixed limit, more than zero and at most 24 hours. See [Waiting for a message](#waiting-for-a-message). |
 | `agent_wait_for_message_timeout(self, agent: impl Into<String>, timeout: impl Into<WaitForMessageTimeout>) -> Self` | The same for one agent, in place of the workflow's setting. |
 | `user_input_handler(self, handler: Arc<dyn UserInputHandler>) -> Self` | Answer agents' `ask_user` questions asynchronously. Without a handler, the run suspends and returns `UserInputRequired`. |
+| `approval_policy(self, policy: ApprovalPolicy) -> Self` | How tool-approval requests are answered. **Default `ApprovalPolicy::ApproveAll`: every call is approved**, including calls an agent's configuration marks for approval. See [Approvals and error recovery](#approvals-and-error-recovery). |
+| `error_recovery_policy(self, policy: ErrorRecoveryPolicy) -> Self` | How error-recovery pauses are answered. **Default `ErrorRecoveryPolicy::Automatic`: recover without an attempt limit** from errors that may pass, and fail clearly on those that won't. |
 | `enable_voting(self) -> Self` | Create an in-memory ballot store and give every agent the `cast_vote` tool. |
 | `cancel_grace_period(self, grace_period: std::time::Duration) -> Self` | How long a stopped run waits for each running agent to stop before aborting it. Default `workflow::cancel::DEFAULT_CANCEL_GRACE_PERIOD`, 30 seconds. See [Stopping a run](#stopping-a-run). |
 | `build(self) -> Result<Workflow, WorkflowError>` | Validate, initialize or restore state, and fire `PreWorkflow`. May create persistence files; runs no agent. |
@@ -161,17 +165,54 @@ Source: [workflow/mod.rs](src/workflow/mod.rs), [engine](src/workflow/engine.rs)
 | Signature | Parameters, result, and behavior |
 | --- | --- |
 | `async run_agent(&self, agent_name: &str, prompt: &str) -> Result<AgentResult, WorkflowError>` | Start a new invocation of a registered agent and await it. Adds pending messages and the list of agents it may message to the prompt, runs the managed driver, and records costs and the result. An unknown name returns `AgentNotFound`. |
-| `async continue_agent(&self, previous: &AgentResult, prompt: &str) -> Result<AgentResult, WorkflowError>` | Resume a `Completed` or `WaitingForInput` result with its task, conversation, and run ID. `prompt` is the follow-up task or the user's answer; pending messages are appended, and no recipient list is added. A message the task took from its command channel but did not add before it stopped (kept in `Task::pending_context_injections`) is among them and is not added again; other context the task kept is added at its first turn boundary. Other statuses, or a task whose state does not match its status, return `BuilderInvalid`. The new result replaces the recorded result with the same run ID; token and cost totals are cumulative. |
-| `async run_agents_parallel(&self, agents: Vec<(&str, String)>) -> Result<Vec<AgentResult>, WorkflowError>` | Run agent-name/prompt pairs concurrently; one agent may appear several times. All the agents are marked running before any is prompted, so each one's recipient list shows the others as running. Waits for every invocation, then returns the results in input order, or the first error in input order. Finalized outcomes are recorded either way. |
+| `async continue_agent(&self, previous: &AgentResult, prompt: &str) -> Result<AgentResult, WorkflowError>` | Resume a `Completed` or `WaitingForInput` result with its task, conversation, and run ID. `prompt` is the follow-up task or the user's answer; the messages queued for the agent that the task doesn't already hold are appended (see [Message bus](#message-bus)), and no recipient list is added. Context the task took from its command channel but did not add before it stopped (`Task::pending_context_injections`) is added at its first turn boundary, not presented again. Other statuses, or a task whose state does not match its status, return `BuilderInvalid`. The new result replaces the recorded result with the same run ID; token and cost totals are cumulative. |
+| `async resume_agent(&self, previous: &AgentResult, resume: AgentResume) -> Result<AgentResult, WorkflowError>` | Continue a `Paused` result (returned as `AgentPaused`) with a decision: `ToolApprovals` for calls awaiting approval, `ContinueAfterError`, `FailAfterError`, or `ResolveRefusal` for an error-recovery pause. A result that isn't paused, or a decision for the other kind of pause (or naming a call that isn't awaiting approval), returns `BuilderInvalid`. Fires `PreAgentSpawn` and runs the managed driver like a continuation; messages queued while it was paused are delivered before the decision takes effect, and none it already holds is delivered again. |
+| `agent_result(&self, agent_run_id: Uuid) -> Option<AgentResult>` | The recorded result of a run, such as the one `UserInputRequired` or `AgentPaused` names by `task_id`. |
+| `async run_agents_parallel(&self, agents: Vec<(&str, String)>) -> Result<Vec<AgentResult>, WorkflowError>` | Run agent-name/prompt pairs concurrently; one agent may appear several times. All the agents are marked running before any is prompted, so each one's recipient list shows the others as running. Waits for every invocation, then returns the results in input order, or the first failure in input order. An agent that pauses (waiting for input, or paused for a decision) is not a failure: its result comes back in its place with status `WaitingForInput` or `Paused`, and the others run on. Finalized outcomes are recorded either way. |
 | `async spawn_agent(&self, agent_name: &str, prompt: &str) -> Result<AgentHandle, WorkflowError>` | Set up and start the agent and return its handle. Nothing drives its events until `wait` is called or the raw channels are used. |
 
 All four return `BudgetExceeded` without starting an agent when the workflow budget is already exceeded. Once the run is stopped, all four return the stop's error (`Cancelled` or `AbortedByHook`) at once, without firing `PreAgentSpawn` or starting an agent; see [Stopping a run](#stopping-a-run).
 
-The managed driver (used by `run_agent`, `continue_agent`, `run_agents_parallel`, and `AgentHandle::wait`) approves every pending single and batched tool call, approves the first approval-required error recovery of an invocation and rejects later ones, and cancels the task when the workflow or agent budget is exceeded or the task is interrupted. A task it cancels ends `Cancelled`, and the call returns `BudgetExceeded`, `AgentBudgetExceeded`, or `AgentInterrupted`. The driver waits for a stopped agent at most the run's grace period, as described under [Stopping a run](#stopping-a-run).
+The managed driver (used by `run_agent`, `continue_agent`, `resume_agent`, `run_agents_parallel`, and `AgentHandle::wait`) answers tool approvals under the workflow's `ApprovalPolicy` and error-recovery pauses under its `ErrorRecoveryPolicy` (see [Approvals and error recovery](#approvals-and-error-recovery)), and cancels the task when the workflow or agent budget is exceeded or the task is interrupted. A task it cancels ends `Cancelled`, and the call returns `BudgetExceeded`, `AgentBudgetExceeded`, or `AgentInterrupted`. The driver waits for a stopped agent at most the run's grace period, as described under [Stopping a run](#stopping-a-run).
 
-A managed call returns the `AgentResult` of a completed task. Otherwise it returns the driver's error, or an error for the finalized status: `UserInputRequired` for `WaitingForInput`, `AgentInterrupted` for `Interrupted`, `AgentCancelled` for `Cancelled`, and `Agent(ArkoAgentsError::TaskExecution)` with the failure reason for `Failed`. Once the run is stopped, the stop's error replaces any of these outcomes. An error can be returned after the invocation's `AgentResult` has been recorded; `result().agent_results` holds finalized failures, cancellations, and input suspensions.
+A managed call returns the `AgentResult` of a completed task. Otherwise it returns the driver's error, or an error for the finalized status: `UserInputRequired` for `WaitingForInput`, `AgentPaused` for `Paused`, `AgentInterrupted` for `Interrupted`, `AgentCancelled` for `Cancelled`, and `Agent(ArkoAgentsError::TaskExecution)` with the failure reason for `Failed`. Once the run is stopped, the stop's error replaces any of these outcomes. An error can be returned after the invocation's `AgentResult` has been recorded; `result().agent_results` and `agent_result` hold finalized failures, cancellations, and pauses.
 
-`run_agent`, `continue_agent`, and `run_agents_parallel` fire `OnWorkflowFailed` before returning an error other than `Cancelled`, including `AbortedByHook`. An `Abort` from that hook stops the run, and the call returns the stop's error; when the run was already stopped, its first cause's error is kept. Calls refused because the run is already stopped do not fire the hook, and neither do `spawn_agent` and `AgentHandle::wait`.
+`run_agent`, `continue_agent`, `resume_agent`, and `run_agents_parallel` fire `OnWorkflowFailed` once before returning a failure: an error other than `Cancelled`, `UserInputRequired`, or `AgentPaused` (a pause is not a failure), including `AbortedByHook`. An `Abort` from that hook stops the run, and the call returns the stop's error; when the run was already stopped, its first cause's error is kept. Calls refused because the run is already stopped do not fire the hook, and neither do `spawn_agent` and `AgentHandle::wait`.
+
+### Approvals and error recovery
+
+Source: [policy.rs](src/policy.rs), [engine](src/workflow/engine.rs). The types are in the prelude.
+
+**Tool approvals.** An agent asks for approval for a call its configuration doesn't auto-approve (`default_auto_approve_tool_use` and per-tool `auto_approve_tool_use`, which default to asking) and for a path outside the workspace under `PathSafetyPolicy::RequireApproval`; each request carries an `arko_agents::ApprovalReason` saying which.
+
+| `ApprovalPolicy` | Behavior |
+| --- | --- |
+| `ApproveAll` (**default**) | Approves every call, so the workflow runs without human input. The first call each agent makes to each tool for each reason is logged as a warning naming the reason. |
+| `RespectAgentConfig` | A call the agent's configuration marks for approval pauses the agent (it is suspended and recorded `Paused`); the call returns `AgentPaused` with `AgentPause::ToolApproval { calls }`, and `OnAgentPaused` fires. Decide with `resume_agent(&result, AgentResume::ToolApprovals(decisions))`; a call without a decision is rejected. |
+| `Handler(Arc<dyn ToolApprovalHandler>)` | The handler decides each such call as it is asked: `ToolApprovalOutcome::Approve`, `Reject { reason }` (the agent is told), or `Pause` (as under `RespectAgentConfig`). It may wait on a person; a stopped run doesn't wait for it. |
+
+```rust
+#[async_trait::async_trait]
+pub trait ToolApprovalHandler: Send + Sync {
+    async fn decide(&self, request: ToolApprovalRequest) -> ToolApprovalOutcome;
+}
+// ToolApprovalRequest: workflow_run_id, agent_run_id, agent_name (registration name),
+// tool_call_id, tool_name, parameters, tool_description, reason: ApprovalReason.
+```
+
+The tool hooks receive the reason: `HookContext::approval_reason` is set at `PreToolExecution` and `PostToolExecution` for a call that awaited approval.
+
+**Error recovery.** The agent runtime recovers on its own first, under its `llm_error_policy` and `llm_retry_config` (the default retries a failed request with backoff, a rate limit after the provider's delay, until 10 attempts or the 5-minute elapsed budget run out, and never cuts off a request in flight). Only then, under the pausing error policies (the default), does the agent pause for error-recovery approval, with an `arko_agents::ErrorRecoveryCause`. The workflow's policy then decides; the driver never sends a model request itself, so nothing is retried twice.
+
+| `ErrorRecoveryPolicy` | Behavior |
+| --- | --- |
+| `Automatic` (**default**) | Recovers without an attempt limit. `RetriesExhausted` (an outage, repeated rate limits): after a wait growing from 30 seconds to 15 minutes while pauses repeat without a model response in between, the failed request is sent again unchanged, starting a new round of the agent's retries. `UsageLimit`: waits until the reported reset plus 5 seconds (or, with no reset reported, the growing wait) and sends the request again. `ToolError` (the agent's opt-in `ToolErrorPolicy::PauseAndAwaitApproval`): continues at once; the calls' results report the errors. `NonRetryable`, `Refusal` (after the agent's opt-in `refusal_fallback`, if configured, could not answer; the same input would be refused again), and `UnusableResponses`: the task fails with a clear reason. `Monitor` (an opt-in plan-usage or cache-efficiency monitor's pause) and an unrecorded cause: the agent pauses for the caller, as configured. Continuing adds nothing to the conversation (`UserCommand::ContinueAfterError` without a note), so the model is never told a user approved. While it waits, the agent's status is `waiting (retrying until …)` or `waiting (usage_limit until …)`. |
+| `Limited { max }` | As `Automatic`, for at most `max` automatic recoveries in each call that drives the agent (a run, continuation or resume); the next such pause fails the task with a reason naming the limit. `max: 0` recovers nothing automatically. |
+| `ReturnToCaller` | Every error-recovery pause pauses the agent: the call returns `AgentPaused` with `AgentPause::ErrorRecovery { error, cause }`. Continue with `resume_agent` and `AgentResume::ContinueAfterError { note }` (without a note the request is sent again unchanged; a note is added for the model first), `FailAfterError { reason }`, or, for a refusal, `ResolveRefusal(changes)`. |
+
+An agent whose `llm_error_policy` is `RetryThenInformAgent` or `InformAgentAndContinue` doesn't pause: when its recovery ends it is interrupted, and the call returns `AgentInterrupted`.
+
+**Pauses.** A paused agent's task keeps its awaiting state (`TaskState::AwaitingToolApproval`, `AwaitingBatchToolApproval`, or `AwaitingErrorRecoveryApproval`), is recorded with status `AgentRunStatus::Paused` (`error` describes the pause), and is saved with the checkpoint, so it can be resumed after a restart. `OnAgentPaused` fires once per pause, and `OnWorkflowFailed` doesn't fire. `AgentPause::of(&task.current_state)` reads the pause from a task.
 
 ### AgentHandle
 
@@ -319,8 +360,8 @@ Source: [workflow/result.rs](src/workflow/result.rs). These types are re-exporte
 
 | Type | Public fields or variants |
 | --- | --- |
-| `AgentRunStatus` | `Completed`, `Failed`, `Interrupted`, `Cancelled`, `WaitingForInput`. `Cancelled` is the status of a task that ended in `arko_agents::TaskState::Cancelled`: stopped with the workflow run, stopped by the managed driver (over budget or after an interruption), or cancelled by any other `CancelTask` command or middleware decision. The status follows the task state, never the wording of a failure reason. |
-| `AgentResult` | `agent_run_id: Uuid`, the stable task identity; `agent_name: String`, the registration name; `status: AgentRunStatus`; `summary: String`, the completion summary for `Completed` and empty otherwise; `error: Option<String>`, the failure, interruption, or cancellation reason or the unanswered questions; `task: arko_agents::Task`, with conversation, usage, and runtime state. |
+| `AgentRunStatus` | `Completed`, `Failed`, `Interrupted`, `Cancelled`, `WaitingForInput`, `Paused`. `is_paused()` is true for the last two: the run waits for input or a decision and can go on. `Paused` is a task suspended awaiting a tool approval or error-recovery decision the workflow's policies leave to the caller. `Cancelled` is the status of a task that ended in `arko_agents::TaskState::Cancelled`: stopped with the workflow run, stopped by the managed driver (over budget or after an interruption), or cancelled by any other `CancelTask` command or middleware decision. The status follows the task state, never the wording of a failure reason. |
+| `AgentResult` | `agent_run_id: Uuid`, the stable task identity; `agent_name: String`, the registration name; `status: AgentRunStatus`; `summary: String`, the completion summary for `Completed` and empty otherwise; `error: Option<String>`, the failure, interruption, or cancellation reason, the unanswered questions, or a description of the pause; `task: arko_agents::Task`, with conversation, usage, and runtime state. |
 | `WorkflowResult` | `workflow_run_id: Uuid`, `workflow_name: String`, `metadata: WorkflowMetadata`, `total_cost: f64` (running workflow total in dollars), `cost_ledger: CostLedger`, `agent_results: Vec<AgentResult>` (finalized outcomes; a continuation replaces the entry with its run ID), `cancellation: Option<Cancellation>` (set once the run is stopped; omitted from JSON when `None` and `None` when absent). |
 | `WorkflowEvent` | `timestamp: chrono::DateTime<chrono::Utc>`, `workflow_run_id: Uuid`, `agent_name: String`, `agent_run_id: Uuid`, `event: arko_agents::runtime::event::AgentEvent`. Wraps each broadcast and persisted runtime event. |
 
@@ -376,12 +417,13 @@ The result of `OnWorkflowCancelled` is ignored. Hooks do not roll back work alre
 | `PostAgentCancellation` | A task finalized as cancelled: stopped with the workflow run, stopped by the managed driver (over budget or after an interruption), or cancelled by any other `CancelTask` command or middleware decision. Agent name, run ID, and the task's reason in `error_message`. Cancelled tasks do not fire `PostAgentFailure`. |
 | `PostAgentInterruption` | A task finalized as interrupted or in a nonterminal state. Agent name, run ID, and the reason in `error_message`. |
 | `OnUserInputRequired` | A task finalized while awaiting user input. Agent name, run ID, and the questions in `error_message`. Not fired when a `UserInputHandler` answers the question. |
-| `PreToolExecution` | Before a tool call executes. Agent name and run ID, `tool_name`, `tool_call_id`, and `tool_params`. `Skip` rejects the call. |
+| `OnAgentPaused` | A task finalized paused for a decision the approval or error recovery policy leaves to the caller (`AgentRunStatus::Paused`); fires once per pause. Agent name, run ID, the pause's description in `error_message`, `metadata["pause"]` (`"tool_approval"` or `"error_recovery"`), and `metadata["cause"]` (such as `"retries_exhausted"`, `"monitor"`) or `metadata["tools"]` (each call's `tool_call_id`, `tool_name`, and `reason`). |
+| `PreToolExecution` | Before a tool call executes. Agent name and run ID, `tool_name`, `tool_call_id`, and `tool_params`; `approval_reason` for a call that awaited approval. `Skip` rejects the call. |
 | `PostToolExecution` | After a tool call, before result interception. The same fields, plus `tool_result` and `original_tool_result`, both holding the raw output or error text. |
 | `PostToolResultInterception` | The managed driver receives an intercepted result. Agent name and run ID, tool name and call ID, the raw output in `original_tool_result`, and the delivered output in `effective_tool_result` and `tool_result`. |
 | `OnWorkflowPause` | The pause flag changes from false to true. |
 | `OnWorkflowResume` | The pause flag changes from true to false, before paused drivers are woken. |
-| `OnWorkflowFailed` | `run_agent`, `continue_agent`, or `run_agents_parallel` is about to return an error other than `Cancelled`, including `AbortedByHook`. Not fired by a call refused because the run is already stopped. `error_message`; the agent name (and, for a continuation, run ID) when available. |
+| `OnWorkflowFailed` | `run_agent`, `continue_agent`, `resume_agent`, or `run_agents_parallel` is about to return a failure: an error other than `Cancelled`, `UserInputRequired`, or `AgentPaused`, including `AbortedByHook`. Fires at most once per call, also when several parallel agents fail. Not fired by a call refused because the run is already stopped. `error_message`; the agent name (and, for a continuation or resume, run ID) when available. |
 | `OnWorkflowCancelled` | A `WorkflowCancelHandle` (or `Workflow::cancel`) cancelled the run. Fires once, from the task that called `cancel`; its result is ignored. A hook's abort does not fire it. |
 | `OnBudgetExceeded` | Each automatic, manual, or distillation cost recorded while workflow spending strictly exceeds the limit. `budget_spent` is the new total. |
 | `OnBudgetWarning` | The first recorded cost that brings spending to or above the warning threshold. `budget_spent` is the new total. |
@@ -407,10 +449,11 @@ The result of `OnWorkflowCancelled` is ignored. Hooks do not roll back work alre
 | `original_tool_result` | `Option<String>` | Raw output before interception. |
 | `effective_tool_result` | `Option<String>` | Output after interception. |
 | `agent_summary` | `Option<String>` | Nonempty completion summary. |
+| `approval_reason` | `Option<arko_agents::ApprovalReason>` | At `PreToolExecution` and `PostToolExecution`: why the call awaited approval, for a call that did. |
 | `error_message` | `Option<String>` | Error, reason, or questions. |
 | `budget_spent` | `f64` | Workflow dollars spent. |
 | `budget_limit` | `Option<f64>` | Configured workflow limit. |
-| `metadata` | `HashMap<String, Value>` | Point-specific data: `resource` and `writer` for `OnFreshnessConflict`; `message_id`, `recipient`, and `content` for `OnAgentMessage`. |
+| `metadata` | `HashMap<String, Value>` | Point-specific data: `resource` and `writer` for `OnFreshnessConflict`; `message_id`, `recipient`, and `content` for `OnAgentMessage`; `pause` and `cause` or `tools` for `OnAgentPaused`. |
 
 ### UserInputHandler and UserInputRequest
 
@@ -590,11 +633,11 @@ fn observe_context(&self, task_id: uuid::Uuid, message: &arko_ai::Message);
 
 Module: `arko_workflows::messaging`. Sources: [message bus, data, and policy](src/messaging/mod.rs), [agent statuses](src/messaging/registry.rs), [agent tools and start notices](src/messaging/tools.rs).
 
-Messages are addressed to an agent name in a fixed roster. They stay queued until drained or acknowledged. Every active task of the recipient receives a live injection at its next safe turn boundary, in a `# Workflow context update` user message; a run that starts receives the queued messages in its prompt, and live any message queued while it was starting. Below, `UserCommand` is `arko_agents::runtime::command::UserCommand`.
+Messages are addressed to an agent name in a fixed roster. They stay queued until drained or acknowledged. Every active task of the recipient receives a live injection at its next safe turn boundary, in a `# Workflow context update` user message; a run that starts receives the queued messages in its prompt, and live any message queued while it was starting. A message reaches each run of the agent once: a continued or resumed run is never presented a message it already holds. Below, `UserCommand` is `arko_agents::runtime::command::UserCommand`.
 
 | Public type | Fields or variants |
 | --- | --- |
-| `AgentMessage` | `id: Uuid`, `from: String`, `from_task_id: Option<Uuid>`, `to: String`, `content: String`, `attachments: Vec<MessageAttachment>`, `timestamp: chrono::DateTime<chrono::Utc>`. When omitted in JSON, `id` is the nil UUID, `from_task_id` is `None`, and `attachments` is `[]`. New messages get a fresh UUID and the current UTC time. |
+| `AgentMessage` | `id: Uuid`, `from: String`, `from_task_id: Option<Uuid>`, `to: String`, `content: String`, `attachments: Vec<MessageAttachment>`, `timestamp: chrono::DateTime<chrono::Utc>`, `to_task_id: Option<Uuid>` (the run a context notice is for), `held_by: Vec<Uuid>` (the runs that stopped holding it; see [Message bus](#message-bus)). When omitted in JSON, `id` is the nil UUID, `from_task_id` and `to_task_id` are `None`, and `attachments` and `held_by` are `[]`; `to_task_id` and `held_by` are omitted from JSON when empty. New messages get a fresh UUID and the current UTC time. `is_held_by(task_id)` and `is_for(task_id)` (not held by the run, and not another run's notice) read them. |
 | `MessageAttachment` | `File { path: String }`, `MemoryTier { tier: String }`, `Transcript { task_id: Uuid }`, `Text { name: String, content: String }`. Typed references or inline text; the bus does not read the referenced files, tiers, or transcripts. |
 
 Both types implement `Debug`, `Clone`, `Serialize`, and `Deserialize`. Attachments serialize with an internal `type` tag in snake case:
@@ -622,13 +665,12 @@ Methods on `MessageBus`. `Default` is an empty roster with no queues or active r
 | `async fn inject_task(&self, task_id: Uuid, content: String) -> bool` | Queue a context notice for one active task without waiting for channel capacity. Creates an `AgentMessage` from `workflow-context` (`messaging::WORKFLOW_CONTEXT_SENDER`) that checkpoints persist like any message; it doesn't end a `wait_for_message`. `true` means queued (not yet consumed or saved); an unknown or inactive task returns `false`. |
 | `async fn send(&self, from: &str, from_task_id: Option<Uuid>, to: &str, content: String, attachments: Vec<MessageAttachment>) -> Result<AgentMessage, String>` | Validate the recipient, queue the message, and return it. Active delivery workers forward it without blocking the sender on a busy recipient. A message to the sender itself returns `'<to>' is not a permitted recipient`; an unknown recipient's error lists the valid names. The messaging policy and recipient statuses are not checked. A closed channel unregisters that task; its unacknowledged messages stay queued. The sender name is not validated. |
 | `fn drain(&self, agent_name: &str) -> Vec<AgentMessage>` | Remove and return the agent's whole queue; `[]` for an unknown or empty name. |
-| `fn pending(&self, agent_name: &str) -> Vec<AgentMessage>` | Clone of the queue without removing messages. |
+| `fn pending(&self, agent_name: &str) -> Vec<AgentMessage>` | Clone of the whole queue without removing messages. |
+| `fn pending_for(&self, agent_name: &str, task_id: Uuid) -> Vec<AgentMessage>` | The queued messages for run `task_id` (`AgentMessage::is_for`): those it doesn't hold, other than another run's context notices. What its prompt presents. |
 | `fn acknowledge(&self, agent_name: &str, message_ids: &[Uuid])` | Remove the given IDs from the agent's queue. |
-| `fn confirm_active_context(&self, agent_name: &str, task_id: Uuid, conversation: &arko_ai::Conversation)` | Mark as confirmed the queued messages whose complete injected payloads appear in finalized user messages with the runtime's workflow-context framing. The engine calls this for completed tasks before checkpointing. Message IDs quoted in prompts or tool results do not count. |
-| `fn acknowledge_active(&self, agent_name: &str, task_id: Uuid)` | Remove only confirmed messages from the agent's queue. Acceptance by the command channel alone does not acknowledge a message. |
 | `fn snapshot(&self) -> HashMap<String, Vec<AgentMessage>>` | Clone of the pending queues, for persistence. |
 
-Queueing, channel acceptance, context confirmation, and acknowledgment are separate steps. Messages reach disk only in a checkpoint; returning from `send` or `inject_task` is not a disk commit. A message can be delivered again after interrupted work, so consumers that need deduplication should use its stable ID. `MessageBus::send` fires no hooks; the `send_message` tool does.
+Queueing, channel acceptance, and acknowledgment are separate steps. When a run stops, the engine records what it holds before checkpointing: the queued messages its conversation holds (presented in one of its prompts, or added as a complete runtime `# Workflow context update`; an echo in an assistant turn, a tool result, or a quoted ID doesn't count) and those it took from its command channel but hadn't added (`Task::pending_context_injections`). Their `AgentMessage::held_by` lists the run, so a continuation or resume of it never presents them again (the context it took is added from the task, once). A run that completed acknowledges the messages in its conversation, which leave the queue; one it only took stays queued. Until acknowledged, a message is still presented to every other run of the agent. A context notice (`to_task_id` set) is for its run only and is dropped when that run stops, whatever the outcome. Messages reach disk only in a checkpoint; returning from `send` or `inject_task` is not a disk commit. A message can be delivered again to a run after interrupted work (a run stopped without being recorded), so consumers that need deduplication should use its stable ID. `MessageBus::send` fires no hooks; the `send_message` tool does.
 
 ### Messaging policy
 
@@ -1250,11 +1292,12 @@ Source: [error.rs](src/error.rs). `WorkflowError` is re-exported at the root and
 | `Agent(arko_agents::ArkoAgentsError)` | Agent setup, runtime, or task error, including a managed task that ended failed (`TaskExecution` with the failure reason). Automatic `From`. |
 | `Llm(arko_ai::Error)` | Model client error. Automatic `From`. |
 | `BuilderMissing { field: String }` | A required builder setting is missing. |
-| `BuilderInvalid(String)` | Invalid configuration or checkpoint identity, an invalid durable step spec, a disabled feature (freshness, voting) used through a `Workflow` method, a non-continuable result passed to `continue_agent`, or a disallowed workflow-services caller or target. |
+| `BuilderInvalid(String)` | Invalid configuration or checkpoint identity, an invalid durable step spec, a disabled feature (freshness, voting) used through a `Workflow` method, a non-continuable result passed to `continue_agent` or a non-paused result or mismatched decision passed to `resume_agent`, or a disallowed workflow-services caller or target. |
 | `AgentNotFound(String)` | No agent is registered under the name. |
 | `AgentInterrupted { agent: String, reason: String }` | A managed invocation was interrupted. |
 | `AgentCancelled { agent: String, reason: String }` | A managed invocation's task ended `Cancelled` while the workflow run was not stopped; `reason` is the task's reason. |
-| `UserInputRequired { agent: String, task_id: Uuid, questions: String }` | The run is suspended until an answer is supplied with `continue_agent`. |
+| `UserInputRequired { agent: String, task_id: Uuid, questions: String }` | The run is suspended until an answer is supplied with `continue_agent`. A pause, not a failure. |
+| `AgentPaused { agent: String, task_id: Uuid, pause: AgentPause }` | The agent is suspended for a tool approval or error-recovery decision the workflow's policies leave to the caller; continue it with `resume_agent` (its result: `agent_result(task_id)`). A pause, not a failure. |
 | `MemoryTierNotFound(String)` | Unknown memory tier. |
 | `MemoryAccessDenied { agent: String, tier: String, action: String }` | The tier's reader or writer policy denies the agent. |
 | `MemoryLimitExceeded { tier: String, attempted: usize, limit: usize }` | The write would exceed the tier's byte limit. |

@@ -79,10 +79,11 @@ impl Workflow {
         .await
     }
 
-    /// Settles a finished run call: a failure other than a cancellation
-    /// fires `OnWorkflowFailed` (whose abort replaces the error), and once
-    /// the run is stopped the call returns the stop's error and the stop is
-    /// checkpointed.
+    /// Settles a finished run call: a failure fires `OnWorkflowFailed` once
+    /// (whose abort replaces the error), and once the run is stopped the call
+    /// returns the stop's error and the stop is checkpointed. A pause (an
+    /// agent waiting for input, or paused for a decision) and a cancellation
+    /// are not failures.
     async fn finish_call<T>(
         &self,
         result: Result<T, WorkflowError>,
@@ -91,6 +92,7 @@ impl Workflow {
         let mut result = result;
         if let Err(error) = &result
             && !matches!(error, WorkflowError::Cancelled)
+            && !engine::is_pause(error)
             && let Err(hook_error) =
                 fire_hooks_on_context(&self.context, HookPoint::OnWorkflowFailed, |hook| {
                     configure(hook);
@@ -120,7 +122,9 @@ impl Workflow {
     }
 
     /// Continue a completed agent with its prior conversation and stable run
-    /// identity instead of starting again from an empty context.
+    /// identity instead of starting again from an empty context, or answer
+    /// an agent waiting for input (`AgentRunStatus::WaitingForInput`) with
+    /// `prompt`.
     pub async fn continue_agent(
         &self,
         previous: &AgentResult,
@@ -138,11 +142,50 @@ impl Workflow {
         .await
     }
 
+    /// Continue an agent paused for a decision (`AgentRunStatus::Paused`,
+    /// returned as [`WorkflowError::AgentPaused`]): decide the tool calls it
+    /// awaits approval for, or continue or fail it after an error-recovery
+    /// pause. See [`AgentResume`](crate::policy::AgentResume).
+    pub async fn resume_agent(
+        &self,
+        previous: &AgentResult,
+        resume: crate::policy::AgentResume,
+    ) -> Result<AgentResult, WorkflowError> {
+        self.ensure_running().await?;
+        let result = self
+            .engine
+            .resume_agent(previous, resume, &self.context)
+            .await;
+        self.finish_call(result, |hook| {
+            hook.agent_name = Some(previous.agent_name.clone());
+            hook.agent_run_id = Some(previous.agent_run_id);
+        })
+        .await
+    }
+
+    /// The recorded result of agent run `agent_run_id` (the task ID that
+    /// [`WorkflowError::UserInputRequired`] and [`WorkflowError::AgentPaused`]
+    /// carry), if it has one.
+    pub fn agent_result(&self, agent_run_id: uuid::Uuid) -> Option<AgentResult> {
+        self.context
+            .agent_results
+            .read()
+            .iter()
+            .find(|result| result.agent_run_id == agent_run_id)
+            .cloned()
+    }
+
     /// Run multiple agents in parallel.
     ///
     /// All agents run concurrently. Results are returned in the same order
-    /// as the input. If any agent fails, the error is propagated once every
-    /// agent has finished.
+    /// as the input once every agent has finished. An agent that pauses
+    /// (waiting for input, or paused for a decision) is not a failure: its
+    /// result is returned with status `WaitingForInput` or `Paused`, to be
+    /// continued with [`continue_agent`](Self::continue_agent) or
+    /// [`resume_agent`](Self::resume_agent), while the others run on. If an
+    /// agent fails, the first failure is returned (and `OnWorkflowFailed`
+    /// fires once); the other results stay available through
+    /// [`result`](Self::result).
     pub async fn run_agents_parallel(
         &self,
         agents: Vec<(&str, String)>,
@@ -649,6 +692,9 @@ pub struct WorkflowBuilder {
     messaging: Option<MessagingPolicy>,
     wait_timeouts: WaitTimeouts,
     user_input_handler: Option<Arc<dyn UserInputHandler>>,
+    approval_policy: crate::policy::ApprovalPolicy,
+    error_recovery_policy: crate::policy::ErrorRecoveryPolicy,
+    recovery_waits: crate::policy::RecoveryWaits,
     voting_enabled: bool,
     interception_failure_policy: Option<InterceptionFailurePolicy>,
     cancel_grace_period: std::time::Duration,
@@ -680,6 +726,9 @@ impl WorkflowBuilder {
             messaging: Some(MessagingPolicy::default()),
             wait_timeouts: WaitTimeouts::default(),
             user_input_handler: None,
+            approval_policy: crate::policy::ApprovalPolicy::default(),
+            error_recovery_policy: crate::policy::ErrorRecoveryPolicy::default(),
+            recovery_waits: crate::policy::RecoveryWaits::default(),
             voting_enabled: false,
             interception_failure_policy: None,
             cancel_grace_period: DEFAULT_CANCEL_GRACE_PERIOD,
@@ -891,6 +940,38 @@ impl WorkflowBuilder {
 
     pub fn user_input_handler(mut self, handler: Arc<dyn UserInputHandler>) -> Self {
         self.user_input_handler = Some(handler);
+        self
+    }
+
+    /// How agents' tool-approval requests are answered. **The default,
+    /// [`ApprovalPolicy::ApproveAll`](crate::policy::ApprovalPolicy::ApproveAll),
+    /// approves every call**, including calls an agent's configuration marks
+    /// for approval and paths outside the workspace under
+    /// `PathSafetyPolicy::RequireApproval`, so the workflow runs without
+    /// human input (the first such call per agent, tool and reason is logged
+    /// as a warning). `RespectAgentConfig` pauses the agent for the caller;
+    /// `Handler` decides each call in-process.
+    pub fn approval_policy(mut self, policy: crate::policy::ApprovalPolicy) -> Self {
+        self.approval_policy = policy;
+        self
+    }
+
+    /// How agents' error-recovery pauses are answered. **The default,
+    /// [`ErrorRecoveryPolicy::Automatic`](crate::policy::ErrorRecoveryPolicy::Automatic),
+    /// recovers without an attempt limit** from errors that may pass
+    /// (outages, rate limits, plan usage limits, which it waits out) and
+    /// fails the run clearly on errors that won't; `Limited { max }` caps
+    /// the automatic recoveries, and `ReturnToCaller` pauses the agent for
+    /// the caller at every error-recovery pause.
+    pub fn error_recovery_policy(mut self, policy: crate::policy::ErrorRecoveryPolicy) -> Self {
+        self.error_recovery_policy = policy;
+        self
+    }
+
+    /// Shortens automatic recovery's waits (tests only).
+    #[cfg(test)]
+    pub(crate) fn recovery_waits(mut self, waits: crate::policy::RecoveryWaits) -> Self {
+        self.recovery_waits = waits;
         self
     }
 
@@ -1252,6 +1333,11 @@ impl WorkflowBuilder {
                 None => AgentRegistry::default(),
             },
             user_input_handler: self.user_input_handler,
+            approval_policy: self.approval_policy,
+            error_recovery_policy: self.error_recovery_policy,
+            recovery_waits: self.recovery_waits,
+            approval_reasons: parking_lot::Mutex::new(HashMap::new()),
+            approval_warnings: parking_lot::Mutex::new(HashSet::new()),
             ballots: self
                 .voting_enabled
                 .then(|| Arc::new(BallotStore::default())),
@@ -1298,3 +1384,7 @@ mod messaging_tests;
 #[cfg(test)]
 #[path = "wait_tests.rs"]
 mod wait_tests;
+
+#[cfg(test)]
+#[path = "policy_tests.rs"]
+mod policy_tests;

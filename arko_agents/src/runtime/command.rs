@@ -70,7 +70,9 @@ pub enum UserCommand {
     /// approval, it starts a new recovery and clears a refused input.
     ContinueAfterError { note: Option<String> },
 
-    /// Reject recovery after an error, potentially leading to task failure.
+    /// Reject recovery after an error: the task fails, with `message` as its
+    /// reason when given (otherwise "Error recovery rejected by user for
+    /// error: …").
     RejectErrorRecovery { message: Option<String> },
 
     /// Change the input of a refused turn (reported with

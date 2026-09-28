@@ -110,6 +110,7 @@ fn outcome_name(outcome: &AgentRunStatus) -> &'static str {
         AgentRunStatus::Interrupted => "interrupted",
         AgentRunStatus::Cancelled => "cancelled",
         AgentRunStatus::WaitingForInput => "waiting_for_input",
+        AgentRunStatus::Paused => "paused",
     }
 }
 
@@ -304,7 +305,7 @@ impl AgentRegistry {
         let state = &mut *guard;
         let continuable = matches!(
             outcome,
-            AgentRunStatus::Completed | AgentRunStatus::WaitingForInput
+            AgentRunStatus::Completed | AgentRunStatus::WaitingForInput | AgentRunStatus::Paused
         );
         if !continuable {
             state.saved.seen.remove(&task_id);
@@ -371,6 +372,21 @@ impl AgentRegistry {
             && run.waiting != waiting
         {
             run.waiting = waiting;
+            state.saved.version += 1;
+            self.publish(state);
+        }
+    }
+
+    /// Marks a running run as waiting for `reason` until its next event says
+    /// otherwise (the workflow's own waits, such as automatic error
+    /// recovery's).
+    pub fn set_waiting(&self, task_id: Uuid, reason: WaitReason) {
+        let mut guard = self.state.lock();
+        let state = &mut *guard;
+        if let Some(run) = state.runs.get_mut(&task_id)
+            && run.waiting.as_ref() != Some(&reason)
+        {
+            run.waiting = Some(reason);
             state.saved.version += 1;
             self.publish(state);
         }

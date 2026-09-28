@@ -131,6 +131,33 @@ pub struct AgentMessage {
     #[serde(default)]
     pub attachments: Vec<MessageAttachment>,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// The agent run a context notice is for (set on notices
+    /// [`MessageBus::inject_task`] queues): it is dropped when that run
+    /// stops, whatever its outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_task_id: Option<Uuid>,
+    /// The agent runs (task IDs) that stopped holding this message: in
+    /// their conversation (in a prompt, or added as a context update) or
+    /// taken to be added when they run again. It is not presented to them
+    /// again when they are continued or resumed; other runs of the agent
+    /// still get it until one that completed with it in its conversation
+    /// acknowledges it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held_by: Vec<Uuid>,
+}
+
+impl AgentMessage {
+    /// Whether run `task_id` holds this message; see
+    /// [`held_by`](Self::held_by).
+    pub fn is_held_by(&self, task_id: Uuid) -> bool {
+        self.held_by.contains(&task_id)
+    }
+
+    /// Whether the message is still to be presented to run `task_id`: the
+    /// run doesn't hold it, and it isn't another run's context notice.
+    pub fn is_for(&self, task_id: Uuid) -> bool {
+        !self.is_held_by(task_id) && self.to_task_id.is_none_or(|to| to == task_id)
+    }
 }
 
 /// Per-agent message queue. Active recipients receive asynchronous context
@@ -161,8 +188,6 @@ fn signal_arrival(arrivals: &HashMap<Uuid, watch::Sender<u64>>, task_id: Uuid) {
 struct ActiveRecipient {
     generation: Uuid,
     sender: mpsc::Sender<UserCommand>,
-    pending_message_ids: Vec<Uuid>,
-    confirmed_message_ids: HashSet<Uuid>,
     outbound: VecDeque<(Uuid, String)>,
     /// Agent messages sent to this run that its conversation doesn't hold
     /// yet: `(id, sender, injected payload)`. Context notices are left out.
@@ -253,8 +278,7 @@ async fn forward(
         else {
             return;
         };
-        if let Some((id, content)) = active.outbound.pop_front() {
-            active.pending_message_ids.push(id);
+        if let Some((_, content)) = active.outbound.pop_front() {
             permit.send(UserCommand::InjectContext { content });
             signal_arrival(&state.arrivals, task_id);
         }
@@ -281,6 +305,28 @@ pub(crate) fn injection(message: &AgentMessage) -> String {
 /// [`injection`].
 pub(crate) fn is_injection_of(content: &str, id: Uuid) -> bool {
     content.starts_with(&format!("Message {id} from agent '"))
+}
+
+/// The line that opens message `id`'s block in a prompt (see
+/// `WorkflowEngine::pending_messages`).
+pub(crate) fn prompt_block_marker(id: Uuid, from: &str) -> String {
+    format!("--- Message {id} from '{from}' ---")
+}
+
+/// Whether `conversation` holds `message`: presented in one of its prompts,
+/// or added as a runtime context update.
+fn conversation_holds(conversation: &arko_ai::Conversation, message: &AgentMessage) -> bool {
+    let marker = prompt_block_marker(message.id, &message.from);
+    let payload = injection(message);
+    conversation.messages.iter().any(|entry| {
+        context_update(entry).is_some_and(|update| contains_injection(update, &payload))
+            || (entry.role == arko_ai::Role::User
+                && entry
+                    .content
+                    .iter()
+                    .filter_map(arko_ai::Content::as_text)
+                    .any(|text| text.contains(&marker)))
+    })
 }
 
 fn acknowledge(state: &mut BusState, agent_name: &str, message_ids: &[Uuid]) {
@@ -374,8 +420,6 @@ impl MessageBus {
             ActiveRecipient {
                 generation: Uuid::new_v4(),
                 sender,
-                pending_message_ids: Vec::new(),
-                confirmed_message_ids: HashSet::new(),
                 outbound: VecDeque::new(),
                 unseen: Vec::new(),
                 wake: Arc::new(Notify::new()),
@@ -390,8 +434,10 @@ impl MessageBus {
     }
 
     /// Registers a run started with the messages `in_prompt` in its prompt,
-    /// and delivers live any message queued for the agent since the prompt
-    /// was built.
+    /// and delivers live every other message queued for the agent that the
+    /// run doesn't hold (see [`AgentMessage::held_by`]): those queued since
+    /// the prompt was built, and, for a run resumed without a prompt, those
+    /// it hasn't seen.
     pub(crate) fn register_run(
         &self,
         agent_name: &str,
@@ -409,7 +455,7 @@ impl MessageBus {
             .get(agent_name)
             .into_iter()
             .flatten()
-            .filter(|message| !in_prompt.contains(&message.id))
+            .filter(|message| !in_prompt.contains(&message.id) && message.is_for(task_id))
             .collect::<Vec<_>>();
         if late.is_empty() {
             return;
@@ -500,6 +546,20 @@ impl MessageBus {
         UnseenMessages { senders, forwarded }
     }
 
+    /// Resolves once every agent message queued for run `task_id` of
+    /// `agent_name` is in its command channel.
+    pub(crate) async fn forwarded(&self, agent_name: &str, task_id: Uuid) {
+        let mut arrivals = self.watch_arrivals(task_id);
+        loop {
+            arrivals.borrow_and_update();
+            if self.unseen_messages(agent_name, task_id).forwarded
+                || arrivals.changed().await.is_err()
+            {
+                return;
+            }
+        }
+    }
+
     /// Notes a message committed to run `task_id`'s conversation: the agent
     /// messages whose injected payload its context update holds are seen.
     pub(crate) fn observe_context(
@@ -524,9 +584,10 @@ impl MessageBus {
     }
 
     /// Queue a task-specific context notice without waiting for the recipient.
-    /// True means retained for a known active task, not yet consumed. The queue
-    /// is persisted by workflow checkpoints, just like inter-agent messages.
-    /// Unacknowledged notices survive snapshot/recovery as ordinary messages.
+    /// True means retained for a known active task, not yet consumed. The
+    /// queue is persisted by workflow checkpoints, just like inter-agent
+    /// messages. A notice is for its run only: it is dropped when that run
+    /// stops ([`settle_run`](Self::settle_run)).
     pub async fn inject_task(&self, task_id: Uuid, content: String) -> bool {
         let mut state = self.state.lock();
         let agent_name = state
@@ -544,6 +605,8 @@ impl MessageBus {
             content,
             attachments: Vec::new(),
             timestamp: chrono::Utc::now(),
+            to_task_id: Some(task_id),
+            held_by: Vec::new(),
         };
         let content = injection(&message);
         state
@@ -564,9 +627,10 @@ impl MessageBus {
     }
 
     /// Retain a message for checkpoint persistence and schedule active delivery
-    /// without waiting for the recipient's command channel. Only confirmed
-    /// context consumption followed by completion acknowledgement removes it;
-    /// interrupted delivery may be presented again on resume.
+    /// without waiting for the recipient's command channel. It leaves the
+    /// queue once a run of the recipient completes with it in its
+    /// conversation ([`settle_run`](Self::settle_run)); until then it is
+    /// presented to every run of the recipient that doesn't hold it.
     pub async fn send(
         &self,
         from: &str,
@@ -593,6 +657,8 @@ impl MessageBus {
             content,
             attachments,
             timestamp: chrono::Utc::now(),
+            to_task_id: None,
+            held_by: Vec::new(),
         };
 
         let mut state = self.state.lock();
@@ -630,6 +696,7 @@ impl MessageBus {
             .unwrap_or_default()
     }
 
+    /// Every message queued for the agent.
     pub fn pending(&self, agent_name: &str) -> Vec<AgentMessage> {
         self.state
             .lock()
@@ -639,85 +706,69 @@ impl MessageBus {
             .unwrap_or_default()
     }
 
+    /// The messages queued for the agent that are for run `task_id` (see
+    /// [`AgentMessage::is_for`]): what its prompt presents.
+    pub fn pending_for(&self, agent_name: &str, task_id: Uuid) -> Vec<AgentMessage> {
+        self.state
+            .lock()
+            .queues
+            .get(agent_name)
+            .into_iter()
+            .flatten()
+            .filter(|message| message.is_for(task_id))
+            .cloned()
+            .collect()
+    }
+
     pub fn acknowledge(&self, agent_name: &str, message_ids: &[Uuid]) {
         acknowledge(&mut self.state.lock(), agent_name, message_ids);
     }
 
-    /// Confirm channel-enqueued messages committed to a finalized conversation.
-    /// Only the runtime's complete User context-update text qualifies, never an
-    /// assistant echo, tool result, arbitrary prompt, or bare message ID.
-    pub fn confirm_active_context(
+    /// Records what run `task_id` of `agent_name` holds as it stops (see
+    /// [`AgentMessage::held_by`]): the queued messages its conversation holds
+    /// (presented in `prompt_ids` or an earlier prompt, or added as a
+    /// runtime context update; an echo in an assistant turn, a tool result,
+    /// or a suffix doesn't count) and those it took from its command channel
+    /// but hadn't added yet (`taken`, its `pending_context_injections`).
+    /// None of them is presented to the run again when it is continued or
+    /// resumed. When the run `completed`, the messages in its conversation
+    /// are acknowledged and leave the queue; one it only took stays for the
+    /// runs that haven't read it. The run's context notices are dropped
+    /// whatever the outcome: they describe the run's own context.
+    pub(crate) fn settle_run(
         &self,
         agent_name: &str,
         task_id: Uuid,
         conversation: &arko_ai::Conversation,
+        prompt_ids: &[Uuid],
+        taken: &[String],
+        completed: bool,
     ) {
-        let (generation, payloads) = {
-            let state = self.state.lock();
-            let Some(active) = state
-                .active
-                .get(agent_name)
-                .and_then(|instances| instances.get(&task_id))
-            else {
-                return;
-            };
-            let enqueued = active
-                .pending_message_ids
-                .iter()
-                .copied()
-                .collect::<HashSet<_>>();
-            let payloads = state
-                .queues
-                .get(agent_name)
-                .into_iter()
-                .flatten()
-                .filter(|message| enqueued.contains(&message.id))
-                .map(|message| (message.id, injection(message)))
-                .collect::<Vec<_>>();
-            (active.generation, payloads)
+        let mut state = self.state.lock();
+        let Some(messages) = state.queues.get_mut(agent_name) else {
+            return;
         };
-        let updates = conversation
-            .messages
-            .iter()
-            .filter_map(context_update)
-            .collect::<Vec<_>>();
-        let confirmed = payloads
-            .into_iter()
-            .filter_map(|(id, payload)| {
-                updates
+        messages.retain_mut(|message| {
+            if message.to_task_id == Some(task_id) {
+                return false;
+            }
+            let in_conversation =
+                prompt_ids.contains(&message.id) || conversation_holds(conversation, message);
+            if completed && in_conversation {
+                return false;
+            }
+            let held = in_conversation
+                || taken
                     .iter()
-                    .any(|update| contains_injection(update, &payload))
-                    .then_some(id)
-            })
-            .collect::<Vec<_>>();
-        let mut state = self.state.lock();
-        if let Some(active) = state
-            .active
-            .get_mut(agent_name)
-            .and_then(|instances| instances.get_mut(&task_id))
-            .filter(|active| active.generation == generation)
-        {
-            active.confirmed_message_ids.extend(confirmed);
+                    .any(|content| is_injection_of(content, message.id));
+            if held && !message.is_held_by(task_id) {
+                message.held_by.push(task_id);
+            }
+            true
+        });
+        if messages.is_empty() {
+            state.queues.remove(agent_name);
         }
-    }
-
-    /// Acknowledge only payloads confirmed in the finalized task's context.
-    /// Merely accepting an InjectContext command into its channel is insufficient.
-    pub fn acknowledge_active(&self, agent_name: &str, task_id: Uuid) {
-        let mut state = self.state.lock();
-        let ids = state
-            .active
-            .get_mut(agent_name)
-            .and_then(|instances| instances.get_mut(&task_id))
-            .map(|active| {
-                let confirmed = std::mem::take(&mut active.confirmed_message_ids);
-                active
-                    .pending_message_ids
-                    .retain(|id| !confirmed.contains(id));
-                confirmed.into_iter().collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        acknowledge(&mut state, agent_name, &ids);
     }
 
     /// Snapshot for persistence.
@@ -737,10 +788,21 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    fn conversation() -> arko_ai::Conversation {
+        arko_ai::Conversation::new(arko_ai::Model::openai_gpt_6_astra())
+    }
+
+    /// Settles run `task_id` as completed with `content` added as a context
+    /// update.
     fn confirm(bus: &MessageBus, agent_name: &str, task_id: Uuid, content: &str) {
-        let mut conversation = arko_ai::Conversation::new(arko_ai::Model::openai_gpt_6_astra());
+        let mut conversation = conversation();
         conversation.add_user_message(&format!("# Workflow context update\n\n{content}"));
-        bus.confirm_active_context(agent_name, task_id, &conversation);
+        bus.settle_run(agent_name, task_id, &conversation, &[], &[], true);
+    }
+
+    /// Settles run `task_id` as completed with nothing in its conversation.
+    fn complete_empty(bus: &MessageBus, agent_name: &str, task_id: Uuid) {
+        bus.settle_run(agent_name, task_id, &conversation(), &[], &[], true);
     }
 
     // Test watchdogs detect deadlocks; production delivery has no forced timeout.
@@ -927,7 +989,6 @@ mod tests {
         assert_eq!(bus.pending("reviewer").len(), 1);
 
         confirm(&bus, "reviewer", task_id, &content);
-        bus.acknowledge_active("reviewer", task_id);
         assert!(bus.pending("reviewer").is_empty());
     }
 
@@ -958,19 +1019,15 @@ mod tests {
 
         // complete_task can return before the runtime reads these commands or
         // commits their text to Task.conversation. Finalization must preserve
-        // both pending records even though channel delivery was successful.
-        bus.confirm_active_context(
-            "creator",
-            task_id,
-            &arko_ai::Conversation::new(arko_ai::Model::openai_gpt_6_astra()),
-        );
-        bus.acknowledge_active("creator", task_id);
+        // the message even though channel delivery was successful; the
+        // run's own context notice ends with it.
+        complete_empty(&bus, "creator", task_id);
         bus.unregister_active("creator", task_id);
         drop(receiver);
         let pending = bus.pending("creator");
-        assert_eq!(pending.len(), 2, "completion discarded unread context");
+        assert_eq!(pending.len(), 1, "completion discarded unread context");
         assert_eq!(pending[0].id, message.id);
-        assert_eq!(pending[1].content, "evidence changed");
+        assert!(pending[0].held_by.is_empty());
     }
 
     #[tokio::test]
@@ -1013,16 +1070,15 @@ mod tests {
             )),
         ];
         for context in invalid {
-            let mut conversation = arko_ai::Conversation::new(arko_ai::Model::openai_gpt_6_astra());
+            let mut conversation = conversation();
             conversation.messages.push(context);
-            bus.confirm_active_context("creator", task_id, &conversation);
-            bus.acknowledge_active("creator", task_id);
+            bus.settle_run("creator", task_id, &conversation, &[], &[], true);
             assert_eq!(bus.pending("creator").len(), 1);
+            assert!(bus.pending("creator")[0].held_by.is_empty());
         }
-        let mut conversation = arko_ai::Conversation::new(arko_ai::Model::openai_gpt_6_astra());
+        let mut conversation = conversation();
         conversation.add_user_message(&format!("{framed}\n\n# Current Environment Information (updated this turn)\nignored metadata\n\n# Reminder\nContinue carefully"));
-        bus.confirm_active_context("creator", task_id, &conversation);
-        bus.acknowledge_active("creator", task_id);
+        bus.settle_run("creator", task_id, &conversation, &[], &[], true);
         assert!(bus.pending("creator").is_empty());
     }
 
@@ -1079,12 +1135,12 @@ mod tests {
         crate::workflow::engine::finalize_agent_task(
             "creator".into(),
             task,
+            &[],
             workflow.context(),
             None,
         )
         .await
         .unwrap();
-        bus.acknowledge_active("creator", task_id);
         bus.unregister_active("creator", task_id);
         drop(receiver);
         let restored = MessageBus::from_snapshot(bus.roster(), bus.snapshot());
@@ -1169,12 +1225,6 @@ mod tests {
                 .len(),
             64
         );
-        bus.acknowledge_active("creator", task_id);
-        assert_eq!(
-            bus.pending("creator").len(),
-            64,
-            "unsent messages were acknowledged"
-        );
         assert_eq!(
             received(&mut receiver).await,
             "runtime is executing consult_design"
@@ -1192,7 +1242,6 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n\n"),
         );
-        bus.acknowledge_active("creator", task_id);
         assert!(bus.pending("creator").is_empty());
         bus.unregister_active("creator", task_id);
     }
@@ -1251,7 +1300,6 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        bus.acknowledge_active("creator", task_id);
         let snapshot = bus.snapshot();
         let encoded = serde_json::to_vec(&snapshot).unwrap();
         let restored =
@@ -1302,7 +1350,6 @@ mod tests {
                 .is_none()
         );
         confirm(&bus, "creator", task_id, &injection(&new));
-        bus.acknowledge_active("creator", task_id);
         assert_eq!(
             bus.pending("creator")
                 .iter()
@@ -1332,7 +1379,6 @@ mod tests {
         })
         .await
         .expect("closed recipient retained its forwarding task");
-        bus.acknowledge_active("creator", task_id);
         assert_eq!(bus.pending("creator").len(), 2);
         assert_eq!(bus.pending("creator")[0].id, message.id);
         assert!(!bus.inject_task(task_id, "no longer active".into()).await);
@@ -1349,7 +1395,6 @@ mod tests {
             for _ in 0..256 {
                 let content = received(&mut receiver).await;
                 confirm(&consumer_bus, "reviewer", task_id, &content);
-                consumer_bus.acknowledge_active("reviewer", task_id);
             }
         });
         for index in 0..256 {
@@ -1387,7 +1432,6 @@ mod tests {
                     .unwrap();
                 assert_eq!(received(&mut receiver).await, injection(&message));
                 confirm(&bus, "reviewer", task_id, &injection(&message));
-                bus.acknowledge_active("reviewer", task_id);
                 assert!(bus.pending("reviewer").is_empty());
             });
     }
