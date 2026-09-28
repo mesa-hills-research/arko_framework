@@ -146,8 +146,9 @@ The managed paths (`run_agent`, `continue_agent`, `resume_agent`,
 error-recovery pauses under the workflow's [policies](#approvals-and-error-recovery)
 (by default: approve every call, and recover from errors automatically), record costs
 and results, and apply budgets, hooks, verification, and persistence. In a parallel
-run, an agent that pauses for input or a decision is not a failure: its result comes
-back with the others, to be continued. `max_parallel_agents(n)` caps how many agents
+run, an agent that pauses for input or a decision (or because a completion verifier
+could not review its completion) is not a failure: its result comes back with the
+others, to be continued. `max_parallel_agents(n)` caps how many agents
 of a parallel call run at once (no cap by default), and `fail_fast(true)` (off by
 default) stops the others at the first failure. To handle events yourself, split a spawned
 handle into its channels. The caller then takes over event handling, approvals, usage

@@ -630,6 +630,64 @@ async fn a_failed_fallback_request_is_recovered_from_by_its_own_error() {
     }
 }
 
+/// Continuing after a failed fallback request sends the refused input to
+/// the fallback again exactly: an approval adds no error note, and the
+/// host's note or message waits as context until the fallback has answered.
+/// (Both were once added to the conversation first, so the fallback
+/// answered, and could refuse, the refused input plus the note.)
+#[tokio::test(start_paused = true)]
+async fn a_note_waits_until_the_pending_fallback_has_answered() {
+    for approve in [false, true] {
+        let (mut agent, mut events, commands) = harness();
+        native(&mut agent);
+        agent.task.agent_config.refusal_fallback = fallback_config(ai::Model::openai_gpt_6_sol());
+        let requested = Arc::clone(&agent.requested_models);
+        push(&mut agent, refused());
+        agent
+            .scripted_responses
+            .get_mut()
+            .unwrap()
+            .push_back(Err(provider_failure(401, None)));
+        push(&mut agent, complete_response());
+        let runner = tokio::spawn(agent.run());
+        loop {
+            match timeout(Duration::from_secs(60), events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
+                    ..
+                }) => {
+                    let command = if approve {
+                        UserCommand::ApproveErrorRecovery {
+                            message: Some("Mind the tests.".into()),
+                        }
+                    } else {
+                        UserCommand::ContinueAfterError {
+                            note: Some("Mind the tests.".into()),
+                        }
+                    };
+                    commands.send(command).await.unwrap();
+                }
+                AgentEvent::TaskStreamEnd => break,
+                _ => {}
+            }
+        }
+        let task = runner.await.unwrap().unwrap();
+        assert!(matches!(task.current_state, TaskState::Completed { .. }));
+        assert_eq!(
+            *requested.lock().unwrap(),
+            ["gpt-5.6-luna", "gpt-6-sol", "gpt-6-sol"]
+        );
+        let conversation = serde_json::to_string(&task.conversation).unwrap();
+        assert!(!conversation.contains("Mind the tests."), "{approve}");
+        assert!(!conversation.contains("resulted in an error"), "{approve}");
+        // Completed right away, the task keeps it for a later run.
+        assert_eq!(task.pending_context_injections, ["Mind the tests."]);
+    }
+}
+
 #[test]
 fn a_fallback_on_another_provider_is_rejected() {
     let (agent, _events, _commands) = harness();

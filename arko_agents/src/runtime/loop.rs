@@ -567,6 +567,14 @@ impl AgentLoop {
         Ok(())
     }
 
+    /// Whether continuing after an error-recovery pause sends the pending
+    /// refusal fallback's request again, unchanged: a fallback is pending
+    /// and no output-based results wait to be sent first.
+    fn fallback_resend(&self) -> bool {
+        self.task.fallback_for.is_some()
+            && (self.is_native_mode() || self.task.pending_text_tool_results.is_empty())
+    }
+
     /// Whether a user message can join the conversation as the loop stops:
     /// no native call waits for its result (a user message between a call
     /// and its result breaks the next request for every provider), no
@@ -2211,7 +2219,15 @@ impl AgentLoop {
                                             )
                                             .await?;
                                         }
-                                        if self.is_native_mode()
+                                        if self.fallback_resend() {
+                                            // The fallback answers exactly the
+                                            // refused input: a note waits, as
+                                            // context, until it has answered.
+                                            if let Some(note) = note {
+                                                self.queue_context_injection(note.to_string());
+                                            }
+                                            native_handled = true;
+                                        } else if self.is_native_mode()
                                             && !self.task.pending_native_tool_results.is_empty()
                                         {
                                             self.flush_native_results_to_conversation(note)?;
@@ -2243,7 +2259,21 @@ impl AgentLoop {
                                             "Task {}: Error recovery approved by user.",
                                             self.task.id
                                         );
-                                        if std::mem::take(&mut self.task.monitor_pause) {
+                                        let monitor_pause =
+                                            std::mem::take(&mut self.task.monitor_pause);
+                                        if self.fallback_resend() {
+                                            // The fallback answers exactly the
+                                            // refused input: no error note, and
+                                            // the host's message waits, as
+                                            // context, until it has answered.
+                                            if let Some(text) = user_msg_on_recovery
+                                                .as_deref()
+                                                .filter(|text| !text.is_empty())
+                                            {
+                                                self.queue_context_injection(text.to_string());
+                                            }
+                                            native_handled = true;
+                                        } else if monitor_pause {
                                             // A monitor paused the task, not a
                                             // model error: nothing to report to
                                             // the model beyond the host's note.

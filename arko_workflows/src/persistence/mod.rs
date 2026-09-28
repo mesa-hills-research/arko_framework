@@ -105,6 +105,15 @@ pub struct PersistenceManager {
     pub(crate) fail_task_writes: Arc<AtomicBool>,
 }
 
+#[cfg(test)]
+impl PersistenceManager {
+    /// Holds off every write (task versions, checkpoints) until the guard
+    /// is dropped, as a long write would.
+    pub(crate) async fn hold_writes(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.write_lock.clone().lock_owned().await
+    }
+}
+
 /// A recorded result's task, as checkpoints refer to it.
 #[derive(Debug, Clone, Default)]
 struct SavedTask {
@@ -592,7 +601,9 @@ impl PersistenceManager {
 
     /// Saves `task` as a version in the run directory, unless that version
     /// is there already, and returns its path. A checkpoint refers to the
-    /// versions of its results' tasks; this call doesn't change which.
+    /// versions of its results' tasks; this call doesn't change which, so
+    /// with [`PersistenceConfig::retain_checkpoints`] the next checkpoint
+    /// deletes a version no checkpoint or recorded result refers to.
     pub async fn save_agent_task(
         &self,
         task: &arko_agents::Task,

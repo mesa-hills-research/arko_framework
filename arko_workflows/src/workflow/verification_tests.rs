@@ -113,6 +113,14 @@ async fn a_failed_review_is_retried_then_reported_as_verifier_failed() {
                 crate::hooks::HookResult::Continue
             })
         })
+        // A pause is not a failure: neither hook fires.
+        .hook(crate::hooks::HookPoint::OnWorkflowFailed, {
+            let hooks_failed = hooks_failed.clone();
+            Arc::new(move |_| {
+                hooks_failed.fetch_add(1, Ordering::SeqCst);
+                crate::hooks::HookResult::Continue
+            })
+        })
         .build()
         .unwrap();
         let error = workflow.run_agent("coder", "Write it.").await.unwrap_err();
@@ -228,4 +236,38 @@ async fn a_task_a_verifier_could_not_review_is_continued_with_continue_agent() {
     assert_eq!(result.agent_run_id, task_id);
     assert_eq!(verifier_bodies(&server).len(), 3);
     assert_eq!(coder_bodies().len(), 3);
+}
+
+/// In a parallel run, a task whose completion its verifier could not
+/// review is a pause, not a failure: its paused result comes back with the
+/// others, and `fail_fast` doesn't stop them.
+#[tokio::test]
+async fn a_verifier_failure_in_a_parallel_run_is_a_pause() {
+    let workspace = Workspace::new();
+    let server = server(|_| "Looks good to me.").await;
+    let workflow = builder(
+        &server,
+        &workspace,
+        CompletionVerifierConfig::correctness("check", "reviewer")
+            .target("coder")
+            .format_retries(0)
+            .review_retries(0),
+    )
+    .agent(
+        "writer",
+        crate::test_support::agent_config("Friendly Writer"),
+    )
+    .fail_fast(true)
+    .build()
+    .unwrap();
+    let results = workflow
+        .run_agents_parallel(vec![
+            ("coder", "Write it.".to_string()),
+            ("writer", "Write the docs.".to_string()),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(results[0].agent_name, "coder");
+    assert_eq!(results[0].status, AgentRunStatus::Paused);
+    assert_eq!(results[1].status, AgentRunStatus::Completed);
 }

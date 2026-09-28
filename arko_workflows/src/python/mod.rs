@@ -28,6 +28,14 @@ pyo3::create_exception!(
 );
 
 #[cfg(feature = "python")]
+pyo3::create_exception!(
+    arko_workflows,
+    VerifierFailed,
+    pyo3::exceptions::PyException,
+    "A completion verifier could not review the agent's completion, which was neither accepted nor rejected; the agent is left paused: args are (message, agent_run_id). Continue it with PyWorkflow.continue_agent on PyWorkflow.agent_result(agent_run_id)."
+);
+
+#[cfg(feature = "python")]
 #[pymodule]
 fn arko_workflows(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWorkflowBuilder>()?;
@@ -36,12 +44,15 @@ fn arko_workflows(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("WorkflowCancelled", m.py().get_type::<WorkflowCancelled>())?;
     m.add("UserInputRequired", m.py().get_type::<UserInputRequired>())?;
     m.add("AgentPaused", m.py().get_type::<AgentPaused>())?;
+    m.add("VerifierFailed", m.py().get_type::<VerifierFailed>())?;
     Ok(())
 }
 
 /// A cancelled run raises `WorkflowCancelled`; an agent waiting for input
-/// `UserInputRequired` and a paused agent `AgentPaused`, each with the
-/// agent run ID as the second argument; other errors raise `RuntimeError`.
+/// `UserInputRequired`, a paused agent `AgentPaused`, and an agent whose
+/// completion a verifier could not review (left paused) `VerifierFailed`,
+/// each with the agent run ID as the second argument; other errors raise
+/// `RuntimeError`.
 #[cfg(feature = "python")]
 fn run_error(error: crate::WorkflowError) -> PyErr {
     match error {
@@ -51,6 +62,9 @@ fn run_error(error: crate::WorkflowError) -> PyErr {
         }
         crate::WorkflowError::AgentPaused { task_id, .. } => {
             AgentPaused::new_err((error.to_string(), task_id.to_string()))
+        }
+        crate::WorkflowError::VerifierFailed { task_id, .. } => {
+            VerifierFailed::new_err((error.to_string(), task_id.to_string()))
         }
         error => pyo3::exceptions::PyRuntimeError::new_err(format!("Workflow error: {error}")),
     }
@@ -431,8 +445,10 @@ impl PyWorkflow {
         })
     }
 
-    /// Continue a completed agent run with a follow-up `prompt`, or answer an
-    /// agent waiting for input (`UserInputRequired`) with it.
+    /// Continue a completed agent run with a follow-up `prompt`, answer an
+    /// agent waiting for input (`UserInputRequired`) with it, or continue an
+    /// agent whose completion a verifier could not review (`VerifierFailed`)
+    /// with it.
     fn continue_agent<'py>(
         &self,
         py: Python<'py>,
@@ -503,8 +519,8 @@ impl PyWorkflow {
         })
     }
 
-    /// The recorded result of agent run `agent_run_id` (as `UserInputRequired`
-    /// and `AgentPaused` give it), or None.
+    /// The recorded result of agent run `agent_run_id` (as `UserInputRequired`,
+    /// `AgentPaused`, and `VerifierFailed` give it), or None.
     fn agent_result(&self, agent_run_id: String) -> PyResult<Option<PyAgentResult>> {
         let id =
             uuid::Uuid::parse_str(&agent_run_id).map_err(|error| value_error(error.to_string()))?;

@@ -852,8 +852,11 @@ also refuses, the refusal stands and can be resolved as above. A fallback reques
 fails otherwise is recovered from like any request, by its own error: a dropped
 connection, server error or rate limit is retried to the fallback model, and when
 recovery ends the task pauses with that error's cause (`RetriesExhausted`,
-`NonRetryable`, ...) with the fallback still pending, so continuing sends its request
-again; resolving the refusal instead sends the changed input to the configured model.
+`NonRetryable`, ...) with the fallback still pending, so continuing
+(`ContinueAfterError` or `ApproveErrorRecovery`) sends its request again, unchanged: no
+error note is added, and a note or message given with the command waits as context
+until the fallback has answered. Resolving the refusal instead sends the changed input
+to the configured model.
 
 Across the two models, the ChatGPT turn-state token of one is not sent with the other's
 requests. OpenAI reasoning is replayed between them only when both are `Provider::OpenAI`

@@ -1033,7 +1033,8 @@ impl WorkflowBuilder {
     /// Opt-in (default off): in `run_agents_parallel`, the first agent that
     /// fails stops the others (each is cancelled, winding down within the
     /// cancel grace period), agents not started yet don't start, and the
-    /// call returns that failure. A pause is not a failure. Off, every agent
+    /// call returns that failure. A pause is not a failure, including a
+    /// completion its verifier could not review. Off, every agent
     /// runs to its end and the first failure in input order is returned.
     pub fn fail_fast(mut self, enabled: bool) -> Self {
         self.parallel.fail_fast = enabled;

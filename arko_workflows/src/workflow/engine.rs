@@ -934,11 +934,14 @@ async fn drive_events(
 }
 
 /// Whether `error` is an agent suspended for its caller, not a failure: it
-/// waits for input or is paused, and the run can go on.
+/// waits for input or is paused (also when a completion verifier could not
+/// review its completion), and the run can go on.
 pub(crate) fn is_pause(error: &WorkflowError) -> bool {
     matches!(
         error,
-        WorkflowError::UserInputRequired { .. } | WorkflowError::AgentPaused { .. }
+        WorkflowError::UserInputRequired { .. }
+            | WorkflowError::AgentPaused { .. }
+            | WorkflowError::VerifierFailed { .. }
     )
 }
 
@@ -1460,11 +1463,22 @@ pub(crate) async fn finalize_agent_task(
     let summary = result.summary.clone();
     let error = result.error.clone();
     // With persistence, its task is saved first (a failure is logged and
-    // retried at the next checkpoint; it never fails the run).
-    // (Boxed: saving's state stays off the stack of the call driving the
-    // agent.)
+    // retried at the next checkpoint; it never fails the run). Spawned, so
+    // the result is recorded even if this call is dropped while it waits
+    // for another save.
     match persistence {
-        Some(persistence) => Box::pin(persistence.record_result(ctx, result.clone())).await,
+        Some(persistence) => {
+            let recording = {
+                let (persistence, ctx, result) = (persistence.clone(), ctx.clone(), result.clone());
+                tokio::spawn(async move { persistence.record_result(&ctx, result).await })
+            };
+            if let Err(error) = recording.await {
+                log::warn!(
+                    "Workflow '{}': recording the result of agent '{agent_name}' ({agent_run_id}) failed: {error}",
+                    ctx.workflow_name
+                );
+            }
+        }
         None => record_result(ctx, result.clone()),
     }
 
@@ -1953,6 +1967,35 @@ impl WorkflowEngine {
 
     /// Run a completion verifier at `depth`: its prompt gets no roster of
     /// the agents it may message.
+    /// [`continue_at`](Self::continue_at) for a run inside another agent's
+    /// tool call: boxed here, so the caller keeps only a pointer to its
+    /// large state on the stack.
+    fn continue_nested<'a>(
+        &'a self,
+        previous: &'a AgentResult,
+        prompt: &'a str,
+        ctx: &'a Arc<SharedContext>,
+        depth: u32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<AgentResult, WorkflowError>> + Send + 'a>,
+    > {
+        Box::pin(self.continue_at(previous, prompt, ctx, depth))
+    }
+
+    /// [`run_verifier`](Self::run_verifier), boxed as
+    /// [`continue_nested`](Self::continue_nested) is.
+    fn run_verifier_nested<'a>(
+        &'a self,
+        agent_name: &'a str,
+        prompt: &'a str,
+        ctx: &'a Arc<SharedContext>,
+        depth: u32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<AgentResult, WorkflowError>> + Send + 'a>,
+    > {
+        Box::pin(self.run_verifier(agent_name, prompt, ctx, depth))
+    }
+
     async fn run_verifier(
         &self,
         agent_name: &str,
@@ -2106,7 +2149,8 @@ impl WorkflowEngine {
                     // result, to be continued, is returned with the others.
                     let paused = match &error {
                         WorkflowError::UserInputRequired { task_id, .. }
-                        | WorkflowError::AgentPaused { task_id, .. } => ctx
+                        | WorkflowError::AgentPaused { task_id, .. }
+                        | WorkflowError::VerifierFailed { task_id, .. } => ctx
                             .agent_results
                             .read()
                             .iter()
@@ -2609,7 +2653,7 @@ impl WorkflowExecutionMiddleware {
                     crate::verification::VERIFIER_OUTPUT_CONTRACT,
                 );
                 match engine
-                    .continue_at(previous, &prompt, &self.context, self.depth + 1)
+                    .continue_nested(previous, &prompt, &self.context, self.depth + 1)
                     .await
                 {
                     Ok(result) => result,
@@ -2644,7 +2688,7 @@ impl WorkflowExecutionMiddleware {
                     crate::verification::VERIFIER_OUTPUT_CONTRACT,
                 );
                 match engine
-                    .run_verifier(
+                    .run_verifier_nested(
                         &verifier.verifier_agent,
                         &prompt,
                         &self.context,
@@ -2674,7 +2718,7 @@ impl WorkflowExecutionMiddleware {
                             crate::verification::VERIFIER_OUTPUT_CONTRACT,
                         );
                         result = match engine
-                            .continue_at(&result, &prompt, &self.context, self.depth + 1)
+                            .continue_nested(&result, &prompt, &self.context, self.depth + 1)
                             .await
                         {
                             Ok(result) => result,

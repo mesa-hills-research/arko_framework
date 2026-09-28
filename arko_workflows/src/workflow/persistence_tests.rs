@@ -449,6 +449,54 @@ async fn a_task_state_that_cant_be_saved_is_retried_and_reported() {
     }
 }
 
+/// Waits, up to a generous limit, until `done` holds.
+async fn until(mut done: impl FnMut() -> bool) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while !done() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the condition came true");
+}
+
+/// A run call dropped while its finished run waits to be saved (behind
+/// another write) still records the result, and saves it once writing goes
+/// on. (The result was once recorded only after the save, so dropping the
+/// call then lost it: `agent_result` found nothing to continue.)
+#[tokio::test]
+async fn a_result_is_recorded_when_its_call_is_dropped_while_saving() {
+    use crate::messaging::registry::AgentStatus;
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let workflow = Arc::new(
+        builder(&server, &workspace)
+            .persistence(PersistenceConfig::new(run_dir(&workspace)))
+            .build()
+            .unwrap(),
+    );
+    let held = workflow.engine.persistence().unwrap().hold_writes().await;
+    let call = tokio::spawn({
+        let workflow = workflow.clone();
+        async move { workflow.run_agent("coder", "Write it.").await }
+    });
+    // The run ended; its call waits to save the result.
+    until(|| {
+        matches!(
+            workflow.agent_status("coder"),
+            Some(AgentStatus::Finished(_))
+        )
+    })
+    .await;
+    call.abort();
+    assert!(call.await.unwrap_err().is_cancelled());
+    drop(held);
+    until(|| !workflow.result().agent_results.is_empty()).await;
+    let result = workflow.result().agent_results[0].clone();
+    assert_eq!(result.status, AgentRunStatus::Completed);
+    until(|| !versions(&workspace, result.agent_run_id).is_empty()).await;
+}
+
 /// An event log that can't be written doesn't stop the agents: the run
 /// completes, and the events are written once writing works again.
 #[tokio::test]
