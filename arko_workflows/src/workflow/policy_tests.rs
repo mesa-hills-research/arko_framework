@@ -405,6 +405,61 @@ async fn automatic_recovery_sends_the_request_again_after_retries_run_out() {
     assert_eq!(hooks.get(HookPoint::OnAgentPaused), 0);
 }
 
+/// The agent's opt-in `user_command_timeout_seconds` doesn't cut short a
+/// decision the workflow owns: automatic recovery's wait before it
+/// continues may be longer. (Real time: a 2 s timeout, a 3 s wait.)
+#[tokio::test]
+async fn the_agents_command_timeout_does_not_cut_a_recovery_wait_short() {
+    let workspace = Workspace::new();
+    let server = scripted(failing_then_done(503)).await;
+    let mut config = failing_once_agent();
+    config.user_command_timeout_seconds = Some(2);
+    let workflow = builder(&server, &workspace, config)
+        .recovery_waits(RecoveryWaits {
+            initial: Duration::from_secs(3),
+            max: Duration::from_secs(3),
+            reset_margin: Duration::ZERO,
+            max_jitter: Duration::ZERO,
+        })
+        .build()
+        .unwrap();
+    let result = within(workflow.run_agent("coder", "Write it.")).await;
+    assert_eq!(result.unwrap().summary, "done");
+    assert_eq!(server.bodies().len(), 2);
+}
+
+/// Approves every call after `0`.
+struct SlowApproval(Duration);
+
+#[async_trait]
+impl ToolApprovalHandler for SlowApproval {
+    async fn decide(&self, _request: ToolApprovalRequest) -> ToolApprovalOutcome {
+        tokio::time::sleep(self.0).await;
+        ToolApprovalOutcome::Approve
+    }
+}
+
+/// Nor does it cut short an approval handler deciding. (Real time: a 2 s
+/// timeout, a 3 s decision.)
+#[tokio::test]
+async fn the_agents_command_timeout_does_not_cut_an_approval_handler_short() {
+    let workspace = Workspace::new();
+    let server = scripted(probe_then_done).await;
+    let probe = ProbeTool::new("probe", false);
+    let mut config = approving_agent(&[]);
+    config.user_command_timeout_seconds = Some(2);
+    let workflow = builder(&server, &workspace, config)
+        .global_tool(probe.clone())
+        .approval_policy(ApprovalPolicy::Handler(Arc::new(SlowApproval(
+            Duration::from_secs(3),
+        ))))
+        .build()
+        .unwrap();
+    let result = within(workflow.run_agent("coder", "Probe.")).await;
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(probe.calls(), 1);
+}
+
 /// `Automatic` fails a run clearly on an error retrying can't fix, without
 /// sending it again; `OnWorkflowFailed` fires once.
 #[tokio::test]

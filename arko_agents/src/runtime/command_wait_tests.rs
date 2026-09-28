@@ -1,0 +1,249 @@
+//! The opt-in `user_command_timeout_seconds`: one deadline per wait for a
+//! command, set when the wait starts. (Paused time: the waits are exact.)
+
+use super::tool_call_tests::{agent, complete, config, result_for, workspace};
+use super::*;
+use crate::agent_config::PerToolConfigOverride;
+use tokio::time::Instant as TokioInstant;
+
+const TIMEOUT: u64 = 100;
+
+/// An agent with a `TIMEOUT` command timeout whose `complete_task` needs
+/// approval.
+fn approving_config() -> AgentConfig {
+    let mut config = config(ToolCallingMode::Native, &[]);
+    config.user_command_timeout_seconds = Some(TIMEOUT);
+    config.tool_config.default_auto_approve_tool_use = false;
+    config.tool_config.tool_specific_configs.insert(
+        COMPLETE_TASK_TOOL_NAME.into(),
+        PerToolConfigOverride {
+            auto_approve_tool_use: Some(false),
+            ..Default::default()
+        },
+    );
+    config
+}
+
+/// An agent waiting for error-recovery approval; approved, it completes
+/// (its `complete_task` needs approval when `approving`).
+fn waiting_for_recovery(
+    approving: bool,
+) -> (
+    AgentLoop,
+    mpsc::Receiver<AgentEvent>,
+    mpsc::Sender<UserCommand>,
+    std::path::PathBuf,
+) {
+    let workspace = workspace();
+    let config = if approving {
+        approving_config()
+    } else {
+        let mut config = config(ToolCallingMode::Native, &[]);
+        config.user_command_timeout_seconds = Some(TIMEOUT);
+        config
+    };
+    let (mut agent, events, commands) = agent(config, ToolRegistry::new(), &workspace);
+    let task = &mut agent.task;
+    task.conversation.system_message = Some("system".into());
+    task.conversation.add_user_message("Do the task");
+    task.set_state(TaskState::AwaitingErrorRecoveryApproval {
+        error_message: "synthetic outage".into(),
+        cause: ErrorRecoveryCause::RetriesExhausted {
+            retry_after_ms: None,
+        },
+    });
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(complete());
+    (agent, events, commands, workspace)
+}
+
+/// The ID of the next call awaiting approval.
+async fn awaited_call(events: &mut mpsc::Receiver<AgentEvent>) -> Uuid {
+    loop {
+        if let Some(AgentEvent::ToolCallAwaitingApproval { tool_call_id, .. }) = events.recv().await
+        {
+            return tool_call_id;
+        }
+    }
+}
+
+async fn sleep_until(start: TokioInstant, seconds: u64) {
+    tokio::time::sleep_until(start + Duration::from_secs(seconds)).await;
+}
+
+/// Context injected during the wait (as a workflow's message bus does)
+/// doesn't restart its deadline: the wait ends at its deadline, and a
+/// decision after it is too late.
+#[tokio::test(start_paused = true)]
+async fn injected_context_does_not_extend_the_wait() {
+    let (agent, _events, commands, workspace) = waiting_for_recovery(false);
+    let start = TokioInstant::now();
+    let _script = tokio::spawn(async move {
+        sleep_until(start, 60).await;
+        let _ = commands
+            .send(UserCommand::InjectContext {
+                content: "A message from another agent.".into(),
+            })
+            .await;
+        sleep_until(start, 120).await;
+        let _ = commands
+            .send(UserCommand::ApproveErrorRecovery { message: None })
+            .await;
+        std::future::pending::<()>().await;
+    });
+    let task = agent.run().await.unwrap();
+    assert!(
+        matches!(task.current_state, TaskState::Interrupted { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert_eq!(
+        start.elapsed(),
+        Duration::from_secs(TIMEOUT),
+        "{:?}",
+        task.current_state
+    );
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+/// Commands the wait ignores (another call's approval or rejection, an
+/// answer while no question is open) don't restart its deadline either.
+#[tokio::test(start_paused = true)]
+async fn ignored_commands_do_not_extend_the_wait() {
+    let workspace = workspace();
+    let (mut agent, mut events, commands) =
+        agent(approving_config(), ToolRegistry::new(), &workspace);
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(complete());
+    let start = TokioInstant::now();
+    let _script = tokio::spawn(async move {
+        let call = awaited_call(&mut events).await;
+        sleep_until(start, 40).await;
+        let _ = commands
+            .send(UserCommand::ApproveToolUse {
+                tool_call_id: Uuid::new_v4(),
+                custom_tool_output: None,
+                message_to_agent: None,
+            })
+            .await;
+        sleep_until(start, 60).await;
+        let _ = commands
+            .send(UserCommand::RejectToolUse {
+                tool_call_id: Uuid::new_v4(),
+                reason: None,
+            })
+            .await;
+        sleep_until(start, 80).await;
+        let _ = commands
+            .send(UserCommand::SubmitUserResponse {
+                response: "Not asked.".into(),
+            })
+            .await;
+        sleep_until(start, 120).await;
+        let _ = commands
+            .send(UserCommand::ApproveToolUse {
+                tool_call_id: call,
+                custom_tool_output: None,
+                message_to_agent: None,
+            })
+            .await;
+        // Keeps the channels open.
+        while events.recv().await.is_some() {}
+        std::future::pending::<()>().await;
+    });
+    let task = agent.run().await.unwrap();
+    assert!(
+        matches!(task.current_state, TaskState::Interrupted { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert_eq!(
+        start.elapsed(),
+        Duration::from_secs(TIMEOUT),
+        "{:?}",
+        task.current_state
+    );
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+/// A decision ends the wait; a later wait has a deadline of its own, a
+/// full timeout from when it starts.
+#[tokio::test(start_paused = true)]
+async fn a_decision_ends_the_wait_and_the_next_wait_has_its_own_deadline() {
+    let (agent, mut events, commands, workspace) = waiting_for_recovery(true);
+    let start = TokioInstant::now();
+    let _script = tokio::spawn(async move {
+        sleep_until(start, 90).await;
+        let _ = commands
+            .send(UserCommand::ContinueAfterError { note: None })
+            .await;
+        // `complete_task` now waits for approval, from 90 s.
+        let call = awaited_call(&mut events).await;
+        sleep_until(start, 180).await;
+        let _ = commands
+            .send(UserCommand::ApproveToolUse {
+                tool_call_id: call,
+                custom_tool_output: None,
+                message_to_agent: None,
+            })
+            .await;
+        // Keeps the channels open.
+        while events.recv().await.is_some() {}
+        std::future::pending::<()>().await;
+    });
+    let task = agent.run().await.unwrap();
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert_eq!(
+        start.elapsed(),
+        Duration::from_secs(180),
+        "{:?}",
+        task.current_state
+    );
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+/// A wait the host says it is deciding (`HostDeciding`, as a workflow does
+/// for each wait of its agents) has no deadline, however long the decision
+/// takes; the next wait is timed again.
+#[tokio::test(start_paused = true)]
+async fn a_wait_the_host_is_deciding_is_not_timed() {
+    let (agent, mut events, commands, workspace) = waiting_for_recovery(true);
+    let start = TokioInstant::now();
+    let _script = tokio::spawn(async move {
+        let _ = commands.send(UserCommand::HostDeciding).await;
+        sleep_until(start, 5 * TIMEOUT).await;
+        let _ = commands
+            .send(UserCommand::ContinueAfterError { note: None })
+            .await;
+        // `complete_task` now waits for approval, and nothing answers.
+        awaited_call(&mut events).await;
+        // Keeps the channels open.
+        while events.recv().await.is_some() {}
+        std::future::pending::<()>().await;
+    });
+    let task = agent.run().await.unwrap();
+    assert!(
+        matches!(task.current_state, TaskState::Interrupted { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert_eq!(start.elapsed(), Duration::from_secs(6 * TIMEOUT));
+    assert!(
+        result_for(&task.conversation, "done")[0]
+            .output
+            .contains(&format!("Human approval timed out after {TIMEOUT} seconds")),
+        "{:?}",
+        task.conversation.messages.last()
+    );
+    std::fs::remove_dir_all(workspace).unwrap();
+}

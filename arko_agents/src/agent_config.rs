@@ -1000,6 +1000,15 @@ pub struct AgentConfig {
     pub llm_error_policy: LLMErrorPolicy,
     #[serde(default)]
     pub llm_retry_config: LLMRetryConfig,
+    /// Opt-in (default `None`, no limit): a task awaiting a command (an
+    /// approval, an answer, or error recovery) that has no decision this
+    /// many seconds after the wait started is returned `Interrupted`, and
+    /// calls awaiting approval get a result saying so. The deadline is set
+    /// once per wait: `InjectContext` and commands the wait ignores don't
+    /// move it, and a decision ends the wait (the next wait gets its own).
+    /// A wait the host says it is deciding
+    /// ([`UserCommand::HostDeciding`](crate::runtime::command::UserCommand::HostDeciding),
+    /// which a workflow sends for every wait of its agents) isn't timed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_command_timeout_seconds: Option<u64>,
     /// Optional user-provided reminder to reinforce instructions the agent may stray from.
@@ -1282,7 +1291,8 @@ impl AgentConfigBuilder {
         self
     }
 
-    /// Sets the user command timeout in seconds.
+    /// Sets the opt-in command timeout in seconds; see
+    /// [`AgentConfig::user_command_timeout_seconds`].
     pub fn user_command_timeout_seconds(mut self, timeout: Option<u64>) -> Self {
         self.user_command_timeout_seconds = timeout;
         self

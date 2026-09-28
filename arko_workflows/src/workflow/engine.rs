@@ -740,6 +740,15 @@ async fn drive_events(
                 None => break,
             },
         };
+        // The workflow decides every wait of the agent, under its policies
+        // and handlers (which may take long: a person deciding, a usage
+        // limit waited out, the workflow paused) or by pausing the agent
+        // for its caller, so the agent's own command timeout doesn't apply.
+        if let AgentEvent::TaskStateChanged(state) = &event
+            && state.is_awaiting_approval()
+        {
+            let _ = cmd_tx.send(UserCommand::HostDeciding).await;
+        }
         wait_while_paused(ctx).await?;
         publish_event(agent_name, agent_run_id, &event, ctx, persistence).await;
         ctx.registry.observe(agent_run_id, &event);

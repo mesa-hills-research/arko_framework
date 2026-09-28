@@ -34,7 +34,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
-use tokio::time::{Duration, sleep as tokio_sleep, timeout};
+#[cfg(test)]
+use tokio::time::timeout;
+use tokio::time::{Duration, sleep as tokio_sleep};
 use uuid::Uuid;
 
 const OAUTH_REFRESH_MARGIN_SECS: u64 = 5 * 60;
@@ -181,6 +183,22 @@ struct NativeRun {
     run: ToolRun,
     /// The host's message with its approval, added to its result.
     message_to_agent: Option<String>,
+}
+
+/// The current wait for a command, timed by the opt-in
+/// `AgentConfig::user_command_timeout_seconds`. Its deadline is set once,
+/// when the wait starts: context injected during the wait and commands the
+/// wait ignores don't move it, and a decision ends the wait (the next one
+/// gets a deadline of its own).
+#[derive(Debug, Clone, Copy)]
+enum CommandWait {
+    /// No wait has started since the last one ended.
+    NotStarted,
+    /// Waiting until this deadline (`None`: no timeout).
+    Until(Option<tokio::time::Instant>),
+    /// The host is deciding this wait itself ([`UserCommand::HostDeciding`]):
+    /// no deadline.
+    HostDeciding,
 }
 
 /// When `user_command_timeout_seconds` ran out during the wait.
@@ -336,6 +354,8 @@ pub struct AgentLoop {
     /// The state the last `TaskStateChanged` reported, so a state reported
     /// by one path isn't reported again by another.
     last_reported_state: std::sync::Mutex<Option<TaskState>>,
+    /// The wait for a command the task is in, with its deadline.
+    command_wait: CommandWait,
     #[cfg(test)]
     scripted_responses: std::sync::Mutex<VecDeque<ScriptedStreamResult>>,
     /// The model of every request made, in order.
@@ -423,6 +443,7 @@ impl AgentLoop {
             suspended_tools: false,
             details_sent_with: None,
             last_reported_state: std::sync::Mutex::new(None),
+            command_wait: CommandWait::NotStarted,
             #[cfg(test)]
             scripted_responses: std::sync::Mutex::new(VecDeque::new()),
             #[cfg(test)]
@@ -1784,18 +1805,37 @@ impl AgentLoop {
             }
 
             if self.task.current_state.is_awaiting_approval() {
+                let deadline = match self.command_wait {
+                    CommandWait::Until(deadline) => deadline,
+                    CommandWait::HostDeciding => None,
+                    CommandWait::NotStarted => {
+                        let deadline = self
+                            .task
+                            .agent_config
+                            .user_command_timeout_seconds
+                            .and_then(|seconds| {
+                                tokio::time::Instant::now()
+                                    .checked_add(Duration::from_secs(seconds))
+                            });
+                        self.command_wait = CommandWait::Until(deadline);
+                        deadline
+                    }
+                };
                 let command_future = self.command_receiver.recv();
-                let command_result =
-                    if let Some(seconds) = self.task.agent_config.user_command_timeout_seconds {
-                        timeout(Duration::from_secs(seconds), command_future).await
-                    } else {
-                        Ok(command_future.await)
-                    };
+                let command_result = match deadline {
+                    Some(deadline) => tokio::time::timeout_at(deadline, command_future).await,
+                    None => Ok(command_future.await),
+                };
 
                 match command_result {
                     Ok(Some(cmd)) => {
+                        // Neither ends the wait or moves its deadline.
                         if let UserCommand::InjectContext { ref content } = cmd {
                             self.queue_context_injection(content.clone());
+                            continue 'main_loop;
+                        }
+                        if let UserCommand::HostDeciding = cmd {
+                            self.command_wait = CommandWait::HostDeciding;
                             continue 'main_loop;
                         }
                         let mut next_user_message_from_command = String::new();
@@ -2410,6 +2450,9 @@ impl AgentLoop {
                             }
                             _ => {}
                         }
+                        // A command the wait didn't ignore (those continue
+                        // above) ends it; a later wait gets its own deadline.
+                        self.command_wait = CommandWait::NotStarted;
 
                         if let UserCommand::CancelTask = cmd {
                             log::info!("Task {}: Cancelled by user command.", self.task.id);
@@ -5323,3 +5366,7 @@ mod network_tests;
 #[cfg(test)]
 #[path = "parallel_tests.rs"]
 mod parallel_tests;
+
+#[cfg(test)]
+#[path = "command_wait_tests.rs"]
+mod command_wait_tests;
