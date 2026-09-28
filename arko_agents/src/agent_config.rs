@@ -159,10 +159,40 @@ pub enum PathSafetyPolicy {
 pub struct PerToolConfigOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_approve_tool_use: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub allow_batched_calls: Option<bool>,
+    /// Whether this tool's calls may run at the same time as other
+    /// parallel-safe calls of a response, instead of the tool's own
+    /// [`ToolDefinition::parallel_safe`](crate::tool::ToolDefinition::parallel_safe);
+    /// see [`AgentToolConfig`]. Configurations saved with the former
+    /// `allow_batched_calls` load it here.
+    #[serde(
+        default,
+        alias = "allow_batched_calls",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub parallel_safe: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub out_of_workspace_path_policy: Option<PathSafetyPolicy>,
+    /// This tool's host-side time limit instead of
+    /// [`AgentToolConfig::tool_timeout_seconds`]: `Some(Some(seconds))`, or
+    /// `Some(None)` (JSON `null`) for none. It applies to the tools that are
+    /// otherwise exempt, such as the terminal tools, too. `None` (the field
+    /// left out) uses the agent's setting.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_explicit_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tool_timeout_seconds: Option<Option<u64>>,
+}
+
+/// A field that can be left out (`None`), set to `null` (`Some(None)`), or
+/// set to a value (`Some(Some(value))`).
+fn deserialize_explicit_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 /// Specifies how tool calls are communicated between the agent and the LLM.
@@ -242,7 +272,28 @@ where
 }
 
 /// Configuration for agent tool usage.
+///
+/// # Several calls in one response
+///
+/// A response's tool calls all run, and each gets exactly one result. Calls
+/// to parallel-safe tools run at the same time as the parallel-safe calls
+/// next to them; any other call runs alone, after the calls before it and
+/// before the calls after it, so calls run in the order the model made them
+/// wherever that matters. A tool is parallel-safe when its definition says
+/// so ([`ToolDefinition::parallel_safe`](crate::tool::ToolDefinition::parallel_safe);
+/// the built-in reads are, the built-in writes are not, and an MCP tool is
+/// when its server marks it `readOnlyHint`) unless its
+/// [`PerToolConfigOverride::parallel_safe`] says otherwise.
+/// [`one_tool_call_per_turn`](Self::one_tool_call_per_turn) asks for one
+/// call per response instead.
+///
+/// Calls that need approval don't hold up the others: the response's
+/// auto-approved calls run first, and the calls waiting for approval run
+/// once decided, under the same rule. Calls after one that ends the turn
+/// (`complete_task`, `ask_user`, or a tool error that fails the task) are
+/// not run, and their results say so.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "AgentToolConfigRepr")]
 pub struct AgentToolConfig {
     /// The tools the agent is offered, besides `complete_task`, which is
     /// always offered. The runtime offers and runs only these (those the
@@ -250,8 +301,16 @@ pub struct AgentToolConfig {
     /// result and `AgentEvent::UnavailableToolAttempted`, and output-based
     /// parsing recognizes only these tools' tags.
     pub available_tool_names: Vec<String>,
+    /// Ask for one tool call per response (off by default). In native mode
+    /// the request disables parallel tool calls where the provider can
+    /// (OpenAI `parallel_tool_calls: false`, Anthropic
+    /// `disable_parallel_tool_use`, OpenRouter `parallel_tool_calls: false`);
+    /// Gemini can't, so a Gemini response's calls run one at a time instead,
+    /// each after the one before, as every provider's do under this switch.
+    /// The native system prompt asks for one call per response. In
+    /// output-based mode no tool can be batched.
     #[serde(default)]
-    pub allow_batched_tool_calls: bool,
+    pub one_tool_call_per_turn: bool,
     /// Whether calls run without approval, unless a tool's
     /// `tool_specific_configs` entry says otherwise. `ask_user` runs without
     /// approval either way, unless its own entry sets
@@ -266,6 +325,72 @@ pub struct AgentToolConfig {
     /// see [`ToolCallingMode`].
     #[serde(default = "loaded_tool_calling_mode")]
     pub tool_calling_mode: ToolCallingMode,
+    /// The host-side time limit of a tool call, in seconds: 20 minutes
+    /// ([`DEFAULT_TOOL_TIMEOUT_SECONDS`]) by default, `None` (JSON `null`)
+    /// for none. It is never shown to the model as a parameter. A call that
+    /// runs longer is stopped (a command it started is killed), and its
+    /// result tells the model it did not finish within the host's time
+    /// limit; the tool-error policy then applies as to any failed call
+    /// (`InformAgentAndContinue` by default). Tools with their own wait and
+    /// job handling are exempt ([`Tool::uses_host_timeout`](crate::tool::Tool::uses_host_timeout)),
+    /// such as the terminal tools. A tool's
+    /// [`PerToolConfigOverride::tool_timeout_seconds`] replaces it for that
+    /// tool. Output supplied with an approval (`custom_tool_output`) runs
+    /// nothing, so no limit applies.
+    #[serde(default = "default_tool_timeout_seconds")]
+    pub tool_timeout_seconds: Option<u64>,
+}
+
+/// The default [`AgentToolConfig::tool_timeout_seconds`]: 20 minutes.
+pub const DEFAULT_TOOL_TIMEOUT_SECONDS: u64 = 20 * 60;
+
+fn default_tool_timeout_seconds() -> Option<u64> {
+    Some(DEFAULT_TOOL_TIMEOUT_SECONDS)
+}
+
+/// The serialized form of [`AgentToolConfig`], which also reads a setting of
+/// older versions.
+#[derive(Deserialize)]
+struct AgentToolConfigRepr {
+    available_tool_names: Vec<String>,
+    #[serde(default)]
+    one_tool_call_per_turn: bool,
+    #[serde(default = "default_auto_approve_tool_use_false")]
+    default_auto_approve_tool_use: bool,
+    #[serde(default)]
+    default_out_of_workspace_path_policy: PathSafetyPolicy,
+    #[serde(default)]
+    tool_specific_configs: HashMap<String, PerToolConfigOverride>,
+    #[serde(default = "loaded_tool_calling_mode")]
+    tool_calling_mode: ToolCallingMode,
+    #[serde(default = "default_tool_timeout_seconds")]
+    tool_timeout_seconds: Option<u64>,
+    /// Removed: every call of a response runs now. Read only to warn when a
+    /// configuration had turned batching off.
+    #[serde(default)]
+    allow_batched_tool_calls: Option<bool>,
+}
+
+impl From<AgentToolConfigRepr> for AgentToolConfig {
+    fn from(repr: AgentToolConfigRepr) -> Self {
+        if repr.allow_batched_tool_calls == Some(false) {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                log::warn!(
+                    "Agent configurations no longer have `allow_batched_tool_calls`; `false` is ignored. Every tool call of a response now runs, calls to parallel-safe tools at the same time; set `one_tool_call_per_turn: true` to ask for one call per response."
+                );
+            });
+        }
+        Self {
+            available_tool_names: repr.available_tool_names,
+            one_tool_call_per_turn: repr.one_tool_call_per_turn,
+            default_auto_approve_tool_use: repr.default_auto_approve_tool_use,
+            default_out_of_workspace_path_policy: repr.default_out_of_workspace_path_policy,
+            tool_specific_configs: repr.tool_specific_configs,
+            tool_calling_mode: repr.tool_calling_mode,
+            tool_timeout_seconds: repr.tool_timeout_seconds,
+        }
+    }
 }
 
 fn default_auto_approve_tool_use_false() -> bool {
@@ -282,17 +407,62 @@ impl AgentToolConfig {
             .chain([crate::tool::builtins::COMPLETE_TASK_TOOL_NAME.to_string()])
             .collect()
     }
+
+    /// The host-side time limit of a call to `tool_name`: its
+    /// [`PerToolConfigOverride::tool_timeout_seconds`], or else
+    /// [`tool_timeout_seconds`](Self::tool_timeout_seconds) unless the tool
+    /// is exempt (`uses_host_timeout` false).
+    pub fn tool_timeout(
+        &self,
+        tool_name: &str,
+        uses_host_timeout: bool,
+    ) -> Option<std::time::Duration> {
+        let seconds = match self
+            .tool_specific_configs
+            .get(tool_name)
+            .and_then(|config| config.tool_timeout_seconds)
+        {
+            Some(explicit) => explicit,
+            None if uses_host_timeout => self.tool_timeout_seconds,
+            None => None,
+        };
+        seconds.map(std::time::Duration::from_secs)
+    }
+
+    fn validate(&self) -> Result<(), ArkoAgentsError> {
+        let invalid = |seconds: Option<u64>| {
+            seconds.is_some_and(|seconds| {
+                seconds == 0
+                    || seconds
+                        .checked_mul(1000)
+                        .is_none_or(|milliseconds| !representable_ms(milliseconds))
+            })
+        };
+        if invalid(self.tool_timeout_seconds)
+            || self
+                .tool_specific_configs
+                .values()
+                .any(|config| invalid(config.tool_timeout_seconds.flatten()))
+        {
+            return Err(ArkoAgentsError::BuilderError {
+                struct_name: "AgentToolConfig".into(),
+                message: "Tool timeouts must be positive and representable; use None (null) for no timeout.".into(),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl Default for AgentToolConfig {
     fn default() -> Self {
         Self {
             available_tool_names: vec![crate::tool::builtins::COMPLETE_TASK_TOOL_NAME.to_string()],
-            allow_batched_tool_calls: false,
+            one_tool_call_per_turn: false,
             default_auto_approve_tool_use: false,
             default_out_of_workspace_path_policy: PathSafetyPolicy::default(),
             tool_specific_configs: HashMap::new(),
             tool_calling_mode: ToolCallingMode::default(),
+            tool_timeout_seconds: default_tool_timeout_seconds(),
         }
     }
 }
@@ -877,23 +1047,43 @@ impl AgentConfig {
             })
     }
 
-    /// Determines if batched calls are allowed for a given tool definition.
+    /// Whether calls to a tool may run at the same time as other
+    /// parallel-safe calls of a response: its
+    /// [`PerToolConfigOverride::parallel_safe`], or else its definition's
+    /// [`parallel_safe`](crate::tool::ToolDefinition::parallel_safe). See
+    /// [`AgentToolConfig`].
+    pub fn is_parallel_safe(&self, tool_definition: &crate::tool::ToolDefinition) -> bool {
+        self.tool_config
+            .tool_specific_configs
+            .get(&tool_definition.name)
+            .and_then(|override_cfg| override_cfg.parallel_safe)
+            .unwrap_or(tool_definition.parallel_safe)
+    }
+
+    /// Whether, in output-based mode, a response may hold a batch of calls
+    /// to this tool: a parallel-safe tool, unless the agent asks for one
+    /// call per response.
     pub fn allows_batched_calls_for_tool(
         &self,
         tool_definition: &crate::tool::ToolDefinition,
     ) -> bool {
-        if !tool_definition.supports_batched_calls {
-            return false;
-        }
-        if let Some(override_cfg) = self
-            .tool_config
-            .tool_specific_configs
-            .get(&tool_definition.name)
-            && let Some(allow_batched) = override_cfg.allow_batched_calls
-        {
-            return allow_batched;
-        }
-        self.tool_config.allow_batched_tool_calls
+        !self.asks_one_tool_call_per_turn() && self.is_parallel_safe(tool_definition)
+    }
+
+    /// Whether the agent asks for one tool call per response:
+    /// [`AgentToolConfig::one_tool_call_per_turn`], or `parallel_tool_calls:
+    /// Some(false)` in the model's configured
+    /// [`tool_config`](arko_ai::GenerationConfig::tool_config), which means the
+    /// same.
+    pub fn asks_one_tool_call_per_turn(&self) -> bool {
+        self.tool_config.one_tool_call_per_turn
+            || self
+                .llm_config
+                .generation_config
+                .tool_config
+                .as_ref()
+                .and_then(|tool_config| tool_config.parallel_tool_calls)
+                == Some(false)
     }
 
     /// A tool's definition as the agent is shown it, in either tool calling
@@ -934,6 +1124,7 @@ impl AgentConfig {
     pub fn validate(&self) -> Result<(), ArkoAgentsError> {
         self.llm_retry_config.validate()?;
         self.monitoring.validate()?;
+        self.tool_config.validate()?;
         if let Some(fallback) = &self.refusal_fallback
             && fallback.model.provider != self.llm_config.model.provider
         {

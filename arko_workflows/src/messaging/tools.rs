@@ -76,7 +76,7 @@ impl Tool for SendMessageTool {
                     default_value: None,
                 },
             ],
-            supports_batched_calls: false,
+            parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
             raw_json_schema_override: None,
         }
@@ -205,7 +205,7 @@ impl Tool for ListRecipientsTool {
             description: "List the agents you can message with send_message, with each one's role and current status: not_started, running, waiting (with the reason and, when known, until when), or finished (with the outcome). Running and waiting agents receive messages.".to_string(),
             output_based_example: None,
             parameters: vec![],
-            supports_batched_calls: true,
+            parallel_safe: true,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
             raw_json_schema_override: None,
         }

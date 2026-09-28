@@ -34,7 +34,7 @@ impl Tool for ContextTool {
             description: "Update a fixture".into(),
             parameters: vec![],
             output_based_example: None,
-            supports_batched_calls: false,
+            parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
             raw_json_schema_override: None,
         }
@@ -143,7 +143,7 @@ async fn exact_results_bypass_distillation_and_are_observed_only_after_delivery_
         agent.observe_committed_tool_context();
         assert_eq!(tool.observed_results.load(Ordering::SeqCst), 0);
         if mode == ToolCallingMode::Native {
-            agent.flush_native_results_to_conversation(None);
+            agent.flush_native_results_to_conversation(None).unwrap();
         } else {
             assert!(text_result.contains("exact fixture result"));
             agent.add_text_tool_results_to_conversation(&text_result);
@@ -155,18 +155,20 @@ async fn exact_results_bypass_distillation_and_are_observed_only_after_delivery_
         agent.task.conversation.messages.clear();
         agent.observe_committed_tool_context();
         assert_eq!(tool.resets.load(Ordering::SeqCst), 1);
-        // Ordinary tools still use the configured interceptor.
-        assert_eq!(
+        // Ordinary tools still use the configured interceptor; tools that
+        // opt out don't.
+        let registry = ToolRegistry::new();
+        let read_file = registry.get("read_file").unwrap();
+        let list_files = registry.get("list_files").unwrap();
+        assert!(
             agent
-                .apply_tool_result_interception("ordinary", "raw", &HashMap::new())
-                .await,
-            ("distilled".into(), true)
+                .interception_for("read_file", read_file.as_ref())
+                .is_some()
         );
-        assert_eq!(
+        assert!(
             agent
-                .apply_tool_result_interception("list_files", "full tree", &HashMap::new())
-                .await,
-            ("full tree".into(), false)
+                .interception_for("list_files", list_files.as_ref())
+                .is_none()
         );
     }
 }

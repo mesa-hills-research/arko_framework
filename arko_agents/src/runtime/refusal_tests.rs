@@ -424,7 +424,7 @@ async fn tools_observe_the_changed_history_from_the_start() {
                 description: "Observes".into(),
                 parameters: vec![],
                 output_based_example: None,
-                supports_batched_calls: false,
+                parallel_safe: false,
                 tool_type_details: crate::tool::ToolTypeDetails::DeveloperDefined,
                 raw_json_schema_override: None,
             }

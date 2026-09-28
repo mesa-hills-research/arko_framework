@@ -144,7 +144,7 @@ impl Tool for RunShellTool {
                     default_value: None,
                 },
             ],
-            supports_batched_calls: false,
+            parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
             raw_json_schema_override: None,
         }
@@ -304,11 +304,11 @@ fn agent_config(
     };
     let tool_config = AgentToolConfig {
         available_tool_names: tools.iter().map(|tool| (*tool).to_string()).collect(),
-        allow_batched_tool_calls: false,
         default_auto_approve_tool_use: true,
         default_out_of_workspace_path_policy: PathSafetyPolicy::AutoReject,
         tool_specific_configs: HashMap::new(),
         tool_calling_mode: ToolCallingMode::Native,
+        ..AgentToolConfig::default()
     };
     Ok(AgentConfig::builder(id.to_string(), name.to_string(), llm_config)
         .role_description(role.to_string())
@@ -537,7 +537,6 @@ async fn main() -> ExampleResult<()> {
         &["read_file", "list_files", "complete_task"],
     )?;
     correctness.complete_task_summary_prompt_override = Some(VERIFIER_OUTPUT_CONTRACT.to_string());
-    correctness.tool_config.allow_batched_tool_calls = true;
     let mut efficiency = agent_config(
         "deepcoder-efficiency-verifier",
         "DeepCoder Efficiency Verifier",
@@ -548,7 +547,6 @@ async fn main() -> ExampleResult<()> {
         &["read_file", "list_files", "complete_task"],
     )?;
     efficiency.complete_task_summary_prompt_override = Some(VERIFIER_OUTPUT_CONTRACT.to_string());
-    efficiency.tool_config.allow_batched_tool_calls = true;
     let mut final_verifier = agent_config(
         "deepcoder-final-verifier",
         "DeepCoder Final Verifier",
@@ -560,7 +558,6 @@ async fn main() -> ExampleResult<()> {
     )?;
     final_verifier.complete_task_summary_prompt_override =
         Some(VERIFIER_OUTPUT_CONTRACT.to_string());
-    final_verifier.tool_config.allow_batched_tool_calls = true;
     let researcher = agent_config(
         "deepcoder-researcher",
         "DeepCoder Researcher",

@@ -217,7 +217,7 @@ impl Tool for SendsThenCloses {
             description: "Sends a note, then closes the channel".into(),
             output_based_example: None,
             parameters: vec![],
-            supports_batched_calls: false,
+            parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
             raw_json_schema_override: None,
         }

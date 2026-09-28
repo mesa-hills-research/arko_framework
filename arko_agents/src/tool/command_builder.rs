@@ -156,6 +156,8 @@ pub(crate) async fn execute_command_from_template(
     let mut cmd = Command::new(&program);
     cmd.args(args);
     cmd.current_dir(task_cwd);
+    // The command never reads the host's input (an approval prompt, say).
+    cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     // A task stopped mid-call (its runtime aborted) doesn't leave the
@@ -232,6 +234,22 @@ mod tests {
             run(Value::from("loudly")).await,
             Err(ToolError::ParameterValidation { .. })
         ));
+    }
+
+    /// End-user commands read nothing from the host's standard input.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn commands_get_a_null_standard_input() {
+        let output = execute_command_from_template(
+            "stdin",
+            "readlink /proc/self/fd/0",
+            &[],
+            &HashMap::new(),
+            &std::env::temp_dir(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output, "/dev/null\n");
     }
 
     fn path_parameter() -> [ToolParameterDefinition; 1] {

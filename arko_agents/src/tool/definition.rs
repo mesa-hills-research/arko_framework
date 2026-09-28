@@ -55,8 +55,16 @@ pub struct ToolDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_based_example: Option<String>,
     pub parameters: Vec<ToolParameterDefinition>,
-    #[serde(default)]
-    pub supports_batched_calls: bool,
+    /// Whether calls to this tool may run at the same time as other
+    /// parallel-safe calls of the same response (native mode), and be
+    /// batched in one output-based response. Set it only for tools whose
+    /// calls don't affect each other, such as reads; calls that write, or
+    /// whose order matters, run one at a time in the order the model made
+    /// them. An agent's configuration can override it per tool; see
+    /// [`AgentToolConfig`](crate::agent_config::AgentToolConfig). Definitions
+    /// saved with the former `supports_batched_calls` load it here.
+    #[serde(default, alias = "supports_batched_calls")]
+    pub parallel_safe: bool,
     pub tool_type_details: ToolTypeDetails,
     /// When set, `to_json_schema()` and `to_arko_ai_tool_definition()` use
     /// this value verbatim instead of generating a schema from `parameters`.
@@ -218,7 +226,7 @@ mod tests {
                     default_value: None,
                 },
             ],
-            supports_batched_calls: true,
+            parallel_safe: true,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
             raw_json_schema_override: None,
         };
@@ -255,7 +263,7 @@ mod tests {
                 parameter("d", ToolParameterType::Bool),
                 parameter("text", ToolParameterType::String),
             ],
-            supports_batched_calls: false,
+            parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
             raw_json_schema_override: None,
         };

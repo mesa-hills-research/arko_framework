@@ -36,7 +36,9 @@ context channel through `Tool::bind_runtime`. Custom hosts call
 the task that started them; another task cannot inspect, answer, or cancel them
 through these tools. The runtime's approval and middleware path applies to
 terminal tools as to any other tool, and their results bypass tool-result
-distillers so output reaches the agent unchanged.
+distillers so output reaches the agent unchanged. The agent's host-side tool time
+limit does not apply to them (a job runs in the background with its own deadline,
+and a wait ends after at most 30 seconds), unless a per-tool setting gives one.
 
 | Tool | Behavior |
 | --- | --- |

@@ -84,11 +84,17 @@ impl<'a> PromptBuilder<'a> {
         }
 
         if self.is_native_mode() {
-            prompt.push_str(
+            let calls = if self.agent_config.asks_one_tool_call_per_turn() {
+                "Call at most one tool per response."
+            } else {
+                "You can call several tools in one response; calls that don't depend on each other can run at the same time, and each call gets its own result."
+            };
+            prompt.push_str(&format!(
                 "## Tool Usage\n\
-                You have tools available via the native tool calling interface. \
-                You MUST use one or more tools in every response, even if it is just 'complete_task'.\n\n"
-            );
+                You have tools available through the native tool calling interface. {calls} \
+                The task ends only when you call `complete_task`: call it with a summary once the task is finished. \
+                A response without a tool call does not end the task.\n\n"
+            ));
         } else {
             prompt.push_str("## Tools Available\n");
             prompt.push_str(
@@ -107,17 +113,14 @@ impl<'a> PromptBuilder<'a> {
                     ));
             }
 
-            let agent_allows_batch_globally =
-                self.agent_config.tool_config.allow_batched_tool_calls;
-            let any_tool_supports_and_is_allowed_batch = self
+            if self
                 .available_tools_defs
                 .iter()
-                .any(|def| self.agent_config.allows_batched_calls_for_tool(def));
-
-            if agent_allows_batch_globally && any_tool_supports_and_is_allowed_batch {
+                .any(|def| self.agent_config.allows_batched_calls_for_tool(def))
+            {
                 prompt.push_str(&format!(
                     "You can call the SAME tool multiple times in a single response using the \
-                    <{0}>...</{0}> structure if that specific tool supports it AND batching is enabled for it.\n",
+                    <{0}>...</{0}> structure when its description says it supports batched calls.\n",
                     self.parsing_config.batched_tool_call_tag
                 ));
             }
@@ -254,9 +257,7 @@ impl<'a> PromptBuilder<'a> {
             s.push_str(&format!("Example:\n{}\n", example));
         }
 
-        if tool_def.supports_batched_calls
-            && self.agent_config.allows_batched_calls_for_tool(tool_def)
-        {
+        if self.agent_config.allows_batched_calls_for_tool(tool_def) {
             s.push_str("Supports batched calls.\n");
         }
 

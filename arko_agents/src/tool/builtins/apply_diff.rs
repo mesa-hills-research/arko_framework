@@ -644,7 +644,7 @@ Best Practices:
                     param_type: ToolParameterType::String, required: true, is_path: false, flag: None, default_value: None,
                 },
             ],
-            supports_batched_calls: true,
+            parallel_safe: false,
             tool_type_details: ToolTypeDetails::BuiltIn,
             raw_json_schema_override: None,
         }

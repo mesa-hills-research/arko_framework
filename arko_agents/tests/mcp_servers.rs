@@ -28,6 +28,15 @@ async fn a_server_is_started_its_tools_called_and_its_exit_survived() {
     names.sort();
     assert_eq!(names, ["mcp__stub__echo", "mcp__stub__write_note"]);
 
+    // Only the tool the server marks read-only is parallel-safe.
+    for tool in manager.tools() {
+        assert_eq!(
+            tool.definition().parallel_safe,
+            tool.remote_tool_name() == "echo",
+            "{}",
+            tool.remote_tool_name()
+        );
+    }
     let echo = manager
         .tools()
         .iter()

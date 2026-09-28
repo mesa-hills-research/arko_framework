@@ -17,6 +17,7 @@ pub mod event;
 mod r#loop;
 mod monitor;
 mod retry;
+mod tool_run;
 pub mod turn_context;
 
 const DEFAULT_EVENT_CHANNEL_SIZE: usize = 100;

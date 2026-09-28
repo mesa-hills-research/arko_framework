@@ -189,12 +189,17 @@ impl Tool for TerminalTool {
             description: description.into(),
             parameters,
             output_based_example: None,
-            supports_batched_calls: false,
+            parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
             raw_json_schema_override: None,
         }
     }
     fn allow_result_interception(&self) -> bool {
+        false
+    }
+    /// Jobs run in the background with their own deadlines, and waits end
+    /// after at most 30 seconds.
+    fn uses_host_timeout(&self) -> bool {
         false
     }
     fn bind_runtime(&self, task_id: Uuid, sender: mpsc::WeakSender<UserCommand>) {

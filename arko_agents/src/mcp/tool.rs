@@ -44,12 +44,21 @@ impl McpTool {
         let raw_schema = Value::Object(mcp_tool.input_schema.as_ref().clone());
         let parameters = extract_parameters_from_schema(&raw_schema);
 
+        // As Codex does: only a tool the server marks read-only runs at the
+        // same time as other calls ("Correctly implemented MCP servers should
+        // tolerate parallel calls to tools that advertise themselves as
+        // read-only"); any other runs alone, in call order.
+        let read_only = mcp_tool
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.read_only_hint)
+            == Some(true);
         let definition = ToolDefinition {
             name: qualified_name,
             description: format!("[MCP:{}] {}", server_name, description),
             output_based_example: None,
             parameters,
-            supports_batched_calls: true,
+            parallel_safe: read_only,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
             raw_json_schema_override: Some(raw_schema),
         };

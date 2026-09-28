@@ -1,8 +1,9 @@
 use super::command::{ToolApprovalDecision, UserCommand};
 use super::event::AgentEvent;
+use super::tool_run::{self, Interception, RunEnvironment, RunOutcome, ToolRun};
 use crate::agent_config::{
-    AgentConfig, LLMErrorPolicy, PathSafetyPolicy, PlanUsageAction, ToolCallingMode,
-    ToolErrorPolicy, UsageLimitPolicy,
+    LLMErrorPolicy, PathSafetyPolicy, PlanUsageAction, ToolCallingMode, ToolErrorPolicy,
+    UsageLimitPolicy,
 };
 use crate::error::ArkoAgentsError;
 use crate::parsing::{
@@ -13,10 +14,16 @@ use crate::skill::SkillPromptContext;
 use crate::task::{
     CANCELLED_BY_USER, DeferredToolError, PendingToolCallInfo, PlanUsageWindowMark, Task, TaskState,
 };
+// Names the test modules (`use super::*`) rely on.
+#[cfg(test)]
+use crate::agent_config::AgentConfig;
+#[cfg(test)]
 use crate::tool::{
-    InterceptedResult, InterceptionFailurePolicy, InterceptorConfig, TaskContext, ToolCallContext,
-    ToolDefinition, ToolExecutionContext, ToolExecutionDecision, ToolExecutionMiddleware,
-    ToolExecutionOutcome, ToolImage, ToolOutput, ToolRegistry,
+    InterceptedResult, TaskContext, ToolCallContext, ToolExecutionContext, ToolExecutionDecision,
+    ToolExecutionOutcome, ToolOutput,
+};
+use crate::tool::{
+    InterceptorConfig, Tool, ToolDefinition, ToolExecutionMiddleware, ToolImage, ToolRegistry,
     builtins::{ASK_USER_TOOL_NAME, COMPLETE_TASK_TOOL_NAME},
 };
 use arko_ai::{self as ai};
@@ -111,6 +118,38 @@ const TASK_FAILED_CALL: &str =
 /// reason: it comes from the user or from a host such as a workflow
 /// stopping its agents.
 const TASK_CANCELLED_CALL: &str = "The task was cancelled, so this call was not run.";
+/// Results of calls a `SuspendTask` command left unrun.
+const TASK_SUSPENDED_CALL: &str = "The task was suspended before this call ran, so it was not run. Call it again if it is still needed.";
+/// Results of calls that were running when `CancelTask` or `SuspendTask`
+/// arrived; see [`AgentLoop::run_group`].
+const STOPPED_BY_CANCEL: &str = "The task was cancelled while this call was running, so the call was stopped before it finished.";
+const STOPPED_BY_SUSPEND: &str = "The task was suspended while this call was running, so the call was stopped before it finished. Call it again if it is still needed.";
+
+/// Why running tool calls were stopped; see [`AgentLoop::run_group`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolsStopped {
+    Cancelled,
+    Suspended,
+}
+
+/// How a group of calls ended; see [`AgentLoop::run_group`].
+struct GroupRun {
+    /// Each call's outcome, in order; `None` when a stop ended the calls.
+    outcomes: Option<Vec<Result<RunOutcome, crate::tool::ToolError>>>,
+    /// A cancellation or suspension that arrived while the calls ran.
+    stop: Option<ToolsStopped>,
+}
+
+/// A native call to run, with where its result goes; see
+/// [`AgentLoop::run_native_calls`].
+struct NativeRun {
+    /// Its position in the turn (or approval batch).
+    index: usize,
+    call: ai::ToolCall,
+    run: ToolRun,
+    /// The host's message with its approval, added to its result.
+    message_to_agent: Option<String>,
+}
 
 /// When `user_command_timeout_seconds` ran out during the wait.
 fn approval_timed_out_call(seconds: u64) -> String {
@@ -208,33 +247,6 @@ enum PathCheck {
 /// transitions, user-facing questions, etc.).
 const INTERCEPTION_EXCLUDED_TOOLS: &[&str] = &[COMPLETE_TASK_TOOL_NAME, ASK_USER_TOOL_NAME];
 
-fn native_batch_rejection_reason(
-    config: &AgentConfig,
-    registry: &ToolRegistry,
-    tool_calls: &[ai::ToolCall],
-) -> Option<String> {
-    if tool_calls.len() <= 1 {
-        return None;
-    }
-    let mut unsafe_tools = tool_calls
-        .iter()
-        .filter_map(|call| {
-            registry.get(&call.name).and_then(|tool| {
-                (!config.allows_batched_calls_for_tool(&tool.definition()))
-                    .then(|| call.name.clone())
-            })
-        })
-        .collect::<Vec<_>>();
-    unsafe_tools.sort();
-    unsafe_tools.dedup();
-    (!unsafe_tools.is_empty()).then(|| {
-        format!(
-            "Native tool batch rejected without execution because these tools are not marked batch-safe: {}. Retry batch-safe tools together and call every other tool alone.",
-            unsafe_tools.join(", ")
-        )
-    })
-}
-
 #[cfg(test)]
 type ScriptedStreamResult =
     Result<futures::stream::BoxStream<'static, Result<ai::StreamEvent, ai::Error>>, ai::Error>;
@@ -282,6 +294,9 @@ pub struct AgentLoop {
     /// (not on a middleware's decision); see
     /// [`not_run_after_stop`](Self::not_run_after_stop).
     failed_on_tool_error: bool,
+    /// `SuspendTask` stopped running tool calls; the loop reports the
+    /// task's state as it stops.
+    suspended_tools: bool,
     #[cfg(test)]
     scripted_responses: std::sync::Mutex<VecDeque<ScriptedStreamResult>>,
     /// The model of every request made, in order.
@@ -366,6 +381,7 @@ impl AgentLoop {
             stop_requested: false,
             deferring_tool_errors: false,
             failed_on_tool_error: false,
+            suspended_tools: false,
             #[cfg(test)]
             scripted_responses: std::sync::Mutex::new(VecDeque::new()),
             #[cfg(test)]
@@ -556,65 +572,358 @@ impl AgentLoop {
         self.add_taken_context()
     }
 
-    fn task_context(&self) -> TaskContext<'_> {
-        TaskContext {
+    /// What the task's tool calls see of it; see [`RunEnvironment`].
+    fn run_environment(&self) -> Arc<RunEnvironment> {
+        Arc::new(RunEnvironment {
             task_id: self.task.id,
-            agent_name: &self.task.agent_config.name,
-            initial_task_prompt: &self.task.initial_task_prompt,
-            current_working_directory: &self.task.current_working_directory,
-        }
+            agent_name: self.task.agent_config.name.clone(),
+            initial_task_prompt: self.task.initial_task_prompt.clone(),
+            working_directory: self.task.current_working_directory.clone(),
+            middleware: self.execution_middleware.clone(),
+        })
     }
 
-    fn tool_execution_context(&self) -> ToolExecutionContext<'_> {
-        ToolExecutionContext {
-            task_id: self.task.id,
-            agent_name: &self.task.agent_config.name,
-            initial_task_prompt: &self.task.initial_task_prompt,
-            current_working_directory: &self.task.current_working_directory,
+    /// How a tool's results are intercepted: by the configured interceptor,
+    /// unless the tool opts out or its results carry meaning the runtime
+    /// uses (`complete_task`, `ask_user`).
+    fn interception_for(&self, tool_name: &str, tool: &dyn Tool) -> Option<Interception> {
+        let config = self.interceptor_config.as_ref()?;
+        if !tool.allow_result_interception() || INTERCEPTION_EXCLUDED_TOOLS.contains(&tool_name) {
+            return None;
         }
+        Some(Interception {
+            interceptor: config.interceptor.clone(),
+            policy: config.failure_policy.clone(),
+        })
     }
 
-    async fn before_tool_execution(
+    /// A call to `tool` to run, under the agent's time limit and
+    /// parallel-safety settings.
+    fn tool_run(
         &self,
         tool_call_id: Uuid,
         tool_name: &str,
-        parameters: &HashMap<String, Value>,
-    ) -> Result<ToolExecutionDecision, crate::tool::ToolError> {
-        let Some(middleware) = &self.execution_middleware else {
-            return Ok(ToolExecutionDecision::Continue);
-        };
-        middleware
-            .before(
-                &self.tool_execution_context(),
-                &ToolCallContext {
-                    tool_call_id,
-                    tool_name,
-                    parameters,
-                },
-            )
-            .await
+        tool: Arc<dyn Tool>,
+        params: HashMap<String, Value>,
+        custom_output: Option<String>,
+    ) -> ToolRun {
+        let config = &self.task.agent_config;
+        ToolRun {
+            tool_call_id,
+            tool_name: tool_name.to_string(),
+            timeout: config
+                .tool_config
+                .tool_timeout(tool_name, tool.uses_host_timeout()),
+            parallel_safe: !config.asks_one_tool_call_per_turn()
+                && config.is_parallel_safe(&tool.definition()),
+            interception: self.interception_for(tool_name, tool.as_ref()),
+            interruptible: tool.interruptible(),
+            tool,
+            params,
+            custom_output,
+        }
     }
 
-    async fn after_tool_execution(
-        &self,
-        tool_call_id: Uuid,
-        tool_name: &str,
-        parameters: &HashMap<String, Value>,
-        outcome: ToolExecutionOutcome<'_>,
-    ) -> Result<(), crate::tool::ToolError> {
-        let Some(middleware) = &self.execution_middleware else {
+    /// Runs `runs` at the same time while watching the command channel:
+    /// context sent meanwhile is kept for the next boundary, and
+    /// `CancelTask` or `SuspendTask` stops the calls (dropping them, which
+    /// kills a command they started) and is returned. Each call's outcome is
+    /// returned in order otherwise; an error is a middleware's own failure.
+    /// A group with a call that isn't [interruptible](crate::tool::Tool::interruptible)
+    /// runs to its end, and a stop that arrived meanwhile is returned with
+    /// the outcomes. A closed channel doesn't stop the calls: the boundary
+    /// after them handles it.
+    async fn run_group(&mut self, runs: Vec<ToolRun>) -> GroupRun {
+        let interruptible = runs.iter().all(|run| run.interruptible);
+        let environment = self.run_environment();
+        let calls = futures::future::join_all(
+            runs.into_iter()
+                .map(|run| tool_run::run_tool(environment.clone(), run)),
+        );
+        tokio::pin!(calls);
+        let mut listening = true;
+        let mut stop = None;
+        loop {
+            tokio::select! {
+                biased;
+                outcomes = &mut calls => {
+                    return GroupRun { outcomes: Some(outcomes), stop };
+                }
+                command = self.command_receiver.recv(), if listening => {
+                    let stopped = match command {
+                        Some(UserCommand::InjectContext { content }) => {
+                            self.queue_context_injection(content);
+                            None
+                        }
+                        Some(UserCommand::CancelTask) => Some(ToolsStopped::Cancelled),
+                        Some(UserCommand::SuspendTask) => Some(ToolsStopped::Suspended),
+                        Some(other) => {
+                            log::warn!(
+                                "Task {}: Unexpected command {:?} received while tool calls ran. Ignoring.",
+                                self.task.id,
+                                other
+                            );
+                            None
+                        }
+                        None => {
+                            listening = false;
+                            None
+                        }
+                    };
+                    if let Some(stopped) = stopped {
+                        if interruptible {
+                            return GroupRun { outcomes: None, stop: Some(stopped) };
+                        }
+                        // Taken after the calls return; later commands
+                        // wait in the channel.
+                        stop = Some(stopped);
+                        listening = false;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Stops the task for a command that stopped running tool calls: a
+    /// cancellation ends it, and a suspension stops the loop after the turn
+    /// (the task keeps its state, reported as it stops). Returns the result
+    /// text of the stopped calls.
+    async fn stop_running_tools(
+        &mut self,
+        stop: ToolsStopped,
+    ) -> Result<&'static str, ArkoAgentsError> {
+        match stop {
+            ToolsStopped::Cancelled => {
+                log::info!("Task {}: Cancelled while tool calls ran.", self.task.id);
+                self.task.set_state(TaskState::Cancelled {
+                    reason: CANCELLED_BY_USER.to_string(),
+                });
+                self.emit_event(AgentEvent::TaskStateChanged(
+                    self.task.current_state.clone(),
+                ))
+                .await?;
+                Ok(STOPPED_BY_CANCEL)
+            }
+            ToolsStopped::Suspended => {
+                self.stop_requested = true;
+                self.suspended_tools = true;
+                Ok(STOPPED_BY_SUSPEND)
+            }
+        }
+    }
+
+    /// Applies a stop that arrived while calls that aren't interruptible
+    /// ran, once they have returned: a cancellation ends the task unless a
+    /// call already ended it, and a suspension stops the loop.
+    async fn stop_after_calls(&mut self, stop: ToolsStopped) -> Result<(), ArkoAgentsError> {
+        if stop == ToolsStopped::Cancelled && self.task.current_state.is_terminal() {
             return Ok(());
-        };
-        middleware
-            .after(
-                &self.tool_execution_context(),
-                &ToolCallContext {
+        }
+        self.stop_running_tools(stop).await.map(|_| ())
+    }
+
+    /// Runs native calls in order under the parallel-safety rule (see
+    /// [`AgentToolConfig`](crate::agent_config::AgentToolConfig)): each group
+    /// of [`tool_run::groups`] runs at the same time, after the one before.
+    /// Once the task can no longer run calls (`keep_going` says so of its
+    /// state, or it was suspended), the calls not yet run are answered as not
+    /// run. Returns each call's result with its index.
+    async fn run_native_calls(
+        &mut self,
+        runs: Vec<NativeRun>,
+        keep_going: fn(&TaskState) -> bool,
+    ) -> Result<Vec<(usize, ai::ToolResult)>, ArkoAgentsError> {
+        let mut results = Vec::new();
+        let mut unreached = Vec::new();
+        for group in tool_run::groups(runs, |run| run.run.parallel_safe) {
+            if !keep_going(&self.task.current_state) || self.stop_requested {
+                unreached.extend(group);
+                continue;
+            }
+            let (calls, group_runs): (Vec<_>, Vec<_>) = group
+                .into_iter()
+                .map(|native| {
+                    let id = native.run.tool_call_id;
+                    (
+                        (native.index, native.call, id, native.message_to_agent),
+                        native.run,
+                    )
+                })
+                .unzip();
+            let group = self.run_group(group_runs).await;
+            match group.outcomes {
+                Some(outcomes) => {
+                    for ((index, call, id, message), outcome) in calls.into_iter().zip(outcomes) {
+                        let result = self
+                            .finish_native_call(&call, id, outcome?, message)
+                            .await?;
+                        results.push((index, result));
+                    }
+                    if let Some(stop) = group.stop {
+                        self.stop_after_calls(stop).await?;
+                    }
+                }
+                None => {
+                    let stop = group.stop.expect("a group without outcomes was stopped");
+                    let reason = self.stop_running_tools(stop).await?;
+                    for (index, call, id, _) in calls {
+                        self.emit_event(AgentEvent::ToolRejected {
+                            tool_call_id: id,
+                            tool_name: call.name.clone(),
+                            reason: Some(reason.to_string()),
+                        })
+                        .await?;
+                        results.push((index, ai::ToolResult::error_from_tool_call(&call, reason)));
+                    }
+                }
+            }
+        }
+        if !unreached.is_empty() {
+            let not_run = self.not_run_after_stop();
+            for native in unreached {
+                self.emit_event(AgentEvent::ToolRejected {
+                    tool_call_id: native.run.tool_call_id,
+                    tool_name: native.call.name.clone(),
+                    reason: Some(not_run.clone()),
+                })
+                .await?;
+                results.push((
+                    native.index,
+                    ai::ToolResult::error_from_tool_call(&native.call, &not_run),
+                ));
+            }
+        }
+        Ok(results)
+    }
+
+    /// The result of a native call that ran, with its events and the state
+    /// changes it makes: `ask_user` awaits the answer, `complete_task`
+    /// completes the task, a middleware's decision can end it, and a tool
+    /// error is handled under the tool-error policy. The tool's images go
+    /// inside its result, after its text. `message_to_agent` (given with an
+    /// approval) is added to the result.
+    async fn finish_native_call(
+        &mut self,
+        call: &ai::ToolCall,
+        tool_call_id: Uuid,
+        outcome: RunOutcome,
+        message_to_agent: Option<String>,
+    ) -> Result<ai::ToolResult, ArkoAgentsError> {
+        let tool_name = call.name.as_str();
+        match outcome {
+            RunOutcome::Rejected(message) => {
+                self.emit_event(AgentEvent::ToolRejected {
                     tool_call_id,
-                    tool_name,
-                    parameters,
-                },
-                outcome,
-            )
+                    tool_name: tool_name.to_string(),
+                    reason: Some(message.clone()),
+                })
+                .await?;
+                Ok(ai::ToolResult::error_from_tool_call(call, &message))
+            }
+            RunOutcome::Stop { reason, cancel } => {
+                self.stop_by_middleware(tool_call_id, tool_name, &reason, cancel)
+                    .await?;
+                Ok(ai::ToolResult::error_from_tool_call(call, &reason))
+            }
+            RunOutcome::Failed(error) => {
+                let error_text = format!("Tool '{}' execution failed: {}", tool_name, error);
+                self.handle_tool_exec_error(tool_name, error, Some(tool_call_id))
+                    .await?;
+                Ok(ai::ToolResult::error_from_tool_call(call, &error_text))
+            }
+            RunOutcome::Finished {
+                output,
+                effective,
+                intercepted,
+            } => {
+                let images = output
+                    .images
+                    .into_iter()
+                    .map(|image| ai::ToolResultImage::new(image.description, image.image))
+                    .collect();
+                let raw = output.text;
+                // A call of a group another call already ended (possible only
+                // for tools configured parallel-safe) changes no state.
+                let open = !self.task.current_state.is_terminal();
+                if tool_name == ASK_USER_TOOL_NAME && open {
+                    self.task.set_state(TaskState::AwaitingUserResponse {
+                        questions: raw.clone(),
+                    });
+                    self.emit_event(AgentEvent::TaskStateChanged(
+                        self.task.current_state.clone(),
+                    ))
+                    .await?;
+                    self.emit_event(AgentEvent::UserQuestionsAsked {
+                        questions: raw.clone(),
+                    })
+                    .await?;
+                }
+                let text = match message_to_agent {
+                    Some(message) => {
+                        let mut text = effective;
+                        if !text.is_empty() {
+                            text.push_str("\n\n");
+                        }
+                        text.push_str("Message from user on approval:\n");
+                        text.push_str(&message);
+                        self.emit_tool_result_events(tool_call_id, tool_name, &text, &text, false)
+                            .await?;
+                        text
+                    }
+                    None => {
+                        self.emit_tool_result_events(
+                            tool_call_id,
+                            tool_name,
+                            &raw,
+                            &effective,
+                            intercepted,
+                        )
+                        .await?;
+                        effective
+                    }
+                };
+                if tool_name == COMPLETE_TASK_TOOL_NAME && open {
+                    self.task.set_state(TaskState::Completed { summary: raw });
+                    self.emit_event(AgentEvent::TaskStateChanged(
+                        self.task.current_state.clone(),
+                    ))
+                    .await?;
+                }
+                Ok(ai::ToolResult::from_tool_call(call, &text).with_images(images))
+            }
+        }
+    }
+
+    /// A middleware stopped the task at a call: it fails, or with `cancel`
+    /// is cancelled, unless it already ended (another call of the same
+    /// group stopped it first); the call is reported rejected either way.
+    async fn stop_by_middleware(
+        &mut self,
+        tool_call_id: Uuid,
+        tool_name: &str,
+        reason: &str,
+        cancel: bool,
+    ) -> Result<(), ArkoAgentsError> {
+        if self.task.current_state.is_terminal() {
+            return self
+                .emit_event(AgentEvent::ToolRejected {
+                    tool_call_id,
+                    tool_name: tool_name.to_string(),
+                    reason: Some(reason.to_string()),
+                })
+                .await;
+        }
+        let reason_text = reason.to_string();
+        let state = if cancel {
+            TaskState::Cancelled {
+                reason: reason_text,
+            }
+        } else {
+            TaskState::Failed {
+                reason: reason_text,
+            }
+        };
+        self.stop_at_tool_call(tool_call_id, tool_name, reason, state)
             .await
     }
 
@@ -657,7 +966,16 @@ impl AgentLoop {
         PathCheck::Inside
     }
 
-    fn build_native_tool_config(&self, model: &ai::Model) -> ai::ToolConfig {
+    /// The tools of a native request: the agent's offered tools, with the
+    /// configured tool choice (none, the provider's `auto`, by default: tool
+    /// use is optional) and parallel-call setting. One call per turn
+    /// ([`AgentConfig::asks_one_tool_call_per_turn`]) disables parallel calls
+    /// where the provider can.
+    fn build_native_tool_config(
+        &self,
+        model: &ai::Model,
+        configured: Option<&ai::ToolConfig>,
+    ) -> ai::ToolConfig {
         let agent_config = &self.task.agent_config;
         let offered = |tool: Arc<dyn crate::tool::Tool>| {
             agent_config
@@ -681,13 +999,17 @@ impl AgentLoop {
         }
 
         let mut config = ai::ToolConfig::new(ai_tools);
-
-        if !self.task.agent_config.tool_config.allow_batched_tool_calls
-            && model.supports_disabling_parallel_tool_calls()
-        {
-            config = config.with_parallel_tool_calls(false);
+        if let Some(configured) = configured {
+            config.tool_choice = configured.tool_choice.clone();
+            config.parallel_tool_calls = configured.parallel_tool_calls;
         }
-
+        if agent_config.asks_one_tool_call_per_turn() {
+            // Gemini can't turn parallel calls off; its calls run one at a
+            // time instead.
+            config.parallel_tool_calls = model
+                .supports_disabling_parallel_tool_calls()
+                .then_some(false);
+        }
         config
     }
 
@@ -705,7 +1027,9 @@ impl AgentLoop {
     ) -> ai::GenerationConfig {
         let mut config = generation_config.clone();
         if self.is_native_mode() {
-            config = config.with_tool_config(self.build_native_tool_config(model));
+            config = config.with_tool_config(
+                self.build_native_tool_config(model, generation_config.tool_config.as_ref()),
+            );
         }
         config
     }
@@ -977,8 +1301,12 @@ impl AgentLoop {
         Ok(())
     }
 
-    fn flush_native_results_to_conversation(&mut self, extra_text: Option<&str>) {
+    fn flush_native_results_to_conversation(
+        &mut self,
+        extra_text: Option<&str>,
+    ) -> Result<(), ArkoAgentsError> {
         self.task.add_pending_tool_results(extra_text);
+        Ok(())
     }
 
     /// Whether an approved native turn's results go into the conversation
@@ -1124,71 +1452,6 @@ impl AgentLoop {
         Ok(())
     }
 
-    /// Applies tool result interception if configured and the tool is eligible.
-    ///
-    /// Returns `(effective_result, was_intercepted)`. When no interceptor is
-    /// configured, or the tool is in the exclusion list, returns the raw result
-    /// unchanged. On interceptor failure, retries according to the configured
-    /// `InterceptionFailurePolicy` and falls back to the raw result.
-    async fn apply_tool_result_interception(
-        &self,
-        tool_name: &str,
-        raw_result: &str,
-        params: &HashMap<String, Value>,
-    ) -> (String, bool) {
-        if self
-            .tool_registry
-            .get(tool_name)
-            .is_some_and(|tool| !tool.allow_result_interception())
-        {
-            return (raw_result.to_string(), false);
-        }
-        let Some(ref config) = self.interceptor_config else {
-            return (raw_result.to_string(), false);
-        };
-
-        if INTERCEPTION_EXCLUDED_TOOLS.contains(&tool_name) {
-            return (raw_result.to_string(), false);
-        }
-
-        let task_context = self.task_context();
-
-        let max_attempts = match config.failure_policy {
-            InterceptionFailurePolicy::UseRawResult => 1,
-            InterceptionFailurePolicy::RetryThenUseRawResult { max_attempts } => {
-                max_attempts.max(1)
-            }
-        };
-
-        for attempt in 1..=max_attempts {
-            match config
-                .interceptor
-                .intercept(tool_name, raw_result, params, &task_context)
-                .await
-            {
-                Ok(InterceptedResult::Unchanged) => return (raw_result.to_string(), false),
-                Ok(InterceptedResult::Replaced(new_result)) => return (new_result, true),
-                Err(e) => {
-                    log::warn!(
-                        "Task {}: Tool result interceptor failed for '{}' (attempt {}/{}): {}",
-                        self.task.id,
-                        tool_name,
-                        attempt,
-                        max_attempts,
-                        e
-                    );
-                }
-            }
-        }
-
-        log::warn!(
-            "Task {}: Interceptor exhausted all attempts for '{}', using raw result.",
-            self.task.id,
-            tool_name
-        );
-        (raw_result.to_string(), false)
-    }
-
     /// Emits `ToolResult` with the original output and, when interception
     /// modified the result, a follow-up `ToolResultIntercepted` event.
     async fn emit_tool_result_events(
@@ -1311,6 +1574,14 @@ impl AgentLoop {
 
         'main_loop: loop {
             if self.stop_requested {
+                if std::mem::take(&mut self.suspended_tools) {
+                    // Suspended while tool calls ran, in the state the turn
+                    // left it in.
+                    self.emit_event(AgentEvent::TaskStateChanged(
+                        self.task.current_state.clone(),
+                    ))
+                    .await?;
+                }
                 break 'main_loop;
             }
             if self.task.current_state.is_terminal() {
@@ -1392,7 +1663,7 @@ impl AgentLoop {
                                         }
                                         self.end_tool_batch().await?;
                                         if self.native_results_are_due() {
-                                            self.flush_native_results_to_conversation(None);
+                                            self.flush_native_results_to_conversation(None)?;
                                         }
                                         native_handled = true;
                                     } else {
@@ -1461,7 +1732,7 @@ impl AgentLoop {
                                             );
                                         }
                                         self.task.set_state(TaskState::InProgress);
-                                        self.flush_native_results_to_conversation(None);
+                                        self.flush_native_results_to_conversation(None)?;
                                         native_handled = true;
                                     } else {
                                         let pb = PromptBuilder::new(
@@ -1511,36 +1782,42 @@ impl AgentLoop {
 
                                     self.begin_tool_batch();
                                     if self.is_native_mode() {
-                                        for pending_call_info in pending_calls {
+                                        // Rejections are answered at once;
+                                        // the approved calls then run like a
+                                        // turn's (parallel-safe ones at the
+                                        // same time), in the batch's order.
+                                        let mut results = Vec::new();
+                                        let mut approved = Vec::new();
+                                        for (index, pending_call_info) in
+                                            pending_calls.iter().enumerate()
+                                        {
+                                            let Some(ai_call) = self
+                                                .task
+                                                .pending_native_tool_calls
+                                                .remove(&pending_call_info.tool_call_id)
+                                            else {
+                                                continue;
+                                            };
                                             match decisions.get(&pending_call_info.tool_call_id) {
                                                 Some(ToolApprovalDecision::Approve {
                                                     custom_tool_output,
                                                     message_to_agent,
-                                                }) => {
-                                                    if let Some(ai_call) = self
-                                                        .task
-                                                        .pending_native_tool_calls
-                                                        .remove(&pending_call_info.tool_call_id)
-                                                    {
-                                                        let result = self
-                                                            .execute_native_tool_for_approval(
-                                                                &ai_call,
-                                                                pending_call_info.tool_call_id,
-                                                                &pending_call_info.tool_name,
-                                                                pending_call_info
-                                                                    .parameters
-                                                                    .clone(),
-                                                                custom_tool_output.clone(),
-                                                                message_to_agent.clone(),
-                                                            )
-                                                            .await?;
-                                                        if let Some(r) = result {
-                                                            self.task
-                                                                .pending_native_tool_results
-                                                                .push(r);
-                                                        }
-                                                    }
-                                                }
+                                                }) => match self.approved_native_run(
+                                                    index,
+                                                    &ai_call,
+                                                    pending_call_info.tool_call_id,
+                                                    &pending_call_info.tool_name,
+                                                    pending_call_info.parameters.clone(),
+                                                    custom_tool_output.clone(),
+                                                    message_to_agent.clone(),
+                                                ) {
+                                                    Ok(run) => approved.push(run),
+                                                    Err(()) => results.push((
+                                                        index,
+                                                        self.unavailable_native_tool(&ai_call)
+                                                            .await?,
+                                                    )),
+                                                },
                                                 Some(ToolApprovalDecision::Reject { reason }) => {
                                                     self.emit_event(AgentEvent::ToolRejected {
                                                         tool_call_id: pending_call_info
@@ -1551,63 +1828,35 @@ impl AgentLoop {
                                                         reason: (*reason).clone(),
                                                     })
                                                     .await?;
-                                                    if let Some(ai_call) = self
-                                                        .task
-                                                        .pending_native_tool_calls
-                                                        .remove(&pending_call_info.tool_call_id)
-                                                    {
-                                                        let reason_str = reason
-                                                            .as_deref()
-                                                            .unwrap_or("Rejected by user");
-                                                        self.task.pending_native_tool_results.push(
-                                                            ai::ToolResult::error_from_tool_call(
-                                                                &ai_call, reason_str,
-                                                            ),
-                                                        );
-                                                    }
-                                                }
-                                                None => {
-                                                    if let Some(ai_call) = self
-                                                        .task
-                                                        .pending_native_tool_calls
-                                                        .remove(&pending_call_info.tool_call_id)
-                                                    {
-                                                        self.task.pending_native_tool_results.push(ai::ToolResult::error_from_tool_call(&ai_call, "No decision provided, implicitly rejected"));
-                                                    }
-                                                }
-                                            }
-                                            if self.task.current_state.is_terminal() {
-                                                break;
-                                            }
-                                        }
-                                        // A task that stopped at a call (failed
-                                        // on a tool error, or cancelled) still
-                                        // answers the calls it didn't run.
-                                        if self.task.current_state.is_terminal() {
-                                            let not_run = self.not_run_after_stop();
-                                            for pending_call_info in pending_calls {
-                                                if let Some(ai_call) = self
-                                                    .task
-                                                    .pending_native_tool_calls
-                                                    .remove(&pending_call_info.tool_call_id)
-                                                {
-                                                    self.emit_event(AgentEvent::ToolRejected {
-                                                        tool_call_id: pending_call_info
-                                                            .tool_call_id,
-                                                        tool_name: pending_call_info
-                                                            .tool_name
-                                                            .clone(),
-                                                        reason: Some(not_run.clone()),
-                                                    })
-                                                    .await?;
-                                                    self.task.pending_native_tool_results.push(
+                                                    let reason_str = reason
+                                                        .as_deref()
+                                                        .unwrap_or("Rejected by user");
+                                                    results.push((
+                                                        index,
                                                         ai::ToolResult::error_from_tool_call(
-                                                            &ai_call, &not_run,
+                                                            &ai_call, reason_str,
                                                         ),
-                                                    );
+                                                    ));
                                                 }
+                                                None => results.push((
+                                                    index,
+                                                    ai::ToolResult::error_from_tool_call(
+                                                        &ai_call,
+                                                        "No decision provided, implicitly rejected",
+                                                    ),
+                                                )),
                                             }
                                         }
+                                        results.extend(
+                                            self.run_native_calls(approved, |state| {
+                                                !state.is_terminal()
+                                            })
+                                            .await?,
+                                        );
+                                        results.sort_by_key(|(index, _)| *index);
+                                        self.task
+                                            .pending_native_tool_results
+                                            .extend(results.into_iter().map(|(_, result)| result));
                                         if matches!(
                                             self.task.current_state,
                                             TaskState::AwaitingBatchToolApproval { .. }
@@ -1616,7 +1865,7 @@ impl AgentLoop {
                                         }
                                         self.end_tool_batch().await?;
                                         if self.native_results_are_due() {
-                                            self.flush_native_results_to_conversation(None);
+                                            self.flush_native_results_to_conversation(None)?;
                                         }
                                         native_handled = true;
                                     } else {
@@ -1683,7 +1932,8 @@ impl AgentLoop {
                                             if !matches!(
                                                 self.task.current_state,
                                                 TaskState::AwaitingBatchToolApproval { .. }
-                                            ) {
+                                            ) || self.stop_requested
+                                            {
                                                 break;
                                             }
                                         }
@@ -1728,7 +1978,9 @@ impl AgentLoop {
                                     self.task.set_state(TaskState::InProgress);
 
                                     if self.is_native_mode() {
-                                        self.flush_native_results_to_conversation(Some(&formatted));
+                                        self.flush_native_results_to_conversation(Some(
+                                            &formatted,
+                                        ))?;
                                         native_handled = true;
                                     } else {
                                         next_user_message_from_command = formatted;
@@ -1794,7 +2046,7 @@ impl AgentLoop {
                                             {
                                                 self.flush_native_results_to_conversation(Some(
                                                     &recovery_prompt,
-                                                ));
+                                                ))?;
                                                 // The note beside the results is the runtime's.
                                                 self.task.mark_last_message_runtime_text();
                                                 native_handled = true;
@@ -2020,6 +2272,10 @@ impl AgentLoop {
                         break 'main_loop;
                     }
                 }
+            }
+            // A suspension while approved calls ran stops the loop here.
+            if self.stop_requested {
+                continue 'main_loop;
             }
             // Every command queued by now, also after an approved call ran,
             // so all context sent before this boundary (for example while a
@@ -2307,20 +2563,14 @@ impl AgentLoop {
                 }
 
                 self.reset_llm_recovery();
-                let mut calls_needing_approval: Vec<PendingToolCallInfo> = Vec::new();
-                let overall_batch_id = if tool_calls.len() > 1 {
-                    Some(Uuid::new_v4())
-                } else {
-                    None
-                };
-                let rejected_batch_reason = native_batch_rejection_reason(
-                    &self.task.agent_config,
-                    &self.tool_registry,
-                    &tool_calls,
-                );
-
+                let overall_batch_id = (tool_calls.len() > 1).then(Uuid::new_v4);
                 self.begin_tool_batch();
-                let mut reached = tool_calls.len();
+                // Every call gets exactly one result, in the order the model
+                // made them: checks answer some at once, the auto-approved
+                // calls run, and the calls that need approval wait for it.
+                let mut results: Vec<Option<ai::ToolResult>> = vec![None; tool_calls.len()];
+                let mut calls_needing_approval: Vec<(usize, PendingToolCallInfo)> = Vec::new();
+                let mut runs: Vec<NativeRun> = Vec::new();
                 for (call_index, ai_tool_call) in tool_calls.iter().enumerate() {
                     let tool_call_id = native_stream_call_ids
                         .remove(&call_index)
@@ -2334,19 +2584,6 @@ impl AgentLoop {
                     })
                     .await?;
 
-                    if let Some(reason) = &rejected_batch_reason {
-                        self.emit_event(AgentEvent::ToolRejected {
-                            tool_call_id,
-                            tool_name: ai_tool_call.name.clone(),
-                            reason: Some(reason.clone()),
-                        })
-                        .await?;
-                        self.task
-                            .pending_native_tool_results
-                            .push(ai::ToolResult::error_from_tool_call(ai_tool_call, reason));
-                        continue;
-                    }
-
                     if let Some(raw) = &ai_tool_call.invalid_arguments {
                         let reason = format!(
                             "The arguments for tool '{}' are not valid JSON, so the tool was not run. Call it again with a JSON object. Received: {}",
@@ -2358,17 +2595,16 @@ impl AgentLoop {
                             reason: Some(reason.clone()),
                         })
                         .await?;
-                        self.task
-                            .pending_native_tool_results
-                            .push(ai::ToolResult::error_from_tool_call(ai_tool_call, &reason));
+                        results[call_index] =
+                            Some(ai::ToolResult::error_from_tool_call(ai_tool_call, &reason));
                         continue;
                     }
 
                     let tool_arc = match self.tool_registry.get(&ai_tool_call.name) {
                         Some(t) => t,
                         None => {
-                            let result = self.unavailable_native_tool(ai_tool_call).await?;
-                            self.task.pending_native_tool_results.push(result);
+                            results[call_index] =
+                                Some(self.unavailable_native_tool(ai_tool_call).await?);
                             continue;
                         }
                     };
@@ -2405,9 +2641,8 @@ impl AgentLoop {
                             reason: Some(reason.clone()),
                         })
                         .await?;
-                        self.task
-                            .pending_native_tool_results
-                            .push(ai::ToolResult::error_from_tool_call(ai_tool_call, &reason));
+                        results[call_index] =
+                            Some(ai::ToolResult::error_from_tool_call(ai_tool_call, &reason));
                         continue;
                     }
 
@@ -2420,30 +2655,44 @@ impl AgentLoop {
                         self.task
                             .pending_native_tool_calls
                             .insert(tool_call_id, ai_tool_call.clone());
-                        calls_needing_approval.push(PendingToolCallInfo {
-                            tool_call_id,
-                            tool_name: ai_tool_call.name.clone(),
-                            parameters: params_map,
-                            tool_description: tool_definition.description.clone(),
-                        });
+                        calls_needing_approval.push((
+                            call_index,
+                            PendingToolCallInfo {
+                                tool_call_id,
+                                tool_name: ai_tool_call.name.clone(),
+                                parameters: params_map,
+                                tool_description: tool_definition.description.clone(),
+                            },
+                        ));
                     } else {
-                        let result = self.execute_native_tool(ai_tool_call, tool_call_id).await?;
-                        if let Some(r) = result {
-                            self.task.pending_native_tool_results.push(r);
-                        }
-                        if !matches!(self.task.current_state, TaskState::InProgress) {
-                            reached = call_index + 1;
-                            break;
-                        }
+                        runs.push(NativeRun {
+                            index: call_index,
+                            call: ai_tool_call.clone(),
+                            run: self.tool_run(
+                                tool_call_id,
+                                &ai_tool_call.name,
+                                tool_arc,
+                                params_map,
+                                None,
+                            ),
+                            message_to_agent: None,
+                        });
                     }
                 }
-                // A turn a call stopped (a tool error that fails the task, or
-                // a cancellation) still answers every call once: calls left
-                // awaiting an approval that won't be asked, and calls it
-                // didn't reach.
-                let not_run = self.not_run_after_stop();
-                if !matches!(self.task.current_state, TaskState::InProgress) {
-                    for pending in calls_needing_approval.drain(..) {
+                for (index, result) in self
+                    .run_native_calls(runs, |state| matches!(state, TaskState::InProgress))
+                    .await?
+                {
+                    results[index] = Some(result);
+                }
+                // A turn a call stopped (a tool error that fails the task,
+                // `complete_task` or `ask_user`, a cancellation or a
+                // suspension) still answers every call once, including the
+                // calls awaiting an approval that won't be asked.
+                if !matches!(self.task.current_state, TaskState::InProgress) || self.stop_requested
+                {
+                    let not_run = self.not_run_after_stop();
+                    for (index, pending) in calls_needing_approval.drain(..) {
                         if let Some(call) = self
                             .task
                             .pending_native_tool_calls
@@ -2455,34 +2704,25 @@ impl AgentLoop {
                                 reason: Some(not_run.clone()),
                             })
                             .await?;
-                            self.task
-                                .pending_native_tool_results
-                                .push(ai::ToolResult::error_from_tool_call(&call, &not_run));
+                            results[index] =
+                                Some(ai::ToolResult::error_from_tool_call(&call, &not_run));
                         }
                     }
                 }
-                for ai_tool_call in &tool_calls[reached..] {
-                    self.task
-                        .pending_native_tool_results
-                        .push(ai::ToolResult::error_from_tool_call(ai_tool_call, &not_run));
-                }
-                // Announced calls the turn ended before reaching, and calls
-                // announced while streaming that the response doesn't hold
-                // (for example cut off at the token limit), are not run.
-                let mut unreached: HashMap<usize, (Uuid, String)> = native_stream_call_ids
-                    .iter()
-                    .filter(|(index, _)| **index < tool_calls.len())
-                    .map(|(index, call)| (*index, call.clone()))
-                    .collect();
-                native_stream_call_ids.retain(|index, _| *index >= tool_calls.len());
-                self.reject_announced_calls(&mut unreached, &not_run)
-                    .await?;
+                self.task
+                    .pending_native_tool_results
+                    .extend(results.into_iter().flatten());
+                // Calls announced while streaming that the response doesn't
+                // hold (for example cut off at the token limit) are not run.
                 self.reject_announced_calls(&mut native_stream_call_ids, UNDELIVERED_CALL)
                     .await?;
 
-                if !calls_needing_approval.is_empty()
-                    && matches!(self.task.current_state, TaskState::InProgress)
-                {
+                if !calls_needing_approval.is_empty() {
+                    let mut calls_needing_approval: Vec<PendingToolCallInfo> =
+                        calls_needing_approval
+                            .into_iter()
+                            .map(|(_, pending)| pending)
+                            .collect();
                     if calls_needing_approval.len() == 1 && overall_batch_id.is_none() {
                         let single_pending = calls_needing_approval.remove(0);
                         self.task.set_state(TaskState::AwaitingToolApproval {
@@ -2528,7 +2768,7 @@ impl AgentLoop {
                 // still awaiting approval are decided.
                 self.end_tool_batch().await?;
                 if self.native_results_are_due() {
-                    self.flush_native_results_to_conversation(None);
+                    self.flush_native_results_to_conversation(None)?;
                 }
             } else {
                 let mut assistant_text_from_raw_events_for_pass1 = String::new();
@@ -2823,12 +3063,29 @@ impl AgentLoop {
                                             e
                                         ),
                                     }
-                                    if !matches!(self.task.current_state, TaskState::InProgress) {
+                                    if !matches!(self.task.current_state, TaskState::InProgress)
+                                        || self.stop_requested
+                                    {
                                         break;
                                     }
                                 }
                             }
 
+                            // Suspended while a call ran: the calls
+                            // awaiting approval are not asked about.
+                            if self.stop_requested {
+                                let not_run = self.not_run_after_stop();
+                                for pending in calls_needing_approval.drain(..) {
+                                    self.emit_event(AgentEvent::ToolRejected {
+                                        tool_call_id: pending.tool_call_id,
+                                        tool_name: pending.tool_name.clone(),
+                                        reason: Some(not_run.clone()),
+                                    })
+                                    .await?;
+                                    auto_approved_call_results
+                                        .push(format!("Tool {}: {not_run}", pending.tool_name));
+                                }
+                            }
                             if !calls_needing_approval.is_empty()
                                 && matches!(self.task.current_state, TaskState::InProgress)
                             {
@@ -3040,8 +3297,12 @@ impl AgentLoop {
     /// Why a call of the turn was not run once the task stopped at an
     /// earlier call: it failed on a tool error, a middleware failed or
     /// cancelled it (a workflow's cancellation gives "This call was not run:
-    /// Workflow cancelled."), or the turn otherwise ended.
+    /// Workflow cancelled."), it was cancelled or suspended while calls ran,
+    /// or the turn otherwise ended.
     fn not_run_after_stop(&self) -> String {
+        if self.stop_requested && !self.task.current_state.is_terminal() {
+            return TASK_SUSPENDED_CALL.to_string();
+        }
         match &self.task.current_state {
             TaskState::Failed { .. } if self.failed_on_tool_error => TASK_FAILED_CALL.to_string(),
             TaskState::Cancelled { reason } if reason == CANCELLED_BY_USER => {
@@ -3165,7 +3426,7 @@ impl AgentLoop {
         self.task.deferred_tool_errors.clear();
         if self.is_native_mode() {
             self.answer_open_native_calls(reason).await?;
-            self.flush_native_results_to_conversation(None);
+            self.flush_native_results_to_conversation(None)?;
             return Ok(());
         }
         let undecided = match &self.task.current_state {
@@ -3209,162 +3470,30 @@ impl AgentLoop {
         Ok(())
     }
 
+    /// Runs one auto-approved native call (see
+    /// [`run_native_calls`](Self::run_native_calls)) and returns its result.
+    #[cfg(test)]
     async fn execute_native_tool(
         &mut self,
         ai_tool_call: &ai::ToolCall,
         internal_id: Uuid,
     ) -> Result<Option<ai::ToolResult>, ArkoAgentsError> {
-        let tool_name = ai_tool_call.name.clone();
-        let params_map = Self::tool_call_args_to_map(ai_tool_call);
-
-        let tool_arc = self
+        let tool = self
             .tool_registry
-            .get(&tool_name)
-            .ok_or_else(|| ArkoAgentsError::ToolNotFound(tool_name.clone()))?;
-
-        match self
-            .before_tool_execution(internal_id, &tool_name, &params_map)
-            .await?
-        {
-            ToolExecutionDecision::Continue => {}
-            ToolExecutionDecision::Reject { message_to_agent } => {
-                self.emit_event(AgentEvent::ToolRejected {
-                    tool_call_id: internal_id,
-                    tool_name: tool_name.clone(),
-                    reason: Some(message_to_agent.clone()),
-                })
-                .await?;
-                return Ok(Some(ai::ToolResult::error_from_tool_call(
-                    ai_tool_call,
-                    &message_to_agent,
-                )));
-            }
-            ToolExecutionDecision::FailTask { reason } => {
-                let state = TaskState::Failed {
-                    reason: reason.clone(),
-                };
-                self.stop_at_tool_call(internal_id, &tool_name, &reason, state)
-                    .await?;
-                return Ok(Some(ai::ToolResult::error_from_tool_call(
-                    ai_tool_call,
-                    &reason,
-                )));
-            }
-            ToolExecutionDecision::CancelTask { reason } => {
-                let state = TaskState::Cancelled {
-                    reason: reason.clone(),
-                };
-                self.stop_at_tool_call(internal_id, &tool_name, &reason, state)
-                    .await?;
-                return Ok(Some(ai::ToolResult::error_from_tool_call(
-                    ai_tool_call,
-                    &reason,
-                )));
-            }
-        }
-
-        let task_context = self.task_context();
-
-        let params_for_interceptor = if self.interceptor_config.is_some() {
-            Some(params_map.clone())
-        } else {
-            None
+            .get(&ai_tool_call.name)
+            .ok_or_else(|| ArkoAgentsError::ToolNotFound(ai_tool_call.name.clone()))?;
+        let params = Self::tool_call_args_to_map(ai_tool_call);
+        let run = NativeRun {
+            index: 0,
+            call: ai_tool_call.clone(),
+            run: self.tool_run(internal_id, &ai_tool_call.name, tool, params, None),
+            message_to_agent: None,
         };
-
-        match tool_arc
-            .execute_with_output(&task_context, params_map.clone())
-            .await
-        {
-            Ok(ToolOutput {
-                text: result_str,
-                images,
-            }) => {
-                self.after_tool_execution(
-                    internal_id,
-                    &tool_name,
-                    &params_map,
-                    ToolExecutionOutcome::Success(&result_str),
-                )
-                .await?;
-                self.queue_tool_images(
-                    &tool_name,
-                    ai_tool_call.id.as_deref().unwrap_or("unidentified"),
-                    images,
-                );
-                if tool_name == ASK_USER_TOOL_NAME {
-                    self.task.set_state(TaskState::AwaitingUserResponse {
-                        questions: result_str.clone(),
-                    });
-                    self.emit_event(AgentEvent::TaskStateChanged(
-                        self.task.current_state.clone(),
-                    ))
-                    .await?;
-                    self.emit_event(AgentEvent::UserQuestionsAsked {
-                        questions: result_str.clone(),
-                    })
-                    .await?;
-                    self.emit_event(AgentEvent::ToolResult {
-                        tool_call_id: internal_id,
-                        tool_name,
-                        output: result_str.clone(),
-                    })
-                    .await?;
-                    return Ok(Some(ai::ToolResult::from_tool_call(
-                        ai_tool_call,
-                        &result_str,
-                    )));
-                }
-
-                let (effective_result, was_intercepted) = self
-                    .apply_tool_result_interception(
-                        &tool_name,
-                        &result_str,
-                        params_for_interceptor.as_ref().unwrap_or(&HashMap::new()),
-                    )
-                    .await;
-
-                self.emit_tool_result_events(
-                    internal_id,
-                    &tool_name,
-                    &result_str,
-                    &effective_result,
-                    was_intercepted,
-                )
-                .await?;
-
-                if tool_name == COMPLETE_TASK_TOOL_NAME {
-                    self.task.set_state(TaskState::Completed {
-                        summary: result_str.clone(),
-                    });
-                    self.emit_event(AgentEvent::TaskStateChanged(
-                        self.task.current_state.clone(),
-                    ))
-                    .await?;
-                }
-
-                Ok(Some(ai::ToolResult::from_tool_call(
-                    ai_tool_call,
-                    &effective_result,
-                )))
-            }
-            Err(e) => {
-                let error_str = format!("Tool '{}' execution failed: {}", tool_name, e);
-                self.after_tool_execution(
-                    internal_id,
-                    &tool_name,
-                    &params_map,
-                    ToolExecutionOutcome::Error(&error_str),
-                )
-                .await?;
-                let _ = self
-                    .handle_tool_exec_error(&tool_name, e, Some(internal_id))
-                    .await?;
-                Ok(Some(ai::ToolResult::error_from_tool_call(
-                    ai_tool_call,
-                    &error_str,
-                )))
-            }
-        }
+        Ok(self
+            .run_native_calls(vec![run], |_| true)
+            .await?
+            .pop()
+            .map(|(_, result)| result))
     }
 
     /// The error result of a native call to a tool the task is not offered
@@ -3383,6 +3512,8 @@ impl AgentLoop {
         ))
     }
 
+    /// Runs one approved native call (see
+    /// [`run_native_calls`](Self::run_native_calls)) and returns its result.
     async fn execute_native_tool_for_approval(
         &mut self,
         ai_call: &ai::ToolCall,
@@ -3392,163 +3523,45 @@ impl AgentLoop {
         custom_output: Option<String>,
         message_to_agent: Option<String>,
     ) -> Result<Option<ai::ToolResult>, ArkoAgentsError> {
-        let params_for_interceptor = if self.interceptor_config.is_some() {
-            Some(parameters.clone())
-        } else {
-            None
-        };
-        // A call saved awaiting approval whose tool this run does not offer
-        // is answered like any unavailable tool, even with caller output.
-        let Some(tool_arc) = self.tool_registry.get(tool_name) else {
-            return self.unavailable_native_tool(ai_call).await.map(Some);
-        };
-
-        let mut output_str = if let Some(output) = custom_output {
-            self.after_tool_execution(
-                internal_id,
-                tool_name,
-                &parameters,
-                ToolExecutionOutcome::CallerProvided(&output),
-            )
-            .await?;
-            output
-        } else {
-            match self
-                .before_tool_execution(internal_id, tool_name, &parameters)
-                .await?
-            {
-                ToolExecutionDecision::Continue => {}
-                ToolExecutionDecision::Reject { message_to_agent } => {
-                    self.emit_event(AgentEvent::ToolRejected {
-                        tool_call_id: internal_id,
-                        tool_name: tool_name.to_string(),
-                        reason: Some(message_to_agent.clone()),
-                    })
-                    .await?;
-                    return Ok(Some(ai::ToolResult::error_from_tool_call(
-                        ai_call,
-                        &message_to_agent,
-                    )));
-                }
-                ToolExecutionDecision::FailTask { reason } => {
-                    let state = TaskState::Failed {
-                        reason: reason.clone(),
-                    };
-                    self.stop_at_tool_call(internal_id, tool_name, &reason, state)
-                        .await?;
-                    return Ok(Some(ai::ToolResult::error_from_tool_call(ai_call, &reason)));
-                }
-                ToolExecutionDecision::CancelTask { reason } => {
-                    let state = TaskState::Cancelled {
-                        reason: reason.clone(),
-                    };
-                    self.stop_at_tool_call(internal_id, tool_name, &reason, state)
-                        .await?;
-                    return Ok(Some(ai::ToolResult::error_from_tool_call(ai_call, &reason)));
-                }
-            }
-
-            let task_context = self.task_context();
-
-            match tool_arc
-                .execute_with_output(&task_context, parameters.clone())
-                .await
-            {
-                Ok(ToolOutput {
-                    text: result_str,
-                    images,
-                }) => {
-                    self.after_tool_execution(
-                        internal_id,
-                        tool_name,
-                        &parameters,
-                        ToolExecutionOutcome::Success(&result_str),
-                    )
-                    .await?;
-                    self.queue_tool_images(
-                        tool_name,
-                        ai_call.id.as_deref().unwrap_or("unidentified"),
-                        images,
-                    );
-                    result_str
-                }
-                Err(e) => {
-                    let error_str = format!("Tool '{}' execution failed: {}", tool_name, e);
-                    self.after_tool_execution(
-                        internal_id,
-                        tool_name,
-                        &parameters,
-                        ToolExecutionOutcome::Error(&error_str),
-                    )
-                    .await?;
-                    let _ = self
-                        .handle_tool_exec_error(tool_name, e, Some(internal_id))
-                        .await?;
-                    return Ok(Some(ai::ToolResult::error_from_tool_call(
-                        ai_call, &error_str,
-                    )));
-                }
-            }
-        };
-
-        if tool_name == COMPLETE_TASK_TOOL_NAME {
-            self.task.set_state(TaskState::Completed {
-                summary: output_str.clone(),
-            });
-            self.emit_event(AgentEvent::TaskStateChanged(
-                self.task.current_state.clone(),
-            ))
-            .await?;
-        }
-        if tool_name == ASK_USER_TOOL_NAME {
-            self.task.set_state(TaskState::AwaitingUserResponse {
-                questions: output_str.clone(),
-            });
-            self.emit_event(AgentEvent::TaskStateChanged(
-                self.task.current_state.clone(),
-            ))
-            .await?;
-            self.emit_event(AgentEvent::UserQuestionsAsked {
-                questions: output_str.clone(),
-            })
-            .await?;
-        }
-
-        let (effective_output, was_intercepted) = self
-            .apply_tool_result_interception(
-                tool_name,
-                &output_str,
-                params_for_interceptor.as_ref().unwrap_or(&HashMap::new()),
-            )
-            .await;
-
-        if let Some(msg) = message_to_agent {
-            if !effective_output.is_empty() {
-                output_str = effective_output;
-                output_str.push_str("\n\n");
-            } else {
-                output_str = effective_output;
-            }
-            output_str.push_str("Message from user on approval:\n");
-            output_str.push_str(&msg);
-
-            self.emit_tool_result_events(internal_id, tool_name, &output_str, &output_str, false)
-                .await?;
-            return Ok(Some(ai::ToolResult::from_tool_call(ai_call, &output_str)));
-        }
-
-        self.emit_tool_result_events(
+        match self.approved_native_run(
+            0,
+            ai_call,
             internal_id,
             tool_name,
-            &output_str,
-            &effective_output,
-            was_intercepted,
-        )
-        .await?;
-        Ok(Some(ai::ToolResult::from_tool_call(
-            ai_call,
-            &effective_output,
-        )))
+            parameters,
+            custom_output,
+            message_to_agent,
+        ) {
+            Ok(run) => Ok(self
+                .run_native_calls(vec![run], |state| !state.is_terminal())
+                .await?
+                .pop()
+                .map(|(_, result)| result)),
+            Err(()) => self.unavailable_native_tool(ai_call).await.map(Some),
+        }
+    }
+
+    /// An approved native call to run, or `Err` when this run doesn't offer
+    /// its tool (a call saved awaiting approval), which is answered like any
+    /// unavailable tool, even with caller output.
+    #[allow(clippy::too_many_arguments, clippy::result_unit_err)]
+    fn approved_native_run(
+        &self,
+        index: usize,
+        ai_call: &ai::ToolCall,
+        internal_id: Uuid,
+        tool_name: &str,
+        parameters: HashMap<String, Value>,
+        custom_output: Option<String>,
+        message_to_agent: Option<String>,
+    ) -> Result<NativeRun, ()> {
+        let tool = self.tool_registry.get(tool_name).ok_or(())?;
+        Ok(NativeRun {
+            index,
+            call: ai_call.clone(),
+            run: self.tool_run(internal_id, tool_name, tool, parameters, custom_output),
+            message_to_agent,
+        })
     }
 
     fn append_error_recovery_user_message(&mut self, message: &str) -> Result<(), ArkoAgentsError> {
@@ -4244,14 +4257,18 @@ impl AgentLoop {
                 Ok(error_message_for_llm)
             }
             ToolErrorPolicy::FailTask => {
-                self.failed_on_tool_error = true;
-                self.task.set_state(TaskState::Failed {
-                    reason: error_message_for_event.clone(),
-                });
-                self.emit_event(AgentEvent::TaskStateChanged(
-                    self.task.current_state.clone(),
-                ))
-                .await?;
+                // A call running beside the one that ended the task (in a
+                // group of parallel-safe calls) doesn't end it again.
+                if !self.task.current_state.is_terminal() {
+                    self.failed_on_tool_error = true;
+                    self.task.set_state(TaskState::Failed {
+                        reason: error_message_for_event.clone(),
+                    });
+                    self.emit_event(AgentEvent::TaskStateChanged(
+                        self.task.current_state.clone(),
+                    ))
+                    .await?;
+                }
                 self.emit_event(AgentEvent::ErrorEncountered {
                     error_message: error_message_for_event,
                     requires_approval_to_retry: false,
@@ -4263,6 +4280,9 @@ impl AgentLoop {
         }
     }
 
+    /// Runs an output-based call (auto-approved or approved) and returns
+    /// its result as text for the next user message. A cancellation or
+    /// suspension while it runs stops it.
     async fn execute_tool_and_handle_result(
         &mut self,
         tool_name: &str,
@@ -4281,173 +4301,131 @@ impl AgentLoop {
             return Ok(format!("Error: Tool '{tool_name}' is not available."));
         };
 
-        let result_str_or_error_msg_for_llm: String;
-        let tool_definition_for_pb = tool_arc.definition();
-        let pb_for_tool_results = PromptBuilder::new(
-            &self.task.agent_config,
-            vec![&tool_definition_for_pb],
-            &self.parsing_config,
-            None,
+        let format_error = |this: &Self, message: &str| {
+            PromptBuilder::new(&this.task.agent_config, vec![], &this.parsing_config, None)
+                .format_tool_execution_error_as_user_message(tool_name, message)
+        };
+        let run = self.tool_run(
+            tool_call_id,
+            tool_name,
+            tool_arc.clone(),
+            parameters,
+            custom_tool_output,
         );
-
-        if let Some(custom_output) = custom_tool_output {
-            self.after_tool_execution(
-                tool_call_id,
+        let group = self.run_group(vec![run]).await;
+        let outcome = match group.outcomes {
+            Some(mut outcomes) => outcomes.pop().expect("one call, one outcome")?,
+            None => {
+                let stop = group.stop.expect("a group without outcomes was stopped");
+                let reason = self.stop_running_tools(stop).await?;
+                self.emit_event(AgentEvent::ToolRejected {
+                    tool_call_id,
+                    tool_name: tool_name.to_string(),
+                    reason: Some(reason.to_string()),
+                })
+                .await?;
+                return Ok(format_error(self, reason));
+            }
+        };
+        let result = self
+            .finish_text_call(
                 tool_name,
-                &parameters,
-                ToolExecutionOutcome::CallerProvided(&custom_output),
-            )
-            .await?;
-            let (effective_output, was_intercepted) = self
-                .apply_tool_result_interception(tool_name, &custom_output, &parameters)
-                .await;
-
-            self.emit_tool_result_events(
                 tool_call_id,
-                tool_name,
-                &custom_output,
-                &effective_output,
-                was_intercepted,
+                outcome,
+                message_to_agent_on_approval,
             )
-            .await?;
-            result_str_or_error_msg_for_llm = pb_for_tool_results
-                .format_tool_result_as_user_message(
-                    tool_name,
-                    &effective_output,
-                    message_to_agent_on_approval.as_deref(),
-                );
-        } else {
-            let params_for_interceptor = if self.interceptor_config.is_some() {
-                Some(parameters.clone())
-            } else {
-                None
-            };
+            .await;
+        if let Some(stop) = group.stop {
+            self.stop_after_calls(stop).await?;
+        }
+        result
+    }
 
-            match self
-                .before_tool_execution(tool_call_id, tool_name, &parameters)
-                .await?
-            {
-                ToolExecutionDecision::Continue => {}
-                ToolExecutionDecision::Reject { message_to_agent } => {
-                    self.emit_event(AgentEvent::ToolRejected {
-                        tool_call_id,
-                        tool_name: tool_name.to_string(),
-                        reason: Some(message_to_agent.clone()),
+    /// The text result of an output-based call that ran; see
+    /// [`execute_tool_and_handle_result`](Self::execute_tool_and_handle_result).
+    async fn finish_text_call(
+        &mut self,
+        tool_name: &str,
+        tool_call_id: Uuid,
+        outcome: RunOutcome,
+        message_to_agent_on_approval: Option<String>,
+    ) -> Result<String, ArkoAgentsError> {
+        let format_error = |this: &Self, message: &str| {
+            PromptBuilder::new(&this.task.agent_config, vec![], &this.parsing_config, None)
+                .format_tool_execution_error_as_user_message(tool_name, message)
+        };
+        match outcome {
+            RunOutcome::Rejected(message) => {
+                self.emit_event(AgentEvent::ToolRejected {
+                    tool_call_id,
+                    tool_name: tool_name.to_string(),
+                    reason: Some(message.clone()),
+                })
+                .await?;
+                Ok(format_error(self, &message))
+            }
+            RunOutcome::Stop { reason, cancel } => {
+                let formatted = format_error(self, &reason);
+                self.stop_by_middleware(tool_call_id, tool_name, &reason, cancel)
+                    .await?;
+                Ok(formatted)
+            }
+            RunOutcome::Failed(error) => {
+                self.handle_tool_exec_error(tool_name, error, Some(tool_call_id))
+                    .await
+            }
+            RunOutcome::Finished {
+                output,
+                effective,
+                intercepted,
+            } => {
+                let raw = output.text;
+                // A call of a group another call already ended (possible only
+                // for tools configured parallel-safe) changes no state.
+                let open = !self.task.current_state.is_terminal();
+                if tool_name == ASK_USER_TOOL_NAME && open {
+                    self.task.set_state(TaskState::AwaitingUserResponse {
+                        questions: raw.clone(),
+                    });
+                    self.emit_event(AgentEvent::TaskStateChanged(
+                        self.task.current_state.clone(),
+                    ))
+                    .await?;
+                    self.emit_event(AgentEvent::UserQuestionsAsked {
+                        questions: raw.clone(),
                     })
                     .await?;
-                    return Ok(
-                        pb_for_tool_results.format_tool_execution_error_as_user_message(
-                            tool_name,
-                            &message_to_agent,
-                        ),
-                    );
-                }
-                ToolExecutionDecision::FailTask { reason } => {
-                    let formatted_error = pb_for_tool_results
-                        .format_tool_execution_error_as_user_message(tool_name, &reason);
-                    let state = TaskState::Failed {
-                        reason: reason.clone(),
-                    };
-                    self.stop_at_tool_call(tool_call_id, tool_name, &reason, state)
-                        .await?;
-                    return Ok(formatted_error);
-                }
-                ToolExecutionDecision::CancelTask { reason } => {
-                    let formatted_error = pb_for_tool_results
-                        .format_tool_execution_error_as_user_message(tool_name, &reason);
-                    let state = TaskState::Cancelled {
-                        reason: reason.clone(),
-                    };
-                    self.stop_at_tool_call(tool_call_id, tool_name, &reason, state)
-                        .await?;
-                    return Ok(formatted_error);
-                }
-            }
-
-            let task_context = self.task_context();
-            match tool_arc
-                .execute_with_output(&task_context, parameters.clone())
-                .await
-            {
-                Ok(ToolOutput {
-                    text: result_str,
-                    images,
-                }) => {
-                    self.after_tool_execution(
+                    self.emit_event(AgentEvent::ToolResult {
                         tool_call_id,
-                        tool_name,
-                        &parameters,
-                        ToolExecutionOutcome::Success(&result_str),
-                    )
+                        tool_name: tool_name.to_string(),
+                        output: raw,
+                    })
                     .await?;
-                    if tool_name == ASK_USER_TOOL_NAME {
-                        self.task.set_state(TaskState::AwaitingUserResponse {
-                            questions: result_str.clone(),
-                        });
-                        self.emit_event(AgentEvent::TaskStateChanged(
-                            self.task.current_state.clone(),
-                        ))
-                        .await?;
-                        self.emit_event(AgentEvent::UserQuestionsAsked {
-                            questions: result_str.clone(),
-                        })
-                        .await?;
-                        self.emit_event(AgentEvent::ToolResult {
-                            tool_call_id,
-                            tool_name: tool_name.to_string(),
-                            output: result_str,
-                        })
-                        .await?;
-                        self.queue_tool_images(tool_name, tool_call_id, images);
-                        return Ok(String::new());
-                    }
-
-                    let (effective_result, was_intercepted) = self
-                        .apply_tool_result_interception(
-                            tool_name,
-                            &result_str,
-                            params_for_interceptor.as_ref().unwrap_or(&HashMap::new()),
-                        )
-                        .await;
-
-                    self.emit_tool_result_events(
-                        tool_call_id,
-                        tool_name,
-                        &result_str,
-                        &effective_result,
-                        was_intercepted,
-                    )
-                    .await?;
-                    result_str_or_error_msg_for_llm = pb_for_tool_results
+                    self.queue_tool_images(tool_name, tool_call_id, output.images);
+                    return Ok(String::new());
+                }
+                self.emit_tool_result_events(
+                    tool_call_id,
+                    tool_name,
+                    &raw,
+                    &effective,
+                    intercepted,
+                )
+                .await?;
+                let formatted =
+                    PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None)
                         .format_tool_result_as_user_message(
                             tool_name,
-                            &effective_result,
+                            &effective,
                             message_to_agent_on_approval.as_deref(),
                         );
-                    self.queue_tool_images(tool_name, tool_call_id, images);
-
-                    if tool_name == COMPLETE_TASK_TOOL_NAME {
-                        self.task.set_state(TaskState::Completed {
-                            summary: result_str,
-                        });
-                    }
+                self.queue_tool_images(tool_name, tool_call_id, output.images);
+                if tool_name == COMPLETE_TASK_TOOL_NAME {
+                    self.task.set_state(TaskState::Completed { summary: raw });
                 }
-                Err(e) => {
-                    let error_str = format!("Tool '{}' execution failed: {}", tool_name, e);
-                    self.after_tool_execution(
-                        tool_call_id,
-                        tool_name,
-                        &parameters,
-                        ToolExecutionOutcome::Error(&error_str),
-                    )
-                    .await?;
-                    result_str_or_error_msg_for_llm = self
-                        .handle_tool_exec_error(tool_name, e, Some(tool_call_id))
-                        .await?;
-                }
+                Ok(formatted)
             }
         }
-        Ok(result_str_or_error_msg_for_llm)
     }
 }
 
@@ -4468,46 +4446,9 @@ mod tests {
         )
         .role_description("test".to_string())
         .instructions("test".to_string())
-        .tool_config(AgentToolConfig {
-            allow_batched_tool_calls: true,
-            ..AgentToolConfig::default()
-        })
+        .tool_config(AgentToolConfig::default())
         .build()
         .unwrap()
-    }
-
-    fn call(name: &str) -> ai::ToolCall {
-        ai::ToolCall {
-            id: Some(format!("call-{name}")),
-            name: name.to_string(),
-            arguments: serde_json::json!({}),
-            thought_signature: None,
-            provider_id: None,
-            invalid_arguments: None,
-        }
-    }
-
-    #[test]
-    fn native_batches_allow_mixed_safe_reads_but_reject_unsafe_tools() {
-        let config = test_config();
-        let registry = ToolRegistry::new();
-        assert!(
-            native_batch_rejection_reason(
-                &config,
-                &registry,
-                &[call("read_file"), call("list_files")],
-            )
-            .is_none()
-        );
-
-        let rejection = native_batch_rejection_reason(
-            &config,
-            &registry,
-            &[call("read_file"), call("complete_task")],
-        )
-        .unwrap();
-        assert!(rejection.contains("complete_task"));
-        assert!(!rejection.contains("read_file, complete_task"));
     }
 
     /// Tells the task about something once, at its first turn boundary.
@@ -4770,3 +4711,7 @@ mod injection_tests;
 #[cfg(test)]
 #[path = "network_tests.rs"]
 mod network_tests;
+
+#[cfg(test)]
+#[path = "parallel_tests.rs"]
+mod parallel_tests;

@@ -60,7 +60,7 @@ impl Tool for WriteFileTool {
                     default_value: None,
                 },
             ],
-            supports_batched_calls: true,
+            parallel_safe: false,
             tool_type_details: ToolTypeDetails::BuiltIn,
             raw_json_schema_override: None,
         }

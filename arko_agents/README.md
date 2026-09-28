@@ -29,7 +29,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let llm_config = AgentLLMConfig {
-        model: Model::anthropic_claude_sonnet_5(),
+        model: Model::anthropic_claude_opus_5_5(),
         generation_config: GenerationConfig::default(),
     };
     let config = AgentConfig::builder("writer".into(), "Writer".into(), llm_config)
@@ -137,7 +137,7 @@ runtime validates them again when a task starts. The quick start's agent as JSON
   "name": "Writer",
   "role_description": "You are a careful software engineer.",
   "instructions": "Make the requested change, then call complete_task with a summary.",
-  "llm_config": { "provider": "Anthropic", "model_id": "claude-sonnet-5" },
+  "llm_config": { "provider": "Anthropic", "model_id": "claude-opus-5-5" },
   "tool_config": {
     "available_tool_names": ["list_files", "read_file", "write_file", "complete_task"],
     "tool_calling_mode": "Native"
@@ -150,7 +150,7 @@ runtime validates them again when a task starts. The quick start's agent as JSON
 | `id`, `name` | Required | Identifier and display name; the name heads the system prompt and is the `agent_name` tools receive. |
 | `role_description`, `instructions` | Required | The system prompt's role and instructions sections. |
 | `llm_config` | Required | Model and `GenerationConfig`; see [Saved tasks and configurations](#saved-tasks-and-configurations). |
-| `tool_config` | `complete_task` only, native tool calling | Available tools, tool calling mode, approvals, batching, and workspace path policy. |
+| `tool_config` | `complete_task` only, native tool calling, 20-minute tool time limit | Available tools, tool calling mode, approvals, parallel calls, tool time limits, and workspace path policy. |
 | `environment_details_config` | Nothing included | Working directory, file tree, date and time, and operating system, each placed in the system prompt, the task prompt, or every user message. |
 | `error_recovery_config` | `InformAgentAndContinue` | What a failed tool execution does. |
 | `llm_error_policy`, `llm_retry_config` | 10 attempts over up to 5 minutes, then pause | What a failed model request does; see [Model-call recovery](#model-call-recovery). |
@@ -198,21 +198,70 @@ so other markup stays response text. `run_task` binds the offered tools to the t
 `tool_config.tool_calling_mode` selects how calls are exchanged with the model:
 
 - `Native` (the default): tools are sent through the provider's tool-calling API. A
-  response can call several different tools, but only when every tool in it allows
-  batching; otherwise none of the calls runs and each gets an error result explaining why.
+  response can call several different tools; see
+  [Several calls in one response](#several-calls-in-one-response).
 - `OutputBased` (legacy): the system prompt describes each tool with an XML-like example,
   and the runtime parses calls from the response text. A response holds one call or one
-  batch of calls to the same tool. Every parameter value arrives as a JSON string, except
-  that `true` or `false` (in any case) for a `bool` parameter becomes a boolean.
+  batch of calls to the same parallel-safe tool, which run in order. Every parameter value
+  arrives as a JSON string, except that `true` or `false` (in any case) for a `bool`
+  parameter becomes a boolean.
 
 A configuration that does not name a mode gets `Native`. A saved task records the mode it
 ran with; a task saved by an older version without it ran output-based and loads that way.
 
-A tool allows batching when its definition sets `supports_batched_calls` and the
-configuration enables it: a per-tool `allow_batched_calls` override, or else
-`allow_batched_tool_calls` (default `false`). With `allow_batched_tool_calls` off, native
-requests also disable parallel tool calls on models that support that setting. Every
-response must call a tool; a response without one is handled as a failed model request.
+In native mode, a `tool_config` in the model's `GenerationConfig` is honoured: its
+`tool_choice` and `parallel_tool_calls` are sent with the agent's tools (its own tool
+definitions are not: the agent's tools come from the registry). Without one, no tool choice
+is sent and the provider's `auto` applies, so tool use is optional and a plain answer is a
+valid response. The system prompt tells the model that the task ends only when it calls
+`complete_task`, and a response without a tool call gets a note asking it to continue with
+its tools or call `complete_task` (see [Model-call recovery](#model-call-recovery)).
+`ToolChoice::Required` forces a call on the models that accept it.
+
+### Several calls in one response
+
+Every call of a response runs, and each gets exactly one result, in the order the model
+made the calls; no response is rejected for holding several. Calls to parallel-safe tools
+run at the same time as the parallel-safe calls next to them. Any other call runs alone,
+after the calls before it and before the calls after it, so calls run in the order the
+model made them wherever that matters. A tool is parallel-safe when its definition sets
+`parallel_safe`, unless its `tool_specific_configs` entry sets `parallel_safe` otherwise.
+The built-in `read_file`, `list_files`, and `load_skill` are parallel-safe; `write_file`,
+`apply_diff`, `ask_user`, and `complete_task` are not; an MCP tool is parallel-safe only
+when its server marks it `readOnlyHint: true`. Calls after one that ends the turn
+(`complete_task`, `ask_user`, a tool error under `FailTask`, or a middleware's decision)
+are not run, and their results say so; parallel-safe calls already running beside it
+finish.
+
+`tool_config.one_tool_call_per_turn: true` (off by default) asks for one call per
+response. Native requests then disable parallel tool calls where the provider can (OpenAI
+and OpenRouter `parallel_tool_calls: false`, Anthropic `disable_parallel_tool_use`), the
+system prompt asks for one call per response, and a response that still holds several
+(Gemini can't turn parallel calls off) runs them one at a time, in order.
+`parallel_tool_calls: Some(false)` in the model's `tool_config` means the same. In
+output-based mode the switch turns batching off.
+
+Configurations saved with the former `allow_batched_tool_calls` still load; the field is
+ignored, and `false` logs a warning once. A per-tool `allow_batched_calls` loads as that
+tool's `parallel_safe`, and a saved tool definition's `supports_batched_calls` as its
+`parallel_safe`.
+
+### Tool time limit
+
+Every tool call runs under a host-side time limit, 20 minutes by default
+(`tool_config.tool_timeout_seconds`, `DEFAULT_TOOL_TIMEOUT_SECONDS`). The limit is never
+shown to the model and is not a tool parameter. A call that runs longer is stopped (an
+end-user command it started is killed), and its result tells the model that the tool did
+not finish within the host's time limit and was stopped; the tool-error policy then
+applies as to any failed call (`InformAgentAndContinue` by default: the model is told, and
+the task goes on). Set `tool_timeout_seconds: None` (JSON `null`) to turn the limit off.
+A tool's `tool_specific_configs` entry sets its own: `tool_timeout_seconds:
+Some(Some(seconds))` (a JSON number) or `Some(None)` (JSON `null`) for none. Tools with
+their own job and wait handling are exempt (`Tool::uses_host_timeout` returns `false`):
+the terminal tools, whose jobs run in the background with their own deadlines, and a
+workflow's `run_workflow_agent`, which runs another agent to completion. A per-tool
+setting applies to them too. Output supplied with an approval runs nothing and has no
+limit.
 
 Response text is streamed as it arrives in native mode. In output-based mode, a turn's
 text and tool events are emitted once the response has been parsed.
@@ -227,7 +276,10 @@ approval, the runtime emits `ToolCallAwaitingApproval`; when it holds several ca
 emits `BatchToolCallAwaitingApproval` listing those that need approval. Answer with
 `ApproveToolUse`, `RejectToolUse`, or `SubmitBatchToolApprovals`, where a call without a
 decision is rejected. An approval can carry `custom_tool_output`, which is used instead
-of running the tool, and a `message_to_agent`.
+of running the tool, and a `message_to_agent`. Calls that need approval don't hold up the
+rest of their response: its auto-approved calls run first, and the calls awaiting
+approval run once decided, the approved calls of a batch under the same parallel-safety
+rule and in the batch's order. Every call gets exactly one result either way.
 
 Parameters marked `is_path` are checked against the task's working directory. A path
 outside it is handled by `default_out_of_workspace_path_policy` or a per-tool override:
@@ -309,7 +361,7 @@ impl Tool for WordCount {
                 flag: None,
                 default_value: None,
             }],
-            supports_batched_calls: true,
+            parallel_safe: true,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
             raw_json_schema_override: None,
         }
@@ -331,11 +383,22 @@ registry.register(Arc::new(WordCount));
 ```
 
 The runtime does not check arguments against the definition before calling `execute`;
-`ToolDefinition::validate_params` is available for tools that want the check. A tool can
-return images with `execute_with_output`, opt out of result interception with
-`allow_result_interception`, and track what reached the conversation with
-`reset_context` and `observe_context`. `bind_runtime` gives a background tool a weak
-command sender for the task, through which it can send `UserCommand::InjectContext`.
+`ToolDefinition::validate_params` is available for tools that want the check. Set
+`parallel_safe` only for tools whose calls don't affect each other, such as reads (see
+[Several calls in one response](#several-calls-in-one-response)). A tool can opt out of
+the agent's time limit with `uses_host_timeout`, and out of being stopped mid-call by
+`CancelTask` or `SuspendTask` with `interruptible`, when it winds its own work down. It
+can opt out of result interception with `allow_result_interception`, and track what
+reached the conversation with `reset_context` and `observe_context`. `bind_runtime` gives
+a background tool a weak command sender for the task, through which it can send
+`UserCommand::InjectContext`.
+
+A tool can return images with `execute_with_output`, each with a `description`. In native
+mode they go inside the call's own result, after its text, each after its description;
+arko_ai sends them there where the model accepts images in tool results, and otherwise
+after all of the turn's results, each after "Image from tool NAME, call ID: DESCRIPTION".
+In output-based mode they follow the results' text the same way. Images are not passed to
+result interceptors and never appear in events.
 
 End-user tools wrap a command without Rust code: a `ToolDefinition` whose
 `tool_type_details` is `EndUserDefined { command_template }`, loaded with
@@ -347,7 +410,8 @@ parameter passes the path the workspace check judged, with `..` resolved so a sy
 link cannot redirect it: relative to the working directory inside it (`./src/main.rs`,
 never a verbatim `\\?\` path on Windows) and absolute outside it, so the program cannot
 read it as an option. The command runs in the task's working directory without a shell,
-and its standard output is the result; a nonzero exit status is a tool error. The process
+with an empty standard input, and its standard output is the result; a nonzero exit
+status is a tool error. The process
 is killed when its call is dropped, for example when the task's runtime is aborted
 mid-call. A boolean parameter takes a JSON boolean or the text `true` or `false`, so it
 works in both tool calling modes.
@@ -388,7 +452,9 @@ discovers its tools, named `mcp__<server>__<tool>`:
 }
 ```
 
-`register_tools` adds them to a registry and `tool_names` returns the names to add to
+An MCP tool is parallel-safe only when its server marks it `readOnlyHint: true`; its
+calls otherwise run one at a time. `register_tools` adds them to a registry and
+`tool_names` returns the names to add to
 `available_tool_names`; `shutdown` closes each connection and gives the server three
 seconds to exit before killing it, and dropping the manager kills the servers. MCP tools
 require native tool calling, and the workspace path policy cannot apply to them.
@@ -454,12 +520,20 @@ Besides answers to the waiting states, a running task accepts:
   `AgentRuntime::with_turn_context` is also asked for context at each such boundary,
   before each model request, and its answer joins that message.
 - `CancelTask`: the task ends as `Cancelled { reason }` with `CANCELLED_BY_USER` ("Task
-  cancelled by user."). Calls it waited on get a result saying they were not run. A task
-  saved by an older version as `Failed { reason: "Task cancelled by user." }` loads as
+  cancelled by user."). Tool calls running when it arrives are stopped, and calls it
+  waited on or that had not run yet get a result saying they were not run. A task saved
+  by an older version as `Failed { reason: "Task cancelled by user." }` loads as
   `Cancelled`.
 - `SuspendTask`: the runtime stops and returns the task in its current state, for example
   to save it. A task suspended while it awaits a command, in any awaiting state, keeps
-  its pending calls and results and waits for that command when it runs again.
+  its pending calls and results and waits for that command when it runs again. Tool calls
+  running when it arrives are stopped, their results and those of the turn's calls not
+  yet run say so ("Call it again if it is still needed."), and the task, in progress,
+  makes its next request when it runs again.
+
+A stopped tool call is dropped, which kills an end-user command it started. A call to a
+tool that isn't interruptible (`Tool::interruptible` returns `false`) finishes first, and
+the cancellation or suspension then takes effect.
 
 `CancelTask` and `SuspendTask` stop the task without another model request, also when
 queued behind context. Context the runtime has taken from the channel is never lost when a

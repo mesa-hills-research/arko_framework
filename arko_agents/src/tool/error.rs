@@ -36,10 +36,35 @@ pub enum ToolError {
     #[error("Shell command template error for tool '{tool_name}': {message}")]
     ShellCommandTemplate { tool_name: String, message: String },
 
+    /// The call ran longer than the host's time limit and was stopped
+    /// ([`AgentToolConfig::tool_timeout_seconds`](crate::agent_config::AgentToolConfig::tool_timeout_seconds)).
+    #[error(
+        "The tool did not finish within the host's time limit of {} and was stopped; anything it had started may be incomplete.",
+        describe_limit(*limit)
+    )]
+    TimedOut { limit: std::time::Duration },
+
     #[error("I/O error during tool execution for tool '{tool_name}': {source}")]
     Io {
         tool_name: String,
         #[source]
         source: std::io::Error,
     },
+}
+
+/// `20 minutes`, `1 hour`, `90 seconds`.
+fn describe_limit(limit: std::time::Duration) -> String {
+    let seconds = limit.as_secs();
+    let (count, unit) = if seconds >= 3600 && seconds.is_multiple_of(3600) {
+        (seconds / 3600, "hour")
+    } else if seconds >= 60 && seconds.is_multiple_of(60) {
+        (seconds / 60, "minute")
+    } else {
+        (seconds, "second")
+    };
+    if count == 1 {
+        format!("1 {unit}")
+    } else {
+        format!("{count} {unit}s")
+    }
 }

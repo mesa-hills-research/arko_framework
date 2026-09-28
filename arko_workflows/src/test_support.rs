@@ -253,6 +253,8 @@ pub(crate) struct ProbeTool {
 }
 
 impl ProbeTool {
+    /// A blocking probe is stuck: a stop doesn't interrupt it
+    /// ([`Tool::interruptible`]), so its agent must be aborted.
     pub fn new(name: &'static str, block: bool) -> Arc<Self> {
         Arc::new(Self {
             name,
@@ -268,13 +270,17 @@ impl ProbeTool {
 
 #[async_trait::async_trait]
 impl Tool for ProbeTool {
+    fn interruptible(&self) -> bool {
+        !self.block
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name.to_string(),
             description: "Test probe.".to_string(),
             output_based_example: None,
             parameters: vec![],
-            supports_batched_calls: false,
+            parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
             raw_json_schema_override: None,
         }

@@ -289,7 +289,7 @@ impl Tool for WaitForMessageTool {
                 flag: None,
                 default_value: None,
             }],
-            supports_batched_calls: false,
+            parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
             raw_json_schema_override: None,
         }

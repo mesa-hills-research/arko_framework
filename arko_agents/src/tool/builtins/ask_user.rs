@@ -49,7 +49,7 @@ impl Tool for AskUserTool {
                 flag: None,
                 default_value: None,
             }],
-            supports_batched_calls: false,
+            parallel_safe: false,
             tool_type_details: ToolTypeDetails::BuiltIn,
             raw_json_schema_override: None,
         }

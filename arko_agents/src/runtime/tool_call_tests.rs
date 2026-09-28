@@ -30,7 +30,7 @@ impl Tool for Counter {
                 flag: None,
                 default_value: None,
             }],
-            supports_batched_calls: true,
+            parallel_safe: true,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
             raw_json_schema_override: None,
         }
@@ -137,7 +137,7 @@ pub(super) fn complete() -> ScriptedStreamResult {
 }
 
 /// An output-based turn: the response text streamed, then the response.
-fn text_turn(text: &str) -> ScriptedStreamResult {
+pub(super) fn text_turn(text: &str) -> ScriptedStreamResult {
     let Ok(end) = response(ai::Message::new_assistant(text)) else {
         unreachable!()
     };
@@ -333,7 +333,7 @@ async fn native_calls_to_registered_tools_the_agent_is_not_offered_do_not_run() 
         &workspace,
     );
     let offered: Vec<_> = agent
-        .build_native_tool_config(&agent.task.conversation.model)
+        .build_native_tool_config(&agent.task.conversation.model, None)
         .tools
         .into_iter()
         .map(|tool| tool.name)
@@ -847,6 +847,19 @@ fn read_a() -> ai::ToolCall {
     native_call("a", "read_file", serde_json::json!({"path": "a.txt"}))
 }
 
+/// Makes `read_file` run one call at a time, in order, so a call that stops
+/// the task leaves the later ones unrun (parallel-safe calls would all be
+/// running already).
+fn one_read_at_a_time(config: &mut AgentConfig) {
+    config.tool_config.tool_specific_configs.insert(
+        "read_file".into(),
+        PerToolConfigOverride {
+            parallel_safe: Some(false),
+            ..Default::default()
+        },
+    );
+}
+
 fn batch_workspace() -> PathBuf {
     let workspace = workspace();
     std::fs::write(workspace.join("a.txt"), "A-CONTENTS").unwrap();
@@ -1038,6 +1051,7 @@ async fn under_fail_task_a_native_batch_stops_and_answers_the_calls_it_did_not_r
     for approvals in [false, true] {
         let workspace = batch_workspace();
         let mut config = config(ToolCallingMode::Native, &["read_file"]);
+        one_read_at_a_time(&mut config);
         config.tool_config.default_auto_approve_tool_use = !approvals;
         config.error_recovery_config.on_tool_execution_error = ToolErrorPolicy::FailTask;
         let (mut agent, mut events, commands) = agent(config, ToolRegistry::new(), &workspace);
@@ -1094,14 +1108,12 @@ async fn under_fail_task_a_native_batch_stops_and_answers_the_calls_it_did_not_r
                 .unwrap()
                 .contains("C-CONTENTS")
         );
-        // A call that waited for approval is reported as not run.
-        assert_eq!(
-            seen.iter().any(|event| matches!(
-                event,
-                AgentEvent::ToolRejected { reason: Some(reason), .. } if reason == TASK_FAILED_CALL
-            )),
-            approvals
-        );
+        // The call that was not run is reported as such, whether it waited
+        // for approval or not.
+        assert!(seen.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolRejected { reason: Some(reason), .. } if reason == TASK_FAILED_CALL
+        )));
         std::fs::remove_dir_all(workspace).unwrap();
     }
 }
@@ -1165,6 +1177,7 @@ async fn a_native_batch_a_middleware_stops_answers_the_calls_it_did_not_run() {
     for (cancel, approvals) in [(true, false), (true, true), (false, false), (false, true)] {
         let workspace = batch_workspace();
         let mut config = config(ToolCallingMode::Native, &["read_file"]);
+        one_read_at_a_time(&mut config);
         config.tool_config.default_auto_approve_tool_use = !approvals;
         let (mut agent, mut events, commands) = agent(config, ToolRegistry::new(), &workspace);
         agent.execution_middleware = Some(Arc::new(StopAtB { cancel }));
@@ -1808,7 +1821,7 @@ async fn output_based_end_user_tools_receive_boolean_parameters() {
                 parameter("text", ToolParameterType::String, None),
                 parameter("shout", ToolParameterType::Bool, Some("--shout")),
             ],
-            supports_batched_calls: false,
+            parallel_safe: false,
             tool_type_details: ToolTypeDetails::EndUserDefined {
                 command_template: "echo".into(),
             },
@@ -1863,7 +1876,7 @@ fn the_summary_override_applies_in_both_tool_calling_modes() {
         let (agent, _events, _commands) = agent(config, ToolRegistry::new(), &workspace);
         let described = if mode == ToolCallingMode::Native {
             let tools = agent
-                .build_native_tool_config(&agent.task.conversation.model)
+                .build_native_tool_config(&agent.task.conversation.model, None)
                 .tools;
             tools[0].parameters["properties"]["summary"]["description"]
                 .as_str()

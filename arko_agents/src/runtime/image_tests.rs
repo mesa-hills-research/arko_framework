@@ -15,7 +15,7 @@ impl Tool for ImageTool {
             description: "Fixture image tool".into(),
             parameters: vec![],
             output_based_example: None,
-            supports_batched_calls: true,
+            parallel_safe: true,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
             raw_json_schema_override: None,
         }
@@ -125,8 +125,20 @@ fn assert_image(content: &ai::Content) {
     );
 }
 
+fn assert_result_image(result: &ai::ToolResult) {
+    assert_eq!(result.images.len(), 1, "{result:?}");
+    assert_eq!(result.images[0].label, "fixture.png, 12 × 8");
+    assert!(
+        matches!(&result.images[0].image, ai::Image::Base64 { data, mime_type } if data == IMAGE_DATA && mime_type == "image/png")
+    );
+}
+
+/// A native tool's images go inside its own result, labelled with the
+/// tool's description (arko_ai adds the "Image from tool ..." prefix where a
+/// model takes images only after the results). They wait with the results
+/// for the rest of the turn, survive saving, and never reach events.
 #[tokio::test]
-async fn native_batch_keeps_all_results_before_labeled_images_and_persists_pending_state() {
+async fn a_native_tools_images_go_inside_its_own_result() {
     let (mut agent, mut events, _commands) = harness(ToolCallingMode::Native);
     for (id, name) in [
         ("one", "view_image"),
@@ -145,7 +157,7 @@ async fn native_batch_keeps_all_results_before_labeled_images_and_persists_pendi
         .task
         .pending_native_tool_calls
         .insert(pending_id, call("four", "plain_text"));
-    assert_eq!(agent.task.pending_tool_images.len(), 2);
+    assert!(agent.task.pending_tool_images.is_empty());
     assert!(agent.task.conversation.messages.is_empty());
     let path = std::env::temp_dir().join(format!("arko-image-state-{}.json", Uuid::new_v4()));
     agent.task.save_to_path(&path).unwrap();
@@ -159,31 +171,70 @@ async fn native_batch_keeps_all_results_before_labeled_images_and_persists_pendi
             .as_deref(),
         Some("four")
     );
-    resumed.flush_native_results_to_conversation(Some("Review both images."));
-    let contents = &resumed.task.conversation.messages[0].content;
-    assert_eq!(contents.len(), 8);
+    resumed
+        .flush_native_results_to_conversation(Some("Review both images."))
+        .unwrap();
+    let message = &resumed.task.conversation.messages[0];
+    let contents = &message.content;
+    assert_eq!(contents.len(), 4, "{contents:?}");
     for (index, expected) in ["one", "two", "three"].into_iter().enumerate() {
         assert_eq!(
             contents[index].as_tool_result().unwrap().call_id.as_deref(),
             Some(expected)
         );
     }
-    assert!(
-        contents[4]
-            .as_text()
-            .unwrap()
-            .contains("Image from tool view_image, call")
-    );
-    assert_image(&contents[5]);
-    assert_image(&contents[7]);
-    assert!(resumed.task.pending_tool_images.is_empty());
+    assert_result_image(contents[0].as_tool_result().unwrap());
+    assert!(contents[1].as_tool_result().unwrap().images.is_empty());
+    assert_result_image(contents[2].as_tool_result().unwrap());
+    assert_eq!(contents[3].as_text(), Some("Review both images."));
+    assert_eq!(message.image_count(), 2);
     assert_eq!(resumed.task.user_message_count, 1);
     let stored = serde_json::to_string(&resumed.task).unwrap();
     let restored: Task = serde_json::from_str(&stored).unwrap();
-    assert_image(&restored.conversation.messages[0].content[5]);
+    assert_result_image(
+        restored.conversation.messages[0].content[0]
+            .as_tool_result()
+            .unwrap(),
+    );
     while let Ok(event) = events.try_recv() {
         assert!(!serde_json::to_string(&event).unwrap().contains(IMAGE_DATA));
     }
+}
+
+/// A task saved mid-turn by an earlier version, with tool images waiting
+/// beside the results (`pending_tool_images`), still loads and sends them as
+/// it did: after the results and their text, each after its description.
+#[tokio::test]
+async fn an_older_task_with_images_beside_its_results_still_sends_them() {
+    let (mut agent, _events, _commands) = harness(ToolCallingMode::Native);
+    agent
+        .task
+        .pending_native_tool_results
+        .push(ai::ToolResult::from_tool_call(
+            &call("one", "view_image"),
+            "Viewed fixture.png, 12 × 8",
+        ));
+    let mut saved = serde_json::to_value(&agent.task).unwrap();
+    saved["pending_tool_images"] = serde_json::json!([{
+        "description": "Image from tool view_image, call one: fixture.png, 12 × 8",
+        "image": serde_json::to_value(ai::Image::new_base64(IMAGE_DATA, "image/png")).unwrap(),
+    }]);
+    let (mut resumed, _, _commands2) = harness(ToolCallingMode::Native);
+    resumed.task = serde_json::from_value(saved).unwrap();
+    assert_eq!(resumed.task.pending_tool_images.len(), 1);
+    resumed
+        .flush_native_results_to_conversation(Some("Review it."))
+        .unwrap();
+    let contents = &resumed.task.conversation.messages[0].content;
+    assert_eq!(contents.len(), 4, "{contents:?}");
+    assert!(contents[0].as_tool_result().unwrap().images.is_empty());
+    assert_eq!(contents[1].as_text(), Some("Review it."));
+    assert_eq!(
+        contents[2].as_text(),
+        Some("Image from tool view_image, call one: fixture.png, 12 × 8")
+    );
+    assert_image(&contents[3]);
+    assert!(resumed.task.pending_tool_images.is_empty());
 }
 
 #[tokio::test]
@@ -215,7 +266,9 @@ async fn text_mode_approval_errors_and_legacy_tools_preserve_their_semantics() {
         .unwrap()
         .unwrap();
     assert!(failed.is_error);
+    assert!(failed.images.is_empty());
     assert!(agent.task.pending_tool_images.is_empty());
+    // An approved call's images go inside its result too.
     let result = agent
         .execute_native_tool_for_approval(
             &call("approved", "view_image"),
@@ -229,10 +282,12 @@ async fn text_mode_approval_errors_and_legacy_tools_preserve_their_semantics() {
         .unwrap()
         .unwrap();
     assert!(result.output.contains("Approved view"));
-    assert_eq!(agent.task.pending_tool_images.len(), 1);
+    assert_result_image(&result);
+    assert!(agent.task.pending_tool_images.is_empty());
     agent.task.pending_native_tool_results.push(result);
-    agent.flush_native_results_to_conversation(None);
-    agent
+    agent.flush_native_results_to_conversation(None).unwrap();
+    // Output the host supplies has no images.
+    let custom = agent
         .execute_native_tool_for_approval(
             &call("custom", "view_image"),
             Uuid::new_v4(),
@@ -242,7 +297,9 @@ async fn text_mode_approval_errors_and_legacy_tools_preserve_their_semantics() {
             None,
         )
         .await
+        .unwrap()
         .unwrap();
+    assert!(custom.images.is_empty());
     assert!(agent.task.pending_tool_images.is_empty());
 }
 
@@ -273,7 +330,7 @@ async fn interception_changes_text_without_dropping_images_and_old_tasks_still_l
         .unwrap()
         .unwrap();
     assert_eq!(result.output, "Short metadata");
-    assert_eq!(agent.task.pending_tool_images.len(), 1);
+    assert_result_image(&result);
     let mut old = serde_json::to_value(&agent.task).unwrap();
     for name in [
         "pending_tool_images",
@@ -338,12 +395,7 @@ async fn full_native_loop_sends_image_content_before_the_next_model_turn() {
         .conversation
         .messages
         .iter()
-        .position(|message| {
-            message
-                .content
-                .iter()
-                .any(|content| content.as_image().is_some())
-        })
+        .position(ai::Message::has_images)
         .unwrap();
     assert!(
         task.conversation.messages[index + 1]
@@ -351,7 +403,11 @@ async fn full_native_loop_sends_image_content_before_the_next_model_turn() {
             .iter()
             .any(|call| call.name == "complete_task")
     );
-    assert_image(task.conversation.messages[index].content.last().unwrap());
+    assert_result_image(
+        task.conversation.messages[index].content[0]
+            .as_tool_result()
+            .unwrap(),
+    );
 }
 
 #[tokio::test]

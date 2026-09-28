@@ -87,6 +87,25 @@ pub trait Tool: Debug + Send + Sync {
         true
     }
 
+    /// Whether the agent's host-side time limit applies to this tool's calls
+    /// ([`AgentToolConfig::tool_timeout_seconds`](crate::agent_config::AgentToolConfig::tool_timeout_seconds)).
+    /// Tools with their own wait and job handling return `false`, as the
+    /// terminal tools do. A per-tool setting applies either way.
+    fn uses_host_timeout(&self) -> bool {
+        true
+    }
+
+    /// Whether `CancelTask` and `SuspendTask` stop a running call of this
+    /// tool: the runtime drops the call (killing a command it started), and
+    /// its result says it was stopped. Tools that wind their own work down
+    /// when the task stops return `false`, as a workflow's
+    /// `run_workflow_agent` does (it stops the agent it runs within the
+    /// workflow's grace period); the stop then takes effect once the call
+    /// returns.
+    fn interruptible(&self) -> bool {
+        true
+    }
+
     /// Discard delivery baselines when a task starts or resumes in a runtime.
     fn reset_context(&self, _task_id: uuid::Uuid) {}
 

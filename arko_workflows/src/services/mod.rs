@@ -213,10 +213,22 @@ impl Tool for RunWorkflowAgentTool {
                 ToolParameterDefinition { name: "agent".to_string(), description: target_guidance, param_type: ToolParameterType::String, required: true, is_path: false, flag: None, default_value: None },
                 ToolParameterDefinition { name: "prompt".to_string(), description: "Concrete bounded task for that agent.".to_string(), param_type: ToolParameterType::String, required: true, is_path: false, flag: None, default_value: None },
             ],
-            supports_batched_calls: false,
+            parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
             raw_json_schema_override: None,
         }
+    }
+
+    /// The call runs another agent to completion, however long that takes.
+    fn uses_host_timeout(&self) -> bool {
+        false
+    }
+
+    /// When the calling agent is stopped, the workflow winds the agent this
+    /// call runs down (within its grace period) and records it; the call
+    /// then returns.
+    fn interruptible(&self) -> bool {
+        false
     }
 
     async fn execute(

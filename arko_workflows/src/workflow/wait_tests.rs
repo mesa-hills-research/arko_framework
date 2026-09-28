@@ -217,7 +217,7 @@ fn the_wait_is_offered_to_agents_that_can_receive() {
     let definition = |agent: &str| {
         let tool = tool(&workflow, agent, WAIT_FOR_MESSAGE_TOOL_NAME).unwrap();
         let definition = tool.definition();
-        assert!(!definition.supports_batched_calls);
+        assert!(!definition.parallel_safe);
         serde_json::to_string(&definition).unwrap()
     };
     let lead = definition("lead");

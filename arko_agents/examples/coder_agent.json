@@ -17,7 +17,6 @@
       "apply_diff",
       "complete_task"
     ],
-    "allow_batched_tool_calls": true,
     "default_auto_approve_tool_use": false,
     "tool_specific_configs": {}
   },
