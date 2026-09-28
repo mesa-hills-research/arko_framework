@@ -295,6 +295,11 @@ impl Tool for WaitForMessageTool {
         }
     }
 
+    /// The wait has its own limit (up to a day, when configured so).
+    fn uses_host_timeout(&self) -> bool {
+        false
+    }
+
     fn observe_context(&self, task_id: uuid::Uuid, message: &arko_ai::Message) {
         self.context
             .messages

@@ -264,9 +264,9 @@ A tool's `tool_specific_configs` entry sets its own: `tool_timeout_seconds:
 Some(Some(seconds))` (a JSON number) or `Some(None)` (JSON `null`) for none. Tools with
 their own job and wait handling are exempt (`Tool::uses_host_timeout` returns `false`):
 the terminal tools, whose jobs run in the background with their own deadlines, and a
-workflow's `run_workflow_agent`, which runs another agent to completion. A per-tool
-setting applies to them too. Output supplied with an approval runs nothing and has no
-limit.
+workflow's `run_workflow_agent`, which runs another agent to completion, and
+`wait_for_message`, which has its own limit. A per-tool setting applies to them too.
+Output supplied with an approval runs nothing and has no limit.
 
 Response text is streamed as it arrives in native mode. In output-based mode, a turn's
 text and tool events are emitted once the response has been parsed.
