@@ -645,6 +645,37 @@ impl ArkoIndex {
         }
         Ok(())
     }
+    /// Applies the repair limit to `window` if its cuts are still invalid.
+    async fn repair_limit(
+        &self,
+        job: &str,
+        s: &Snapshot,
+        guard: &Structure,
+        window: &mut Window,
+        chunking: &ChunkingOptions,
+    ) -> Result<()> {
+        let Some(cuts) = &window.cuts else {
+            return Ok(());
+        };
+        if window.forced || chunker::failures(s, guard, window, cuts).is_empty() {
+            return Ok(());
+        }
+        let rounds = window.repair_rounds;
+        match chunking.repair_limit {
+            RepairLimitPolicy::Merge => {
+                let merged = chunker::merge_invalid_cuts(s, guard, window, cuts);
+                self.inner.db.event(job, "deterministic_repair", json!({"path":s.path,"snapshot":s.hash,"window_start":window.start,"removed_cuts":cuts.len()-merged.len(),"reason":format!("repair limit reached after {rounds} round(s); disputed regions merged")})).await?;
+                window.cuts = Some(merged);
+                window.problem = None;
+            }
+            RepairLimitPolicy::Block => {
+                window.problem = Some(format!(
+                    "cuts still invalid after {rounds} repair round(s); the repair limit blocks the file"
+                ));
+            }
+        }
+        Ok(())
+    }
     async fn run(&self, job: &str, control: &Control) -> Result<()> {
         control.check()?;
         self.prepare(job).await?;
@@ -659,10 +690,17 @@ impl ArkoIndex {
             self.inner.db.file(job, &s.path, state).await?;
         }
         let j = job.to_owned();
-        let budget: Option<Budget> = self.inner.db.call(move |c| {
-            let saved: Option<String> = c.query_row("SELECT json_extract(detail,'$.chunk_budget') FROM events WHERE job=?1 AND kind='snapshot' ORDER BY sequence DESC LIMIT 1", [j], |r| r.get(0)).optional()?.flatten();
-            saved.map(|saved| decode(&saved)).transpose()
+        let (budget, chunking): (Option<Budget>, ChunkingOptions) = self.inner.db.call(move |c| {
+            let saved: Option<String> = c.query_row("SELECT json_extract(detail,'$.chunk_budget') FROM events WHERE job=?1 AND kind='snapshot' ORDER BY sequence DESC LIMIT 1", [&j], |r| r.get(0)).optional()?.flatten();
+            let spec: String = c.query_row("SELECT i.spec FROM jobs j JOIN indexes i ON i.id=j.index_id WHERE j.id=?1", [&j], |r| r.get(0))?;
+            Ok((saved.map(|saved| decode(&saved)).transpose()?, decode::<BuildSpec>(&spec)?.chunking))
         }).await?;
+        // Whether a window's repairs have run out.
+        let exhausted = |window: &Window| {
+            chunking
+                .max_repair_rounds
+                .is_some_and(|max| window.repair_rounds >= max)
+        };
         let mut work = FuturesUnordered::new();
         let mut group = vec![];
         let mut group_size = budget::Size::default();
@@ -670,10 +708,19 @@ impl ArkoIndex {
         let mut transient = HashSet::new();
         // The usage limit that paused the job.
         let mut usage_limited = None;
+        for (s, state) in &mut files {
+            for window in &mut state.windows {
+                if window.cuts.is_some() && exhausted(window) {
+                    self.repair_limit(job, s, &state.structure, window, &chunking)
+                        .await?;
+                }
+            }
+        }
         for (i, (s, state)) in files.iter().enumerate() {
             for (w, window) in state.windows.iter().enumerate() {
                 if let Some(cuts) = &window.cuts {
                     if !window.forced
+                        && window.problem.is_none()
                         && !chunker::failures(s, &state.structure, window, cuts).is_empty()
                     {
                         let repair = chunker::repair(s, &state.structure, window, cuts)?;
@@ -789,9 +836,17 @@ impl ArkoIndex {
                 }
                 self.canonicalize_cuts(job, s, &state.structure, window)
                     .await?;
+                if window.cuts.is_some() && result.is_ok() && exhausted(window) {
+                    self.repair_limit(job, s, &state.structure, window, &chunking)
+                        .await?;
+                }
                 if let Some(cuts) = &window.cuts {
                     let failed = chunker::failures(s, &state.structure, window, cuts);
-                    if !failed.is_empty() && result.is_ok() && control.check().is_ok() {
+                    if !failed.is_empty()
+                        && result.is_ok()
+                        && !exhausted(window)
+                        && control.check().is_ok()
+                    {
                         let repair = chunker::repair(s, &state.structure, window, cuts)?;
                         window.problem = None;
                         work.push(self.dispatch(

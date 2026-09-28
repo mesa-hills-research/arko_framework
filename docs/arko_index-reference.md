@@ -165,9 +165,18 @@ between the neighboring accepted cuts, the disputed cuts are removed without a m
 request (a `deterministic_repair` event). Otherwise a repair request sends the window's
 rows (the complete file when it is one window) with the legal boundary IDs of each
 disputed region, and the model returns an ordered
-selection of boundaries, or `[]` to merge the region into one chunk. Repairs continue
-until every cut is valid, and a repair applies only to the snapshot and cut set it was
-requested for. A file with no legal internal boundary becomes a single chunk without a
+selection of boundaries, or `[]` to merge the region into one chunk. A repair applies
+only to the snapshot and cut set it was requested for.
+
+A window gets up to `ChunkingOptions::max_repair_rounds` repair requests (5 by default;
+`None` repairs until every cut is valid). When its cuts are still invalid after that,
+`ChunkingOptions::repair_limit` (`RepairLimitPolicy`) decides:
+
+- `Merge` (default): the invalid cuts are dropped, merging each disputed region into its
+  neighboring chunk, which is always valid; accepted cuts stay, and a
+  `deterministic_repair` event records the merge.
+- `Block`: the file stays unfinished and the job is blocked, naming it; resuming the job
+  allows as many repairs again. A file with no legal internal boundary becomes a single chunk without a
 model request (counted in `JobStatus::bypassed`); empty and whitespace-only files produce
 no chunks.
 

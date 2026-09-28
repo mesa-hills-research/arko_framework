@@ -229,6 +229,12 @@ pub struct ChunkingOptions {
     pub max_request_bytes: Option<usize>,
     /// What happens to a file that doesn't fit in one request.
     pub oversize: OversizePolicy,
+    /// Repair requests per window before `repair_limit` applies: 5 by
+    /// default. `None` repairs until every cut is valid.
+    pub max_repair_rounds: Option<usize>,
+    /// What happens to a window whose cuts are still invalid after
+    /// `max_repair_rounds` repairs.
+    pub repair_limit: RepairLimitPolicy,
 }
 impl Default for ChunkingOptions {
     fn default() -> Self {
@@ -236,13 +242,32 @@ impl Default for ChunkingOptions {
             max_request_tokens: None,
             max_request_bytes: None,
             oversize: OversizePolicy::Split,
+            max_repair_rounds: Some(5),
+            repair_limit: RepairLimitPolicy::Merge,
         }
     }
+}
+/// What happens to a window whose cuts are still invalid when its repair
+/// requests run out ([`ChunkingOptions::repair_limit`]).
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairLimitPolicy {
+    /// Drop the invalid cuts, merging each disputed region into the
+    /// neighboring chunk, which is always valid; accepted cuts stay. A
+    /// `deterministic_repair` event records it.
+    #[default]
+    Merge,
+    /// Leave the window unfinished, so the job is blocked naming the file;
+    /// resuming the job allows as many repairs again.
+    Block,
 }
 impl ChunkingOptions {
     pub fn validate(&self) -> Result<()> {
         if self.max_request_tokens == Some(0) || self.max_request_bytes == Some(0) {
             return Err(invalid("chunk request limits must be positive"));
+        }
+        if self.max_repair_rounds == Some(0) {
+            return Err(invalid("max_repair_rounds must be positive when set"));
         }
         Ok(())
     }

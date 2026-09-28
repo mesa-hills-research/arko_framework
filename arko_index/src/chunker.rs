@@ -211,6 +211,24 @@ pub fn remove_impossible_cuts(
     }
     Ok(result)
 }
+/// `cuts` without every invalid cut, repeated until the rest are valid:
+/// each disputed region merges into its neighboring chunk. Accepted cuts and
+/// all source bytes remain unchanged.
+pub fn merge_invalid_cuts(s: &Snapshot, guard: &Structure, w: &Window, cuts: &[Cut]) -> Vec<Cut> {
+    let mut result = cuts.to_vec();
+    loop {
+        let bad = failures(s, guard, w, &result);
+        if bad.is_empty() {
+            return result;
+        }
+        result = result
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !bad.contains(i))
+            .map(|(_, cut)| cut)
+            .collect();
+    }
+}
 fn candidate_ids(candidates: &BTreeMap<String, Vec<Cut>>) -> Vec<&str> {
     let mut entries: Vec<_> = candidates.iter().collect();
     entries.sort_by_key(|(_, cuts)| cuts[0].after_line);

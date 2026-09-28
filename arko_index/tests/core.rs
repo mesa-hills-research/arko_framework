@@ -3223,3 +3223,97 @@ async fn a_failed_rescan_at_publish_marks_the_generation_not_fresh() {
     assert!(!page.fresh_at_publication);
     assert_eq!(page.hits.len(), 1);
 }
+
+/// Builds one file whose cuts are invalid and whose repairs the model keeps
+/// answering invalidly (`invalid` times), under `chunking`.
+async fn build_with_failing_repairs(
+    invalid: usize,
+    chunking: ChunkingOptions,
+) -> (
+    Arc<Fake>,
+    ArkoIndex,
+    JobHandle,
+    JobStatus,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
+    let root = tempfile::tempdir().unwrap();
+    let db = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("bad.txt"), "alpha\n".repeat(600)).unwrap();
+    let fake = Arc::new(Fake::new());
+    *fake.fail_file.lock().unwrap() = Some("bad.txt".into());
+    fake.invalid_repair_replies.store(invalid, Ordering::SeqCst);
+    let spec = BuildSpec::new("test", root.path()).with_chunking(chunking);
+    let (index, job, status) = build_spec(&fake, db.path(), spec).await;
+    (fake, index, job, status, root, db)
+}
+fn repairs(fake: &Fake) -> usize {
+    fake.calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.tool == "repair_cuts")
+        .count()
+}
+#[tokio::test]
+async fn repairs_stop_after_five_rounds_and_merge_the_disputed_region() {
+    let (fake, index, job, status, root, _db) =
+        build_with_failing_repairs(usize::MAX, ChunkingOptions::default()).await;
+    assert_eq!(status.phase, "ready", "{:?}", status.problem);
+    assert_eq!(repairs(&fake), 5);
+    let events = index.events(&job.job, 0, 10_000).await.unwrap();
+    let merged = events
+        .iter()
+        .find(|e| e.kind == "deterministic_repair")
+        .unwrap();
+    assert!(
+        merged.detail["reason"]
+            .as_str()
+            .unwrap()
+            .contains("repair limit reached")
+    );
+    // The disputed cut is gone; the file is one chunk.
+    let page = index
+        .search(&job.index, "alpha", options(SearchMode::Lexical))
+        .await
+        .unwrap();
+    assert_eq!(page.hits.len(), 1);
+    assert_eq!(
+        page.hits[0].text,
+        std::fs::read_to_string(root.path().join("bad.txt")).unwrap()
+    );
+}
+#[tokio::test]
+async fn the_repair_limit_can_block_or_be_lifted() {
+    let block = ChunkingOptions {
+        repair_limit: RepairLimitPolicy::Block,
+        max_repair_rounds: Some(3),
+        ..Default::default()
+    };
+    let (fake, index, job, status, _root, _db) =
+        build_with_failing_repairs(usize::MAX, block).await;
+    assert_eq!(status.phase, "blocked");
+    assert!(status.problem.unwrap().contains("bad.txt"));
+    assert_eq!(repairs(&fake), 3);
+    // Resuming allows as many repairs again.
+    fake.invalid_repair_replies.store(0, Ordering::SeqCst);
+    index.resume(&job.job).await.unwrap();
+    assert_eq!(settle(&index, &job.job).await.phase, "ready");
+    assert_eq!(repairs(&fake), 4);
+    // Without a limit, repairs continue until the cuts are valid.
+    let unlimited = ChunkingOptions {
+        max_repair_rounds: None,
+        ..Default::default()
+    };
+    let (fake, _index, _job, status, _root, _db) = build_with_failing_repairs(7, unlimited).await;
+    assert_eq!(status.phase, "ready", "{:?}", status.problem);
+    assert_eq!(repairs(&fake), 8);
+    let saved: ChunkingOptions =
+        serde_json::from_value(json!({"max_repair_rounds": null})).unwrap();
+    assert_eq!(saved.max_repair_rounds, None);
+    let default: ChunkingOptions = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(
+        (default.max_repair_rounds, default.repair_limit),
+        (Some(5), RepairLimitPolicy::Merge)
+    );
+}
