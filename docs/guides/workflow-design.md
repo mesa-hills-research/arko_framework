@@ -33,7 +33,7 @@ Separate independent discovery from dependent decisions. For example, several in
 
 Give each agent a responsibility that can be described in one or two sentences. A useful role names the input it reads, the artifact or decision it owns, and the signal that tells it to finish. Avoid roles such as “manage the entire project” when the workflow can divide the work into discovery, implementation, and review.
 
-Keep agent configuration close to the role it serves. Provide only the tools, memory tiers, recipients, and model capacity the role needs. Narrow configuration makes failures easier to attribute and reduces the amount of irrelevant context each agent must process.
+Keep agent configuration close to the role it serves. Provide only the tools, memory tiers, recipients, and model capacity the role needs; agents tend to use whatever they are offered or told about, whether or not the task needs it. Narrow configuration makes failures easier to attribute and reduces the amount of irrelevant context each agent must process.
 
 When several agents perform the same kind of work, give them independent inputs or explicit comparison tasks. If they all edit the same file or memory entry without a merge rule, the workflow is relying on timing rather than design.
 

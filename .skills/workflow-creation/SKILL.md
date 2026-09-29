@@ -29,11 +29,11 @@ The design guides offer ideas, not rules.
 7. Configure cancellation, budgets, and human input for the deployment. For set-and-forget workflows, keep the default `ApprovalPolicy::ApproveAll` and `ErrorRecoveryPolicy::Automatic`: they are the only settings that let a run finish without a person.
 8. Use persistence for runs that must survive interruption. Wrap external side effects in durable steps and define how in-doubt outcomes are resolved. Preserve compatibility with earlier checkpoints and task files.
 
-Start with the simplest approach that could work, and build up only when it falls short. Keep the workflow control flow explicit, and add agents, shared write access, retries, and expensive model calls only when each has a concrete role in the outcome. Prefer the model and reasoning recommendations in the model-choice section of the agent guide; leave `model.max_output_tokens` at the model maximum unless a clear limit is required.
+Start with the simplest approach that could work, and build up only when it falls short. Anything you mention in an agent's prompt or offer as a tool or parameter steers the agent toward using it, even when the task doesn't need it, so decide carefully what each agent sees and phrase optional things as optional. Keep the workflow control flow explicit, and add agents, shared write access, retries, and expensive model calls only when each has a concrete role in the outcome. Prefer the model and reasoning recommendations in the model-choice section of the agent guide; leave `model.max_output_tokens` at the model maximum unless a clear limit is required.
 
 ## Design patterns
 
-Pick the patterns that fit the workflow's coordination problems.
+These patterns are optional. Use one only when the workflow has the coordination problem it solves; many workflows need none of them.
 
 ### Orchestrator and delegated specialists
 

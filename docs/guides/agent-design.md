@@ -30,6 +30,8 @@ Summary:
 
 Follow the prompting guide for the model used by each agent. Use the [Opus 5.5 prompting guide](../prompting/opus-5.5.md) for Opus 5.5; it also applies to Fable 5.1. Use the [Astra 6 prompting guide](../prompting/astra-6.md) for Astra 6.
 
+Anything you put in front of an agent steers it. Mentioning a rule or concept, or making a tool available, often leads an agent to use it even when the task doesn't need it. Decide carefully what each prompt includes, leave out what the role doesn't need, and when something is optional, say so and say when it applies.
+
 ## Model Choice
 
 Opus 5.5 is the default choice for most work. It is a strong general-purpose model and usually offers the best balance of capability, speed, and cost. Use Medium for straightforward tasks that still need more intelligence than Luna.
@@ -83,6 +85,9 @@ It is very important to brainstorm what tooling should be available for the agen
 from network access or installing their own tooling. For example, before writing a coding agent or coding workflow, consider if tools such as ast-grep, semgrep, etc. should be made available to
 the agent. Often times agents can use these tools more effectively than pure grep. If you're having the agent write rust, ensure that rust is installed.
 
+Offering a tool or parameter is itself a nudge to use it. For example, give agents an optional timeout parameter on a tool and they will almost always set one. Offer only the tools and parameters a role needs, and describe optional ones as optional, with when they're worth using.
+
 Summary:
 - Before creating an agent or workflow, consider what tooling is necessary and beneficial to the agent(s).
 - Ensure these tools are accessible beforehand, especially in controlled environments that prevent the agents from acquiring them.
+- Every tool and parameter you offer steers the agent toward using it. Offer only what the role needs, and phrase optional ones as optional.
