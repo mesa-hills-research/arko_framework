@@ -57,7 +57,7 @@ Send every verifier finding to the orchestrator as well as to the agent that mus
 
 ### Independent research and replication
 
-For research tasks, let the lead delegate independent questions to researchers and preserve separate evidence until synthesis. Researchers can message the lead and one another to compare or correct findings. Record agreed conclusions separately and keep each researcher's evidence. Independent prompts and separate outputs make counterexamples more likely to be rediscovered instead of copied from the first report. Sonnet 5.5 suits researchers that dig deep into one question and return a quality analysis; outside such roles, prefer Opus 5.5 ([model choice](../../docs/guides/agent-design.md#model-choice)).
+For research tasks, let the lead delegate independent questions to researchers and preserve separate evidence until synthesis. Researchers can message the lead and one another to compare or correct findings. Record agreed conclusions separately and keep each researcher's evidence. Independent prompts and separate outputs make counterexamples more likely to be rediscovered instead of copied from the first report.
 
 ### Continuation reports for long runs
 
