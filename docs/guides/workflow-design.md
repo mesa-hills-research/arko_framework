@@ -1,9 +1,6 @@
 # General Workflow Design Guide for Arko Framework
 
-Author: Luke Erickson | Mesa Hills Research
-Purpose: To provide a concise guide to designing reliable, efficient workflows with arko_framework.
-
-This guide covers workflow structure and the decisions that matter before implementation. For agent prompts, tools, and model selection, see the [general agent design guide](agent-design.md). For API details, defaults, and complete signatures, see the [`arko_workflows` API index](../../arko_workflows/INDEX.md) and the [reference map](../reference-map.md). The [complete workflow example](../../arko_workflows/examples/complete_workflow.rs) shows how the pieces fit together in a runnable workflow.
+A concise guide to designing reliable, efficient workflows with arko_framework. It covers workflow structure and the decisions that matter before implementation. For agent prompts, tools, and model selection, see the [general agent design guide](agent-design.md). For API details, defaults, and complete signatures, see the [`arko_workflows` API index](../../arko_workflows/INDEX.md) and the [reference map](../reference-map.md). The [complete workflow example](../../arko_workflows/examples/complete_workflow.rs) shows how the pieces fit together in a runnable workflow.
 
 This guide offers ideas, not rules. A simpler approach is usually better than an elaborate one: start with the simplest workflow that could meet the goal, and add agents, stages, or controls only when it falls short. Aim for workflows that run autonomously.
 

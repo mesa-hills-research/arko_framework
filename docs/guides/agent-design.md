@@ -1,13 +1,6 @@
 # General Agent Design Guide for Arko Framework
 
-Author: Luke Erickson | Mesa Hills Research
-Purpose: To provide a concise, general guide to creating high performance and efficient agents and workflows with arko_framework.
-
-This guide offers ideas, not rules.
-
-Sections:
-
----
+A concise, general guide to creating high-performance, efficient agents and workflows with arko_framework. It offers ideas, not rules.
 
 ## Fundamentals
 
