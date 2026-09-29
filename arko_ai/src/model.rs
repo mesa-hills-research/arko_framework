@@ -991,6 +991,33 @@ impl Model {
         }
     }
 
+    /// Same prices as Sonnet 5. Adaptive thinking is on by default (default effort
+    /// `high`, levels recalibrated from Sonnet 5); `thinking.type: "disabled"`,
+    /// manual budgets, non-default sampling parameters, prefill and forced tool
+    /// choice are rejected. No fast mode.
+    /// https://platform.claude.com/docs/en/about-claude/pricing
+    pub fn anthropic_claude_sonnet_5_5() -> Self {
+        Self {
+            provider: Provider::Anthropic,
+            id: "claude-sonnet-5-5".to_string(),
+            model_type: ModelType::Reasoning,
+            max_input_tokens: 1_000_000,
+            max_output_tokens: 128_000,
+            supports_image_input: true,
+            supports_cache: true,
+            openrouter: None,
+            pricing: ModelPricing {
+                input_cost_per_million: 2.00,
+                output_cost_per_million: 10.00,
+                cached_input_cost_per_million: Some(0.20),
+                cache_write_cost_per_million: Some(2.50),
+                cache_write_1h_cost_per_million: Some(4.00),
+                residency: vec![ResidencyPricing::new("us", 1.1)],
+                ..ModelPricing::default()
+            },
+        }
+    }
+
     /// $2/$10 is the standard price, the same as the introductory rate that ended
     /// August 31, 2026.
     /// https://platform.claude.com/docs/en/about-claude/pricing
@@ -1802,6 +1829,7 @@ impl Model {
             Self::anthropic_claude_opus_5_5(),
             Self::anthropic_claude_opus_5(),
             Self::anthropic_claude_opus_4_8(),
+            Self::anthropic_claude_sonnet_5_5(),
             Self::anthropic_claude_sonnet_5(),
             Self::anthropic_claude_opus_4_7(),
             Self::anthropic_claude_opus_4_6(),
@@ -2102,6 +2130,10 @@ impl Model {
         self.id == "claude-sonnet-4-6"
     }
 
+    pub fn is_sonnet_5_5(&self) -> bool {
+        self.id == "claude-sonnet-5-5"
+    }
+
     pub fn is_sonnet_5(&self) -> bool {
         self.id == "claude-sonnet-5"
     }
@@ -2116,6 +2148,7 @@ impl Model {
             || self.is_opus_4_8()
             || self.is_opus_4_7()
             || self.is_opus_4_6()
+            || self.is_sonnet_5_5()
             || self.is_sonnet_5()
             || self.is_sonnet_4_6()
     }
@@ -2132,12 +2165,15 @@ impl Model {
             || self.is_fable_5()
             || self.is_opus_5_5()
             || self.is_opus_5()
+            || self.is_sonnet_5_5()
             || self.is_sonnet_5()
     }
 
     /// Adaptive thinking can't be disabled (`thinking.type: "disabled"` returns 400).
+    /// Sonnet 5.5's lowest setting, `thinking.type: "between_tools"`, is not sent
+    /// by this client.
     pub fn always_uses_anthropic_adaptive_thinking(&self) -> bool {
-        self.is_fable_5_1() || self.is_fable_5() || self.is_opus_5_5()
+        self.is_fable_5_1() || self.is_fable_5() || self.is_opus_5_5() || self.is_sonnet_5_5()
     }
 
     pub fn rejects_anthropic_manual_thinking(&self) -> bool {
@@ -2147,6 +2183,7 @@ impl Model {
             || self.is_opus_5()
             || self.is_opus_4_8()
             || self.is_opus_4_7()
+            || self.is_sonnet_5_5()
             || self.is_sonnet_5()
     }
 
@@ -2158,6 +2195,7 @@ impl Model {
             || self.is_opus_5()
             || self.is_opus_4_8()
             || self.is_opus_4_7()
+            || self.is_sonnet_5_5()
             || self.is_sonnet_5()
     }
 
@@ -2171,6 +2209,7 @@ impl Model {
             || self.is_opus_5()
             || self.is_opus_4_8()
             || self.is_opus_4_7()
+            || self.is_sonnet_5_5()
             || self.is_sonnet_5()
     }
 
@@ -2187,6 +2226,7 @@ impl Model {
             || self.is_opus_5()
             || self.is_opus_4_8()
             || self.is_opus_4_7()
+            || self.is_sonnet_5_5()
             || self.is_sonnet_5()
     }
 
@@ -2199,7 +2239,7 @@ impl Model {
     /// is enabled.
     /// https://platform.claude.com/docs/en/build-with-claude/thinking
     pub fn rejects_anthropic_forced_tool_choice(&self) -> bool {
-        self.is_fable_5_1() || self.is_opus_5_5()
+        self.is_fable_5_1() || self.is_opus_5_5() || self.is_sonnet_5_5()
     }
 
     /// Fast mode (`speed: "fast"`, research preview): Opus 5.5, Opus 5 and Opus 4.8
@@ -2248,6 +2288,7 @@ impl Model {
                 | "claude-sonnet-4-5-20250929"
                 | "claude-sonnet-4-6"
                 | "claude-sonnet-5"
+                | "claude-sonnet-5-5"
         )
     }
 
@@ -2464,6 +2505,31 @@ mod tests {
         assert!(opus.supports_interleaved_thinking());
         assert!(opus.auto_enables_interleaved_thinking());
 
+        let sonnet = Model::anthropic_claude_sonnet_5_5();
+        assert!(sonnet.is_sonnet_5_5());
+        assert!(!sonnet.is_sonnet_5());
+        assert!(sonnet.supports_anthropic_adaptive_thinking());
+        assert!(sonnet.defaults_anthropic_adaptive_thinking());
+        assert!(sonnet.always_uses_anthropic_adaptive_thinking());
+        assert!(sonnet.rejects_anthropic_manual_thinking());
+        assert!(sonnet.omits_anthropic_sampling_parameters());
+        assert!(sonnet.supports_anthropic_summarized_thinking_display());
+        assert!(sonnet.supports_anthropic_effort());
+        assert!(sonnet.supports_anthropic_xhigh_effort());
+        assert!(sonnet.supports_anthropic_max_effort());
+        assert!(sonnet.rejects_anthropic_forced_tool_choice());
+        assert!(!sonnet.supports_anthropic_fast_mode());
+        assert!(sonnet.supports_anthropic_inference_geo());
+        assert!(sonnet.has_standard_anthropic_1m_context());
+        assert!(sonnet.supports_interleaved_thinking());
+        assert!(sonnet.auto_enables_interleaved_thinking());
+        assert_eq!(
+            Model::openrouter("anthropic/claude-sonnet-5.5")
+                .openrouter_claude_equivalent()
+                .map(|model| model.id),
+            Some("claude-sonnet-5-5".to_string())
+        );
+
         for model in [
             Model::google_gemini_3_8_flash(),
             Model::google_gemini_3_7_flash(),
@@ -2577,6 +2643,8 @@ mod tests {
         );
         assert!(!Model::anthropic_claude_fable_5_1().supports_forced_tool_choice(&default));
         assert!(!Model::anthropic_claude_opus_5_5().supports_forced_tool_choice(&default));
+        assert!(!Model::anthropic_claude_sonnet_5_5().supports_forced_tool_choice(&default));
+        assert!(Model::anthropic_claude_sonnet_5().supports_forced_tool_choice(&default));
         assert!(Model::openai_gpt_6_astra().supports_forced_tool_choice(&default));
         assert!(Model::google_gemini_3_5_flash().supports_forced_tool_choice(&default));
 
