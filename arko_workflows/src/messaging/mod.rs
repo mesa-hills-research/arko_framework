@@ -144,6 +144,12 @@ pub struct AgentMessage {
     /// acknowledges it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub held_by: Vec<Uuid>,
+    /// The agent runs that read this message in a conversation they later
+    /// handed over (see [`arko_agents::handover`]): it counts as in their
+    /// conversation when they stop, though the fresh conversation no
+    /// longer holds it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_by: Vec<Uuid>,
 }
 
 impl AgentMessage {
@@ -620,6 +626,7 @@ impl MessageBus {
             timestamp: chrono::Utc::now(),
             to_task_id: Some(task_id),
             held_by: Vec::new(),
+            read_by: Vec::new(),
         };
         let content = injection(&message);
         state
@@ -672,6 +679,7 @@ impl MessageBus {
             timestamp: chrono::Utc::now(),
             to_task_id: None,
             held_by: Vec::new(),
+            read_by: Vec::new(),
         };
 
         let mut state = self.state.lock();
@@ -769,7 +777,10 @@ impl MessageBus {
         let mut in_conversation = HashSet::new();
         let mut held = HashSet::new();
         for message in &queued {
-            if prompt_ids.contains(&message.id) || conversation_holds(conversation, message) {
+            if prompt_ids.contains(&message.id)
+                || message.read_by.contains(&task_id)
+                || conversation_holds(conversation, message)
+            {
                 in_conversation.insert(message.id);
                 held.insert(message.id);
             } else if taken
@@ -791,6 +802,59 @@ impl MessageBus {
                 return false;
             }
             if held.contains(&message.id) && !message.is_held_by(task_id) {
+                message.held_by.push(task_id);
+            }
+            true
+        });
+        if messages.is_empty() {
+            state.queues.remove(agent_name);
+        }
+    }
+
+    /// Records that run `task_id` of `agent_name` is handing over
+    /// `conversation` (see [`arko_agents::handover`]): the queued messages
+    /// it holds (presented in `prompt_ids` or a prompt, or added as a
+    /// runtime context update) are marked as read by the run
+    /// ([`AgentMessage::read_by`]) and held by it, so they are neither
+    /// presented to it again nor left unacknowledged when it completes. Its
+    /// context notices in the conversation are dropped; those it hasn't
+    /// received yet stay.
+    pub fn hand_over(
+        &self,
+        agent_name: &str,
+        task_id: Uuid,
+        conversation: &arko_ai::Conversation,
+        prompt_ids: &[Uuid],
+    ) {
+        let queued = self
+            .state
+            .lock()
+            .queues
+            .get(agent_name)
+            .cloned()
+            .unwrap_or_default();
+        let read: HashSet<Uuid> = queued
+            .iter()
+            .filter(|message| {
+                prompt_ids.contains(&message.id) || conversation_holds(conversation, message)
+            })
+            .map(|message| message.id)
+            .collect();
+        let mut state = self.state.lock();
+        let Some(messages) = state.queues.get_mut(agent_name) else {
+            return;
+        };
+        messages.retain_mut(|message| {
+            if !read.contains(&message.id) {
+                return true;
+            }
+            if message.to_task_id == Some(task_id) {
+                return false;
+            }
+            if !message.read_by.contains(&task_id) {
+                message.read_by.push(task_id);
+            }
+            if !message.is_held_by(task_id) {
                 message.held_by.push(task_id);
             }
             true
@@ -1517,6 +1581,72 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// A handover marks the messages the old conversation held as read by
+    /// the run: they are not presented to it again, and they are
+    /// acknowledged when it completes though the fresh conversation lacks
+    /// them. Its own notices in the old conversation go; unread messages
+    /// stay.
+    #[tokio::test]
+    async fn a_handover_keeps_what_the_old_conversation_read() {
+        let bus = MessageBus::new(["lead".to_string(), "worker".to_string()]);
+        let run = Uuid::new_v4();
+        let read = bus
+            .send("lead", None, "worker", "read".into(), vec![])
+            .await
+            .unwrap();
+        let unread = bus
+            .send("lead", None, "worker", "unread".into(), vec![])
+            .await
+            .unwrap();
+        let notice = AgentMessage {
+            id: Uuid::new_v4(),
+            from: WORKFLOW_CONTEXT_SENDER.to_string(),
+            from_task_id: None,
+            to: "worker".into(),
+            content: "a file changed".into(),
+            attachments: Vec::new(),
+            timestamp: chrono::Utc::now(),
+            to_task_id: Some(run),
+            held_by: Vec::new(),
+            read_by: Vec::new(),
+        };
+        bus.state
+            .lock()
+            .queues
+            .get_mut("worker")
+            .unwrap()
+            .push(notice.clone());
+        let mut old = conversation();
+        old.messages.push(update(&injection(&read)));
+        old.messages.push(update(&injection(&notice)));
+        bus.hand_over("worker", run, &old, &[]);
+
+        let pending = bus.pending("worker");
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].id, read.id);
+        assert_eq!(pending[0].read_by, [run]);
+        assert!(pending[0].is_held_by(run));
+        assert_eq!(pending[1].id, unread.id);
+        assert!(pending[1].read_by.is_empty());
+        assert_eq!(
+            bus.pending_for("worker", run)
+                .iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            [unread.id]
+        );
+
+        // The fresh conversation holds neither.
+        complete_empty(&bus, "worker", run);
+        assert_eq!(
+            bus.pending("worker")
+                .iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            [unread.id]
         );
     }
 }

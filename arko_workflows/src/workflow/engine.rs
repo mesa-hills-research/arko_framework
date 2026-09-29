@@ -4,6 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
+use arko_agents::handover::{HandoverHook, HandoverSeed};
 use arko_agents::skill::{SkillManager, SkillPromptContext};
 use arko_agents::tool::builtins::COMPLETE_TASK_TOOL_NAME;
 use arko_agents::{
@@ -1018,6 +1019,64 @@ pub(crate) fn without_roster(prompt: &str) -> &str {
         .map_or(prompt, |start| &prompt[..start])
 }
 
+/// The heading of the initial prompt's messages from other agents (see
+/// `WorkflowEngine::pending_messages`).
+const MESSAGES_HEADING: &str = "\n\n# Messages from other agents:\n";
+
+/// The task part of an initial prompt: `prompt` without the messages it
+/// delivered and the list of agents it may message.
+pub(crate) fn task_part(prompt: &str) -> &str {
+    let prompt = without_roster(prompt);
+    match prompt.rfind(MESSAGES_HEADING) {
+        Some(start) if prompt[start..].contains("\n--- Message ") => &prompt[..start],
+        _ => prompt,
+    }
+}
+
+/// What a workflow does when one of its agents hands its conversation over
+/// ([`arko_agents::handover`]): the messages the old conversation held are
+/// recorded as read by the run (and acknowledged when it completes, as if
+/// its conversation still held them), the freshness tracker forgets the
+/// run's reads (the fresh conversation holds none of their content), and
+/// the fresh conversation restates the task without the delivered messages
+/// (the report covers them) and with the current list of agents it may
+/// message, when its prompt had one.
+pub(crate) struct WorkflowHandover {
+    pub context: Arc<SharedContext>,
+    pub agent_name: String,
+    /// The messages delivered in the run's initial prompt.
+    pub prompt_message_ids: Vec<uuid::Uuid>,
+}
+
+impl HandoverHook for WorkflowHandover {
+    fn on_handover(&self, task: &Task, _report: &str) -> HandoverSeed {
+        let ctx = &self.context;
+        ctx.messages.hand_over(
+            &self.agent_name,
+            task.id,
+            &task.conversation,
+            &self.prompt_message_ids,
+        );
+        if let Some(tracker) = &ctx.resource_tracker {
+            tracker.clear_actor(&ActorId::new(task.id, &self.agent_name));
+        }
+        let prompt = &task.initial_task_prompt;
+        let recipients = ctx.message_recipients(&self.agent_name);
+        let context = (prompt.contains(ROSTER_HEADING) && !recipients.is_empty()).then(|| {
+            let roster = ctx.registry.roster(
+                task.id,
+                &recipients,
+                ctx.paused.load(std::sync::atomic::Ordering::Acquire),
+            );
+            format!("{}{}", ROSTER_HEADING, render_recipients(ctx, &roster))
+        });
+        HandoverSeed {
+            task_prompt: task_part(prompt).to_string(),
+            context,
+        }
+    }
+}
+
 /// An agent run the engine started, to be driven to its result.
 pub(crate) struct StartedRun {
     pub agent_name: String,
@@ -1933,7 +1992,12 @@ impl WorkflowEngine {
                 context: ctx.clone(),
                 agent_name: agent_name.to_string(),
             }))
-            .with_host_decisions(host_decisions.clone());
+            .with_host_decisions(host_decisions.clone())
+            .with_handover_hook(Arc::new(WorkflowHandover {
+                context: ctx.clone(),
+                agent_name: agent_name.to_string(),
+                prompt_message_ids: pending_message_ids.clone(),
+            }));
         let (event_rx, cmd_tx, join_handle) = runtime.run_task(
             task,
             Arc::new(registry),
@@ -3664,5 +3728,22 @@ mod tests {
             InterceptedResult::Replaced(ref text) if text.starts_with("skill text\n\n[This is the full result")
         ));
         assert_eq!(failing.0.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn the_task_part_drops_delivered_messages_and_the_roster() {
+        let prompt = format!(
+            "Draft it.{MESSAGES_HEADING}\n--- Message 1 from 'lead' ---\nhi\n--- End message ---\n{ROSTER_HEADING}- `lead` (lead role): running"
+        );
+        assert_eq!(task_part(&prompt), "Draft it.");
+        assert_eq!(task_part("Draft it."), "Draft it.");
+        // A heading the task itself uses is kept.
+        let own = format!("Draft it.{MESSAGES_HEADING}none yet");
+        assert_eq!(task_part(&own), own);
     }
 }

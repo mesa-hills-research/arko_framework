@@ -12,7 +12,8 @@ use super::*;
 use crate::messaging::registry::{AgentStatus, WaitReason};
 use crate::messaging::tools::{LIST_RECIPIENTS_TOOL_NAME, SEND_MESSAGE_TOOL_NAME};
 use crate::test_support::{
-    ProbeTool, Reply, ResponsesServer, Workspace, agent_config, complete_turn, tool_call_turn,
+    ProbeTool, Reply, ResponsesServer, Workspace, agent_config, complete_turn, text_turn,
+    tool_call_turn,
 };
 use crate::workflow::result::AgentRunStatus;
 
@@ -835,4 +836,78 @@ fn message_queues_from_an_early_checkpoint_load_on_resume() {
         Some(AgentStatus::NotStarted)
     );
     let _ = WaitReason::Paused;
+}
+
+/// A handover in a workflow: the fresh conversation restates the task
+/// without the messages its prompt delivered (the report covers them) and
+/// with a current list of recipients, and those messages are still
+/// acknowledged when the run completes.
+#[tokio::test]
+async fn a_handover_restates_the_task_and_keeps_its_messages_read() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|_, body| {
+        let text = user_text(body);
+        if !text.contains("Draft it.") {
+            return None; // The lead keeps running.
+        }
+        Some(if text.contains("# Handover report") {
+            complete_turn("done", "drafted")
+        } else if text.contains("Your conversation is getting long") {
+            text_turn("report", "REPORT: drafted the intro in British spelling.")
+        } else {
+            tool_call_turn("p0", "probe", json!({}))
+        })
+    })
+    .await;
+    let mut writer = agent("writer");
+    writer.handover = Some(arko_agents::HandoverConfig::at_input_tokens(10));
+    let workflow = Arc::new(
+        builder_with(server.client(), &workspace, &["lead"])
+            .agent("writer", writer)
+            .agent_tool("writer", ProbeTool::new("probe", false))
+            .build()
+            .unwrap(),
+    );
+    let lead = workflow
+        .spawn_agent("lead", "Lead the work.")
+        .await
+        .unwrap();
+    server.wait_for_requests(1).await;
+    workflow
+        .context()
+        .messages
+        .send(
+            "lead",
+            None,
+            "writer",
+            "Use British spelling.".into(),
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    let result = workflow.run_agent("writer", "Draft it.").await.unwrap();
+    assert_eq!(result.status, AgentRunStatus::Completed);
+    assert_eq!(result.task.handovers.len(), 1);
+    let writer_bodies = server
+        .bodies()
+        .into_iter()
+        .filter(|body| is_request_of(body, "Draft it."))
+        .collect::<Vec<_>>();
+    assert_eq!(writer_bodies.len(), 3);
+    assert!(user_text(&writer_bodies[0]).contains("Use British spelling."));
+    let fresh = user_text(&writer_bodies[2]);
+    assert!(fresh.contains("REPORT: drafted the intro"), "{fresh}");
+    assert!(!fresh.contains("Use British spelling."), "{fresh}");
+    assert!(
+        !fresh.contains("Your conversation is getting long"),
+        "{fresh}"
+    );
+    assert_eq!(fresh.matches(ROSTER).count(), 1, "{fresh}");
+    assert!(fresh.contains("- `lead` (lead role): running"), "{fresh}");
+    // Read before the handover, acknowledged at completion.
+    assert!(workflow.context().messages.pending("writer").is_empty());
+
+    workflow.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(10), lead.wait()).await;
 }

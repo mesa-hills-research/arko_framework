@@ -49,8 +49,9 @@ fn is_fragment(event: &arko_agents::runtime::event::AgentEvent) -> bool {
     )
 }
 
-/// An event written to disk at once: a state change, the end of a run, or
-/// an error or recovery report.
+/// An event written to disk at once: a state change, the end of a run, an
+/// error or recovery report, or a handover (whose report the replaced
+/// conversation no longer holds).
 fn is_urgent(event: &arko_agents::runtime::event::AgentEvent) -> bool {
     use arko_agents::runtime::event::AgentEvent;
     matches!(
@@ -62,6 +63,7 @@ fn is_urgent(event: &arko_agents::runtime::event::AgentEvent) -> bool {
             | AgentEvent::UsageLimitReached { .. }
             | AgentEvent::RefusalReceived(_)
             | AgentEvent::OutputTokenLimitReached { .. }
+            | AgentEvent::ConversationHandedOver { .. }
     )
 }
 
