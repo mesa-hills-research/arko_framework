@@ -22,14 +22,14 @@ Use this skill when creating or changing a workflow in `arko_framework`.
 4. Use memory for durable shared state, messages for handoffs and questions, and files for artifacts. Assign every shared resource an owner and an access policy.
 5. Enable freshness tracking when agents can concurrently read and write the same files, memory tiers, or other resources. Define whether a conflict causes a reread, merge, retry, or review.
 6. Add completion verification when a successful `complete_task` call is not enough evidence that the artifact is correct. Keep reviewers independent when that matters.
-7. Configure approvals, error recovery, cancellation, budgets, and human input for the deployment. The workflow defaults approve tool calls and recover errors automatically, so do not treat those defaults as a safety policy.
+7. Configure approvals, error recovery, cancellation, budgets, and human input for the deployment. The defaults approve every tool call and recover errors automatically, so set these explicitly.
 8. Use persistence for runs that must survive interruption. Wrap external side effects in durable steps and define how in-doubt outcomes are resolved. Preserve compatibility with earlier checkpoints and task files.
 
-Keep the workflow control flow explicit. Do not add agents, shared write access, retries, or expensive model calls without a concrete role in the outcome. Prefer the model and reasoning recommendations in the model-choice section of the agent guide; leave `model.max_output_tokens` at the model maximum unless a clear limit is required.
+Keep the workflow control flow explicit, and add agents, shared write access, retries, and expensive model calls only when each has a concrete role in the outcome. Prefer the model and reasoning recommendations in the model-choice section of the agent guide; leave `model.max_output_tokens` at the model maximum unless a clear limit is required.
 
 ## Design patterns
 
-Use these as patterns to choose from, not as requirements for every workflow. Combine them only when each pattern solves a real coordination problem.
+Pick the patterns that fit the workflow's coordination problems.
 
 ### Orchestrator and delegated specialists
 
@@ -49,11 +49,11 @@ Set a total minor-repair cap for the workflow, commonly 10–15 across all targe
 
 ### Verifier feedback to the orchestrator
 
-Send every verifier finding to the orchestrator as well as to the agent that must repair it. The orchestrator should incorporate recurring findings into the instructions, task decomposition, or acceptance criteria it uses for future specialists. Store durable findings in a dedicated memory tier so later sessions can avoid repeating known mistakes; messages alone are not a persistent learning record.
+Send every verifier finding to the orchestrator as well as to the agent that must repair it. The orchestrator should incorporate recurring findings into the instructions, task decomposition, or acceptance criteria it uses for future specialists. Store durable findings in a dedicated memory tier so later sessions can avoid repeating known mistakes.
 
 ### Independent research and replication
 
-For research tasks, let the lead delegate independent questions to researchers and preserve separate evidence until synthesis. Researchers can message the lead and one another when comparison or correction is useful, but shared conclusions should be marked as conclusions rather than silently replacing each researcher's evidence. Independent prompts and separate outputs make counterexamples more likely to be rediscovered instead of copied from the first report.
+For research tasks, let the lead delegate independent questions to researchers and preserve separate evidence until synthesis. Researchers can message the lead and one another to compare or correct findings. Record agreed conclusions separately and keep each researcher's evidence. Independent prompts and separate outputs make counterexamples more likely to be rediscovered instead of copied from the first report. Sonnet 5.5 suits researchers that dig deep into one question and return a quality analysis; outside such roles, prefer Opus 5.5 ([model choice](../../docs/guides/agent-design.md#model-choice)).
 
 ### Continuation reports for long runs
 
@@ -67,9 +67,9 @@ Decide how much supervision the workflow is meant to require before configuring 
 
 - A fully autonomous workflow should be set and forget. Define its error-recovery policy, approval policy, retry and budget limits, cancellation behavior, and complete toolset in advance. Omit `ask_user` unless a real handler can answer it automatically; an unanswered question turns a supposedly autonomous run into a pause.
 - A supervised workflow can pause for approvals, error decisions, and questions. Give the host a clear continuation path and make each question specific enough to answer without reconstructing the run.
-- A remotely supervised workflow can remain autonomous while sending status, failure, or decision requests through an explicit integration such as a Telegram bot or another API service. Notifications do not replace durable state or a defined recovery decision.
+- A remotely supervised workflow can remain autonomous while sending status, failure, or decision requests through an explicit integration such as a Telegram bot or another API service.
 
-Choose tools according to that level. `ask_user`, approval requests, error-recovery pauses, and external notification tools should be deliberate parts of the interaction contract. Do not rely on permissive defaults to define autonomy: configure what the workflow may do without a person, what it must report, and what it must stop for.
+Choose tools according to that level. `ask_user`, approval requests, error-recovery pauses, and external notification tools should be deliberate parts of the interaction contract. Configure what the workflow may do without a person, what it must report, and what it must stop for.
 
 ## Implement and verify
 

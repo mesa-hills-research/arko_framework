@@ -23,7 +23,7 @@ Start with the smallest topology that meets the requirements. `arko_workflows` s
 - **Delegated stages** let one agent call another through the bounded `run_workflow_agent` service. Enable delegation only for callers and targets that have a concrete reason to use it, and keep nested work bounded.
 - **Human-in-the-loop stages** pause when the workflow needs a decision, clarification, or approval. Make the question specific enough that the host can answer it without reconstructing the entire run.
 
-Separate independent discovery from dependent decisions. For example, several investigators can inspect different sources in parallel, then one writer can combine their findings, and a reviewer can verify the finished artifact. Do not parallelize stages that can overwrite each other or depend on a result that has not been finalized.
+Separate independent discovery from dependent decisions. For example, several investigators can inspect different sources in parallel, then one writer can combine their findings, and a reviewer can verify the finished artifact.
 
 ## Give each agent a bounded role
 
@@ -39,11 +39,11 @@ Use shared memory for durable, structured context that several agents need to re
 
 ### Memory
 
-Create a separate memory tier for each kind of shared state with a different audience or retention rule. Examples include requirements, research findings, decisions, and verification notes. Configure readers and writers explicitly. A tier that every agent can write is convenient, but it also makes accidental overwrites and unclear ownership likely.
+Create a separate memory tier for each kind of shared state with a different audience or retention rule. Examples include requirements, research findings, decisions, and verification notes. Configure readers and writers explicitly. Give write access only to the agents that own a tier's content.
 
 Choose a write mode that matches the data. Append-only history is useful for findings and audit notes; replacement is useful for a current plan or status document. Set a size limit when unbounded growth would crowd out the context needed to finish the task.
 
-Memory access is part of the workflow contract. An agent that cannot read a tier should not be expected to act on it, and an agent that can write a tier should have a specific reason to do so. On resume, configure the same tier names or explicitly map or drop changed tiers.
+On resume, configure the same tier names or explicitly map or drop changed tiers.
 
 ### Messaging
 
@@ -53,7 +53,7 @@ Start with the narrowest `MessagingPolicy` that supports the topology. One-way c
 
 ### Freshness
 
-When agents can read and write the same files, memory tiers, or other resources concurrently, enable context-freshness tracking. A freshness conflict means an agent is about to act on data that another actor changed after it read it. Decide whether the agent should reread, merge, retry, or stop for review. Do not silently accept stale writes for resources where last-writer-wins could lose work.
+When agents can read and write the same files, memory tiers, or other resources concurrently, enable context-freshness tracking. A freshness conflict means an agent is about to act on data that another actor changed after it read it. Decide whether the agent should reread, merge, retry, or stop for review.
 
 ## Plan tools and context
 
@@ -61,23 +61,23 @@ List the tools each role needs before building the workflow. Global tools are ap
 
 Use tool-result interceptors when every call of a tool needs a deterministic transformation, such as redaction or normalization. Use distillation when selected large results should be condensed before they reach an agent. Distillation is an additional model call and an additional cost, so target only the tools or agents that need it. If a transformation must withhold data when it fails, configure its failure behavior so the raw result is not delivered accidentally.
 
-Do not solve context growth by forcing every agent to read every memory tier, tool result, or prior conversation. Give each stage the smallest useful context, preserve important state in memory or files, and ask agents to record concise findings for the next stage.
+Give each stage the smallest useful context, preserve important state in memory or files, and ask agents to record concise findings for the next stage.
 
 ## Define completion and review
 
 An agent completes when it has produced the artifact or decision required by its role and recorded a useful summary. A successful `complete_task` call is a handoff signal, not proof that the artifact is correct.
 
-Use a completion verifier when a result must satisfy a concrete contract. A verifier can inspect the target's files and memory, accept the completion, or reject it with repair context that sends the target back to work. Give the verifier a narrow checklist and access to the evidence it needs. A verifier that can only read a summary cannot reliably check an artifact.
+Use a completion verifier when a result must satisfy a concrete contract. A verifier can inspect the target's files and memory, accept the completion, or reject it with repair context that sends the target back to work. Give the verifier a narrow checklist and access to the evidence it needs.
 
-Keep verification separate from creation when independence matters. A reviewer that shares the writer's assumptions or edits the same output during review is less useful than one that checks the finished state and reports specific failures.
+Keep verification separate from creation when independence matters: the reviewer checks the finished state and reports specific failures rather than editing the output itself.
 
-For workflows that need consensus rather than a single review, use structured voting with explicit options, eligible voters, quorum, weights, and tie behavior. Voting should decide among well-defined options; it should not replace a missing artifact or an unclear question.
+For workflows that need consensus rather than a single review, use structured voting with explicit options, eligible voters, quorum, weights, and tie behavior. Give voters well-defined options to choose from.
 
 ## Set boundaries for tools and failures
 
 The workflow's defaults are permissive: every tool call is approved by default, and tool errors are recovered automatically without an attempt limit. These defaults are convenient for local autonomous runs, but they are not a safety policy. Configure approval and error-recovery behavior explicitly when tools can change external systems, spend money, expose data, or repeat side effects.
 
-Use hooks for lifecycle policy and observation: budget warnings, audit events, pre-tool checks, post-tool recording, freshness conflicts, and cancellation. A hook can stop a run, but it cannot undo work that already happened. Put reversible checks before the side effect and record the reason for any abort.
+Use hooks for lifecycle policy and observation: budget warnings, audit events, pre-tool checks, post-tool recording, freshness conflicts, and cancellation. A hook can stop a run but can't undo work already done, so run checks before the side effect and record the reason for any abort.
 
 Route questions through a `UserInputHandler` when the host can answer them asynchronously. Without a handler, the run returns `UserInputRequired`; continue the paused agent with the answer rather than starting a second run that loses its conversation.
 
@@ -85,9 +85,9 @@ Give cancellation a deliberate path. A cancel handle can stop the workflow from 
 
 ## Budget the workflow
 
-Set a workflow budget when a run has a known cost ceiling, and set agent budgets when one role must not consume the whole allowance. Add a warning threshold before the hard limit and use the cost ledger to explain where spending went. Include manual charges and distillation costs in the estimate; the workflow total is not just the sum of agent model calls.
+Set a workflow budget when a run has a known cost ceiling, and set agent budgets when one role must not consume the whole allowance. Add a warning threshold before the hard limit and use the cost ledger to explain where spending went. Include manual charges and distillation costs in the estimate.
 
-Choose models and reasoning effort per role rather than using the most expensive setting everywhere. The [model-choice guidance](agent-design.md#model-choice) recommends Opus 5.5 for most work, stronger tag-in models for a different perspective, and GPT-6 Luna for high-volume transformations.
+Choose models and reasoning effort per role. The [model-choice guidance](agent-design.md#model-choice) recommends Opus 5.5 for most work, stronger tag-in models for a different perspective, Astra 6 for 3D design paired with Fable 5.1 for 3D interaction, Sonnet 5.5 only for a few roles such as deep-research subagents, and GPT-6 Luna for high-volume transformations.
 
 ## Make side effects durable
 
@@ -95,7 +95,7 @@ Use persistence when a workflow must survive process loss, operator interruption
 
 Design resume behavior before enabling checkpoints. `resume_from` restores state and configuration from the new builder; it does not replay the original Rust or Python control flow and it does not automatically continue agents. The host must inspect restored results and explicitly run the next stage or continue a paused agent. A checkpoint can also record cancellation, so decide whether the host should keep a stopped run stopped before resuming it.
 
-Wrap external side effects in durable steps. A durable step records its input, attempt, and outcome so a retry does not duplicate work silently. If an operation can finish after the process loses contact with it, provide a resolver for an in-doubt result or require an operator to mark it completed, failed, or safe to retry. Do not treat a timeout as proof that an external action did not happen.
+Wrap external side effects in durable steps. A durable step records its input, attempt, and outcome so a retry does not repeat work. If an operation can finish after the process loses contact with it, provide a resolver for an in-doubt result or require an operator to mark it completed, failed, or safe to retry.
 
 Keep saved state compatible with earlier versions. Add serde defaults for new fields, continue reading old checkpoint and task formats, and avoid changing the meaning of an existing workflow name or memory tier without an explicit migration path.
 

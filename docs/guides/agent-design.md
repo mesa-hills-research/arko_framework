@@ -33,11 +33,13 @@ Opus 5.5 is the default choice for most work. It is a strong general-purpose mod
 
 Fable 5.1 and Astra 6 are also strong choices, but they cost more. They are especially useful as tag-in models when Opus 5.5 would benefit from a different perspective or an independent pass over the work. Use XHigh reasoning effort by default for Opus 5.5, Fable 5.1, and Astra 6. High is also a good choice and usually makes little practical difference. Max should rarely, if ever, be used with these models: it adds substantial time and cost for little additional benefit.
 
+Astra 6 and Fable 5.1 have complementary strengths in 3D work: Astra 6 is good at 3D design, while Fable 5.1 is good at 3D interaction. Split 3D projects along that line. For a game, you might have Astra 6 work as the 3D modeler and Fable 5.1 as the model that ties everything together.
+
 Use GPT-6 Luna for high-volume, low-intelligence work such as converting unstructured data into structured data. Max reasoning effort is appropriate for Luna.
 
-Sonnet 5.5 is a capable workhorse and a reasonable alternative for general work. Use Medium when a task needs more intelligence than Luna but does not need a higher effort level. Use High reasoning effort as the normal maximum. XHigh can be appropriate when the task needs it, but avoid Max; when Max would be justified, Opus 5.5 at XHigh is usually the better value.
+Sonnet 5.5 really shouldn't be used except for a select few tasks; for general work, use Opus 5.5. The main exception is a researcher subagent that dives deep into a question and returns a quality analysis to the agent that spawned it. For that role, use High reasoning effort, or XHigh when the question needs it. Avoid Max; when Max would be justified, Opus 5.5 at XHigh is usually the better value.
 
-GPT-6 Sol occupies a less favorable position for most users: it is not yet as capable as Opus 5.5 while costing as much or more. It is reasonable when users want to use existing OAuth access through a ChatGPT subscription; otherwise, Opus 5.5 is the clearer default.
+GPT-6 Sol occupies a less favorable position for most users: it is not yet as capable as Opus 5.5 while costing as much or more, so Opus 5.5 is the clearer default. Sol is reasonable with existing OAuth access through a ChatGPT subscription, but even there Astra 6 is usually still the better choice. Pick Sol over Astra 6 only when you want to get the most usage out of the subscription or keep cost to a minimum.
 
 Do not restrict a model's output token limit (`model.max_output_tokens`) unless there is a clear reason. Leave it at the model's maximum as the safe default.
 
