@@ -42,7 +42,7 @@ Astra 6 and Fable 5.1 have complementary strengths in 3D work: Astra 6 is good a
 
 Use GPT-6 Luna for high-volume, low-intelligence work such as converting unstructured data into structured data. Max reasoning effort is appropriate for Luna.
 
-Sonnet 5.5 really shouldn't be used except for a select few tasks; for general work, use Opus 5.5 or GPT-6.1 Sol. The main exception is a researcher subagent that dives deep into a question and returns a quality analysis to the agent that spawned it. For that role, use High reasoning effort, or XHigh when the question needs it. Avoid Max; when Max would be justified, Opus 5.5 at XHigh is usually the better value.
+Sonnet 5.5 really shouldn't be used except for a select few tasks; for general work, use Opus 5.5 or GPT-6.1 Sol. The main exception is a subagent that explores a codebase in depth to answer a question and returns a quality analysis to the agent that spawned it. For that role, use High reasoning effort, or XHigh when the question needs it. Avoid Max; when Max would be justified, Opus 5.5 at XHigh is usually the better value.
 
 GPT-6.1 Sol replaces GPT-6 Sol at the same price. GPT-6 Sol costs less per token than Opus 5.5 but about the same per task in practice, and Opus 5.5 clearly outperforms it, so there is no reason to choose it for new work.
 

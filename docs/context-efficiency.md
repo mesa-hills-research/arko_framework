@@ -89,12 +89,13 @@ agent then works from the summary, so target it only where that suits.
 use arko_ai::{Model, OpenAIEffort, ReasoningConfig};
 use arko_workflows::prelude::*;
 
-let distiller = DistillationConfig::new("bulk-research", Model::openai_gpt_5_6_luna())
+let model = Model::openai_gpt_5_6_luna();
+let distiller = DistillationConfig::new("bulk-research", model.clone())
     .reasoning(ReasoningConfig::openai(OpenAIEffort::High, false))
     .target_agent("researcher") // The registration name used below.
     .target_tool("search_documents")
     .min_chars(12_000)
-    .max_output_tokens(16_000) // Room for high-effort reasoning plus the summary.
+    .max_output_tokens(model.max_output_tokens)
     .instructions("Preserve exact findings, qualifications, and source references. Remove irrelevant repetition.");
 
 let workflow = Workflow::builder()
@@ -115,8 +116,9 @@ explicitly.
 
 Reasoning tokens count against the output limit with OpenAI API keys and on
 Anthropic, and some models reason by default (for example GPT-5.5 and later, and
-Claude Opus 5.5). Leave room for reasoning as well as the summary: a limit that is
-too small produces truncated summaries, which are billed but not used.
+Claude Opus 5.5). Leave room for reasoning as well as the summary, as the example does by
+setting the model's own limit: a limit that is too small produces truncated
+summaries, which are billed but not used.
 
 A distiller sees the task prompt, the tool name and parameters, and the raw
 result. Its output is model-written, not a guaranteed-accurate transformation, so
