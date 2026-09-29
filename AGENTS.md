@@ -4,6 +4,9 @@
   default, the opt-ins, and the behaviours to configure explicitly. Then the crate
   READMEs and [arko_workflows/INDEX.md](arko_workflows/INDEX.md) for details and
   examples.
+- A workflow built with arko_workflows is always a binary, never a wrapper around
+  arko_agents (such as a configuration run through `arko_agents_cli`) unless that is
+  explicitly requested.
 - When designing an agent or workflow, treat the [design guides](docs/guides/README.md)
   as ideas, not rules. Start with the simplest approach that could work and build up
   only when it falls short. Aim for autonomy: set-and-forget workflows keep the default

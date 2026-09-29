@@ -7,6 +7,8 @@ description: Design or modify arko_workflows workflows when a task involves work
 
 Use this skill when creating or changing a workflow in `arko_framework`.
 
+A workflow built with `arko_workflows` is always a binary. It never means a wrapper around `arko_agents`, such as an agent configuration run through `arko_agents_cli`, unless that is explicitly requested: `arko_workflows` exists for more comprehensive, autonomous agent workflows.
+
 ## Read the relevant guidance
 
 The design guides offer ideas, not rules.
@@ -27,7 +29,7 @@ The design guides offer ideas, not rules.
 7. Configure cancellation, budgets, and human input for the deployment. For set-and-forget workflows, keep the default `ApprovalPolicy::ApproveAll` and `ErrorRecoveryPolicy::Automatic`: they are the only settings that let a run finish without a person.
 8. Use persistence for runs that must survive interruption. Wrap external side effects in durable steps and define how in-doubt outcomes are resolved. Preserve compatibility with earlier checkpoints and task files.
 
-Start with the simplest approach that could work, often a single agent, and build up only when it falls short. Keep the workflow control flow explicit, and add agents, shared write access, retries, and expensive model calls only when each has a concrete role in the outcome. Prefer the model and reasoning recommendations in the model-choice section of the agent guide; leave `model.max_output_tokens` at the model maximum unless a clear limit is required.
+Start with the simplest approach that could work, and build up only when it falls short. Keep the workflow control flow explicit, and add agents, shared write access, retries, and expensive model calls only when each has a concrete role in the outcome. Prefer the model and reasoning recommendations in the model-choice section of the agent guide; leave `model.max_output_tokens` at the model maximum unless a clear limit is required.
 
 ## Design patterns
 
