@@ -167,6 +167,37 @@ impl Model {
         }
     }
 
+    /// Standard API pricing and limits: cache reads are $0.10, half GPT-6
+    /// Sol's; other rates match it. Long-context cache rates are taken as 2x,
+    /// as on GPT-6 Sol.
+    /// https://developers.openai.com/api/docs/models/gpt-6.1-sol
+    pub fn openai_gpt_6_1_sol() -> Self {
+        Self {
+            provider: Provider::OpenAI,
+            id: "gpt-6.1-sol".to_string(),
+            model_type: ModelType::Reasoning,
+            max_input_tokens: 922_000,
+            max_output_tokens: 128_000,
+            supports_image_input: true,
+            supports_cache: true,
+            openrouter: None,
+            pricing: ModelPricing {
+                input_cost_per_million: 2.00,
+                output_cost_per_million: 10.00,
+                cached_input_cost_per_million: Some(0.10),
+                cache_write_cost_per_million: Some(2.50),
+                large_input_threshold: Some(272_000),
+                large_input_cost_per_million: Some(4.00),
+                large_output_cost_per_million: Some(15.00),
+                large_cached_input_cost_per_million: Some(0.20),
+                large_cache_write_cost_per_million: Some(5.00),
+                reasoning_output_cost_per_million: None,
+                service_tiers: vec![TierPricing::fast(2.0), TierPricing::flex(0.5)],
+                ..ModelPricing::default()
+            },
+        }
+    }
+
     /// Standard API pricing and limits.
     /// https://developers.openai.com/api/docs/models/gpt-6-luna
     pub fn openai_gpt_6_luna() -> Self {
@@ -1793,6 +1824,7 @@ impl Model {
     pub(crate) fn list_openai_models() -> Vec<Self> {
         vec![
             Self::openai_gpt_6_astra(),
+            Self::openai_gpt_6_1_sol(),
             Self::openai_gpt_6_sol(),
             Self::openai_gpt_6_luna(),
             Self::openai_gpt_5_6_sol(),
@@ -2043,9 +2075,10 @@ impl Model {
         self.id == "gpt-6-astra"
     }
 
-    /// GPT-6 Sol and Luna share GPT-5.6's reasoning controls; unlike Astra, they accept `none`.
+    /// GPT-6 Sol, GPT-6.1 Sol and GPT-6 Luna share GPT-5.6's reasoning
+    /// controls; unlike Astra, they accept `none`.
     pub fn is_openai_gpt_6_sol_or_luna(&self) -> bool {
-        matches!(self.id.as_str(), "gpt-6-sol" | "gpt-6-luna")
+        matches!(self.id.as_str(), "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6-luna")
     }
 
     pub fn is_openai_gpt_5_6(&self) -> bool {

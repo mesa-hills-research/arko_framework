@@ -91,7 +91,7 @@ Give cancellation a deliberate path. A cancel handle can stop the workflow from 
 
 Set a workflow budget when a run has a known cost ceiling, and set agent budgets when one role must not consume the whole allowance. Add a warning threshold before the hard limit and use the cost ledger to explain where spending went. Include manual charges and distillation costs in the estimate.
 
-Choose models and reasoning effort per role. The [model-choice guidance](agent-design.md#model-choice) recommends Opus 5.5 for most work, stronger tag-in models for a different perspective, Astra 6 for 3D design paired with Fable 5.1 for 3D interaction, Sonnet 5.5 only for a few roles such as deep-research subagents, and GPT-6 Luna for high-volume transformations.
+Choose models and reasoning effort per role. The [model-choice guidance](agent-design.md#model-choice) recommends Opus 5.5 or GPT-6.1 Sol for most work, stronger tag-in models for a different perspective, Astra 6 for 3D design paired with Fable 5.1 for 3D interaction, Sonnet 5.5 only for a few roles such as deep-research subagents, and GPT-6 Luna for high-volume transformations.
 
 ## Make side effects durable
 

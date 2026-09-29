@@ -3351,7 +3351,7 @@ mod tests {
     fn gpt_6_sol_and_luna_build_reasoning_verbosity_and_cache_requests() {
         let client = OpenAIClient::new("test");
 
-        for id in ["gpt-6-sol", "gpt-6-luna"] {
+        for id in ["gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"] {
             let conversation = Conversation::new(Model::get(Provider::OpenAI, id).unwrap());
 
             for effort in [
