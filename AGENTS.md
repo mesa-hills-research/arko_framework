@@ -6,9 +6,11 @@
   examples.
 - When designing an agent or workflow, treat the [design guides](docs/guides/README.md)
   as ideas, not rules. Start with the simplest approach that could work and build up
-  only when it falls short. Aim for autonomy: add approval gates, human checkpoints, or
-  restrictions only for a concrete risk. Workflow runs are expensive, so iterate on a
-  workflow with live test runs or benchmarks only when explicitly asked.
+  only when it falls short. Aim for autonomy: set-and-forget workflows keep the default
+  `ApprovalPolicy::ApproveAll` and `ErrorRecoveryPolicy::Automatic`; don't trade them
+  for `Limited`, `ReturnToCaller`, or approval gates out of caution. Workflow runs are
+  expensive, so iterate on a workflow with live test runs or benchmarks only when
+  explicitly asked.
 - Crates: arko_agents builds on arko_ai, arko_workflows on both, and arko_index on
   arko_ai.
 - Building needs Rust 1.89 or later and a C compiler. Run `cargo fmt --all` before

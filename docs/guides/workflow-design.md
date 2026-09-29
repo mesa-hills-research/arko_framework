@@ -77,7 +77,7 @@ For workflows that need consensus rather than a single review, use structured vo
 
 ## Set boundaries for tools and failures
 
-The workflow's defaults are permissive: every tool call is approved by default, and tool errors are recovered automatically without an attempt limit. These defaults are convenient for local autonomous runs, but they are not a safety policy. Configure approval and error-recovery behavior explicitly when tools can change external systems, spend money, expose data, or repeat side effects. Don't add approvals, human checkpoints, or restrictions beyond what a concrete risk calls for; autonomy is the goal.
+The workflow's defaults are autonomous: every tool call is approved (`ApprovalPolicy::ApproveAll`), and errors are recovered automatically without an attempt limit (`ErrorRecoveryPolicy::Automatic`). Keep them for set-and-forget workflows; they are the only settings that let a run finish without a person. Don't switch to `Limited`, `ReturnToCaller`, `RespectAgentConfig`, or an approval handler out of caution; use them only when a person is meant to supervise the run.
 
 Use hooks for lifecycle policy and observation: budget warnings, audit events, pre-tool checks, post-tool recording, freshness conflicts, and cancellation. A hook can stop a run but can't undo work already done, so run checks before the side effect and record the reason for any abort.
 
@@ -117,7 +117,7 @@ Build and validate the workflow before making provider calls. The complete workf
 - Shared resources have freshness tracking or an explicit conflict policy.
 - Each agent has only the tools and context required for its role.
 - Completion verification checks the artifact, not only the agent's summary.
-- Approval, error recovery, cancellation, budgets, and human input are configured for the deployment.
+- Set-and-forget workflows keep `ApproveAll` and `Automatic`; cancellation, budgets, and human input are configured for the deployment.
 - External side effects use durable steps and define in-doubt resolution.
 - Checkpoints and old saved data remain loadable, and resume behavior is explicit.
 - A dry run passes. Live test runs and benchmark iterations happen only when explicitly requested.

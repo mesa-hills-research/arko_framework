@@ -9,6 +9,8 @@ Use this skill when creating or changing a workflow in `arko_framework`.
 
 ## Read the relevant guidance
 
+The design guides offer ideas, not rules.
+
 - Read the [general workflow design guide](../../docs/guides/workflow-design.md) before choosing the topology or shared-state design.
 - Read the [general agent design guide](../../docs/guides/agent-design.md) when changing agent roles, prompts, tools, models, or reasoning effort.
 - Consult the [`arko_workflows` API index](../../arko_workflows/INDEX.md) for exact signatures, defaults, and persistence behavior.
@@ -22,10 +24,10 @@ Use this skill when creating or changing a workflow in `arko_framework`.
 4. Use memory for durable shared state, messages for handoffs and questions, and files for artifacts. Assign every shared resource an owner and an access policy.
 5. Enable freshness tracking when agents can concurrently read and write the same files, memory tiers, or other resources. Define whether a conflict causes a reread, merge, retry, or review.
 6. Add completion verification when a successful `complete_task` call is not enough evidence that the artifact is correct. Keep reviewers independent when that matters.
-7. Configure approvals, error recovery, cancellation, budgets, and human input for the deployment. The defaults approve every tool call and recover errors automatically, so set these explicitly.
+7. Configure cancellation, budgets, and human input for the deployment. For set-and-forget workflows, keep the default `ApprovalPolicy::ApproveAll` and `ErrorRecoveryPolicy::Automatic`: they are the only settings that let a run finish without a person.
 8. Use persistence for runs that must survive interruption. Wrap external side effects in durable steps and define how in-doubt outcomes are resolved. Preserve compatibility with earlier checkpoints and task files.
 
-Keep the workflow control flow explicit, and add agents, shared write access, retries, and expensive model calls only when each has a concrete role in the outcome. Prefer the model and reasoning recommendations in the model-choice section of the agent guide; leave `model.max_output_tokens` at the model maximum unless a clear limit is required.
+Start with the simplest approach that could work, often a single agent, and build up only when it falls short. Keep the workflow control flow explicit, and add agents, shared write access, retries, and expensive model calls only when each has a concrete role in the outcome. Prefer the model and reasoning recommendations in the model-choice section of the agent guide; leave `model.max_output_tokens` at the model maximum unless a clear limit is required.
 
 ## Design patterns
 
@@ -63,9 +65,9 @@ Enforce the continuation turn at the tool boundary rather than relying on the pr
 
 ## Choose the autonomy level
 
-Decide how much supervision the workflow is meant to require before configuring its policies and tools.
+Decide how much supervision the workflow is meant to require before configuring its policies and tools. Default to fully autonomous; choose supervision only when a person is meant to take part in the run, not out of caution.
 
-- A fully autonomous workflow should be set and forget. Define its error-recovery policy, approval policy, retry and budget limits, cancellation behavior, and complete toolset in advance. Omit `ask_user` unless a real handler can answer it automatically; an unanswered question turns a supposedly autonomous run into a pause.
+- A fully autonomous workflow should be set and forget. Keep `ApproveAll` and `Automatic`, and leave agents on a pausing `llm_error_policy` (the default) so the workflow recovers their errors instead of the run ending interrupted. Define budget limits, cancellation behavior, and the complete toolset in advance. Omit `ask_user` unless a real handler can answer it automatically; an unanswered question turns a supposedly autonomous run into a pause.
 - A supervised workflow can pause for approvals, error decisions, and questions. Give the host a clear continuation path and make each question specific enough to answer without reconstructing the run.
 - A remotely supervised workflow can remain autonomous while sending status, failure, or decision requests through an explicit integration such as a Telegram bot or another API service.
 
@@ -77,5 +79,5 @@ Choose tools according to that level. `ask_user`, approval requests, error-recov
 - Use the framework’s actual builder and execution APIs; do not invent a separate scheduler or graph layer.
 - Run `cargo fmt --all -- --check` and the repository’s required locked checks after implementation.
 - Exercise a dry run before provider calls when the workflow supports one.
-- Test the important pause, error, verification-rejection, cancellation, budget, persistence, and resume paths for the workflow’s deployment.
+- Workflow runs are expensive: run live tests of the pause, error, verification-rejection, cancellation, budget, persistence, and resume paths, or iterate on the workflow against tests or benchmarks, only when explicitly requested.
 - Report incomplete work, pauses, cancellation causes, costs, and the evidence used to accept a result.
