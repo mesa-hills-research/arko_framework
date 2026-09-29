@@ -14,7 +14,7 @@ use arko_agents::tool::{
 };
 
 use crate::context::SharedContext;
-use crate::messaging::registry::{AgentStatus, WaitReason};
+use crate::messaging::registry::{ActivityChange, AgentStatus, WaitReason};
 
 pub use super::wait::{WAIT_FOR_MESSAGE_TOOL_NAME, WaitForMessageTool};
 
@@ -45,7 +45,14 @@ impl Tool for SendMessageTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: SEND_MESSAGE_TOOL_NAME.to_string(),
-            description: "Send a message to another workflow agent that is running (or waiting); it receives the message at its next safe turn boundary. list_recipients reports the agents you can message and their current status; workflow context updates tell you when one starts.".to_string(),
+            description: format!(
+                "Send a message to another workflow agent that is running (or waiting); it receives the message at its next safe turn boundary. list_recipients reports the agents you can message and their current status; workflow context updates tell you when one starts or finishes.{}",
+                if self.context.keeps_messages_for_finished() {
+                    " A message to a finished agent is kept until it is continued or runs again."
+                } else {
+                    ""
+                }
+            ),
             output_based_example: None,
             parameters: vec![
                 ToolParameterDefinition {
@@ -127,12 +134,13 @@ impl Tool for SendMessageTool {
                     "Agent '{to}' has not started, so it can't receive messages. A workflow context update will tell you when it starts."
                 )));
             }
-            AgentStatus::Finished(_) => {
+            AgentStatus::Finished(_) if !self.context.keeps_messages_for_finished() => {
                 return Err(ToolError::ExecutionFailed(format!(
                     "Agent '{to}' is {}; it no longer receives messages.",
                     status.describe()
                 )));
             }
+            AgentStatus::Finished(_) => {}
             AgentStatus::Running | AgentStatus::Waiting(_) => {}
         }
 
@@ -172,6 +180,11 @@ impl Tool for SendMessageTool {
             }
             AgentStatus::Waiting(_) => format!(
                 "Message {} sent to agent '{to}', which is {}; it receives the message when it continues.",
+                message.id,
+                status.describe()
+            ),
+            AgentStatus::Finished(_) => format!(
+                "Message {} queued for agent '{to}', which is {}; it receives the message if it is continued or runs again.",
                 message.id,
                 status.describe()
             ),
@@ -249,32 +262,55 @@ fn role<'a>(context: &'a SharedContext, agent: &str) -> &'a str {
         .map_or("", |config| config.role_description.as_str())
 }
 
-/// The start notices a running agent receives at each safe turn boundary:
-/// one line for every agent it may message that started after the registry
-/// version it has seen.
-pub(crate) struct StartNotices {
+/// The notices a running agent receives at each safe turn boundary: one
+/// line for every agent it may message that started or finished after the
+/// registry version it has seen.
+pub(crate) struct ActivityNotices {
     pub context: Arc<SharedContext>,
     pub agent_name: String,
 }
 
-impl arko_agents::TurnContextSource for StartNotices {
+impl arko_agents::TurnContextSource for ActivityNotices {
     fn turn_context(&self, task_id: uuid::Uuid) -> Option<String> {
         let recipients = self.context.message_recipients(&self.agent_name);
         if recipients.is_empty() {
             return None;
         }
-        let started = self
+        let changes = self
             .context
             .registry
-            .started_since_seen(task_id, &recipients);
-        (!started.is_empty()).then(|| {
-            started
+            .changes_since_seen(task_id, &recipients);
+        (!changes.is_empty()).then(|| {
+            changes
                 .iter()
-                .map(|agent| start_notice(&self.context, agent))
+                .map(|change| match change {
+                    ActivityChange::Started(agent) => start_notice(&self.context, agent),
+                    ActivityChange::Finished(agent, outcome) => {
+                        finish_notice(&self.context, agent, outcome)
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         })
     }
+}
+
+/// The notice that `agent` finished with `outcome`.
+pub(crate) fn finish_notice(
+    context: &SharedContext,
+    agent: &str,
+    outcome: &crate::workflow::result::AgentRunStatus,
+) -> String {
+    let status = AgentStatus::Finished(outcome.clone()).describe();
+    let messages = if context.keeps_messages_for_finished() {
+        "Messages you send it are kept until it is continued or runs again."
+    } else {
+        "It no longer receives messages, so don't wait for a reply from it."
+    };
+    format!(
+        "Agent `{agent}` (role: {}) is {status}. {messages}",
+        role(context, agent)
+    )
 }
 
 /// The notice that `agent` started.

@@ -99,6 +99,14 @@ impl SharedContext {
         })
     }
 
+    /// Whether messages to a finished agent are kept for its next run; see
+    /// [`MessagingPolicy::keep_for_finished`](crate::messaging::MessagingPolicy::keep_for_finished).
+    pub fn keeps_messages_for_finished(&self) -> bool {
+        self.messaging
+            .as_ref()
+            .is_some_and(|policy| policy.keep_for_finished)
+    }
+
     /// The agents that may message `agent_name` with `send_message`:
     /// registered agents other than itself whose messaging policy permits it.
     /// Empty when messaging is disabled; the agent is then not offered

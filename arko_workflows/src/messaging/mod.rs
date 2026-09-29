@@ -55,6 +55,12 @@ pub struct MessagingPolicy {
     /// set is empty); an agent without an entry may message every other
     /// agent.
     pub recipients: HashMap<String, HashSet<String>>,
+    /// Opt-in: `send_message` to a finished agent queues the message for
+    /// the agent's next run (a continuation or a new run) instead of
+    /// failing. Off by default: a message to a finished agent may never be
+    /// read, and the sender should know. See
+    /// [`keep_messages_for_finished`](Self::keep_messages_for_finished).
+    pub keep_for_finished: bool,
 }
 
 impl MessagingPolicy {
@@ -74,6 +80,15 @@ impl MessagingPolicy {
             agent.into(),
             recipients.into_iter().map(Into::into).collect(),
         );
+        self
+    }
+
+    /// Messages to a finished agent are kept for its next run instead of
+    /// being refused; its finish notice says so. Suits workflows that
+    /// continue or run agents again: a lead that finished before a worker
+    /// replied gets the reply when it is continued.
+    pub fn keep_messages_for_finished(mut self) -> Self {
+        self.keep_for_finished = true;
         self
     }
 

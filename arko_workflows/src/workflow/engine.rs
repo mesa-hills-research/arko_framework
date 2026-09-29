@@ -1010,7 +1010,7 @@ impl Drop for Reservation {
 }
 
 /// The heading of the initial prompt's list of the agents it may message.
-const ROSTER_HEADING: &str = "\n\n# Agents you can message\n\nMessage these agents with send_message while they are running or waiting; call list_recipients for their current status. You are told when one starts.\n";
+const ROSTER_HEADING: &str = "\n\n# Agents you can message\n\nMessage these agents with send_message while they are running or waiting; call list_recipients for their current status. You are told when one starts or finishes.\n";
 
 /// `prompt` without the list of agents it may message.
 pub(crate) fn without_roster(prompt: &str) -> &str {
@@ -1988,7 +1988,7 @@ impl WorkflowEngine {
         let started_task = task.clone();
         let host_decisions = HostDecisions::new(driven);
         let runtime = AgentRuntime::new(self.llm_client.clone())
-            .with_turn_context(Arc::new(StartNotices {
+            .with_turn_context(Arc::new(ActivityNotices {
                 context: ctx.clone(),
                 agent_name: agent_name.to_string(),
             }))

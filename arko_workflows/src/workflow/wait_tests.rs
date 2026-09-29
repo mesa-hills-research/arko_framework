@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use super::*;
 use crate::messaging::registry::WaitReason;
 use crate::messaging::tools::{
-    LIST_RECIPIENTS_TOOL_NAME, SEND_MESSAGE_TOOL_NAME, StartNotices, WAIT_FOR_MESSAGE_TOOL_NAME,
+    ActivityNotices, LIST_RECIPIENTS_TOOL_NAME, SEND_MESSAGE_TOOL_NAME, WAIT_FOR_MESSAGE_TOOL_NAME,
     WaitForMessageTool,
 };
 use crate::messaging::wait::{
@@ -652,7 +652,7 @@ async fn a_start_or_finish_ends_the_wait_and_start_notices_still_come() {
         run(&workflow, "worker")
     });
     assert_eq!(result, "`worker` started.");
-    let notices = StartNotices {
+    let notices = ActivityNotices {
         context: context.clone(),
         agent_name: "lead".to_string(),
     };

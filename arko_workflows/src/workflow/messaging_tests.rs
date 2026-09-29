@@ -911,3 +911,118 @@ async fn a_handover_restates_the_task_and_keeps_its_messages_read() {
     workflow.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(10), lead.wait()).await;
 }
+
+/// With `keep_messages_for_finished`, a message to a finished agent is
+/// queued for its next run, which gets it in its prompt; without it, the
+/// message is refused (see above).
+#[tokio::test]
+async fn messages_to_a_finished_agent_can_be_kept_for_its_next_run() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|_, _| Some(complete_turn("done", "ok"))).await;
+    let workflow = builder_with(server.client(), &workspace, &["lead", "worker"])
+        .messaging(MessagingPolicy::all().keep_messages_for_finished())
+        .build()
+        .unwrap();
+    let context = workflow.context();
+    let lead = start(&workflow, "lead");
+    context.registry.finish(lead, AgentRunStatus::Completed);
+    let queued = send(&workflow, "worker", "lead", &workspace).await.unwrap();
+    assert!(
+        queued.contains("queued for agent 'lead', which is finished (completed)"),
+        "{queued}"
+    );
+    assert_eq!(context.messages.pending("lead").len(), 1);
+
+    workflow.run_agent("lead", "Lead again.").await.unwrap();
+    let body = server.bodies().remove(0);
+    assert!(user_text(&body).contains("hello"), "{body}");
+    assert!(context.messages.pending("lead").is_empty());
+}
+
+/// A running agent is told when a recipient finishes, and whether messages
+/// to it are still read.
+#[tokio::test]
+async fn a_running_agent_is_told_when_a_recipient_finishes() {
+    for keep in [false, true] {
+        let workspace = Workspace::new();
+        let finished = Arc::new(tokio::sync::Notify::new());
+        let server = ResponsesServer::start_async({
+            let finished = finished.clone();
+            move |_, body| {
+                let finished = finished.clone();
+                Box::pin(async move {
+                    let text = user_text(&body);
+                    if text.contains("Work on it.") {
+                        return Some(Reply::Stream(complete_turn("w", "worked")));
+                    }
+                    let turns = tool_outputs(&body);
+                    if turns == 0 {
+                        // Answer the lead's first request once the worker
+                        // has finished.
+                        finished.notified().await;
+                    }
+                    Some(Reply::Stream(if turns == 0 {
+                        tool_call_turn("p0", "probe", json!({}))
+                    } else {
+                        complete_turn("l", "led")
+                    }))
+                })
+            }
+        })
+        .await;
+        let mut policy = MessagingPolicy::all();
+        if keep {
+            policy = policy.keep_messages_for_finished();
+        }
+        let workflow = Arc::new(
+            builder_with(server.client(), &workspace, &["lead", "worker"])
+                .messaging(policy)
+                .agent_tool("lead", ProbeTool::new("probe", false))
+                .build()
+                .unwrap(),
+        );
+        let lead = workflow
+            .spawn_agent("lead", "Lead the work.")
+            .await
+            .unwrap();
+        server.wait_for_requests(1).await;
+        let worker = workflow.run_agent("worker", "Work on it.").await.unwrap();
+        assert_eq!(worker.status, AgentRunStatus::Completed);
+        finished.notify_one();
+        let led = tokio::time::timeout(Duration::from_secs(10), lead.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(led.status, AgentRunStatus::Completed);
+
+        let lead_bodies = server
+            .bodies()
+            .into_iter()
+            .filter(|body| is_request_of(body, "Lead the work."))
+            .map(|body| user_text(&body))
+            .collect::<Vec<_>>();
+        assert_eq!(lead_bodies.len(), 2);
+        let expected = format!(
+            "Agent `worker` (role: worker role) is finished (completed). {}",
+            if keep {
+                "Messages you send it are kept until it is continued or runs again."
+            } else {
+                "It no longer receives messages, so don't wait for a reply from it."
+            }
+        );
+        assert!(!lead_bodies[0].contains(&expected), "{}", lead_bodies[0]);
+        assert_eq!(
+            lead_bodies[1].matches(&expected).count(),
+            1,
+            "{}",
+            lead_bodies[1]
+        );
+        // It started and finished between the lead's requests: no start
+        // notice.
+        assert!(
+            !lead_bodies[1].contains("is now running"),
+            "{}",
+            lead_bodies[1]
+        );
+    }
+}

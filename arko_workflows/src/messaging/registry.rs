@@ -123,6 +123,21 @@ pub struct AgentRecord {
     /// How the agent's latest run ended, when no run is running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished: Option<AgentRunStatus>,
+    /// The registry version at which the agent last finished: its last
+    /// running run ended (0: never, or not recorded by an older version).
+    #[serde(default)]
+    pub last_finish: u64,
+}
+
+/// A change in an agent's activity a run is told about; see
+/// [`AgentRegistry::changes_since_seen`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ActivityChange {
+    /// The agent started and is running.
+    Started(String),
+    /// The agent finished, with its latest run's outcome, and no run of it
+    /// is running.
+    Finished(String, AgentRunStatus),
 }
 
 /// The registry state a checkpoint saves:
@@ -314,7 +329,12 @@ impl AgentRegistry {
             return;
         };
         state.saved.version += 1;
-        state.saved.agents.entry(run.agent).or_default().finished = Some(outcome);
+        let last_run = !state.runs.values().any(|other| other.agent == run.agent);
+        let record = state.saved.agents.entry(run.agent).or_default();
+        record.finished = Some(outcome);
+        if last_run {
+            record.last_finish = state.saved.version;
+        }
         self.publish(state);
     }
 
@@ -453,24 +473,48 @@ impl AgentRegistry {
     /// `task_id` has seen and are still running, in order; the run has then
     /// seen the current version. A run without a seen version (a task from
     /// an older checkpoint) is told about every running recipient.
+    #[cfg(test)]
     pub fn started_since_seen(&self, task_id: Uuid, recipients: &[String]) -> Vec<String> {
+        self.changes_since_seen(task_id, recipients)
+            .into_iter()
+            .filter_map(|change| match change {
+                ActivityChange::Started(agent) => Some(agent),
+                ActivityChange::Finished(..) => None,
+            })
+            .collect()
+    }
+
+    /// The recipients (of `recipients`) that started or finished after the
+    /// version run `task_id` has seen, in order: those running that started
+    /// since, and those not running that finished since (one that did both
+    /// is reported finished). The run has then seen the current version. A
+    /// run without a seen version (a task from an older checkpoint) is told
+    /// about every running recipient, and none that finished.
+    pub(crate) fn changes_since_seen(
+        &self,
+        task_id: Uuid,
+        recipients: &[String],
+    ) -> Vec<ActivityChange> {
         let mut guard = self.state.lock();
         let state = &mut *guard;
-        let seen = state.saved.seen.get(&task_id).copied().unwrap_or(0);
-        let started = recipients
+        let seen = state.saved.seen.get(&task_id).copied();
+        let changes = recipients
             .iter()
-            .filter(|agent| {
-                state.runs.values().any(|run| &run.agent == *agent)
-                    && state
-                        .saved
-                        .agents
-                        .get(*agent)
-                        .is_some_and(|record| record.last_start > seen)
+            .filter_map(|agent| {
+                let record = state.saved.agents.get(agent)?;
+                let running = state.runs.values().any(|run| &run.agent == agent);
+                if running {
+                    (record.last_start > seen.unwrap_or(0))
+                        .then(|| ActivityChange::Started(agent.clone()))
+                } else {
+                    let outcome = record.finished.clone()?;
+                    seen.filter(|seen| record.last_finish > *seen)
+                        .map(|_| ActivityChange::Finished(agent.clone(), outcome))
+                }
             })
-            .cloned()
             .collect();
         state.saved.seen.insert(task_id, state.saved.version);
-        started
+        changes
     }
 }
 
@@ -872,5 +916,65 @@ mod tests {
         // An older checkpoint has no registry.
         let legacy = AgentRegistry::restore(None, &[]);
         assert_eq!(status_of(&legacy, "worker"), AgentStatus::NotStarted);
+    }
+
+    /// A run is told once when a recipient finishes after its roster, only
+    /// when the recipient's last running run ends; a recipient that started
+    /// and finished since is reported finished, and a finish before the
+    /// roster is not reported.
+    #[test]
+    fn a_run_is_told_about_each_finish_after_its_roster_once() {
+        let registry = AgentRegistry::default();
+        let recipients = names(&["early", "worker"]);
+        let early = Uuid::new_v4();
+        registry.start(&[(early, "early")]);
+        registry.finish(early, AgentRunStatus::Completed);
+        let lead = Uuid::new_v4();
+        registry.start(&[(lead, "lead")]);
+        registry.roster(lead, &recipients, false);
+
+        let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
+        registry.start(&[(first, "worker"), (second, "worker")]);
+        registry.finish(first, AgentRunStatus::Completed);
+        // Another run of it still runs: it started, not finished.
+        assert_eq!(
+            registry.changes_since_seen(lead, &recipients),
+            [ActivityChange::Started("worker".into())]
+        );
+        registry.finish(second, AgentRunStatus::Failed);
+        assert_eq!(
+            registry.changes_since_seen(lead, &recipients),
+            [ActivityChange::Finished(
+                "worker".into(),
+                AgentRunStatus::Failed
+            )]
+        );
+        assert!(registry.changes_since_seen(lead, &recipients).is_empty());
+
+        // Started and finished between two looks: reported finished.
+        let again = Uuid::new_v4();
+        registry.start(&[(again, "worker")]);
+        registry.finish(again, AgentRunStatus::Completed);
+        assert_eq!(
+            registry.changes_since_seen(lead, &recipients),
+            [ActivityChange::Finished(
+                "worker".into(),
+                AgentRunStatus::Completed
+            )]
+        );
+
+        // A run with no seen version (an older checkpoint's) hears of no
+        // finish.
+        assert!(
+            registry
+                .changes_since_seen(Uuid::new_v4(), &recipients)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn records_saved_before_finish_versions_load() {
+        let record: AgentRecord = serde_json::from_str(r#"{"last_start":3}"#).unwrap();
+        assert_eq!(record.last_finish, 0);
     }
 }
