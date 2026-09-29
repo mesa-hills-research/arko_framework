@@ -79,5 +79,5 @@ Choose tools according to that level. `ask_user`, approval requests, error-recov
 - Use the framework’s actual builder and execution APIs; do not invent a separate scheduler or graph layer.
 - Run `cargo fmt --all -- --check` and the repository’s required locked checks after implementation.
 - Exercise a dry run before provider calls when the workflow supports one.
-- Workflow runs are expensive: run live tests of the pause, error, verification-rejection, cancellation, budget, persistence, and resume paths, or iterate on the workflow against tests or benchmarks, only when explicitly requested.
+- Workflow runs are expensive. Gauge the user's budget before running live tests of the pause, error, verification-rejection, cancellation, budget, persistence, and resume paths, or iterating on the workflow against tests or benchmarks; when the user authorizes extensive testing and refinement, go ahead. At any level of testing, start simple and change the workflow only where the results show it's necessary.
 - Report incomplete work, pauses, cancellation causes, costs, and the evidence used to accept a result.

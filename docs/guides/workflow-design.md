@@ -105,7 +105,7 @@ Keep saved state compatible with earlier versions. Add serde defaults for new fi
 
 Subscribe to workflow events or register hooks when the host needs progress, audit records, or live status. Report agent results, waiting states, pauses, costs, and cancellation causes separately. A final summary should identify incomplete work and the evidence used to accept completed work.
 
-Build and validate the workflow before making provider calls. The complete workflow example supports a dry run that builds the workflow and writes a checkpoint without credentials or network access. Use that path to catch missing agents, invalid policies, unknown targets, and persistence errors early. Workflow runs are expensive, so live test runs (the smallest real run, an interruption and resume, a verifier rejection, a missing human answer, a tool failure, or a budget boundary) and iterating on a workflow against tests or benchmarks should happen only when explicitly requested.
+Build and validate the workflow before making provider calls. The complete workflow example supports a dry run that builds the workflow and writes a checkpoint without credentials or network access. Use that path to catch missing agents, invalid policies, unknown targets, and persistence errors early. Workflow runs are expensive, so gauge the user's budget before live test runs (the smallest real run, an interruption and resume, a verifier rejection, a missing human answer, a tool failure, or a budget boundary) or iterating on a workflow against tests or benchmarks. When the user authorizes extensive testing and refinement, go ahead. At any level of testing, start simple and change the workflow only where the results show it's necessary.
 
 ## Workflow checklist
 
@@ -120,4 +120,4 @@ Build and validate the workflow before making provider calls. The complete workf
 - Set-and-forget workflows keep `ApproveAll` and `Automatic`; cancellation, budgets, and human input are configured for the deployment.
 - External side effects use durable steps and define in-doubt resolution.
 - Checkpoints and old saved data remain loadable, and resume behavior is explicit.
-- A dry run passes. Live test runs and benchmark iterations happen only when explicitly requested.
+- A dry run passes. Live test runs and benchmark iterations fit the budget the user has authorized.

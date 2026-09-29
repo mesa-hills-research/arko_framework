@@ -9,8 +9,9 @@
   only when it falls short. Aim for autonomy: set-and-forget workflows keep the default
   `ApprovalPolicy::ApproveAll` and `ErrorRecoveryPolicy::Automatic`; don't trade them
   for `Limited`, `ReturnToCaller`, or approval gates out of caution. Workflow runs are
-  expensive, so iterate on a workflow with live test runs or benchmarks only when
-  explicitly asked.
+  expensive, so gauge the user's budget before iterating on a workflow with live test
+  runs or benchmarks; extensive testing and refinement is fine once they authorize it.
+  Either way, start simple and change only what the results show is necessary.
 - Crates: arko_agents builds on arko_ai, arko_workflows on both, and arko_index on
   arko_ai.
 - Building needs Rust 1.89 or later and a C compiler. Run `cargo fmt --all` before
