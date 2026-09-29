@@ -31,6 +31,12 @@ directory contains runnable programs.
 
 - [Defaults reference](docs/reference-map.md): every setting's default across the
   four crates, the opt-ins, and the behaviours to know before configuring them.
+- [Prompting guides](docs/prompting/README.md): model-specific guidance for Opus 5.5,
+  Fable 5.1, and Astra 6.
+- [General agent design guide](docs/guides/agent-design.md): agent roles, tools,
+  prompting, model selection, and coordination.
+- [General workflow design guide](docs/guides/workflow-design.md): workflow topology,
+  shared state, verification, persistence, and lifecycle design.
 - [Context management](docs/context-efficiency.md): versioned memory reads,
   file-tree change notices, tool-result distillation, and background shell jobs.
 - [Interactive terminals](docs/interactive-terminals.md): PTY and pipe terminal
