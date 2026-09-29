@@ -95,6 +95,15 @@ pub enum UserCommand {
         changes: Vec<crate::task::RefusalResolution>,
     },
 
+    /// Start a handover at the next turn boundary where one can start: the
+    /// agent writes a report, and its conversation is replaced with a fresh
+    /// one that starts from the task prompt and the report. Works whether
+    /// or not [`AgentConfig::handover`](crate::agent_config::AgentConfig::handover)
+    /// is set; ignored while a handover is already under way. It doesn't
+    /// end a wait: a task awaiting a command hands over after the wait. See
+    /// [`crate::handover`].
+    RequestHandover,
+
     /// Request to gracefully cancel the currently running task.
     CancelTask,
 

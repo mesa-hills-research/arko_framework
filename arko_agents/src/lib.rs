@@ -1,6 +1,7 @@
 pub mod agent_config;
 pub mod error;
 mod file_tree;
+pub mod handover;
 pub mod mcp;
 pub mod parsing;
 pub mod runtime;
@@ -21,6 +22,7 @@ pub use agent_config::{
     ToolErrorPolicy, UsageLimitPolicy, UserReminder,
 };
 pub use error::ArkoAgentsError;
+pub use handover::{HandoverConfig, HandoverHook, HandoverRecord, HandoverRequest, HandoverSeed};
 pub use mcp::{McpConfig, McpManager, McpServerConfig};
 pub use parsing::{
     ParsedToolCall, RawParserEvent, ToolAssemblyError, ToolCallGroup, ToolCallParser,

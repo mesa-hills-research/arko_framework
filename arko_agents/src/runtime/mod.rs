@@ -8,6 +8,7 @@ use self::event::AgentEvent;
 use self::r#loop::AgentLoop;
 pub use self::turn_context::TurnContextSource;
 use crate::error::ArkoAgentsError;
+use crate::handover::HandoverHook;
 use crate::skill::SkillPromptContext;
 use crate::task::Task;
 use crate::tool::{InterceptorConfig, ToolExecutionMiddleware, ToolRegistry};
@@ -62,6 +63,7 @@ pub struct AgentRuntime {
     llm_client: Arc<LLMClient>,
     turn_context: Option<Arc<dyn TurnContextSource>>,
     host_decisions: HostDecisions,
+    handover_hook: Option<Arc<dyn HandoverHook>>,
 }
 
 impl AgentRuntime {
@@ -71,6 +73,7 @@ impl AgentRuntime {
             llm_client,
             turn_context: None,
             host_decisions: HostDecisions::default(),
+            handover_hook: None,
         }
     }
 
@@ -86,6 +89,13 @@ impl AgentRuntime {
     /// runtime runs; see [`TurnContextSource`].
     pub fn with_turn_context(mut self, source: Arc<dyn TurnContextSource>) -> Self {
         self.turn_context = Some(source);
+        self
+    }
+
+    /// Calls `hook` when a task this runtime runs hands its conversation
+    /// over; see [`HandoverHook`].
+    pub fn with_handover_hook(mut self, hook: Arc<dyn HandoverHook>) -> Self {
+        self.handover_hook = Some(hook);
         self
     }
 
@@ -132,6 +142,7 @@ impl AgentRuntime {
         );
         agent_loop.turn_context = self.turn_context.clone();
         agent_loop.host_decisions = self.host_decisions.clone();
+        agent_loop.handover_hook = self.handover_hook.clone();
         agent_loop.bind_tools(&command_sender);
 
         let task_join_handle = tokio::spawn(async move { agent_loop.run().await });

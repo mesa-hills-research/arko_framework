@@ -213,4 +213,24 @@ pub enum AgentEvent {
         waiting_until_unix_ms: Option<u64>,
         error_message: String,
     },
+    /// A handover started: the agent was asked for its handover report,
+    /// and its tool calls other than `complete_task` are rejected until it
+    /// replies. See [`crate::handover`].
+    HandoverRequested {
+        /// The input size of the latest request of the conversation being
+        /// replaced; 0 when a host asked before any request.
+        input_tokens: usize,
+    },
+    /// The conversation was replaced with a fresh one that starts from the
+    /// task prompt and the report ([`Task::handovers`](crate::task::Task::handovers)
+    /// holds the record).
+    ConversationHandedOver {
+        /// The report the agent wrote.
+        report: String,
+        /// The input size of the latest request of the replaced
+        /// conversation.
+        input_tokens: usize,
+        /// How many handovers the task has made, this one included.
+        handovers: usize,
+    },
 }

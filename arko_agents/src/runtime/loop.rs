@@ -6,6 +6,7 @@ use crate::agent_config::{
     UsageLimitPolicy,
 };
 use crate::error::ArkoAgentsError;
+use crate::handover::{HandoverHook, HandoverRecord, HandoverRequest, HandoverSeed};
 use crate::parsing::{
     ParsedToolCall, PromptBuilder, RawParserEvent, ToolCallGroup, ToolCallParser,
     ToolParsingConfig, assemble_tool_calls,
@@ -93,6 +94,12 @@ fn describe_duration(duration: Duration) -> String {
 /// The runtime's notes on a response it can't use, added to the
 /// conversation before it asks again; see
 /// [`AgentLoop::handle_model_output_failure`].
+/// The result of a tool call made while a handover report is due.
+const HANDOVER_REPORT_DUE: &str = "This call was not run: your handover report is due. Reply with the report as plain text, without calling a tool (call complete_task instead if the task is done).";
+
+/// The note after a reply to a report request that had no text.
+const NO_HANDOVER_REPORT: &str = "Your reply had no text, so no handover report was received. Reply with the handover report as plain text, without calling a tool.";
+
 const NO_NATIVE_TOOL_CALL: &str = "Your response did not call a tool, so the task is still open. Continue with your tools, or call complete_task with a summary if the task is finished.";
 const NO_TEXT_TOOL_CALL: &str = "Your response did not contain a tool call. Use one of your tools in the format the system prompt describes, or complete_task if the task is finished.";
 
@@ -266,6 +273,15 @@ fn strip_openai_reasoning(message: &mut ai::Message) {
     }
 }
 
+/// The text of a message.
+fn message_text(message: &ai::Message) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|content| content.as_text())
+        .collect()
+}
+
 /// The text of an output-based turn without its tool-call markup.
 fn parsed_plain_text(events: &[RawParserEvent]) -> String {
     events
@@ -371,6 +387,8 @@ pub struct AgentLoop {
     execution_middleware: Option<Arc<dyn ToolExecutionMiddleware>>,
     /// Asked for context at each safe turn boundary.
     pub(super) turn_context: Option<Arc<dyn super::TurnContextSource>>,
+    /// Called when the conversation is handed over.
+    pub(super) handover_hook: Option<Arc<dyn HandoverHook>>,
     tool_context_cursor: usize,
     file_tree_baseline: Option<crate::file_tree::FileTreeSnapshot>,
     file_tree_error: Option<String>,
@@ -456,6 +474,7 @@ impl AgentLoop {
             interceptor_config,
             execution_middleware,
             turn_context: None,
+            handover_hook: None,
             tool_context_cursor: 0,
             file_tree_baseline: None,
             file_tree_error: None,
@@ -479,6 +498,149 @@ impl AgentLoop {
         if !content.trim().is_empty() {
             self.task.pending_context_injections.push(content);
         }
+    }
+
+    /// Notes a host's [`UserCommand::RequestHandover`]: the report is
+    /// requested at the next boundary where a user message can go. Ignored
+    /// while a handover is under way.
+    fn note_handover_request(&mut self) {
+        if self.task.handover_requested.is_none() {
+            self.task.handover_requested = Some(HandoverRequest {
+                requested_at: chrono::Utc::now(),
+                input_tokens: self.task.current_conversation_context_size().unwrap_or(0),
+                report_requested: false,
+            });
+        }
+    }
+
+    /// The agent was asked for its handover report and hasn't written it.
+    fn handover_report_due(&self) -> bool {
+        self.task
+            .handover_requested
+            .as_ref()
+            .is_some_and(|request| request.report_requested)
+    }
+
+    /// Whether a call to `tool_name` is rejected because the handover report
+    /// is due: every call except `complete_task`.
+    fn handover_blocks(&self, tool_name: &str) -> bool {
+        self.handover_report_due() && tool_name != COMPLETE_TASK_TOOL_NAME
+    }
+
+    /// Before a model request (not a refusal fallback's): asks the agent for
+    /// its handover report when a host asked for a handover or the current
+    /// conversation reached the configured threshold, and a user message can
+    /// go into the conversation.
+    async fn start_handover_if_due(&mut self) -> Result<(), ArkoAgentsError> {
+        if self.handover_report_due() || !self.context_can_be_added_now() {
+            return Ok(());
+        }
+        let context_size = self.task.current_conversation_context_size();
+        let config = self.task.agent_config.handover.clone();
+        if self.task.handover_requested.is_none() {
+            let threshold = config.as_ref().and_then(|config| {
+                config.threshold(self.task.agent_config.llm_config.model.max_input_tokens)
+            });
+            let reached = threshold
+                .zip(context_size)
+                .is_some_and(|(threshold, size)| size >= threshold);
+            if !reached {
+                return Ok(());
+            }
+        }
+        let request = self
+            .task
+            .handover_requested
+            .get_or_insert_with(|| HandoverRequest {
+                requested_at: chrono::Utc::now(),
+                input_tokens: context_size.unwrap_or(0),
+                report_requested: false,
+            });
+        request.report_requested = true;
+        let input_tokens = request.input_tokens;
+        let report_request = config
+            .as_ref()
+            .map_or(crate::handover::DEFAULT_REPORT_REQUEST, |config| {
+                config.report_request()
+            });
+        self.task.conversation.add_user_message(report_request);
+        self.task.mark_last_message_runtime();
+        self.task.increment_user_message_count();
+        log::info!(
+            "Task {}: Handover requested at {} input tokens.",
+            self.task.id,
+            input_tokens
+        );
+        self.emit_event(AgentEvent::HandoverRequested { input_tokens })
+            .await
+    }
+
+    /// A reply without tool calls while the handover report is due: its
+    /// text is the report, and the conversation is handed over; a reply
+    /// without text is answered with a note, like a turn without a tool
+    /// call.
+    async fn take_handover_report(&mut self, report: String) -> Result<(), ArkoAgentsError> {
+        if report.trim().is_empty() {
+            return self
+                .handle_model_output_failure(NO_HANDOVER_REPORT.to_string())
+                .await;
+        }
+        self.complete_handover(report).await
+    }
+
+    /// Replaces the conversation with a fresh one that starts from the
+    /// seed (the [`HandoverHook`]'s, or the task's initial prompt) and the
+    /// report, and resets what the loop keeps about the old one.
+    async fn complete_handover(&mut self, report: String) -> Result<(), ArkoAgentsError> {
+        let report = report.trim().to_string();
+        let seed = match &self.handover_hook {
+            Some(hook) => hook.on_handover(&self.task, &report),
+            None => HandoverSeed::for_task(&self.task),
+        };
+        let input_tokens = self
+            .task
+            .handover_requested
+            .take()
+            .map_or(0, |request| request.input_tokens);
+        let replaced_messages = self.task.start_fresh_conversation();
+        self.task.handovers.push(HandoverRecord {
+            at: chrono::Utc::now(),
+            input_tokens,
+            replaced_messages,
+            report: report.clone(),
+        });
+        let prompt_builder =
+            PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None);
+        let first_message =
+            prompt_builder.format_initial_task_prompt(&self.task, &seed.message(&report))?;
+        self.task.conversation.add_user_message(&first_message);
+        self.task.increment_user_message_count();
+
+        // What the loop keeps about the replaced conversation: tools that
+        // track what the conversation holds start over (see
+        // `observe_committed_tool_context`), the file tree is sent in full
+        // again, and the cache monitor judges the fresh conversation alone.
+        self.tool_context_cursor = usize::MAX;
+        self.file_tree_baseline = None;
+        self.file_tree_error = None;
+        self.details_sent_with = None;
+        self.cache_warned = false;
+        self.cache_pause_episode = false;
+        self.cache_pause_pending = None;
+        self.reset_llm_recovery();
+
+        log::info!(
+            "Task {}: Conversation handed over ({} messages replaced).",
+            self.task.id,
+            replaced_messages
+        );
+        let handovers = self.task.handovers.len();
+        self.emit_event(AgentEvent::ConversationHandedOver {
+            report,
+            input_tokens,
+            handovers,
+        })
+        .await
     }
 
     fn observe_committed_tool_context(&mut self) {
@@ -760,6 +922,10 @@ impl AgentLoop {
                     let stopped = match command {
                         Some(UserCommand::InjectContext { content }) => {
                             self.queue_context_injection(content);
+                            None
+                        }
+                        Some(UserCommand::RequestHandover) => {
+                            self.note_handover_request();
                             None
                         }
                         Some(UserCommand::CancelTask) => Some(ToolsStopped::Cancelled),
@@ -1374,6 +1540,7 @@ impl AgentLoop {
     ) -> Result<bool, ArkoAgentsError> {
         match command {
             Some(UserCommand::InjectContext { content }) => self.queue_context_injection(content),
+            Some(UserCommand::RequestHandover) => self.note_handover_request(),
             Some(UserCommand::CancelTask) => {
                 self.task.set_state(TaskState::Cancelled {
                     reason: CANCELLED_BY_USER.into(),
@@ -1409,6 +1576,7 @@ impl AgentLoop {
                 Ok(UserCommand::InjectContext { content }) => {
                     self.queue_context_injection(content);
                 }
+                Ok(UserCommand::RequestHandover) => self.note_handover_request(),
                 Ok(UserCommand::CancelTask) => {
                     self.task.set_state(TaskState::Cancelled {
                         reason: CANCELLED_BY_USER.to_string(),
@@ -1652,6 +1820,7 @@ impl AgentLoop {
             .usage_history
             .iter()
             .enumerate()
+            .skip(self.task.conversation_usage_start)
             .filter(|(index, _)| !self.task.fallback_calls.contains(index))
             .map(|(_, usage)| usage.clone())
             .collect();
@@ -1904,6 +2073,10 @@ impl AgentLoop {
                         }
                         if let UserCommand::HostDeciding = cmd {
                             self.command_wait = CommandWait::HostDeciding;
+                            continue 'main_loop;
+                        }
+                        if let UserCommand::RequestHandover = cmd {
+                            self.note_handover_request();
                             continue 'main_loop;
                         }
                         let mut next_user_message_from_command = String::new();
@@ -2731,6 +2904,7 @@ impl AgentLoop {
             if self.task.fallback_for.is_none() {
                 self.flush_context_injections()?;
                 self.refresh_file_tree_context();
+                self.start_handover_if_due().await?;
             }
             self.ensure_user_turn_before_request()?;
             if !self.apply_plan_usage_threshold().await? {
@@ -2818,6 +2992,7 @@ impl AgentLoop {
                             Some(UserCommand::InjectContext { content }) => {
                                 self.queue_context_injection(content);
                             }
+                            Some(UserCommand::RequestHandover) => self.note_handover_request(),
                             Some(_) => {}
                             None => {
                                 if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
@@ -2984,12 +3159,23 @@ impl AgentLoop {
                     .unwrap_or_default();
 
                 if tool_calls.is_empty() {
+                    self.reject_announced_calls(&mut native_stream_call_ids, UNDELIVERED_CALL)
+                        .await?;
+                    if self.handover_report_due() {
+                        let report = final_generation_response
+                            .as_ref()
+                            .map(|response| message_text(&response.message))
+                            .unwrap_or_default();
+                        self.take_handover_report(report).await?;
+                        if self.task.current_state.is_terminal() {
+                            break 'main_loop;
+                        }
+                        continue 'main_loop;
+                    }
                     log::warn!(
                         "LLM response for task {} did not contain a native tool call.",
                         self.task.id
                     );
-                    self.reject_announced_calls(&mut native_stream_call_ids, UNDELIVERED_CALL)
-                        .await?;
                     self.handle_model_output_failure(NO_NATIVE_TOOL_CALL.to_string())
                         .await?;
                     if self.task.current_state.is_terminal() {
@@ -3043,6 +3229,20 @@ impl AgentLoop {
                         .await?;
                         results[call_index] =
                             Some(ai::ToolResult::error_from_tool_call(ai_tool_call, &reason));
+                        continue;
+                    }
+
+                    if self.handover_blocks(&ai_tool_call.name) {
+                        self.emit_event(AgentEvent::ToolRejected {
+                            tool_call_id,
+                            tool_name: ai_tool_call.name.clone(),
+                            reason: Some(HANDOVER_REPORT_DUE.to_string()),
+                        })
+                        .await?;
+                        results[call_index] = Some(ai::ToolResult::error_from_tool_call(
+                            ai_tool_call,
+                            HANDOVER_REPORT_DUE,
+                        ));
                         continue;
                     }
 
@@ -3406,6 +3606,14 @@ impl AgentLoop {
                             }
                             next_user_message_str_accumulated.push_str(&error_msg);
                         } else if tool_call_groups.is_empty() {
+                            if self.handover_report_due() {
+                                self.take_handover_report(plain_text_from_assembler.clone())
+                                    .await?;
+                                if self.task.current_state.is_terminal() {
+                                    break 'main_loop;
+                                }
+                                continue 'main_loop;
+                            }
                             if !self.task.current_state.is_terminal() {
                                 self.handle_model_output_failure(NO_TEXT_TOOL_CALL.to_string())
                                     .await?;
@@ -3511,6 +3719,28 @@ impl AgentLoop {
                                     parameters: parsed_tool_call_ref.parameters.clone(),
                                 })
                                 .await?;
+
+                                if self.handover_blocks(&parsed_tool_call_ref.name) {
+                                    self.emit_event(AgentEvent::ToolRejected {
+                                        tool_call_id,
+                                        tool_name: parsed_tool_call_ref.name.clone(),
+                                        reason: Some(HANDOVER_REPORT_DUE.to_string()),
+                                    })
+                                    .await?;
+                                    auto_approved_call_results.push(
+                                        PromptBuilder::new(
+                                            &self.task.agent_config,
+                                            vec![],
+                                            &self.parsing_config,
+                                            None,
+                                        )
+                                        .format_tool_execution_error_as_user_message(
+                                            &parsed_tool_call_ref.name,
+                                            HANDOVER_REPORT_DUE,
+                                        ),
+                                    );
+                                    continue;
+                                }
 
                                 let tool_arc =
                                     match self.tool_registry.get(&parsed_tool_call_ref.name) {
@@ -5502,3 +5732,7 @@ mod parallel_tests;
 #[cfg(test)]
 #[path = "command_wait_tests.rs"]
 mod command_wait_tests;
+
+#[cfg(test)]
+#[path = "handover_tests.rs"]
+mod handover_tests;

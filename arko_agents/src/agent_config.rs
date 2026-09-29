@@ -1,4 +1,5 @@
 use crate::error::ArkoAgentsError;
+use crate::handover::HandoverConfig;
 use crate::parsing::ToolParsingConfig;
 use crate::skill::SkillsConfig;
 use crate::task::Task;
@@ -1055,6 +1056,13 @@ pub struct AgentConfig {
     /// of the same provider is unverified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal_fallback: Option<AgentLLMConfig>,
+    /// Opt-in: once the context reaches a threshold, the agent writes a
+    /// report and continues from it in a fresh conversation, in the same
+    /// task; see [`crate::handover`]. Off by default. A host can ask for a
+    /// handover with [`UserCommand::RequestHandover`](crate::runtime::command::UserCommand::RequestHandover)
+    /// whether or not this is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handover: Option<HandoverConfig>,
 }
 
 impl AgentConfig {
@@ -1196,6 +1204,9 @@ impl AgentConfig {
     pub fn validate(&self) -> Result<(), ArkoAgentsError> {
         self.llm_retry_config.validate()?;
         self.monitoring.validate()?;
+        if let Some(handover) = &self.handover {
+            handover.validate()?;
+        }
         self.tool_config.validate()?;
         if self.user_command_timeout_seconds == Some(0) {
             return Err(ArkoAgentsError::BuilderError {
@@ -1271,6 +1282,7 @@ pub struct AgentConfigBuilder {
     skills_config: Option<SkillsConfig>,
     monitoring: Option<MonitoringConfig>,
     refusal_fallback: Option<AgentLLMConfig>,
+    handover: Option<HandoverConfig>,
 }
 
 impl AgentConfigBuilder {
@@ -1371,6 +1383,12 @@ impl AgentConfigBuilder {
         self
     }
 
+    /// Sets the opt-in conversation handover; see [`AgentConfig::handover`].
+    pub fn handover(mut self, config: HandoverConfig) -> Self {
+        self.handover = Some(config);
+        self
+    }
+
     /// Builds the `AgentConfig`, returning an error if required fields are missing.
     pub fn build(self) -> Result<AgentConfig, ArkoAgentsError> {
         let llm_retry_config = self.llm_retry_config.unwrap_or_default();
@@ -1414,6 +1432,7 @@ impl AgentConfigBuilder {
             skills_config: self.skills_config,
             monitoring,
             refusal_fallback: self.refusal_fallback,
+            handover: self.handover,
         };
         config.validate()?;
         Ok(config)

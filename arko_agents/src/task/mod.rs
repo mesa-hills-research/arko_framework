@@ -1,5 +1,6 @@
 use crate::agent_config::{AgentConfig, DeveloperDefinableEnvironmentDetail};
 use crate::error::ArkoAgentsError;
+use crate::handover::{HandoverRecord, HandoverRequest};
 use arko_ai::{ModelCallUsage, UsageInfo};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -394,6 +395,26 @@ pub struct Task {
     /// runs again still gets it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_context_injections: Vec<String>,
+    /// Set while the runtime waits for the agent's handover report; see
+    /// [`crate::handover`]. Saved so a task stopped in between still hands
+    /// over when it runs again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handover_requested: Option<HandoverRequest>,
+    /// The handovers this task has made, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handovers: Vec<HandoverRecord>,
+    /// Index in `usage_history` of the current conversation's first model
+    /// call: 0 until a handover. Calls before it belong to replaced
+    /// conversations.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub conversation_usage_start: usize,
+    /// The same index in `model_call_usage_history`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub conversation_model_call_start: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 /// A failed tool call the task will pause on; see
@@ -459,6 +480,10 @@ impl Task {
             plan_usage_threshold_reported: None,
             monitor_pause: false,
             pending_context_injections: Vec::new(),
+            handover_requested: None,
+            handovers: Vec::new(),
+            conversation_usage_start: 0,
+            conversation_model_call_start: 0,
         }
     }
 
@@ -467,7 +492,13 @@ impl Task {
     ///
     /// Returns the usage with `input_delta_from_previous_call` populated.
     pub fn record_model_call_usage(&mut self, mut usage: ModelCallUsage) -> ModelCallUsage {
-        if let Some(previous) = self.model_call_usage_history.last() {
+        // The first call of a conversation that replaced another has no
+        // previous call to compare with.
+        let previous = self
+            .model_call_usage_history
+            .get(self.conversation_model_call_start..)
+            .and_then(|calls| calls.last());
+        if let Some(previous) = previous {
             let delta = usage.input_tokens as isize - previous.input_tokens as isize;
             usage = usage.with_input_delta(delta);
         }
@@ -531,6 +562,8 @@ impl Task {
             ));
         }
         self.set_state(TaskState::InProgress);
+        // A report requested before the task completed is no longer due.
+        self.handover_requested = None;
         // A continuation is a user message just like an answer to a paused
         // task. Keep the per-message environment details and reminder rules
         // consistent across both paths.
@@ -653,6 +686,38 @@ impl Task {
     /// its total input tokens, including cached input.
     pub fn current_context_size(&self) -> Option<usize> {
         self.usage_history.last().map(|u| u.input_tokens)
+    }
+
+    /// The context size of the current conversation's latest model call:
+    /// [`current_context_size`](Self::current_context_size), but `None`
+    /// after a handover until the fresh conversation's first call.
+    pub fn current_conversation_context_size(&self) -> Option<usize> {
+        if self.usage_history.len() > self.conversation_usage_start {
+            self.current_context_size()
+        } else {
+            None
+        }
+    }
+
+    /// Replaces the conversation with an empty one that keeps the system
+    /// message, cache settings and model, and returns how many messages were
+    /// replaced. Clears what refers to the old messages (the runtime-message
+    /// indices, a refused input, the ChatGPT turn state) and the user
+    /// message count, and marks where the fresh conversation's usage starts.
+    /// Pending context injections are kept, to be added to the fresh
+    /// conversation. The runtime calls this during a handover; the caller
+    /// adds the fresh conversation's first message.
+    pub fn start_fresh_conversation(&mut self) -> usize {
+        let replaced = self.conversation.messages.len();
+        self.conversation.messages.clear();
+        self.conversation.openai_turn_state = None;
+        self.runtime_messages.clear();
+        self.runtime_text_messages.clear();
+        self.refused_input = None;
+        self.user_message_count = 0;
+        self.conversation_usage_start = self.usage_history.len();
+        self.conversation_model_call_start = self.model_call_usage_history.len();
+        replaced
     }
 
     /// Increments the user message count and returns the new count.
