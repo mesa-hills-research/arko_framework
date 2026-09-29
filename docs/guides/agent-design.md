@@ -23,7 +23,7 @@ Anything you put in front of an agent steers it. Mentioning a rule or concept, o
 
 ## Model Choice
 
-Opus 5.5 and GPT-6.1 Sol are the default choices for most work. Both are strong general-purpose models that perform about as well as Astra 6. GPT-6.1 Sol has the lower list price ($2 input and $10 output per million tokens, against $4 and $20 for Opus 5.5), and it is the natural choice when you already have OAuth access through a ChatGPT subscription. Use Medium reasoning effort for straightforward tasks that still need more intelligence than Luna.
+Opus 5.5 and GPT-6.1 Sol are the default choices for most work. Both are strong general-purpose models that perform about as well as Astra 6. GPT-6.1 Sol has the lower list price ($2 input and $10 output per million tokens, against $4 and $20 for Opus 5.5), and it is the natural choice when you already have OAuth access through a ChatGPT subscription. Use High or XHigh reasoning effort for GPT-6.1 Sol. Use Medium reasoning effort for straightforward tasks that still need more intelligence than Luna.
 
 Fable 5.1 and Astra 6 are also strong choices, but they cost more. They are especially useful as tag-in models when the default model would benefit from a different perspective or an independent pass over the work. Use XHigh reasoning effort by default for Opus 5.5, Fable 5.1, and Astra 6. High is also a good choice and usually makes little practical difference. Max should rarely, if ever, be used with these models: it adds substantial time and cost for little additional benefit.
 
@@ -31,7 +31,7 @@ Astra 6 and Fable 5.1 have complementary strengths in 3D work: Astra 6 is good a
 
 Use GPT-6 Luna for high-volume, low-intelligence work, such as converting unstructured data into structured data. Max reasoning effort is appropriate for Luna.
 
-GPT-6.1 Sol has also largely taken over Sonnet 5.5's one remaining role: a subagent that explores a codebase in depth to answer a question and returns a quality analysis to the agent that spawned it. Otherwise, avoid Sonnet 5.5; for general work, use Opus 5.5 or GPT-6.1 Sol. If you do use Sonnet 5.5 for such a subagent, use High reasoning effort, or XHigh when the question needs it. Avoid Max; when Max would be justified, Opus 5.5 at XHigh is usually the better value.
+GPT-6.1 Sol, at High or XHigh, has also largely taken over Sonnet 5.5's one remaining role: a subagent that explores a codebase in depth to answer a question and returns a quality analysis to the agent that spawned it. Otherwise, avoid Sonnet 5.5; for general work, use Opus 5.5 or GPT-6.1 Sol. If you do use Sonnet 5.5 for such a subagent, use High reasoning effort, or XHigh when the question needs it. Avoid Max; when Max would be justified, Opus 5.5 at XHigh is usually the better value.
 
 GPT-6.1 Sol replaces GPT-6 Sol at the same price. GPT-6 Sol costs less per token than Opus 5.5 but about the same per task in practice, and Opus 5.5 clearly outperforms it, so there is no reason to choose it for new work.
 
