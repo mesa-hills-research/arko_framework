@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arko_agents::agent_config::PathSafetyPolicy;
+use arko_agents::terminal::{CommandGuard, ShellDialect};
 use arko_agents::{
     AgentConfig, AgentLLMConfig, AgentToolConfig, BuiltInEnvironmentDetail,
     EnvironmentDetailPlacement, EnvironmentDetailsConfig, LLMErrorPolicy, TaskContext, Tool,
@@ -75,19 +76,26 @@ struct Args {
 
     #[arg(long, default_value_t = 65_536)]
     shell_output_bytes: usize,
+
+    /// Let `run_shell` run every command, including ones that delete the
+    /// filesystem root or the home directory.
+    #[arg(long)]
+    dangerously_allow_all_commands: bool,
 }
 
 #[derive(Debug)]
 struct RunShellTool {
     default_timeout: Duration,
     output_limit: usize,
+    guard: CommandGuard,
 }
 
 impl RunShellTool {
-    fn new(timeout_seconds: u64, output_limit: usize) -> Self {
+    fn new(timeout_seconds: u64, output_limit: usize, guard: CommandGuard) -> Self {
         Self {
             default_timeout: Duration::from_secs(timeout_seconds.max(1)),
             output_limit: output_limit.max(1_024),
+            guard,
         }
     }
 
@@ -121,7 +129,7 @@ impl Tool for RunShellTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: RUN_SHELL_TOOL.to_string(),
-            description: "Run one local shell command in the workflow workspace. Use it for inspection, formatting, linting, builds, and tests. Use write_file/apply_diff for source edits so context-freshness tracking remains precise. This is not a security sandbox and must never be used to deploy, publish, push, or contact production services.".to_string(),
+            description: "Run one local shell command in the workflow workspace. Use it for inspection, formatting, linting, builds, and tests. Use write_file/apply_diff for source edits so context-freshness tracking remains precise. Commands that would delete, move or overwrite protected paths or paths outside the workspace are refused. This is not a security sandbox and must never be used to deploy, publish, push, or contact production services.".to_string(),
             output_based_example: None,
             parameters: vec![
                 ToolParameterDefinition {
@@ -172,6 +180,14 @@ impl Tool for RunShellTool {
             })?
             .map(Duration::from_secs)
             .unwrap_or(self.default_timeout);
+        let dialect = if cfg!(target_os = "windows") {
+            ShellDialect::Cmd
+        } else {
+            ShellDialect::Posix
+        };
+        self.guard
+            .check(command, dialect, context.current_working_directory)
+            .map_err(|refusal| ToolError::ExecutionFailed(refusal.message))?;
         if requested_timeout.is_zero() || requested_timeout > self.default_timeout {
             return Err(ToolError::ParameterValidation {
                 param_name: "timeout_seconds".to_string(),
@@ -610,6 +626,10 @@ async fn main() -> ExampleResult<()> {
     let shell = Arc::new(RunShellTool::new(
         args.shell_timeout_seconds,
         args.shell_output_bytes,
+        CommandGuard {
+            dangerously_allow_all_commands: args.dangerously_allow_all_commands,
+            ..CommandGuard::default()
+        },
     ));
     let client = Arc::new(build_client()?);
     let mut builder = Workflow::builder()
@@ -843,7 +863,7 @@ mod tests {
 
     #[test]
     fn shell_output_keeps_head_and_tail_when_bounded() {
-        let tool = RunShellTool::new(10, 1_024);
+        let tool = RunShellTool::new(10, 1_024, CommandGuard::default());
         let input = format!("HEAD{}TAIL", "x".repeat(2_000));
         let output = tool.bounded_output(input.as_bytes());
         assert!(output.starts_with("HEAD"));

@@ -64,6 +64,7 @@ calling, for example `{"job_id":"…","revision":"3","text":"Y\n"}`.
 | Shell (`shell`, `shell_args`) | `/bin/sh -c` on Unix, `cmd.exe /D /S /C` on Windows |
 | Prompt rules (`prompt_rules`) | Y/N, password/passphrase, and "press a key" prompts |
 | Quiet environment for PTY jobs (`quiet_terminal_environment`) | On |
+| Command guard (`command_guard`) | On: drastic commands are refused (see [Command guard](#command-guard)) |
 
 PTY jobs run with the host's environment plus `TERM=dumb`, `NO_COLOR=1`,
 `PAGER=cat`, `GIT_PAGER=cat`, and `LANG`, `LC_CTYPE`, and `LC_ALL` set to a UTF-8
@@ -78,6 +79,60 @@ unchanged. Pipe jobs always get it unchanged.
 Prompt rules are named regular expressions. The number of jobs is not limited,
 running or finished. Jobs run with the host process's permissions; the terminal
 tools do not provide a filesystem or network sandbox.
+
+## Command guard
+
+`TerminalConfig::command_guard` refuses commands that would delete, move,
+overwrite, or reformat something by accident. It checks `terminal_start`
+commands, and `terminal_input` text too, since that can be a command typed into
+a shell. A refused command starts no job; the tool returns an error that names the
+path and why, so the agent can correct the command.
+
+| Target | Default | Setting that allows it |
+| --- | --- | --- |
+| The working directory and everything below it, and the inside of temporary directories | Allowed | — |
+| Other paths, such as `~/Documents` or a sibling repository | Refused | `allow_outside_workspace: true`, or the path (and what is below it) in `allowed_paths` |
+| Protected paths: the filesystem root, drive roots and network-share roots, the home directory, its parents and other users' home directories, top-level directories (`/usr`, `/opt`, `D:\data`), system directories (`/etc`, `/var`, `/System`, `C:\Windows`, `C:\Program Files`), mounted volumes (`/Volumes/*`, `/mnt/*`, `/media/*`), and devices | Refused | Only `dangerously_allow_all_commands: true`, which turns the guard off |
+
+The guard reads the command in the shell's language, chosen from `shell`
+(`ShellDialect::from_shell`: POSIX shells, `cmd.exe`, or PowerShell). It follows
+what the shell will do rather than matching command names:
+
+- It finds the paths a command acts on: `rm`, `rmdir`, `shred`, `find -delete` and
+  `-exec rm`, `git clean -f`, `rsync --delete`, `mv` sources, `truncate`,
+  `dd of=`, `tee`, recursive `chmod`/`chown`, disk tools (`mkfs`, `wipefs`, `fdisk`,
+  `diskutil erase…`), `>` redirections, and on Windows `rd`, `del`, `move`,
+  `format`, `diskpart`, `robocopy /MIR`, `icacls /t`, `Remove-Item` and its
+  aliases, `Move-Item`, `Set-Content`, `Format-Volume`, `Clear-Disk`, and
+  `[IO.Directory]::Delete`.
+- It resolves `~`, variables from the job's environment and from assignments
+  earlier in the command, `cd` and `Set-Location` (an unset `cd $DIR` goes home),
+  `..`, and wildcards. An unset variable expands to nothing, as in the shell, so
+  `rm -rf "$OUT"/*` with `OUT` unset is refused as a delete of `/*`. `${OUT:?}`
+  makes the shell stop instead, and the guard allows it.
+- It follows `sudo`, `env`, `xargs` and pipelines (`find … | xargs rm`,
+  `Get-ChildItem … | Remove-Item`), and checks `sh -c`, `bash -c`, `eval`,
+  `cmd /c`, and `powershell -Command` and `-EncodedCommand` text as commands.
+- `$(pwd)` is the working directory and `$(mktemp)` a new temporary path. A path
+  it can't know in advance (other `$(…)` output, or a variable a sourced script
+  may set) counts as outside the working directory. If that value could be empty
+  and the rest of the path starts at the root, the root path is checked as well.
+
+It guards against accidents, not against a determined agent: a script, Makefile,
+or test the command runs is not inspected, and neither is text a command decodes
+and pipes to a shell. Harmless commands are not refused because of what they
+print, so `echo "rm -rf /"` and a heredoc containing it run.
+
+```rust,ignore
+let mut config = TerminalConfig::new(workspace.join(".terminal-jobs"));
+config.command_guard.allowed_paths.push(home.join(".cache/my-app"));
+// For hosts that want no guard at all:
+// config.command_guard.dangerously_allow_all_commands = true;
+```
+
+`CommandGuard::check(command, dialect, working_directory)` runs the same check
+for other tools that run shell commands; the `deepcoder` example's `run_shell`
+uses it, with a `--dangerously-allow-all-commands` flag.
 
 ## Input requests
 

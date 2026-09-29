@@ -760,3 +760,69 @@ fn stripped_windows_keep_raw_offsets() {
     };
     assert_eq!(snapshot.output.text, expected);
 }
+
+#[tokio::test]
+async fn the_command_guard_refuses_drastic_commands_and_input() {
+    let f = Fixture::new(|_| {});
+    let drastic = if cfg!(windows) {
+        "rd /s /q %USERPROFILE%"
+    } else {
+        "rm -rf ~"
+    };
+    let error = f
+        .manager
+        .start(&f.context(), drastic, StartOptions::default())
+        .unwrap_err();
+    let TerminalError::Refused(refusal) = &error else {
+        panic!("expected a refusal, got {error}");
+    };
+    assert!(refusal.protected);
+    let job_directories = std::fs::read_dir(f.root.join("jobs"))
+        .unwrap()
+        .filter(|entry| entry.as_ref().unwrap().path().is_dir())
+        .count();
+    assert_eq!(job_directories, 0, "a refused command starts no job");
+
+    // Text typed into a running job is checked as a command too.
+    let job = f.python(
+        "print('ready',flush=True); print('ANSWER='+input())",
+        StartOptions {
+            detect_prompts: false,
+            ..Default::default()
+        },
+    );
+    let ready = f
+        .until(job.job_id, |s| s.output.text.contains("ready"))
+        .await;
+    let typed = format!("{drastic}\n");
+    assert!(matches!(
+        f.input(f.owner, job.job_id, ready.revision, typed).await,
+        Err(TerminalError::Refused(_))
+    ));
+    f.input(f.owner, job.job_id, ready.revision, "Y\n".into())
+        .await
+        .unwrap();
+    assert!(
+        f.finished(job.job_id)
+            .await
+            .output
+            .text
+            .contains("ANSWER=Y")
+    );
+}
+
+#[tokio::test]
+async fn dangerously_allow_all_commands_turns_the_guard_off() {
+    let f = Fixture::new(|config| config.command_guard.dangerously_allow_all_commands = true);
+    // The shell stops before the destructive half, so this is safe to run.
+    let command = if cfg!(windows) {
+        "exit /b 3 && rd /s /q %USERPROFILE%"
+    } else {
+        "exit 3 && rm -rf ~"
+    };
+    let job = f
+        .manager
+        .start(&f.context(), command, StartOptions::default())
+        .unwrap();
+    assert_eq!(f.finished(job.job_id).await.exit_code, Some(3));
+}
