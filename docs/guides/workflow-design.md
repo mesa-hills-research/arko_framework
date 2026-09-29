@@ -5,6 +5,8 @@ Purpose: To provide a concise guide to designing reliable, efficient workflows w
 
 This guide covers workflow structure and the decisions that matter before implementation. For agent prompts, tools, and model selection, see the [general agent design guide](agent-design.md). For API details, defaults, and complete signatures, see the [`arko_workflows` API index](../../arko_workflows/INDEX.md) and the [reference map](../reference-map.md). The [complete workflow example](../../arko_workflows/examples/complete_workflow.rs) shows how the pieces fit together in a runnable workflow.
 
+This guide offers ideas, not rules. A simpler approach is usually better than an elaborate one: start with the simplest workflow that could meet the goal, often a single agent, and add agents, stages, or controls only when it falls short. Aim for workflows that run autonomously.
+
 ## Start with the outcome
 
 Define the result before choosing agents or communication tools. Write down the deliverable, the source material, what counts as complete, and how a reviewer can verify it. Include the conditions that require human input, the conditions that should stop the run, and the conditions that can be retried safely.
@@ -75,7 +77,7 @@ For workflows that need consensus rather than a single review, use structured vo
 
 ## Set boundaries for tools and failures
 
-The workflow's defaults are permissive: every tool call is approved by default, and tool errors are recovered automatically without an attempt limit. These defaults are convenient for local autonomous runs, but they are not a safety policy. Configure approval and error-recovery behavior explicitly when tools can change external systems, spend money, expose data, or repeat side effects.
+The workflow's defaults are permissive: every tool call is approved by default, and tool errors are recovered automatically without an attempt limit. These defaults are convenient for local autonomous runs, but they are not a safety policy. Configure approval and error-recovery behavior explicitly when tools can change external systems, spend money, expose data, or repeat side effects. Don't add approvals, human checkpoints, or restrictions beyond what a concrete risk calls for; autonomy is the goal.
 
 Use hooks for lifecycle policy and observation: budget warnings, audit events, pre-tool checks, post-tool recording, freshness conflicts, and cancellation. A hook can stop a run but can't undo work already done, so run checks before the side effect and record the reason for any abort.
 
@@ -103,7 +105,7 @@ Keep saved state compatible with earlier versions. Add serde defaults for new fi
 
 Subscribe to workflow events or register hooks when the host needs progress, audit records, or live status. Report agent results, waiting states, pauses, costs, and cancellation causes separately. A final summary should identify incomplete work and the evidence used to accept completed work.
 
-Build and validate the workflow before making provider calls. The complete workflow example supports a dry run that builds the workflow and writes a checkpoint without credentials or network access. Use that path to catch missing agents, invalid policies, unknown targets, and persistence errors early. Then test the smallest real run, an interruption and resume, a verifier rejection, a missing human answer, a tool failure, and the budget boundary that matters for the deployment.
+Build and validate the workflow before making provider calls. The complete workflow example supports a dry run that builds the workflow and writes a checkpoint without credentials or network access. Use that path to catch missing agents, invalid policies, unknown targets, and persistence errors early. Workflow runs are expensive, so live test runs (the smallest real run, an interruption and resume, a verifier rejection, a missing human answer, a tool failure, or a budget boundary) and iterating on a workflow against tests or benchmarks should happen only when explicitly requested.
 
 ## Workflow checklist
 
@@ -118,4 +120,4 @@ Build and validate the workflow before making provider calls. The complete workf
 - Approval, error recovery, cancellation, budgets, and human input are configured for the deployment.
 - External side effects use durable steps and define in-doubt resolution.
 - Checkpoints and old saved data remain loadable, and resume behavior is explicit.
-- A dry run and the important pause, failure, resume, and budget paths have been exercised.
+- A dry run passes. Live test runs and benchmark iterations happen only when explicitly requested.

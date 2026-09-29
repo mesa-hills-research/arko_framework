@@ -3,6 +3,8 @@
 Author: Luke Erickson | Mesa Hills Research
 Purpose: To provide a concise, general guide to creating high performance and efficient agents and workflows with arko_framework.
 
+This guide offers ideas, not rules.
+
 Sections:
 
 ---
@@ -20,6 +22,7 @@ Once the model hits or crosses this threshold, you can inject a message telling 
 losing progress.**
 
 Summary:
+- Start with the simplest setup that could work, and add tools, subagents, or controls only when it falls short. Aim for autonomy rather than gating the agent by default.
 - Prefer terminal over a large set of tools that can be achieved by terminal tools such as `cat`, `grep`, `sed`, `ls`, etc.
 - Consider allowing the agent to spawn subagents. Determine what mode of communication should be provided to the top level model and its subagents.
 
