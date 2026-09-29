@@ -9,7 +9,7 @@ graph or pipeline definition to write.
 
 The [API index](INDEX.md) lists every public type, signature, default, and
 agent-tool contract; the
-[defaults reference](../docs/defaults-reference.md#arko_workflows) summarizes the
+[defaults reference](../docs/reference-map.md#arko_workflows) summarizes the
 defaults of all four crates.
 
 ## Installation
@@ -101,6 +101,10 @@ same environment variables. The Python API covers a subset of the Rust API; see
 
 For a complete orchestrator, coder, and verifier workflow, see the
 [DeepCoder example](examples/deepcoder/README.md).
+
+For a compact end-to-end example that exercises the workflow primitives together, see
+[`complete_workflow.rs`](examples/complete_workflow.rs). It supports a credential-free
+`--dry-run`, checkpoint resume, `continue_agent`, and `resume_agent`.
 
 ## Running agents
 

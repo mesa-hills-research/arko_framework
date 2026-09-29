@@ -1419,3 +1419,4 @@ async fn run_workflow(
 | --- | --- |
 | [basic_workflow.rs](examples/basic_workflow.rs) | Sequential architect-to-coder handoff, a client from `LLMClient::from_env()`, a shared memory tier, a budget limit and warning, and a completion hook. Uses the fixed paths `./my-project` and `configs/*.json` set in `main`. |
 | [DeepCoder guide](examples/deepcoder/README.md), [deepcoder.rs](examples/deepcoder.rs) | Agent-driven delegation, correctness, efficiency, and final verification gates, conversation reuse with repair deltas, context freshness, per-role memory policies, a custom shell tool, checkpoint and resume, and workflow metadata. The CLI and shell policies are specific to the example. |
+| [complete_workflow.rs](examples/complete_workflow.rs) | Explicit agent settings, built-in tools, shared memory, messaging, completion verification, tool-result distillation, persistence, dry-run validation, checkpoint resume, `continue_agent`, and `resume_agent`. |

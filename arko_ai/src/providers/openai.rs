@@ -3848,6 +3848,34 @@ mod tests {
     }
 
     #[test]
+    fn chatgpt_oauth_usage_reports_the_backend_input_limit() {
+        let usage = |oauth| {
+            OpenAIClient::generation_response(
+                &response(None),
+                &Model::openai_gpt_6_astra(),
+                &GenerationConfig::default(),
+                oauth,
+                super::StreamedOutput::default(),
+                &super::ResponseHead::default(),
+            )
+            .model_call_usage
+        };
+        // 100,000 input tokens of GPT-6's 922,000 on the API...
+        let api_key = usage(false);
+        assert_eq!(api_key.max_input_tokens, Some(922_000));
+        // ...and of the ChatGPT backend's 272,000 over OAuth.
+        let oauth = usage(true);
+        assert_eq!(
+            oauth.max_input_tokens,
+            Some(crate::input_limit::CHATGPT_OAUTH_MAX_INPUT_TOKENS)
+        );
+        assert!(close(
+            oauth.context_usage_percent.unwrap(),
+            100_000.0 / 272_000.0 * 100.0
+        ));
+    }
+
+    #[test]
     fn oauth_refresh_backoff_doubles_to_a_cap_and_honors_server_hints() {
         let retry = super::OAUTH_REFRESH_RETRY;
         for sample in [0, 1, 7_777, u64::MAX / 3, u64::MAX] {

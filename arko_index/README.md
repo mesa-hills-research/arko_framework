@@ -8,7 +8,7 @@ that returns the complete text of every matching chunk.
 The [reference](../docs/arko_index-reference.md) documents file selection, chunk
 validation, configuration, job events, embeddings, search options, usage accounting, the
 LLM judge, and the example CLI in full. The
-[defaults reference](../docs/defaults-reference.md#arko_index) lists every setting's
+[defaults reference](../docs/reference-map.md#arko_index) lists every setting's
 default.
 
 ## Installation

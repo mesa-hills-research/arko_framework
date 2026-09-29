@@ -29,7 +29,7 @@ directory contains runnable programs.
 
 ## Guides
 
-- [Defaults reference](docs/defaults-reference.md): every setting's default across the
+- [Defaults reference](docs/reference-map.md): every setting's default across the
   four crates, the opt-ins, and the behaviours to know before configuring them.
 - [Context management](docs/context-efficiency.md): versioned memory reads,
   file-tree change notices, tool-result distillation, and background shell jobs.
@@ -39,6 +39,8 @@ directory contains runnable programs.
   of asynchronous tool calling and mid-turn steering.
 - [Arko Workflows API index](arko_workflows/INDEX.md): the complete arko_workflows
   API reference.
+- [Complete workflow example](arko_workflows/examples/complete_workflow.rs): explicit agent
+  configuration, memory, messaging, verification, distillation, persistence, and resume.
 - [Arko Index reference](docs/arko_index-reference.md): file selection, chunk
   validation, jobs and events, search, usage accounting, and the example CLI.
 
