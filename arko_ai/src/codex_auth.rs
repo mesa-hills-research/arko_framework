@@ -877,7 +877,16 @@ fn read_credentials(path: &Path) -> Result<(Vec<u8>, ChatGptOAuthCredentials), E
                 hook(path);
             }
         });
-        let bytes = std::fs::read(path)?;
+        let bytes = std::fs::read(path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Error::IoError(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("No Codex login at {}: run `codex login`", path.display()),
+                ))
+            } else {
+                Error::IoError(error)
+            }
+        })?;
         reads += 1;
         match parse_credentials(&bytes, path) {
             Ok(credentials) => return Ok((bytes, credentials)),
@@ -889,7 +898,12 @@ fn read_credentials(path: &Path) -> Result<(Vec<u8>, ChatGptOAuthCredentials), E
 }
 
 fn parse_credentials(bytes: &[u8], path: &Path) -> Result<ChatGptOAuthCredentials, Error> {
-    let value: Value = serde_json::from_slice(bytes)?;
+    let value: Value = serde_json::from_slice(bytes).map_err(|error| {
+        Error::JsonError(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Could not parse Codex login at {}: {error}", path.display()),
+        )))
+    })?;
     let tokens = value
         .get("tokens")
         .filter(|tokens| tokens.is_object())

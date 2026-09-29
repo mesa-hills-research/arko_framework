@@ -118,6 +118,37 @@ async fn a_failed_request_is_traced_as_an_error() {
 }
 
 #[tokio::test]
+async fn an_oauth_refresh_failure_is_traced_as_an_error() {
+    let (url, server) = server(vec![
+        super::oauth_recovery_tests::reply(
+            "/responses",
+            401,
+            r#"{"error":{"code":"token_expired"}}"#,
+        ),
+        super::oauth_recovery_tests::reply("/token", 400, r#"{"error":"invalid_grant"}"#),
+    ])
+    .await;
+    let dir =
+        std::env::temp_dir().join(format!("arko-trace-refresh-error-{}", uuid::Uuid::new_v4()));
+    let client = client(&url).with_request_trace(Some(RequestTrace::new(&dir)));
+    let error = client
+        .generate_text(
+            &Conversation::new(Model::openai_gpt_6_astra()),
+            &GenerationConfig::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("invalid_grant"), "{error:?}");
+    server.await.unwrap();
+
+    let line = summary(&dir);
+    assert_eq!(line["status"], "error");
+    assert_ne!(line["reason"], "call dropped before completion");
+    assert!(line["error"].as_str().unwrap().contains("invalid_grant"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
 async fn llm_client_settings_apply_to_an_installed_openai_client() {
     let bad = r#"{"error":{"code":"invalid_request_error","message":"bad"}}"#;
     let (url, server) = server(vec![

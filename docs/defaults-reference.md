@@ -37,7 +37,7 @@ Guide: [arko_ai README](../arko_ai/README.md).
 | Credentials without a refresh token | — | The access token is used until the server rejects it, then `Error::AuthenticationFailed`. |
 | Token-refresh rate-limit retries | Off | `with_openai_chatgpt_oauth_rate_limit_retries(.., true)` or `OpenAIClient::with_oauth_rate_limit_retries(true)`: up to 8 retries of an HTTP 429, backing off from 30 s to 15 min; a server hint is honoured up to 15 min per wait. Applies only to explicit `refresh_openai_oauth_token()` calls: the refresh after a 401 and `refresh_openai_oauth_token_if_expiring`, which the arko_agents runtime uses, never wait; a 429 from them is the request's error, which the agent's own rate-limit recovery handles. So the setting does nothing for a client that only runs agents. |
 | `with_openai_originator`, `with_openai_user_agent` | Not sent | No `originator` or `User-Agent` header by default. |
-| `with_request_trace(RequestTrace::new(dir))` | Off | Writes every OpenAI request and response, full prompts included (credential headers redacted), with default file permissions. Other providers are not traced; the first request to each logs a warning. |
+| `with_request_trace(RequestTrace::new(dir))` | Off | Writes every OpenAI request and response, full prompts included (credential headers redacted), with default file permissions. Refresh and OAuth account-change failures are recorded as errors with their cause. Other providers are not traced; the first request to each logs a warning. |
 | `with_openai_request_hook(hook)` | None | Adjusts OpenAI headers and body before sending. |
 | `OpenAIClient::with_credential_store(Some(store))` | None | A `ChatGptOAuthStore` that keeps rotated tokens in step with other storage (`CodexAuthStore` for a Codex `auth.json`). `with_oauth_token_url` sets the token endpoint (default `https://auth.openai.com/oauth/token`); `LLMClient::with_openai_auth(OpenAIAuth)` installs either kind of credentials. |
 | `with_stream_idle_timeout(duration)` | Off | Applies to every provider client of the `LLMClient` and can't be cleared on it again. See [Retries and timeouts](#retries-and-timeouts). |
@@ -65,7 +65,7 @@ and `long_context` without sending anything.
 | `max_tokens` | The model's own maximum: OpenAI with an API key, Anthropic and Gemini send the model's registered output limit; OpenRouter sends none; ChatGPT OAuth never sends one | Over ChatGPT OAuth a set value is ignored with a warning, since the backend rejects it. On OpenRouter a set value also restricts routing to endpoints that accept it. |
 | `verbosity` | Not sent | `low`, `medium`, `high`. OpenAI GPT-5 family and GPT-6 only (an error on other OpenAI models); dropped on Claude and Gemini; on OpenRouter it can't be combined with `reasoning.effort` on Claude. |
 | `reasoning` | The model's default; see [Reasoning](#reasoning) | Each provider takes its own `ReasoningConfig` variant; another provider's variant is dropped with a warning. |
-| `openai_reasoning_mode` | Not sent | `standard`, `pro`; GPT-5.6 and GPT-6 only. |
+| `openai_reasoning_mode` | Not sent | `standard`, `pro`; GPT-5.6 and GPT-6 only. ChatGPT OAuth omits this backend-unsupported field and warns once if it was configured. |
 | `anthropic_thinking_enabled` | The model's default | `Some(true)` without a reasoning config selects adaptive thinking (an error on models without it). `Some(false)` sends `thinking.type: "disabled"`: an error on Fable 5.x and Opus 5.5, and together with an Anthropic reasoning config. |
 | `prompt_caching` | `Conversation::enable_cache` (default `true`) | See [Prompt caching](#prompt-caching). |
 | `anthropic_summarized_thinking` | The model's default display | `Some(true)` sends `thinking.display: "summarized"` on models that omit thinking text by default (Fable 5.x, Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5); an error without active thinking. |
@@ -460,7 +460,7 @@ execution_middleware)`:
 | `simplified_tool_events` | Required `bool` | Output-based mode only: `true` leaves out `ToolParamName`, `ToolParamValueChunk` and `ToolParamEnd`. |
 | `skill_prompt_context` | No skills in the prompt | From `SkillManager::setup`. |
 | `interceptor_config` | No result interception | `InterceptorConfig { interceptor, failure_policy }`. |
-| `execution_middleware` | None | `before`/`after` every tool execution; for output supplied with an approval, only `after`. |
+| `execution_middleware` | None | `before`/`after` every tool execution; for output supplied with an approval, only `after`. A hook error pauses with `ErrorRecoveryCause::Middleware`; a `before` error leaves the call unrun, while an `after` error keeps its result before pausing. |
 | `AgentRuntime::with_turn_context(source)` | No turn context | Asked for context before each model request. |
 
 The event channel holds 100 events and the command channel 10: a host that stops
@@ -541,7 +541,7 @@ directory and its `workflow-run-id` file when persistence is set.
 | `metadata` | Empty | Only `supported_platforms` is enforced: a nonempty list the host matches none of fails `build`. |
 | `memory` | No tiers, no memory tools | See [Memory](#memory). |
 | `budget`, `budget_warning` | None: unlimited, no warning | Dollars, finite and nonnegative. Spending counts `UsageInfo::billed()`, so ChatGPT OAuth calls add zero. |
-| `agent_budget(agent, limit)` | None | The agent's own model spend across its runs. |
+| `agent_budget(agent, limit)` | None | The agent's own model spend across its runs. Admission rejects a start or continuation once the cumulative limit is already reached. |
 | `hook(point, callback)` | None | Synchronous; run in registration order, and the first result other than `Continue` ends the point. `Abort` stops the run; `Skip` is honoured only at `PreToolExecution`. |
 | `persistence` | None: nothing is saved, durable steps unavailable | See [Persistence](#persistence). |
 | `resume_from(checkpoint_file)` | None | Needs `persistence` on the same run directory; see [Resume](#resume). |
@@ -719,6 +719,9 @@ it is logged and retried by the next checkpoint.
 - The new builder supplies agents, client, tools, hooks, policies, budget limits and
   metadata. Memory access, limits and write mode come from the builder; the checkpoint
   supplies each tier's content and history by name.
+- A task that can be resumed must keep its user agent configuration. `build` rejects a
+  changed configuration while ignoring workflow-injected tools, prepared prompt state,
+  and saved model registry snapshots.
 - A tier configured but missing from the checkpoint starts as configured. A checkpoint
   tier with no configured tier fails `build`, unless renamed with
   `rename_memory_tier_on_resume` or dropped with `drop_memory_tier_on_resume`.
@@ -828,8 +831,10 @@ newest unfinished job's changes.
 
 ### Jobs
 
-- A job left running by a stopped process is `paused` when the database is next opened;
-  only a watcher resumes it automatically.
+- A job left running by a stopped process is atomically set to `paused` when the database
+  is next opened, with a `phase` event containing `problem: "process interrupted; resume
+  persisted work"`; a newer pause request remains `paused` with `problem: "paused"`. Only
+  a watcher resumes interrupted work automatically.
 - A plan usage limit pauses the job with the reset time; nothing resumes it
   automatically.
 - A paused or blocked job keeps new updates of its index from starting; a failed or

@@ -946,6 +946,53 @@ impl AgentLoop {
                 .await?;
                 Ok(ai::ToolResult::error_from_tool_call(call, &message))
             }
+            RunOutcome::MiddlewareErrorBefore { reason } => {
+                self.pause_by_middleware(tool_call_id, tool_name, &reason, reason.clone())
+                    .await?;
+                Ok(ai::ToolResult::error_from_tool_call(call, &reason))
+            }
+            RunOutcome::MiddlewareErrorAfter {
+                output,
+                effective,
+                intercepted,
+                reason,
+                is_error,
+            } => {
+                let images = output
+                    .images
+                    .into_iter()
+                    .map(|image| ai::ToolResultImage::new(image.description, image.image))
+                    .collect();
+                let raw = output.text;
+                self.emit_tool_result_events(
+                    tool_call_id,
+                    tool_name,
+                    &raw,
+                    &effective,
+                    intercepted,
+                )
+                .await?;
+                let text = match message_to_agent {
+                    Some(message) => {
+                        let mut text = effective;
+                        if !text.is_empty() {
+                            text.push_str("\n\n");
+                        }
+                        text.push_str("Message from user on approval:\n");
+                        text.push_str(&message);
+                        text
+                    }
+                    None => effective,
+                };
+                self.pause_for_middleware_error(tool_call_id, tool_name, reason)
+                    .await?;
+                let result = if is_error {
+                    ai::ToolResult::error_from_tool_call(call, &text)
+                } else {
+                    ai::ToolResult::from_tool_call(call, &text)
+                };
+                Ok(result.with_images(images))
+            }
             RunOutcome::Stop { reason, cancel } => {
                 self.stop_by_middleware(tool_call_id, tool_name, &reason, cancel)
                     .await?;
@@ -989,6 +1036,14 @@ impl AgentLoop {
                     })
                     .await?;
                 }
+                self.emit_tool_result_events(
+                    tool_call_id,
+                    tool_name,
+                    &raw,
+                    &effective,
+                    intercepted,
+                )
+                .await?;
                 let text = match message_to_agent {
                     Some(message) => {
                         let mut text = effective;
@@ -997,21 +1052,9 @@ impl AgentLoop {
                         }
                         text.push_str("Message from user on approval:\n");
                         text.push_str(&message);
-                        self.emit_tool_result_events(tool_call_id, tool_name, &text, &text, false)
-                            .await?;
                         text
                     }
-                    None => {
-                        self.emit_tool_result_events(
-                            tool_call_id,
-                            tool_name,
-                            &raw,
-                            &effective,
-                            intercepted,
-                        )
-                        .await?;
-                        effective
-                    }
+                    None => effective,
                 };
                 if tool_name == COMPLETE_TASK_TOOL_NAME && open {
                     self.task.set_state(TaskState::Completed { summary: raw });
@@ -1075,11 +1118,24 @@ impl AgentLoop {
             reason: Some(message.to_string()),
         })
         .await?;
+        self.pause_for_middleware_error(tool_call_id, tool_name, reason)
+            .await
+    }
+
+    /// Pauses for a middleware hook failure after a call that ran. Its result
+    /// has already been emitted and is kept in the conversation, so the host
+    /// can continue without executing the call again.
+    async fn pause_for_middleware_error(
+        &mut self,
+        tool_call_id: Uuid,
+        tool_name: &str,
+        reason: String,
+    ) -> Result<(), ArkoAgentsError> {
         if self.task.current_state.is_terminal() {
             return Ok(());
         }
         log::info!(
-            "Task {}: execution middleware paused the task at '{tool_name}': {reason}",
+            "Task {}: execution middleware failure paused the task at '{tool_name}': {reason}",
             self.task.id
         );
         if self.deferring_tool_errors {
@@ -2098,13 +2154,26 @@ impl AgentLoop {
                                                         ),
                                                     ));
                                                 }
-                                                None => results.push((
-                                                    index,
-                                                    ai::ToolResult::error_from_tool_call(
-                                                        &ai_call,
-                                                        "No decision provided, implicitly rejected",
-                                                    ),
-                                                )),
+                                                None => {
+                                                    self.emit_event(AgentEvent::ToolRejected {
+                                                        tool_call_id: pending_call_info
+                                                            .tool_call_id,
+                                                        tool_name: pending_call_info
+                                                            .tool_name
+                                                            .clone(),
+                                                        reason: Some(
+                                                            "No decision provided".to_string(),
+                                                        ),
+                                                    })
+                                                    .await?;
+                                                    results.push((
+                                                        index,
+                                                        ai::ToolResult::error_from_tool_call(
+                                                            &ai_call,
+                                                            "No decision provided, implicitly rejected",
+                                                        ),
+                                                    ));
+                                                }
                                             }
                                         }
                                         self.run_decided_native_calls(approved, results).await?;
@@ -2171,6 +2240,17 @@ impl AgentLoop {
                                                     );
                                                 }
                                                 None => {
+                                                    self.emit_event(AgentEvent::ToolRejected {
+                                                        tool_call_id: pending_call_info
+                                                            .tool_call_id,
+                                                        tool_name: pending_call_info
+                                                            .tool_name
+                                                            .clone(),
+                                                        reason: Some(
+                                                            "No decision provided".to_string(),
+                                                        ),
+                                                    })
+                                                    .await?;
                                                     let pb = PromptBuilder::new(
                                                         &self.task.agent_config,
                                                         vec![],
@@ -5023,6 +5103,43 @@ impl AgentLoop {
                 })
                 .await?;
                 Ok(format_error(self, &message))
+            }
+            RunOutcome::MiddlewareErrorBefore { reason } => {
+                let formatted = format_error(self, &reason);
+                self.pause_by_middleware(tool_call_id, tool_name, &reason, reason.clone())
+                    .await?;
+                Ok(formatted)
+            }
+            RunOutcome::MiddlewareErrorAfter {
+                output,
+                effective,
+                intercepted,
+                reason,
+                is_error,
+            } => {
+                let raw = output.text;
+                self.emit_tool_result_events(
+                    tool_call_id,
+                    tool_name,
+                    &raw,
+                    &effective,
+                    intercepted,
+                )
+                .await?;
+                let formatted = if is_error {
+                    format_error(self, &effective)
+                } else {
+                    PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None)
+                        .format_tool_result_as_user_message(
+                            tool_name,
+                            &effective,
+                            message_to_agent_on_approval.as_deref(),
+                        )
+                };
+                self.queue_tool_images(tool_name, tool_call_id, output.images);
+                self.pause_for_middleware_error(tool_call_id, tool_name, reason)
+                    .await?;
+                Ok(formatted)
             }
             RunOutcome::Stop { reason, cancel } => {
                 let formatted = format_error(self, &reason);

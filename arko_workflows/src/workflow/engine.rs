@@ -1821,6 +1821,13 @@ impl WorkflowEngine {
                 limit: ctx.budget.limit().unwrap_or(0.0),
             });
         }
+        if ctx.budget.is_agent_exceeded(agent_name) {
+            return Err(WorkflowError::AgentBudgetExceeded {
+                agent: agent_name.to_string(),
+                spent: ctx.budget.agent_spent(agent_name),
+                limit: ctx.budget.agent_limit(agent_name).unwrap_or(0.0),
+            });
+        }
         fire_hooks_on_context(ctx, HookPoint::PreAgentSpawn, |hook| {
             hook.agent_name = Some(agent_name.to_string());
             hook.agent_run_id = agent_run_id;

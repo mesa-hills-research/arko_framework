@@ -1,6 +1,6 @@
 //! What `build` requires and checks, and the tools each agent is offered.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use arko_agents::TaskContext;
@@ -47,6 +47,26 @@ fn tier(name: &str, readers: AccessScope, writers: AccessScope) -> MemoryTier {
 
 fn only(agents: &[&str]) -> AccessScope {
     AccessScope::Only(agents.iter().map(|agent| agent.to_string()).collect())
+}
+
+#[test]
+fn resume_config_comparison_ignores_workflow_tools_and_model_snapshots() {
+    let current = agent_config("Friendly agent");
+    let mut saved = current.clone();
+    saved
+        .tool_config
+        .available_tool_names
+        .push("workflow_tool".into());
+    let mut workflow_tools = HashSet::from(["workflow_tool".to_string()]);
+    let current_json = super::normalized_resume_agent_config(&current, &workflow_tools).unwrap();
+    let saved_json = super::normalized_resume_agent_config(&saved, &workflow_tools).unwrap();
+    assert_eq!(current_json, saved_json);
+
+    workflow_tools.clear();
+    saved.instructions.push_str(" Changed.");
+    let current_json = super::normalized_resume_agent_config(&current, &workflow_tools).unwrap();
+    let saved_json = super::normalized_resume_agent_config(&saved, &workflow_tools).unwrap();
+    assert_ne!(current_json, saved_json);
 }
 
 /// The tools of `agent`'s registry, which its prepared configuration also

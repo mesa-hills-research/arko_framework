@@ -362,8 +362,9 @@ println!("Total spent: ${:.6}", result.total_cost);
 Budgets count what the account is billed (`UsageInfo::billed()`). Calls billed to a
 subscription, such as ChatGPT OAuth, add zero to the budget; their per-token
 estimate remains in the ledger entry's `UsageInfo`. `agent_budget` sets a
-cumulative limit for one agent, and `add_manual_cost` records charges from outside
-the model calls. See [budget and cost accounting](INDEX.md#budget-and-cost-accounting).
+cumulative limit for one agent. Admission checks that limit before starting or
+continuing an agent, and `add_manual_cost` records charges from outside the model calls.
+See [budget and cost accounting](INDEX.md#budget-and-cost-accounting).
 
 ## Messaging
 
@@ -500,9 +501,10 @@ happens when an agent would otherwise stop for a person:
   resets; after tool errors it continues. It fails the run with a clear reason on
   errors that retrying can't fix (authentication, invalid requests), on refusals that
   stand after the agent's refusal fallback, and on responses the runtime can't use.
-  The model is never told that a user approved anything. `Limited { max }` caps the
-  automatic recoveries per run call; `ReturnToCaller` pauses at every error-recovery
-  pause.
+  A `Middleware` pause, including an execution-middleware hook error, always returns
+  to the caller under every policy. The model is never told that a user approved
+  anything. `Limited { max }` caps the automatic recoveries per run call;
+  `ReturnToCaller` pauses at every other error-recovery pause.
 
 A paused agent is recorded with `AgentRunStatus::Paused`, the call returns
 `WorkflowError::AgentPaused { agent, task_id, pause }`, and `OnAgentPaused` fires.
@@ -533,10 +535,12 @@ match workflow.run_agent("coder", "Deploy the fix").await {
 The paused task is saved with checkpoints, so it can be resumed after a restart. A
 pause by an opt-in agent monitor (the plan-usage threshold's `Pause` action or the
 cache monitor's `pause_below`) always returns to the caller. An agent running inside
-another agent's tool call (a completion verifier or a delegated run) can't pause:
-under `RespectAgentConfig` its `complete_task` is approved (its parent waits for
-that result), and where it would pause for anything else it is stopped with a reason
-(a verifier's review then fails). Under `RespectAgentConfig`, give such agents
+another agent's tool call (a completion verifier or a delegated run) can also pause
+for a `Middleware` cause, including an execution-middleware hook error; other pauses
+are stopped because the parent must receive a bounded result. Under
+`RespectAgentConfig` its `complete_task` is approved (its parent waits for that
+result), and where it would pause for anything else it is stopped with a reason (a
+verifier's review then fails). Under `RespectAgentConfig`, give such agents
 configurations that auto-approve the other tools they use, or use a `Handler`. See
 [Approvals and error recovery](INDEX.md#approvals-and-error-recovery) for every cause
 and option.
@@ -649,6 +653,10 @@ an agent's run: a task or checkpoint that can't be written is logged as a warnin
 and the next checkpoint tries again. A checkpoint written meanwhile refers to the
 task's last saved version and lists the run in `missing_task_states`; resuming from it
 restores the task as last saved, with a warning that its latest state is missing.
+When a checkpoint contains a task that can be resumed, `build` rejects a changed agent
+configuration. Workflow-injected tools and prepared prompt state are excluded from this
+comparison, as are saved model registry details; provider, model ID, generation settings,
+and other user configuration must remain compatible.
 The event log records every event, including each streamed text and reasoning
 fragment; `event_log(EventLog::LifecycleOnly)` leaves the fragments out (the
 finished responses stay in the task files). Events are buffered and written at least

@@ -95,7 +95,10 @@ the subscription (see [Usage and cost](../docs/arko_index-reference.md#usage-and
   files are never modified. See [Chunking and validation](../docs/arko_index-reference.md#chunking-and-validation).
 - **Jobs.** Builds and updates run in the background through `snapshotting`, `chunking`
   and `embedding` to `ready`, and can be paused, resumed from their checkpoints, or
-  cancelled. Transient provider failures are retried with backoff. See
+  cancelled. On database reopen, an active job is atomically moved to `paused` with a
+  recovery `phase` event (`process interrupted; resume persisted work`), while a newer
+  pause request remains paused as requested. Transient provider failures are retried with
+  backoff. See
   [Jobs, scheduling and retries](../docs/arko_index-reference.md#jobs-scheduling-and-retries).
 - **Generations and updates.** A successful job publishes a generation in one
   transaction, and search reads the active generation, so an update that fails, pauses or

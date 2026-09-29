@@ -144,9 +144,10 @@ pub enum ErrorRecoveryPolicy {
     ///   action, the cache monitor's `pause_below`) stops for the
     ///   application as configured: the agent pauses and the run call
     ///   returns [`WorkflowError::AgentPaused`](crate::WorkflowError::AgentPaused).
-    /// - A completion its verifier could not review (cause `Middleware`)
-    ///   pauses for the caller too: the run call returns
-    ///   [`WorkflowError::VerifierFailed`](crate::WorkflowError::VerifierFailed).
+    /// - A completion its verifier could not review, or an execution
+    ///   middleware hook error (cause `Middleware`), pauses for the caller
+    ///   too. The run call returns the pause (a verifier pause is reported as
+    ///   [`WorkflowError::VerifierFailed`](crate::WorkflowError::VerifierFailed)).
     ///
     /// Continuing adds nothing to the conversation: the model is never told
     /// that a user approved.

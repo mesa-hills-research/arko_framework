@@ -8,7 +8,7 @@ use crate::tool::{Tool, ToolError, ToolParameterDefinition, ToolParameterType, T
 use async_trait::async_trait;
 use futures::StreamExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// A batch-safe tool with a path parameter that counts its runs.
 #[derive(Debug)]
@@ -1392,6 +1392,125 @@ async fn a_middleware_pause_answers_the_call_and_pauses_after_the_batch() {
             assert_calls_paired(&task.conversation);
         }
         std::fs::remove_dir_all(workspace).unwrap();
+    }
+}
+
+/// Fails one middleware hook so the runtime must preserve the task for the
+/// host instead of returning the middleware error from the run.
+struct ErroringMiddleware {
+    fail_before: bool,
+    after_failed: AtomicBool,
+}
+
+#[async_trait]
+impl ToolExecutionMiddleware for ErroringMiddleware {
+    async fn before(
+        &self,
+        _: &ToolExecutionContext<'_>,
+        call: &ToolCallContext<'_>,
+    ) -> Result<ToolExecutionDecision, ToolError> {
+        if self.fail_before && call.tool_name == "counter" {
+            return Err(ToolError::ExecutionFailed("before hook unavailable".into()));
+        }
+        Ok(ToolExecutionDecision::Continue)
+    }
+
+    async fn after(
+        &self,
+        _: &ToolExecutionContext<'_>,
+        call: &ToolCallContext<'_>,
+        _: ToolExecutionOutcome<'_>,
+    ) -> Result<(), ToolError> {
+        if !self.fail_before
+            && call.tool_name == "counter"
+            && !self.after_failed.swap(true, Ordering::SeqCst)
+        {
+            return Err(ToolError::ExecutionFailed("after hook unavailable".into()));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn middleware_hook_errors_pause_and_preserve_tool_work() {
+    for mode in [ToolCallingMode::Native, ToolCallingMode::OutputBased] {
+        for fail_before in [true, false] {
+            let workspace = workspace();
+            let runs = Arc::new(AtomicUsize::new(0));
+            let mut registry = ToolRegistry::new();
+            registry.register(Arc::new(Counter(Arc::clone(&runs))));
+            let (mut agent, mut events, commands) =
+                agent(config(mode.clone(), &["counter"]), registry, &workspace);
+            agent.execution_middleware = Some(Arc::new(ErroringMiddleware {
+                fail_before,
+                after_failed: AtomicBool::new(false),
+            }));
+            if mode == ToolCallingMode::Native {
+                agent.scripted_responses.get_mut().unwrap().extend([
+                    turn(vec![native_call(
+                        "count",
+                        "counter",
+                        serde_json::json!({"path": "counter.txt"}),
+                    )]),
+                    complete(),
+                ]);
+            } else {
+                agent.scripted_responses.get_mut().unwrap().extend([
+                    text_turn("<counter>\n<path>counter.txt</path>\n</counter>"),
+                    text_turn("<complete_task>\n<summary>done</summary>\n</complete_task>"),
+                ]);
+            }
+            let mut seen = Vec::new();
+            let run = tokio::spawn(agent.run());
+            let (error, cause) = wait_for(&mut events, &mut seen, |event| match event {
+                AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
+                    error_message,
+                    cause,
+                }) => Some((error_message.clone(), cause.clone())),
+                _ => None,
+            })
+            .await;
+            assert_eq!(cause, ErrorRecoveryCause::Middleware);
+            assert!(
+                error.contains(if fail_before {
+                    "before hook unavailable"
+                } else {
+                    "after hook unavailable"
+                }),
+                "{mode:?}: {error}"
+            );
+            if fail_before {
+                assert_eq!(runs.load(Ordering::SeqCst), 0);
+                assert!(!seen.iter().any(|event| matches!(
+                    event,
+                    AgentEvent::ToolResult { tool_name, .. } if tool_name == "counter"
+                )));
+            } else {
+                assert_eq!(runs.load(Ordering::SeqCst), 1);
+                assert!(seen.iter().any(|event| matches!(
+                    event,
+                    AgentEvent::ToolResult { tool_name, output, .. }
+                        if tool_name == "counter" && output == "counted"
+                )));
+            }
+            commands
+                .send(UserCommand::ContinueAfterError { note: None })
+                .await
+                .unwrap();
+            let task = timeout(Duration::from_secs(10), run)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(matches!(task.current_state, TaskState::Completed { .. }));
+            assert_eq!(runs.load(Ordering::SeqCst), usize::from(!fail_before));
+            let conversation = serde_json::to_string(&task.conversation).unwrap();
+            assert_eq!(
+                conversation.matches("counted").count(),
+                usize::from(!fail_before)
+            );
+            std::fs::remove_dir_all(workspace).unwrap();
+        }
     }
 }
 

@@ -35,7 +35,7 @@ use crate::workflow::cancel::{
 };
 use crate::workflow::config::{WorkflowConfig, WorkflowMetadata};
 use crate::workflow::engine::{StartedRun, WorkflowEngine, fire_hooks_on_context};
-use crate::workflow::result::{AgentResult, WorkflowEvent, WorkflowResult};
+use crate::workflow::result::{AgentResult, AgentRunStatus, WorkflowEvent, WorkflowResult};
 
 /// A configured multi-agent workflow.
 ///
@@ -1345,6 +1345,12 @@ impl WorkflowBuilder {
             }
             _ => Vec::new(),
         };
+        validate_resumed_agent_configs(
+            &self.agents,
+            &self.global_tools,
+            &self.agent_tools,
+            &resumed_results,
+        )?;
         if resume_state.is_some() && self.persistence_config.is_none() {
             return Err(WorkflowError::BuilderInvalid(
                 "resume_from requires persistence configuration".to_string(),
@@ -1553,6 +1559,101 @@ fn normalize_workspace(workspace: &std::path::Path) -> Result<PathBuf, WorkflowE
         )));
     }
     Ok(normalized)
+}
+
+/// A task that can be resumed must keep the settings that define the agent's
+/// behavior. The task stores the prepared configuration, so compare it with
+/// the builder's user configuration after removing workflow-owned additions.
+/// Model registry snapshots are deliberately ignored: the provider and model
+/// id remain authoritative, while the registry may gain metadata between
+/// checkpoints.
+fn validate_resumed_agent_configs(
+    agents: &[(String, AgentConfig)],
+    global_tools: &[Arc<dyn arko_agents::tool::Tool>],
+    agent_tools: &HashMap<String, Vec<Arc<dyn arko_agents::tool::Tool>>>,
+    resumed_results: &[AgentResult],
+) -> Result<(), WorkflowError> {
+    let configured = agents
+        .iter()
+        .map(|(name, config)| (name, config))
+        .collect::<HashMap<_, _>>();
+    let mut workflow_tools = [
+        crate::memory::tools::READ_MEMORY_TOOL_NAME,
+        crate::memory::tools::WRITE_MEMORY_TOOL_NAME,
+        crate::memory::tools::LIST_MEMORIES_TOOL_NAME,
+        SEND_MESSAGE_TOOL_NAME,
+        LIST_RECIPIENTS_TOOL_NAME,
+        WAIT_FOR_MESSAGE_TOOL_NAME,
+        RUN_WORKFLOW_AGENT_TOOL_NAME,
+        CAST_VOTE_TOOL_NAME,
+        arko_agents::LOAD_SKILL_TOOL_NAME,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<HashSet<_>>();
+    workflow_tools.extend(global_tools.iter().map(|tool| tool.name()));
+    workflow_tools.extend(agent_tools.values().flatten().map(|tool| tool.name()));
+
+    for result in resumed_results {
+        if !matches!(
+            result.status,
+            AgentRunStatus::Completed | AgentRunStatus::WaitingForInput | AgentRunStatus::Paused
+        ) {
+            continue;
+        }
+        let Some(current) = configured.get(&result.agent_name) else {
+            continue;
+        };
+        let current = normalized_resume_agent_config(current, &workflow_tools)?;
+        let saved = normalized_resume_agent_config(&result.task.agent_config, &workflow_tools)?;
+        if current != saved {
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "agent '{}' configuration changed since its checkpoint; use the original configuration to resume it or register the changed configuration under another agent name",
+                result.agent_name
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn normalized_resume_agent_config(
+    config: &AgentConfig,
+    workflow_tools: &HashSet<String>,
+) -> Result<serde_json::Value, WorkflowError> {
+    let mut value = serde_json::to_value(config).map_err(|error| {
+        WorkflowError::BuilderInvalid(format!(
+            "could not compare agent configuration while resuming: {error}"
+        ))
+    })?;
+    let object = value
+        .as_object_mut()
+        .expect("AgentConfig serializes as an object");
+    if let Some(tool_config) = object
+        .get_mut("tool_config")
+        .and_then(|value| value.as_object_mut())
+    {
+        if let Some(names) = tool_config
+            .get_mut("available_tool_names")
+            .and_then(|value| value.as_array_mut())
+        {
+            names.retain(|name| {
+                name.as_str()
+                    .is_none_or(|name| !workflow_tools.contains(name))
+            });
+        }
+        if let Some(overrides) = tool_config
+            .get_mut("tool_specific_configs")
+            .and_then(|value| value.as_object_mut())
+        {
+            overrides.retain(|name, _| !workflow_tools.contains(name));
+        }
+    }
+    for key in ["llm_config", "refusal_fallback"] {
+        if let Some(model_config) = object.get_mut(key).and_then(|value| value.as_object_mut()) {
+            model_config.remove("model");
+        }
+    }
+    Ok(value)
 }
 
 /// Logs a warning for each tool name the freshness mapping or a distiller

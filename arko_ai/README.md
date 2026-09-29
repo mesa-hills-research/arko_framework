@@ -97,8 +97,9 @@ Gemini requests use Google's Interactions API. OpenAI requests carry no `origina
 `with_openai_user_agent`; use your own application's name. `with_request_trace` writes
 every OpenAI request and response to a directory for diagnosing prompt caching
 (`RequestTrace`); requests to other providers are not traced, and the first one to each
-provider logs a warning saying so. `with_openai_request_hook` can adjust OpenAI requests
-before they are sent.
+provider logs a warning saying so. A request that fails while refreshing OAuth credentials
+or detecting an account change is recorded as an error with its cause, rather than as an
+abandoned call. `with_openai_request_hook` can adjust OpenAI requests before they are sent.
 
 ## Models
 
@@ -368,7 +369,9 @@ No `OpenAI-Beta` header is sent on either path. The backend rejects `max_output_
 ("Unsupported parameter"), so `GenerationConfig::max_tokens` is never sent over ChatGPT
 OAuth and the model's own output limit applies; a set limit is ignored with a warning
 logged once. The backend also caches implicitly and takes no cache options, so turning
-prompt caching off has no effect there (also warned about once).
+prompt caching off has no effect there (also warned about once). It also does not accept
+`reasoning.mode`; `GenerationConfig::openai_reasoning_mode` is omitted on this auth path
+and warns once when configured.
 
 **Turn state.** The backend returns an `x-codex-turn-state` routing token.
 `GenerationResponse::openai_turn_state` carries it, and
@@ -422,6 +425,8 @@ step with its `auth.json`.
   then build the client with `LLMClient::new().with_codex_auth_file(&file)?`,
   `file.openai_client()?`, or `file.client()?`. Both the nested `tokens` layout Codex
   writes and top-level token fields are read.
+- Missing or malformed login files report the path; a missing file also tells the caller to
+  run `codex login`.
 - Other storage implements `ChatGptOAuthStore` and is installed with
   `OpenAIClient::with_credential_store`.
 

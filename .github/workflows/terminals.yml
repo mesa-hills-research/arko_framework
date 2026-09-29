@@ -44,5 +44,8 @@ jobs:
         run: cargo test --workspace --lib --locked --no-fail-fast
       - name: Index pipeline and watcher tests
         run: cargo test -p arko_index --locked --no-fail-fast
+      - name: Compile every workspace target
+        if: runner.os == 'Linux'
+        run: cargo check --workspace --all-targets --locked
       - name: Interactive terminal example
         run: cargo run -p arko_agents --example interactive_terminal --locked

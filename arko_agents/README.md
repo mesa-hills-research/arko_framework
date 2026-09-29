@@ -467,6 +467,8 @@ The last two `run_task` arguments wrap tool execution:
   output; `ToolResultIntercepted` follows with the replacement. Results of `complete_task`
   and `ask_user` are never intercepted, and `load_skill` results only when the agent's
   `SkillsConfig::load_skill_interception` opts in (see [Skills](#skills)).
+  The event pair is emitted even when an approval supplies a message to the agent, so the
+  audit stream still contains both the raw and effective result.
 - A `ToolExecutionMiddleware` runs `before` and `after` every execution, whether
   approved or auto-approved, native or output-based. `before` returns `Continue`,
   `Reject { message_to_agent }`, `FailTask { reason }`, `CancelTask { reason }`,
@@ -479,7 +481,11 @@ The last two `run_task` arguments wrap tool execution:
   error-recovery approval with the cause `Middleware` and `reason` as its error
   (arko_workflows uses it for a completion its verifier could not review). A call
   answered with `custom_tool_output` skips `before`, and `after` receives
-  `CallerProvided`.
+  `CallerProvided`. If a middleware hook returns an error, the runtime treats it as
+  the same kind of host decision: a `before` error leaves the call unrun and pauses
+  with the hook error; an `after` error keeps the tool's result and pauses after
+  recording it, so continuing does not execute the tool again. In a batch, the other
+  calls finish before the pause is reported.
 
 ### MCP servers
 
@@ -616,6 +622,10 @@ last input). Then it is kept in `Task::pending_context_injections`, saved with t
 and added at the first turn boundary where it can go once the task runs again, before
 context sent later. A completed task also keeps the context taken during its last turn
 there, since the model has not read it, and a continued task gets it.
+
+`prepare_for_resumption_from_completed` applies the same `EachUserMessage` environment
+details and reminder schedule as an ordinary user message. Pending context is delivered
+once at the next safe turn boundary, including file-tree changes, without duplication.
 
 Tasks serialize to JSON (`Task::save_to_path`, `Task::load_from_path`). Running a
 returned task again continues it: a task that is pending, in progress, or interrupted

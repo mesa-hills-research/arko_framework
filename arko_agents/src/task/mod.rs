@@ -107,8 +107,9 @@ pub enum ErrorRecoveryCause {
     Monitor,
     /// The tool execution middleware paused the task at a call
     /// ([`ToolExecutionDecision::PauseTask`](crate::tool::ToolExecutionDecision::PauseTask)),
-    /// for a decision it leaves to the host (for example, a workflow's
-    /// completion verifier that could not review a completion).
+    /// or one of its hooks returned an error. This leaves the decision to the
+    /// host (for example, a workflow's completion verifier could not review a
+    /// completion).
     Middleware,
 }
 
@@ -402,7 +403,7 @@ pub struct DeferredToolError {
     /// The error, as `AgentEvent::ErrorEncountered` reports it.
     pub message: String,
     pub tool_call_id: Option<Uuid>,
-    /// A pause the execution middleware asked for
+    /// A pause the execution middleware asked for or caused with a hook error
     /// ([`ErrorRecoveryCause::Middleware`]) rather than a tool error. The
     /// pause has that cause when any of its entries is one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -530,7 +531,18 @@ impl Task {
             ));
         }
         self.set_state(TaskState::InProgress);
-        self.conversation.add_user_message(&continuation_prompt);
+        // A continuation is a user message just like an answer to a paused
+        // task. Keep the per-message environment details and reminder rules
+        // consistent across both paths.
+        let parsing = self.agent_config.get_tool_parsing_config();
+        let continuation =
+            crate::parsing::PromptBuilder::new(&self.agent_config, vec![], &parsing, None)
+                .augment_user_message_with_env_details_and_reminder(
+                    self,
+                    &continuation_prompt,
+                    self.user_message_count + 1,
+                )?;
+        self.conversation.add_user_message(&continuation);
         self.user_message_count += 1;
         Ok(())
     }
@@ -653,7 +665,10 @@ impl Task {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_config::AgentLLMConfig;
+    use crate::agent_config::{
+        AgentLLMConfig, DeveloperDefinableEnvironmentDetail, EnvironmentDetailPlacement,
+        UserReminder,
+    };
     use crate::runtime::event::AgentEvent;
 
     fn state(json: Value) -> TaskState {
@@ -835,6 +850,53 @@ mod tests {
         );
         let loaded: Task = serde_json::from_str(&json.to_string()).unwrap();
         assert_eq!(loaded.pending_context_injections, ["First.", "Second."]);
+    }
+
+    #[test]
+    fn completed_continuations_apply_environment_details_and_reminders() {
+        let config = AgentConfig::builder(
+            "continued".into(),
+            "Continued".into(),
+            AgentLLMConfig {
+                model: arko_ai::Model::openai_gpt_5_6_luna(),
+                generation_config: Default::default(),
+            },
+        )
+        .role_description("test".into())
+        .instructions("test".into())
+        .build()
+        .unwrap();
+        let detail = DeveloperDefinableEnvironmentDetail::new_static(
+            "Build".into(),
+            "green".into(),
+            EnvironmentDetailPlacement::EachUserMessage,
+        );
+        let mut task = Task::new(
+            config,
+            "prompt".into(),
+            PathBuf::from("/workspace"),
+            Some(vec![detail]),
+        );
+        task.agent_config.user_reminder = Some(UserReminder::every_message("Stay focused.".into()));
+        task.conversation.add_user_message("Initial");
+        task.user_message_count = 1;
+        task.set_state(TaskState::Completed {
+            summary: "done".into(),
+        });
+        task.prepare_for_resumption_from_completed("Continue".into())
+            .unwrap();
+        let message = task.conversation.messages.last().unwrap();
+        let text = message
+            .content
+            .iter()
+            .find_map(arko_ai::Content::as_text)
+            .unwrap();
+        assert!(
+            text.contains("# Current Environment Information (updated this turn)\nBuild:\ngreen"),
+            "{text}"
+        );
+        assert!(text.contains("# Reminder\nStay focused."));
+        assert!(task.pending_context_injections.is_empty());
     }
 
     /// A new configuration without a tool calling mode gets native; a saved

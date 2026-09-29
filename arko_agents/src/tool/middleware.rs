@@ -77,6 +77,11 @@ pub enum ToolExecutionOutcome<'a> {
 /// approved, native, output-based, single, and batched calls alike.
 #[async_trait]
 pub trait ToolExecutionMiddleware: Send + Sync {
+    /// Returning an error pauses the task with
+    /// [`ErrorRecoveryCause::Middleware`](crate::task::ErrorRecoveryCause::Middleware).
+    /// A `before` error means the call is not run. An `after` error keeps the
+    /// tool's result in the conversation before pausing, so continuing does
+    /// not execute the tool again.
     async fn before(
         &self,
         context: &ToolExecutionContext<'_>,

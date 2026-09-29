@@ -74,6 +74,18 @@ pub(super) struct ToolRun {
 pub(super) enum RunOutcome {
     /// The middleware rejected the call; it did not run.
     Rejected(String),
+    /// The middleware hook itself failed before the tool ran; the task must
+    /// pause so the host can decide whether to continue.
+    MiddlewareErrorBefore { reason: String },
+    /// The middleware hook itself failed after the tool returned. The output
+    /// is kept so a continuation does not execute the tool again.
+    MiddlewareErrorAfter {
+        output: ToolOutput,
+        effective: String,
+        intercepted: bool,
+        reason: String,
+        is_error: bool,
+    },
     /// The middleware failed (or, with `cancel`, cancelled) the task at the
     /// call; it did not run.
     Stop { reason: String, cancel: bool },
@@ -91,7 +103,8 @@ pub(super) enum RunOutcome {
     Failed(ToolError),
 }
 
-/// Runs one call. An error is the middleware's own failure.
+/// Runs one call. Middleware hook errors become pausable outcomes so the task
+/// and any completed tool result remain available to the host.
 pub(super) async fn run_tool(
     environment: Arc<RunEnvironment>,
     run: ToolRun,
@@ -105,45 +118,64 @@ pub(super) async fn run_tool(
     let middleware = environment.middleware.as_ref();
     let output = match &run.custom_output {
         Some(output) => {
-            if let Some(middleware) = middleware {
-                middleware
+            let output = ToolOutput::text(output.clone());
+            if let Some(middleware) = middleware
+                && let Err(error) = middleware
                     .after(
                         &execution,
                         &call,
-                        ToolExecutionOutcome::CallerProvided(output),
+                        ToolExecutionOutcome::CallerProvided(&output.text),
                     )
-                    .await?;
+                    .await
+            {
+                let reason = middleware_error_reason("after", &run.tool_name, &error);
+                let (effective, intercepted) =
+                    intercepted_output(&environment, &run, &output.text).await;
+                return Ok(RunOutcome::MiddlewareErrorAfter {
+                    output,
+                    effective,
+                    intercepted,
+                    reason,
+                    is_error: false,
+                });
             }
-            ToolOutput::text(output.clone())
+            output
         }
         None => {
             if let Some(middleware) = middleware {
-                match middleware.before(&execution, &call).await? {
-                    ToolExecutionDecision::Continue => {}
-                    ToolExecutionDecision::Reject { message_to_agent } => {
-                        return Ok(RunOutcome::Rejected(message_to_agent));
-                    }
-                    ToolExecutionDecision::FailTask { reason } => {
-                        return Ok(RunOutcome::Stop {
-                            reason,
-                            cancel: false,
+                match middleware.before(&execution, &call).await {
+                    Err(error) => {
+                        return Ok(RunOutcome::MiddlewareErrorBefore {
+                            reason: middleware_error_reason("before", &run.tool_name, &error),
                         });
                     }
-                    ToolExecutionDecision::CancelTask { reason } => {
-                        return Ok(RunOutcome::Stop {
+                    Ok(decision) => match decision {
+                        ToolExecutionDecision::Continue => {}
+                        ToolExecutionDecision::Reject { message_to_agent } => {
+                            return Ok(RunOutcome::Rejected(message_to_agent));
+                        }
+                        ToolExecutionDecision::FailTask { reason } => {
+                            return Ok(RunOutcome::Stop {
+                                reason,
+                                cancel: false,
+                            });
+                        }
+                        ToolExecutionDecision::CancelTask { reason } => {
+                            return Ok(RunOutcome::Stop {
+                                reason,
+                                cancel: true,
+                            });
+                        }
+                        ToolExecutionDecision::PauseTask {
+                            message_to_agent,
                             reason,
-                            cancel: true,
-                        });
-                    }
-                    ToolExecutionDecision::PauseTask {
-                        message_to_agent,
-                        reason,
-                    } => {
-                        return Ok(RunOutcome::Pause {
-                            message: message_to_agent,
-                            reason,
-                        });
-                    }
+                        } => {
+                            return Ok(RunOutcome::Pause {
+                                message: message_to_agent,
+                                reason,
+                            });
+                        }
+                    },
                 }
             }
             let context = environment.task_context();
@@ -158,14 +190,25 @@ pub(super) async fn run_tool(
             };
             match result {
                 Ok(output) => {
-                    if let Some(middleware) = middleware {
-                        middleware
+                    if let Some(middleware) = middleware
+                        && let Err(error) = middleware
                             .after(
                                 &execution,
                                 &call,
                                 ToolExecutionOutcome::Success(&output.text),
                             )
-                            .await?;
+                            .await
+                    {
+                        let reason = middleware_error_reason("after", &run.tool_name, &error);
+                        let (effective, intercepted) =
+                            intercepted_output(&environment, &run, &output.text).await;
+                        return Ok(RunOutcome::MiddlewareErrorAfter {
+                            output,
+                            effective,
+                            intercepted,
+                            reason,
+                            is_error: false,
+                        });
                     }
                     output
                 }
@@ -173,33 +216,58 @@ pub(super) async fn run_tool(
                     if let Some(middleware) = middleware {
                         let error_text =
                             format!("Tool '{}' execution failed: {}", run.tool_name, error);
-                        middleware
+                        if let Err(middleware_error) = middleware
                             .after(&execution, &call, ToolExecutionOutcome::Error(&error_text))
-                            .await?;
+                            .await
+                        {
+                            return Ok(RunOutcome::MiddlewareErrorAfter {
+                                output: ToolOutput::text(error_text.clone()),
+                                effective: error_text,
+                                intercepted: false,
+                                reason: middleware_error_reason(
+                                    "after",
+                                    &run.tool_name,
+                                    &middleware_error,
+                                ),
+                                is_error: true,
+                            });
+                        }
                     }
                     return Ok(RunOutcome::Failed(error));
                 }
             }
         }
     };
-    let (effective, intercepted) = match &run.interception {
-        Some(interception) => {
-            intercept(
-                &environment,
-                interception,
-                &run.tool_name,
-                &output.text,
-                &run.params,
-            )
-            .await
-        }
-        None => (output.text.clone(), false),
-    };
+    let (effective, intercepted) = intercepted_output(&environment, &run, &output.text).await;
     Ok(RunOutcome::Finished {
         output,
         effective,
         intercepted,
     })
+}
+
+async fn intercepted_output(
+    environment: &RunEnvironment,
+    run: &ToolRun,
+    raw_output: &str,
+) -> (String, bool) {
+    match &run.interception {
+        Some(interception) => {
+            intercept(
+                environment,
+                interception,
+                &run.tool_name,
+                raw_output,
+                &run.params,
+            )
+            .await
+        }
+        None => (raw_output.to_string(), false),
+    }
+}
+
+fn middleware_error_reason(phase: &str, tool_name: &str, error: &ToolError) -> String {
+    format!("Tool execution middleware {phase} hook failed for '{tool_name}': {error}")
 }
 
 /// Applies `interception` to a result; returns the text for the

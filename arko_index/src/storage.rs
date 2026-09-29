@@ -48,7 +48,26 @@ impl Db {
             // forever. A job the host asked to pause (its last pause request is
             // newer than its last phase change) stays paused as asked; the others
             // are marked interrupted, which a watcher resumes.
-            c.execute("UPDATE jobs SET phase='paused', problem=CASE WHEN (SELECT kind FROM events WHERE job=jobs.id AND kind IN ('pause_requested','phase') ORDER BY sequence DESC LIMIT 1)='pause_requested' THEN 'paused' ELSE ?1 END WHERE phase IN ('snapshotting','chunking','embedding')",[INTERRUPTED])?;
+            let tx = c.transaction()?;
+            let mut jobs = tx.prepare("SELECT id, CASE WHEN (SELECT kind FROM events WHERE job=jobs.id AND kind IN ('pause_requested','phase') ORDER BY sequence DESC LIMIT 1)='pause_requested' THEN 'paused' ELSE ?1 END FROM jobs WHERE phase IN ('snapshotting','chunking','embedding')")?;
+            let interrupted = jobs
+                .query_map([INTERRUPTED], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(jobs);
+            for (job, problem) in interrupted {
+                tx.execute(
+                    "UPDATE jobs SET phase='paused',problem=?2 WHERE id=?1",
+                    rusqlite::params![job, problem],
+                )?;
+                let detail = serde_json::json!({"phase":"paused","problem":problem});
+                tx.execute(
+                    "INSERT INTO events(job,kind,detail) VALUES(?1,'phase',?2)",
+                    rusqlite::params![job, encode(&detail)?],
+                )?;
+            }
+            tx.commit()?;
             Ok(Self(Arc::new(Database{connection:Mutex::new(c),_lock:lock})))
         }).await?
     }
@@ -339,6 +358,80 @@ mod tests {
             assert_eq!(value, expected);
             drop(db);
         }
+    }
+
+    #[tokio::test]
+    async fn reopening_active_jobs_records_the_recovery_phase_event_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        let db = Db::open(&path, crate::Synchronous::Full).await.unwrap();
+        db.call(|c| {
+            c.execute(
+                "INSERT INTO indexes VALUES('i','test','{}',NULL,'{}')",
+                [],
+            )?;
+            c.execute(
+                "INSERT INTO jobs(id,index_id,phase,config) VALUES('interrupted','i','chunking','{}'),('requested','i','embedding','{}')",
+                [],
+            )?;
+            c.execute(
+                "INSERT INTO events(job,kind,detail) VALUES('requested','pause_requested','{}')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        drop(db);
+
+        let db = Db::open(&path, crate::Synchronous::Full).await.unwrap();
+        for (job, problem) in [("interrupted", INTERRUPTED), ("requested", "paused")] {
+            let row = db
+                .call({
+                    let job = job.to_string();
+                    move |c| {
+                        Ok(c.query_row(
+                            "SELECT phase,problem FROM jobs WHERE id=?1",
+                            [&job],
+                            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                        )?)
+                    }
+                })
+                .await
+                .unwrap();
+            assert_eq!(row, ("paused".to_string(), Some(problem.to_string())));
+            let detail = db
+                .call({
+                    let job = job.to_string();
+                    move |c| {
+                        Ok(c.query_row(
+                            "SELECT detail FROM events WHERE job=?1 AND kind='phase' ORDER BY sequence DESC LIMIT 1",
+                            [&job],
+                            |row| row.get::<_, String>(0),
+                        )?)
+                    }
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                decode::<serde_json::Value>(&detail).unwrap()["phase"],
+                "paused"
+            );
+        }
+        drop(db);
+
+        let db = Db::open(&path, crate::Synchronous::Full).await.unwrap();
+        let phase_events = db
+            .call(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM events WHERE kind='phase'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(phase_events, 2);
     }
 
     #[test]

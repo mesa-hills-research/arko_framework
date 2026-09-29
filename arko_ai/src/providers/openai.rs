@@ -1147,7 +1147,13 @@ impl OpenAIClient {
                 // A server can reject a token before its embedded expiry.
                 // Refresh once; transient failures return to the agent's bounded
                 // recovery policy. No stream or tool calls have been delivered.
-                self.refresh_oauth_token_for_auth(&auth, false).await?;
+                let refreshed = self.refresh_oauth_token_for_auth(&auth, false).await;
+                if let Err(refresh_error) = refreshed {
+                    if let Some(trace) = trace.take() {
+                        trace.fail(&refresh_error.to_string(), None);
+                    }
+                    return Err(refresh_error);
+                }
                 true
             } else if recoverable && self.credential_store.is_some() {
                 // Any other 401: another program may have refreshed or signed
@@ -1162,6 +1168,9 @@ impl OpenAIClient {
                 let updated = self.snapshot_auth().await;
                 if !matches!((&auth, &updated), (OpenAIAuth::ChatGptOAuth(old), OpenAIAuth::ChatGptOAuth(new)) if old.account_id == new.account_id)
                 {
+                    if let Some(trace) = trace.take() {
+                        trace.fail(&error.to_string(), None);
+                    }
                     return Err(error);
                 }
                 auth = updated;
@@ -1710,7 +1719,7 @@ impl OpenAIClient {
             response.model.clone(),
             response.usage.input_tokens,
             response.usage.output_tokens,
-            model.max_input_tokens,
+            crate::input_limit::effective_max_input_tokens(model, is_chatgpt_oauth).unwrap_or(0),
         );
         let model_call_usage = Self::with_response_stop_metadata(
             model_call_usage,
@@ -2218,7 +2227,7 @@ impl OpenAIClient {
             }
 
             request.reasoning = Some(OpenAIReasoning {
-                mode: config.openai_reasoning_mode,
+                mode: config.openai_reasoning_mode.filter(|_| !is_chatgpt_oauth),
                 effort: Some(*effort),
                 summary: if *include_summaries {
                     Some("auto".to_string())
@@ -2229,7 +2238,7 @@ impl OpenAIClient {
             });
         } else if is_chatgpt_oauth && (is_gpt5_family || is_gpt6) {
             request.reasoning = Some(OpenAIReasoning {
-                mode: config.openai_reasoning_mode,
+                mode: None,
                 effort: Some(OpenAIEffort::Medium),
                 summary: None,
                 context: reasoning_context,
@@ -2438,6 +2447,11 @@ impl OpenAIClient {
         if !config.prompt_caching.unwrap_or(conversation.enable_cache) {
             crate::notice::warn_once("openai-oauth:prompt_caching", || {
                 "arko_ai: the ChatGPT OAuth backend caches prompts implicitly and can't turn caching off, so disabled prompt caching has no effect on ChatGPT OAuth requests.".to_string()
+            });
+        }
+        if config.openai_reasoning_mode.is_some() {
+            crate::notice::warn_once("openai-oauth:reasoning_mode", || {
+                "arko_ai: the ChatGPT OAuth backend does not accept OpenAI reasoning.mode, so GenerationConfig::openai_reasoning_mode is not sent on ChatGPT OAuth requests.".to_string()
             });
         }
     }
@@ -3299,7 +3313,14 @@ mod tests {
                     assert!(value["reasoning"].get("context").is_none());
                 }
                 assert_eq!(value["stream"], oauth);
-                assert_eq!(value["reasoning"]["mode"], "pro");
+                assert_eq!(
+                    value["reasoning"]["mode"],
+                    if oauth {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!("pro")
+                    }
+                );
                 assert_eq!(
                     value["reasoning"]["effort"],
                     serde_json::to_value(effort).unwrap()
@@ -3356,7 +3377,14 @@ mod tests {
                     } else {
                         assert!(value["reasoning"].get("context").is_none());
                     }
-                    assert_eq!(value["reasoning"]["mode"], "pro");
+                    assert_eq!(
+                        value["reasoning"]["mode"],
+                        if oauth {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::json!("pro")
+                        }
+                    );
                     assert_eq!(
                         value["reasoning"]["effort"],
                         serde_json::to_value(effort).unwrap()
