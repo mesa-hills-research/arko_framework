@@ -1308,11 +1308,6 @@ impl AgentConfig {
                 "a Claude Code agent calls tools natively; set tool_calling_mode to Native.".into(),
             ));
         }
-        if self.refusal_fallback.is_some() {
-            return Err(error(
-                "refusal_fallback isn't supported for Claude Code models: Claude Code handles refusals in its own loop.".into(),
-            ));
-        }
         if let Some(tool) = tools
             .available_tool_names
             .iter()

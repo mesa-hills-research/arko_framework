@@ -874,12 +874,16 @@ answers:
 | `auto_approve_tool_use` and approvals | Yes | A call that needs approval goes to a permission request that waits for `ApproveToolUse` or `RejectToolUse` (`ToolCallAwaitingApproval`, `AwaitingToolApproval`), with `user_command_timeout_seconds` and `HostDecisions` as usual. `custom_tool_output` becomes the call's result instead of running it, and `message_to_agent` comes with the result |
 | Workspace path policy | Yes | On the path inputs of `Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Glob` and `Grep` (`claude_code::built_in_path_parameters`) |
 | Execution middleware | Yes | `before` in the gate (a rejection, pause, failure or cancellation applies as for any call) and `after` once the call ran |
+| Terminal command guard | `Bash`, `PowerShell` | The command must pass [`CommandGuard`](../docs/interactive-terminals.md) for the working directory; `ClaudeCodeSettings::{allow_commands_outside_workspace, allowed_command_paths, dangerously_allow_all_commands}` are its opt-ins |
 | Result interception | No | Claude Code produces a built-in's output; a workflow rejects a distiller aimed at one |
 | `tool_timeout_seconds`, `parallel_safe` | No | Claude Code runs its built-ins; `validate` rejects these settings for them |
 | `ToolErrorPolicy` | Arko tools only | A built-in's failure (a command that exits non-zero, say) is its result |
 
 `AskUserQuestion`, `ExitPlanMode` and `EnterPlanMode` can't be offered (they would bypass
-the host; ask with `ask_user`).
+the host; ask with `ask_user`). Claude Code shows a refused call to the model as
+`PreToolUse:<tool> hook error: <reason>`, so the gate's reasons say who refused it and why
+(`arko did not run this Read call: …`); a call held for the handover report says it isn't
+an error.
 
 **Sessions.** `ClaudeCodeSettings` sets the CLI (`cli_path`, and `cli_args` for one run
 through an interpreter), `env`, whether the agent's system prompt replaces Claude Code's
@@ -904,7 +908,25 @@ their results) as a record for hosts; subagents' messages aren't included. Usage
 recorded per request from Claude Code's stream events (its final `message_delta`): the
 whole input, adding Anthropic's exclusive uncached, cache-read and cache-write counts, and
 the output with thinking, billed as a subscription (nothing per call; the cost is the estimate at list
-prices). `refusal_fallback` and the monitors aren't supported for Claude Code models.
+prices).
+
+**Monitors and limits.** Claude Code's `rate_limit_event` is reported as
+`PlanUsageReported` (its five-hour window as the primary one, its seven-day window as the
+secondary) and attached to the requests after it, and the plan-usage threshold applies:
+`Pause` interrupts the turn and pauses as a monitor, `SlowDown` delays each tool call while
+usage stays over the threshold. A turn that fails while Claude Code reports the plan limit
+reached pauses with `ErrorRecoveryCause::UsageLimit` and its reset (`UsageLimitReached`),
+so automatic recovery waits for it. The cache monitor judges the main conversation's
+requests.
+
+**Refusals.** By default Claude Code retries a refused request on a fallback model it
+chooses; the runtime reports it as `RefusalReceived` then `RefusalFallback`, and a model
+switch for availability as `ModelRerouted`. A refusal that stands (no retry ran) is
+`RefusalReceived`; with `refusal_fallback` (a Claude Code model), the session switches to
+that model (`set_model`) for one turn, asks it to continue, and switches back, and a
+refusal on that turn stands. Without it, the task pauses with `ErrorRecoveryCause::Refusal`
+under the pausing policies. The refused request stays in Claude Code's conversation, so
+`ResolveRefusal` doesn't apply.
 
 **Handovers.** With `handover` set, the threshold is checked against each request of the
 main conversation as Claude Code reports it. Once reached, the model's next tool call is

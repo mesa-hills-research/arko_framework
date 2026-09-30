@@ -15,6 +15,7 @@ the next turn's index). Steps:
   {"exit": 3}                            the CLI crashes
   {"rate_limit": {...}}                  a rate_limit_event with this info
   {"fail": "..."}                        the turn ends in this error
+  {"system": {"subtype": ...}}           a system message
 
 A turn's result is its last text. FAKE_CLAUDE_LOG receives one JSON line per
 event: argv, tools, user messages, hook and permission answers, tool results.
@@ -185,6 +186,9 @@ def turn(text):
             send({"type": "rate_limit_event", "rate_limit_info": step["rate_limit"],
                   "session_id": SESSION})
             continue
+        if "system" in step:
+            send(dict({"type": "system", "session_id": SESSION}, **step["system"]))
+            continue
         if "fail" in step:
             send({"type": "result", "subtype": "error_during_execution", "is_error": True,
                   "num_turns": 1, "session_id": SESSION, "duration_ms": 5,
@@ -208,6 +212,9 @@ def handle(message):
                 state["hooks"][event] = matchers[0]["hookCallbackIds"][0]
             reply(message["request_id"], {"commands": []})
             log("argv", argv=ARGS)
+        elif subtype == "set_model":
+            log("set_model", model=request.get("model"))
+            reply(message["request_id"], {})
         elif subtype == "interrupt":
             state["interrupted"] = True
             reply(message["request_id"], {})

@@ -98,6 +98,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             AgentEvent::ModelCallUsageReported(usage) => {
                 println!("  [request: {} input tokens]", usage.input_tokens)
             }
+            AgentEvent::PlanUsageReported(usage) => println!(
+                "  [plan usage: five-hour {:?}%, seven-day {:?}%]",
+                usage.primary.map(|window| window.used_percent),
+                usage.secondary.map(|window| window.used_percent)
+            ),
+            AgentEvent::RefusalReceived(refusal) => println!("[refusal] {refusal:?}"),
+            AgentEvent::RefusalFallback { model_id } => println!("[refusal fallback] {model_id}"),
             AgentEvent::HandoverRequested { input_tokens } => {
                 println!("=== handover requested at {input_tokens} input tokens ===")
             }

@@ -484,6 +484,11 @@ pub(super) struct ClaudeCodeRun {
     cache_pause_episode: bool,
     /// The cache monitor asked for a pause; the turn is interrupted.
     cache_interrupt: bool,
+    /// A refusal Claude Code reported standing in this turn (no retry ran).
+    refused: Option<ai::Refusal>,
+    /// The refusal fallback model answers this turn; the configured model
+    /// takes over again when it ends.
+    fallback_turn: bool,
     /// The input of the current conversation's latest and first requests.
     context_size: Option<usize>,
     first_context_size: Option<usize>,
@@ -546,6 +551,8 @@ impl ClaudeCodeRun {
             cache_warned: false,
             cache_pause_episode: false,
             cache_interrupt: false,
+            refused: None,
+            fallback_turn: false,
             context_size: None,
             first_context_size: None,
             open_turns: 0,
@@ -1892,6 +1899,38 @@ impl ClaudeCodeRun {
                 _ => {}
             },
             cc::Message::RateLimit { info, .. } => self.plan_usage_reported(&info, session).await?,
+            cc::Message::System(system) if system.subtype == "model_refusal_fallback" => {
+                // Claude Code retried the refused request on its fallback
+                // model.
+                self.emit(AgentEvent::RefusalReceived(refusal_of(&system.raw)))
+                    .await?;
+                let model_id = system.raw["fallback_model"].as_str().unwrap_or_default();
+                self.emit(AgentEvent::RefusalFallback {
+                    model_id: model_id.to_string(),
+                })
+                .await?;
+            }
+            cc::Message::System(system) if system.subtype == "model_refusal" => {
+                // The refusal stands: no retry ran.
+                let refusal = refusal_of(&system.raw);
+                self.emit(AgentEvent::RefusalReceived(refusal.clone()))
+                    .await?;
+                self.refused = Some(refusal);
+            }
+            cc::Message::System(system) if system.subtype == "model_fallback" => {
+                self.emit(AgentEvent::ModelRerouted {
+                    provider: ai::Provider::ClaudeCode.as_telemetry_str().to_string(),
+                    requested_model: system.raw["original_model"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                    served_model: system.raw["fallback_model"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                })
+                .await?;
+            }
             cc::Message::System(system) if system.subtype == "compact_boundary" => {
                 log::warn!(
                     "Task {}: Claude Code compacted the conversation; the task's record keeps the full conversation.",
@@ -2347,6 +2386,48 @@ impl ClaudeCodeRun {
             self.pause(reason, cause).await?;
             return Ok(Some(SessionEnd::Wait));
         }
+        let fallback_answered = std::mem::take(&mut self.fallback_turn);
+        if fallback_answered {
+            // The fallback answered one turn; the configured model is back.
+            let model = self.task.agent_config.llm_config.model.id.clone();
+            if let Err(error) = session.set_model(Some(&model)).await {
+                return self.session_failed(error.to_string()).await.map(Some);
+            }
+        }
+        if let Some(refusal) = self.refused.take() {
+            match self.task.agent_config.refusal_fallback.clone() {
+                // Once per refusal: a fallback that refuses too, stands.
+                Some(fallback) if !fallback_answered => {
+                    if let Err(error) = session.set_model(Some(&fallback.model.id)).await {
+                        return self.session_failed(error.to_string()).await.map(Some);
+                    }
+                    self.fallback_turn = true;
+                    self.emit(AgentEvent::RefusalFallback {
+                        model_id: fallback.model.id.clone(),
+                    })
+                    .await?;
+                    if let Err(error) = self.send(session, CONTINUE).await {
+                        return self.session_failed(error.to_string()).await.map(Some);
+                    }
+                    return Ok(None);
+                }
+                _ => {
+                    let message = refusal
+                        .explanation
+                        .clone()
+                        .unwrap_or_else(|| "The model refused the request.".to_string());
+                    self.pause_on_error(message, ErrorRecoveryCause::Refusal)
+                        .await?;
+                    return Ok(Some(
+                        if matches!(self.task.current_state, TaskState::Interrupted { .. }) {
+                            SessionEnd::Stop
+                        } else {
+                            SessionEnd::Wait
+                        },
+                    ));
+                }
+            }
+        }
         if let Some(questions) = self.questions.take() {
             self.set_state(TaskState::AwaitingUserResponse {
                 questions: questions.clone(),
@@ -2564,6 +2645,16 @@ fn plan_usage_of(info: &Value) -> ai::PlanUsage {
         primary,
         secondary,
     }
+}
+
+/// A refusal Claude Code reported (`model_refusal`,
+/// `model_refusal_fallback`): the API's refusal category and explanation.
+fn refusal_of(raw: &Value) -> ai::Refusal {
+    let mut refusal = ai::Refusal::new(ai::RefusalSource::SafetyClassifier);
+    refusal.category = raw["api_refusal_category"].as_str().map(str::to_string);
+    refusal.explanation = raw["api_refusal_explanation"].as_str().map(str::to_string);
+    refusal.provider_details = raw.clone();
+    refusal
 }
 
 /// A tool result's text, from its content (a string or text blocks).

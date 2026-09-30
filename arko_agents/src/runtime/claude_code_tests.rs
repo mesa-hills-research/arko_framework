@@ -835,3 +835,82 @@ async fn the_cache_monitor_judges_the_main_conversation() {
         1
     );
 }
+
+fn refusal_message(subtype: &str) -> Value {
+    json!({"system": {
+        "subtype": subtype, "original_model": "claude-opus-5-5", "fallback_model": "claude-sonnet-5",
+        "api_refusal_category": "cyber", "api_refusal_explanation": "The request was refused.",
+    }})
+}
+
+#[tokio::test]
+async fn claude_codes_own_refusal_retry_is_reported() {
+    let fake = Fake::new(json!([[
+        refusal_message("model_refusal_fallback"),
+        complete("done")
+    ]]));
+    let task = Task::new(config(&fake, &[]), "Do it.".into(), fake.workspace(), None);
+    let (task, events) = start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::RefusalReceived(refusal) if refusal.category.as_deref() == Some("cyber")
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::RefusalFallback { model_id } if model_id == "claude-sonnet-5"
+    )));
+}
+
+#[tokio::test]
+async fn a_standing_refusal_goes_to_the_fallback_for_one_turn() {
+    let fake = Fake::new(json!([
+        [refusal_message("model_refusal"), {"text": "I can't help with that."}],
+        [{"text": "Continuing on the fallback."}],
+        [complete("done")],
+    ]));
+    let mut config = config(&fake, &[]);
+    config.refusal_fallback = Some(AgentLLMConfig {
+        model: arko_ai::Model::claude_code(arko_ai::Model::anthropic_claude_sonnet_5_5()),
+        generation_config: Default::default(),
+    });
+    let task = Task::new(config, "Do it.".into(), fake.workspace(), None);
+    let (task, events) = start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let switches: Vec<String> = fake
+        .logged("set_model")
+        .iter()
+        .map(|entry| entry["model"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(switches, ["claude-sonnet-5-5", "claude-opus-5-5"]);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::RefusalFallback { model_id } if model_id == "claude-sonnet-5-5"
+    )));
+}
+
+#[tokio::test]
+async fn without_a_fallback_a_standing_refusal_pauses() {
+    let fake = Fake::new(json!([[refusal_message("model_refusal"), {"text": "No."}]]));
+    let task = Task::new(config(&fake, &[]), "Do it.".into(), fake.workspace(), None);
+    let mut run = start(task);
+    let events = run
+        .events_until(|event| {
+            matches!(
+                event,
+                AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+            )
+        })
+        .await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TaskStateChanged(
+            TaskState::AwaitingErrorRecoveryApproval {
+                cause: crate::task::ErrorRecoveryCause::Refusal,
+                ..
+            }
+        ))
+    ));
+    run.commands.send(UserCommand::CancelTask).await.unwrap();
+    run.finish().await;
+}
