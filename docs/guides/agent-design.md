@@ -8,7 +8,7 @@ As LLMs have become more capable and better trained, best practices for agent de
 
 Some tools and techniques have survived this shift. `ask_user` is still relevant: it lets an agent ask the user to clarify an ambiguity or choose which path to take. Subagents have not only survived but become more useful. One agent can spawn others with instructions, and can even communicate with them.
 
-Memory and progress tracking are also useful. It is good practice to keep the context window from growing too large, so set a threshold, usually 20–30% of the model's context window. When the model reaches it, inject a message telling the model to document its progress, and once it has, continue in a fresh conversation. **Do not use hard limits for this; they risk losing progress.**
+Memory and progress tracking are also useful. It is good practice to keep the context window from growing too large, so set a threshold, usually 20–30% of the model's context window. When the model reaches it, the model documents its progress and continues in a fresh conversation. `arko_agents` does this natively: set `AgentConfig::handover` (for example `HandoverConfig::at_context_fraction(0.25)`), and the agent writes a handover report at the threshold, then continues from the task and the report in a fresh conversation, in the same task. Its name, task ID and budget stay the same, so a workflow's messages still reach it. **Do not use hard limits for this; they risk losing progress.**
 
 Summary:
 - Start with the simplest setup that could work, and add tools, subagents, or controls only when it falls short. Aim for autonomy rather than gating the agent by default.
@@ -47,7 +47,7 @@ Do not restrict a model's output token limit (`model.max_output_tokens`) unless 
 
 ### Messaging Tools
 
-`arko_workflows` has built-in primitives that give agents tools to message each other. Messages are queued until the recipient's next opportunity to receive input. For example, if Agent A messages Agent B while Agent B is calling a tool, the message is delivered once the tool call finishes and a user message can be inserted. Messaging also has access control. For example, you can set up one-way messaging, where Agent A can message Agent B but Agent B cannot message Agent A.
+`arko_workflows` has built-in primitives that give agents tools to message each other. Messages are queued until the recipient's next opportunity to receive input. For example, if Agent A messages Agent B while Agent B is calling a tool, the message is delivered once the tool call finishes and a user message can be inserted. Messaging also has access control. For example, you can set up one-way messaging, where Agent A can message Agent B but Agent B cannot message Agent A. A running agent is told when an agent it can message starts or finishes. A message to a finished agent is refused by default, so the sender knows no reply is coming; `MessagingPolicy::keep_messages_for_finished()` queues it for that agent's next run instead, which suits workflows that continue or rerun agents.
 
 ### Best Practices
 

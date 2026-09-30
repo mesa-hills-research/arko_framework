@@ -59,11 +59,9 @@ Send every verifier finding to the orchestrator as well as to the agent that mus
 
 For research tasks, let the lead delegate independent questions to researchers and preserve separate evidence until synthesis. Researchers can message the lead and one another to compare or correct findings. Record agreed conclusions separately and keep each researcher's evidence. Independent prompts and separate outputs make counterexamples more likely to be rediscovered instead of copied from the first report.
 
-### Continuation reports for long runs
+### Handover reports for long runs
 
-For agents that approach a context or input-token limit, track cumulative usage from the workflow's usage events and choose a threshold appropriate to the model. A 200,000-input-token threshold is a useful example for a long research run. At the threshold, inject a continuation instruction for the next turn: require a concise progress report covering completed work, evidence, open questions, and the next steps, then require `complete_task`.
-
-Enforce the continuation turn at the tool boundary rather than relying on the prompt alone. During that turn, reject every tool call except a dedicated continuation-report operation and `complete_task`; save the report in memory or a file, checkpoint the run, and resume from the report in a fresh context. This preserves progress without allowing the agent to spend the continuation turn on more exploration.
+For agents that approach a context or input-token limit, set `AgentConfig::handover` with a threshold appropriate to the model: `HandoverConfig::at_context_fraction(0.25)`, or `at_input_tokens(200_000)` for a long research run. At the threshold the runtime asks the agent for a report covering the task, completed work and evidence, decisions, open questions, what it is waiting for and from whom, and the next steps. During that turn it rejects every tool call except `complete_task`, then continues the same task in a fresh conversation that starts from the task and the report. The workflow keeps the agent's identity, delivered messages, and budget, and refreshes its recipient list; nothing needs to be checkpointed or restarted by hand. Set `report_request` to ask for workflow-specific content, and use `UserCommand::RequestHandover` to trigger one from the host. Save durable results in memory or files as usual; the report is for the agent's own continuation.
 
 ## Choose the autonomy level
 

@@ -39,8 +39,9 @@ response is not a complete snapshot and does not establish a baseline. The
 Baselines are kept per task and tier, and advance only once the exact result has
 entered that task's conversation; reads still waiting on a tool batch do not
 advance them. Restarting or resuming a runtime resets its baselines, so the next
-read is full. An application that replaces or compacts a conversation should start
-a new runtime. Custom runners reproduce this lifecycle with
+read is full. A conversation handover (`AgentConfig::handover`) resets them in
+place, so the fresh conversation's next read is full too. An application that
+replaces or compacts a conversation by other means should start a new runtime. Custom runners reproduce this lifecycle with
 `Tool::reset_context(task_id)` and `Tool::observe_context(task_id, message)`,
 passing the actual messages sent to the model. Without observations, reads
 conservatively return full snapshots. Both callbacks are synchronous and only

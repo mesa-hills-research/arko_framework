@@ -666,6 +666,9 @@ Most items are re-exported at the crate root (`arko_agents::AgentConfig`). Items
 | `AgentConfig::skills_config` | Skill sources (`SkillsConfig`), read by `SkillManager::load`. | `arko_agents/src/agent_config.rs` | [Skills, MCP and terminals (arko_agents)](#skills-mcp-and-terminals-arko_agents) |
 | `AgentConfig::monitoring` | Opt-in model-call monitors (`MonitoringConfig`). | `arko_agents/src/agent_config.rs` | [Monitoring (arko_agents)](#monitoring-arko_agents) |
 | `AgentConfig::refusal_fallback` | Opt-in `AgentLLMConfig` a refused turn is sent to once. | `arko_agents/src/agent_config.rs` | [Refusals (arko_agents)](#refusals-arko_agents) |
+| `AgentConfig::handover`, `HandoverConfig { at_input_tokens, at_context_fraction, report_request }`, `HandoverConfig::{at_input_tokens, at_context_fraction, threshold, report_request, validate}` | Opt-in conversation handover and its threshold. | `arko_agents/src/handover.rs` | [Conversation handover (arko_agents)](#conversation-handover-arko_agents) |
+| `HandoverHook::on_handover`, `HandoverSeed { task_prompt, context }`, `HandoverSeed::{for_task, message}`, `AgentRuntime::with_handover_hook` | A host's hook, called as the conversation is replaced; it returns the fresh conversation's first message. | `arko_agents/src/handover.rs` | [Conversation handover (arko_agents)](#conversation-handover-arko_agents) |
+| `Task::{handover_requested, handovers, conversation_usage_start, conversation_model_call_start}`, `HandoverRequest`, `HandoverRecord`, `Task::{start_fresh_conversation, current_conversation_context_size}`, `handover::{DEFAULT_REPORT_REQUEST, REPORT_HEADING, REPORT_INTRODUCTION}` | A pending handover, the handovers made, where the current conversation's usage starts, and the primitives the runtime uses. | `arko_agents/src/task/mod.rs`, `arko_agents/src/handover.rs` | [Conversation handover (arko_agents)](#conversation-handover-arko_agents) |
 | `AgentConfig::complete_task_summary_prompt_override` | Replaces the description of `complete_task`'s `summary` parameter. | `arko_agents/src/agent_config.rs` | [AgentConfig (arko_agents)](#agentconfig-arko_agents) |
 | `AgentConfig::parsing_config_override`, `AgentConfig::get_tool_parsing_config` | Output-based tag syntax; the getter returns the override or `ToolParsingConfig::default()`. | `arko_agents/src/agent_config.rs` | [AgentConfig (arko_agents)](#agentconfig-arko_agents) |
 | `AgentConfig::{should_auto_approve_tool, get_path_safety_policy, is_parallel_safe, allows_batched_calls_for_tool, asks_one_tool_call_per_turn, is_native_tool_calling}` | Queries that resolve per-tool overrides against the agent's defaults, as the runtime does. | `arko_agents/src/agent_config.rs` | [Tools (arko_agents)](#tools-arko_agents) |
@@ -745,7 +748,7 @@ Most items are re-exported at the crate root (`arko_agents::AgentConfig`). Items
 | `AgentRuntime::with_host_decisions`, `HostDecisions::{new, set, get}` | A run-level switch: while `true`, no wait of the run is timed. | `arko_agents/src/runtime/mod.rs` | [Runtime (arko_agents)](#runtime-arko_agents) |
 | `UserCommand::{ApproveToolUse, RejectToolUse, SubmitBatchToolApprovals, SubmitUserResponse}`, `ToolApprovalDecision::{Approve, Reject}` | Answers to approval and question waits. An approval can carry `custom_tool_output` (used instead of running the tool) and `message_to_agent`. | `arko_agents/src/runtime/command.rs` | [Approvals and workspace paths](../arko_agents/README.md#approvals-and-workspace-paths) |
 | `UserCommand::{ApproveErrorRecovery, ContinueAfterError, RejectErrorRecovery, ResolveRefusal}` | Answers to an error-recovery pause. | `arko_agents/src/runtime/command.rs` | [Runtime (arko_agents)](#runtime-arko_agents) |
-| `UserCommand::{InjectContext, HostDeciding, CancelTask, SuspendTask}` | Context updates, wait control, and stopping the run. | `arko_agents/src/runtime/command.rs` | [Runtime (arko_agents)](#runtime-arko_agents) |
+| `UserCommand::{InjectContext, HostDeciding, RequestHandover, CancelTask, SuspendTask}` | Context updates, wait control, a handover, and stopping the run. | `arko_agents/src/runtime/command.rs` | [Runtime (arko_agents)](#runtime-arko_agents) |
 
 #### Map: events (arko_agents)
 
@@ -764,6 +767,7 @@ Most items are re-exported at the crate root (`arko_agents::AgentConfig`). Items
 | `AgentEvent::{RefusalReceived, RefusedInput, RefusalFallback}` | A refusal, the input it answered, and the fallback model being asked. | `arko_agents/src/runtime/event.rs` | [Refusals (arko_agents)](#refusals-arko_agents) |
 | `AgentEvent::{UsageReported, ModelCallUsageReported, PlanUsageReported, ModelRerouted}` | Usage after each model call; plan usage when the provider reports it; a model served other than the one requested. | `arko_agents/src/runtime/event.rs` | [Monitoring (arko_agents)](#monitoring-arko_agents) |
 | `AgentEvent::{PlanUsageThresholdReached, CacheEfficiencyReported, CacheEfficiencyLow}` | Events of the opt-in monitors. | `arko_agents/src/runtime/event.rs` | [Monitoring (arko_agents)](#monitoring-arko_agents) |
+| `AgentEvent::{HandoverRequested, ConversationHandedOver}` | A handover started; the conversation was replaced, with the report. | `arko_agents/src/runtime/event.rs` | [Conversation handover (arko_agents)](#conversation-handover-arko_agents) |
 
 #### Map: tools (arko_agents)
 
@@ -894,6 +898,7 @@ Most items are re-exported at the crate root (`arko_agents::AgentConfig`). Items
 | `skills_config` | `None` | Read by `SkillManager::load`; the runtime itself reads only `load_skill_interception`. See [Skills, MCP and terminals (arko_agents)](#skills-mcp-and-terminals-arko_agents). |
 | `monitoring` | Nothing monitored | See [Monitoring (arko_agents)](#monitoring-arko_agents). |
 | `refusal_fallback` | `None` | Opt-in `AgentLLMConfig`; a provider other than the configured model's is rejected. See [Refusals (arko_agents)](#refusals-arko_agents). |
+| `handover` | `None`: the conversation grows until the task ends | Opt-in `HandoverConfig`. See [Conversation handover (arko_agents)](#conversation-handover-arko_agents). |
 | `complete_task_summary_prompt_override` | `None`: the built-in description | Replaces the description of `complete_task`'s `summary` parameter, in both tool calling modes. |
 | `parsing_config_override` | `None`: tags `<`, `>`, `batched_tool_call`, escape prefix `!!--!!` | Output-based mode only. A field omitted in JSON or YAML takes its default; `escape_prefix: null` turns escaping off. |
 
@@ -982,6 +987,17 @@ A call that reports plan usage (the ChatGPT backend on ChatGPT OAuth calls) emit
 | `cache: Some(CacheMonitorConfig::default())` | `warmup_calls` 2, `window_calls` 5, `warn_below` `Some(0.5)`, `pause_below` `None` | `CacheEfficiencyReported` after each judged call (not the warm-up calls, calls without a cache figure, or refusal-fallback calls). `CacheEfficiencyLow` once per drop of the rolling efficiency below `warn_below`, after `window_calls` judged calls; `pause_below` also pauses before the next request. |
 
 A monitor pause waits in `AwaitingErrorRecoveryApproval` (cause `Monitor`) under the pausing error policies, and returns the task `Interrupted` under the others. Approving it adds no error note.
+
+### Conversation handover (arko_agents)
+
+| Setting | Default | Notes |
+|---|---|---|
+| `HandoverConfig::at_input_tokens` | `None` | Hand over once a request's input reaches this many tokens. At least 1. |
+| `HandoverConfig::at_context_fraction` | `None` | Above 0 and at most 1, of the model's input limit; ignored for a model whose limit is unknown. With both set, the lower threshold applies; at least one must be set. |
+| `HandoverConfig::report_request` | `DEFAULT_REPORT_REQUEST` | The user message asking for the report; not blank. |
+| `AgentRuntime::with_handover_hook` | `HandoverSeed::for_task`: the fresh conversation restates `initial_task_prompt` | The hook sees the task with the old conversation. |
+
+Checked before each model request (not a refusal fallback's) against the latest request of the current conversation, and only where a user message can go. During the report turn every tool call except `complete_task` is rejected; a reply without text gets a note. The fresh conversation keeps the system prompt, the pending context injections and the task's usage; tools observing the conversation are reset, the file tree is sent in full again, and the cache monitor judges only the fresh conversation. `initial_task_prompt` is unchanged. `UserCommand::RequestHandover` starts one without a threshold. See [Conversation handover](../arko_agents/README.md#conversation-handover).
 
 ### Refusals (arko_agents)
 
@@ -1192,9 +1208,9 @@ Agents are named by their registration name (the one given to `WorkflowBuilder::
 
 | Item | What it is | Code | Docs |
 |---|---|---|---|
-| `MessagingPolicy` (`recipients`, `all`, `can_message`, `cannot_message`, `permits`, `recipients_of`) | Whom each agent may message with `send_message`; never itself. | `arko_workflows/src/messaging/mod.rs` | [Messaging policy](../arko_workflows/INDEX.md#messaging-policy) |
-| `AgentMessage` (`id`, `from`, `from_task_id`, `to`, `content`, `attachments`, `timestamp`, `to_task_id`, `held_by`), `is_held_by`, `is_for`; `MessageAttachment` (`File`, `MemoryTier`, `Transcript`, `Text`) | A queued message and its typed references. | `arko_workflows/src/messaging/mod.rs` | [Messaging](../arko_workflows/INDEX.md#messaging) |
-| `MessageBus` (`new`, `from_snapshot`, `roster`, `register_active`, `unregister_active`, `inject_task`, `send`, `drain`, `pending`, `pending_for`, `acknowledge`, `snapshot`) | The run's message queues and live delivery (`SharedContext::messages`). `send` checks neither the policy nor statuses, and fires no hook. | `arko_workflows/src/messaging/mod.rs` | [Message bus](../arko_workflows/INDEX.md#message-bus) |
+| `MessagingPolicy` (`recipients`, `keep_for_finished`, `all`, `can_message`, `cannot_message`, `keep_messages_for_finished`, `permits`, `recipients_of`) | Whom each agent may message with `send_message`, never itself, and whether messages to a finished agent are kept for its next run. | `arko_workflows/src/messaging/mod.rs` | [Messaging policy](../arko_workflows/INDEX.md#messaging-policy) |
+| `AgentMessage` (`id`, `from`, `from_task_id`, `to`, `content`, `attachments`, `timestamp`, `to_task_id`, `held_by`, `read_by`), `is_held_by`, `is_for`; `MessageAttachment` (`File`, `MemoryTier`, `Transcript`, `Text`) | A queued message and its typed references. | `arko_workflows/src/messaging/mod.rs` | [Messaging](../arko_workflows/INDEX.md#messaging) |
+| `MessageBus` (`new`, `from_snapshot`, `roster`, `register_active`, `unregister_active`, `inject_task`, `send`, `drain`, `pending`, `pending_for`, `acknowledge`, `hand_over`, `snapshot`) | The run's message queues and live delivery (`SharedContext::messages`). `send` checks neither the policy nor statuses, and fires no hook. | `arko_workflows/src/messaging/mod.rs` | [Message bus](../arko_workflows/INDEX.md#message-bus) |
 | `messaging::WORKFLOW_CONTEXT_SENDER` | `"workflow-context"`: the sender of context notices such as freshness notices. | `arko_workflows/src/messaging/mod.rs` | [Message bus](../arko_workflows/INDEX.md#message-bus) |
 | `AgentStatus` (`NotStarted`, `Running`, `Waiting(WaitReason)`, `Finished(AgentRunStatus)`), `is_reachable`, `describe`; `WaitReason` (`RateLimited`, `Retrying`, `UsageLimit`, `AwaitingApproval`, `AwaitingInput`, `AwaitingMessage`, `Paused`) | An agent's status in the run, as `agent_status`, rosters and `list_recipients` report it. | `arko_workflows/src/messaging/registry.rs` | [Agent statuses](../arko_workflows/INDEX.md#agent-statuses) |
 | `WaitForMessageTimeout` (`Auto`, `Fixed(Duration)`, `resolve`, `From<Duration>`), `DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT` (270 s), `MAX_WAIT_FOR_MESSAGE_TIMEOUT` (24 h) | The `wait_for_message` limit setting and its bounds. | `arko_workflows/src/messaging/wait.rs` | [Waiting for a message](../arko_workflows/INDEX.md#waiting-for-a-message) |
@@ -1263,7 +1279,7 @@ Agents are named by their registration name (the one given to `WorkflowBuilder::
 | `PersistenceManager` (`resolve_run_id`, `new`, `config`, `durable_store`, `save_checkpoint`, `auto_checkpoint`, `append_event`, `flush_events`, `save_agent_task`, `load_checkpoint`) | Writes a run directory; usable directly, for example `load_checkpoint` to inspect a checkpoint before resuming. | `arko_workflows/src/persistence/mod.rs` | [PersistenceConfig and PersistenceManager](../arko_workflows/INDEX.md#persistenceconfig-and-persistencemanager) |
 | `persistence::state::WorkflowState` (`workflow_run_id`, `workflow_name`, `workflow_metadata`, `checkpoint_id`, `timestamp`, `memory_snapshot`, `message_queues`, `budget_spent`, `cost_ledger`, `freshness_snapshot`, `agent_results`, `agent_runs`, `missing_task_states`, `verification_records`, `distillation_records`, `completed_agents`, `cancellation`, `agent_registry`), `WorkflowState::agent_results_in` | A checkpoint's content; `agent_results_in` returns its results with their tasks read from the run directory. | `arko_workflows/src/persistence/state.rs` | [Checkpoint payloads](../arko_workflows/INDEX.md#checkpoint-payloads) |
 | `persistence::state::AgentRunRecord` (`agent_run_id`, `agent_name`, `status`, `summary`, `error`, `task_file`), `MissingTaskState` (`agent_run_id`, `agent_name`, `status`, `last_saved`, `reason`), `SerializableAgentResult` (`agent_name`, `summary`) | A checkpoint's reference to a result's task version, a run whose latest task state couldn't be saved, and a name-and-summary record. | `arko_workflows/src/persistence/state.rs` | [Checkpoint payloads](../arko_workflows/INDEX.md#checkpoint-payloads) |
-| `messaging::registry::RegistrySnapshot` (`version`, `agents`, `seen`), `AgentRecord` (`last_start`, `finished`) | The agent status registry as a checkpoint saves it. | `arko_workflows/src/messaging/registry.rs` | [Checkpoint payloads](../arko_workflows/INDEX.md#checkpoint-payloads) |
+| `messaging::registry::RegistrySnapshot` (`version`, `agents`, `seen`), `AgentRecord` (`last_start`, `finished`, `last_finish`) | The agent status registry as a checkpoint saves it. | `arko_workflows/src/messaging/registry.rs` | [Checkpoint payloads](../arko_workflows/INDEX.md#checkpoint-payloads) |
 | Event log (`events.jsonl`) | One JSON line per recorded agent event, with time, run ID, agent name and agent run ID. | `arko_workflows/src/persistence/mod.rs` | [PersistenceConfig and PersistenceManager](../arko_workflows/INDEX.md#persistenceconfig-and-persistencemanager) |
 
 **Shared context**
@@ -1376,7 +1392,8 @@ An agent gets `read_memory` if it can read a tier, `write_memory` if it can writ
 
 | Setting | Default | Notes |
 |---|---|---|
-| `MessagingPolicy` | Every agent may message every other | `can_message(agent, recipients)` limits one agent; `cannot_message(agent)`. `send_message` and `list_recipients` go to agents with a permitted recipient, `wait_for_message` to agents another may message. `send_message` reaches only running or waiting agents. |
+| `MessagingPolicy` | Every agent may message every other | `can_message(agent, recipients)` limits one agent; `cannot_message(agent)`. `send_message` and `list_recipients` go to agents with a permitted recipient, `wait_for_message` to agents another may message. `send_message` reaches only running or waiting agents. Running agents are told when a recipient starts or finishes. |
+| `MessagingPolicy::keep_messages_for_finished()` | Off: a message to a finished agent is refused | On: it is queued for the agent's next run (a continuation or a new run), and the finish notice says so. |
 | `WorkflowServicesConfig::allowed_callers`, `allowed_targets` | Empty: **nobody** | Name them with `allow_caller` and `allow_target`; an empty caller list is only warned about. |
 | `allow_all_callers()`, `allow_all_targets()` | Off | Every agent except verifier agents (and, as a target, the caller itself). |
 | `max_active_calls` | 4 | Delegated calls running at once, workflow-wide; a call over the limit fails at once. A `NonZeroU32`: `max_active_calls(0)` fails the build. |

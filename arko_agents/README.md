@@ -162,6 +162,7 @@ runtime validates them again when a task starts. The quick start's agent as JSON
 | `skills_config` | None | Skill sources; see [Skills](#skills). |
 | `monitoring` | Nothing monitored | Plan-usage and prompt-cache monitors; see [Monitoring](#monitoring). |
 | `refusal_fallback` | None | A model that answers a refused turn once; see [Refusals](#refusals). |
+| `handover` | None | Opt-in: at a context size, the agent writes a report and continues from it in a fresh conversation; see [Conversation handover](#conversation-handover). |
 | `complete_task_summary_prompt_override` | None | Replaces the description of `complete_task`'s `summary` parameter. |
 | `parsing_config_override` | Default tags | Tag syntax for output-based tool calls. |
 
@@ -579,6 +580,7 @@ causes were recorded loads with `Unknown`.
 | `RefusalReceived`, `RefusedInput`, `RefusalFallback` | Refusals. |
 | `UsageReported`, `ModelCallUsageReported`, `PlanUsageReported`, `ModelRerouted` | Usage after each model call. |
 | `CacheEfficiencyReported`, `CacheEfficiencyLow`, `PlanUsageThresholdReached` | Opt-in monitors. |
+| `HandoverRequested`, `ConversationHandedOver` | A handover started (the agent was asked for its report), then the conversation was replaced; see [Conversation handover](#conversation-handover). |
 | `TaskStreamEnd` | The run ended. |
 
 Besides answers to the waiting states, a running task accepts:
@@ -596,6 +598,10 @@ Besides answers to the waiting states, a running task accepts:
   `HostDecisions` set to `true` instead (`AgentRuntime::with_host_decisions`): no wait of
   the run is timed. It is a run-level setting, not saved with the task, and a workflow sets
   it for the runs it drives.
+- `RequestHandover`: the agent hands its conversation over at the next turn boundary
+  where a user message can go, whether or not `AgentConfig::handover` is set; see
+  [Conversation handover](#conversation-handover). It doesn't end a wait, and is ignored
+  while a handover is under way.
 - `CancelTask`: the task ends as `Cancelled { reason }` with `CANCELLED_BY_USER` ("Task
   cancelled by user."). Tool calls running when it arrives are stopped, and calls it
   waited on or that had not run yet get a result saying they were not run. A task saved
@@ -818,6 +824,68 @@ ChatGPT backend reroute) emits `ModelRerouted` with both models.
 A monitor pause waits in `AwaitingErrorRecoveryApproval` under the pausing error policies
 and returns the task `Interrupted` under the others. Approving it continues without an
 error note; a message given with the approval is added as a user message.
+
+## Conversation handover
+
+A long task's conversation grows until its cost and quality suffer. A handover replaces
+the conversation, in the same task, with a fresh one that starts from the task and a
+report the agent writes: the task keeps its ID, state, budget and usage history, so a
+host that addresses the agent by name or task ID sees no restart.
+
+```rust
+use arko_agents::HandoverConfig;
+
+let config = AgentConfig::builder(id, name, llm_config)
+    // ...
+    // Hand over at 40% of the model's input limit, or 200K tokens, whichever is lower.
+    .handover(HandoverConfig {
+        at_input_tokens: Some(200_000),
+        at_context_fraction: Some(0.4),
+        report_request: None,
+    })
+    .build()?;
+```
+
+1. **The request.** Before a model request, once the latest request of the current
+   conversation had at least the threshold's input tokens (the lower of
+   `at_input_tokens` and `at_context_fraction` of the model's input limit; the fraction is
+   ignored for a model whose limit is unknown), or after a host sent
+   `UserCommand::RequestHandover`, the runtime adds a user message asking for the report
+   (`DEFAULT_REPORT_REQUEST`, or `report_request`) and emits `HandoverRequested`. It waits
+   for a boundary where a user message can go: not while calls wait for results, and not
+   for a refusal fallback's request.
+2. **The report turn.** The agent replies with the report as plain text. The request
+   asks for the task, what was done and the evidence, decisions, where it stopped, the
+   next steps, and what it is still waiting for and from whom (such as a reply to a
+   question it sent). Tool calls in this turn are rejected with a result saying the report
+   is due, except `complete_task`: a task that is done completes instead. A reply without
+   text gets a note and the request stands. The tools offered don't change, so the
+   request keeps its cache prefix.
+3. **The fresh conversation.** `Task::start_fresh_conversation` clears the messages (and
+   what refers to them: runtime-message indices, a refused input, the ChatGPT turn state,
+   the user-message count) and keeps the system prompt, the pending context injections,
+   and the task's usage. Its first message is the seed's text, framed as a task prompt
+   (with the initial environment details and reminder): by default the task's
+   `initial_task_prompt`, then `# Handover report`, a sentence saying the conversation
+   was replaced, and the report. The runtime then resets what it tracks about the old
+   conversation: tools observing the conversation start over
+   (`Tool::reset_context`), the file tree is sent in full again, and the cache monitor
+   judges only the fresh conversation's calls (`Task::conversation_usage_start`). The
+   first call of the fresh conversation has no input delta. `ConversationHandedOver`
+   carries the report, and `Task::handovers` records each handover
+   (`HandoverRecord { at, input_tokens, replaced_messages, report }`).
+
+`Task::initial_task_prompt` is not changed. A task saved during the report turn keeps
+`Task::handover_requested` and hands over when it runs again; continuing a completed task
+clears it.
+
+**Hosts.** `AgentRuntime::with_handover_hook` takes a `HandoverHook`, whose
+`on_handover(task, report)` is called while the task still holds the old conversation and
+returns the `HandoverSeed { task_prompt, context }` that starts the fresh one
+(`HandoverSeed::for_task` is the default). A host that tracks what a conversation holds
+(messages delivered into it, files it read) updates its records there, and can restate
+the task without material the report covers and add context after the report. The
+arko_workflows engine does this for every agent it runs.
 
 ## Refusals
 

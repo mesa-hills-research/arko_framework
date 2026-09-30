@@ -50,7 +50,9 @@ On resume, configure the same tier names or explicitly map or drop changed tiers
 
 Use messages to tell another agent that work is ready, to pass a small instruction, or to ask for a response. A message should state what changed, where the durable result is stored, and what the recipient should do next. Do not use a message as the only copy of a requirement or result that must survive a checkpoint.
 
-Start with the narrowest `MessagingPolicy` that supports the topology. One-way communication is useful when a reviewer should report to an owner without receiving work back. Allow two-way communication when agents need to clarify or coordinate. An agent can wait for a message, but the workflow should define a timeout or a continuation path for a missing response.
+Start with the narrowest `MessagingPolicy` that supports the topology. One-way communication is useful when a reviewer should report to an owner without receiving work back. Allow two-way communication when agents need to clarify or coordinate. An agent can wait for a message, but the workflow should define a timeout or a continuation path for a missing response. Agents are told when a recipient finishes, so one waiting on a reply learns when none can come. If the workflow continues or reruns agents, `keep_messages_for_finished()` lets a late reply reach the next run instead of being refused.
+
+Give long-running agents, such as a lead that coordinates workers for hours, a conversation handover (`AgentConfig::handover`) rather than a restart: the agent continues in the same run from its own report, so its identity, messages and budget carry over.
 
 ### Freshness
 

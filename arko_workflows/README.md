@@ -375,7 +375,9 @@ See [budget and cost accounting](INDEX.md#budget-and-cost-accounting).
 Agents send messages with the injected `send_message` tool, to agents that are
 running or waiting (for example on a rate limit or for approval); a recipient
 receives the message at its next turn boundary. Messages to agents that have not
-started or have finished are refused with their status, not queued. An accepted
+started or have finished are refused with their status, not queued; with
+`MessagingPolicy::keep_messages_for_finished()`, a message to a finished agent is
+queued instead for its next run (a continuation or a new run). An accepted
 message stays queued until a run of the recipient that received it completes
 successfully, so a later run receives it again otherwise. Messages carry stable
 IDs, sender task IDs, typed attachments, and timestamps, all of which survive
@@ -383,7 +385,8 @@ checkpoints.
 
 Agents learn whom they can reach from three sources: the initial prompt of each
 new run lists the agents it may message with their roles and statuses, a
-"Workflow context update" tells a running agent when one of them starts, and the
+"Workflow context update" tells a running agent when one of them starts or
+finishes (saying whether messages to it are still read), and the
 `list_recipients` tool reports current statuses. Recipient information never goes
 into tool definitions or system prompts, which stay the same during a task. (An agent
 allowed to delegate through workflow services finds the agents it can run, with
@@ -423,6 +426,22 @@ services. With messaging disabled, or for agents that are not offered the tools,
 the names `send_message`, `list_recipients` and `wait_for_message` are free for
 tools of your own. See [messaging](INDEX.md#messaging) for the statuses, notices,
 and tool results.
+
+### Long-running agents
+
+An agent that runs long (a lead coordinating workers, say) can hand its
+conversation over instead of letting it grow: with `AgentConfig::handover` set, it
+writes a report once its context reaches a threshold and continues from that
+report in a fresh conversation, in the same run. Its name, task ID and status don't
+change, so messages and replies still reach it. The workflow keeps the messages the
+old conversation read acknowledged, lets freshness tracking start over, and gives the
+fresh conversation the task and a current list of the agents it may message. See
+[Conversation handover](INDEX.md#conversation-handover).
+
+```rust
+let mut lead = lead_config;
+lead.handover = Some(arko_agents::HandoverConfig::at_context_fraction(0.4));
+```
 
 ### Waiting for a message
 
