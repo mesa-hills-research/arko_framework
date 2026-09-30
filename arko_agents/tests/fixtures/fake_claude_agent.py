@@ -80,21 +80,35 @@ def next_turn():
     return script[index] if index < len(script) else [{"text": "script exhausted"}]
 
 
-def usage(step):
+def usage(step, output):
+    # Anthropic's input counts are exclusive: these add up to input_tokens.
     tokens = step.get("input_tokens", 10)
     return {"input_tokens": 2, "cache_read_input_tokens": tokens - 2,
-            "cache_creation_input_tokens": 0, "output_tokens": step.get("output_tokens", 5)}
+            "cache_creation_input_tokens": 0, "output_tokens": output}
+
+
+def stream_event(event):
+    if "--include-partial-messages" in ARGS:
+        send({"type": "stream_event", "event": event, "parent_tool_use_id": None,
+              "session_id": SESSION})
 
 
 def assistant(content, step):
     # "continues": part of the previous message's response (the same id),
-    # as Claude Code sends a response's text and its call.
+    # as Claude Code sends a response's text and its call. Like Claude
+    # Code, the assistant messages carry the output count as it stood when
+    # the stream started; the request's message_delta has the final one.
     if not step.get("continues"):
         state["message"] += 1
+        stream_event({"type": "message_start", "message": {
+            "id": "msg_%d" % state["message"], "model": "claude-opus-5-5",
+            "usage": usage(step, 1)}})
     send({"type": "assistant", "parent_tool_use_id": None, "session_id": SESSION,
           "message": {"id": "msg_%d" % state["message"], "role": "assistant",
                       "model": "claude-opus-5-5", "content": content,
-                      "usage": usage(step)}})
+                      "usage": usage(step, 1)}})
+    if step.get("closes", True):
+        stream_event({"type": "message_delta", "usage": usage(step, step.get("output_tokens", 5))})
 
 
 def hook(event, fields, tool_use_id):
@@ -153,7 +167,11 @@ def turn(text):
     send({"type": "system", "subtype": "init", "session_id": SESSION})
     state["interrupted"] = False
     final = ""
-    for index, step in enumerate(next_turn()):
+    steps = next_turn()
+    for index, step in enumerate(steps):
+        # A step followed by one that continues its response doesn't close it.
+        following = steps[index + 1] if index + 1 < len(steps) else {}
+        step = dict(step, closes=not following.get("continues"))
         if state["interrupted"]:
             send({"type": "result", "subtype": "error_during_execution", "is_error": True,
                   "num_turns": 1, "session_id": SESSION, "duration_ms": 5, "result": None})

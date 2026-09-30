@@ -449,10 +449,12 @@ pub(super) struct ClaudeCodeRun {
     parsing: ToolParsingConfig,
 
     calls: HashMap<String, Call>,
-    /// The latest response's usage, recorded once the response is complete:
-    /// one response arrives as several messages (a text, a call) with the
-    /// same id, whose output count grows.
-    pending_usage: Option<PendingUsage>,
+    /// Each thread's (the main conversation's, or a subagent's) latest
+    /// request's usage, recorded once the request is complete; see
+    /// [`observe_usage`](Self::observe_usage).
+    pending_usage: HashMap<Option<String>, PendingUsage>,
+    /// Requests whose usage the stream events report.
+    streamed: std::collections::HashSet<String>,
     /// The input of the current conversation's latest and first requests.
     context_size: Option<usize>,
     first_context_size: Option<usize>,
@@ -506,7 +508,8 @@ impl ClaudeCodeRun {
             skill_prompt_context,
             parsing,
             calls: HashMap::new(),
-            pending_usage: None,
+            pending_usage: HashMap::new(),
+            streamed: Default::default(),
             context_size: None,
             first_context_size: None,
             open_turns: 0,
@@ -927,6 +930,8 @@ impl ClaudeCodeRun {
                 hook(cc::HookEvent::PostToolUse),
             ],
             tool_servers: vec![Arc::new(server)],
+            // Each request's final usage comes in its `message_delta`.
+            include_partial_messages: true,
             ..cc::ClaudeOptions::default()
         }
     }
@@ -1677,7 +1682,25 @@ impl ClaudeCodeRun {
     ) -> Result<(), ArkoAgentsError> {
         match message {
             cc::Message::Assistant(assistant) => {
-                self.observe_usage(&assistant).await?;
+                if let Some(usage) = &assistant.usage {
+                    let key = assistant
+                        .raw
+                        .pointer("/message/id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| Uuid::new_v4().to_string());
+                    // The stream events report this request's usage, its
+                    // final output included; this message's is a snapshot.
+                    if !self.streamed.contains(&key) {
+                        self.observe_usage(
+                            key,
+                            usage.clone(),
+                            assistant.model.clone(),
+                            assistant.parent_tool_use_id.clone(),
+                        )
+                        .await?;
+                    }
+                }
                 // A subagent's messages are its own conversation.
                 if assistant.parent_tool_use_id.is_some() {
                     return Ok(());
@@ -1752,6 +1775,42 @@ impl ClaudeCodeRun {
                     self.task.claude_code_synced = self.task.conversation.messages.len();
                 }
             }
+            cc::Message::StreamEvent {
+                event,
+                parent_tool_use_id,
+                ..
+            } => match event["type"].as_str() {
+                Some("message_start") => {
+                    let message = &event["message"];
+                    if let (Some(key), Some(usage)) = (message["id"].as_str(), message.get("usage"))
+                    {
+                        self.streamed.insert(key.to_string());
+                        self.observe_usage(
+                            key.to_string(),
+                            usage.clone(),
+                            message["model"].as_str().map(str::to_string),
+                            parent_tool_use_id,
+                        )
+                        .await?;
+                        self.check_handover_threshold().await?;
+                    }
+                }
+                Some("message_delta") => {
+                    // The request's final usage.
+                    if let (Some(pending), Some(Value::Object(usage))) = (
+                        self.pending_usage.get_mut(&parent_tool_use_id),
+                        event.get("usage"),
+                    ) {
+                        if let Value::Object(fields) = &mut pending.usage {
+                            for (field, value) in usage {
+                                fields.insert(field.clone(), value.clone());
+                            }
+                        }
+                        self.flush_thread(&parent_tool_use_id).await?;
+                    }
+                }
+                _ => {}
+            },
             cc::Message::System(system) if system.subtype == "compact_boundary" => {
                 log::warn!(
                     "Task {}: Claude Code compacted the conversation; the task's record keeps the full conversation.",
@@ -1902,47 +1961,57 @@ impl ClaudeCodeRun {
         Ok(())
     }
 
-    /// Notes an assistant message's usage: the main conversation's
-    /// requests set the context size a handover checks at once (a
-    /// response's input doesn't change), and the usage is recorded when the
-    /// response is complete.
+    /// Notes a request's usage as it starts: the main conversation's
+    /// requests set the context size a handover checks at once (a request's
+    /// input doesn't change as it runs). The usage is recorded once the
+    /// request is complete: its final `message_delta`, or else when the next
+    /// request of its thread starts or the turn ends. Claude Code's
+    /// `assistant` messages carry the output count as it stood when the
+    /// stream started, and its turn result sums the turn's requests, so
+    /// neither gives a request's output.
     async fn observe_usage(
         &mut self,
-        assistant: &cc::AssistantMessage,
+        key: String,
+        usage: Value,
+        model: Option<String>,
+        parent: Option<String>,
     ) -> Result<(), ArkoAgentsError> {
-        let Some(usage) = &assistant.usage else {
-            return Ok(());
-        };
-        let key = assistant
-            .raw
-            .pointer("/message/id")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let main = assistant.parent_tool_use_id.is_none();
-        if main {
-            let input = PendingUsage::input(usage);
+        if parent.is_none() {
+            // Anthropic's input counts are exclusive: the uncached input,
+            // cache reads and cache writes add up to the whole input.
+            let input = PendingUsage::input(&usage);
             self.context_size = Some(input);
             self.first_context_size.get_or_insert(input);
         }
         if self
             .pending_usage
-            .as_ref()
+            .get(&parent)
             .is_some_and(|pending| pending.key != key)
         {
-            self.flush_usage().await?;
+            self.flush_thread(&parent).await?;
         }
-        self.pending_usage = Some(PendingUsage {
-            key,
-            usage: usage.clone(),
-            model: assistant.model.clone(),
-        });
+        match self.pending_usage.get_mut(&parent) {
+            Some(pending) => pending.usage = usage,
+            None => {
+                self.pending_usage
+                    .insert(parent, PendingUsage { key, usage, model });
+            }
+        }
         Ok(())
     }
 
-    /// Records the pending response's usage.
+    /// Records every thread's pending usage.
     async fn flush_usage(&mut self) -> Result<(), ArkoAgentsError> {
-        let Some(pending) = self.pending_usage.take() else {
+        let threads: Vec<Option<String>> = self.pending_usage.keys().cloned().collect();
+        for thread in threads {
+            self.flush_thread(&thread).await?;
+        }
+        Ok(())
+    }
+
+    /// Records a thread's pending usage.
+    async fn flush_thread(&mut self, thread: &Option<String>) -> Result<(), ArkoAgentsError> {
+        let Some(pending) = self.pending_usage.remove(thread) else {
             return Ok(());
         };
         let count = |field: &str| {
@@ -2191,7 +2260,8 @@ impl ClaudeCodeRun {
             }
         }
         self.calls.clear();
-        self.pending_usage = None;
+        self.pending_usage.clear();
+        self.streamed.clear();
         self.context_size = None;
         self.first_context_size = None;
         self.report_delivered = false;

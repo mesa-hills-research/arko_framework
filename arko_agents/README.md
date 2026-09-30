@@ -901,8 +901,9 @@ model with the next tool result (`PostToolUse`), or with the next message; the t
 conversation records them after that result, as a `# Workflow context update`. The
 conversation mirrors the session's (the task's messages, the model's text and calls, and
 their results) as a record for hosts; subagents' messages aren't included. Usage is
-recorded once per response: the request's whole input (cache reads and writes
-included), billed as a subscription (nothing per call; the cost is the estimate at list
+recorded per request from Claude Code's stream events (its final `message_delta`): the
+whole input, adding Anthropic's exclusive uncached, cache-read and cache-write counts, and
+the output with thinking, billed as a subscription (nothing per call; the cost is the estimate at list
 prices). `refusal_fallback` and the monitors aren't supported for Claude Code models.
 
 **Handovers.** With `handover` set, the threshold is checked against each request of the

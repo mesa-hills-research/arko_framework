@@ -1038,7 +1038,7 @@ session.close().await?;
 | Host tools | `tool_servers` are served in-process as MCP servers over the same pipes; the model sees `mcp__<server>__<tool>` |
 | Settings | `settings` (`--settings`, for example `{"autoCompactEnabled": false}`) and `setting_sources` (`--setting-sources`; `Some(vec![])` loads none of the user's settings files) |
 | Control | `interrupt`, `set_model`, `set_permission_mode` |
-| Messages | `Message` variants keep their raw JSON, so message types this client does not model are still available. An `assistant` message's `usage` is its request's (`input_tokens` plus the cache reads and writes is the whole input); one response can arrive as several messages with the same id |
+| Messages | `Message` variants keep their raw JSON, so message types this client does not model are still available. Usage follows Anthropic's exclusive counts: `input_tokens`, `cache_read_input_tokens` and `cache_creation_input_tokens` add up to a request's whole input. An `assistant` message's output count is the one when its stream started (one response can arrive as several messages with the same id), and the turn's `result` sums the turn's requests; with `include_partial_messages`, each request's `message_delta` stream event has its final usage |
 
 On Windows, npm installs Claude Code as a `claude.cmd` launcher script, which can't be
 run without a shell. The client follows it to the package's `bin/claude.exe`, or to
