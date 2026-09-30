@@ -596,3 +596,28 @@ fn built_in_tools_are_only_for_claude_code_models() {
     config.claude_code = None;
     assert!(config.validate().is_ok());
 }
+
+#[tokio::test]
+async fn a_response_sent_as_several_messages_is_counted_once_in_full() {
+    let fake = Fake::new(json!([[
+        {"text": "Let me finish.", "input_tokens": 900, "output_tokens": 3},
+        {"tool": "mcp__arko__complete_task", "input": {"summary": "done"},
+         "input_tokens": 900, "output_tokens": 40, "continues": true},
+    ]]));
+    let task = Task::new(
+        config(&fake, &[]),
+        "Do the thing.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (task, events) = start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(task.usage_history.len(), 1);
+    assert_eq!(task.usage_history[0].output_tokens, 40);
+    assert_eq!(task.usage_history[0].input_tokens, 900);
+    let reported = events
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::ModelCallUsageReported(_)))
+        .count();
+    assert_eq!(reported, 1);
+}

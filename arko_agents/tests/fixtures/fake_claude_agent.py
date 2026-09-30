@@ -83,11 +83,14 @@ def next_turn():
 def usage(step):
     tokens = step.get("input_tokens", 10)
     return {"input_tokens": 2, "cache_read_input_tokens": tokens - 2,
-            "cache_creation_input_tokens": 0, "output_tokens": 5}
+            "cache_creation_input_tokens": 0, "output_tokens": step.get("output_tokens", 5)}
 
 
 def assistant(content, step):
-    state["message"] += 1
+    # "continues": part of the previous message's response (the same id),
+    # as Claude Code sends a response's text and its call.
+    if not step.get("continues"):
+        state["message"] += 1
     send({"type": "assistant", "parent_tool_use_id": None, "session_id": SESSION,
           "message": {"id": "msg_%d" % state["message"], "role": "assistant",
                       "model": "claude-opus-5-5", "content": content,

@@ -14,7 +14,7 @@
 //! ([`Task::claude_code_session`]) when it continues. A handover starts a
 //! new session.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -376,6 +376,27 @@ impl cc::ClaudeTool for ServedTool {
     }
 }
 
+/// A response's usage, until the response is complete.
+struct PendingUsage {
+    key: String,
+    usage: Value,
+    model: Option<String>,
+}
+
+impl PendingUsage {
+    /// A request's whole input: uncached, cache reads and cache writes.
+    fn input(usage: &Value) -> usize {
+        [
+            "input_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ]
+        .iter()
+        .map(|field| usage.get(field).and_then(Value::as_u64).unwrap_or(0) as usize)
+        .sum()
+    }
+}
+
 /// A tool call of the session, by its Claude Code `tool_use_id`.
 struct Call {
     id: Uuid,
@@ -428,9 +449,10 @@ pub(super) struct ClaudeCodeRun {
     parsing: ToolParsingConfig,
 
     calls: HashMap<String, Call>,
-    /// Assistant messages whose usage is recorded (one response can arrive
-    /// as several messages).
-    counted: HashSet<String>,
+    /// The latest response's usage, recorded once the response is complete:
+    /// one response arrives as several messages (a text, a call) with the
+    /// same id, whose output count grows.
+    pending_usage: Option<PendingUsage>,
     /// The input of the current conversation's latest and first requests.
     context_size: Option<usize>,
     first_context_size: Option<usize>,
@@ -484,7 +506,7 @@ impl ClaudeCodeRun {
             skill_prompt_context,
             parsing,
             calls: HashMap::new(),
-            counted: HashSet::new(),
+            pending_usage: None,
             context_size: None,
             first_context_size: None,
             open_turns: 0,
@@ -1060,6 +1082,7 @@ impl ClaudeCodeRun {
         };
         // Late hook requests get their stopping answer.
         drop(requests);
+        self.flush_usage().await?;
         if let Some(approval) = self.approval.take() {
             let _ = approval
                 .reply
@@ -1654,7 +1677,7 @@ impl ClaudeCodeRun {
     ) -> Result<(), ArkoAgentsError> {
         match message {
             cc::Message::Assistant(assistant) => {
-                self.record_usage(&assistant).await?;
+                self.observe_usage(&assistant).await?;
                 // A subagent's messages are its own conversation.
                 if assistant.parent_tool_use_id.is_some() {
                     return Ok(());
@@ -1694,6 +1717,7 @@ impl ClaudeCodeRun {
                 self.check_handover_threshold().await?;
             }
             cc::Message::User(user) if user.parent_tool_use_id.is_none() => {
+                self.flush_usage().await?;
                 let mut results = Vec::new();
                 for block in &user.content {
                     let cc::ContentBlock::ToolResult {
@@ -1878,9 +1902,11 @@ impl ClaudeCodeRun {
         Ok(())
     }
 
-    /// Records an assistant message's usage once per response. The main
-    /// conversation's requests set the context size a handover checks.
-    async fn record_usage(
+    /// Notes an assistant message's usage: the main conversation's
+    /// requests set the context size a handover checks at once (a
+    /// response's input doesn't change), and the usage is recorded when the
+    /// response is complete.
+    async fn observe_usage(
         &mut self,
         assistant: &cc::AssistantMessage,
     ) -> Result<(), ArkoAgentsError> {
@@ -1893,13 +1919,42 @@ impl ClaudeCodeRun {
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        if !self.counted.insert(key.clone()) {
-            return Ok(());
+        let main = assistant.parent_tool_use_id.is_none();
+        if main {
+            let input = PendingUsage::input(usage);
+            self.context_size = Some(input);
+            self.first_context_size.get_or_insert(input);
         }
-        let count = |field: &str| usage.get(field).and_then(Value::as_u64).unwrap_or(0) as usize;
+        if self
+            .pending_usage
+            .as_ref()
+            .is_some_and(|pending| pending.key != key)
+        {
+            self.flush_usage().await?;
+        }
+        self.pending_usage = Some(PendingUsage {
+            key,
+            usage: usage.clone(),
+            model: assistant.model.clone(),
+        });
+        Ok(())
+    }
+
+    /// Records the pending response's usage.
+    async fn flush_usage(&mut self) -> Result<(), ArkoAgentsError> {
+        let Some(pending) = self.pending_usage.take() else {
+            return Ok(());
+        };
+        let count = |field: &str| {
+            pending
+                .usage
+                .get(field)
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize
+        };
         let cache_read = count("cache_read_input_tokens");
         let cache_write = count("cache_creation_input_tokens");
-        let input = count("input_tokens") + cache_read + cache_write;
+        let input = PendingUsage::input(&pending.usage);
         let output = count("output_tokens");
         let model = self.task.agent_config.llm_config.model.clone();
         let mut info = ai::UsageInfo::new(input, output)
@@ -1912,9 +1967,9 @@ impl ClaudeCodeRun {
         let info = info.with_billing(ai::BillingKind::Subscription);
         self.task.usage_history.push(info.clone());
         self.emit(AgentEvent::UsageReported(info)).await?;
-        let served = assistant.model.clone().unwrap_or_else(|| model.id.clone());
+        let served = pending.model.unwrap_or_else(|| model.id.clone());
         let call = ai::ModelCallUsage::new(
-            key,
+            pending.key,
             ai::Provider::ClaudeCode.as_telemetry_str().to_string(),
             served,
             input,
@@ -1922,12 +1977,7 @@ impl ClaudeCodeRun {
             model.max_input_tokens,
         );
         let call = self.task.record_model_call_usage(call);
-        self.emit(AgentEvent::ModelCallUsageReported(call)).await?;
-        if assistant.parent_tool_use_id.is_none() {
-            self.context_size = Some(input);
-            self.first_context_size.get_or_insert(input);
-        }
-        Ok(())
+        self.emit(AgentEvent::ModelCallUsageReported(call)).await
     }
 
     /// After a request of the main conversation: a handover starts once its
@@ -1979,6 +2029,7 @@ impl ClaudeCodeRun {
         result: &cc::ResultMessage,
         session: &cc::ClaudeSession,
     ) -> Result<Option<SessionEnd>, ArkoAgentsError> {
+        self.flush_usage().await?;
         if let Some(stopping) = self.stopping {
             let _ = stopping;
             return Ok(Some(SessionEnd::Stop));
@@ -2140,7 +2191,7 @@ impl ClaudeCodeRun {
             }
         }
         self.calls.clear();
-        self.counted.clear();
+        self.pending_usage = None;
         self.context_size = None;
         self.first_context_size = None;
         self.report_delivered = false;
