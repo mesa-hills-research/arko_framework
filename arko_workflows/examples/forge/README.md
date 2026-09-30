@@ -78,6 +78,8 @@ which you want, or the architect chooses and explains it.
 | `--state-dir PATH` | `~/.arko/forge/runs/<name>-<time>` | Checkpoints, the event log, trial logs and the report. |
 | `--resume STATE_DIR` | | Continue an interrupted run with its saved settings. |
 | `--budget DOLLARS` | none | Pause and stop at this spend (billed usage: the API backend, or Claude Code with `--metered`); with `--resume`, replaces the saved budget. |
+| `--plan-budget-5h POINTS` | none | Pause and stop once the run has used this many percentage points of the subscription plan's five-hour usage window, counted from its level when the run started (Claude Code, ChatGPT sign-in). Other use of the same plan during the run counts too. With `--resume`, replaces the saved limit. |
+| `--plan-budget-7d POINTS` | none | The same for the plan's seven-day window. |
 | `--metered` | off | The Claude Code CLI is billed per token (an API key, cloud credits, a host-managed provider): count its list-price estimate as spend, so costs and `--budget` apply. |
 | `--verbose` | off | Print every agent's tool calls and text. |
 
@@ -110,4 +112,12 @@ and the agents carry on from their pauses:
 forge --resume <state dir> --budget <dollars>
 ```
 
-Spending can go past the budget by the requests already in flight when it is reached.
+`--plan-budget-5h` and `--plan-budget-7d` work the same way for a subscription plan, in
+percentage points of its usage windows used since the run started; the stop message names the
+window, and the run continues with a higher limit:
+
+```text
+forge --resume <state dir> --plan-budget-5h <points>
+```
+
+Spending can go past a budget by the requests already in flight when it is reached.

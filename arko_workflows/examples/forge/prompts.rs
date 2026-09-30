@@ -108,7 +108,8 @@ pub const TRIALS: &str = r#"
   code or its own summary) against the use case, and fix what falls short. Each run uses real
   model usage, so make each one count. When a trial or forge budget is set, each run needs a
   `budget`: the most it may spend, reserved in full, which you also pass to the workflow's own
-  budget flag in `arguments`. Size it to the trial: a toy input needs a few dollars, not tens."#;
+  budget flag in `arguments`. Be generous: a trial that stops at its cap is wasted, so give it
+  comfortably more than you expect it to use."#;
 
 /// Involvement: no questions.
 pub const INVOLVEMENT_NONE: &str = r#"

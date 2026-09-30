@@ -195,6 +195,20 @@ struct Settings {
     #[arg(long)]
     budget: Option<f64>,
 
+    /// Stop at this many percentage points of the plan's five-hour usage
+    /// window, counted from its level when the run started (a subscription
+    /// plan: Claude Code, ChatGPT sign-in). Other use of the same plan
+    /// meanwhile counts too.
+    #[arg(long, value_name = "POINTS")]
+    #[serde(default)]
+    plan_budget_5h: Option<f64>,
+
+    /// Stop at this many percentage points of the plan's seven-day usage
+    /// window, counted as `--plan-budget-5h` is.
+    #[arg(long, value_name = "POINTS")]
+    #[serde(default)]
+    plan_budget_7d: Option<f64>,
+
     /// The Claude Code CLI is billed per token (an API key, cloud credits, a
     /// host-managed provider), not covered by a plan: count its usage in
     /// costs and budgets.
@@ -228,12 +242,28 @@ async fn main() -> ForgeResult<()> {
             let state_dir = std::fs::canonicalize(state_dir)?;
             let mut manifest: RunManifest =
                 serde_json::from_slice(&std::fs::read(state_dir.join("forge-run.json"))?)?;
-            // A budget given with --resume replaces the saved one (to raise
-            // a budget the run stopped at); the other settings stay.
-            if let Some(budget) = args.settings.budget
-                && manifest.settings.budget != Some(budget)
+            // A budget given with --resume (dollars or plan points) replaces
+            // the saved one (to raise a budget the run stopped at); the other
+            // settings stay.
+            let saved = manifest.settings.clone();
+            let settings = &mut manifest.settings;
+            for (given, kept) in [
+                (args.settings.budget, &mut settings.budget),
+                (args.settings.plan_budget_5h, &mut settings.plan_budget_5h),
+                (args.settings.plan_budget_7d, &mut settings.plan_budget_7d),
+            ] {
+                if given.is_some() {
+                    *kept = given;
+                }
+            }
+            if [
+                (saved.budget, manifest.settings.budget),
+                (saved.plan_budget_5h, manifest.settings.plan_budget_5h),
+                (saved.plan_budget_7d, manifest.settings.plan_budget_7d),
+            ]
+            .iter()
+            .any(|(before, after)| before != after)
             {
-                manifest.settings.budget = Some(budget);
                 std::fs::write(
                     state_dir.join("forge-run.json"),
                     serde_json::to_vec_pretty(&manifest)?,
@@ -439,6 +469,10 @@ async fn main() -> ForgeResult<()> {
     if let Some(budget) = settings.budget {
         builder = builder.budget(budget);
     }
+    builder = builder.plan_budget(PlanBudget {
+        five_hour: settings.plan_budget_5h,
+        seven_day: settings.plan_budget_7d,
+    });
     // Running agents are saved as they run, so the latest checkpoint holds
     // the architect as it was when the forge stopped. Without one (the forge
     // stopped before the architect's first save), a resume starts from the
@@ -651,13 +685,50 @@ async fn budget_stop(workflow: &Workflow, state_dir: &Path) -> ! {
         eprintln!("forge: couldn't save a checkpoint ({error}); the latest one is kept");
     }
     let spent = workflow.cost_ledger().total();
-    let limit = workflow.budget().unwrap_or(spent);
+    let mut used_up = Vec::new();
+    let mut flags = Vec::new();
+    if let Some(limit) = workflow.budget()
+        && spent > limit
+    {
+        used_up.push(format!("the budget of ${limit:.2} (spent ${spent:.2})"));
+        flags.push("--budget <dollars>");
+    }
+    let plan = workflow.plan_budget();
+    let plan_spent = workflow.plan_usage_spent();
+    for (window, flag, label) in [
+        (
+            PlanWindow::FiveHour,
+            "--plan-budget-5h <points>",
+            "five-hour",
+        ),
+        (
+            PlanWindow::SevenDay,
+            "--plan-budget-7d <points>",
+            "seven-day",
+        ),
+    ] {
+        if let (Some(limit), Some(used)) = (plan.limit(window), plan_spent.get(window))
+            && used > limit
+        {
+            used_up.push(format!(
+                "the plan budget of {limit} points of the {label} window (used {used:.1})"
+            ));
+            flags.push(flag);
+        }
+    }
+    if used_up.is_empty() {
+        // An agent's own budget; the forge sets none, but say something.
+        used_up.push("a budget".to_string());
+        flags.push("--budget <dollars>");
+    }
     eprintln!(
-        "\nforge: the budget of ${limit:.2} is used up (spent ${spent:.2}). The agents are paused where they were and saved."
+        "\nforge: {} is used up. The agents are paused where they were and saved.",
+        used_up.join(" and ")
     );
     eprintln!(
-        "forge: to continue, resume with a higher budget:\n\n    forge --resume {} --budget <dollars>\n",
-        state_dir.display()
+        "forge: to continue, resume with a higher budget:\n\n    forge --resume {} {}\n",
+        state_dir.display(),
+        flags.join(" ")
     );
     std::process::exit(2);
 }

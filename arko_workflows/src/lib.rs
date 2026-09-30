@@ -63,6 +63,7 @@ pub use workflow::{AgentHandle, Workflow, WorkflowBuilder};
 pub mod prelude {
     pub use crate::budget::{
         AddCostResult, BudgetExceededPolicy, BudgetManager, CostEntry, CostLedger, CostSource,
+        PlanBudget, PlanUsageSpent, PlanWindow,
     };
     pub use crate::distillation::{DistillationConfig, DistillationRecord};
     pub use crate::durable::{

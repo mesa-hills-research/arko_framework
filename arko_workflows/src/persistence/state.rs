@@ -69,6 +69,12 @@ pub struct WorkflowState {
     /// for how a resume combines them with the builder's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_limits: Option<BudgetLimits>,
+    /// The plan budget's limits in force at the checkpoint and how much of
+    /// each plan window the run had used, from the levels it first saw
+    /// (see [`WorkflowBuilder::plan_budget`](crate::WorkflowBuilder::plan_budget)).
+    /// Absent in checkpoints from before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_budget: Option<crate::budget::PlanBudgetState>,
 }
 
 /// The budget limits a checkpoint records.
@@ -272,6 +278,7 @@ mod tests {
             cancellation: None,
             agent_registry: None,
             budget_limits: None,
+            plan_budget: None,
         };
 
         let json = serde_json::to_string_pretty(&state).unwrap();

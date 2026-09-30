@@ -16,6 +16,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub(crate) enum Reply {
     /// A 200 response streaming these server-sent events.
     Stream(String),
+    /// A 200 response streaming these server-sent events, with extra
+    /// headers (each line `Name: value`, without line ends).
+    StreamWithHeaders {
+        stream: String,
+        headers: Vec<String>,
+    },
     /// An error status, with an optional `Retry-After` in seconds.
     Status {
         status: u16,
@@ -29,6 +35,14 @@ impl Reply {
         match self {
             Self::Stream(stream) => format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{stream}",
+                stream.len()
+            ),
+            Self::StreamWithHeaders { stream, headers } => format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{stream}",
+                headers
+                    .iter()
+                    .map(|header| format!("{header}\r\n"))
+                    .collect::<String>(),
                 stream.len()
             ),
             Self::Status {

@@ -296,7 +296,8 @@ impl arko_agents::TurnContextSource for ActivityNotices {
     }
 
     /// Under `BudgetExceededPolicy::Pause`, an agent over the workflow's
-    /// budget or its own is held before its next request.
+    /// budget or its own, or while a plan budget window is over its limit,
+    /// is held before its next request.
     fn hold_request(&self, _task_id: uuid::Uuid) -> Option<String> {
         self.context.budget.hold_reason(&self.agent_name)
     }

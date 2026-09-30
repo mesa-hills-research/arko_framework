@@ -85,6 +85,15 @@ pub enum WorkflowError {
         limit: f64,
     },
 
+    /// Under `BudgetExceededPolicy::Cancel`, the plan budget is exceeded
+    /// (`window`: `five-hour` or `seven-day`; points of the window).
+    #[error("Plan budget exceeded: {window} window used {used:.1} of {limit} points")]
+    PlanBudgetExceeded {
+        window: String,
+        used: f64,
+        limit: f64,
+    },
+
     #[error("Invalid cost amount {0}: costs must be finite and non-negative")]
     InvalidCost(f64),
 

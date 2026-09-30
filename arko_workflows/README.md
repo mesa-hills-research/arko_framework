@@ -386,6 +386,22 @@ checkpoint; resumed with a higher `.budget(...)`, `recover_agent` and `resume_ag
 continue the agents from their pauses. Checkpoints keep a limit raised live, and a
 resume keeps the higher of it and the builder's.
 
+A plan budget limits subscription usage instead of dollars: how many percentage
+points of the plan's five-hour and seven-day windows the run may use, counted from
+each window's level when the run started (from the plan usage Claude Code and
+ChatGPT OAuth report). Plan usage is account-wide, so other use of the same plan
+during the run counts too, and the points are only known after a request
+completes. A window over its limit holds agents as the dollar budget does;
+`set_plan_budget` raises it, and checkpoints keep the counting, so a resumed run
+counts from where it started:
+
+```rust
+let workflow = Workflow::builder()
+    .plan_budget(PlanBudget::none().five_hour(25.0).seven_day(5.0))
+    .build()?;
+println!("{:?}", workflow.plan_usage_spent());
+```
+
 ```rust
 let workflow = Workflow::builder()
     .budget(10.0)

@@ -10,6 +10,13 @@ use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 
+mod plan;
+
+pub use plan::{
+    PlanBudget, PlanBudgetCrossing, PlanBudgetState, PlanUsageSpent, PlanUsageTracking, PlanWindow,
+    PlanWindowUsage,
+};
+
 /// Scale factor: store cost as integer micro-dollars for lock-free atomics.
 const COST_SCALE: f64 = 1_000_000.0;
 
@@ -26,7 +33,7 @@ fn scaled_limit(limit: Option<f64>) -> u64 {
 
 /// What a workflow does when its budget, or an agent's
 /// ([`WorkflowBuilder::agent_budget`](crate::WorkflowBuilder::agent_budget)),
-/// is exceeded. Set with
+/// is exceeded, or a [`PlanBudget`] window's limit. Set with
 /// [`WorkflowBuilder::budget_exceeded_policy`](crate::WorkflowBuilder::budget_exceeded_policy).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -134,6 +141,8 @@ pub struct BudgetManager {
     agent_spent: Mutex<HashMap<String, u64>>,
     policy: BudgetExceededPolicy,
     wait_for_raise: bool,
+    /// The plan budget: its limits and the plan usage the run has seen.
+    plan: Mutex<plan::PlanBudgetTracker>,
     /// Counts the changes of the limits.
     changes: tokio::sync::watch::Sender<u64>,
 }
@@ -152,6 +161,7 @@ impl BudgetManager {
             agent_spent: Mutex::new(HashMap::new()),
             policy: BudgetExceededPolicy::default(),
             wait_for_raise: false,
+            plan: Mutex::default(),
             changes: tokio::sync::watch::Sender::new(0),
         }
     }
@@ -203,6 +213,7 @@ impl BudgetManager {
             agent_spent: Mutex::new(agent_spent),
             policy: BudgetExceededPolicy::default(),
             wait_for_raise: false,
+            plan: Mutex::default(),
             changes: tokio::sync::watch::Sender::new(0),
         }
     }
@@ -304,7 +315,58 @@ impl BudgetManager {
                 self.agent_limit(agent_name).unwrap_or(0.0)
             ));
         }
+        if let Some(crossing) = self.plan_exceeded() {
+            return Some(format!(
+                "Plan budget exceeded: {} used since the run started. The request waits until the plan budget is raised.",
+                crossing.describe()
+            ));
+        }
         None
+    }
+
+    /// Takes a plan usage report (from any agent: plan usage is
+    /// account-wide); returns the windows it took over their plan budget
+    /// limits, each once per crossing.
+    pub fn record_plan_usage(&self, usage: &arko_ai::PlanUsage) -> Vec<PlanBudgetCrossing> {
+        let now = Utc::now().timestamp().max(0) as u64;
+        self.plan.lock().observe(usage, now)
+    }
+
+    /// Sets the plan budget's limits, while agents run too: raising them
+    /// releases the runs held on them.
+    pub fn set_plan_limits(&self, limits: PlanBudget) {
+        self.plan.lock().set_limits(limits);
+        self.changed();
+    }
+
+    /// The plan budget's limits.
+    pub fn plan_limits(&self) -> PlanBudget {
+        self.plan.lock().limits
+    }
+
+    /// The points of each plan window the run has used.
+    pub fn plan_spent(&self) -> PlanUsageSpent {
+        self.plan.lock().usage.spent()
+    }
+
+    /// A window over its plan budget limit, if any.
+    pub fn plan_exceeded(&self) -> Option<PlanBudgetCrossing> {
+        self.plan.lock().exceeded()
+    }
+
+    /// The plan budget's limits and tracking, for a checkpoint.
+    pub fn plan_state(&self) -> PlanBudgetState {
+        let plan = self.plan.lock();
+        PlanBudgetState {
+            limits: plan.limits,
+            usage: plan.usage.clone(),
+        }
+    }
+
+    /// Restores the plan usage tracking a checkpoint recorded (the limits
+    /// are set with [`set_plan_limits`](Self::set_plan_limits)).
+    pub(crate) fn restore_plan_usage(&self, usage: PlanUsageTracking) {
+        self.plan.lock().restore(usage);
     }
 
     pub fn agent_limit(&self, agent_name: &str) -> Option<f64> {

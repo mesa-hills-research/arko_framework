@@ -337,6 +337,21 @@ fn budget_cancels(ctx: &SharedContext) -> bool {
     ctx.budget.exceeded_policy() == BudgetExceededPolicy::Cancel
 }
 
+/// Under [`BudgetExceededPolicy::Cancel`], the error for a plan budget
+/// window over its limit.
+fn plan_budget_error(ctx: &SharedContext) -> Option<WorkflowError> {
+    if !budget_cancels(ctx) {
+        return None;
+    }
+    ctx.budget
+        .plan_exceeded()
+        .map(|crossing| WorkflowError::PlanBudgetExceeded {
+            window: crossing.window.label().to_string(),
+            used: crossing.used,
+            limit: crossing.limit,
+        })
+}
+
 /// Answers an agent held before a model request because a budget is
 /// exceeded ([`ErrorRecoveryCause::BudgetExceeded`](arko_agents::ErrorRecoveryCause::BudgetExceeded)):
 /// once the budget is raised, it continues. A run inside another agent's
@@ -843,6 +858,12 @@ async fn drive_events(
                 limit: ctx.budget.limit().unwrap_or(0.0),
             });
         }
+        if !matches!(&event, AgentEvent::PlanUsageReported(_))
+            && let Some(error) = plan_budget_error(ctx)
+        {
+            let _ = cmd_tx.try_send(UserCommand::CancelTask);
+            return Err(error);
+        }
         match event {
             AgentEvent::ToolCallAwaitingApproval {
                 tool_call_id,
@@ -926,6 +947,27 @@ async fn drive_events(
                         spent: ctx.budget.total_spent(),
                         limit: ctx.budget.limit().unwrap_or(0.0),
                     });
+                }
+            }
+
+            AgentEvent::PlanUsageReported(ref usage) => {
+                // Under `Pause`, agents are held before their next request
+                // (`BudgetManager::hold_reason`).
+                for crossing in ctx.budget.record_plan_usage(usage) {
+                    let _ = fire_hooks_on_context(ctx, HookPoint::OnBudgetExceeded, |hook| {
+                        hook.agent_name = Some(agent_name.to_string());
+                        hook.agent_run_id = Some(agent_run_id);
+                        hook.metadata
+                            .insert("plan_window".to_string(), crossing.window.key().into());
+                        hook.metadata
+                            .insert("plan_points_used".to_string(), crossing.used.into());
+                        hook.metadata
+                            .insert("plan_points_limit".to_string(), crossing.limit.into());
+                    });
+                }
+                if let Some(error) = plan_budget_error(ctx) {
+                    let _ = cmd_tx.try_send(UserCommand::CancelTask);
+                    return Err(error);
                 }
             }
 
@@ -2295,6 +2337,9 @@ impl WorkflowEngine {
                 limit: ctx.budget.agent_limit(agent_name).unwrap_or(0.0),
             });
         }
+        if let Some(error) = plan_budget_error(ctx) {
+            return Err(error);
+        }
         fire_hooks_on_context(ctx, HookPoint::PreAgentSpawn, |hook| {
             hook.agent_name = Some(agent_name.to_string());
             hook.agent_run_id = agent_run_id;
@@ -2624,6 +2669,9 @@ impl WorkflowEngine {
                                 spent: ctx_clone.budget.total_spent(),
                                 limit: ctx_clone.budget.limit().unwrap_or(0.0),
                             });
+                        }
+                        if let Some(error) = plan_budget_error(&ctx_clone) {
+                            return Err(error);
                         }
                         let task_id = uuid::Uuid::new_v4();
                         ctx_clone.registry.start(&[(task_id, name_owned.as_str())]);

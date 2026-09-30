@@ -712,6 +712,7 @@ impl PersistenceManager {
             limit: ctx.budget.limit(),
             agent_limits: ctx.budget.agent_limits().into_iter().collect(),
         };
+        let plan_budget = ctx.budget.plan_state();
         let shared = fingerprint(&(
             &memory_snapshot,
             &message_queues,
@@ -721,6 +722,7 @@ impl PersistenceManager {
             &cancellation,
             &agent_registry,
             &budget_limits,
+            &plan_budget,
         ));
 
         let mut agent_runs = Vec::new();
@@ -869,6 +871,8 @@ impl PersistenceManager {
             cancellation,
             agent_registry: Some(agent_registry),
             budget_limits: Some(budget_limits),
+            // Recorded once the run has a plan budget or has seen plan usage.
+            plan_budget: (plan_budget != Default::default()).then_some(plan_budget),
         };
         Some(Built {
             state,
