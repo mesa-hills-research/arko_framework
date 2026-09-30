@@ -1710,6 +1710,13 @@ fn warn_unknown_tool_names(
             .iter()
             .flat_map(|(_, config)| config.tool_config.available_tool_names.iter().cloned()),
     );
+    // Claude Code's built-in tools, which the default freshness mapping
+    // names for agents that run in Claude Code.
+    known.extend(
+        arko_agents::claude_code::BUILT_IN_TOOLS
+            .iter()
+            .map(|tool| tool.to_string()),
+    );
     known.extend(global_tools.iter().map(|tool| tool.name()));
     known.extend(agent_tools.values().flatten().map(|tool| tool.name()));
     let mut named = Vec::new();

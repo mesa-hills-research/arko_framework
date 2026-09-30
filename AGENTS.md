@@ -20,7 +20,8 @@
 - Building needs Rust 1.89 or later and a C compiler. Run `cargo fmt --all` before
   committing; CI checks formatting.
 - Test with `cargo test --workspace --locked`. The tests make no provider calls; the
-  terminal and MCP tests need Python 3 (`ARKO_TEST_PYTHON` selects the interpreter).
+  terminal, MCP and Claude Code tests need Python 3 (`ARKO_TEST_PYTHON` selects the
+  interpreter).
 - Saved data must stay loadable: agent configurations, tasks, conversations, workflow
   checkpoints and index databases written by earlier versions. Give new fields serde
   defaults and keep reading old ones.

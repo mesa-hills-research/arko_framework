@@ -163,6 +163,7 @@ runtime validates them again when a task starts. The quick start's agent as JSON
 | `monitoring` | Nothing monitored | Plan-usage and prompt-cache monitors; see [Monitoring](#monitoring). |
 | `refusal_fallback` | None | A model that answers a refused turn once; see [Refusals](#refusals). |
 | `handover` | None | Opt-in: at a context size, the agent writes a report and continues from it in a fresh conversation; see [Conversation handover](#conversation-handover). |
+| `claude_code` | None (the defaults) | How the Claude Code CLI runs, for a Claude Code model; see [Claude Code models](#claude-code-models). |
 | `complete_task_summary_prompt_override` | None | Replaces the description of `complete_task`'s `summary` parameter. |
 | `parsing_config_override` | Default tags | Tag syntax for output-based tool calls. |
 
@@ -824,6 +825,98 @@ ChatGPT backend reroute) emits `ModelRerouted` with both models.
 A monitor pause waits in `AwaitingErrorRecoveryApproval` under the pausing error policies
 and returns the task `Interrupted` under the others. Approving it continues without an
 error note; a message given with the approval is added as a user message.
+
+## Claude Code models
+
+An agent whose model is a Claude Code model runs in a session of the user's installed
+Claude Code CLI, under its login, instead of through `LLMClient` requests (see
+arko_ai's *Claude Code*). Claude Code runs the agent loop; the runtime drives the session
+and keeps the task, its events, commands, approvals and handovers as for any agent.
+Nothing else changes for a host: `AgentRuntime::run_task` picks the Claude Code runtime
+from the model's provider.
+
+```rust
+use arko_agents::{ClaudeCodeSettings, ClaudeCodeTools};
+
+let config = AgentConfig::builder(id, name, AgentLLMConfig {
+    model: Model::claude_code(Model::anthropic_claude_opus_5_5()),
+    generation_config: GenerationConfig::default()
+        .with_reasoning(ReasoningConfig::AnthropicAdaptive {
+            effort: Some(AnthropicReasoningEffort::High),
+        }),
+})
+// ...
+.tool_config(AgentToolConfig {
+    // Claude Code's own tools, next to the agent's arko tools.
+    available_tool_names: ClaudeCodeTools::editing(),
+    ..AgentToolConfig::default()
+})
+.claude_code(ClaudeCodeSettings::default())
+.build()?;
+```
+
+**Tools.** The agent's arko tools (`complete_task`, `ask_user`, a workflow's
+`send_message`, custom tools) are served to Claude Code in-process as the MCP server
+`arko`, so the model sees them as `mcp__arko__<name>` (the system prompt says so). They
+run as for any agent, with the execution middleware, result interception and time
+limits. Claude Code's built-in tools (`claude_code::BUILT_IN_TOOLS`: `Read`, `Edit`,
+`Bash`, `Grep`, `WebFetch`, …) are offered when `available_tool_names` lists them, and
+only then; `ClaudeCodeTools::{read_only, editing, shell, web, all}` list common sets. A
+name that isn't an arko tool is offered as a built-in, so tools a newer CLI adds can be
+listed too.
+
+**The gate.** Every call, built-in or arko, first passes a `PreToolUse` hook the runtime
+answers:
+
+| Setting | Applies to built-ins | Notes |
+| --- | --- | --- |
+| Offered tools | Yes | A tool not listed is refused with a result saying it's not available |
+| `auto_approve_tool_use` and approvals | Yes | A call that needs approval goes to a permission request that waits for `ApproveToolUse` or `RejectToolUse` (`ToolCallAwaitingApproval`, `AwaitingToolApproval`), with `user_command_timeout_seconds` and `HostDecisions` as usual. `custom_tool_output` becomes the call's result instead of running it, and `message_to_agent` comes with the result |
+| Workspace path policy | Yes | On the path inputs of `Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Glob` and `Grep` (`claude_code::built_in_path_parameters`) |
+| Execution middleware | Yes | `before` in the gate (a rejection, pause, failure or cancellation applies as for any call) and `after` once the call ran |
+| Result interception | No | Claude Code produces a built-in's output; a workflow rejects a distiller aimed at one |
+| `tool_timeout_seconds`, `parallel_safe` | No | Claude Code runs its built-ins; `validate` rejects these settings for them |
+| `ToolErrorPolicy` | Arko tools only | A built-in's failure (a command that exits non-zero, say) is its result |
+
+`AskUserQuestion`, `ExitPlanMode` and `EnterPlanMode` can't be offered (they would bypass
+the host; ask with `ask_user`).
+
+**Sessions.** `ClaudeCodeSettings` sets the CLI (`cli_path`, and `cli_args` for one run
+through an interpreter), `env`, whether the agent's system prompt replaces Claude Code's
+(`replace_system_prompt`; by default it is appended), and the user's settings files the
+session loads (`setting_sources`: none by default, with `--strict-mcp-config`, so the
+agent behaves the same on any machine). The reasoning effort of an `Anthropic` or
+`AnthropicAdaptive` reasoning config becomes `--effort`, and `anthropic_fast_mode`
+Claude Code's fast mode. The session lives while the task is in progress: a wait for an
+answer (`ask_user`) or an error-recovery decision closes it, and the task resumes it
+(`Task::claude_code_session`) when it continues. A turn that ends without `complete_task`
+gets a note asking the model to continue or complete; after 10 in a row the task is
+interrupted. If the CLI exits, or a turn ends in an error Claude Code's own retries
+didn't recover from, the error policy decides: a pause (`RetriesExhausted`, or
+`NonRetryable` when the CLI can't start) under the pausing policies, otherwise
+`Interrupted`. `ContinueAfterError` and `ApproveErrorRecovery` resume the session.
+
+**Context and usage.** `InjectContext` and the turn-context source's context reach the
+model with the next tool result (`PostToolUse`), or with the next message; the task's
+conversation records them after that result, as a `# Workflow context update`. The
+conversation mirrors the session's (the task's messages, the model's text and calls, and
+their results) as a record for hosts; subagents' messages aren't included. Usage is
+recorded once per response: the request's whole input (cache reads and writes
+included), billed as a subscription (nothing per call; the cost is the estimate at list
+prices). `refusal_fallback` and the monitors aren't supported for Claude Code models.
+
+**Handovers.** With `handover` set, the threshold is checked against each request of the
+main conversation as Claude Code reports it. Once reached, the model's next tool call is
+refused with the report request as its result (or, if its turn ends first, the request is
+sent as a message); the report is the turn's text, and a fresh Claude Code session starts
+from the seed and the report. Claude Code's own auto-compaction is off for such an
+agent (`autoCompactEnabled: false`), so it never replaces the conversation first.
+
+`examples/claude_code_agent.rs` runs an agent with Claude Code's read-only tools and a
+handover threshold, printing its calls, usage and handovers; it uses the CLI's login and
+counts against its plan usage. The tests run a scripted fake CLI
+(`tests/fixtures/fake_claude_agent.py`) and need Python 3 (`ARKO_TEST_PYTHON` selects the
+interpreter).
 
 ## Conversation handover
 

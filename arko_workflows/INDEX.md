@@ -97,7 +97,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 | `rename_memory_tier_on_resume(self, from: impl Into<String>, to: impl Into<String>) -> Self` | On resume, restore the checkpoint's memory tier `from` into the configured tier `to`. A `from` the checkpoint lacks is logged as a warning. |
 | `drop_memory_tier_on_resume(self, name: impl Into<String>) -> Self` | On resume, discard the checkpoint's memory tier `name` instead of failing because it isn't configured. |
 | `ephemeral(self) -> Self` | Clear the persistence and resume settings made so far. Later setters can enable them again. |
-| `context_freshness(self, config: ContextFreshnessConfig) -> Self` | Enable versioned resource tracking. `ContextFreshnessConfig::default()` maps the built-in file tools `read_file`, `list_files`, `write_file`, and `apply_diff`. See [Context freshness](#context-freshness). |
+| `context_freshness(self, config: ContextFreshnessConfig) -> Self` | Enable versioned resource tracking. `ContextFreshnessConfig::default()` maps the built-in file tools `read_file`, `list_files`, `write_file`, and `apply_diff`, and Claude Code's `Read`, `Write`, `Edit`, `MultiEdit`, and `NotebookEdit`. See [Context freshness](#context-freshness). |
 | `global_tool(self, tool: Arc<dyn arko_agents::tool::Tool>) -> Self` | Register a tool for every agent and add its name to each agent's available tools. |
 | `agent_tool(self, agent_name: impl Into<String>, tool: Arc<dyn arko_agents::tool::Tool>) -> Self` | Register a tool for one agent and add its name to that agent's available tools. |
 | `tool_result_interceptor(self, interceptor: Arc<dyn ToolResultInterceptor>) -> Self` | Append an interceptor for every agent's tool results. |
@@ -133,9 +133,10 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 - a fixed `wait_for_message` limit of zero or more than 24 hours, for the workflow or an agent;
 - `max_parallel_agents(0)`;
 - a distiller whose `max_output_tokens` is zero or whose `reasoning` configuration is for a different provider than its model;
+- a distiller that targets one of Claude Code's built-in tools for an agent whose model runs in Claude Code (`distiller '<name>' targets Claude Code's '<tool>', whose output can't be distilled`): Claude Code produces that output itself;
 - `resume_from` without `persistence`, a checkpoint for a different workflow name, a checkpoint run ID that differs from the persistence directory's, or a resumable task whose user agent configuration changed.
 
-Checkpoint read and parse failures return `Io` or `Json`. A warning threshold may exceed the budget limit. Tool names are only warned about, since MCP servers and skills add tools whose names aren't known at build: a tool the context freshness mapping or a distiller's targets name that no agent is configured with (`available_tool_names`), no workflow or custom tool has, and no `arko_agents` built-in has is logged as a warning. Workflow services that name no caller are logged as a warning too: no agent is offered `run_workflow_agent`. Metadata dependencies are descriptive: the builder neither installs nor checks executables.
+Checkpoint read and parse failures return `Io` or `Json`. A warning threshold may exceed the budget limit. Tool names are only warned about, since MCP servers and skills add tools whose names aren't known at build: a tool the context freshness mapping or a distiller's targets name that no agent is configured with (`available_tool_names`), no workflow or custom tool has, and no `arko_agents` or Claude Code built-in has is logged as a warning. Workflow services that name no caller are logged as a warning too: no agent is offered `run_workflow_agent`. Metadata dependencies are descriptive: the builder neither installs nor checks executables.
 
 Tool names: duplicate global tool names, duplicate names within one agent's tools, and a name shared by a global and an agent-local tool are rejected. Global tools cannot use the reserved names `complete_task`, `ask_user`, `read_memory`, `write_memory`, `list_memories`, `run_workflow_agent`, or `cast_vote`, nor `send_message` or `list_recipients` while any agent is offered the workflow's messaging tools, nor `wait_for_message` while any agent is offered it; an agent-local tool with one of these names is rejected for an agent that is offered the workflow's tool. Agent-local tools are not checked against reserved names: an agent-local tool with a reserved name replaces that workflow or built-in tool for its agent, except `complete_task`, which `arko_agents` never lets a non-built-in tool replace. Custom tools are registered after the workflow tools, so a custom tool named like an `arko_agents` built-in (for example `read_file`) replaces it for the agents that receive it.
 
@@ -243,6 +244,10 @@ The engine gives every run a `HandoverHook`. When the conversation is replaced, 
 - starts the fresh conversation from the run's prompt without the messages it delivered and without its recipient list, then the report, then a current `# Agents you can message` list (when the prompt had one), which also counts as the list the run has seen for start and finish notices.
 
 `Task::initial_task_prompt` is kept, so a completion verifier still reviews against the original task. `ConversationHandedOver` is written to the event journal at once. A caller can also ask a running agent to hand over by sending `arko_agents::UserCommand::RequestHandover` on the command channel of an `AgentHandle::into_parts` run.
+
+### Claude Code agents
+
+An agent whose model is a Claude Code model (`Model::claude_code(...)`) runs in the installed Claude Code CLI, under its login; see arko_agents' README, *Claude Code models*. A workflow drives it like any agent: its workflow tools (`send_message`, `list_recipients`, `wait_for_message`, the memory tools, `run_workflow_agent`, `cast_vote`) are served to Claude Code with its other arko tools, and the workflow's approvals, error recovery, middleware, context updates, start and finish notices, messages, budgets and handovers apply. Its Claude Code built-in tools (listed in `available_tool_names`) pass the workflow's approval policy and execution middleware, including the `PreToolExecution` and `PostToolExecution` hooks and freshness tracking; they can't be distilled. Its calls are billed as a subscription (nothing per call), so they count toward the token totals but not the budget's spend. `examples/claude_code_team.rs` runs a lead and a worker in Claude Code that message each other while the lead hands its conversation over.
 
 ### AgentHandle
 
@@ -863,6 +868,11 @@ All six types implement `Debug`, `Clone`, `Serialize`, and `Deserialize`; `Resou
 | `read_file` | `ReadFile { parameter: "path" }` |
 | `list_files` | `ReadDirectoryTree { parameter: "directory" }` |
 | `write_file`, `apply_diff` | `WriteFile { parameter: "path" }` |
+| `Read` (Claude Code) | `ReadFile { parameter: "file_path" }` |
+| `Write`, `Edit`, `MultiEdit` (Claude Code) | `WriteFile { parameter: "file_path" }` |
+| `NotebookEdit` (Claude Code) | `WriteFile { parameter: "notebook_path" }` |
+
+A Claude Code agent's built-in calls pass the workflow's execution middleware, so the Claude Code mappings track them as the arko file tools are tracked. Claude Code's `Bash` is not tracked, like a shell command run through arko's terminal tools.
 
 `ContextFreshnessConfig::tool_effect(self, tool_name: impl Into<String>, effect: ToolResourceEffect) -> Self` adds or replaces a mapping; assign `tool_effects` to replace them all. Fields omitted in JSON take the `Default` values; a given `tool_effects` replaces the default mappings whole.
 

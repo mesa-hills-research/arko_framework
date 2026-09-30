@@ -443,6 +443,16 @@ let mut lead = lead_config;
 lead.handover = Some(arko_agents::HandoverConfig::at_context_fraction(0.4));
 ```
 
+### Claude Code agents
+
+An agent whose model is a Claude Code model (`Model::claude_code(...)`) runs in the
+user's installed Claude Code CLI, under its login, and takes part in a workflow like any
+other agent: messaging, approvals, error recovery, context freshness and handovers all
+apply. Claude Code's own tools (`Read`, `Edit`, `Bash`, …) are offered when the agent's
+`available_tool_names` lists them, and they pass the workflow's approval policy and
+hooks too. See [Claude Code agents](INDEX.md#claude-code-agents), and
+`examples/claude_code_team.rs` for two such agents working together.
+
 ### Waiting for a message
 
 An agent in native tool mode must call a tool every turn, so an agent that another

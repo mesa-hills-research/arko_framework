@@ -1,7 +1,8 @@
 # Arko AI
 
 Rust clients for language models from OpenAI (API key or ChatGPT OAuth), Anthropic,
-Google Gemini, and [OpenRouter](#openrouter), and for Voyage text embeddings. One
+Google Gemini, and [OpenRouter](#openrouter), for Claude models run through the user's
+installed [Claude Code](#claude-code) CLI, and for Voyage text embeddings. One
 `LLMClient` sends a `Conversation` to the provider of its model and returns a normalized
 response: text and reasoning, tool calls, stop reasons and refusals, token usage, and
 cost.
@@ -113,6 +114,12 @@ The example CLI lists the registered IDs and the aliases it accepts:
 ```bash
 cargo run -p arko_ai --example llm_client_cli -- models
 ```
+
+`Provider::ClaudeCode` models are the Anthropic models run through Claude Code:
+`Model::claude_code(Model::anthropic_claude_opus_5_5())`, or
+`Model::get(Provider::ClaudeCode, "claude-opus-5-5")`. `Model::list(Provider::ClaudeCode)`
+mirrors the Anthropic registry; `Model::all()` and `Model::find` leave the mirror out, so
+IDs stay unique. See [Claude Code](#claude-code).
 
 OpenRouter models are not in the registry: `Model::openrouter(slug)` accepts any slug,
 and the OpenRouter catalog supplies limits and prices on request; see
@@ -985,6 +992,61 @@ has it. On other models these four Claude settings are dropped with a warning to
   OPENROUTER_API_KEY=... cargo test -p arko_ai openrouter::live_tests -- --ignored --nocapture --test-threads=1
   ```
 
+## Claude Code
+
+`arko_ai::claude_code` drives the user's installed Claude Code CLI over its stream-json
+control protocol, the protocol Anthropic's Python and TypeScript Agent SDKs use. There is
+no official Rust Agent SDK; this module speaks the protocol directly, so it needs neither
+Node nor Python. It is the transport of `Provider::ClaudeCode` models. Claude Code runs
+its own agent loop, so these models take no `LLMClient` requests (`LLMClient` returns
+`Error::ModelNotSupported`); arko_agents runs an agent whose model is one of them in a
+Claude Code session (see its README's *Claude Code models*).
+
+The CLI runs unmodified, under whatever login the user already has (or an API key in its
+environment). This module never reads, stores, or refreshes credentials and makes no
+requests of its own; Claude Code makes the model calls. Plan limits assume ordinary,
+individual use, so shared or production automation should run Claude Code with an API
+key.
+
+```rust,ignore
+use std::sync::Arc;
+use arko_ai::claude_code::*;
+
+let mut session = ClaudeSession::start(ClaudeOptions {
+    model: Some("claude-opus-5-5".into()),
+    effort: Some(Effort::High),
+    permission_handler: Some(Arc::new(my_approvals)),
+    tool_servers: vec![Arc::new(ToolServer::new("arko").tool(Arc::new(my_tool)))],
+    setting_sources: Some(Vec::new()),
+    ..ClaudeOptions::default()
+})
+.await?;
+session.send("Summarize the open TODOs in this repository.").await?;
+let turn = session.receive_turn().await?;
+println!("{:?}", turn.result.result);
+let id = session.session_id();
+session.close().await?;
+```
+
+| Capability | How |
+| --- | --- |
+| Turns | One process per conversation; `send` starts a turn, `receive_turn` collects it up to its `Result` |
+| Model and effort | `--model` and `--effort` per process; `set_model` switches the model mid-session. To change effort, start a new session with `SessionStart::Resume` |
+| Conversation history | Claude Code keeps the transcript; hold on to `session_id()` and resume with `SessionStart::Resume { session, fork }`. `SessionStart::WithId` names a new session |
+| Approvals | `permission_handler` answers the CLI's `can_use_tool` requests (`--permission-prompt-tool stdio`) |
+| Hooks | `hooks` registers host callbacks for events such as `PreToolUse`; `Hook::deny_tool` blocks a call |
+| Host tools | `tool_servers` are served in-process as MCP servers over the same pipes; the model sees `mcp__<server>__<tool>` |
+| Settings | `settings` (`--settings`, for example `{"autoCompactEnabled": false}`) and `setting_sources` (`--setting-sources`; `Some(vec![])` loads none of the user's settings files) |
+| Control | `interrupt`, `set_model`, `set_permission_mode` |
+| Messages | `Message` variants keep their raw JSON, so message types this client does not model are still available. An `assistant` message's `usage` is its request's (`input_tokens` plus the cache reads and writes is the whole input); one response can arrive as several messages with the same id |
+
+On Windows, npm installs Claude Code as a `claude.cmd` launcher script, which can't be
+run without a shell. The client follows it to the package's `bin/claude.exe`, or to
+`cli.js` run with `node` for older releases, as T3 Code does; native installs are used as
+found. A program running inside a Claude Code session inherits variables that describe
+that session (`CLAUDE_CODE_SESSION_ID`, its messaging socket, its effort); the client
+removes them, so the CLI it starts runs as its own session.
+
 ## Examples and tests
 
 The `llm_client_cli` example sends one prompt or runs an interactive chat with any
@@ -1007,12 +1069,19 @@ models that need a manual thinking budget get half of `--max-tokens` (or of the 
 output limit), between 1,024 and 16,000 tokens. `--reasoning-level` and
 `--reasoning-effort` set the effort, level or budget explicitly.
 
+`claude_code_live` runs a short conversation against the installed Claude Code CLI (a
+tool call, a hook, a second turn, and a resume), and `claude_code_delivery_probe`
+measures when a message sent mid-turn reaches the model. Both use the CLI's login and
+count against its usage.
+
 `embeddings_demo` requests Voyage embeddings with `VOYAGE_API_KEY`, and
 `oauth_cache_probe` measures prompt-cache hits on the ChatGPT OAuth path with the
 credentials in a Codex `auth.json`; with `--idle-gap` it measures how long an idle
 conversation's cache lasts.
 
-The unit tests use local fixtures and make no provider calls:
+The unit tests use local fixtures and make no provider calls; the Claude Code tests run
+a fake CLI (`tests/fixtures/fake_claude.py`) and need Python 3 (`ARKO_TEST_PYTHON`
+selects the interpreter):
 
 ```bash
 cargo test -p arko_ai --lib
