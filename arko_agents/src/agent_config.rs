@@ -871,7 +871,8 @@ impl MonitoringConfig {
                 PlanUsageAction::SlowDown { delay_ms } => representable_ms(delay_ms),
                 PlanUsageAction::Pause => true,
             };
-            if !(threshold.percent > 0.0 && threshold.percent <= 100.0) || !delay_ok {
+            let percent_ok = threshold.percent > 0.0 && threshold.percent <= 100.0;
+            if !(percent_ok && delay_ok) {
                 return Err(ArkoAgentsError::BuilderError {
                     struct_name: "PlanUsageThreshold".into(),
                     message: "percent must be in (0, 100] and a slow-down delay representable."

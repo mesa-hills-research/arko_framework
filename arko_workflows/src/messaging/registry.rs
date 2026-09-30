@@ -678,7 +678,8 @@ mod tests {
             }
             let notices = registry.started_since_seen(lead, &recipients);
             let in_roster = roster[0].1 == AgentStatus::Running;
-            assert!(in_roster != !notices.is_empty(), "order {order}");
+            // Exactly one of the two tells the lead: the roster or a notice.
+            assert_eq!(in_roster, notices.is_empty(), "order {order}");
             assert_eq!(in_roster, order < 2, "order {order}");
             assert!(registry.started_since_seen(lead, &recipients).is_empty());
         }
