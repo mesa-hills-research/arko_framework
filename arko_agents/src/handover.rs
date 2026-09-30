@@ -26,7 +26,7 @@ use crate::task::Task;
 /// The agent answers with the report as plain text; other tool calls are
 /// rejected until it does (it may still call `complete_task` if the task is
 /// done).
-pub const DEFAULT_REPORT_REQUEST: &str = "Your conversation is getting long, so it will be replaced with a fresh one that starts from your task and a report you write now. Reply with that report as plain text, without calling a tool. Cover what the task is, what you have done and the evidence for it (files, commands, results), decisions you made and why, what you were doing when you stopped, and the next steps. List anything you are still waiting for, such as a reply to a question you asked, and from whom. Be complete: the fresh conversation will have only the task and this report.";
+pub const DEFAULT_REPORT_REQUEST: &str = "Your conversation is getting long, so it will be replaced with a fresh one that starts from your task and a report you write now. Reply with that report as plain text, without calling a tool. Cover what the task is, what you have done and the evidence for it (files, commands, results), decisions you made and why, what you were doing when you stopped, and the next steps. List anything you are still waiting for, such as a reply to a question you asked, and from whom, and every message you received that you haven't fully answered yet: who sent it, what it asked, and what you meant to reply. Be complete: the fresh conversation will have only the task and this report. Messages that arrive while you write it are delivered after it, in the fresh conversation.";
 
 /// The heading of the report in the fresh conversation's first message.
 pub const REPORT_HEADING: &str = "# Handover report";

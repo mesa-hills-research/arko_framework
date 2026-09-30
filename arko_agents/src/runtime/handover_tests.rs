@@ -282,3 +282,73 @@ fn tasks_saved_before_handovers_load() {
     assert_eq!(task.conversation_usage_start, 0);
     assert!(task.agent_config.handover.is_none());
 }
+
+/// Context that arrives as a handover starts (a message that needs a reply,
+/// say) is not added to the conversation being replaced, where only the
+/// report could carry it: it is added to the fresh one.
+#[tokio::test]
+async fn context_arriving_during_the_report_waits_for_the_fresh_conversation() {
+    let (mut agent, mut events, commands) = harness(ToolCallingMode::Native);
+    commands.try_send(UserCommand::RequestHandover).unwrap();
+    commands
+        .try_send(UserCommand::InjectContext {
+            content: "Message from agent 'lead': what did you find?".into(),
+        })
+        .unwrap();
+    struct Seen(std::sync::Mutex<Vec<String>>);
+    impl HandoverHook for Seen {
+        fn on_handover(&self, task: &Task, _report: &str) -> HandoverSeed {
+            *self.0.lock().unwrap() = texts(task);
+            HandoverSeed::for_task(task)
+        }
+    }
+    let hook = Arc::new(Seen(Default::default()));
+    agent.handover_hook = Some(hook.clone());
+    push(
+        &mut agent,
+        vec![reply("Nothing yet.", 10), native_complete()],
+    );
+    let (task, _events) = run(agent, &mut events).await;
+
+    assert_eq!(task.handovers.len(), 1);
+    let old = hook.0.lock().unwrap().clone();
+    assert!(
+        !old.iter().any(|text| text.contains("what did you find?")),
+        "{old:#?}"
+    );
+    let fresh = texts(&task);
+    assert!(fresh[0].contains(REPORT_HEADING));
+    assert!(
+        fresh
+            .iter()
+            .skip(1)
+            .any(|text| text.contains("# Workflow context update")
+                && text.contains("what did you find?")),
+        "{fresh:#?}"
+    );
+    assert!(task.pending_context_injections.is_empty());
+}
+
+/// A conversation whose first request was already over the threshold
+/// doesn't hand over: the fresh one would start over it too.
+#[tokio::test]
+async fn no_handover_loop_when_the_first_request_is_over_the_threshold() {
+    let (mut agent, mut events, _commands) = harness(ToolCallingMode::Native);
+    agent.task.agent_config.handover = Some(HandoverConfig::at_input_tokens(1_000));
+    push(
+        &mut agent,
+        vec![
+            native_call("plain_text", 2_000),
+            native_call("plain_text", 2_500),
+            native_complete(),
+        ],
+    );
+    let (task, events) = run(agent, &mut events).await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(task.handovers.is_empty());
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::HandoverRequested { .. }))
+    );
+}

@@ -855,7 +855,17 @@ async fn a_handover_restates_the_task_and_keeps_its_messages_read() {
         } else if text.contains("Your conversation is getting long") {
             text_turn("report", "REPORT: drafted the intro in British spelling.")
         } else {
-            tool_call_turn("p0", "probe", json!({}))
+            // Under the threshold, then over it: a conversation that starts
+            // over it doesn't hand over.
+            let turns = tool_outputs(body);
+            tool_call_turn(&format!("p{turns}"), "probe", json!({})).replace(
+                "\"input_tokens\":10",
+                if turns == 0 {
+                    "\"input_tokens\":5"
+                } else {
+                    "\"input_tokens\":20"
+                },
+            )
         })
     })
     .await;
@@ -894,9 +904,9 @@ async fn a_handover_restates_the_task_and_keeps_its_messages_read() {
         .into_iter()
         .filter(|body| is_request_of(body, "Draft it."))
         .collect::<Vec<_>>();
-    assert_eq!(writer_bodies.len(), 3);
+    assert_eq!(writer_bodies.len(), 4);
     assert!(user_text(&writer_bodies[0]).contains("Use British spelling."));
-    let fresh = user_text(&writer_bodies[2]);
+    let fresh = user_text(&writer_bodies[3]);
     assert!(fresh.contains("REPORT: drafted the intro"), "{fresh}");
     assert!(!fresh.contains("Use British spelling."), "{fresh}");
     assert!(

@@ -389,6 +389,9 @@ pub struct AgentLoop {
     pub(super) turn_context: Option<Arc<dyn super::TurnContextSource>>,
     /// Called when the conversation is handed over.
     pub(super) handover_hook: Option<Arc<dyn HandoverHook>>,
+    /// A threshold handover was skipped and logged; see
+    /// `start_handover_if_due`.
+    handover_skip_warned: bool,
     tool_context_cursor: usize,
     file_tree_baseline: Option<crate::file_tree::FileTreeSnapshot>,
     file_tree_error: Option<String>,
@@ -475,6 +478,7 @@ impl AgentLoop {
             execution_middleware,
             turn_context: None,
             handover_hook: None,
+            handover_skip_warned: false,
             tool_context_cursor: 0,
             file_tree_baseline: None,
             file_tree_error: None,
@@ -541,10 +545,29 @@ impl AgentLoop {
             let threshold = config.as_ref().and_then(|config| {
                 config.threshold(self.task.agent_config.llm_config.model.max_input_tokens)
             });
-            let reached = threshold
-                .zip(context_size)
-                .is_some_and(|(threshold, size)| size >= threshold);
-            if !reached {
+            let Some((threshold, size)) = threshold.zip(context_size) else {
+                return Ok(());
+            };
+            if size < threshold {
+                return Ok(());
+            }
+            // A conversation whose first request was already over the
+            // threshold would start over the threshold again: handing over
+            // can't make it smaller.
+            let first = self
+                .task
+                .usage_history
+                .get(self.task.conversation_usage_start)
+                .map_or(0, |usage| usage.input_tokens);
+            if first >= threshold {
+                if !std::mem::replace(&mut self.handover_skip_warned, true) {
+                    log::warn!(
+                        "Task {}: No handover: the conversation's first request ({} input tokens) was already over the handover threshold ({}).",
+                        self.task.id,
+                        first,
+                        threshold
+                    );
+                }
                 return Ok(());
             }
         }
@@ -627,6 +650,7 @@ impl AgentLoop {
         self.cache_warned = false;
         self.cache_pause_episode = false;
         self.cache_pause_pending = None;
+        self.handover_skip_warned = false;
         self.reset_llm_recovery();
 
         log::info!(
@@ -665,6 +689,9 @@ impl AgentLoop {
     }
 
     fn refresh_file_tree_context(&mut self) {
+        if self.handover_report_due() {
+            return;
+        }
         let config = &self.task.agent_config.environment_details_config;
         if !config.file_tree.include
             || config.file_tree_mode != crate::agent_config::FileTreeMode::Diff
@@ -715,6 +742,9 @@ impl AgentLoop {
     /// source's context joins the context taken from the channel, and all of
     /// it goes into the conversation.
     fn flush_context_injections(&mut self) -> Result<(), ArkoAgentsError> {
+        if self.handover_report_due() {
+            return Ok(());
+        }
         if let Some(content) = self
             .turn_context
             .as_ref()
@@ -731,7 +761,10 @@ impl AgentLoop {
     /// sent. Only where a user message can go now; see
     /// [`context_can_be_added_now`](Self::context_can_be_added_now).
     fn add_taken_context(&mut self) -> Result<(), ArkoAgentsError> {
-        if self.task.pending_context_injections.is_empty() {
+        // While the handover report is due, context waits for the fresh
+        // conversation: added now, it would be read only through the report
+        // and could be lost from it (a message that needs a reply, say).
+        if self.task.pending_context_injections.is_empty() || self.handover_report_due() {
             return Ok(());
         }
         let content = self.task.pending_context_injections.join("\n\n");
@@ -2902,9 +2935,11 @@ impl AgentLoop {
             // The fallback answers exactly the refused input: context updates
             // and file-tree changes wait for the next request.
             if self.task.fallback_for.is_none() {
+                // First: context that arrives as a handover starts waits for
+                // the fresh conversation.
+                self.start_handover_if_due().await?;
                 self.flush_context_injections()?;
                 self.refresh_file_tree_context();
-                self.start_handover_if_due().await?;
             }
             self.ensure_user_turn_before_request()?;
             if !self.apply_plan_usage_threshold().await? {

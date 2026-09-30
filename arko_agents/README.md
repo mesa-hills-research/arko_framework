@@ -853,11 +853,17 @@ let config = AgentConfig::builder(id, name, llm_config)
    `UserCommand::RequestHandover`, the runtime adds a user message asking for the report
    (`DEFAULT_REPORT_REQUEST`, or `report_request`) and emits `HandoverRequested`. It waits
    for a boundary where a user message can go: not while calls wait for results, and not
-   for a refusal fallback's request.
+   for a refusal fallback's request. A conversation whose first request was already over
+   the threshold doesn't hand over (the fresh one would start over it too); a warning is
+   logged once.
 2. **The report turn.** The agent replies with the report as plain text. The request
    asks for the task, what was done and the evidence, decisions, where it stopped, the
-   next steps, and what it is still waiting for and from whom (such as a reply to a
-   question it sent). Tool calls in this turn are rejected with a result saying the report
+   next steps, what it is still waiting for and from whom (such as a reply to a
+   question it sent), and every message it hasn't fully answered, with what it meant to
+   reply. Context that arrives from the moment the report is requested (injected
+   context, the turn-context source's, file-tree changes) is held in
+   `Task::pending_context_injections` and added to the fresh conversation, not the one
+   being replaced, so a message that needs a reply is read in full after the handover. Tool calls in this turn are rejected with a result saying the report
    is due, except `complete_task`: a task that is done completes instead. A reply without
    text gets a note and the request stands. The tools offered don't change, so the
    request keeps its cache prefix.
