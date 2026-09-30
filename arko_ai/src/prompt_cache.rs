@@ -122,7 +122,10 @@ pub fn prompt_cache_lifetime(
         Provider::OpenRouter if crate::providers::openrouter::is_claude_family(&model.id) => {
             anthropic()
         }
-        Provider::OpenRouter | Provider::Google => PromptCacheLifetime::Unknown,
+        // Claude Code sets its own cache lifetime.
+        Provider::OpenRouter | Provider::Google | Provider::ClaudeCode => {
+            PromptCacheLifetime::Unknown
+        }
         Provider::OpenAI
             if !enabled
                 && !openai_chatgpt_oauth

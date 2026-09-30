@@ -322,6 +322,7 @@ fn models_without_image_input_reject_result_images() {
             Provider::Anthropic => anthropic_body(&conversation),
             Provider::Google => google_body(&conversation),
             Provider::OpenRouter => openrouter_body(&conversation),
+            Provider::ClaudeCode => unreachable!("not listed"),
         }
         .unwrap_err();
         assert!(

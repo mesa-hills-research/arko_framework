@@ -9,6 +9,12 @@ pub enum Provider {
     /// OpenRouter's Chat Completions API. Models are dynamic slugs such as
     /// `anthropic/claude-sonnet-5` ([`Model::openrouter`]).
     OpenRouter,
+    /// Claude models run through the user's installed Claude Code CLI, under
+    /// its login ([`Model::claude_code`], [`crate::claude_code`]). Claude
+    /// Code runs its own agent loop, so these models are driven by
+    /// arko_agents' Claude Code runtime, not [`LLMClient`](crate::LLMClient)
+    /// requests.
+    ClaudeCode,
 }
 
 impl Provider {
@@ -18,6 +24,7 @@ impl Provider {
             Provider::Anthropic => "anthropic",
             Provider::Google => "gemini",
             Provider::OpenRouter => "openrouter",
+            Provider::ClaudeCode => "claude_code",
         }
     }
 }
@@ -1933,10 +1940,27 @@ impl Model {
             Provider::Anthropic => Self::list_anthropic_models(),
             Provider::Google => Self::list_google_models(),
             Provider::OpenRouter => Vec::new(),
+            Provider::ClaudeCode => Self::list_anthropic_models()
+                .into_iter()
+                .map(Self::claude_code)
+                .collect(),
         }
     }
 
-    /// Every registered model, across providers.
+    /// `model` (a registered Anthropic model) run through the user's Claude
+    /// Code CLI: the same id, limits and list prices (for estimates; calls
+    /// under a Claude subscription are billed nothing per call), with
+    /// [`Provider::ClaudeCode`].
+    pub fn claude_code(model: Model) -> Self {
+        Self {
+            provider: Provider::ClaudeCode,
+            ..model
+        }
+    }
+
+    /// Every registered model, across providers. Claude Code models share
+    /// their ids with the Anthropic models and are listed only by
+    /// [`Model::list`].
     pub fn all() -> Vec<Self> {
         [Provider::OpenAI, Provider::Anthropic, Provider::Google]
             .into_iter()
@@ -1983,6 +2007,8 @@ impl Model {
     /// [`ToolChoice::Specific`]: crate::tool::ToolChoice::Specific
     pub fn supports_forced_tool_choice(&self, config: &crate::config::GenerationConfig) -> bool {
         match self.provider {
+            // Claude Code chooses its own tool calls.
+            Provider::ClaudeCode => false,
             Provider::Anthropic => {
                 let manual_thinking = config.anthropic_thinking_enabled != Some(false)
                     && matches!(
@@ -2050,7 +2076,7 @@ impl Model {
     pub fn supports_disabling_parallel_tool_calls(&self) -> bool {
         match self.provider {
             Provider::OpenAI | Provider::Anthropic | Provider::OpenRouter => true,
-            Provider::Google => false,
+            Provider::Google | Provider::ClaudeCode => false,
         }
     }
 
@@ -2060,9 +2086,11 @@ impl Model {
     /// ones.
     pub fn reports_stop_reason(&self) -> bool {
         match self.provider {
-            Provider::OpenAI | Provider::Anthropic | Provider::Google | Provider::OpenRouter => {
-                true
-            }
+            Provider::OpenAI
+            | Provider::Anthropic
+            | Provider::Google
+            | Provider::OpenRouter
+            | Provider::ClaudeCode => true,
         }
     }
 
@@ -2104,7 +2132,8 @@ impl Model {
             && match self.provider {
                 Provider::OpenAI | Provider::Anthropic => true,
                 Provider::Google => gemini_major_version(&self.id).is_some_and(|major| major >= 3),
-                Provider::OpenRouter => false,
+                // Its in-process tools return text.
+                Provider::OpenRouter | Provider::ClaudeCode => false,
             }
     }
 

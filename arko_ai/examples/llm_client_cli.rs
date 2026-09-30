@@ -675,6 +675,12 @@ fn reasoning_config(
             }
             ReasoningConfig::openrouter(reasoning)
         }
+        Provider::ClaudeCode => {
+            return Err(invalid(format!(
+                "{} runs through Claude Code, which this client doesn't drive; see the claude_code_live example.",
+                model.id
+            )));
+        }
     }))
 }
 

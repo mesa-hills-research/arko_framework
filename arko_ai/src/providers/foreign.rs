@@ -127,6 +127,20 @@ fn foreign_settings(model: &Model) -> Vec<&'static Setting> {
             &INTERLEAVED_THINKING,
             &OPENROUTER,
         ],
+        // Claude Code takes the reasoning effort and fast mode; it decides
+        // the rest itself.
+        Provider::ClaudeCode => vec![
+            &VERBOSITY,
+            &OPENAI_REASONING_MODE,
+            &OPENAI_SERVICE_TIER,
+            &ANTHROPIC_THINKING_ENABLED,
+            &ANTHROPIC_SUMMARIZED_THINKING,
+            &ANTHROPIC_CACHE_TTL,
+            &ANTHROPIC_INFERENCE_GEO,
+            &LONG_CONTEXT,
+            &INTERLEAVED_THINKING,
+            &OPENROUTER,
+        ],
         Provider::OpenRouter => {
             let mut settings = vec![
                 &OPENAI_REASONING_MODE,
@@ -153,7 +167,10 @@ fn foreign_settings(model: &Model) -> Vec<&'static Setting> {
 
 /// The `ReasoningConfig` variants `provider` takes.
 fn takes_reasoning(provider: &Provider, reasoning: &ReasoningConfig) -> bool {
-    reasoning.provider() == *provider
+    match provider {
+        Provider::ClaudeCode => reasoning.provider() == Provider::Anthropic,
+        provider => reasoning.provider() == *provider,
+    }
 }
 
 fn reasoning_hint(provider: &Provider) -> &'static str {
@@ -165,6 +182,9 @@ fn reasoning_hint(provider: &Provider) -> &'static str {
         Provider::Google => "Gemini models take ReasoningConfig::Gemini or ::Google",
         Provider::OpenRouter => {
             "OpenRouter models take ReasoningConfig::OpenRouter; convert another variant with ReasoningConfig::to_openrouter"
+        }
+        Provider::ClaudeCode => {
+            "Claude Code models take ReasoningConfig::AnthropicAdaptive or ::Anthropic, whose effort becomes Claude Code's --effort"
         }
     }
 }

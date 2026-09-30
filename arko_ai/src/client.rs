@@ -658,6 +658,9 @@ impl LLMClient {
                 .as_ref()
                 .map(|c| c as &dyn ProviderClient)
                 .ok_or_else(|| Error::MissingApiKey("OpenRouter".to_string())),
+            Provider::ClaudeCode => Err(Error::ModelNotSupported(
+                "Claude Code models run in a Claude Code session (arko_ai::claude_code), which arko_agents drives for an agent; they take no LLMClient requests.".to_string(),
+            )),
         }
     }
 
