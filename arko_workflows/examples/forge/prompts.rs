@@ -106,7 +106,9 @@ pub const TRIALS: &str = r#"
   output and a full log path. Use them after the offline checks pass, on a small input, to see the
   workflow work end to end. Then check what it produced (the files it wrote, not just its exit
   code or its own summary) against the use case, and fix what falls short. Each run uses real
-  model usage, so make each one count."#;
+  model usage, so make each one count. When a trial or forge budget is set, each run needs a
+  `budget`: the most it may spend, reserved in full, which you also pass to the workflow's own
+  budget flag in `arguments`. Size it to the trial: a toy input needs a few dollars, not tens."#;
 
 /// Involvement: no questions.
 pub const INVOLVEMENT_NONE: &str = r#"

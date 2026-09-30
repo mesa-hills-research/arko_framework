@@ -166,6 +166,13 @@ struct Settings {
     #[arg(long, default_value_t = 20)]
     trial_minutes: u64,
 
+    /// The most all trial runs together may spend, in dollars at list
+    /// prices. Each run reserves its cap in full; without this, trials draw
+    /// on `--budget`.
+    #[arg(long)]
+    #[serde(default)]
+    trial_budget: Option<f64>,
+
     /// The architect hands its conversation over at this many input tokens.
     #[arg(long, default_value_t = 300_000)]
     handover_at: usize,
@@ -374,6 +381,7 @@ async fn main() -> ForgeResult<()> {
             Arc::new(tools::RecordLesson { path: path.clone() }),
         );
     }
+    let trial_ledger = Arc::new(std::sync::OnceLock::new());
     if settings.trial_runs > 0 {
         builder = builder.agent_tool(
             ARCHITECT,
@@ -389,6 +397,8 @@ async fn main() -> ForgeResult<()> {
                         .unwrap_or(0),
                 ),
                 max_minutes: settings.trial_minutes,
+                trial_budget: settings.trial_budget,
+                workflow: trial_ledger.clone(),
             }),
         );
     }
@@ -439,6 +449,7 @@ async fn main() -> ForgeResult<()> {
         builder = builder.resume_from(state_dir.join(pointer.trim()));
     }
     let workflow = builder.build()?;
+    let _ = trial_ledger.set(workflow.context().clone());
 
     eprintln!(
         "forge: building `{}` in {}",
@@ -594,6 +605,7 @@ async fn main() -> ForgeResult<()> {
         &result.summary,
         &checks,
         &finished,
+        trial_reserved(&workflow),
         plan_usage.lock().unwrap().clone(),
     );
     std::fs::write(state_dir.join("report.md"), &report)?;
@@ -713,6 +725,20 @@ fn architect_instructions(manifest: &RunManifest) -> String {
             },
         );
     fill(&text, manifest).replace("{lessons}", &lessons)
+}
+
+/// What trial runs reserved in the workflow's ledger.
+fn trial_reserved(workflow: &Workflow) -> f64 {
+    workflow
+        .cost_ledger()
+        .entries
+        .iter()
+        .filter(|entry| {
+            matches!(&entry.source, arko_workflows::budget::CostSource::Manual { description }
+                if description == tools::TRIAL_RESERVATION)
+        })
+        .map(|entry| entry.amount)
+        .sum()
 }
 
 /// Builds agent configurations for the chosen backend.
@@ -999,6 +1025,7 @@ fn report(
     summary: &str,
     checks: &Result<Vec<String>, String>,
     result: &WorkflowResult,
+    trials: f64,
     plan_usage: Option<String>,
 ) -> String {
     let mut text = format!("# Forge report: `{}`\n\n", manifest.name);
@@ -1034,6 +1061,11 @@ fn report(
         ));
     }
     text.push_str(&format!("\nBilled: ${:.2}", result.total_cost));
+    if trials > 0.0 {
+        text.push_str(&format!(
+            ", of which ${trials:.2} was reserved for trial runs (their caps, in full)"
+        ));
+    }
     if let Some(plan_usage) = plan_usage {
         text.push_str(&format!(" (plan usage at the end: {plan_usage})"));
     }

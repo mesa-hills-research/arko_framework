@@ -34,7 +34,9 @@ Without `--use-case` or `--use-case-file`, it asks for the use case at the termi
   every run, so later runs don't repeat earlier mistakes. `--no-lessons` turns this off.
 - **Trial runs** (off by default): with `--trial-runs N`, the architect may run the new workflow for
   real, up to N times and `--trial-minutes` each, and fix what the output shows. Each run uses real
-  model usage.
+  model usage. Trials run as separate processes, so their actual spend isn't visible to the forge:
+  with a `--trial-budget` or `--budget`, each run reserves a cap in full, and the architect must
+  pass the same cap to the workflow's own budget flag, which enforces it.
 
 The new crate depends on this checkout by path, has its own `[workspace]`, starts from the
 checkout's `Cargo.lock`, and builds into the checkout's `target` directory (`--target-dir`), so
@@ -67,6 +69,7 @@ which you want, or the architect chooses and explains it.
 | `--no-explorers` | off | No explorers. |
 | `--max-active-calls N` | 4 | Explorers running at once. |
 | `--trial-runs N`, `--trial-minutes M` | 0, 20 | Live trial runs allowed, and the longest each may take. |
+| `--trial-budget DOLLARS` | none | The most all trial runs together may spend. Each run reserves its cap in full (the workflow's own budget flag enforces it); without this, trials draw on `--budget`, and their reservations count toward it. |
 | `--handover-at TOKENS` | 300000 | The architect's handover threshold. |
 | `--max-repairs N` | 3 | Failed checks sent back to the architect. |
 | `--lessons PATH`, `--no-lessons` | `~/.arko/forge/lessons.md` | The lessons file. |
