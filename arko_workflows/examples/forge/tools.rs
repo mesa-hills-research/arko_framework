@@ -334,7 +334,7 @@ pub fn refused_command(command: &str) -> Option<&'static str> {
         match program(word).as_str() {
             "git" | "gh" => {
                 return Some(
-                    "The forge doesn't run git or gh: version control and publishing are the user's. Leave the crate's files as they are; the user reviews and commits them.",
+                    "The forge doesn't run git or gh: version control and publishing are the user's. Leave the crate's files as they are; the user reviews and commits them. Don't try to get around this refusal; if it blocks work you need, say so in your summary.",
                 );
             }
             "cargo"
@@ -342,7 +342,9 @@ pub fn refused_command(command: &str) -> Option<&'static str> {
                     ["publish", "login", "logout", "owner", "yank"].contains(next)
                 }) =>
             {
-                return Some("The forge doesn't publish crates or change registry logins.");
+                return Some(
+                    "The forge doesn't publish crates or change registry logins. Don't try to get around this refusal; if it blocks work you need, say so in your summary.",
+                );
             }
             _ => {}
         }

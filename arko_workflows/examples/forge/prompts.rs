@@ -57,9 +57,16 @@ when the use case needs them; say why in DESIGN.md. Settle these before writing 
   the build is interrupted, a restarted architect continues from it and the code.
 - Write idiomatic Rust that reads like the arko examples. Keep it in as few files as is clear.
 - Unit-test the logic that doesn't call a model: tools, parsing, file handling, state.
+- When the workflow has a policy that can refuse agents' calls (a command guard, a hook, path
+  rules), tell each agent in its prompt how to treat a refusal: it is the policy working, not an
+  obstacle. Never rephrase, split or encode a command to get past the check; do the work another
+  way, or report the refusal. One that looks mistaken is a finding for the user to fix in the
+  policy, reported in the agent's result, not routed around.
 - Never make live model calls with your shell: no running the workflow for real through Bash.
 - Don't use git, gh or any publishing command: the forge refuses them. Version control is the
-  user's; they review and commit the crate themselves.{trials}
+  user's; they review and commit the crate themselves.
+- The same holds for you: if the forge refuses a command, don't work around it. If a refusal
+  looks mistaken, say so in your summary.{trials}
 - Write `README.md` (what it does, requirements and credentials, how to run and resume it, every
   flag, what it asks of the user, what it costs or uses) and `DESIGN.md` (the use case restated,
   the topology and why, the autonomy level, models and effort, alternatives you rejected, known
