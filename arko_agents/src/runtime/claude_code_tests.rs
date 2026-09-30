@@ -699,3 +699,139 @@ async fn a_call_held_for_the_report_says_it_is_not_an_error() {
         "{held}"
     );
 }
+
+fn windows(five_hour: f64, seven_day: f64) -> Value {
+    let later = chrono::Utc::now().timestamp() + 3600;
+    json!({
+        "five_hour": {"utilization": five_hour, "resetsAt": later},
+        "seven_day": {"utilization": seven_day, "resetsAt": later + 86_400},
+    })
+}
+
+#[tokio::test]
+async fn plan_usage_is_reported_and_the_threshold_pauses() {
+    let fake = Fake::new(json!([
+        [
+            {"rate_limit": {"status": "allowed_warning", "rateLimitType": "five_hour",
+                            "unifiedWindows": windows(0.9, 0.2)}},
+            {"tool": "Grep", "input": {"pattern": "a"}},
+            {"tool": "Grep", "input": {"pattern": "b"}},
+        ],
+        [complete("done")],
+    ]));
+    let mut config = config(&fake, &["Grep"]);
+    config.monitoring.plan_usage = Some(crate::agent_config::PlanUsageThreshold {
+        percent: 80.0,
+        action: crate::agent_config::PlanUsageAction::Pause,
+    });
+    let task = Task::new(config, "Search.".into(), fake.workspace(), None);
+    let mut run = start(task);
+    let events = run
+        .events_until(|event| {
+            matches!(
+                event,
+                AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+            )
+        })
+        .await;
+    let Some(AgentEvent::PlanUsageReported(usage)) = events
+        .iter()
+        .find(|event| matches!(event, AgentEvent::PlanUsageReported(_)))
+    else {
+        panic!("{events:#?}");
+    };
+    assert_eq!(usage.primary.as_ref().unwrap().used_percent, 90.0);
+    assert_eq!(usage.primary.as_ref().unwrap().window_minutes, Some(300));
+    assert!((usage.secondary.as_ref().unwrap().used_percent - 20.0).abs() < 1e-9);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::PlanUsageThresholdReached { window, .. } if window == "primary"
+    )));
+    run.commands
+        .send(UserCommand::ApproveErrorRecovery { message: None })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    // The calls after the report carry it.
+    assert!(
+        task.model_call_usage_history
+            .iter()
+            .any(|call| call.plan_usage.is_some())
+    );
+    assert_eq!(
+        fake.logged("post").len(),
+        2,
+        "the second call ran before the interrupt"
+    );
+}
+
+#[tokio::test]
+async fn a_failure_at_a_reached_plan_limit_waits_for_its_reset() {
+    let resets_at = chrono::Utc::now().timestamp() as u64 + 7200;
+    let fake = Fake::new(json!([[
+        {"rate_limit": {"status": "rejected", "rateLimitType": "seven_day", "resetsAt": resets_at,
+                        "unifiedWindows": windows(0.1, 1.0)}},
+        {"fail": "Claude usage limit reached."},
+    ]]));
+    let task = Task::new(config(&fake, &[]), "Do it.".into(), fake.workspace(), None);
+    let mut run = start(task);
+    let events = run
+        .events_until(|event| {
+            matches!(
+                event,
+                AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+            )
+        })
+        .await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::UsageLimitReached { resets_at_unix_ms: Some(at), .. } if *at == resets_at * 1000
+    )));
+    let Some(AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
+        cause, ..
+    })) = events.last()
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        *cause,
+        crate::task::ErrorRecoveryCause::UsageLimit {
+            resets_at_unix_ms: Some(resets_at * 1000)
+        }
+    );
+    run.commands.send(UserCommand::CancelTask).await.unwrap();
+    run.finish().await;
+}
+
+#[tokio::test]
+async fn the_cache_monitor_judges_the_main_conversation() {
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 1000, "cached": 0},
+        {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1100, "cached": 0},
+        {"tool": "Grep", "input": {"pattern": "c"}, "input_tokens": 1200, "cached": 0},
+        complete("done"),
+    ]]));
+    let mut config = config(&fake, &["Grep"]);
+    config.monitoring.cache = Some(crate::agent_config::CacheMonitorConfig {
+        warmup_calls: 1,
+        window_calls: 2,
+        warn_below: Some(0.5),
+        pause_below: None,
+    });
+    let task = Task::new(config, "Search.".into(), fake.workspace(), None);
+    let (task, events) = start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::CacheEfficiencyReported { .. }))
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::CacheEfficiencyLow { pausing: false, .. }))
+            .count(),
+        1
+    );
+}

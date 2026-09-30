@@ -13,6 +13,8 @@ the next turn's index). Steps:
   {"tool": "mcp__arko__probe", "input": {...}, "input_tokens": 500}
                                          a tool call
   {"exit": 3}                            the CLI crashes
+  {"rate_limit": {...}}                  a rate_limit_event with this info
+  {"fail": "..."}                        the turn ends in this error
 
 A turn's result is its last text. FAKE_CLAUDE_LOG receives one JSON line per
 event: argv, tools, user messages, hook and permission answers, tool results.
@@ -83,7 +85,8 @@ def next_turn():
 def usage(step, output):
     # Anthropic's input counts are exclusive: these add up to input_tokens.
     tokens = step.get("input_tokens", 10)
-    return {"input_tokens": 2, "cache_read_input_tokens": tokens - 2,
+    cached = step.get("cached", tokens - 2)
+    return {"input_tokens": tokens - cached, "cache_read_input_tokens": cached,
             "cache_creation_input_tokens": 0, "output_tokens": output}
 
 
@@ -178,6 +181,15 @@ def turn(text):
             return
         if "exit" in step:
             sys.exit(step["exit"])
+        if "rate_limit" in step:
+            send({"type": "rate_limit_event", "rate_limit_info": step["rate_limit"],
+                  "session_id": SESSION})
+            continue
+        if "fail" in step:
+            send({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                  "num_turns": 1, "session_id": SESSION, "duration_ms": 5,
+                  "result": step["fail"]})
+            return
         if "text" in step:
             assistant([{"type": "text", "text": step["text"]}], step)
             final = step["text"]

@@ -471,6 +471,19 @@ pub(super) struct ClaudeCodeRun {
     pending_usage: HashMap<Option<String>, PendingUsage>,
     /// Requests whose usage the stream events report.
     streamed: std::collections::HashSet<String>,
+    /// Indices in `usage_history` of subagents' requests, which the cache
+    /// monitor leaves out.
+    subagent_calls: Vec<usize>,
+    /// The latest plan usage Claude Code reported (`rate_limit_event`), and
+    /// the reset of a limit it reported reached.
+    plan_usage: Option<ai::PlanUsage>,
+    limit_reached: Option<Option<u64>>,
+    /// The plan-usage threshold's `SlowDown` delay, while usage is over it.
+    slow_down: Option<Duration>,
+    cache_warned: bool,
+    cache_pause_episode: bool,
+    /// The cache monitor asked for a pause; the turn is interrupted.
+    cache_interrupt: bool,
     /// The input of the current conversation's latest and first requests.
     context_size: Option<usize>,
     first_context_size: Option<usize>,
@@ -526,6 +539,13 @@ impl ClaudeCodeRun {
             calls: HashMap::new(),
             pending_usage: HashMap::new(),
             streamed: Default::default(),
+            subagent_calls: Vec::new(),
+            plan_usage: None,
+            limit_reached: None,
+            slow_down: None,
+            cache_warned: false,
+            cache_pause_episode: false,
+            cache_interrupt: false,
             context_size: None,
             first_context_size: None,
             open_turns: 0,
@@ -1379,6 +1399,11 @@ impl ClaudeCodeRun {
                 }
             }
         }
+        if let Some(delay) = self.slow_down {
+            // The plan-usage threshold's SlowDown: each call waits, and the
+            // request after it with it.
+            tokio::time::sleep(delay).await;
+        }
         let needs_approval = !self.task.agent_config.should_auto_approve_tool(&name);
         if needs_approval || outside.is_some() {
             // The permission request that follows waits for approval.
@@ -1723,6 +1748,18 @@ impl ClaudeCodeRun {
         message: cc::Message,
         session: &cc::ClaudeSession,
     ) -> Result<(), ArkoAgentsError> {
+        let result = self.handle_message_inner(message, session).await;
+        if std::mem::take(&mut self.cache_interrupt) {
+            let _ = session.interrupt().await;
+        }
+        result
+    }
+
+    async fn handle_message_inner(
+        &mut self,
+        message: cc::Message,
+        session: &cc::ClaudeSession,
+    ) -> Result<(), ArkoAgentsError> {
         match message {
             cc::Message::Assistant(assistant) => {
                 if let Some(usage) = &assistant.usage {
@@ -1854,6 +1891,7 @@ impl ClaudeCodeRun {
                 }
                 _ => {}
             },
+            cc::Message::RateLimit { info, .. } => self.plan_usage_reported(&info, session).await?,
             cc::Message::System(system) if system.subtype == "compact_boundary" => {
                 log::warn!(
                     "Task {}: Claude Code compacted the conversation; the task's record keeps the full conversation.",
@@ -2077,6 +2115,9 @@ impl ClaudeCodeRun {
             Some(&self.task.agent_config.llm_config.generation_config),
         );
         let info = info.with_billing(ai::BillingKind::Subscription);
+        if thread.is_some() {
+            self.subagent_calls.push(self.task.usage_history.len());
+        }
         self.task.usage_history.push(info.clone());
         self.emit(AgentEvent::UsageReported(info)).await?;
         let served = pending.model.unwrap_or_else(|| model.id.clone());
@@ -2087,9 +2128,146 @@ impl ClaudeCodeRun {
             input,
             output,
             model.max_input_tokens,
-        );
+        )
+        .with_plan_usage(self.plan_usage.clone());
         let call = self.task.record_model_call_usage(call);
-        self.emit(AgentEvent::ModelCallUsageReported(call)).await
+        self.emit(AgentEvent::ModelCallUsageReported(call)).await?;
+        if thread.is_none() {
+            self.monitor_cache().await?;
+        }
+        Ok(())
+    }
+
+    /// Claude Code's plan usage (`rate_limit_event`: its five-hour window as
+    /// the primary one, its seven-day window as the secondary), reported
+    /// and checked against the opt-in threshold.
+    async fn plan_usage_reported(
+        &mut self,
+        info: &Value,
+        session: &cc::ClaudeSession,
+    ) -> Result<(), ArkoAgentsError> {
+        let usage = plan_usage_of(info);
+        self.limit_reached = (info["status"] == "rejected" && info["isUsingOverage"] != true)
+            .then(|| info["resetsAt"].as_u64());
+        self.emit(AgentEvent::PlanUsageReported(usage.clone()))
+            .await?;
+        self.plan_usage = Some(usage.clone());
+        let Some(threshold) = self.task.agent_config.monitoring.plan_usage.clone() else {
+            return Ok(());
+        };
+        let now = chrono::Utc::now().timestamp().max(0) as u64;
+        let reached = usage
+            .most_used_window()
+            .filter(|(_, window)| window.used_percent >= threshold.percent)
+            .filter(|(_, window)| window.resets_at.is_none_or(|resets_at| resets_at > now));
+        let Some((window, reached)) = reached else {
+            self.slow_down = None;
+            return Ok(());
+        };
+        let mark = crate::task::PlanUsageWindowMark {
+            window: window.to_string(),
+            resets_at: reached.resets_at,
+        };
+        let first = self.task.plan_usage_threshold_reported.as_ref() != Some(&mark);
+        if first {
+            self.task.plan_usage_threshold_reported = Some(mark);
+            self.emit(AgentEvent::PlanUsageThresholdReached {
+                window: window.to_string(),
+                used_percent: reached.used_percent,
+                threshold_percent: threshold.percent,
+                resets_at_unix_ms: reached
+                    .resets_at
+                    .map(|seconds| seconds.saturating_mul(1000)),
+                action: threshold.action.clone(),
+            })
+            .await?;
+        }
+        match threshold.action {
+            crate::agent_config::PlanUsageAction::Pause => {
+                if first {
+                    self.pause_after_turn = Some((
+                        format!(
+                            "Plan usage reached {:.1}% of the {window} usage-limit window (threshold {:.1}%).",
+                            reached.used_percent, threshold.percent
+                        ),
+                        ErrorRecoveryCause::Monitor,
+                    ));
+                    let _ = session.interrupt().await;
+                }
+            }
+            crate::agent_config::PlanUsageAction::SlowDown { delay_ms } => {
+                self.slow_down = Some(Duration::from_millis(delay_ms));
+            }
+        }
+        Ok(())
+    }
+
+    /// The opt-in cache monitor, after a request of the main conversation:
+    /// as for other agents, over the current conversation's requests.
+    async fn monitor_cache(&mut self) -> Result<(), ArkoAgentsError> {
+        let Some(config) = self.task.agent_config.monitoring.cache.clone() else {
+            return Ok(());
+        };
+        let calls: Vec<ai::UsageInfo> = self
+            .task
+            .usage_history
+            .iter()
+            .enumerate()
+            .skip(self.task.conversation_usage_start)
+            .filter(|(index, _)| !self.subagent_calls.contains(index))
+            .map(|(_, usage)| usage.clone())
+            .collect();
+        let Some(efficiency) = super::monitor::cache_efficiency(&calls, &config) else {
+            return Ok(());
+        };
+        self.emit(AgentEvent::CacheEfficiencyReported {
+            call_efficiency: efficiency.call,
+            rolling_efficiency: efficiency.rolling,
+            calls: efficiency.calls,
+        })
+        .await?;
+        if efficiency.calls < config.window_calls {
+            return Ok(());
+        }
+        let low =
+            |threshold: Option<f64>| threshold.filter(|threshold| efficiency.rolling < *threshold);
+        match low(config.warn_below) {
+            Some(threshold) if !self.cache_warned => {
+                self.cache_warned = true;
+                self.emit(AgentEvent::CacheEfficiencyLow {
+                    rolling_efficiency: efficiency.rolling,
+                    threshold,
+                    pausing: false,
+                })
+                .await?;
+            }
+            Some(_) => {}
+            None => self.cache_warned = false,
+        }
+        match low(config.pause_below) {
+            Some(threshold) if !self.cache_pause_episode => {
+                self.cache_pause_episode = true;
+                self.pause_after_turn = Some((
+                    format!(
+                        "Prompt cache efficiency fell to {:.1}% over the last {} calls (threshold {:.1}%).",
+                        efficiency.rolling * 100.0,
+                        efficiency.calls,
+                        threshold * 100.0
+                    ),
+                    ErrorRecoveryCause::Monitor,
+                ));
+                self.cache_interrupt = true;
+                self.emit(AgentEvent::CacheEfficiencyLow {
+                    rolling_efficiency: efficiency.rolling,
+                    threshold,
+                    pausing: true,
+                })
+                .await?;
+            }
+            Some(_) => {}
+            None => self.cache_pause_episode = false,
+        }
+        Ok(())
     }
 
     /// After a request of the main conversation: a handover starts once its
@@ -2150,6 +2328,22 @@ impl ClaudeCodeRun {
             return Ok(Some(SessionEnd::Stop));
         }
         if let Some((reason, cause)) = self.pause_after_turn.take() {
+            if matches!(cause, ErrorRecoveryCause::Monitor) {
+                // As for other agents: a pause under the pausing error
+                // policies, the task returned interrupted under the others.
+                self.pause_on_error(reason, cause).await?;
+                self.task.monitor_pause = matches!(
+                    self.task.current_state,
+                    TaskState::AwaitingErrorRecoveryApproval { .. }
+                );
+                return Ok(Some(
+                    if matches!(self.task.current_state, TaskState::Interrupted { .. }) {
+                        SessionEnd::Stop
+                    } else {
+                        SessionEnd::Wait
+                    },
+                ));
+            }
             self.pause(reason, cause).await?;
             return Ok(Some(SessionEnd::Wait));
         }
@@ -2215,13 +2409,24 @@ impl ClaudeCodeRun {
         if self.stopping.is_some() || self.task.current_state.is_terminal() {
             return Ok(SessionEnd::Stop);
         }
-        self.pause_on_error(
-            message,
-            ErrorRecoveryCause::RetriesExhausted {
+        // A plan limit Claude Code reported reached: the pause waits for its
+        // reset (a workflow's automatic recovery waits until then).
+        let cause = match self.limit_reached {
+            Some(resets_at) => {
+                let resets_at_unix_ms = resets_at.map(|seconds| seconds.saturating_mul(1000));
+                self.emit(AgentEvent::UsageLimitReached {
+                    resets_at_unix_ms,
+                    waiting_until_unix_ms: None,
+                    error_message: message.clone(),
+                })
+                .await?;
+                ErrorRecoveryCause::UsageLimit { resets_at_unix_ms }
+            }
+            None => ErrorRecoveryCause::RetriesExhausted {
                 retry_after_ms: None,
             },
-        )
-        .await?;
+        };
+        self.pause_on_error(message, cause).await?;
         Ok(
             if matches!(self.task.current_state, TaskState::Interrupted { .. }) {
                 SessionEnd::Stop
@@ -2305,6 +2510,8 @@ impl ClaudeCodeRun {
         self.calls.clear();
         self.pending_usage.clear();
         self.streamed.clear();
+        self.cache_warned = false;
+        self.cache_pause_episode = false;
         self.context_size = None;
         self.first_context_size = None;
         self.report_delivered = false;
@@ -2321,6 +2528,41 @@ impl ClaudeCodeRun {
             handovers,
         })
         .await
+    }
+}
+
+/// Claude Code's `rate_limit_info` as plan usage: the five-hour window is
+/// the primary one and the seven-day window the secondary, as in its
+/// `unifiedWindows`; an event without them reports its one window.
+fn plan_usage_of(info: &Value) -> ai::PlanUsage {
+    let window = |value: &Value, minutes: u64| {
+        value
+            .get("utilization")
+            .and_then(Value::as_f64)
+            .map(|utilization| ai::PlanUsageWindow {
+                used_percent: utilization * 100.0,
+                window_minutes: Some(minutes),
+                resets_at: value.get("resetsAt").and_then(Value::as_u64),
+                reset_after_seconds: None,
+            })
+    };
+    let limit_type = info["rateLimitType"].as_str().map(str::to_string);
+    let (primary, secondary) = match info.get("unifiedWindows") {
+        Some(windows) => (
+            window(&windows["five_hour"], 300),
+            window(&windows["seven_day"], 10_080),
+        ),
+        None => match limit_type.as_deref() {
+            Some("five_hour") => (window(info, 300), None),
+            Some(_) => (None, window(info, 10_080)),
+            None => (None, None),
+        },
+    };
+    ai::PlanUsage {
+        plan_type: None,
+        active_limit: limit_type,
+        primary,
+        secondary,
     }
 }
 

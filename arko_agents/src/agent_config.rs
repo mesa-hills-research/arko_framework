@@ -1313,11 +1313,6 @@ impl AgentConfig {
                 "refusal_fallback isn't supported for Claude Code models: Claude Code handles refusals in its own loop.".into(),
             ));
         }
-        if !self.monitoring.is_empty() {
-            return Err(error(
-                "the plan-usage and cache monitors aren't supported for Claude Code models yet; leave monitoring unset.".into(),
-            ));
-        }
         if let Some(tool) = tools
             .available_tool_names
             .iter()
