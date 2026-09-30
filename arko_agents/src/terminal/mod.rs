@@ -3,11 +3,13 @@
 //! Program declarations travel over a dedicated stream. Prompt rules report
 //! possible input only: silence and descriptor writability are never detectors.
 mod detection;
+mod guard;
 mod io;
 mod runner;
 mod tools;
 
 pub use detection::PromptRule;
+pub use guard::{CommandGuard, CommandRefusal, ShellDialect};
 pub use tools::TerminalTool;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -34,6 +36,9 @@ pub enum TerminalError {
     StaleView,
     #[error("terminal job has finished")]
     Finished,
+    /// The [`CommandGuard`] refused the command.
+    #[error(transparent)]
+    Refused(#[from] CommandRefusal),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -59,6 +64,12 @@ pub struct TerminalConfig {
     /// set `false` to give PTY jobs the host's environment unchanged. Pipe
     /// jobs always get it unchanged.
     pub quiet_terminal_environment: bool,
+    /// Refuses commands that would delete, move, overwrite, or reformat a
+    /// protected path (the filesystem root, a drive root, the home directory
+    /// or its parents, top-level and system directories, mounted volumes,
+    /// devices) or a path outside the job's working directory. On by
+    /// default; see [`CommandGuard`] for the opt-ins.
+    pub command_guard: CommandGuard,
 }
 
 /// The UTF-8 locale PTY jobs get: `C.UTF-8`, except on macOS, which may
@@ -117,6 +128,7 @@ impl TerminalConfig {
             prompt_rules: detection::default_rules(),
             default_timeout: None,
             quiet_terminal_environment: true,
+            command_guard: CommandGuard::default(),
         }
     }
 }
@@ -297,6 +309,9 @@ pub(super) enum Control {
 }
 struct Job {
     data: Arc<Mutex<JobData>>,
+    /// The directory the job started in, for checking input typed into a
+    /// shell it runs. `None` for jobs restored from an earlier process.
+    working_directory: Option<PathBuf>,
     controls: mpsc::Sender<Control>,
     cancel: watch::Sender<bool>,
     changes: watch::Receiver<u64>,
@@ -310,6 +325,7 @@ fn completed_job(data: Arc<Mutex<JobData>>) -> Arc<Job> {
     let (_, done) = watch::channel(true);
     Arc::new(Job {
         data,
+        working_directory: None,
         controls,
         cancel,
         changes,
@@ -531,6 +547,11 @@ impl TerminalManager {
                 "empty/oversized command or zero timeout".into(),
             ));
         }
+        self.config.command_guard.check(
+            command,
+            ShellDialect::from_shell(&self.config.shell),
+            context.current_working_directory,
+        )?;
         let mut jobs = self.jobs.lock().unwrap();
         if self.closing.load(std::sync::atomic::Ordering::Acquire) {
             return Err(TerminalError::Invalid(
@@ -597,6 +618,7 @@ impl TerminalManager {
             id,
             Arc::new(Job {
                 data: data.clone(),
+                working_directory: Some(context.current_working_directory.to_path_buf()),
                 controls,
                 cancel,
                 changes,
@@ -644,6 +666,14 @@ impl TerminalManager {
         let job = self.owned(owner, id)?;
         if job.data.lock().unwrap().record.state.is_terminal() {
             return Err(TerminalError::Finished);
+        }
+        // Input may be a command typed into a shell the job runs.
+        if let Some(directory) = &job.working_directory {
+            self.config.command_guard.check(
+                &text,
+                ShellDialect::from_shell(&self.config.shell),
+                directory,
+            )?;
         }
         let (response, answer) = oneshot::channel();
         job.controls

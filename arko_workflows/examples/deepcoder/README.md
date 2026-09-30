@@ -69,6 +69,7 @@ cargo run -p arko_workflows --example deepcoder -- \
 | `--state-dir PATH` | new directory | Run directory for checkpoints and logs; must be outside the workspace. |
 | `--resume PATH` | none | Resume from a checkpoint file or a run directory. |
 | `--ephemeral` | off | Disable checkpoints and run artifacts. Cannot be combined with `--resume`. |
+| `--dangerously-allow-all-commands` | off | Turn off the `run_shell` command guard, so every command runs as written. |
 
 Budgets count billed cost. ChatGPT OAuth calls are billed at $0, so `--budget`
 and the reported total cost only constrain API-key runs.
@@ -97,7 +98,11 @@ verification records, messages, freshness state, event logs, and costs.
 The example's `run_shell` tool runs local commands in the workspace with a
 timeout and a cap on returned output, and only the coder and verifier roles
 receive it. It removes common token, key, and secret variables from the child
-environment. It is not a sandbox for untrusted code: role prompts tell verifiers
+environment. It refuses commands that would delete, move, overwrite or reformat a
+protected path (the filesystem root, the home directory or its parents, system
+directories, devices) or a path outside the workspace, using the
+[terminal command guard](../../../docs/interactive-terminals.md#command-guard);
+`--dangerously-allow-all-commands` turns that off. It is not a sandbox for untrusted code: role prompts tell verifiers
 to stay read-only and coders to avoid deployment or publication, but shell
 commands can reach anything the host process can.
 

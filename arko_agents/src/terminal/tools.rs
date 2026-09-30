@@ -110,7 +110,7 @@ impl Tool for TerminalTool {
         let (name, description, parameters) = match self.operation {
             Operation::Start => (
                 Self::NAMES[0],
-                "Start a shell command in the background; returns a job ID immediately. terminal=true uses a live PTY; false uses pipes. Program-declared input requests, possible prompt matches, and completion are injected into task context. Continue independent work. Inspect terminal_status for output; answer with terminal_input using the latest revision. Shell commands run with the host's permissions.",
+                "Start a shell command in the background; returns a job ID immediately. terminal=true uses a live PTY; false uses pipes. Program-declared input requests, possible prompt matches, and completion are injected into task context. Continue independent work. Inspect terminal_status for output; answer with terminal_input using the latest revision. Shell commands run with the host's permissions. Commands that would delete, move or overwrite the filesystem root, the home directory, system directories or devices, or paths outside the working directory, are refused.",
                 vec![
                     parameter(
                         "command",
