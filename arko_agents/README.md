@@ -826,6 +826,27 @@ A monitor pause waits in `AwaitingErrorRecoveryApproval` under the pausing error
 and returns the task `Interrupted` under the others. Approving it continues without an
 error note; a message given with the approval is added as a user message.
 
+**Choosing a plan-usage action.** Neither action saves usage: a task's requests cost the
+same whenever they're made. The choice is whether the task keeps going as the limit
+nears, and it turns on two times: when the window resets (`PlanUsageThresholdReached`
+carries it), and how long the prompt cache lasts. A request made after the cache has
+expired reads the whole context again, uncached, and that costs more usage than any wait
+saves. `arko_ai::prompt_cache::prompt_cache_lifetime` (or `LLMClient::prompt_cache_lifetime`)
+gives a model's lifetime: 5 minutes for Anthropic by default (1 hour with
+`AnthropicCacheTtl::OneHour`), a conservative 5 minutes for OpenAI; Claude Code sets its
+own, 5 minutes or 1 hour.
+
+| Situation | Action | Cost |
+| --- | --- | --- |
+| The reset is far off | `Pause`, so the rest of the window isn't spent before someone decides | Resuming after the cache expired costs one uncached request |
+| The reset is close | Keep going, with `UsageLimitPolicy::WaitUntilReset` to wait out the limit if it's reached first | One uncached request once a long wait ends |
+| The reset is close and the task shouldn't stop | `SlowDown { delay_ms }`, to stretch what is left until the reset | Nothing extra while `delay_ms` stays well under the cache lifetime |
+
+`SlowDown` spends the same usage over more time, so it only helps when the reset comes
+before the rest of the window runs out. A delay that reaches the cache lifetime makes every
+request after it miss the cache, which drains usage faster than no delay at all; the
+runtime logs a warning, once per run, when it does.
+
 ## Claude Code models
 
 An agent whose model is a Claude Code model runs in a session of the user's installed

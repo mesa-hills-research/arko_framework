@@ -389,6 +389,9 @@ pub struct AgentLoop {
     pub(super) turn_context: Option<Arc<dyn super::TurnContextSource>>,
     /// Called when the conversation is handed over.
     pub(super) handover_hook: Option<Arc<dyn HandoverHook>>,
+    /// The plan-usage SlowDown's delay was checked against the prompt-cache
+    /// lifetime (once per run).
+    slow_down_cache_checked: bool,
     /// A threshold handover was skipped and logged; see
     /// `start_handover_if_due`.
     handover_skip_warned: bool,
@@ -478,6 +481,7 @@ impl AgentLoop {
             execution_middleware,
             turn_context: None,
             handover_hook: None,
+            slow_down_cache_checked: false,
             handover_skip_warned: false,
             tool_context_cursor: 0,
             file_tree_baseline: None,
@@ -5170,6 +5174,20 @@ impl AgentLoop {
             }
             PlanUsageAction::Pause => Ok(true),
             PlanUsageAction::SlowDown { delay_ms } => {
+                if !std::mem::replace(&mut self.slow_down_cache_checked, true) {
+                    let lifetime = self
+                        .llm_client
+                        .prompt_cache_lifetime(
+                            &self.task.agent_config.llm_config.model,
+                            &self.task.agent_config.llm_config.generation_config,
+                        )
+                        .await;
+                    super::monitor::warn_if_slow_down_outlasts_cache(
+                        self.task.id,
+                        delay_ms,
+                        lifetime,
+                    );
+                }
                 let Some(until) =
                     tokio::time::Instant::now().checked_add(Duration::from_millis(delay_ms))
                 else {

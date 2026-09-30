@@ -2264,6 +2264,17 @@ impl ClaudeCodeRun {
                 }
             }
             crate::agent_config::PlanUsageAction::SlowDown { delay_ms } => {
+                if self.slow_down.is_none() {
+                    // Claude Code sets its own cache lifetime: five minutes
+                    // (Anthropic's default) at least.
+                    super::monitor::warn_if_slow_down_outlasts_cache(
+                        self.task.id,
+                        delay_ms,
+                        ai::PromptCacheLifetime::Known(
+                            ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME,
+                        ),
+                    );
+                }
                 self.slow_down = Some(Duration::from_millis(delay_ms));
             }
         }

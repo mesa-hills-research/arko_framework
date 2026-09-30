@@ -729,6 +729,12 @@ pub enum UsageLimitPolicy {
     /// `max_wait_ms`; otherwise pause. Applies under every error policy
     /// (`PauseAndAwaitApproval` and `InformAgentAndContinue` too). The wait
     /// is cancellable and reported with `AgentEvent::UsageLimitReached`.
+    ///
+    /// A wait longer than the model's prompt-cache lifetime (see
+    /// [`PlanUsageAction`]) makes the retried request read the whole context
+    /// uncached, once; it can't be helped once the limit is reached. For an
+    /// agent running in Claude Code, the limit is the one Claude Code reports
+    /// reached, and the task resumes its session after the wait.
     WaitUntilReset { max_wait_ms: u64 },
 }
 
@@ -909,15 +915,43 @@ pub struct PlanUsageThreshold {
 }
 
 /// What a [`PlanUsageThreshold`] does.
+///
+/// Neither action saves usage: the task's requests cost the same whenever
+/// they are made. What differs is whether the task keeps going as the limit
+/// nears. Choose with the window's reset in mind (the threshold event
+/// carries it) and the prompt cache: a request made after the cache has
+/// expired reads the whole context again, uncached, which costs more usage
+/// than any wait saves. [`prompt_cache_lifetime`](arko_ai::prompt_cache::prompt_cache_lifetime)
+/// gives the model's lifetime: 5 minutes for Anthropic by default (1 hour
+/// with `AnthropicCacheTtl::OneHour`), a conservative 5 minutes for OpenAI;
+/// Claude Code sets its own, 5 minutes or 1 hour.
+///
+/// - The reset is far off: [`Pause`](Self::Pause), so the rest of the
+///   window isn't spent before someone decides. Resuming after the cache has
+///   expired costs one uncached request.
+/// - The reset is close: let the task run, with
+///   [`UsageLimitPolicy::WaitUntilReset`] to wait out the limit if it is
+///   reached first (again, one uncached request once the wait ends), or
+///   [`SlowDown`](Self::SlowDown) to stretch what is left until the reset.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub enum PlanUsageAction {
     /// Pause once per window and reset, like exhausted recovery (awaiting
     /// error-recovery approval, or interrupted under the informing error
-    /// policies).
+    /// policies). Suits a threshold reached with the window's reset far off.
     #[default]
     Pause,
     /// Wait `delay_ms` (cancellable) before every model request while usage
-    /// stays at or above the threshold.
+    /// stays at or above the threshold. It spends the same usage over more
+    /// time, so it only helps when the reset comes before the rest of the
+    /// window runs out: pace the task to reach the reset without stopping.
+    ///
+    /// Keep `delay_ms` well under the model's prompt-cache lifetime (see
+    /// [`PlanUsageAction`]): a delay that reaches it makes every request after
+    /// it miss the cache, which drains usage faster than no delay at all.
+    /// The runtime logs a warning once per run when it does. For an agent
+    /// running in Claude Code, each tool call is held instead (and the
+    /// request that follows it with it), since Claude Code makes the
+    /// requests.
     SlowDown { delay_ms: u64 },
 }
 
