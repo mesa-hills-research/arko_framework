@@ -1,0 +1,2186 @@
+//! The runtime of agents whose model runs in Claude Code; see
+//! [`crate::claude_code`].
+//!
+//! Claude Code runs the agent loop in a session of the installed CLI. This
+//! runtime starts the session, sends it the task's user messages, answers
+//! its hooks and permission requests (the gate every tool call passes),
+//! serves the agent's arko tools in-process, and turns what the session
+//! reports into the task's conversation, usage and events. The conversation
+//! the task keeps mirrors the session's: it is a record for hosts (a
+//! workflow reads which messages it holds), not what the model is sent.
+//!
+//! The session lives while the task is in progress. A wait (for an answer,
+//! or an error-recovery decision) ends it, and the task resumes it
+//! ([`Task::claude_code_session`]) when it continues. A handover starts a
+//! new session.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use serde_json::{Value, json};
+use tokio::sync::{mpsc, oneshot};
+use uuid::Uuid;
+
+use super::command::UserCommand;
+use super::event::AgentEvent;
+use super::tool_run::{self, Interception, RunEnvironment, RunOutcome, ToolRun};
+use crate::agent_config::{AgentConfig, LLMErrorPolicy, PathSafetyPolicy, ToolErrorPolicy};
+use crate::claude_code::built_in_path_parameters;
+use crate::error::ArkoAgentsError;
+use crate::handover::{
+    DEFAULT_REPORT_REQUEST, HandoverHook, HandoverRecord, HandoverRequest, HandoverSeed,
+};
+use crate::parsing::{PromptBuilder, ToolParsingConfig};
+use crate::skill::SkillPromptContext;
+use crate::task::{ApprovalReason, ErrorRecoveryCause, Task, TaskState};
+use crate::tool::builtins::{ASK_USER_TOOL_NAME, COMPLETE_TASK_TOOL_NAME};
+use crate::tool::{
+    InterceptorConfig, ToolCallContext, ToolExecutionContext, ToolExecutionDecision,
+    ToolExecutionMiddleware, ToolExecutionOutcome, ToolRegistry,
+};
+use arko_ai::claude_code as cc;
+use arko_ai::{self as ai};
+
+/// The in-process MCP server serving the agent's arko tools.
+pub const ARKO_TOOL_SERVER: &str = "arko";
+
+/// How long Claude Code waits for the runtime's answer to a hook: the gate
+/// decides at once, except for a built-in call's middleware `before`.
+const HOOK_TIMEOUT_SECONDS: f64 = 600.0;
+
+/// Turns in a row that end without `complete_task` before the task is
+/// interrupted (the native runtime's limit on unusable responses).
+const MAX_OPEN_TURNS: u32 = 10;
+
+const OPEN_TURN_NOTE: &str = "Your turn ended without calling complete_task, so the task is still open. Continue with your tools, or call mcp__arko__complete_task with a summary if the task is finished.";
+
+const NO_HANDOVER_REPORT: &str = "Your reply had no text, so no handover report was received. Reply with the handover report as plain text, without calling a tool.";
+
+const TASK_COMPLETE: &str = "The task is complete; end your turn without calling tools.";
+
+const ASKED: &str = "Your questions were sent to the user. End your turn now without calling tools; the answer arrives as the next message.";
+
+const CONTINUE: &str = "Continue the task from where you left off.";
+
+/// The arko tool a Claude Code tool name serves, if it is one.
+fn arko_name(served: &str) -> Option<&str> {
+    served
+        .strip_prefix("mcp__")
+        .and_then(|rest| rest.strip_prefix(ARKO_TOOL_SERVER))
+        .and_then(|rest| rest.strip_prefix("__"))
+}
+
+/// A canonical key of a call's input, to match a gated arko call with the
+/// MCP call that runs it (serde_json objects are sorted by key).
+fn input_key(name: &str, input: &Value) -> (String, String) {
+    (name.to_string(), input.to_string())
+}
+
+fn params_of(input: &Value) -> HashMap<String, Value> {
+    input
+        .as_object()
+        .map(|object| object.clone().into_iter().collect())
+        .unwrap_or_default()
+}
+
+/// What Claude Code's hooks and permission requests ask the runtime.
+enum HostRequest {
+    PreToolUse {
+        tool_use_id: Option<String>,
+        tool_name: String,
+        input: Value,
+        reply: oneshot::Sender<Value>,
+    },
+    Permission {
+        request: cc::PermissionRequest,
+        reply: oneshot::Sender<cc::PermissionDecision>,
+    },
+    PostToolUse {
+        tool_use_id: Option<String>,
+        tool_name: String,
+        response: Value,
+        reply: oneshot::Sender<Value>,
+    },
+}
+
+struct HookForwarder {
+    event: cc::HookEvent,
+    requests: mpsc::UnboundedSender<HostRequest>,
+}
+
+#[async_trait]
+impl cc::HookCallback for HookForwarder {
+    async fn call(&self, input: Value, tool_use_id: Option<String>) -> Value {
+        let tool_use_id = tool_use_id.or_else(|| {
+            input
+                .get("tool_use_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+        let tool_name = input["tool_name"].as_str().unwrap_or_default().to_string();
+        let (reply, answer) = oneshot::channel();
+        let request = match self.event {
+            cc::HookEvent::PreToolUse => HostRequest::PreToolUse {
+                tool_use_id,
+                tool_name,
+                input: input.get("tool_input").cloned().unwrap_or(Value::Null),
+                reply,
+            },
+            _ => HostRequest::PostToolUse {
+                tool_use_id,
+                tool_name,
+                response: input.get("tool_response").cloned().unwrap_or(Value::Null),
+                reply,
+            },
+        };
+        if self.requests.send(request).is_err() {
+            return stopping_answer(&self.event);
+        }
+        answer
+            .await
+            .unwrap_or_else(|_| stopping_answer(&self.event))
+    }
+}
+
+fn stopping_answer(event: &cc::HookEvent) -> Value {
+    match event {
+        cc::HookEvent::PreToolUse => cc::Hook::deny_tool("The agent is stopping."),
+        _ => cc::Hook::proceed(),
+    }
+}
+
+fn allow_tool() -> Value {
+    json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}})
+}
+
+/// Sends the call to the permission request, where it waits for approval.
+fn ask_tool() -> Value {
+    json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask"}})
+}
+
+fn add_context(text: &str) -> Value {
+    json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text}})
+}
+
+struct PermissionForwarder {
+    requests: mpsc::UnboundedSender<HostRequest>,
+}
+
+#[async_trait]
+impl cc::PermissionHandler for PermissionForwarder {
+    async fn decide(&self, request: cc::PermissionRequest) -> cc::PermissionDecision {
+        let (reply, answer) = oneshot::channel();
+        if self
+            .requests
+            .send(HostRequest::Permission { request, reply })
+            .is_err()
+        {
+            return cc::PermissionDecision::deny("The agent is stopping.");
+        }
+        answer
+            .await
+            .unwrap_or_else(|_| cc::PermissionDecision::deny("The agent is stopping."))
+    }
+}
+
+/// How an arko tool call ended, for the runtime to report.
+#[derive(Debug, Clone)]
+enum CallOutcome {
+    Finished {
+        raw: String,
+        effective: String,
+        intercepted: bool,
+    },
+    Rejected(String),
+    Failed(String),
+    Stop {
+        reason: String,
+        cancel: bool,
+    },
+    Pause {
+        message: String,
+        reason: String,
+    },
+}
+
+/// A gated arko call waiting for its MCP call.
+struct Admitted {
+    id: Uuid,
+    custom_output: Option<String>,
+}
+
+/// Runs the agent's arko tools for Claude Code's MCP calls.
+struct ToolHost {
+    environment: Arc<RunEnvironment>,
+    config: AgentConfig,
+    registry: Arc<ToolRegistry>,
+    interceptor: Option<InterceptorConfig>,
+    admitted: Mutex<HashMap<(String, String), VecDeque<Admitted>>>,
+    outcomes: Mutex<HashMap<Uuid, CallOutcome>>,
+}
+
+impl ToolHost {
+    fn interception_for(&self, name: &str, tool: &dyn crate::tool::Tool) -> Option<Interception> {
+        let config = self.interceptor.as_ref()?;
+        if !tool.allow_result_interception()
+            || [COMPLETE_TASK_TOOL_NAME, ASK_USER_TOOL_NAME].contains(&name)
+        {
+            return None;
+        }
+        let policy = if name == crate::skill::LOAD_SKILL_TOOL_NAME {
+            self.config
+                .skills_config
+                .as_ref()?
+                .load_skill_interception
+                .clone()?
+        } else {
+            config.failure_policy.clone()
+        };
+        Some(Interception {
+            interceptor: config.interceptor.clone(),
+            policy,
+        })
+    }
+
+    async fn call(&self, name: &str, arguments: Value) -> cc::ToolOutput {
+        let Some(tool) = self.registry.get(name) else {
+            return cc::ToolOutput::error(format!("Tool '{name}' is not available."));
+        };
+        let admitted = self
+            .admitted
+            .lock()
+            .unwrap()
+            .get_mut(&input_key(name, &arguments))
+            .and_then(VecDeque::pop_front);
+        let Some(admitted) = admitted else {
+            // Every call passes the gate first; one that didn't isn't run.
+            return cc::ToolOutput::error(format!(
+                "Tool '{name}' was called without passing the host's checks, so it was not run."
+            ));
+        };
+        let id = admitted.id;
+        let run = ToolRun {
+            tool_call_id: id,
+            tool_name: name.to_string(),
+            timeout: self
+                .config
+                .tool_config
+                .tool_timeout(name, tool.uses_host_timeout()),
+            parallel_safe: false,
+            interception: self.interception_for(name, tool.as_ref()),
+            interruptible: tool.interruptible(),
+            params: params_of(&arguments),
+            custom_output: admitted.custom_output,
+            tool,
+        };
+        let outcome = match tool_run::run_tool(self.environment.clone(), run).await {
+            Ok(outcome) => outcome,
+            Err(error) => RunOutcome::Failed(error),
+        };
+        let (outcome, output) = match outcome {
+            RunOutcome::Finished {
+                output,
+                effective,
+                intercepted,
+            } => {
+                let text = match name {
+                    ASK_USER_TOOL_NAME => ASKED.to_string(),
+                    _ => effective.clone(),
+                };
+                (
+                    CallOutcome::Finished {
+                        raw: output.text,
+                        effective,
+                        intercepted,
+                    },
+                    cc::ToolOutput::text(text),
+                )
+            }
+            RunOutcome::MiddlewareErrorAfter {
+                output,
+                effective,
+                intercepted,
+                reason,
+                is_error,
+            } => {
+                let _ = (output, intercepted, is_error);
+                (
+                    CallOutcome::Pause {
+                        message: effective.clone(),
+                        reason,
+                    },
+                    cc::ToolOutput::text(effective),
+                )
+            }
+            RunOutcome::Rejected(message) => (
+                CallOutcome::Rejected(message.clone()),
+                cc::ToolOutput::error(message),
+            ),
+            RunOutcome::MiddlewareErrorBefore { reason } => (
+                CallOutcome::Pause {
+                    message: reason.clone(),
+                    reason: reason.clone(),
+                },
+                cc::ToolOutput::error(reason),
+            ),
+            RunOutcome::Stop { reason, cancel } => (
+                CallOutcome::Stop {
+                    reason: reason.clone(),
+                    cancel,
+                },
+                cc::ToolOutput::error(reason),
+            ),
+            RunOutcome::Pause { message, reason } => (
+                CallOutcome::Pause {
+                    message: message.clone(),
+                    reason,
+                },
+                cc::ToolOutput::error(message),
+            ),
+            RunOutcome::Failed(error) => {
+                let text = format!("Tool '{name}' execution failed: {error}");
+                (
+                    CallOutcome::Failed(text.clone()),
+                    cc::ToolOutput::error(text),
+                )
+            }
+        };
+        self.outcomes.lock().unwrap().insert(id, outcome);
+        output
+    }
+}
+
+/// One arko tool, served to Claude Code.
+struct ServedTool {
+    name: String,
+    description: String,
+    schema: Value,
+    host: Arc<ToolHost>,
+}
+
+#[async_trait]
+impl cc::ClaudeTool for ServedTool {
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+    fn description(&self) -> String {
+        self.description.clone()
+    }
+    fn input_schema(&self) -> Value {
+        self.schema.clone()
+    }
+    async fn call(&self, arguments: Value) -> cc::ToolOutput {
+        self.host.call(&self.name, arguments).await
+    }
+}
+
+/// A tool call of the session, by its Claude Code `tool_use_id`.
+struct Call {
+    id: Uuid,
+    /// The arko tool's name, or the built-in's.
+    name: String,
+    built_in: bool,
+    record: ai::ToolCall,
+    input: Value,
+}
+
+/// A call waiting for approval in a permission request.
+struct Approval {
+    tool_use_id: Option<String>,
+    id: Uuid,
+    name: String,
+    input: Value,
+    reply: oneshot::Sender<cc::PermissionDecision>,
+    deadline: Option<tokio::time::Instant>,
+}
+
+/// How a session ended.
+enum SessionEnd {
+    /// The task stopped (it ended, was suspended, or its host is gone).
+    Stop,
+    /// The task waits for a command; the session is closed meanwhile.
+    Wait,
+    /// A handover: the next session starts a fresh conversation.
+    Restart,
+}
+
+/// A stop the host asked for while the session ran.
+#[derive(Clone, Copy)]
+enum Stopping {
+    Cancel,
+    Suspend,
+    Closed,
+}
+
+pub(super) struct ClaudeCodeRun {
+    task: Task,
+    registry: Arc<ToolRegistry>,
+    events: mpsc::Sender<AgentEvent>,
+    commands: mpsc::Receiver<UserCommand>,
+    pub(super) turn_context: Option<Arc<dyn super::TurnContextSource>>,
+    pub(super) host_decisions: super::HostDecisions,
+    pub(super) handover_hook: Option<Arc<dyn HandoverHook>>,
+    middleware: Option<Arc<dyn ToolExecutionMiddleware>>,
+    interceptor: Option<InterceptorConfig>,
+    skill_prompt_context: Option<SkillPromptContext>,
+    parsing: ToolParsingConfig,
+
+    calls: HashMap<String, Call>,
+    /// Assistant messages whose usage is recorded (one response can arrive
+    /// as several messages).
+    counted: HashSet<String>,
+    /// The input of the current conversation's latest and first requests.
+    context_size: Option<usize>,
+    first_context_size: Option<usize>,
+    open_turns: u32,
+    /// Questions `ask_user` sent in this turn.
+    questions: Option<String>,
+    /// The report request reached the model in this turn (a denied call's
+    /// result, or a user message).
+    report_delivered: bool,
+    approval: Option<Approval>,
+    /// Text to add after a call's result: a message given with its approval.
+    after_result: HashMap<String, String>,
+    /// Context delivered with the latest results, mirrored after them.
+    delivered_context: Vec<String>,
+    /// A pause the turn's calls asked for, applied when the turn ends.
+    pause_after_turn: Option<(String, ErrorRecoveryCause)>,
+    stopping: Option<Stopping>,
+    handover_skip_warned: bool,
+    host: Option<Arc<ToolHost>>,
+}
+
+impl ClaudeCodeRun {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        task: Task,
+        registry: Arc<ToolRegistry>,
+        events: mpsc::Sender<AgentEvent>,
+        commands: mpsc::Receiver<UserCommand>,
+        skill_prompt_context: Option<SkillPromptContext>,
+        interceptor: Option<InterceptorConfig>,
+        middleware: Option<Arc<dyn ToolExecutionMiddleware>>,
+    ) -> Self {
+        let offered = task.agent_config.tool_config.offered_tool_names();
+        let registry = Arc::new(registry.restricted_to(offered.iter().map(String::as_str)));
+        for name in registry.list_tool_names() {
+            if let Some(tool) = registry.get(&name) {
+                tool.reset_context(task.id);
+            }
+        }
+        let parsing = task.agent_config.get_tool_parsing_config();
+        Self {
+            task,
+            registry,
+            events,
+            commands,
+            turn_context: None,
+            host_decisions: super::HostDecisions::default(),
+            handover_hook: None,
+            middleware,
+            interceptor,
+            skill_prompt_context,
+            parsing,
+            calls: HashMap::new(),
+            counted: HashSet::new(),
+            context_size: None,
+            first_context_size: None,
+            open_turns: 0,
+            questions: None,
+            report_delivered: false,
+            approval: None,
+            after_result: HashMap::new(),
+            delivered_context: Vec::new(),
+            pause_after_turn: None,
+            stopping: None,
+            handover_skip_warned: false,
+            host: None,
+        }
+    }
+
+    /// Binds the task's tools to its command channel.
+    pub(super) fn bind_tools(&self, sender: &mpsc::Sender<UserCommand>) {
+        for name in self.registry.list_tool_names() {
+            if let Some(tool) = self.registry.get(&name) {
+                tool.bind_runtime(self.task.id, sender.downgrade());
+            }
+        }
+    }
+
+    async fn emit(&self, event: AgentEvent) -> Result<(), ArkoAgentsError> {
+        self.events
+            .send(event)
+            .await
+            .map_err(|error| ArkoAgentsError::ChannelSend(format!("{error:?}")))
+    }
+
+    async fn set_state(&mut self, state: TaskState) -> Result<(), ArkoAgentsError> {
+        self.task.set_state(state);
+        self.emit(AgentEvent::TaskStateChanged(
+            self.task.current_state.clone(),
+        ))
+        .await
+    }
+
+    pub(super) async fn run(mut self) -> Result<Task, ArkoAgentsError> {
+        self.task.agent_config.validate()?;
+        if self.task.conversation.system_message.is_none() {
+            let prompt = self.system_prompt()?;
+            self.task.conversation.system_message = Some(prompt);
+        }
+        if matches!(self.task.current_state, TaskState::Pending) {
+            self.set_state(TaskState::InProgress).await?;
+        }
+        if self.task.conversation.messages.is_empty() {
+            let builder = PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing, None);
+            let first =
+                builder.format_initial_task_prompt(&self.task, &self.task.initial_task_prompt)?;
+            self.task.conversation.add_user_message(&first);
+            self.task.increment_user_message_count();
+        }
+        // A call's approval can't outlive its session: a task saved while
+        // one waited continues without it.
+        if matches!(
+            self.task.current_state,
+            TaskState::AwaitingToolApproval { .. } | TaskState::AwaitingBatchToolApproval { .. }
+        ) {
+            self.add_user_message(
+                "The run stopped while a tool call waited for approval, so the call was not run. Call it again if it is still needed.",
+            )?;
+            self.set_state(TaskState::InProgress).await?;
+        }
+        let result = self.drive().await;
+        let _ = self.emit(AgentEvent::TaskStreamEnd).await;
+        result?;
+        log::info!(
+            "Claude Code agent run finished for task {}: {:?}",
+            self.task.id,
+            self.task.current_state
+        );
+        Ok(self.task)
+    }
+
+    fn system_prompt(&self) -> Result<String, ArkoAgentsError> {
+        let builder = PromptBuilder::new(
+            &self.task.agent_config,
+            vec![],
+            &self.parsing,
+            self.skill_prompt_context.as_ref(),
+        );
+        let mut prompt = builder.build_system_prompt(&self.task)?;
+        prompt.push_str(&format!(
+            "## Tool names\nThe tools of this task are served by the MCP server `{ARKO_TOOL_SERVER}`, so you see each as `mcp__{ARKO_TOOL_SERVER}__<name>`: `complete_task` is `mcp__{ARKO_TOOL_SERVER}__complete_task`.\n"
+        ));
+        Ok(prompt)
+    }
+
+    /// Adds a user message to the conversation, with the environment details
+    /// and reminder of every user message; it is sent with the next input.
+    fn add_user_message(&mut self, text: &str) -> Result<(), ArkoAgentsError> {
+        let builder = PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing, None);
+        let number = self.task.user_message_count + 1;
+        let message = builder.augment_user_message(&self.task, text, number, true)?;
+        self.task.conversation.add_user_message(&message);
+        self.task.mark_last_message_runtime();
+        self.task.increment_user_message_count();
+        Ok(())
+    }
+
+    async fn drive(&mut self) -> Result<(), ArkoAgentsError> {
+        loop {
+            match self.task.current_state.clone() {
+                state if state.is_terminal() => return Ok(()),
+                TaskState::AwaitingUserResponse { .. }
+                | TaskState::AwaitingErrorRecoveryApproval { .. }
+                | TaskState::Interrupted { .. } => {
+                    if matches!(self.task.current_state, TaskState::Interrupted { .. }) {
+                        // Running an interrupted task again continues it.
+                        self.set_state(TaskState::InProgress).await?;
+                        continue;
+                    }
+                    if !self.wait_for_decision().await? {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            let session = match self.start_session().await {
+                Ok(session) => session,
+                Err(error) => {
+                    self.pause_on_error(
+                        format!("Claude Code could not start: {error}"),
+                        ErrorRecoveryCause::NonRetryable,
+                    )
+                    .await?;
+                    continue;
+                }
+            };
+            let end = self.drive_session(session).await?;
+            match end {
+                SessionEnd::Stop => return Ok(()),
+                SessionEnd::Wait | SessionEnd::Restart => continue,
+            }
+        }
+    }
+
+    /// Waits for the command that ends an answer or error-recovery wait.
+    /// Returns false when the task stops instead.
+    async fn wait_for_decision(&mut self) -> Result<bool, ArkoAgentsError> {
+        loop {
+            let deadline = self
+                .task
+                .agent_config
+                .user_command_timeout_seconds
+                .filter(|_| !self.host_decisions.get())
+                .map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds));
+            let command = match deadline {
+                Some(deadline) => {
+                    match tokio::time::timeout_at(deadline, self.commands.recv()).await {
+                        Ok(command) => command,
+                        Err(_) => {
+                            self.set_state(TaskState::Interrupted {
+                                reason: "No decision arrived before the command timeout.".into(),
+                            })
+                            .await?;
+                            return Ok(false);
+                        }
+                    }
+                }
+                None => self.commands.recv().await,
+            };
+            let Some(command) = command else {
+                self.set_state(TaskState::Interrupted {
+                    reason: "Command channel disconnected.".into(),
+                })
+                .await?;
+                return Ok(false);
+            };
+            match (self.task.current_state.clone(), command) {
+                (_, UserCommand::InjectContext { content }) => self.queue_context(content),
+                (_, UserCommand::HostDeciding) => {}
+                (_, UserCommand::RequestHandover) => self.note_handover_request().await?,
+                (_, UserCommand::CancelTask) => {
+                    self.set_state(TaskState::Cancelled {
+                        reason: crate::task::CANCELLED_BY_USER.into(),
+                    })
+                    .await?;
+                    return Ok(false);
+                }
+                (_, UserCommand::SuspendTask) => return Ok(false),
+                (
+                    TaskState::AwaitingUserResponse { .. },
+                    UserCommand::SubmitUserResponse { response },
+                ) => {
+                    self.task
+                        .prepare_for_resumption_with_user_response(response)?;
+                    self.emit(AgentEvent::TaskStateChanged(
+                        self.task.current_state.clone(),
+                    ))
+                    .await?;
+                    return Ok(true);
+                }
+                (
+                    TaskState::AwaitingErrorRecoveryApproval {
+                        error_message,
+                        cause,
+                    },
+                    UserCommand::ApproveErrorRecovery { message },
+                ) => {
+                    let mut note = format!(
+                        "The previous attempt failed: {error_message}\nThe user approved continuing."
+                    );
+                    if matches!(cause, ErrorRecoveryCause::Monitor) {
+                        note = CONTINUE.to_string();
+                    }
+                    if let Some(message) = message {
+                        note.push_str(&format!("\n\n{message}"));
+                    }
+                    self.add_user_message(&note)?;
+                    self.set_state(TaskState::InProgress).await?;
+                    return Ok(true);
+                }
+                (
+                    TaskState::AwaitingErrorRecoveryApproval { .. },
+                    UserCommand::ContinueAfterError { note },
+                ) => {
+                    self.add_user_message(note.as_deref().unwrap_or(CONTINUE))?;
+                    self.set_state(TaskState::InProgress).await?;
+                    return Ok(true);
+                }
+                (
+                    TaskState::AwaitingErrorRecoveryApproval { error_message, .. },
+                    UserCommand::RejectErrorRecovery { message },
+                ) => {
+                    self.set_state(TaskState::Failed {
+                        reason: message.unwrap_or_else(|| {
+                            format!("Error recovery rejected by user for error: {error_message}")
+                        }),
+                    })
+                    .await?;
+                    return Ok(false);
+                }
+                (_, other) => log::warn!(
+                    "Task {}: command {:?} doesn't apply while the task is {:?}; ignored.",
+                    self.task.id,
+                    other,
+                    self.task.current_state
+                ),
+            }
+        }
+    }
+
+    fn queue_context(&mut self, content: String) {
+        if !content.trim().is_empty() {
+            self.task.pending_context_injections.push(content);
+        }
+    }
+
+    async fn note_handover_request(&mut self) -> Result<(), ArkoAgentsError> {
+        if self.task.handover_requested.is_some() {
+            return Ok(());
+        }
+        let input_tokens = self.context_size.unwrap_or(0);
+        self.task.handover_requested = Some(HandoverRequest {
+            requested_at: chrono::Utc::now(),
+            input_tokens,
+            report_requested: true,
+        });
+        self.emit(AgentEvent::HandoverRequested { input_tokens })
+            .await
+    }
+
+    fn handover_due(&self) -> bool {
+        self.task.handover_requested.is_some()
+    }
+
+    fn report_request(&self) -> String {
+        self.task
+            .agent_config
+            .handover
+            .as_ref()
+            .map_or(DEFAULT_REPORT_REQUEST, |config| config.report_request())
+            .to_string()
+    }
+
+    /// The context waiting for the model (taken from the channel, and the
+    /// turn context source's), as one context update; `None` while a
+    /// handover report is due, when it waits for the fresh conversation.
+    fn take_context(&mut self) -> Option<String> {
+        if self.handover_due() {
+            return None;
+        }
+        if let Some(content) = self
+            .turn_context
+            .as_ref()
+            .and_then(|source| source.turn_context(self.task.id))
+        {
+            self.queue_context(content);
+        }
+        if self.task.pending_context_injections.is_empty() {
+            return None;
+        }
+        let content = self.task.pending_context_injections.join("\n\n");
+        self.task.pending_context_injections.clear();
+        Some(format!("# Workflow context update\n\n{content}"))
+    }
+
+    fn session_options(
+        &mut self,
+        requests: &mpsc::UnboundedSender<HostRequest>,
+    ) -> cc::ClaudeOptions {
+        let config = self.task.agent_config.clone();
+        let settings = config.claude_code.clone().unwrap_or_default();
+        let generation = &config.llm_config.generation_config;
+        let effort = match &generation.reasoning {
+            Some(ai::ReasoningConfig::Anthropic { effort, .. })
+            | Some(ai::ReasoningConfig::AnthropicAdaptive { effort }) => {
+                effort.map(|effort| match effort {
+                    ai::AnthropicReasoningEffort::Low => cc::Effort::Low,
+                    ai::AnthropicReasoningEffort::Medium => cc::Effort::Medium,
+                    ai::AnthropicReasoningEffort::High => cc::Effort::High,
+                    ai::AnthropicReasoningEffort::XHigh => cc::Effort::XHigh,
+                    ai::AnthropicReasoningEffort::Max => cc::Effort::Max,
+                })
+            }
+            _ => None,
+        };
+        let built_ins: Vec<String> = config
+            .tool_config
+            .available_tool_names
+            .iter()
+            .filter(|name| self.registry.get(name).is_none())
+            .cloned()
+            .collect();
+        let mut cc_settings = serde_json::Map::new();
+        if config.handover.is_some() {
+            // The handover keeps the context small; Claude Code's own
+            // compaction would replace the conversation first.
+            cc_settings.insert("autoCompactEnabled".into(), json!(false));
+        }
+        if generation.anthropic_fast_mode == Some(true) {
+            cc_settings.insert("fastMode".into(), json!(true));
+        }
+        let system = self
+            .task
+            .conversation
+            .system_message
+            .clone()
+            .unwrap_or_default();
+        let host = self.tool_host();
+        let mut server = cc::ToolServer::new(ARKO_TOOL_SERVER);
+        let mut names = self.registry.list_tool_names();
+        names.sort();
+        for name in names {
+            let Some(tool) = self.registry.get(&name) else {
+                continue;
+            };
+            let definition = config
+                .offered_tool_definition(tool.definition())
+                .to_arko_ai_tool_definition();
+            server = server.tool(Arc::new(ServedTool {
+                name: definition.name,
+                description: definition.description,
+                schema: definition.parameters,
+                host: host.clone(),
+            }));
+        }
+        let session = match &self.task.claude_code_session {
+            Some(session) => cc::SessionStart::Resume {
+                session: session.clone(),
+                fork: false,
+            },
+            None => {
+                let id = Uuid::new_v4().to_string();
+                self.task.claude_code_session = Some(id.clone());
+                cc::SessionStart::WithId(id)
+            }
+        };
+        let hook = |event: cc::HookEvent| {
+            let mut hook = cc::Hook::new(
+                event.clone(),
+                None,
+                Arc::new(HookForwarder {
+                    event,
+                    requests: requests.clone(),
+                }),
+            );
+            hook.timeout_seconds = Some(HOOK_TIMEOUT_SECONDS);
+            hook
+        };
+        cc::ClaudeOptions {
+            cli_path: settings.cli_path.clone(),
+            cli_prefix_args: settings.cli_args.clone(),
+            working_directory: Some(self.task.current_working_directory.clone()),
+            model: Some(config.llm_config.model.id.clone()),
+            effort,
+            system_prompt: if settings.replace_system_prompt {
+                cc::SystemPrompt::Replace(system)
+            } else {
+                cc::SystemPrompt::Append(system)
+            },
+            built_in_tools: if built_ins.is_empty() {
+                cc::BuiltInTools::None
+            } else {
+                cc::BuiltInTools::Only(built_ins)
+            },
+            permission_mode: Some(cc::PermissionMode::Default),
+            session,
+            settings: (!cc_settings.is_empty()).then_some(Value::Object(cc_settings)),
+            setting_sources: Some(settings.setting_sources.clone()),
+            env: settings.env.clone().into_iter().collect(),
+            extra_args: if settings.setting_sources.is_empty() {
+                // Only the agent's MCP servers, not the user's.
+                vec!["--strict-mcp-config".into()]
+            } else {
+                Vec::new()
+            },
+            permission_handler: Some(Arc::new(PermissionForwarder {
+                requests: requests.clone(),
+            })),
+            hooks: vec![
+                hook(cc::HookEvent::PreToolUse),
+                hook(cc::HookEvent::PostToolUse),
+            ],
+            tool_servers: vec![Arc::new(server)],
+            ..cc::ClaudeOptions::default()
+        }
+    }
+
+    fn tool_host(&mut self) -> Arc<ToolHost> {
+        if let Some(host) = &self.host {
+            return host.clone();
+        }
+        let host = Arc::new(ToolHost {
+            environment: Arc::new(RunEnvironment {
+                task_id: self.task.id,
+                agent_name: self.task.agent_config.name.clone(),
+                initial_task_prompt: self.task.initial_task_prompt.clone(),
+                working_directory: self.task.current_working_directory.clone(),
+                middleware: self.middleware.clone(),
+            }),
+            config: self.task.agent_config.clone(),
+            registry: self.registry.clone(),
+            interceptor: self.interceptor.take(),
+            admitted: Mutex::default(),
+            outcomes: Mutex::default(),
+        });
+        self.host = Some(host.clone());
+        host
+    }
+
+    async fn start_session(
+        &mut self,
+    ) -> Result<(cc::ClaudeSession, mpsc::UnboundedReceiver<HostRequest>), cc::ClaudeError> {
+        let (requests, receiver) = mpsc::unbounded_channel();
+        let options = self.session_options(&requests);
+        let session = cc::ClaudeSession::start(options).await?;
+        if let Some(tools) = session.initialization().get("tools") {
+            log::debug!("Task {}: Claude Code tools: {tools}", self.task.id);
+        }
+        Ok((session, receiver))
+    }
+
+    /// The task's input the session hasn't received: user messages added
+    /// since it last ran (the task prompt, a follow-up, an answer, a note),
+    /// and context waiting for the model. A resumed session with nothing new
+    /// is asked to continue.
+    fn unsent_input(&mut self) -> Result<String, ArkoAgentsError> {
+        let synced = self
+            .task
+            .claude_code_synced
+            .min(self.task.conversation.messages.len());
+        let mut parts: Vec<String> = self.task.conversation.messages[synced..]
+            .iter()
+            .filter(|message| message.role == ai::Role::User)
+            .map(|message| {
+                message
+                    .content
+                    .iter()
+                    .filter_map(ai::Content::as_text)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|text| !text.trim().is_empty())
+            .collect();
+        if parts.is_empty() {
+            self.add_user_message(CONTINUE)?;
+            parts.push(
+                self.task
+                    .conversation
+                    .messages
+                    .last()
+                    .map(|message| {
+                        message
+                            .content
+                            .iter()
+                            .filter_map(ai::Content::as_text)
+                            .collect::<String>()
+                    })
+                    .unwrap_or_default(),
+            );
+        }
+        if let Some(context) = self.take_context() {
+            self.task.conversation.add_user_message(&context);
+            self.task.increment_user_message_count();
+            parts.push(context);
+        }
+        self.task.claude_code_synced = self.task.conversation.messages.len();
+        Ok(parts.join("\n\n"))
+    }
+
+    /// Sends a user message to the running session and records it.
+    async fn send(
+        &mut self,
+        session: &cc::ClaudeSession,
+        text: &str,
+    ) -> Result<(), cc::ClaudeError> {
+        self.add_user_message(text).ok();
+        self.task.claude_code_synced = self.task.conversation.messages.len();
+        let sent = self
+            .task
+            .conversation
+            .messages
+            .last()
+            .map(|message| {
+                message
+                    .content
+                    .iter()
+                    .filter_map(ai::Content::as_text)
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        session.send(sent).await
+    }
+
+    async fn drive_session(
+        &mut self,
+        (mut session, mut requests): (cc::ClaudeSession, mpsc::UnboundedReceiver<HostRequest>),
+    ) -> Result<SessionEnd, ArkoAgentsError> {
+        let input = self.unsent_input()?;
+        if let Err(error) = session.send(input).await {
+            let end = self.session_failed(error.to_string()).await?;
+            let _ = session.close().await;
+            return Ok(end);
+        }
+        self.questions = None;
+        let end = loop {
+            let approval_deadline = self
+                .approval
+                .as_ref()
+                .and_then(|approval| approval.deadline);
+            tokio::select! {
+                biased;
+                command = self.commands.recv() => {
+                    self.handle_command(command, &session).await?;
+                }
+                Some(request) = requests.recv() => {
+                    self.handle_request(request, &session).await?;
+                }
+                _ = sleep_until(approval_deadline), if approval_deadline.is_some() => {
+                    self.approval_timed_out().await?;
+                }
+                message = session.next_message() => match message {
+                    None => {
+                        if self.task.current_state.is_terminal() || self.stopping.is_some() {
+                            break SessionEnd::Stop;
+                        }
+                        break self.session_failed("Claude Code exited during the turn.".into()).await?;
+                    }
+                    Some(cc::Message::Result(result)) => {
+                        if let Some(end) = self.turn_ended(&result, &session).await? {
+                            break end;
+                        }
+                    }
+                    Some(message) => self.handle_message(message, &session).await?,
+                },
+            }
+        };
+        // Late hook requests get their stopping answer.
+        drop(requests);
+        if let Some(approval) = self.approval.take() {
+            let _ = approval
+                .reply
+                .send(cc::PermissionDecision::deny("The agent is stopping."));
+        }
+        if let Err(error) = session.close().await {
+            log::warn!("Task {}: closing Claude Code: {error}", self.task.id);
+        }
+        Ok(end)
+    }
+
+    async fn handle_command(
+        &mut self,
+        command: Option<UserCommand>,
+        session: &cc::ClaudeSession,
+    ) -> Result<(), ArkoAgentsError> {
+        let stop = |this: &mut Self, stopping| {
+            if this.stopping.is_none() {
+                this.stopping = Some(stopping);
+            }
+        };
+        match command {
+            Some(UserCommand::InjectContext { content }) => self.queue_context(content),
+            Some(UserCommand::RequestHandover) => self.note_handover_request().await?,
+            Some(UserCommand::HostDeciding) => {
+                if let Some(approval) = &mut self.approval {
+                    approval.deadline = None;
+                }
+            }
+            Some(UserCommand::ApproveToolUse {
+                tool_call_id,
+                custom_tool_output,
+                message_to_agent,
+            }) => {
+                self.decide_approval(
+                    tool_call_id,
+                    true,
+                    custom_tool_output,
+                    message_to_agent,
+                    None,
+                )
+                .await?
+            }
+            Some(UserCommand::RejectToolUse {
+                tool_call_id,
+                reason,
+            }) => {
+                self.decide_approval(tool_call_id, false, None, None, reason)
+                    .await?
+            }
+            Some(UserCommand::SubmitBatchToolApprovals { decisions, .. }) => {
+                if let Some(id) = self.approval.as_ref().map(|approval| approval.id)
+                    && let Some(decision) = decisions.get(&id).cloned()
+                {
+                    match decision {
+                        super::command::ToolApprovalDecision::Approve {
+                            custom_tool_output,
+                            message_to_agent,
+                        } => {
+                            self.decide_approval(
+                                id,
+                                true,
+                                custom_tool_output,
+                                message_to_agent,
+                                None,
+                            )
+                            .await?
+                        }
+                        super::command::ToolApprovalDecision::Reject { reason } => {
+                            self.decide_approval(id, false, None, None, reason).await?
+                        }
+                    }
+                }
+            }
+            Some(UserCommand::CancelTask) => {
+                stop(self, Stopping::Cancel);
+                self.set_state(TaskState::Cancelled {
+                    reason: crate::task::CANCELLED_BY_USER.into(),
+                })
+                .await?;
+                let _ = session.interrupt().await;
+            }
+            Some(UserCommand::SuspendTask) => {
+                stop(self, Stopping::Suspend);
+                let _ = session.interrupt().await;
+            }
+            None => {
+                stop(self, Stopping::Closed);
+                self.set_state(TaskState::Interrupted {
+                    reason: "Command channel disconnected.".into(),
+                })
+                .await?;
+                let _ = session.interrupt().await;
+            }
+            Some(other) => log::warn!(
+                "Task {}: command {:?} doesn't apply while Claude Code runs; ignored.",
+                self.task.id,
+                other
+            ),
+        }
+        Ok(())
+    }
+
+    async fn handle_request(
+        &mut self,
+        request: HostRequest,
+        session: &cc::ClaudeSession,
+    ) -> Result<(), ArkoAgentsError> {
+        match request {
+            HostRequest::PreToolUse {
+                tool_use_id,
+                tool_name,
+                input,
+                reply,
+            } => {
+                let answer = self.gate(tool_use_id, &tool_name, input, session).await?;
+                let _ = reply.send(answer);
+            }
+            HostRequest::Permission { request, reply } => {
+                self.permission(request, reply).await?;
+            }
+            HostRequest::PostToolUse {
+                tool_use_id,
+                tool_name,
+                response,
+                reply,
+            } => {
+                let answer = self.after_tool(tool_use_id, &tool_name, response).await?;
+                let _ = reply.send(answer);
+            }
+        }
+        Ok(())
+    }
+
+    /// Every tool call's first check: the gate allows it, rejects it (the
+    /// reason is its result), or sends it to a permission request that
+    /// waits for approval.
+    async fn gate(
+        &mut self,
+        tool_use_id: Option<String>,
+        served: &str,
+        input: Value,
+        session: &cc::ClaudeSession,
+    ) -> Result<Value, ArkoAgentsError> {
+        let (name, built_in) = match arko_name(served) {
+            Some(name) => (name.to_string(), false),
+            None => (served.to_string(), true),
+        };
+        let id = Uuid::new_v4();
+        let params = params_of(&input);
+        let record = ai::ToolCall {
+            id: tool_use_id.clone(),
+            name: name.clone(),
+            arguments: input.clone(),
+            thought_signature: None,
+            provider_id: None,
+            invalid_arguments: None,
+        };
+        if let Some(tool_use_id) = &tool_use_id {
+            self.calls.insert(
+                tool_use_id.clone(),
+                Call {
+                    id,
+                    name: name.clone(),
+                    built_in,
+                    record,
+                    input: input.clone(),
+                },
+            );
+        }
+        self.emit(AgentEvent::ToolCallFormatted {
+            tool_call_id: id,
+            tool_name: name.clone(),
+            parameters: params.clone(),
+        })
+        .await?;
+        if matches!(self.task.current_state, TaskState::Completed { .. }) || self.stopping.is_some()
+        {
+            return self.reject_call(id, &name, TASK_COMPLETE.to_string()).await;
+        }
+        if self.handover_due() && name != COMPLETE_TASK_TOOL_NAME {
+            self.report_delivered = true;
+            let request = self.report_request();
+            return self.reject_call(id, &name, request).await;
+        }
+        let offered = if built_in {
+            self.task
+                .agent_config
+                .tool_config
+                .available_tool_names
+                .contains(&name)
+        } else {
+            self.registry.get(&name).is_some()
+        };
+        if !offered {
+            return self
+                .reject_call(id, &name, format!("Tool '{name}' is not available."))
+                .await;
+        }
+        // The workspace path policy.
+        let path_params: Vec<String> = if built_in {
+            built_in_path_parameters(&name)
+                .iter()
+                .map(|param| param.to_string())
+                .collect()
+        } else {
+            self.registry
+                .get(&name)
+                .map(|tool| {
+                    tool.definition()
+                        .parameters
+                        .into_iter()
+                        .filter(|param| param.is_path)
+                        .map(|param| param.name)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let mut outside = None;
+        for param in path_params {
+            let Some(path) = params.get(&param).and_then(Value::as_str) else {
+                continue;
+            };
+            if path.is_empty() {
+                continue;
+            }
+            match crate::utils::is_path_in_workspace(path, &self.task.current_working_directory) {
+                Ok(true) => {}
+                Ok(false) => match self.task.agent_config.get_path_safety_policy(&name) {
+                    PathSafetyPolicy::AutoReject => {
+                        let reason =
+                            format!("Path for parameter '{param}' is outside the workspace.");
+                        return self.reject_call(id, &name, reason).await;
+                    }
+                    PathSafetyPolicy::RequireApproval => {
+                        outside = Some(param);
+                        break;
+                    }
+                    PathSafetyPolicy::AutoApprove => {}
+                },
+                Err(error) => {
+                    let reason = format!("Path validation failed for parameter '{param}': {error}");
+                    return self.reject_call(id, &name, reason).await;
+                }
+            }
+        }
+        let needs_approval = !self.task.agent_config.should_auto_approve_tool(&name);
+        if needs_approval || outside.is_some() {
+            // The permission request that follows waits for approval.
+            return Ok(ask_tool());
+        }
+        self.admit(&name, built_in, id, &input, None, session).await
+    }
+
+    async fn reject_call(
+        &self,
+        id: Uuid,
+        name: &str,
+        reason: String,
+    ) -> Result<Value, ArkoAgentsError> {
+        self.emit(AgentEvent::ToolRejected {
+            tool_call_id: id,
+            tool_name: name.to_string(),
+            reason: Some(reason.clone()),
+        })
+        .await?;
+        Ok(cc::Hook::deny_tool(reason))
+    }
+
+    /// An approved (or auto-approved) call: a built-in passes the
+    /// middleware's `before`; an arko call is admitted for its MCP call,
+    /// where the middleware runs.
+    async fn admit(
+        &mut self,
+        name: &str,
+        built_in: bool,
+        id: Uuid,
+        input: &Value,
+        custom_output: Option<String>,
+        session: &cc::ClaudeSession,
+    ) -> Result<Value, ArkoAgentsError> {
+        if !built_in {
+            self.tool_host()
+                .admitted
+                .lock()
+                .unwrap()
+                .entry(input_key(name, input))
+                .or_default()
+                .push_back(Admitted { id, custom_output });
+            return Ok(allow_tool());
+        }
+        if let Some(output) = custom_output {
+            // Claude Code runs a built-in itself: output the host supplies
+            // is its result instead of running it.
+            return Ok(cc::Hook::deny_tool(output));
+        }
+        let Some(middleware) = self.middleware.clone() else {
+            return Ok(allow_tool());
+        };
+        let params = params_of(input);
+        let execution = ToolExecutionContext {
+            task_id: self.task.id,
+            agent_name: &self.task.agent_config.name,
+            initial_task_prompt: &self.task.initial_task_prompt,
+            current_working_directory: &self.task.current_working_directory,
+        };
+        let call = ToolCallContext {
+            tool_call_id: id,
+            tool_name: name,
+            parameters: &params,
+        };
+        let decision = middleware.before(&execution, &call).await;
+        let (answer, event_reason) = match decision {
+            Ok(ToolExecutionDecision::Continue) => return Ok(allow_tool()),
+            Ok(ToolExecutionDecision::Reject { message_to_agent }) => (
+                cc::Hook::deny_tool(message_to_agent.clone()),
+                message_to_agent,
+            ),
+            Ok(ToolExecutionDecision::FailTask { reason }) => {
+                self.set_state(TaskState::Failed {
+                    reason: reason.clone(),
+                })
+                .await?;
+                let _ = session.interrupt().await;
+                (cc::Hook::deny_tool(reason.clone()), reason)
+            }
+            Ok(ToolExecutionDecision::CancelTask { reason }) => {
+                self.set_state(TaskState::Cancelled {
+                    reason: reason.clone(),
+                })
+                .await?;
+                let _ = session.interrupt().await;
+                (cc::Hook::deny_tool(reason.clone()), reason)
+            }
+            Ok(ToolExecutionDecision::PauseTask {
+                message_to_agent,
+                reason,
+            }) => {
+                self.pause_after_turn = Some((reason, ErrorRecoveryCause::Middleware));
+                let _ = session.interrupt().await;
+                (
+                    cc::Hook::deny_tool(message_to_agent.clone()),
+                    message_to_agent,
+                )
+            }
+            Err(error) => {
+                let reason = format!("The execution middleware failed before '{name}': {error}");
+                self.pause_after_turn = Some((reason.clone(), ErrorRecoveryCause::Middleware));
+                let _ = session.interrupt().await;
+                (cc::Hook::deny_tool(reason.clone()), reason)
+            }
+        };
+        self.emit(AgentEvent::ToolRejected {
+            tool_call_id: id,
+            tool_name: name.to_string(),
+            reason: Some(event_reason),
+        })
+        .await?;
+        Ok(answer)
+    }
+
+    /// A permission request: the gate asked for approval (or Claude Code
+    /// asks about a call the gate didn't see). The call waits for the host's
+    /// decision.
+    async fn permission(
+        &mut self,
+        request: cc::PermissionRequest,
+        reply: oneshot::Sender<cc::PermissionDecision>,
+    ) -> Result<(), ArkoAgentsError> {
+        let known = request
+            .tool_use_id
+            .as_ref()
+            .and_then(|tool_use_id| self.calls.get(tool_use_id))
+            .map(|call| (call.id, call.name.clone(), call.built_in));
+        let Some((id, name, built_in)) = known else {
+            // Not gated (an unexpected request): refused.
+            let _ = reply.send(cc::PermissionDecision::deny(
+                "This call did not pass the host's checks, so it was not run.",
+            ));
+            return Ok(());
+        };
+        let config = &self.task.agent_config;
+        let params = params_of(&request.input);
+        let description = if built_in {
+            format!("Claude Code's {name} tool.")
+        } else {
+            self.registry
+                .get(&name)
+                .map(|tool| tool.definition().description)
+                .unwrap_or_default()
+        };
+        let outside = if built_in {
+            built_in_path_parameters(&name)
+                .iter()
+                .find(|param| {
+                    params
+                        .get(**param)
+                        .and_then(Value::as_str)
+                        .is_some_and(|path| {
+                            matches!(
+                                crate::utils::is_path_in_workspace(
+                                    path,
+                                    &self.task.current_working_directory,
+                                ),
+                                Ok(false)
+                            )
+                        })
+                })
+                .map(|param| param.to_string())
+        } else {
+            None
+        };
+        let reason = ApprovalReason {
+            tool_not_auto_approved: !config.should_auto_approve_tool(&name),
+            path_outside_workspace: outside,
+        };
+        let deadline = config
+            .user_command_timeout_seconds
+            .filter(|_| !self.host_decisions.get())
+            .map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds));
+        self.approval = Some(Approval {
+            tool_use_id: request.tool_use_id.clone(),
+            id,
+            name: name.clone(),
+            input: request.input.clone(),
+            reply,
+            deadline,
+        });
+        self.emit(AgentEvent::ToolCallAwaitingApproval {
+            tool_call_id: id,
+            tool_name: name.clone(),
+            parameters: params.clone(),
+            tool_description: description.clone(),
+            approval_reason: reason.clone(),
+        })
+        .await?;
+        self.set_state(TaskState::AwaitingToolApproval {
+            tool_call_id: id,
+            tool_name: name,
+            parameters: params,
+            tool_description: description,
+            approval_reason: reason,
+        })
+        .await
+    }
+
+    async fn decide_approval(
+        &mut self,
+        id: Uuid,
+        approve: bool,
+        custom_output: Option<String>,
+        message_to_agent: Option<String>,
+        reason: Option<String>,
+    ) -> Result<(), ArkoAgentsError> {
+        if self
+            .approval
+            .as_ref()
+            .is_none_or(|approval| approval.id != id)
+        {
+            log::warn!(
+                "Task {}: no call {id} awaits approval; ignored.",
+                self.task.id
+            );
+            return Ok(());
+        }
+        let approval = self.approval.take().expect("checked");
+        self.set_state(TaskState::InProgress).await?;
+        if !approve {
+            let reason = reason.unwrap_or_else(|| "The user rejected this call.".into());
+            self.emit(AgentEvent::ToolRejected {
+                tool_call_id: id,
+                tool_name: approval.name.clone(),
+                reason: Some(reason.clone()),
+            })
+            .await?;
+            let _ = approval.reply.send(cc::PermissionDecision::deny(reason));
+            return Ok(());
+        }
+        if let (Some(tool_use_id), Some(message)) = (&approval.tool_use_id, message_to_agent) {
+            self.after_result.insert(
+                tool_use_id.clone(),
+                format!("Message from user on approval:\n{message}"),
+            );
+        }
+        let built_in = self
+            .calls
+            .values()
+            .find(|call| call.id == id)
+            .is_some_and(|call| call.built_in);
+        let decision = if built_in {
+            match custom_output {
+                Some(output) => cc::PermissionDecision::deny(output),
+                None => cc::PermissionDecision::allow(),
+            }
+        } else {
+            self.tool_host()
+                .admitted
+                .lock()
+                .unwrap()
+                .entry(input_key(&approval.name, &approval.input))
+                .or_default()
+                .push_back(Admitted { id, custom_output });
+            cc::PermissionDecision::allow()
+        };
+        let _ = approval.reply.send(decision);
+        Ok(())
+    }
+
+    async fn approval_timed_out(&mut self) -> Result<(), ArkoAgentsError> {
+        let Some(approval) = self.approval.take() else {
+            return Ok(());
+        };
+        let seconds = self
+            .task
+            .agent_config
+            .user_command_timeout_seconds
+            .unwrap_or_default();
+        let reason = format!(
+            "Human approval timed out after {seconds} seconds, so this call was not run. You can call it again if it is still needed."
+        );
+        self.emit(AgentEvent::ToolRejected {
+            tool_call_id: approval.id,
+            tool_name: approval.name.clone(),
+            reason: Some(reason.clone()),
+        })
+        .await?;
+        let _ = approval.reply.send(cc::PermissionDecision::deny(reason));
+        self.set_state(TaskState::InProgress).await
+    }
+
+    /// After a call ran: the middleware's `after` for a built-in, and
+    /// context for the model with the result.
+    async fn after_tool(
+        &mut self,
+        tool_use_id: Option<String>,
+        _served: &str,
+        response: Value,
+    ) -> Result<Value, ArkoAgentsError> {
+        let call = tool_use_id.as_ref().and_then(|id| self.calls.get(id));
+        if let (Some(call), Some(middleware)) = (call, self.middleware.clone())
+            && call.built_in
+        {
+            let params = params_of(&call.input);
+            let output = match &response {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            let execution = ToolExecutionContext {
+                task_id: self.task.id,
+                agent_name: &self.task.agent_config.name,
+                initial_task_prompt: &self.task.initial_task_prompt,
+                current_working_directory: &self.task.current_working_directory,
+            };
+            let context = ToolCallContext {
+                tool_call_id: call.id,
+                tool_name: &call.name,
+                parameters: &params,
+            };
+            if let Err(error) = middleware
+                .after(&execution, &context, ToolExecutionOutcome::Success(&output))
+                .await
+            {
+                self.pause_after_turn = Some((
+                    format!(
+                        "The execution middleware failed after '{}': {error}",
+                        call.name
+                    ),
+                    ErrorRecoveryCause::Middleware,
+                ));
+            }
+        }
+        let mut texts = Vec::new();
+        if let Some(message) = tool_use_id.and_then(|id| self.after_result.remove(&id)) {
+            texts.push(message);
+        }
+        if let Some(context) = self.take_context() {
+            texts.push(context);
+        }
+        if texts.is_empty() {
+            return Ok(cc::Hook::proceed());
+        }
+        let text = texts.join("\n\n");
+        self.delivered_context.push(text.clone());
+        Ok(add_context(&text))
+    }
+
+    /// A message the session reported.
+    async fn handle_message(
+        &mut self,
+        message: cc::Message,
+        session: &cc::ClaudeSession,
+    ) -> Result<(), ArkoAgentsError> {
+        match message {
+            cc::Message::Assistant(assistant) => {
+                self.record_usage(&assistant).await?;
+                // A subagent's messages are its own conversation.
+                if assistant.parent_tool_use_id.is_some() {
+                    return Ok(());
+                }
+                let mut text = String::new();
+                let mut calls = Vec::new();
+                for block in &assistant.content {
+                    match block {
+                        cc::ContentBlock::Text(chunk) => {
+                            self.emit(AgentEvent::AssistantResponseChunk(chunk.clone()))
+                                .await?;
+                            text.push_str(chunk);
+                        }
+                        cc::ContentBlock::Thinking(thinking) if !thinking.is_empty() => {
+                            self.emit(AgentEvent::ReasoningChunk(thinking.clone()))
+                                .await?;
+                        }
+                        cc::ContentBlock::ToolUse { id, name, input } => {
+                            let name = arko_name(name).unwrap_or(name).to_string();
+                            calls.push(ai::ToolCall {
+                                id: Some(id.clone()),
+                                name,
+                                arguments: input.clone(),
+                                thought_signature: None,
+                                provider_id: None,
+                                invalid_arguments: None,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                if !text.is_empty() || !calls.is_empty() {
+                    let mut message = ai::Message::new_assistant(&text);
+                    message.tool_calls = calls;
+                    self.commit(message);
+                }
+                self.check_handover_threshold().await?;
+            }
+            cc::Message::User(user) if user.parent_tool_use_id.is_none() => {
+                let mut results = Vec::new();
+                for block in &user.content {
+                    let cc::ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } = block
+                    else {
+                        continue;
+                    };
+                    let text = result_text(content);
+                    let Some(call) = self.calls.get(tool_use_id) else {
+                        continue;
+                    };
+                    let (id, name, record) = (call.id, call.name.clone(), call.record.clone());
+                    results.push(if *is_error {
+                        ai::ToolResult::error_from_tool_call(&record, &text)
+                    } else {
+                        ai::ToolResult::from_tool_call(&record, &text)
+                    });
+                    self.call_finished(id, &name, &text, *is_error, session)
+                        .await?;
+                }
+                if !results.is_empty() {
+                    self.task.conversation.add_tool_results(results);
+                    self.observe_last();
+                    for context in std::mem::take(&mut self.delivered_context) {
+                        self.task.conversation.add_user_message(&context);
+                        self.task.increment_user_message_count();
+                        self.observe_last();
+                    }
+                    self.task.claude_code_synced = self.task.conversation.messages.len();
+                }
+            }
+            cc::Message::System(system) if system.subtype == "compact_boundary" => {
+                log::warn!(
+                    "Task {}: Claude Code compacted the conversation; the task's record keeps the full conversation.",
+                    self.task.id
+                );
+            }
+            cc::Message::System(system) if system.subtype == "api_retry" => {
+                log::info!("Task {}: Claude Code is retrying a request.", self.task.id);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn commit(&mut self, message: ai::Message) {
+        self.task.conversation.messages.push(message);
+        self.observe_last();
+        self.task.claude_code_synced = self.task.conversation.messages.len();
+    }
+
+    /// Tools that track what the conversation holds observe each message.
+    fn observe_last(&self) {
+        let Some(message) = self.task.conversation.messages.last() else {
+            return;
+        };
+        for name in self.registry.list_tool_names() {
+            if let Some(tool) = self.registry.get(&name) {
+                tool.observe_context(self.task.id, message);
+            }
+        }
+    }
+
+    /// A call's result arrived: its events, and what its outcome does to the
+    /// task.
+    async fn call_finished(
+        &mut self,
+        id: Uuid,
+        name: &str,
+        text: &str,
+        is_error: bool,
+        session: &cc::ClaudeSession,
+    ) -> Result<(), ArkoAgentsError> {
+        let outcome = self
+            .host
+            .as_ref()
+            .and_then(|host| host.outcomes.lock().unwrap().remove(&id));
+        match outcome {
+            // A built-in, or a call the gate refused.
+            None => {
+                self.emit(AgentEvent::ToolResult {
+                    tool_call_id: id,
+                    tool_name: name.to_string(),
+                    output: text.to_string(),
+                })
+                .await?;
+                let _ = is_error;
+            }
+            Some(CallOutcome::Finished {
+                raw,
+                effective,
+                intercepted,
+            }) => {
+                self.emit(AgentEvent::ToolResult {
+                    tool_call_id: id,
+                    tool_name: name.to_string(),
+                    output: raw.clone(),
+                })
+                .await?;
+                if intercepted && raw != effective {
+                    self.emit(AgentEvent::ToolResultIntercepted {
+                        tool_call_id: id,
+                        tool_name: name.to_string(),
+                        original_output: raw.clone(),
+                        intercepted_output: effective,
+                    })
+                    .await?;
+                }
+                if name == ASK_USER_TOOL_NAME {
+                    self.questions = Some(raw);
+                } else if name == COMPLETE_TASK_TOOL_NAME && !self.task.current_state.is_terminal()
+                {
+                    self.set_state(TaskState::Completed { summary: raw })
+                        .await?;
+                    // Its turn ends here.
+                    let _ = session.interrupt().await;
+                }
+            }
+            Some(CallOutcome::Rejected(reason)) => {
+                self.emit(AgentEvent::ToolRejected {
+                    tool_call_id: id,
+                    tool_name: name.to_string(),
+                    reason: Some(reason),
+                })
+                .await?;
+            }
+            Some(CallOutcome::Failed(error)) => {
+                self.emit(AgentEvent::ErrorEncountered {
+                    error_message: error.clone(),
+                    requires_approval_to_retry: false,
+                    tool_call_id: Some(id),
+                })
+                .await?;
+                match self
+                    .task
+                    .agent_config
+                    .error_recovery_config
+                    .on_tool_execution_error
+                {
+                    ToolErrorPolicy::InformAgentAndContinue => {}
+                    ToolErrorPolicy::PauseAndAwaitApproval => {
+                        self.pause_after_turn = Some((error, ErrorRecoveryCause::ToolError));
+                        let _ = session.interrupt().await;
+                    }
+                    ToolErrorPolicy::FailTask => {
+                        self.set_state(TaskState::Failed { reason: error }).await?;
+                        let _ = session.interrupt().await;
+                    }
+                }
+            }
+            Some(CallOutcome::Stop { reason, cancel }) => {
+                self.emit(AgentEvent::ToolRejected {
+                    tool_call_id: id,
+                    tool_name: name.to_string(),
+                    reason: Some(reason.clone()),
+                })
+                .await?;
+                if !self.task.current_state.is_terminal() {
+                    self.set_state(if cancel {
+                        TaskState::Cancelled { reason }
+                    } else {
+                        TaskState::Failed { reason }
+                    })
+                    .await?;
+                }
+                let _ = session.interrupt().await;
+            }
+            Some(CallOutcome::Pause { message, reason }) => {
+                self.emit(AgentEvent::ToolRejected {
+                    tool_call_id: id,
+                    tool_name: name.to_string(),
+                    reason: Some(message),
+                })
+                .await?;
+                self.pause_after_turn = Some((reason, ErrorRecoveryCause::Middleware));
+                let _ = session.interrupt().await;
+            }
+        }
+        Ok(())
+    }
+
+    /// Records an assistant message's usage once per response. The main
+    /// conversation's requests set the context size a handover checks.
+    async fn record_usage(
+        &mut self,
+        assistant: &cc::AssistantMessage,
+    ) -> Result<(), ArkoAgentsError> {
+        let Some(usage) = &assistant.usage else {
+            return Ok(());
+        };
+        let key = assistant
+            .raw
+            .pointer("/message/id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        if !self.counted.insert(key.clone()) {
+            return Ok(());
+        }
+        let count = |field: &str| usage.get(field).and_then(Value::as_u64).unwrap_or(0) as usize;
+        let cache_read = count("cache_read_input_tokens");
+        let cache_write = count("cache_creation_input_tokens");
+        let input = count("input_tokens") + cache_read + cache_write;
+        let output = count("output_tokens");
+        let model = self.task.agent_config.llm_config.model.clone();
+        let mut info = ai::UsageInfo::new(input, output)
+            .with_cached_tokens(cache_read)
+            .with_cache_write_tokens(cache_write);
+        info.calculate_cost(
+            &model,
+            Some(&self.task.agent_config.llm_config.generation_config),
+        );
+        let info = info.with_billing(ai::BillingKind::Subscription);
+        self.task.usage_history.push(info.clone());
+        self.emit(AgentEvent::UsageReported(info)).await?;
+        let served = assistant.model.clone().unwrap_or_else(|| model.id.clone());
+        let call = ai::ModelCallUsage::new(
+            key,
+            ai::Provider::ClaudeCode.as_telemetry_str().to_string(),
+            served,
+            input,
+            output,
+            model.max_input_tokens,
+        );
+        let call = self.task.record_model_call_usage(call);
+        self.emit(AgentEvent::ModelCallUsageReported(call)).await?;
+        if assistant.parent_tool_use_id.is_none() {
+            self.context_size = Some(input);
+            self.first_context_size.get_or_insert(input);
+        }
+        Ok(())
+    }
+
+    /// After a request of the main conversation: a handover starts once its
+    /// input reaches the threshold. The report request reaches the model as
+    /// the result of its next tool call, or as a message when its turn ends.
+    async fn check_handover_threshold(&mut self) -> Result<(), ArkoAgentsError> {
+        if self.handover_due() {
+            return Ok(());
+        }
+        let config = &self.task.agent_config;
+        let Some(threshold) = config
+            .handover
+            .as_ref()
+            .and_then(|handover| handover.threshold(config.llm_config.model.max_input_tokens))
+        else {
+            return Ok(());
+        };
+        let Some(size) = self.context_size.filter(|size| *size >= threshold) else {
+            return Ok(());
+        };
+        if self
+            .first_context_size
+            .is_some_and(|first| first >= threshold)
+        {
+            if !std::mem::replace(&mut self.handover_skip_warned, true) {
+                log::warn!(
+                    "Task {}: No handover: the conversation's first request was already over the handover threshold ({threshold}).",
+                    self.task.id
+                );
+            }
+            return Ok(());
+        }
+        self.task.handover_requested = Some(HandoverRequest {
+            requested_at: chrono::Utc::now(),
+            input_tokens: size,
+            report_requested: true,
+        });
+        log::info!(
+            "Task {}: Handover requested at {size} input tokens.",
+            self.task.id
+        );
+        self.emit(AgentEvent::HandoverRequested { input_tokens: size })
+            .await
+    }
+
+    /// A turn ended. Returns how the session ends, or `None` to go on.
+    async fn turn_ended(
+        &mut self,
+        result: &cc::ResultMessage,
+        session: &cc::ClaudeSession,
+    ) -> Result<Option<SessionEnd>, ArkoAgentsError> {
+        if let Some(stopping) = self.stopping {
+            let _ = stopping;
+            return Ok(Some(SessionEnd::Stop));
+        }
+        if self.task.current_state.is_terminal() {
+            return Ok(Some(SessionEnd::Stop));
+        }
+        if let Some((reason, cause)) = self.pause_after_turn.take() {
+            self.pause(reason, cause).await?;
+            return Ok(Some(SessionEnd::Wait));
+        }
+        if let Some(questions) = self.questions.take() {
+            self.set_state(TaskState::AwaitingUserResponse {
+                questions: questions.clone(),
+            })
+            .await?;
+            self.emit(AgentEvent::UserQuestionsAsked { questions })
+                .await?;
+            return Ok(Some(SessionEnd::Wait));
+        }
+        if result.is_error {
+            let message = result
+                .result
+                .clone()
+                .unwrap_or_else(|| format!("Claude Code ended the turn with {}", result.subtype));
+            return self.session_failed(message).await.map(Some);
+        }
+        if self.handover_due() {
+            if !self.report_delivered {
+                self.report_delivered = true;
+                let request = self.report_request();
+                if let Err(error) = self.send(session, &request).await {
+                    return self.session_failed(error.to_string()).await.map(Some);
+                }
+                return Ok(None);
+            }
+            let report = result.result.clone().unwrap_or_default();
+            if report.trim().is_empty() {
+                if let Err(error) = self.send(session, NO_HANDOVER_REPORT).await {
+                    return self.session_failed(error.to_string()).await.map(Some);
+                }
+                return Ok(None);
+            }
+            self.complete_handover(report).await?;
+            return Ok(Some(SessionEnd::Restart));
+        }
+        self.open_turns += 1;
+        if self.open_turns > MAX_OPEN_TURNS {
+            self.set_state(TaskState::Interrupted {
+                reason: format!(
+                    "{MAX_OPEN_TURNS} turns in a row ended without calling complete_task."
+                ),
+            })
+            .await?;
+            return Ok(Some(SessionEnd::Stop));
+        }
+        let mut note = OPEN_TURN_NOTE.to_string();
+        if let Some(context) = self.take_context() {
+            note.push_str("\n\n");
+            note.push_str(&context);
+        }
+        if let Err(error) = self.send(session, &note).await {
+            return self.session_failed(error.to_string()).await.map(Some);
+        }
+        Ok(None)
+    }
+
+    /// The session failed (it exited, or a turn ended in an error Claude
+    /// Code's own retries didn't recover from): the error policy decides.
+    async fn session_failed(&mut self, message: String) -> Result<SessionEnd, ArkoAgentsError> {
+        if self.stopping.is_some() || self.task.current_state.is_terminal() {
+            return Ok(SessionEnd::Stop);
+        }
+        self.pause_on_error(
+            message,
+            ErrorRecoveryCause::RetriesExhausted {
+                retry_after_ms: None,
+            },
+        )
+        .await?;
+        Ok(
+            if matches!(self.task.current_state, TaskState::Interrupted { .. }) {
+                SessionEnd::Stop
+            } else {
+                SessionEnd::Wait
+            },
+        )
+    }
+
+    /// Pauses for an error-recovery decision under a pausing error policy,
+    /// or returns the task interrupted under the others.
+    async fn pause_on_error(
+        &mut self,
+        message: String,
+        cause: ErrorRecoveryCause,
+    ) -> Result<(), ArkoAgentsError> {
+        log::warn!("Task {}: {message}", self.task.id);
+        let pausing = matches!(
+            self.task.agent_config.llm_error_policy,
+            LLMErrorPolicy::PauseAndAwaitApproval
+                | LLMErrorPolicy::RetryThenPauseAndAwaitApproval { .. }
+        );
+        self.emit(AgentEvent::ErrorEncountered {
+            error_message: message.clone(),
+            requires_approval_to_retry: pausing,
+            tool_call_id: None,
+        })
+        .await?;
+        if pausing {
+            self.pause(message, cause).await
+        } else {
+            self.set_state(TaskState::Interrupted { reason: message })
+                .await
+        }
+    }
+
+    async fn pause(
+        &mut self,
+        message: String,
+        cause: ErrorRecoveryCause,
+    ) -> Result<(), ArkoAgentsError> {
+        self.set_state(TaskState::AwaitingErrorRecoveryApproval {
+            error_message: message,
+            cause,
+        })
+        .await
+    }
+
+    /// The report arrived: a fresh session starts from the seed and the
+    /// report, in the same task.
+    async fn complete_handover(&mut self, report: String) -> Result<(), ArkoAgentsError> {
+        let report = report.trim().to_string();
+        let seed = match &self.handover_hook {
+            Some(hook) => hook.on_handover(&self.task, &report),
+            None => HandoverSeed::for_task(&self.task),
+        };
+        let input_tokens = self
+            .task
+            .handover_requested
+            .take()
+            .map_or(0, |request| request.input_tokens);
+        let replaced_messages = self.task.start_fresh_conversation();
+        self.task.handovers.push(HandoverRecord {
+            at: chrono::Utc::now(),
+            input_tokens,
+            replaced_messages,
+            report: report.clone(),
+        });
+        let builder = PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing, None);
+        let first = builder.format_initial_task_prompt(&self.task, &seed.message(&report))?;
+        self.task.conversation.add_user_message(&first);
+        self.task.increment_user_message_count();
+        // The next session is a new Claude Code conversation.
+        self.task.claude_code_session = None;
+        self.task.claude_code_synced = 0;
+        for name in self.registry.list_tool_names() {
+            if let Some(tool) = self.registry.get(&name) {
+                tool.reset_context(self.task.id);
+            }
+        }
+        self.calls.clear();
+        self.counted.clear();
+        self.context_size = None;
+        self.first_context_size = None;
+        self.report_delivered = false;
+        self.open_turns = 0;
+        self.handover_skip_warned = false;
+        log::info!(
+            "Task {}: Conversation handed over ({replaced_messages} messages replaced).",
+            self.task.id
+        );
+        let handovers = self.task.handovers.len();
+        self.emit(AgentEvent::ConversationHandedOver {
+            report,
+            input_tokens,
+            handovers,
+        })
+        .await
+    }
+}
+
+/// A tool result's text, from its content (a string or text blocks).
+fn result_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+async fn sleep_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+#[cfg(test)]
+#[path = "claude_code_tests.rs"]
+mod tests;

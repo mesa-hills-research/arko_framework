@@ -14,6 +14,7 @@ use crate::task::Task;
 use crate::tool::{InterceptorConfig, ToolExecutionMiddleware, ToolRegistry};
 use arko_ai::LLMClient;
 
+mod claude_code;
 pub mod command;
 pub mod event;
 mod r#loop;
@@ -128,6 +129,23 @@ impl AgentRuntime {
         let (event_sender, event_receiver) = mpsc::channel(DEFAULT_EVENT_CHANNEL_SIZE);
         let (command_sender, command_receiver) = mpsc::channel(DEFAULT_COMMAND_CHANNEL_SIZE);
 
+        if task.agent_config.runs_in_claude_code() {
+            let mut run = claude_code::ClaudeCodeRun::new(
+                task,
+                tool_registry,
+                event_sender,
+                command_receiver,
+                skill_prompt_context,
+                interceptor_config,
+                execution_middleware,
+            );
+            run.turn_context = self.turn_context.clone();
+            run.host_decisions = self.host_decisions.clone();
+            run.handover_hook = self.handover_hook.clone();
+            run.bind_tools(&command_sender);
+            let join_handle = tokio::spawn(async move { run.run().await });
+            return (event_receiver, command_sender, join_handle);
+        }
         let mut agent_loop = AgentLoop::new(
             task,
             Arc::clone(&self.llm_client),

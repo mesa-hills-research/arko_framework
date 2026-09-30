@@ -1,4 +1,5 @@
 pub mod agent_config;
+pub mod claude_code;
 pub mod error;
 mod file_tree;
 pub mod handover;
@@ -21,6 +22,7 @@ pub use agent_config::{
     PlanUsageAction, PlanUsageThreshold, ReminderInjectionFrequency, ToolCallingMode,
     ToolErrorPolicy, UsageLimitPolicy, UserReminder,
 };
+pub use claude_code::{ClaudeCodeSettings, ClaudeCodeTools};
 pub use error::ArkoAgentsError;
 pub use handover::{HandoverConfig, HandoverHook, HandoverRecord, HandoverRequest, HandoverSeed};
 pub use mcp::{McpConfig, McpManager, McpServerConfig};

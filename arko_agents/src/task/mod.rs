@@ -411,6 +411,16 @@ pub struct Task {
     /// The same index in `model_call_usage_history`.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub conversation_model_call_start: usize,
+    /// The Claude Code session holding the conversation of a task whose
+    /// model runs in Claude Code, resumed when the task runs again. A
+    /// handover starts a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_code_session: Option<String>,
+    /// How many messages of the conversation the Claude Code session has
+    /// received or produced. User messages after them (a follow-up added to
+    /// a completed task, say) are sent when the task runs again.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub claude_code_synced: usize,
 }
 
 fn is_zero(value: &usize) -> bool {
@@ -484,6 +494,8 @@ impl Task {
             handovers: Vec::new(),
             conversation_usage_start: 0,
             conversation_model_call_start: 0,
+            claude_code_session: None,
+            claude_code_synced: 0,
         }
     }
 

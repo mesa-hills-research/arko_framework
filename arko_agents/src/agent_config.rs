@@ -1,3 +1,4 @@
+use crate::claude_code::ClaudeCodeSettings;
 use crate::error::ArkoAgentsError;
 use crate::handover::HandoverConfig;
 use crate::parsing::ToolParsingConfig;
@@ -1063,6 +1064,10 @@ pub struct AgentConfig {
     /// whether or not this is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handover: Option<HandoverConfig>,
+    /// How the Claude Code CLI runs, for an agent whose model is a Claude
+    /// Code model; see [`crate::claude_code`]. `None`: the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_code: Option<ClaudeCodeSettings>,
 }
 
 impl AgentConfig {
@@ -1244,6 +1249,7 @@ impl AgentConfig {
                 });
             }
         }
+        self.validate_claude_code()?;
         if let Some(fallback) = &self.refusal_fallback
             && fallback.model.provider != self.llm_config.model.provider
         {
@@ -1257,6 +1263,84 @@ impl AgentConfig {
                     self.llm_config.model.provider, fallback.model.provider
                 ),
             });
+        }
+        Ok(())
+    }
+}
+
+impl AgentConfig {
+    /// Whether the agent's model runs in Claude Code
+    /// ([`Provider::ClaudeCode`](arko_ai::Provider::ClaudeCode)).
+    pub fn runs_in_claude_code(&self) -> bool {
+        self.llm_config.model.provider == arko_ai::Provider::ClaudeCode
+    }
+
+    /// The Claude Code rules of [`validate`](Self::validate): built-in tools
+    /// only for Claude Code models, and for those, only the settings the
+    /// Claude Code runtime applies.
+    fn validate_claude_code(&self) -> Result<(), ArkoAgentsError> {
+        let error = |message: String| ArkoAgentsError::BuilderError {
+            struct_name: "AgentConfig".into(),
+            message,
+        };
+        let tools = &self.tool_config;
+        if !self.runs_in_claude_code() {
+            if let Some(tool) = tools
+                .available_tool_names
+                .iter()
+                .find(|name| crate::claude_code::is_built_in_tool(name))
+            {
+                return Err(error(format!(
+                    "'{tool}' is a Claude Code built-in tool, offered only to agents whose model is a Claude Code model (Model::claude_code); model '{}' is {:?}.",
+                    self.llm_config.model.id, self.llm_config.model.provider
+                )));
+            }
+            if self.claude_code.is_some() {
+                return Err(error(format!(
+                    "claude_code settings apply only to Claude Code models; model '{}' is {:?}.",
+                    self.llm_config.model.id, self.llm_config.model.provider
+                )));
+            }
+            return Ok(());
+        }
+        if tools.tool_calling_mode != ToolCallingMode::Native {
+            return Err(error(
+                "a Claude Code agent calls tools natively; set tool_calling_mode to Native.".into(),
+            ));
+        }
+        if self.refusal_fallback.is_some() {
+            return Err(error(
+                "refusal_fallback isn't supported for Claude Code models: Claude Code handles refusals in its own loop.".into(),
+            ));
+        }
+        if !self.monitoring.is_empty() {
+            return Err(error(
+                "the plan-usage and cache monitors aren't supported for Claude Code models yet; leave monitoring unset.".into(),
+            ));
+        }
+        if let Some(tool) = tools
+            .available_tool_names
+            .iter()
+            .find(|name| crate::claude_code::UNSUPPORTED_BUILT_IN_TOOLS.contains(&name.as_str()))
+        {
+            return Err(error(format!(
+                "Claude Code's '{tool}' can't be offered: it would bypass the host (ask the user with ask_user instead)."
+            )));
+        }
+        for (tool, config) in &tools.tool_specific_configs {
+            if !crate::claude_code::is_built_in_tool(tool) {
+                continue;
+            }
+            if config.tool_timeout_seconds.is_some() {
+                return Err(error(format!(
+                    "tool_timeout_seconds can't apply to Claude Code's '{tool}': Claude Code runs its built-in tools, and arko can't stop one call."
+                )));
+            }
+            if config.parallel_safe.is_some() {
+                return Err(error(format!(
+                    "parallel_safe can't apply to Claude Code's '{tool}': Claude Code decides how its built-in tools run."
+                )));
+            }
         }
         Ok(())
     }
@@ -1283,6 +1367,7 @@ pub struct AgentConfigBuilder {
     monitoring: Option<MonitoringConfig>,
     refusal_fallback: Option<AgentLLMConfig>,
     handover: Option<HandoverConfig>,
+    claude_code: Option<ClaudeCodeSettings>,
 }
 
 impl AgentConfigBuilder {
@@ -1389,6 +1474,13 @@ impl AgentConfigBuilder {
         self
     }
 
+    /// Sets how the Claude Code CLI runs, for a Claude Code model; see
+    /// [`AgentConfig::claude_code`].
+    pub fn claude_code(mut self, settings: ClaudeCodeSettings) -> Self {
+        self.claude_code = Some(settings);
+        self
+    }
+
     /// Builds the `AgentConfig`, returning an error if required fields are missing.
     pub fn build(self) -> Result<AgentConfig, ArkoAgentsError> {
         let llm_retry_config = self.llm_retry_config.unwrap_or_default();
@@ -1433,6 +1525,7 @@ impl AgentConfigBuilder {
             monitoring,
             refusal_fallback: self.refusal_fallback,
             handover: self.handover,
+            claude_code: self.claude_code,
         };
         config.validate()?;
         Ok(config)
