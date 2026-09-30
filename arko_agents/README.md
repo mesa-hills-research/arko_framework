@@ -568,8 +568,9 @@ the delay the provider asked for, or the wait the runtime had scheduled, when kn
 credential, or the configuration must change), `UnusableResponses` (responses the runtime
 couldn't use, up to the attempt limit), `UsageLimit { resets_at_unix_ms }`, `Refusal`
 (after the opt-in refusal fallback, if configured, also refused), `ToolError` (under
-`PauseAndAwaitApproval`), `Monitor` (an opt-in monitor paused it), or `Middleware` (the
-execution middleware paused it with `PauseTask`). A task saved before
+`PauseAndAwaitApproval`), `Monitor` (an opt-in monitor paused it), `Middleware` (the
+execution middleware paused it with `PauseTask`), or `BudgetExceeded` (the host held its
+next model request; see `TurnContextSource::hold_request` below). A task saved before
 causes were recorded loads with `Unknown`.
 
 | Events | Meaning |
@@ -594,7 +595,12 @@ Besides answers to the waiting states, a running task accepts:
   injection sent before the boundary (including while a tool call ran, approved or not)
   joins that one message, in the order sent. A `TurnContextSource` given to
   `AgentRuntime::with_turn_context` is also asked for context at each such boundary,
-  before each model request, and its answer joins that message.
+  before each model request, and its answer joins that message. Its `hold_request`
+  (default: never) can hold the request: the request isn't made, and the task pauses
+  with `AwaitingErrorRecoveryApproval { cause: BudgetExceeded }` whatever its
+  `llm_error_policy`; `ContinueAfterError` asks again, and approving adds no error note.
+  A workflow holds agents over their budget this way. A Claude Code agent is asked before
+  each turn and at each message of a turn, and a turn it holds is interrupted.
 - `HostDeciding`: while the task awaits a command, the host is deciding that wait itself
   (an approval handler, or a wait before it continues after a usage limit), so
   `user_command_timeout_seconds` doesn't end it; the next wait is timed again. Ignored
@@ -674,7 +680,12 @@ turn boundary (which covers pauses and waits), after a handover, and when the ru
 safe point where nothing changed reports nothing. Before a group of calls starts, the calls
 are recorded in `Task::running_tool_calls` and the report is *durable*:
 `TaskSnapshotSink::task_changed(task, true)` returns only once the task is saved, and the
-calls start afterwards. The other reports may be saved later, the latest one replacing any
+calls start afterwards. A group whose calls recovery simply runs again (every tool
+`ToolRecovery::Rerun`, without the host's own output) is reported without waiting, and so
+is a Claude Code agent's call to a read-only built-in
+(`claude_code::READ_ONLY_BUILT_IN_TOOLS`: `Read`, `Glob`, `Grep`, `WebFetch`,
+`WebSearch`, `TaskOutput`, `LSP`, `ToolSearch`): a crash before the save only has them
+run, or asked for, again. The other reports may be saved later, the latest one replacing any
 not yet saved. A sink error is logged and the run goes on. Results are recorded in the
 task as their calls end (`pending_native_tool_results`, `pending_text_tool_results`), so
 a snapshot holds every result produced so far; the conversation the task ends up with is
@@ -708,6 +719,12 @@ calls arko already ran, so the resumed session's first message lists each open c
 outcome as arko recorded it: completed (with its result), run again now (an arko tool
 that is `Rerun` or `Resume`), or unknown (the others; for a built-in, commands it started
 may still be running). The same note follows a Claude Code crash the host survives.
+
+A host that runs a task inside another task's tool call records it in the task:
+`Task::parent` (`TaskParent { task_id, tool_call_id }`, absent in tasks saved before it
+existed), so that a `Resume` tool can find the task its call started. The runtime doesn't
+read it; a host that resumes the task in another call points it there. arko_workflows saves its agents this way and recovers them with
+`Workflow::recover_agent`; see its [task journal](../arko_workflows/INDEX.md#task-journal-and-recovery).
 
 ## Model-call recovery
 

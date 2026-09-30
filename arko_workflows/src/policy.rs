@@ -266,6 +266,7 @@ pub(crate) fn cause_name(cause: &ErrorRecoveryCause) -> &'static str {
         ErrorRecoveryCause::ToolError => "tool_error",
         ErrorRecoveryCause::Monitor => "monitor",
         ErrorRecoveryCause::Middleware => "middleware",
+        ErrorRecoveryCause::BudgetExceeded => "budget_exceeded",
     }
 }
 
@@ -406,8 +407,11 @@ impl ErrorRecoveryPolicy {
             }
             // A monitor's pause stops for the application, as configured; so
             // does a pause the execution middleware asked for (a completion
-            // a verifier could not review), and a cause not recorded.
+            // a verifier could not review), and a cause not recorded. A
+            // budget hold waits for a raise instead (the workflow answers it
+            // before asking the policy).
             ErrorRecoveryCause::Monitor
+            | ErrorRecoveryCause::BudgetExceeded
             | ErrorRecoveryCause::Middleware
             | ErrorRecoveryCause::Unknown => {
                 return RecoveryAction::ReturnToCaller;

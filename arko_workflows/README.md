@@ -371,9 +371,34 @@ println!("Total spent: ${:.6}", result.total_cost);
 Budgets count what the account is billed (`UsageInfo::billed()`). Calls billed to a
 subscription, such as ChatGPT OAuth, add zero to the budget; their per-token
 estimate remains in the ledger entry's `UsageInfo`. `agent_budget` sets a
-cumulative limit for one agent. Admission checks that limit before starting or
-continuing an agent, and `add_manual_cost` records charges from outside the model calls.
-See [budget and cost accounting](INDEX.md#budget-and-cost-accounting).
+cumulative limit for one agent, and `add_manual_cost` records charges from outside
+the model calls.
+
+Reaching a budget cancels nothing by default (`BudgetExceededPolicy::Pause`): each
+agent over it is held before its next model request, its tool calls finishing
+first. Raise the budget while the run is live with `set_budget` (or
+`set_agent_budget`) and the held agents go on. A run inside another agent's tool
+call waits for the raise; a run the host started returns `AgentPaused` (cause
+`BudgetExceeded`) and continues with `resume_agent` once the budget is raised, or
+waits too with `wait_for_budget_raise(true)`. A host that can't raise the budget
+live stops once `budget_blocked()` resolves (or the call returns paused), saving a
+checkpoint; resumed with a higher `.budget(...)`, `recover_agent` and `resume_agent`
+continue the agents from their pauses. Checkpoints keep a limit raised live, and a
+resume keeps the higher of it and the builder's.
+
+```rust
+let workflow = Workflow::builder()
+    .budget(10.0)
+    .wait_for_budget_raise(true)
+    .build()?;
+// Later, from another task: the held agents continue.
+workflow.set_budget(Some(20.0))?;
+```
+
+`budget_exceeded_policy(BudgetExceededPolicy::Cancel)` cancels agents over the
+budget instead; `reopen_agent` continues a cancelled run from where it stopped. See
+[budget holds](INDEX.md#budget-holds) and
+[budget and cost accounting](INDEX.md#budget-and-cost-accounting).
 
 ## Messaging
 
@@ -648,7 +673,8 @@ configuration example.
 
 Workflow services let named agents run other configured agents through the
 `run_workflow_agent` tool, with separate caller and target lists and a limit on
-concurrent calls. Callers and targets are named explicitly (`allow_caller`,
+concurrent calls. With `resume_run`, a call resumes an unfinished run it was told
+about instead of starting a new one. Callers and targets are named explicitly (`allow_caller`,
 `allow_target`); with none named, no agent is offered the tool. The opt-ins
 `allow_all_callers` and `allow_all_targets` admit every agent except
 completion-verifier agents and, as a target, the caller itself. Delegated runs share
@@ -661,7 +687,7 @@ handling. See
 
 ## Persistence
 
-Checkpoint workflow state at agent boundaries:
+Checkpoint workflow state at agent boundaries, and save running agents as they run:
 
 ```rust
 use arko_workflows::persistence::PersistenceConfig;
@@ -681,8 +707,40 @@ versions, each agent result with a reference to the version of its task the
 checkpoint saw, verification and distillation records, and, once the run is stopped,
 its cancellation. A task version is written only when the task changed, so
 checkpoints that saw the same task share its file, and an older checkpoint still
-resumes a task that has since run on as it was then. Files are pretty-printed JSON,
-written to a temporary file, synced, and renamed into place.
+resumes a task that has since run on as it was then. Checkpoints and task versions
+are pretty-printed JSON. Every file except the append-only logs and the run identity is written to a
+temporary file, synced, and renamed into place (with the directory synced on Unix,
+and the rename retried on Windows while another program holds the file), so a crash
+leaves the old content or the new.
+
+Running agents are saved as they run (the task journal, on by default; turn it off
+with `task_journal(false)`): each running task in `agents/<task id>/live.json`, and
+the workflow's state in `live-checkpoint.json`, rewritten at the task's safe points:
+after each model turn, before its tool calls run (both files are on disk before a
+call with effects starts; read-only calls, which recovery simply runs again, don't
+wait), after their results, and at pauses. The live checkpoint is rewritten only when
+a resume would read something new from it. `latest-checkpoint` names the newest
+checkpoint, live or versioned, and every checkpoint records the runs still running as
+`Interrupted`. These files are compact JSON unless
+`pretty_json(true)`. If the workflow stops (a crash, a reboot), build it again with
+`resume_from` the latest checkpoint and continue the runs that were running:
+
+```rust
+for run in workflow.interrupted_runs() {
+    workflow.recover_agent(&run).await?;
+}
+```
+
+A recovered run continues where it was saved, with no new message. A tool call it
+was running is answered that it may have run (check its effects) unless its tool
+declares it safe to run again (`Tool::recovery_mode`; read-only built-ins do), and a
+`run_workflow_agent` call recovers the agent it started, so delegated agents resume
+with their callers. Usage reported before the crash is charged once. No delegated run
+is orphaned silently: when a caller's call can't recover the run it started (a
+budget refuses it, say), the call's result names the run, and the caller can resume
+it with the tool's `resume_run` parameter and a message saying what happened. A run
+its caller can no longer resume (the caller ended) is listed by `interrupted_runs`
+too, with `task.parent` set, and `recover_agent` recovers it for the host.
 
 By default a checkpoint is saved after every finalized agent run, and every
 checkpoint and task version is kept: `keep_last_checkpoints(n)` opts in to keeping only
@@ -691,8 +749,8 @@ an agent's run: a task or checkpoint that can't be written is logged as a warnin
 and the next checkpoint tries again. A checkpoint written meanwhile refers to the
 task's last saved version and lists the run in `missing_task_states`; resuming from it
 restores the task as last saved, with a warning that its latest state is missing.
-When a checkpoint contains a task that can be resumed, `build` rejects a changed agent
-configuration. Workflow-injected tools and prepared prompt state are excluded from this
+When a checkpoint contains a task that can be resumed (including an interrupted one),
+`build` rejects a changed agent configuration. Workflow-injected tools and prepared prompt state are excluded from this
 comparison, as are saved model registry details; provider, model ID, generation settings,
 and other user configuration must remain compatible.
 The event log records every event, including each streamed text and reasoning

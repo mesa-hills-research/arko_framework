@@ -68,13 +68,18 @@ impl Workflow {
         agent_name: &str,
         prompt: &str,
     ) -> Result<AgentResult, WorkflowError> {
-        self.ensure_running().await?;
-        let result = self
-            .engine
-            .run_agent(agent_name, prompt, &self.context)
-            .await;
-        self.finish_call(result, |hook| {
-            hook.agent_name = Some(agent_name.to_string());
+        // Boxed: an `AgentResult` is large, and each layer holding one
+        // grows the future a host awaits on its own stack.
+        Box::pin(async move {
+            self.ensure_running().await?;
+            let result = self
+                .engine
+                .run_agent(agent_name, prompt, &self.context)
+                .await;
+            self.finish_call(result, |hook| {
+                hook.agent_name = Some(agent_name.to_string());
+            })
+            .await
         })
         .await
     }
@@ -132,14 +137,19 @@ impl Workflow {
         previous: &AgentResult,
         prompt: &str,
     ) -> Result<AgentResult, WorkflowError> {
-        self.ensure_running().await?;
-        let result = self
-            .engine
-            .continue_agent(previous, prompt, &self.context)
-            .await;
-        self.finish_call(result, |hook| {
-            hook.agent_name = Some(previous.agent_name.clone());
-            hook.agent_run_id = Some(previous.agent_run_id);
+        // Boxed: an `AgentResult` is large, and each layer holding one
+        // grows the future a host awaits on its own stack.
+        Box::pin(async move {
+            self.ensure_running().await?;
+            let result = self
+                .engine
+                .continue_agent(previous, prompt, &self.context)
+                .await;
+            self.finish_call(result, |hook| {
+                hook.agent_name = Some(previous.agent_name.clone());
+                hook.agent_run_id = Some(previous.agent_run_id);
+            })
+            .await
         })
         .await
     }
@@ -153,14 +163,99 @@ impl Workflow {
         previous: &AgentResult,
         resume: crate::policy::AgentResume,
     ) -> Result<AgentResult, WorkflowError> {
-        self.ensure_running().await?;
-        let result = self
-            .engine
-            .resume_agent(previous, resume, &self.context)
-            .await;
-        self.finish_call(result, |hook| {
-            hook.agent_name = Some(previous.agent_name.clone());
-            hook.agent_run_id = Some(previous.agent_run_id);
+        // Boxed: an `AgentResult` is large, and each layer holding one
+        // grows the future a host awaits on its own stack.
+        Box::pin(async move {
+            self.ensure_running().await?;
+            let result = self
+                .engine
+                .resume_agent(previous, resume, &self.context)
+                .await;
+            self.finish_call(result, |hook| {
+                hook.agent_name = Some(previous.agent_name.clone());
+                hook.agent_run_id = Some(previous.agent_run_id);
+            })
+            .await
+        })
+        .await
+    }
+
+    /// The agent runs that were running when the workflow stopped (it
+    /// crashed, or its process ended), as the checkpoint it resumed from
+    /// recorded them: `Interrupted` results carrying their tasks as last
+    /// saved, to be continued with [`recover_agent`](Self::recover_agent).
+    /// With the task journal on ([`PersistenceConfig::task_journal`], the
+    /// default), each was saved at its last safe point, so it continues
+    /// where it was. A run that stopped on its own as interrupted (a lasting
+    /// connection failure) is listed too. Runs being recovered are not.
+    ///
+    /// Two kinds are listed:
+    /// - top-level runs (`task.parent` is `None`), which the host started;
+    /// - orphaned runs (`task.parent` is set): runs started inside another
+    ///   run's tool call (a delegated agent) that the run which started
+    ///   them can no longer resume, because it ended, or it stopped with
+    ///   that call answered (the call failed; its result named the run).
+    ///   Only the host recovers them, unless an agent resumes one first
+    ///   (`run_workflow_agent` with `resume_run`).
+    ///
+    /// A run started inside a tool call its parent still holds open is not
+    /// listed: recovering the parent recovers it (or supersedes it, for a
+    /// completion verifier's review or a call that can't resume).
+    pub fn interrupted_runs(&self) -> Vec<AgentResult> {
+        let interrupted = self
+            .context
+            .agent_results
+            .read()
+            .iter()
+            .filter(|result| {
+                result.status == AgentRunStatus::Interrupted
+                    && !self.context.registry.is_running(result.agent_run_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        interrupted
+            .into_iter()
+            .filter(|result| {
+                result.task.parent.is_none() || engine::is_orphaned(&self.context, result)
+            })
+            .collect()
+    }
+
+    /// Continue an agent run that was running when the workflow stopped
+    /// (one of [`interrupted_runs`](Self::interrupted_runs)) where its task
+    /// was saved, with its run identity and without a new message. Tool
+    /// calls it was running are settled by their tools'
+    /// [`recovery_mode`](arko_agents::Tool::recovery_mode): by default the
+    /// agent is told the call may have run and to check its effects;
+    /// read-only built-in tools run again; `run_workflow_agent` recovers the
+    /// agent run it started (or returns its result if it had finished), and
+    /// a `complete_task` call is reviewed again by its completion verifiers.
+    /// A wait it was saved in (a tool approval, an error-recovery pause, a
+    /// question) is answered again under the workflow's policies. Returns as
+    /// [`run_agent`](Self::run_agent) does. The agent's configuration must
+    /// be the one it was saved with (`build` checks it).
+    ///
+    /// An orphaned run (listed with `task.parent` set) is recovered as the
+    /// host's own: its parent link is released, so its result is returned
+    /// here only. A run whose parent can still resume it is refused, and so
+    /// is a run being recovered already ("is running already"): a run is
+    /// never recovered twice. A run that was recovered (or resumed by an
+    /// agent) since `previous` was listed returns the outcome it recorded,
+    /// so recovering each run of an earlier `interrupted_runs` list is safe.
+    pub async fn recover_agent(
+        &self,
+        previous: &AgentResult,
+    ) -> Result<AgentResult, WorkflowError> {
+        // Boxed: an `AgentResult` is large, and each layer holding one
+        // grows the future a host awaits on its own stack.
+        Box::pin(async move {
+            self.ensure_running().await?;
+            let result = self.engine.recover_agent(previous, &self.context).await;
+            self.finish_call(result, |hook| {
+                hook.agent_name = Some(previous.agent_name.clone());
+                hook.agent_run_id = Some(previous.agent_run_id);
+            })
+            .await
         })
         .await
     }
@@ -280,9 +375,11 @@ impl Workflow {
         }
 
         if cost_result.exceeded {
-            fire_hooks_on_context(&self.context, HookPoint::OnBudgetExceeded, |hctx| {
-                hctx.budget_spent = cost_result.new_total;
-            })?;
+            if engine::reports_exceeded(&self.context, &cost_result) {
+                fire_hooks_on_context(&self.context, HookPoint::OnBudgetExceeded, |hctx| {
+                    hctx.budget_spent = cost_result.new_total;
+                })?;
+            }
             return Err(WorkflowError::BudgetExceeded {
                 spent: cost_result.new_total,
                 limit: self.context.budget.limit().unwrap_or(0.0),
@@ -290,6 +387,142 @@ impl Workflow {
         }
 
         Ok(cost_result)
+    }
+
+    /// Changes the workflow's budget limit, in dollars (`None`: no limit),
+    /// also while agents run: it applies from their next model requests.
+    /// Under [`BudgetExceededPolicy::Pause`](crate::budget::BudgetExceededPolicy::Pause)
+    /// (the default), raising it releases the agents held on it: runs
+    /// waiting for a raise continue at once, and a run returned as
+    /// [`WorkflowError::AgentPaused`] continues with
+    /// [`resume_agent`](Self::resume_agent). Lowering it holds agents at
+    /// their next request once the spend is over it. The limit is saved
+    /// with the next checkpoint, so a resume keeps it (see
+    /// [`WorkflowBuilder::resume_from`]). `OnBudgetExceeded` fires again
+    /// when the spend goes over the new limit.
+    pub fn set_budget(&self, limit: Option<f64>) -> Result<(), WorkflowError> {
+        if let Some(limit) = limit
+            && (!limit.is_finite() || limit < 0.0)
+        {
+            return Err(WorkflowError::BuilderInvalid(
+                "budget limit must be finite and non-negative".to_string(),
+            ));
+        }
+        self.context.budget.set_limit(limit);
+        self.budget_changed();
+        Ok(())
+    }
+
+    /// Changes `agent`'s own budget limit, in dollars (`None`: none), also
+    /// while it runs, as [`set_budget`](Self::set_budget) does for the
+    /// workflow's.
+    pub fn set_agent_budget(&self, agent: &str, limit: Option<f64>) -> Result<(), WorkflowError> {
+        if !self.context.agent_configs.contains_key(agent) {
+            return Err(WorkflowError::AgentNotFound(agent.to_string()));
+        }
+        match limit {
+            Some(limit) if !limit.is_finite() || limit < 0.0 => {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "budget for agent '{agent}' must be finite and non-negative"
+                )));
+            }
+            Some(limit) => self.context.budget.set_agent_limit(agent, limit),
+            None => self.context.budget.clear_agent_limit(agent),
+        }
+        self.budget_changed();
+        Ok(())
+    }
+
+    /// The workflow's budget limit in dollars, if it has one.
+    pub fn budget(&self) -> Option<f64> {
+        self.context.budget.limit()
+    }
+
+    /// With the task journal saving running agents, a live checkpoint
+    /// records the changed limits (it would otherwise wait for the next
+    /// safe point of an agent, which a held agent doesn't reach).
+    fn budget_changed(&self) {
+        let Some(persistence) = self.engine.persistence().cloned() else {
+            return;
+        };
+        if !persistence.has_live_runs() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let context = self.context.clone();
+        runtime.spawn(async move {
+            if let Err(error) = persistence.write_live_checkpoint(&context, false).await {
+                log::warn!(
+                    "Workflow '{}': could not save the changed budget: {error}",
+                    context.workflow_name
+                );
+            }
+        });
+    }
+
+    /// Whether the budget holds up the whole run: agents are held until
+    /// the budget is raised, and no running agent can go on without them
+    /// (each is held, waits for a run it delegated to, or waits for a
+    /// message). A host that can't raise the budget while the run is live
+    /// can stop here: the running agents were saved (with the task journal,
+    /// the default under persistence), and after a resume with a higher
+    /// budget, [`recover_agent`](Self::recover_agent) and
+    /// [`resume_agent`](Self::resume_agent) continue them.
+    pub fn is_budget_blocked(&self) -> bool {
+        self.context.budget.exceeded_policy() == crate::budget::BudgetExceededPolicy::Pause
+            && self.context.registry.blocked_on_budget()
+    }
+
+    /// Waits until [`is_budget_blocked`](Self::is_budget_blocked) holds.
+    /// Never returns while agents make progress or none is running.
+    pub async fn budget_blocked(&self) {
+        let mut versions = self.context.registry.subscribe();
+        while !self.is_budget_blocked() {
+            if versions.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
+    /// Continue an agent run that was cancelled (`AgentRunStatus::Cancelled`),
+    /// such as one the budget stopped under
+    /// [`BudgetExceededPolicy::Cancel`](crate::budget::BudgetExceededPolicy::Cancel)
+    /// or one stopped with the workflow, from where its task stopped, with
+    /// its run identity: it is told it was reopened and that calls reported
+    /// cancelled did not finish, followed by `prompt` (may be empty). Tool
+    /// calls it was running without results are settled as for
+    /// [`recover_agent`](Self::recover_agent). Runs recorded by earlier
+    /// versions can be reopened too. A run started inside another run's
+    /// tool call becomes the host's (its parent link is released), if it
+    /// is orphaned as for [`recover_agent`](Self::recover_agent): a run
+    /// whose parent is running, or whose parent's recovery settles it, is
+    /// refused. So is a run recorded superseded (another run replaced it
+    /// after a restart, such as a completion verifier's review). Under
+    /// `Cancel`, raise the budget first ([`set_budget`](Self::set_budget)),
+    /// or it is refused again. Returns as [`run_agent`](Self::run_agent)
+    /// does.
+    pub async fn reopen_agent(
+        &self,
+        previous: &AgentResult,
+        prompt: &str,
+    ) -> Result<AgentResult, WorkflowError> {
+        // Boxed: an `AgentResult` is large, and each layer holding one
+        // grows the future a host awaits on its own stack.
+        Box::pin(async move {
+            self.ensure_running().await?;
+            let result = self
+                .engine
+                .reopen_agent(previous, prompt, &self.context)
+                .await;
+            self.finish_call(result, |hook| {
+                hook.agent_name = Some(previous.agent_name.clone());
+                hook.agent_run_id = Some(previous.agent_run_id);
+            })
+            .await
+        })
+        .await
     }
 
     /// Returns a snapshot of the cost ledger for analysis.
@@ -653,7 +886,8 @@ impl AgentHandle {
     /// the run still sends the agent `CancelTask`, and the tool middleware
     /// still cancels it at its next tool call. The workflow can't observe
     /// the agent's end: other agents see it as running for the rest of the
-    /// run.
+    /// run, and the task journal doesn't save it
+    /// ([`PersistenceConfig::task_journal`]).
     #[allow(clippy::type_complexity)]
     pub fn into_parts(
         mut self,
@@ -664,6 +898,9 @@ impl AgentHandle {
         String,
     ) {
         let run = self.take_run();
+        if let Some(journal) = &run.journal {
+            journal.end_live_run(run.agent_run_id);
+        }
         (
             run.event_rx,
             run.cmd_tx,
@@ -697,6 +934,8 @@ pub struct WorkflowBuilder {
     budget_limit: Option<f64>,
     budget_warning: Option<f64>,
     agent_budgets: HashMap<String, f64>,
+    budget_exceeded_policy: crate::budget::BudgetExceededPolicy,
+    wait_for_budget_raise: bool,
     hooks: Vec<(HookPoint, HookCallback)>,
     persistence_config: Option<PersistenceConfig>,
     resume_from: Option<PathBuf>,
@@ -735,6 +974,8 @@ impl WorkflowBuilder {
             budget_limit: None,
             budget_warning: None,
             agent_budgets: HashMap::new(),
+            budget_exceeded_policy: crate::budget::BudgetExceededPolicy::default(),
+            wait_for_budget_raise: false,
             hooks: Vec::new(),
             persistence_config: None,
             resume_from: None,
@@ -789,9 +1030,39 @@ impl WorkflowBuilder {
         self
     }
 
-    /// Set the budget limit in dollars.
+    /// Set the budget limit in dollars. What happens when it is exceeded is
+    /// the [`budget_exceeded_policy`](Self::budget_exceeded_policy): by
+    /// default the agents pause, to go on once it is raised
+    /// ([`Workflow::set_budget`]). On resume, see
+    /// [`resume_from`](Self::resume_from) for how it combines with the
+    /// limit the checkpoint recorded.
     pub fn budget(mut self, limit: f64) -> Self {
         self.budget_limit = Some(limit);
+        self
+    }
+
+    /// What happens when the workflow's budget, or an agent's, is exceeded:
+    /// [`BudgetExceededPolicy::Pause`](crate::budget::BudgetExceededPolicy::Pause)
+    /// (the default) holds each agent over it before its next model
+    /// request until the budget is raised;
+    /// [`BudgetExceededPolicy::Cancel`](crate::budget::BudgetExceededPolicy::Cancel)
+    /// cancels it.
+    pub fn budget_exceeded_policy(mut self, policy: crate::budget::BudgetExceededPolicy) -> Self {
+        self.budget_exceeded_policy = policy;
+        self
+    }
+
+    /// Under [`BudgetExceededPolicy::Pause`](crate::budget::BudgetExceededPolicy::Pause),
+    /// whether a run the host started (`run_agent` and the like) that the
+    /// budget holds waits in the call until the budget is raised with
+    /// [`Workflow::set_budget`] or [`Workflow::set_agent_budget`], as runs
+    /// inside another agent's tool call always do. Off by default: the
+    /// call returns [`WorkflowError::AgentPaused`] (cause
+    /// `BudgetExceeded`), and [`Workflow::resume_agent`] continues it once
+    /// the budget is raised. Turn it on when the host can raise the budget
+    /// while the run is live (from another task, or a UI).
+    pub fn wait_for_budget_raise(mut self, enabled: bool) -> Self {
+        self.wait_for_budget_raise = enabled;
         self
     }
 
@@ -813,6 +1084,10 @@ impl WorkflowBuilder {
         self
     }
 
+    /// Set `agent`'s own budget limit in dollars: its runs together may
+    /// spend this much. Exceeding it is handled as exceeding the workflow's
+    /// budget is (see [`budget_exceeded_policy`](Self::budget_exceeded_policy)),
+    /// for that agent's runs only.
     pub fn agent_budget(mut self, agent: impl Into<String>, limit: f64) -> Self {
         self.agent_budgets.insert(agent.into(), limit);
         self
@@ -852,6 +1127,23 @@ impl WorkflowBuilder {
     /// Restore workflow state from a checkpoint when building. Persistence
     /// must also be configured, and its run directory must match the
     /// checkpoint's workflow-run identity.
+    ///
+    /// Agent runs that were running when the checkpoint was written come
+    /// back `Interrupted`, with their tasks; see
+    /// [`Workflow::interrupted_runs`] and [`Workflow::recover_agent`]. The
+    /// usage they reported that the checkpoint's cost ledger lacks is
+    /// charged now.
+    ///
+    /// Budget limits: the checkpoint records the limits in force when it
+    /// was written, including changes made while the run was live
+    /// ([`Workflow::set_budget`], [`Workflow::set_agent_budget`]). For the
+    /// workflow's limit and each agent's, the limit set on this builder
+    /// applies unless the recorded one is higher, which then applies. A
+    /// limit not set on the builder is none, as in a new run, whatever the
+    /// checkpoint recorded; a checkpoint written before limits were
+    /// recorded leaves the builder's. So resuming with a higher budget
+    /// raises it, and resuming with the budget the run was built with keeps
+    /// a raise made while it was live (a lowering is not kept).
     ///
     /// Memory: the current configuration decides each tier's readers,
     /// writers, limit and write mode, and the checkpoint supplies content
@@ -1369,6 +1661,11 @@ impl WorkflowBuilder {
             &self.global_tools,
             &self.agent_tools,
             &resumed_results,
+            &self
+                .completion_verifiers
+                .iter()
+                .map(|verifier| verifier.verifier_agent.as_str())
+                .collect(),
         )?;
         if resume_state.is_some() && self.persistence_config.is_none() {
             return Err(WorkflowError::BuilderInvalid(
@@ -1418,16 +1715,51 @@ impl WorkflowBuilder {
         }
         let durable_store = persistence.as_ref().map(PersistenceManager::durable_store);
 
+        // The limits: the builder's, or the checkpoint's where it recorded
+        // a higher one (see `resume_from`).
+        let recorded_limits = resume_state
+            .as_ref()
+            .and_then(|state| state.budget_limits.clone());
+        let budget_limit = match &recorded_limits {
+            Some(recorded) => resumed_limit(self.budget_limit, recorded.limit),
+            None => self.budget_limit,
+        };
+        let mut agent_budgets = self.agent_budgets.clone();
+        if let Some(recorded) = &recorded_limits {
+            for (agent, limit) in &mut agent_budgets {
+                if let Some(recorded) = recorded.agent_limits.get(agent) {
+                    *limit = limit.max(*recorded);
+                }
+            }
+        }
         let budget = if let Some(state) = &resume_state {
-            BudgetManager::from_ledger(
-                self.budget_limit,
+            let budget = BudgetManager::from_ledger(
+                budget_limit,
                 self.budget_warning,
                 state.cost_ledger.clone(),
-            )
+            );
+            // A run that was running may have reported usage the ledger
+            // didn't record yet.
+            for record in &state.agent_runs {
+                let Some(charged) = record.usage_charged else {
+                    continue;
+                };
+                if let Some(result) = resumed_results
+                    .iter()
+                    .find(|result| result.agent_run_id == record.agent_run_id)
+                {
+                    for usage in result.task.usage_history.iter().skip(charged) {
+                        budget.add_agent_cost(&record.agent_name, usage);
+                    }
+                }
+            }
+            budget
         } else {
-            BudgetManager::new(self.budget_limit, self.budget_warning)
+            BudgetManager::new(budget_limit, self.budget_warning)
         };
-        for (agent, limit) in self.agent_budgets {
+        let budget =
+            budget.with_exceeded_policy(self.budget_exceeded_policy, self.wait_for_budget_raise);
+        for (agent, limit) in agent_budgets {
             budget.set_agent_limit(agent, limit);
         }
         // On resume the configuration decides access, limits and write
@@ -1558,6 +1890,15 @@ impl Default for WorkflowBuilder {
     }
 }
 
+/// A limit on resume: the builder's (`configured`) unless the checkpoint
+/// recorded a higher one; none when the builder sets none.
+fn resumed_limit(configured: Option<f64>, recorded: Option<f64>) -> Option<f64> {
+    match (configured, recorded) {
+        (Some(configured), Some(recorded)) => Some(configured.max(recorded)),
+        (configured, _) => configured,
+    }
+}
+
 /// The workspace as an absolute path with `.` and `..` resolved lexically
 /// (symbolic links are kept), so paths the agents and freshness tracking
 /// derive from it compare equal. `std::fs::canonicalize` is not used: on
@@ -1585,13 +1926,20 @@ fn normalize_workspace(workspace: &std::path::Path) -> Result<PathBuf, WorkflowE
 /// the builder's user configuration after removing workflow-owned additions.
 /// Model registry snapshots are deliberately ignored: the provider and model
 /// id remain authoritative, while the registry may gain metadata between
-/// checkpoints.
+/// checkpoints. An interrupted run no one can reach, because recovering the
+/// run that started it supersedes it ([`superseded_on_recovery`]), is not
+/// checked: it never runs again.
 fn validate_resumed_agent_configs(
     agents: &[(String, AgentConfig)],
     global_tools: &[Arc<dyn arko_agents::tool::Tool>],
     agent_tools: &HashMap<String, Vec<Arc<dyn arko_agents::tool::Tool>>>,
     resumed_results: &[AgentResult],
+    verifier_agents: &HashSet<&str>,
 ) -> Result<(), WorkflowError> {
+    let by_id = resumed_results
+        .iter()
+        .map(|result| (result.agent_run_id, result))
+        .collect::<HashMap<_, _>>();
     let configured = agents
         .iter()
         .map(|(name, config)| (name, config))
@@ -1616,13 +1964,21 @@ fn validate_resumed_agent_configs(
     for result in resumed_results {
         if !matches!(
             result.status,
-            AgentRunStatus::Completed | AgentRunStatus::WaitingForInput | AgentRunStatus::Paused
+            AgentRunStatus::Completed
+                | AgentRunStatus::WaitingForInput
+                | AgentRunStatus::Paused
+                | AgentRunStatus::Interrupted
         ) {
             continue;
         }
         let Some(current) = configured.get(&result.agent_name) else {
             continue;
         };
+        if result.status == AgentRunStatus::Interrupted
+            && superseded_on_recovery(result, &by_id, verifier_agents, 0)
+        {
+            continue;
+        }
         let current = normalized_resume_agent_config(current, &workflow_tools)?;
         let saved = normalized_resume_agent_config(&result.task.agent_config, &workflow_tools)?;
         if current != saved {
@@ -1633,6 +1989,44 @@ fn validate_resumed_agent_configs(
         }
     }
     Ok(())
+}
+
+/// Whether interrupted run `result` is superseded, not run again, when the
+/// run that started it is recovered (see `WorkflowEngine::recover_at`): its
+/// parent is interrupted and holds the call it ran in open without resuming
+/// it (a completion verifier's review, a call the host answered with its
+/// own output), or its parent is superseded itself. A run whose parent
+/// resumes it is superseded only with its parent, and an orphaned run (its
+/// parent ended, or answered the call) is not.
+fn superseded_on_recovery(
+    result: &AgentResult,
+    by_id: &HashMap<uuid::Uuid, &AgentResult>,
+    verifier_agents: &HashSet<&str>,
+    depth: usize,
+) -> bool {
+    let Some(link) = result.task.parent else {
+        return false;
+    };
+    let Some(parent) = by_id.get(&link.task_id) else {
+        return false;
+    };
+    if parent.status != AgentRunStatus::Interrupted {
+        return false;
+    }
+    // Bounded, against a cycle of parent links in a damaged checkpoint.
+    if depth < 64 && superseded_on_recovery(parent, by_id, verifier_agents, depth + 1) {
+        return true;
+    }
+    let call = parent
+        .task
+        .running_tool_calls
+        .iter()
+        .find(|call| call.tool_call_id == link.tool_call_id && call.output.is_none());
+    let resumed = call.is_some_and(|call| {
+        call.tool_name == RUN_WORKFLOW_AGENT_TOOL_NAME && call.custom_output.is_none()
+    });
+    let settled = call.is_some() || verifier_agents.contains(result.agent_name.as_str());
+    settled && !resumed
 }
 
 fn normalized_resume_agent_config(
@@ -1769,3 +2163,11 @@ mod verification_tests;
 #[cfg(test)]
 #[path = "persistence_tests.rs"]
 mod persistence_tests;
+
+#[cfg(test)]
+#[path = "recovery_tests.rs"]
+mod recovery_tests;
+
+#[cfg(test)]
+#[path = "budget_tests.rs"]
+mod budget_tests;

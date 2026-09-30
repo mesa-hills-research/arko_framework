@@ -58,6 +58,22 @@ pub const BUILT_IN_TOOLS: &[&str] = &[
     "ToolSearch",
 ];
 
+/// The [built-in tools](BUILT_IN_TOOLS) that only read (files, the web, a
+/// background command's output): a call to one that was running when its
+/// task stopped needs no care, so the runtime doesn't wait for the task to
+/// be saved before it runs (see
+/// [`TaskSnapshotSink`](crate::snapshot::TaskSnapshotSink)).
+pub const READ_ONLY_BUILT_IN_TOOLS: &[&str] = &[
+    "Read",
+    "Glob",
+    "Grep",
+    "WebFetch",
+    "WebSearch",
+    "TaskOutput",
+    "LSP",
+    "ToolSearch",
+];
+
 /// Built-in tools arko doesn't offer: they would bypass the host (a question
 /// to the user, or leaving plan mode).
 pub const UNSUPPORTED_BUILT_IN_TOOLS: &[&str] =

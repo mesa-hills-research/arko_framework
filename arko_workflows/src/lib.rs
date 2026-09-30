@@ -61,7 +61,9 @@ pub use workflow::{AgentHandle, Workflow, WorkflowBuilder};
 
 /// Convenience re-exports for common usage.
 pub mod prelude {
-    pub use crate::budget::{AddCostResult, BudgetManager, CostEntry, CostLedger, CostSource};
+    pub use crate::budget::{
+        AddCostResult, BudgetExceededPolicy, BudgetManager, CostEntry, CostLedger, CostSource,
+    };
     pub use crate::distillation::{DistillationConfig, DistillationRecord};
     pub use crate::durable::{
         DurableRetryPolicy, DurableStepContext, DurableStepSpec, DurableStepStatus, InDoubtContext,

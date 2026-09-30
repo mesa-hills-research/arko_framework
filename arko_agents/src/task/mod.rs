@@ -112,6 +112,12 @@ pub enum ErrorRecoveryCause {
     /// host (for example, a workflow's completion verifier could not review a
     /// completion).
     Middleware,
+    /// The host held the task's next model request because a spending
+    /// budget is used up
+    /// ([`TurnContextSource::hold_request`](crate::runtime::TurnContextSource::hold_request)).
+    /// No request was made; continuing sends it (or the host holds it
+    /// again), and approving adds no error note.
+    BudgetExceeded,
 }
 
 /// The reason a task stopped by [`UserCommand::CancelTask`](crate::runtime::command::UserCommand::CancelTask) records.
@@ -432,6 +438,24 @@ pub struct Task {
     /// else happens.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub running_tool_calls: Vec<RunningToolCall>,
+    /// The task and tool call this task runs inside, set by a host that
+    /// runs a task within another task's tool call (a workflow's delegated
+    /// agent or completion verifier), so that after a crash the host finds
+    /// the task again when it recovers that call. The runtime doesn't use
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<TaskParent>,
+}
+
+/// The task and tool call a task runs inside; see [`Task::parent`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct TaskParent {
+    /// The ID of the task whose tool call runs this task.
+    pub task_id: Uuid,
+    /// The runtime's ID of that call
+    /// ([`TaskContext::tool_call_id`](crate::tool::TaskContext::tool_call_id)),
+    /// which a recovered call keeps.
+    pub tool_call_id: Uuid,
 }
 
 fn is_zero(value: &usize) -> bool {
@@ -544,6 +568,7 @@ impl Task {
             claude_code_session: None,
             claude_code_synced: 0,
             running_tool_calls: Vec::new(),
+            parent: None,
         }
     }
 

@@ -271,6 +271,8 @@ pub(crate) struct ProbeTool {
     pub started: tokio::sync::Notify,
     /// Blocked calls whose future was dropped (their task was aborted).
     pub dropped: AtomicUsize,
+    /// How a call running when the workflow stopped is recovered.
+    pub recovery: arko_agents::ToolRecovery,
 }
 
 impl ProbeTool {
@@ -284,6 +286,21 @@ impl ProbeTool {
         })
     }
 
+    /// A probe whose calls running when the workflow stopped are recovered
+    /// by `recovery`.
+    pub fn recovered_by(
+        name: &'static str,
+        block: bool,
+        recovery: arko_agents::ToolRecovery,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            name,
+            block,
+            recovery,
+            ..Self::default()
+        })
+    }
+
     pub fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
@@ -293,6 +310,10 @@ impl ProbeTool {
 impl Tool for ProbeTool {
     fn interruptible(&self) -> bool {
         !self.block
+    }
+
+    fn recovery_mode(&self) -> arko_agents::ToolRecovery {
+        self.recovery
     }
 
     fn definition(&self) -> ToolDefinition {

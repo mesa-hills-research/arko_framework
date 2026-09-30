@@ -651,7 +651,9 @@ impl ClaudeCodeRun {
     /// Records the call Claude Code's `tool_use_id` names as running before
     /// it is allowed to run, and waits until the task is saved with it (the
     /// write-ahead point): a task that stops while it runs knows it may have
-    /// run.
+    /// run. A read-only call (a [read-only built-in](crate::claude_code::READ_ONLY_BUILT_IN_TOOLS),
+    /// or an arko tool whose calls recovery runs again) doesn't wait: if
+    /// the task stops before it is saved, the model reads again.
     async fn record_running(
         &mut self,
         tool_use_id: Option<&String>,
@@ -670,11 +672,19 @@ impl ClaudeCodeRun {
             built_in: call.built_in,
             output: None,
         };
+        let rerunnable = running.custom_output.is_none()
+            && if running.built_in {
+                crate::claude_code::READ_ONLY_BUILT_IN_TOOLS.contains(&running.tool_name.as_str())
+            } else {
+                self.registry
+                    .get(&running.tool_name)
+                    .is_some_and(|tool| tool.recovery_mode() == ToolRecovery::Rerun)
+            };
         self.task
             .running_tool_calls
             .retain(|recorded| recorded.call_id != running.call_id);
         self.task.running_tool_calls.push(running);
-        self.report(true).await;
+        self.report(!rerunnable).await;
     }
 
     /// A call's result, as Claude Code reported it: kept with the running
@@ -917,6 +927,10 @@ impl ClaudeCodeRun {
                 self.recover_open_calls().await?;
                 continue;
             }
+            if let Some(reason) = self.held_request() {
+                self.hold(reason).await?;
+                continue;
+            }
             let session = match self.start_session().await {
                 Ok(session) => session,
                 Err(error) => {
@@ -1002,7 +1016,10 @@ impl ClaudeCodeRun {
                     let mut note = format!(
                         "The previous attempt failed: {error_message}\nThe user approved continuing."
                     );
-                    if matches!(cause, ErrorRecoveryCause::Monitor) {
+                    if matches!(
+                        cause,
+                        ErrorRecoveryCause::Monitor | ErrorRecoveryCause::BudgetExceeded
+                    ) {
                         note = CONTINUE.to_string();
                     }
                     if let Some(message) = message {
@@ -2082,6 +2099,13 @@ impl ClaudeCodeRun {
                         .await?;
                     }
                 }
+                // Over the host's budget: the turn ends here, held.
+                if self.pause_after_turn.is_none()
+                    && let Some(reason) = self.held_request()
+                {
+                    self.pause_after_turn = Some((reason, ErrorRecoveryCause::BudgetExceeded));
+                    let _ = session.interrupt().await;
+                }
                 // A subagent's messages are its own conversation.
                 if assistant.parent_tool_use_id.is_some() {
                     return Ok(());
@@ -2741,6 +2765,10 @@ impl ClaudeCodeRun {
             return Ok(Some(SessionEnd::Stop));
         }
         if let Some((reason, cause)) = self.pause_after_turn.take() {
+            if matches!(cause, ErrorRecoveryCause::BudgetExceeded) {
+                self.hold(reason).await?;
+                return Ok(Some(SessionEnd::Wait));
+            }
             if matches!(cause, ErrorRecoveryCause::Monitor) {
                 // As for other agents: a pause under the pausing error
                 // policies, the task returned interrupted under the others.
@@ -2998,6 +3026,33 @@ impl ClaudeCodeRun {
             self.set_state(TaskState::Interrupted { reason: message })
                 .await
         }
+    }
+
+    /// Why the host holds the task's next request, if it does (see
+    /// [`TurnContextSource::hold_request`](super::TurnContextSource::hold_request)).
+    fn held_request(&self) -> Option<String> {
+        self.turn_context
+            .as_ref()
+            .and_then(|source| source.hold_request(self.task.id))
+    }
+
+    /// Pauses the task for the host, which holds its next request: an
+    /// error-recovery pause whatever the error policy, whose approval adds
+    /// no error note.
+    async fn hold(&mut self, reason: String) -> Result<(), ArkoAgentsError> {
+        log::info!(
+            "Task {}: the host holds the next request: {reason}",
+            self.task.id
+        );
+        self.task.monitor_pause = true;
+        self.pause(reason.clone(), ErrorRecoveryCause::BudgetExceeded)
+            .await?;
+        self.emit(AgentEvent::ErrorEncountered {
+            error_message: reason,
+            requires_approval_to_retry: true,
+            tool_call_id: None,
+        })
+        .await
     }
 
     async fn pause(

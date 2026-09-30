@@ -2,12 +2,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use crate::context::SharedContext;
 use crate::error::WorkflowError;
+use crate::workflow::result::AgentRunStatus;
 
 pub mod state;
 
@@ -103,6 +104,23 @@ pub struct PersistenceConfig {
     /// buffer before each checkpoint. Default
     /// [`DEFAULT_EVENT_FLUSH_INTERVAL`].
     pub event_flush_interval: Duration,
+    /// Whether running agents are saved as they run (default `true`): each
+    /// running task in `agents/<task id>/live.json`, rewritten at its safe
+    /// points (before its tool calls run, after their results, after each
+    /// model turn), with the workflow's state in `live-checkpoint.json`
+    /// (rewritten when a resume would read something new from it).
+    /// `latest-checkpoint` names the newest checkpoint, live or versioned.
+    /// A workflow that stops (a crash, a reboot) then resumes its running
+    /// agents where they were: see
+    /// [`Workflow::interrupted_runs`](crate::Workflow::interrupted_runs)
+    /// and [`Workflow::recover_agent`](crate::Workflow::recover_agent).
+    /// Set with [`task_journal`](Self::task_journal).
+    pub task_journal: bool,
+    /// Whether the files the task journal rewrites as agents run (their
+    /// live task files and the live checkpoint) are pretty-printed JSON;
+    /// default `false`, compact. Checkpoints and task versions are always
+    /// pretty-printed. Set with [`pretty_json`](Self::pretty_json).
+    pub pretty_json: bool,
     /// `keep_last_checkpoints(0)` was asked for; `WorkflowBuilder::build`
     /// reports it.
     zero_kept_checkpoints: bool,
@@ -121,9 +139,41 @@ pub struct PersistenceManager {
     saved_tasks: Arc<parking_lot::Mutex<HashMap<uuid::Uuid, SavedTask>>>,
     /// Checkpoint files this manager wrote, oldest first (for retention).
     written: Arc<parking_lot::Mutex<VecDeque<PathBuf>>>,
+    /// The task journal's state: the running agent runs and their live
+    /// files ([`PersistenceConfig::task_journal`]).
+    live: Arc<parking_lot::Mutex<LiveState>>,
+    /// Writes the live checkpoint, one write at a time.
+    live_checkpoints: Arc<LiveCheckpoints>,
+    /// Numbers the checkpoints as their states are built (with the write
+    /// lock held): a higher number holds a newer state.
+    builds: Arc<AtomicU64>,
+    /// What `latest-checkpoint` names.
+    latest: Arc<parking_lot::Mutex<Latest>>,
+    /// Held while `latest-checkpoint` is written.
+    pointer_writes: Arc<tokio::sync::Mutex<()>>,
     /// Makes task writes fail, as a full or read-only disk would.
     #[cfg(test)]
     pub(crate) fail_task_writes: Arc<AtomicBool>,
+    /// Set by [`simulate_crash`](Self::simulate_crash): nothing is written
+    /// or deleted any more.
+    #[cfg(test)]
+    crashed: Arc<AtomicBool>,
+    /// Where [`crash_at`](Self::crash_at) crashes.
+    #[cfg(test)]
+    crash_point: Arc<parking_lot::Mutex<Option<CrashPoint>>>,
+}
+
+/// A point of the finalization of an agent run a test can crash at; see
+/// [`PersistenceManager::crash_at`].
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CrashPoint {
+    /// The run's result is recorded (its task version written), and no
+    /// checkpoint records it yet.
+    ResultRecorded,
+    /// The live checkpoint recording the run's end is written, and the
+    /// versioned checkpoint after it isn't.
+    LiveRunReleased,
 }
 
 #[cfg(test)]
@@ -133,6 +183,131 @@ impl PersistenceManager {
     pub(crate) async fn hold_writes(&self) -> tokio::sync::OwnedMutexGuard<()> {
         self.write_lock.clone().lock_owned().await
     }
+
+    /// From now on nothing is written, renamed or deleted: the run
+    /// directory stays as a process killed now would leave it.
+    pub(crate) fn simulate_crash(&self) {
+        self.crashed.store(true, Ordering::SeqCst);
+    }
+
+    /// The flag [`simulate_crash`](Self::simulate_crash) sets, for a hook
+    /// to crash at a chosen point.
+    pub(crate) fn crash_switch(&self) -> Arc<AtomicBool> {
+        self.crashed.clone()
+    }
+
+    /// Crashes (see [`simulate_crash`](Self::simulate_crash)) as the next
+    /// agent run to end reaches `point`.
+    pub(crate) fn crash_at(&self, point: CrashPoint) {
+        *self.crash_point.lock() = Some(point);
+    }
+
+    /// Crashes if a test asked to at `point`.
+    fn reached(&self, point: CrashPoint) {
+        if *self.crash_point.lock() == Some(point) {
+            self.simulate_crash();
+        }
+    }
+}
+
+/// The live checkpoint's file in the run directory; see
+/// [`PersistenceConfig::task_journal`].
+pub const LIVE_CHECKPOINT_FILE: &str = "live-checkpoint.json";
+
+/// A running task's file in its task directory.
+const LIVE_TASK_FILE: &str = "live.json";
+
+/// The error a checkpoint records for an agent run that was running when
+/// it was written.
+pub(crate) const RUNNING_AT_CHECKPOINT: &str =
+    "The workflow stopped while this agent run was running; Workflow::recover_agent continues it.";
+
+/// The live file of task `id`, relative to the run directory.
+fn live_task_file(id: uuid::Uuid) -> String {
+    format!("{TASKS_DIR}/{id}/{LIVE_TASK_FILE}")
+}
+
+/// The task journal's state.
+#[derive(Default)]
+struct LiveState {
+    /// The running agent runs the journal saves, by task ID.
+    runs: HashMap<uuid::Uuid, LiveRun>,
+    /// Orders `runs` by start.
+    started: u64,
+    /// The live task files, on disk or to be written, with the lock that
+    /// writing or deleting each takes.
+    files: HashMap<uuid::Uuid, Arc<tokio::sync::Mutex<()>>>,
+    /// The runs whose live file the live checkpoint on disk refers to (or
+    /// the one being written will): their files are kept until a live
+    /// checkpoint no longer does.
+    referenced: HashSet<uuid::Uuid>,
+}
+
+/// The checkpoint `latest-checkpoint` names, as this manager last wrote it.
+#[derive(Default)]
+struct Latest {
+    /// Its file name.
+    name: Option<String>,
+    /// Its build number (see [`PersistenceManager::builds`]).
+    build: u64,
+    /// The agent runs it records as running.
+    running: HashSet<uuid::Uuid>,
+    /// When it is the live checkpoint: the fingerprint of the state it
+    /// holds (see [`Built::fingerprint`]).
+    live: Option<u64>,
+    /// Its directory entry is flushed to disk.
+    synced: bool,
+}
+
+/// A checkpoint's state, as [`PersistenceManager::build_state`] builds it.
+struct Built {
+    state: state::WorkflowState,
+    /// Its build number (see [`PersistenceManager::builds`]).
+    build: u64,
+    /// The agent runs it records as running.
+    running: HashSet<uuid::Uuid>,
+    /// The agent runs whose live files it refers to.
+    live_files: HashSet<uuid::Uuid>,
+    /// Equal for two states that differ only where a resume can tell the
+    /// newer from the running tasks' live files: the cost ledger, as far as
+    /// the running runs' usage goes (see `usage_charged`), and the time.
+    fingerprint: u64,
+}
+
+/// A running agent run, as the task journal saves it.
+struct LiveRun {
+    agent_name: String,
+    /// When it started, in the order of the journal's runs.
+    started: u64,
+    /// How many of its task's `usage_history` entries the budget was
+    /// charged for: the reports the workflow processed. A checkpoint
+    /// records it with the ledger, so a resume charges the rest.
+    usage_charged: usize,
+    /// The latest snapshot of its task.
+    task: Option<Arc<arko_agents::Task>>,
+    /// `task` is not in the live file yet.
+    pending: bool,
+    /// The live file holds a snapshot of the run.
+    written: bool,
+    /// The live file's directory entry is flushed to disk, as a durable
+    /// save needs.
+    synced: bool,
+    /// Why the latest snapshot could not be written.
+    unsaved: Option<String>,
+}
+
+/// Writes the live checkpoint for its requests, one write at a time: each
+/// write saves the state as it is when it starts, so requests made while
+/// another write runs are answered by the next one.
+#[derive(Default)]
+struct LiveCheckpoints {
+    requested: AtomicU64,
+    /// The requests answered by a live checkpoint on disk.
+    written: AtomicU64,
+    /// The requests answered by a live checkpoint whose directory entry is
+    /// flushed to disk too.
+    synced: AtomicU64,
+    lock: tokio::sync::Mutex<()>,
 }
 
 /// A recorded result's task, as checkpoints refer to it.
@@ -153,14 +328,34 @@ impl PersistenceConfig {
             retain_checkpoints: CheckpointRetention::KeepAll,
             event_log: EventLog::default(),
             event_flush_interval: DEFAULT_EVENT_FLUSH_INTERVAL,
+            task_journal: true,
+            pretty_json: false,
             zero_kept_checkpoints: false,
         }
     }
 
     /// Whether a checkpoint is saved after each finalized agent result
-    /// (default `true`).
+    /// (default `true`). The task journal's live checkpoint
+    /// ([`task_journal`](Self::task_journal)) is written either way.
     pub fn auto_checkpoint(mut self, enabled: bool) -> Self {
         self.auto_checkpoint = enabled;
+        self
+    }
+
+    /// Whether running agents are saved as they run, so that a workflow
+    /// that stops resumes them where they were (default `true`); see
+    /// [`PersistenceConfig::task_journal`]. Off, a run is saved only once it
+    /// ends, and one running when the workflow stops starts again.
+    pub fn task_journal(mut self, enabled: bool) -> Self {
+        self.task_journal = enabled;
+        self
+    }
+
+    /// Opt-in: pretty-print the files the task journal rewrites as agents
+    /// run (default compact JSON, which is smaller and quicker to write);
+    /// see [`PersistenceConfig::pretty_json`].
+    pub fn pretty_json(mut self, enabled: bool) -> Self {
+        self.pretty_json = enabled;
         self
     }
 
@@ -292,6 +487,14 @@ impl PersistenceManager {
             config.event_log,
             config.event_flush_interval,
         ));
+        // The live files the live checkpoint on disk (an earlier process's)
+        // refers to are kept until this manager's live checkpoint replaces
+        // it; what an earlier process left behind otherwise goes.
+        let mut live = LiveState::default();
+        for id in sweep_run_directory(&config.checkpoint_dir) {
+            live.files.insert(id, Arc::default());
+            live.referenced.insert(id);
+        }
         Ok(Self {
             config,
             durable_store,
@@ -299,8 +502,17 @@ impl PersistenceManager {
             events,
             saved_tasks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             written: Arc::new(parking_lot::Mutex::new(VecDeque::new())),
+            live: Arc::new(parking_lot::Mutex::new(live)),
+            live_checkpoints: Arc::default(),
+            builds: Arc::default(),
+            latest: Arc::default(),
+            pointer_writes: Arc::default(),
             #[cfg(test)]
             fail_task_writes: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            crashed: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            crash_point: Arc::default(),
         })
     }
 
@@ -314,15 +526,21 @@ impl PersistenceManager {
     }
 
     /// Records that the recorded results' tasks were loaded from these task
-    /// versions (task ID, file relative to the run directory).
+    /// versions (task ID, file relative to the run directory). A task
+    /// loaded from its live file is saved as a version by the next
+    /// checkpoint (that file changes once the run is recovered); until one
+    /// is, checkpoints refer to the live file, which is kept.
     pub(crate) fn mark_tasks_saved(&self, tasks: impl IntoIterator<Item = (uuid::Uuid, String)>) {
         let mut saved = self.saved_tasks.lock();
         for (id, file) in tasks {
+            let unsaved = live_file_task(&file).is_some().then(|| {
+                "it was restored from its live file and isn't saved as a version yet".to_string()
+            });
             saved.insert(
                 id,
                 SavedTask {
                     file: Some(file),
-                    unsaved: None,
+                    unsaved,
                 },
             );
         }
@@ -360,6 +578,11 @@ impl PersistenceManager {
             }
             Err(error) => entry.unsaved = Some(error.to_string()),
         }
+        // Recorded: the run is no longer running, and checkpoints record
+        // its result from now on.
+        self.live.lock().runs.remove(&id);
+        #[cfg(test)]
+        self.reached(CrashPoint::ResultRecorded);
     }
 
     /// Save a checkpoint of the current workflow state.
@@ -372,105 +595,29 @@ impl PersistenceManager {
     /// again, the checkpoint refers to the task's last saved version (a run
     /// never saved is left out) and lists it in
     /// [`missing_task_states`](state::WorkflowState::missing_task_states),
-    /// with a warning. Buffered events are written first as well. With
+    /// with a warning. With the task journal
+    /// ([`PersistenceConfig::task_journal`]), the agent runs still running
+    /// are recorded `Interrupted`, each with a version of its latest task
+    /// snapshot, so resuming from the checkpoint can recover them. Buffered
+    /// events are written first as well. With
     /// [`CheckpointRetention::KeepLast`], older checkpoint files beyond the
     /// count are then deleted, with the task versions no remaining
     /// checkpoint refers to.
     pub async fn save_checkpoint(&self, ctx: &SharedContext) -> Result<PathBuf, WorkflowError> {
         self.flush_events().await;
         let _guard = self.write_lock.lock().await;
-        // Results change only with the write lock held.
-        let results = ctx.agent_results.read().clone();
-        for result in &results {
-            let pending = self
-                .saved_tasks
-                .lock()
-                .get(&result.agent_run_id)
-                .is_none_or(|saved| saved.unsaved.is_some() || saved.file.is_none());
-            if !pending {
-                continue;
-            }
-            let saved = self.write_task(&result.task).await;
-            let mut tasks = self.saved_tasks.lock();
-            let entry = tasks.entry(result.agent_run_id).or_default();
-            match saved {
-                Ok(file) => {
-                    entry.file = Some(file);
-                    entry.unsaved = None;
-                }
-                Err(error) => entry.unsaved = Some(error.to_string()),
-            }
-        }
-        let (agent_runs, missing_task_states) = {
-            let tasks = self.saved_tasks.lock();
-            let mut runs = Vec::new();
-            let mut missing = Vec::new();
-            for result in &results {
-                let saved = tasks.get(&result.agent_run_id).cloned().unwrap_or_default();
-                if let Some(reason) = saved.unsaved {
-                    missing.push(state::MissingTaskState {
-                        agent_run_id: result.agent_run_id,
-                        agent_name: result.agent_name.clone(),
-                        status: result.status.clone(),
-                        last_saved: saved.file.clone(),
-                        reason,
-                    });
-                }
-                if let Some(file) = saved.file {
-                    runs.push(state::AgentRunRecord::of(result, file));
-                }
-            }
-            (runs, missing)
+        let Some(built) = self.build_state(ctx, false).await else {
+            unreachable!("a versioned checkpoint is always built");
         };
-        let ws = state::WorkflowState {
-            workflow_run_id: ctx.workflow_run_id,
-            workflow_name: ctx.workflow_name.clone(),
-            workflow_metadata: ctx.workflow_metadata.clone(),
-            checkpoint_id: uuid::Uuid::new_v4(),
-            timestamp: chrono::Utc::now(),
-            memory_snapshot: ctx.memory.snapshot(),
-            message_queues: ctx.messages.snapshot(),
-            budget_spent: ctx.budget.total_spent(),
-            cost_ledger: ctx.budget.snapshot_ledger(),
-            freshness_snapshot: ctx
-                .resource_tracker
-                .as_ref()
-                .map(|tracker| tracker.snapshot()),
-            agent_results: Vec::new(),
-            agent_runs,
-            missing_task_states,
-            verification_records: ctx.verification_records.read().clone(),
-            distillation_records: ctx.distillation_records.read().clone(),
-            completed_agents: results
-                .iter()
-                .map(|r| state::SerializableAgentResult {
-                    agent_name: r.agent_name.clone(),
-                    summary: r.summary.clone(),
-                })
-                .collect(),
-            cancellation: ctx.run_control.cancellation(),
-            agent_registry: Some(ctx.registry.snapshot()),
-        };
-
-        std::fs::create_dir_all(&self.config.checkpoint_dir)?;
+        let ws = &built.state;
         let path = self
             .config
             .checkpoint_dir
             .join(format!("checkpoint-{}.json", ws.checkpoint_id));
-        let json = serde_json::to_string_pretty(&ws)?;
-        let temporary = path.with_extension("json.tmp");
-        write_synced(&temporary, json.as_bytes()).await?;
-        tokio::fs::rename(&temporary, &path).await?;
-        let latest = self.config.checkpoint_dir.join("latest-checkpoint");
-        let latest_temporary = self.config.checkpoint_dir.join("latest-checkpoint.tmp");
-        tokio::fs::write(
-            &latest_temporary,
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default(),
-        )
-        .await?;
-        tokio::fs::rename(&latest_temporary, &latest).await?;
+        let json = serde_json::to_string_pretty(ws)?;
+        self.write_file(&path, json.as_bytes(), true).await?;
+        self.point_latest_at(&path, built.build, built.running, None)
+            .await?;
         self.written.lock().push_back(path.clone());
         for missing in &ws.missing_task_states {
             log::warn!(
@@ -490,8 +637,289 @@ impl PersistenceManager {
         if let CheckpointRetention::KeepLast(keep) = self.config.retain_checkpoints {
             self.prune_checkpoints(keep).await;
         }
+        self.delete_finished_live_files().await;
         log::info!("Checkpoint saved to {}", path.display());
         Ok(path)
+    }
+
+    /// The workflow's state for a checkpoint; the caller holds the write
+    /// lock. Task versions not saved yet are written first. The agent runs
+    /// the task journal saves are recorded `Interrupted`: in the live
+    /// checkpoint (`live`) with their live files, in a versioned one with a
+    /// version of their latest snapshot (so that it stays valid once the
+    /// live file changes). For the live checkpoint, `None` when the live
+    /// checkpoint `latest-checkpoint` names holds this state already (see
+    /// [`Built::fingerprint`]): the cost ledger isn't even copied then.
+    async fn build_state(&self, ctx: &SharedContext, live: bool) -> Option<Built> {
+        // Results change only with the write lock held. Only the tasks
+        // whose versions must be written are cloned.
+        let pending = {
+            let results = ctx.agent_results.read();
+            let tasks = self.saved_tasks.lock();
+            results
+                .iter()
+                .filter(|result| {
+                    tasks
+                        .get(&result.agent_run_id)
+                        .is_none_or(|saved| saved.unsaved.is_some() || saved.file.is_none())
+                })
+                .map(|result| result.task.clone())
+                .collect::<Vec<_>>()
+        };
+        for task in pending {
+            let saved = self.write_task(&task).await;
+            let mut tasks = self.saved_tasks.lock();
+            let entry = tasks.entry(task.id).or_default();
+            match saved {
+                Ok(file) => {
+                    entry.file = Some(file);
+                    entry.unsaved = None;
+                }
+                Err(error) => entry.unsaved = Some(error.to_string()),
+            }
+        }
+        // A versioned checkpoint's versions of the running tasks.
+        let mut live_versions = HashMap::new();
+        if !live {
+            let snapshots = self
+                .live
+                .lock()
+                .runs
+                .iter()
+                .filter_map(|(id, run)| run.task.clone().map(|task| (*id, task)))
+                .collect::<Vec<_>>();
+            for (id, task) in snapshots {
+                let saved = self
+                    .write_task(&task)
+                    .await
+                    .map_err(|error| error.to_string());
+                live_versions.insert(id, saved);
+            }
+        }
+
+        // The state shared by the agents, which the fingerprint covers.
+        let memory_snapshot = ctx.memory.snapshot();
+        let message_queues = ctx.messages.snapshot();
+        let freshness_snapshot = ctx
+            .resource_tracker
+            .as_ref()
+            .map(|tracker| tracker.snapshot());
+        let verification_records = ctx.verification_records.read().clone();
+        let distillation_records = ctx.distillation_records.read().clone();
+        let cancellation = ctx.run_control.cancellation();
+        let agent_registry = ctx.registry.snapshot();
+        let budget_limits = state::BudgetLimits {
+            limit: ctx.budget.limit(),
+            agent_limits: ctx.budget.agent_limits().into_iter().collect(),
+        };
+        let shared = fingerprint(&(
+            &memory_snapshot,
+            &message_queues,
+            &freshness_snapshot,
+            &verification_records,
+            &distillation_records,
+            &cancellation,
+            &agent_registry,
+            &budget_limits,
+        ));
+
+        let mut agent_runs = Vec::new();
+        let mut missing_task_states = Vec::new();
+        let mut running_ids = HashSet::new();
+        let mut live_files = HashSet::new();
+        let completed_agents: Vec<state::SerializableAgentResult>;
+        let (budget_spent, cost_ledger, fingerprint);
+        {
+            let results = ctx.agent_results.read();
+            let tasks = self.saved_tasks.lock();
+            // Held while the ledger is read, so that it and each run's
+            // charged usage agree (see `charge_usage`).
+            let journal = self.live.lock();
+            let mut running = journal.runs.iter().collect::<Vec<_>>();
+            running.sort_by_key(|(_, run)| run.started);
+            let mut running_records = Vec::new();
+            for (id, run) in running {
+                let (file, unsaved) = if live {
+                    (
+                        run.written.then(|| live_task_file(*id)),
+                        run.unsaved.clone(),
+                    )
+                } else {
+                    match live_versions.remove(id) {
+                        Some(Ok(file)) => (Some(file), None),
+                        Some(Err(error)) => (None, Some(error)),
+                        None => (None, None),
+                    }
+                };
+                if let Some(reason) = unsaved {
+                    missing_task_states.push(state::MissingTaskState {
+                        agent_run_id: *id,
+                        agent_name: run.agent_name.clone(),
+                        status: AgentRunStatus::Interrupted,
+                        last_saved: file.clone(),
+                        reason,
+                    });
+                }
+                // A run with no saved snapshot yet keeps the result it had
+                // (a continued run), if any.
+                let Some(file) = file else {
+                    continue;
+                };
+                running_ids.insert(*id);
+                running_records.push(state::AgentRunRecord {
+                    agent_run_id: *id,
+                    agent_name: run.agent_name.clone(),
+                    status: AgentRunStatus::Interrupted,
+                    summary: String::new(),
+                    error: Some(RUNNING_AT_CHECKPOINT.to_string()),
+                    task_file: file,
+                    usage_charged: Some(run.usage_charged),
+                });
+            }
+            for result in results.iter() {
+                if running_ids.contains(&result.agent_run_id) {
+                    continue;
+                }
+                let saved = tasks.get(&result.agent_run_id).cloned().unwrap_or_default();
+                if let Some(reason) = saved.unsaved {
+                    missing_task_states.push(state::MissingTaskState {
+                        agent_run_id: result.agent_run_id,
+                        agent_name: result.agent_name.clone(),
+                        status: result.status.clone(),
+                        last_saved: saved.file.clone(),
+                        reason,
+                    });
+                }
+                if let Some(file) = saved.file {
+                    agent_runs.push(state::AgentRunRecord::of(result, file));
+                }
+            }
+            agent_runs.extend(running_records);
+            if live {
+                live_files.extend(
+                    agent_runs
+                        .iter()
+                        .filter_map(|record| live_file_task(&record.task_file)),
+                );
+            }
+            completed_agents = results
+                .iter()
+                .filter(|result| !running_ids.contains(&result.agent_run_id))
+                .map(|r| state::SerializableAgentResult {
+                    agent_name: r.agent_name.clone(),
+                    summary: r.summary.clone(),
+                })
+                .collect();
+            // The ledger's entries the running runs' records don't count:
+            // a resume can't tell those from the live files.
+            let counted = agent_runs
+                .iter()
+                .filter(|record| running_ids.contains(&record.agent_run_id))
+                .filter_map(|record| record.usage_charged)
+                .sum::<usize>();
+            let uncounted = ctx.budget.ledger_len().saturating_sub(counted);
+            let records = agent_runs
+                .iter()
+                .map(|record| {
+                    (
+                        record.agent_run_id,
+                        &record.agent_name,
+                        &record.status,
+                        &record.summary,
+                        &record.error,
+                        &record.task_file,
+                    )
+                })
+                .collect::<Vec<_>>();
+            fingerprint = self::fingerprint(&(
+                shared,
+                &records,
+                &missing_task_states,
+                &completed_agents,
+                uncounted,
+            ));
+            if live {
+                let latest = self.latest.lock();
+                if latest.name.as_deref() == Some(LIVE_CHECKPOINT_FILE)
+                    && latest.live == Some(fingerprint)
+                {
+                    return None;
+                }
+            }
+            budget_spent = ctx.budget.total_spent();
+            cost_ledger = ctx.budget.snapshot_ledger();
+        }
+        let state = state::WorkflowState {
+            workflow_run_id: ctx.workflow_run_id,
+            workflow_name: ctx.workflow_name.clone(),
+            workflow_metadata: ctx.workflow_metadata.clone(),
+            checkpoint_id: uuid::Uuid::new_v4(),
+            timestamp: chrono::Utc::now(),
+            memory_snapshot,
+            message_queues,
+            budget_spent,
+            cost_ledger,
+            freshness_snapshot,
+            agent_results: Vec::new(),
+            agent_runs,
+            missing_task_states,
+            verification_records,
+            distillation_records,
+            completed_agents,
+            cancellation,
+            agent_registry: Some(agent_registry),
+            budget_limits: Some(budget_limits),
+        };
+        Some(Built {
+            state,
+            build: self.builds.fetch_add(1, Ordering::SeqCst) + 1,
+            running: running_ids,
+            live_files,
+            fingerprint,
+        })
+    }
+
+    /// Points `latest-checkpoint` at checkpoint file `path` (in the run
+    /// directory) of build `build`, which records `running` as running,
+    /// unless it names a newer checkpoint (built later) already. For the
+    /// live checkpoint, `live` is its state's fingerprint and whether its
+    /// directory entry is flushed.
+    async fn point_latest_at(
+        &self,
+        path: &Path,
+        build: u64,
+        running: HashSet<uuid::Uuid>,
+        live: Option<(u64, bool)>,
+    ) -> Result<(), WorkflowError> {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let _writing = self.pointer_writes.lock().await;
+        let rewrite = {
+            let latest = self.latest.lock();
+            if build < latest.build {
+                return Ok(());
+            }
+            latest.name.as_deref() != Some(name.as_str())
+        };
+        if rewrite {
+            self.write_file(
+                &self.config.checkpoint_dir.join("latest-checkpoint"),
+                name.as_bytes(),
+                true,
+            )
+            .await?;
+        }
+        *self.latest.lock() = Latest {
+            name: Some(name),
+            build,
+            running,
+            live: live.map(|(fingerprint, _)| fingerprint),
+            synced: live.is_none_or(|(_, synced)| synced),
+        };
+        Ok(())
     }
 
     /// Deletes checkpoint files beyond the newest `keep`: those of earlier
@@ -532,7 +960,7 @@ impl PersistenceManager {
                 retained.push(path);
                 continue;
             }
-            match tokio::fs::remove_file(&path).await {
+            match self.remove_file(&path).await {
                 Ok(()) => self.written.lock().retain(|written| *written != path),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     self.written.lock().retain(|written| *written != path);
@@ -549,40 +977,27 @@ impl PersistenceManager {
         self.prune_task_versions(&retained).await;
     }
 
-    /// Deletes the task versions that neither a checkpoint in `retained`
-    /// nor a recorded result refers to. Nothing is deleted if a retained
-    /// checkpoint can't be read (it may refer to any version). Task files
-    /// of older versions (`agents/<task id>.json`) are left alone.
+    /// Deletes the task versions that neither a checkpoint in `retained`,
+    /// the live checkpoint (while `latest-checkpoint` names it), nor a
+    /// recorded result refers to. A live checkpoint that a newer checkpoint
+    /// replaced as the latest is stale: it is never named again unless it
+    /// is written anew, from the current state. Nothing is
+    /// deleted if one of those checkpoints can't be read (it may refer to
+    /// any version). Live task files and the task files of older versions
+    /// (`agents/<task id>.json`) are left alone.
     async fn prune_task_versions(&self, retained: &[PathBuf]) {
-        #[derive(serde::Deserialize)]
-        struct References {
-            #[serde(default)]
-            agent_runs: Vec<Reference>,
-        }
-        #[derive(serde::Deserialize)]
-        struct Reference {
-            task_file: String,
-        }
         let mut referenced = self
             .saved_tasks
             .lock()
             .values()
             .filter_map(|saved| saved.file.clone())
             .collect::<HashSet<_>>();
-        for path in retained {
-            let references = tokio::fs::read(path)
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|json| {
-                    serde_json::from_slice::<References>(&json).map_err(|error| error.to_string())
-                });
-            match references {
-                Ok(references) => referenced.extend(
-                    references
-                        .agent_runs
-                        .into_iter()
-                        .map(|reference| reference.task_file),
-                ),
+        let live_checkpoint = self.config.checkpoint_dir.join(LIVE_CHECKPOINT_FILE);
+        let live_named = self.latest.lock().name.as_deref() == Some(LIVE_CHECKPOINT_FILE);
+        let live_checkpoint = (live_named && live_checkpoint.is_file()).then_some(live_checkpoint);
+        for path in retained.iter().chain(&live_checkpoint) {
+            match checkpoint_references(path) {
+                Ok(references) => referenced.extend(references),
                 Err(error) => {
                     log::warn!(
                         "Not deleting task versions: checkpoint {} can't be read ({error})",
@@ -605,7 +1020,7 @@ impl PersistenceManager {
             };
             for version in versions.flatten() {
                 let name = version.file_name().to_string_lossy().into_owned();
-                if !name.ends_with(".json") {
+                if !name.ends_with(".json") || name == LIVE_TASK_FILE {
                     continue;
                 }
                 let file = format!(
@@ -615,7 +1030,7 @@ impl PersistenceManager {
                 if referenced.contains(&file) {
                     continue;
                 }
-                if let Err(error) = tokio::fs::remove_file(version.path()).await
+                if let Err(error) = self.remove_file(&version.path()).await
                     && error.kind() != std::io::ErrorKind::NotFound
                 {
                     log::warn!(
@@ -674,14 +1089,409 @@ impl PersistenceManager {
         if tokio::fs::try_exists(&path).await.unwrap_or(false) {
             return Ok(file);
         }
-        let directory = path
-            .parent()
-            .expect("a task version is in its task's directory");
-        tokio::fs::create_dir_all(directory).await?;
-        let temporary = path.with_extension("json.tmp");
-        write_synced(&temporary, &content).await?;
-        tokio::fs::rename(&temporary, &path).await?;
+        self.write_file(&path, &content, true).await?;
         Ok(file)
+    }
+
+    /// Writes `bytes` to `path` with [`write_replacing`], unless a crash is
+    /// being simulated.
+    async fn write_file(
+        &self,
+        path: &Path,
+        bytes: &[u8],
+        sync_directory: bool,
+    ) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self.crashed.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        write_replacing(path, bytes, sync_directory).await
+    }
+
+    /// Flushes the entries of the directory holding `path` to disk, unless a
+    /// crash is being simulated.
+    async fn sync_directory_of(&self, path: &Path) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self.crashed.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        sync_directory(parent_directory(path)).await
+    }
+
+    /// Deletes `path`, unless a crash is being simulated.
+    async fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self.crashed.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        tokio::fs::remove_file(path).await
+    }
+
+    /// Whether the task journal saves running agents
+    /// ([`PersistenceConfig::task_journal`]).
+    pub(crate) fn journals_tasks(&self) -> bool {
+        self.config.task_journal
+    }
+
+    /// Starts saving agent run `id` of `agent_name` as it runs, its budget
+    /// charged for the first `usage_charged` entries of its task's usage
+    /// history; its snapshots arrive through a [`TaskJournal`]. It is saved
+    /// until its result is recorded or [`end_live_run`](Self::end_live_run)
+    /// drops it.
+    pub(crate) fn begin_live_run(&self, id: uuid::Uuid, agent_name: &str, usage_charged: usize) {
+        if !self.config.task_journal {
+            return;
+        }
+        let mut live = self.live.lock();
+        live.started += 1;
+        let started = live.started;
+        live.runs.insert(
+            id,
+            LiveRun {
+                agent_name: agent_name.to_string(),
+                started,
+                usage_charged,
+                task: None,
+                pending: false,
+                written: false,
+                synced: false,
+                unsaved: None,
+            },
+        );
+        live.files.entry(id).or_default();
+    }
+
+    /// Stops saving agent run `id` without recording it (the run was
+    /// dropped, or its caller drives it outside the workflow): later
+    /// checkpoints leave it out, and its live file is deleted once no
+    /// checkpoint refers to it.
+    pub(crate) fn end_live_run(&self, id: uuid::Uuid) {
+        self.live.lock().runs.remove(&id);
+    }
+
+    /// The latest snapshot the task journal has of running agent run `id`,
+    /// if it saves the run and has one.
+    pub(crate) fn latest_live_task(&self, id: uuid::Uuid) -> Option<arko_agents::Task> {
+        self.live.lock().runs.get(&id)?.task.as_deref().cloned()
+    }
+
+    /// Whether the task journal saves any running agent run now.
+    pub(crate) fn has_live_runs(&self) -> bool {
+        !self.live.lock().runs.is_empty()
+    }
+
+    /// Charges usage the workflow processed for running agent run `id`:
+    /// `charge` adds it to the budget, and the run's count of charged usage
+    /// goes up with it, both while checkpoints can't read them, so that a
+    /// checkpoint's ledger and counts agree.
+    pub(crate) fn charge_usage<T>(&self, id: uuid::Uuid, charge: impl FnOnce() -> T) -> T {
+        let mut live = self.live.lock();
+        let charged = charge();
+        if let Some(run) = live.runs.get_mut(&id) {
+            run.usage_charged += 1;
+        }
+        charged
+    }
+
+    /// A snapshot of running task `task` arrived (see [`TaskJournal`]): it
+    /// is written to the task's live file, then the live checkpoint. With
+    /// `durable`, both are on disk (their directory entries flushed too)
+    /// when this returns; otherwise they are written in the background, a
+    /// later snapshot replacing one not written yet, and only the files are
+    /// flushed (a crash of the machine may then keep the older file, never
+    /// a part).
+    async fn live_task_changed(
+        &self,
+        ctx: &Arc<SharedContext>,
+        task: &arko_agents::Task,
+        durable: bool,
+    ) -> Result<(), String> {
+        let task = Arc::new(task.clone());
+        {
+            let mut live = self.live.lock();
+            let Some(run) = live.runs.get_mut(&task.id) else {
+                // No longer saved: recorded, or dropped.
+                return Ok(());
+            };
+            run.task = Some(task.clone());
+            run.pending = true;
+        }
+        if durable {
+            return self.save_live_run(ctx, task.id, true).await;
+        }
+        let (manager, ctx, id) = (self.clone(), ctx.clone(), task.id);
+        tokio::spawn(async move {
+            if let Err(error) = manager.save_live_run(&ctx, id, false).await {
+                log::warn!(
+                    "Workflow '{}': could not save running agent run {id}: {error}. The next save tries again.",
+                    ctx.workflow_name
+                );
+            }
+        });
+        Ok(())
+    }
+
+    /// Writes running task `id`'s latest snapshot to its live file, if it
+    /// isn't there yet, and then the live checkpoint. When another call
+    /// wrote the snapshot already, that call writes the checkpoint; a
+    /// `durable` save still waits for a checkpoint written after it began.
+    async fn save_live_run(
+        &self,
+        ctx: &SharedContext,
+        id: uuid::Uuid,
+        durable: bool,
+    ) -> Result<(), String> {
+        let written = match self.write_live_task(id, durable).await {
+            Some(written) => written,
+            None if durable => Ok(()),
+            None => return Ok(()),
+        };
+        let checkpoint = self
+            .write_live_checkpoint(ctx, durable)
+            .await
+            .map_err(|error| format!("the live checkpoint could not be written: {error}"));
+        written.and(checkpoint)
+    }
+
+    /// Writes running task `id`'s latest snapshot to its live file; with
+    /// `durable`, the file's directory entry is flushed too (also for a
+    /// snapshot written already). `None` when there was nothing to do: the
+    /// file holds the latest snapshot already, or the run is no longer
+    /// saved.
+    async fn write_live_task(&self, id: uuid::Uuid, durable: bool) -> Option<Result<(), String>> {
+        let writer = self.live.lock().files.entry(id).or_default().clone();
+        let _writing = writer.lock().await;
+        let task = {
+            let mut live = self.live.lock();
+            let run = live.runs.get_mut(&id)?;
+            if std::mem::take(&mut run.pending) {
+                Some(run.task.clone()?)
+            } else if durable && run.written && !run.synced {
+                None
+            } else {
+                return None;
+            }
+        };
+        let path = self.config.checkpoint_dir.join(live_task_file(id));
+        let rewritten = task.is_some();
+        let result = match task {
+            Some(task) => {
+                let pretty = self.config.pretty_json;
+                // Off the async threads: a long conversation takes a while.
+                let json = tokio::task::spawn_blocking(move || {
+                    if pretty {
+                        serde_json::to_vec_pretty(&*task)
+                    } else {
+                        serde_json::to_vec(&*task)
+                    }
+                })
+                .await;
+                match json {
+                    Ok(Ok(json)) => self
+                        .write_file(&path, &json, durable)
+                        .await
+                        .map_err(|error| error.to_string()),
+                    Ok(Err(error)) => Err(error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                }
+            }
+            None => self
+                .sync_directory_of(&path)
+                .await
+                .map_err(|error| error.to_string()),
+        };
+        let mut live = self.live.lock();
+        let run = live.runs.get_mut(&id)?;
+        Some(match result {
+            Ok(()) => {
+                run.written = true;
+                run.synced = durable || (run.synced && !rewritten);
+                if run.unsaved.take().is_some() {
+                    log::info!("Running agent run {id} is saved again");
+                }
+                Ok(())
+            }
+            Err(error) => {
+                // Written with the next snapshot, or the next checkpoint.
+                run.pending |= rewritten;
+                let first = run.unsaved.replace(error.clone()).is_none();
+                if first {
+                    log::warn!(
+                        "Could not save running agent run {id} of agent '{}' to {}: {error}. Checkpoints refer to its last saved state until a save succeeds.",
+                        run.agent_name,
+                        path.display()
+                    );
+                }
+                Err(error)
+            }
+        })
+    }
+
+    /// Writes the live checkpoint ([`LIVE_CHECKPOINT_FILE`]) with the state
+    /// as it is once earlier writes are done: a request made while another
+    /// write runs is answered by the next one. `latest-checkpoint` then
+    /// points to it, unless a newer checkpoint was written meanwhile. When
+    /// the live checkpoint `latest-checkpoint` names holds that state
+    /// already (a resume would read the same from it), nothing is written;
+    /// with `durable`, its directory entry is flushed if it isn't yet.
+    pub(crate) async fn write_live_checkpoint(
+        &self,
+        ctx: &SharedContext,
+        durable: bool,
+    ) -> Result<(), WorkflowError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let writer = &self.live_checkpoints;
+        let request = writer.requested.fetch_add(1, SeqCst) + 1;
+        let _writing = writer.lock.lock().await;
+        let answered = if durable {
+            &writer.synced
+        } else {
+            &writer.written
+        };
+        if answered.load(SeqCst) >= request {
+            return Ok(());
+        }
+        let covered = writer.requested.load(SeqCst);
+        // Every snapshot not written yet is written first (a failed write
+        // is tried again): the checkpoint then lists each run at its latest
+        // snapshot. Otherwise a run whose snapshot was still on its way
+        // (a non-durable save) would be left out while a run it started
+        // (a completion verifier's review) is listed, and after a crash
+        // the parent would be lost and its child listed as an orphan.
+        let unwritten = self
+            .live
+            .lock()
+            .runs
+            .iter()
+            .filter(|(_, run)| run.pending)
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in unwritten {
+            let _ = self.write_live_task(id, durable).await;
+        }
+        let built = {
+            let _guard = self.write_lock.lock().await;
+            let built = self.build_state(ctx, true).await;
+            if let Some(built) = &built {
+                // Kept from now on, until the file is written without them.
+                self.live
+                    .lock()
+                    .referenced
+                    .extend(built.live_files.iter().copied());
+            }
+            built
+        };
+        let path = self.config.checkpoint_dir.join(LIVE_CHECKPOINT_FILE);
+        match built {
+            None => {
+                if durable && !self.latest.lock().synced {
+                    self.sync_directory_of(&path).await?;
+                    let mut latest = self.latest.lock();
+                    if latest.name.as_deref() == Some(LIVE_CHECKPOINT_FILE) {
+                        latest.synced = true;
+                    }
+                }
+            }
+            Some(built) => {
+                let (pretty, state) = (self.config.pretty_json, built.state);
+                // Off the async threads: the cost ledger can be long.
+                let json = tokio::task::spawn_blocking(move || {
+                    if pretty {
+                        serde_json::to_vec_pretty(&state)
+                    } else {
+                        serde_json::to_vec(&state)
+                    }
+                })
+                .await
+                .map_err(std::io::Error::other)??;
+                if let Err(error) = self.write_file(&path, &json, durable).await {
+                    // The file may hold this state or the one before.
+                    self.latest.lock().live = None;
+                    return Err(error.into());
+                }
+                self.live.lock().referenced = built.live_files;
+                self.point_latest_at(
+                    &path,
+                    built.build,
+                    built.running,
+                    Some((built.fingerprint, durable)),
+                )
+                .await?;
+            }
+        }
+        writer.written.fetch_max(covered, SeqCst);
+        if durable {
+            writer.synced.fetch_max(covered, SeqCst);
+        }
+        self.delete_finished_live_files().await;
+        Ok(())
+    }
+
+    /// After agent run `id`'s result is recorded: when the live checkpoint
+    /// refers to the run's live file, or `latest-checkpoint` names a
+    /// checkpoint recording the run as running, the live checkpoint is
+    /// written again, recording its end: the file can go, and a resume
+    /// finds the run ended.
+    pub(crate) async fn release_live_run(
+        &self,
+        ctx: &SharedContext,
+        id: uuid::Uuid,
+    ) -> Result<(), WorkflowError> {
+        let recorded_running =
+            self.live.lock().referenced.contains(&id) || self.latest.lock().running.contains(&id);
+        if recorded_running {
+            self.write_live_checkpoint(ctx, false).await?;
+        }
+        #[cfg(test)]
+        self.reached(CrashPoint::LiveRunReleased);
+        Ok(())
+    }
+
+    /// Deletes the live files of the runs no longer running that the live
+    /// checkpoint no longer refers to (a versioned checkpoint refers to one
+    /// only while it is the task's last saved state), unless the run's
+    /// recorded state could not be saved as a version. A file that can't
+    /// be deleted is tried again after the next checkpoint.
+    async fn delete_finished_live_files(&self) {
+        let finished = {
+            let tasks = self.saved_tasks.lock();
+            let live = self.live.lock();
+            live.files
+                .iter()
+                .filter(|(id, _)| {
+                    !live.runs.contains_key(id)
+                        && !live.referenced.contains(id)
+                        && tasks
+                            .get(id)
+                            .is_none_or(|saved| saved.unsaved.is_none() && saved.file.is_some())
+                })
+                .map(|(id, writer)| (*id, writer.clone()))
+                .collect::<Vec<_>>()
+        };
+        for (id, writer) in finished {
+            // After a write in progress.
+            let _writing = writer.lock().await;
+            if self.live.lock().runs.contains_key(&id) {
+                // Running again (recovered).
+                continue;
+            }
+            let path = self.config.checkpoint_dir.join(live_task_file(id));
+            match self.remove_file(&path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    log::warn!(
+                        "Could not delete the live file {} of a finished agent run: {error}",
+                        path.display()
+                    );
+                    continue;
+                }
+            }
+            let mut live = self.live.lock();
+            if !live.runs.contains_key(&id) {
+                live.files.remove(&id);
+            }
+        }
     }
 
     /// Auto-checkpoint if configured.
@@ -701,14 +1511,314 @@ impl PersistenceManager {
     }
 }
 
+/// Saves an agent run's task at its safe points for the task journal
+/// ([`PersistenceConfig::task_journal`]): the workflow gives one to each run
+/// it starts while the journal is on.
+pub(crate) struct TaskJournal {
+    persistence: Arc<PersistenceManager>,
+    context: Arc<SharedContext>,
+}
+
+impl TaskJournal {
+    pub(crate) fn new(persistence: Arc<PersistenceManager>, context: Arc<SharedContext>) -> Self {
+        Self {
+            persistence,
+            context,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl arko_agents::TaskSnapshotSink for TaskJournal {
+    async fn task_changed(&self, task: &arko_agents::Task, durable: bool) -> Result<(), String> {
+        self.persistence
+            .live_task_changed(&self.context, task, durable)
+            .await
+    }
+}
+
+/// The task files the checkpoint at `path` refers to, relative to its
+/// directory.
+fn checkpoint_references(path: &Path) -> std::io::Result<Vec<String>> {
+    #[derive(serde::Deserialize)]
+    struct References {
+        #[serde(default)]
+        agent_runs: Vec<Reference>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Reference {
+        task_file: String,
+    }
+    let json = std::fs::read(path)?;
+    let references = serde_json::from_slice::<References>(&json).map_err(std::io::Error::other)?;
+    Ok(references
+        .agent_runs
+        .into_iter()
+        .map(|reference| reference.task_file)
+        .collect())
+}
+
+/// The task whose live file `file` (relative to the run directory) is, if
+/// it is one.
+fn live_file_task(file: &str) -> Option<uuid::Uuid> {
+    file.strip_prefix(TASKS_DIR)?
+        .strip_prefix('/')?
+        .strip_suffix(LIVE_TASK_FILE)?
+        .strip_suffix('/')?
+        .parse()
+        .ok()
+}
+
 /// Writes `bytes` to `path` and flushes them to disk through the same handle.
 /// Windows can only flush a handle opened for writing, so reopening the file
 /// read-only to sync it fails there with "Access is denied".
 async fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
-    let mut file = tokio::fs::File::create(path).await?;
+    let mut file = retry_while_shared(|| tokio::fs::File::create(path)).await?;
     file.write_all(bytes).await?;
     file.sync_all().await
+}
+
+/// Replaces `path` with `bytes`, so that a reader, or a crash, finds the
+/// old content or the new, never a part: the bytes are written to a
+/// temporary file beside it (`<name>.<process>-<n>.tmp`, in the directory,
+/// created if missing), flushed to disk, and renamed over `path`. On Unix
+/// the directory is flushed too, so the rename survives a crash of the
+/// machine (a directory created for the file is flushed into its parent
+/// as well). On Windows a rename refused because another program has the
+/// file open (an antivirus scanner, an indexer, an editor) is tried again a
+/// few times, as is creating the temporary file. The temporary file is
+/// removed when the write fails. Every
+/// file of a run directory is written this way except the append-only logs
+/// and `workflow-run-id`, which is created once, exclusively.
+///
+/// With `sync_directory` unset, the directory isn't flushed after the
+/// rename: a crash of the machine (not of the process) may then leave the
+/// old file, still whole.
+async fn write_replacing(path: &Path, bytes: &[u8], sync_directory: bool) -> std::io::Result<()> {
+    /// Makes the temporary files' names unique within the process.
+    static TEMPORARIES: AtomicU64 = AtomicU64::new(0);
+    let directory = parent_directory(path);
+    create_directory(directory).await?;
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(format!(
+        ".{}-{}{TEMPORARY_SUFFIX}",
+        std::process::id(),
+        TEMPORARIES.fetch_add(1, Ordering::Relaxed)
+    ));
+    let temporary = PathBuf::from(temporary);
+    let written = async {
+        write_synced(&temporary, bytes).await?;
+        rename_replacing(&temporary, path).await
+    }
+    .await;
+    if let Err(error) = written {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error);
+    }
+    if sync_directory {
+        self::sync_directory(directory).await?;
+    }
+    Ok(())
+}
+
+/// The ending of the temporary files [`write_replacing`] writes.
+const TEMPORARY_SUFFIX: &str = ".tmp";
+
+/// The directory holding `path`.
+fn parent_directory(path: &Path) -> &Path {
+    match path.parent() {
+        Some(directory) if !directory.as_os_str().is_empty() => directory,
+        _ => Path::new("."),
+    }
+}
+
+/// Creates `directory` and its missing parents, each flushed into its
+/// parent (Unix), so that files written into it are found after a crash
+/// of the machine.
+async fn create_directory(directory: &Path) -> std::io::Result<()> {
+    if tokio::fs::metadata(directory)
+        .await
+        .is_ok_and(|metadata| metadata.is_dir())
+    {
+        return Ok(());
+    }
+    // The directories to create, the deepest first.
+    let mut missing = Vec::new();
+    let mut next = Some(directory);
+    while let Some(current) = next {
+        if current.as_os_str().is_empty() || tokio::fs::try_exists(current).await.unwrap_or(true) {
+            break;
+        }
+        missing.push(current);
+        next = current.parent();
+    }
+    tokio::fs::create_dir_all(directory).await?;
+    for created in missing.into_iter().rev() {
+        sync_directory(parent_directory(created)).await?;
+    }
+    Ok(())
+}
+
+/// Removes what an earlier process left in run directory `directory`: the
+/// temporary files of writes it didn't finish, and the live task files no
+/// checkpoint refers to (written just before it stopped, or of runs it
+/// finished). Returns the tasks whose live files the live checkpoint refers
+/// to. Nothing is removed when a checkpoint that could refer to live files
+/// can't be read; a file that can't be removed is left.
+fn sweep_run_directory(directory: &Path) -> HashSet<uuid::Uuid> {
+    let mut referenced = HashSet::new();
+    let mut kept = HashSet::new();
+    let mut known = true;
+    let latest = std::fs::read_to_string(directory.join("latest-checkpoint"))
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty() && !name.contains(['/', '\\']));
+    let live_checkpoint = directory.join(LIVE_CHECKPOINT_FILE);
+    for path in
+        std::iter::once(live_checkpoint.clone()).chain(latest.map(|name| directory.join(name)))
+    {
+        match checkpoint_references(&path) {
+            Ok(files) => {
+                let tasks = files.iter().filter_map(|file| live_file_task(file));
+                if path == live_checkpoint {
+                    let tasks = tasks.collect::<Vec<_>>();
+                    referenced.extend(tasks.iter().copied());
+                    kept.extend(tasks);
+                } else {
+                    kept.extend(tasks);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => known = false,
+        }
+    }
+    let remove = |path: &Path| {
+        if let Err(error) = std::fs::remove_file(path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!("Could not remove {}: {error}", path.display());
+        }
+    };
+    let temporary = |path: &Path| {
+        path.file_name()
+            .is_some_and(|name| name.to_string_lossy().ends_with(TEMPORARY_SUFFIX))
+            && path.is_file()
+    };
+    for entry in std::fs::read_dir(directory).into_iter().flatten().flatten() {
+        if temporary(&entry.path()) {
+            remove(&entry.path());
+        }
+    }
+    for task_dir in std::fs::read_dir(directory.join(TASKS_DIR))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let task = task_dir
+            .file_name()
+            .to_string_lossy()
+            .parse::<uuid::Uuid>()
+            .ok();
+        for entry in std::fs::read_dir(task_dir.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let path = entry.path();
+            let unreferenced_live_file = entry.file_name() == LIVE_TASK_FILE
+                && known
+                && task.is_some_and(|task| !kept.contains(&task));
+            if temporary(&path) || unreferenced_live_file {
+                remove(&path);
+            }
+        }
+    }
+    referenced
+}
+
+/// A hash of `value`'s JSON form (through a JSON value, whose maps are
+/// ordered): equal for equal values. A value that can't be serialized
+/// hashes to a random number, equal to nothing.
+fn fingerprint(value: &impl serde::Serialize) -> u64 {
+    use std::hash::Hasher;
+    struct HashWriter(std::collections::hash_map::DefaultHasher);
+    impl std::io::Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.write(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = HashWriter(Default::default());
+    match serde_json::to_value(value).and_then(|value| serde_json::to_writer(&mut writer, &value)) {
+        Ok(()) => writer.0.finish(),
+        Err(_) => uuid::Uuid::new_v4().as_u64_pair().0,
+    }
+}
+
+/// Renames `from` over `to`, [retrying](retry_while_shared) on Windows.
+async fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+    retry_while_shared(|| tokio::fs::rename(from, to)).await
+}
+
+/// Runs `operation`, and on Windows runs it again a few times while it
+/// fails because another program holds the file open without sharing it
+/// (an antivirus scanner or an indexer): "access denied" (5) or a sharing
+/// violation (32), which pass in a moment.
+async fn retry_while_shared<T, F, Fut>(mut operation: F) -> std::io::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<T>>,
+{
+    #[cfg(windows)]
+    {
+        const RETRIES: u32 = 5;
+        let mut attempt = 0;
+        loop {
+            match operation().await {
+                Err(error) if attempt < RETRIES && matches!(error.raw_os_error(), Some(5 | 32)) => {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(10 << attempt)).await;
+                }
+                done => return done,
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    operation().await
+}
+
+/// Flushes `directory`'s entries to disk (Unix), so a file renamed into it
+/// stays renamed after a crash. Windows can't flush a directory, and a
+/// file system that doesn't support it is skipped.
+async fn sync_directory(directory: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let directory = directory.to_path_buf();
+        let synced =
+            tokio::task::spawn_blocking(move || std::fs::File::open(&directory)?.sync_all())
+                .await
+                .map_err(std::io::Error::other)?;
+        match synced {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::Unsupported
+                ) =>
+            {
+                Ok(())
+            }
+            synced => synced,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = directory;
+        Ok(())
+    }
 }
 
 /// The most buffered event bytes kept while writes fail; the oldest lines
@@ -1084,6 +2194,112 @@ mod tests {
             .await;
         drop(manager);
         assert_eq!(lines(&workspace.0.join("events.jsonl")).len(), 2);
+    }
+
+    /// `write_replacing` replaces a file whole (creating its directory), and
+    /// a failed write leaves the target as it was, without a temporary
+    /// file.
+    #[tokio::test]
+    async fn atomic_writes_replace_whole_files_and_clean_up_after_failures() {
+        let workspace = crate::test_support::Workspace::new();
+        let file = workspace.0.join("nested/state.json");
+        write_replacing(&file, b"first", true).await.unwrap();
+        write_replacing(&file, b"second", true).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "second");
+        let names = |directory: &Path| {
+            let mut names = std::fs::read_dir(directory)
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        assert_eq!(names(&workspace.0.join("nested")), ["state.json"]);
+
+        // A directory can't be replaced by a file.
+        let occupied = workspace.0.join("occupied");
+        std::fs::create_dir(&occupied).unwrap();
+        assert!(write_replacing(&occupied, b"data", true).await.is_err());
+        assert!(occupied.is_dir());
+        assert_eq!(names(&workspace.0), ["nested", "occupied"]);
+    }
+
+    /// Checkpoints point `latest-checkpoint` at themselves through atomic
+    /// writes: no temporary file is left.
+    #[tokio::test]
+    async fn the_latest_checkpoint_pointer_is_written_atomically() {
+        let workspace = crate::test_support::Workspace::new();
+        let workflow = crate::Workflow::builder()
+            .name("pointer-test")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(arko_ai::LLMClient::new()))
+            .agent("coder", crate::test_support::agent_config("Coder"))
+            .persistence(PersistenceConfig::new(workspace.0.join(".run")))
+            .build()
+            .unwrap();
+        workflow.checkpoint().await.unwrap();
+        let run = workspace.0.join(".run");
+        let latest = std::fs::read_to_string(run.join("latest-checkpoint")).unwrap();
+        assert!(run.join(latest.trim()).is_file());
+        assert!(
+            std::fs::read_dir(&run)
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp"))
+        );
+    }
+
+    /// A manager opening a run directory removes what an earlier process
+    /// left unfinished: temporary files, and live files no checkpoint
+    /// refers to. The live files the live checkpoint refers to stay.
+    #[test]
+    fn leftovers_of_an_earlier_process_are_removed() {
+        let workspace = crate::test_support::Workspace::new();
+        let run = workspace.0.join(".run");
+        let (kept, orphan) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        for id in [kept, orphan] {
+            std::fs::create_dir_all(run.join(format!("{TASKS_DIR}/{id}"))).unwrap();
+            std::fs::write(run.join(live_task_file(id)), "{}").unwrap();
+        }
+        let leftovers = [
+            run.join("checkpoint-1.json.7-0.tmp"),
+            run.join(format!("{}.7-1.tmp", live_task_file(kept))),
+        ];
+        for file in &leftovers {
+            std::fs::write(file, "half").unwrap();
+        }
+        let version = run.join(format!("{TASKS_DIR}/{kept}/0123.json"));
+        std::fs::write(&version, "{}").unwrap();
+        std::fs::write(
+            run.join(LIVE_CHECKPOINT_FILE),
+            serde_json::json!({"agent_runs": [{"task_file": live_task_file(kept)}]}).to_string(),
+        )
+        .unwrap();
+        let opened = manager(PersistenceConfig::new(&run));
+        assert!(run.join(live_task_file(kept)).is_file());
+        assert!(version.is_file());
+        assert!(!run.join(live_task_file(orphan)).exists());
+        for file in &leftovers {
+            assert!(!file.exists(), "{}", file.display());
+        }
+        assert!(opened.live.lock().referenced.contains(&kept));
+
+        // An unreadable live checkpoint may refer to any live file.
+        std::fs::write(run.join(LIVE_CHECKPOINT_FILE), "{").unwrap();
+        std::fs::write(run.join(live_task_file(orphan)), "{}").unwrap();
+        drop(opened);
+        let _reopened = manager(PersistenceConfig::new(&run));
+        assert!(run.join(live_task_file(orphan)).is_file());
+    }
+
+    /// Only a task's live file is taken for one.
+    #[test]
+    fn live_files_are_recognized_by_path() {
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(live_file_task(&live_task_file(id)), Some(id));
+        assert_eq!(live_file_task(&format!("agents/{id}/0123.json")), None);
+        assert_eq!(live_file_task(&format!("agents/{id}.json")), None);
     }
 
     #[test]

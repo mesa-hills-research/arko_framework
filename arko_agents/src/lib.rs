@@ -44,7 +44,7 @@ pub use snapshot::TaskSnapshotSink;
 pub use task::{
     ApprovalReason, DeferredToolError, ErrorRecoveryCause, PendingToolCallInfo,
     PlanUsageWindowMark, RefusalResolution, RefusedInput, RefusedMessage, RefusedToolResult,
-    RunningToolCall, Task, TaskState,
+    RunningToolCall, Task, TaskParent, TaskState,
 };
 pub use tool::{
     InterceptedResult, InterceptionFailurePolicy, InterceptorConfig, TaskContext, Tool,

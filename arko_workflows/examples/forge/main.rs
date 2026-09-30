@@ -212,8 +212,19 @@ async fn main() -> ForgeResult<()> {
     let (state_dir, manifest, use_case) = match &args.resume {
         Some(state_dir) => {
             let state_dir = std::fs::canonicalize(state_dir)?;
-            let manifest: RunManifest =
+            let mut manifest: RunManifest =
                 serde_json::from_slice(&std::fs::read(state_dir.join("forge-run.json"))?)?;
+            // A budget given with --resume replaces the saved one (to raise
+            // a budget the run stopped at); the other settings stay.
+            if let Some(budget) = args.settings.budget
+                && manifest.settings.budget != Some(budget)
+            {
+                manifest.settings.budget = Some(budget);
+                std::fs::write(
+                    state_dir.join("forge-run.json"),
+                    serde_json::to_vec_pretty(&manifest)?,
+                )?;
+            }
             let use_case = std::fs::read_to_string(manifest.output.join("USE_CASE.md"))?;
             (state_dir, manifest, use_case)
         }
@@ -405,11 +416,15 @@ async fn main() -> ForgeResult<()> {
             }
         }),
     );
+    // Over the budget the agents pause (the default policy) and the forge
+    // stops, saved, until it is resumed with a higher budget.
     if let Some(budget) = settings.budget {
         builder = builder.budget(budget);
     }
-    // Checkpoints are saved when an agent run finishes. A run stopped before
-    // any finished resumes from the files in the crate instead.
+    // Running agents are saved as they run, so the latest checkpoint holds
+    // the architect as it was when the forge stopped. Without one (the forge
+    // stopped before the architect's first save), a resume starts from the
+    // files in the crate instead.
     if args.resume.is_some()
         && let Ok(pointer) = std::fs::read_to_string(state_dir.join("latest-checkpoint"))
     {
@@ -440,27 +455,91 @@ async fn main() -> ForgeResult<()> {
         .agent_results
         .into_iter()
         .rfind(|result| result.agent_name == ARCHITECT);
-    let mut result = match earlier {
+    // An architect that was running when the forge stopped continues where
+    // it was saved, its explorers with it; if that fails, it continues from
+    // the crate as below.
+    let recovered = match workflow
+        .interrupted_runs()
+        .into_iter()
+        .rfind(|run| run.agent_name == ARCHITECT && run.task.parent.is_none())
+    {
+        Some(interrupted) => {
+            eprintln!("forge: recovering the architect where it stopped");
+            match within_budget(&workflow, &state_dir, workflow.recover_agent(&interrupted)).await {
+                Ok(result) => Some(result),
+                Err(error) => {
+                    eprintln!("forge: couldn't recover the architect ({error})");
+                    // Its latest recorded state.
+                    workflow.agent_result(interrupted.agent_run_id)
+                }
+            }
+        }
+        None => None,
+    };
+    let mut result = match recovered.or(earlier) {
         Some(earlier) if earlier.status == AgentRunStatus::Completed => earlier,
+        // Paused by the budget (or an error the forge doesn't wait out):
+        // it continues with its held request.
+        Some(earlier) if earlier.status == AgentRunStatus::Paused => {
+            eprintln!("forge: continuing the paused architect");
+            let resume = AgentResume::ContinueAfterError { note: None };
+            within_budget(
+                &workflow,
+                &state_dir,
+                workflow.resume_agent(&earlier, resume),
+            )
+            .await?
+        }
         Some(earlier) => {
             let resume = fill(prompts::ARCHITECT_RESUME, &manifest);
-            match workflow.continue_agent(&earlier, &resume).await {
+            match within_budget(
+                &workflow,
+                &state_dir,
+                workflow.continue_agent(&earlier, &resume),
+            )
+            .await
+            {
                 Ok(result) => result,
                 Err(error) => {
                     eprintln!(
                         "forge: couldn't continue the earlier task ({error}); starting again"
                     );
-                    workflow.run_agent(ARCHITECT, &resume).await?
+                    within_budget(
+                        &workflow,
+                        &state_dir,
+                        workflow.run_agent(ARCHITECT, &resume),
+                    )
+                    .await?
                 }
             }
         }
         None if args.resume.is_some() => {
-            workflow
-                .run_agent(ARCHITECT, &fill(prompts::ARCHITECT_RESUME, &manifest))
-                .await?
+            within_budget(
+                &workflow,
+                &state_dir,
+                workflow.run_agent(ARCHITECT, &fill(prompts::ARCHITECT_RESUME, &manifest)),
+            )
+            .await?
         }
-        None => workflow.run_agent(ARCHITECT, &task).await?,
+        None => within_budget(&workflow, &state_dir, workflow.run_agent(ARCHITECT, &task)).await?,
     };
+    // Explorers the architect was running when the forge stopped and that it
+    // didn't resume itself finish their work too (their results are in the
+    // crate and the event log).
+    for orphan in workflow.interrupted_runs() {
+        eprintln!(
+            "forge: recovering {} run {} where it stopped",
+            orphan.agent_name, orphan.agent_run_id
+        );
+        if let Err(error) =
+            within_budget(&workflow, &state_dir, workflow.recover_agent(&orphan)).await
+        {
+            eprintln!(
+                "forge: couldn't recover {} run {} ({error})",
+                orphan.agent_name, orphan.agent_run_id
+            );
+        }
+    }
 
     // The forge's own checks; failures go back to the architect.
     let mut repairs = 0;
@@ -485,7 +564,12 @@ async fn main() -> ForgeResult<()> {
                     "The forge's check `{}` failed after you finished. Fix the cause, run the checks again, and call complete_task when they all pass.\n\n```text\n{}\n```",
                     failure.check, failure.output
                 );
-                result = workflow.continue_agent(&result, &prompt).await?;
+                result = within_budget(
+                    &workflow,
+                    &state_dir,
+                    workflow.continue_agent(&result, &prompt),
+                )
+                .await?;
             }
             Err(failure) => {
                 break Err(format!(
@@ -511,6 +595,52 @@ async fn main() -> ForgeResult<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Runs a workflow call, unless the budget stops the forge first: when the
+/// budget holds the whole run (an explorer waits for a raise while the
+/// architect waits for it) or the call returns paused by the budget, the
+/// forge saves a checkpoint and exits, telling how to continue.
+async fn within_budget<T>(
+    workflow: &Workflow,
+    state_dir: &Path,
+    call: impl std::future::Future<Output = Result<T, WorkflowError>>,
+) -> Result<T, WorkflowError> {
+    tokio::pin!(call);
+    let result = tokio::select! {
+        result = &mut call => result,
+        // The call is still running here, so the checkpoint records its
+        // agents as they are, held.
+        () = workflow.budget_blocked() => budget_stop(workflow, state_dir).await,
+    };
+    match result {
+        Err(WorkflowError::AgentPaused {
+            pause:
+                AgentPause::ErrorRecovery {
+                    cause: arko_agents::ErrorRecoveryCause::BudgetExceeded,
+                    ..
+                },
+            ..
+        }) => budget_stop(workflow, state_dir).await,
+        result => result,
+    }
+}
+
+/// The budget is used up: saves the paused agents and exits with status 2.
+async fn budget_stop(workflow: &Workflow, state_dir: &Path) -> ! {
+    if let Err(error) = workflow.checkpoint().await {
+        eprintln!("forge: couldn't save a checkpoint ({error}); the latest one is kept");
+    }
+    let spent = workflow.cost_ledger().total();
+    let limit = workflow.budget().unwrap_or(spent);
+    eprintln!(
+        "\nforge: the budget of ${limit:.2} is used up (spent ${spent:.2}). The agents are paused where they were and saved."
+    );
+    eprintln!(
+        "forge: to continue, resume with a higher budget:\n\n    forge --resume {} --budget <dollars>\n",
+        state_dir.display()
+    );
+    std::process::exit(2);
 }
 
 /// Fills a prompt's `{placeholders}` from the run's manifest.

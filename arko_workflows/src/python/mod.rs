@@ -82,10 +82,14 @@ pub struct PyWorkflowBuilder {
     workspace: Option<String>,
     agents: Vec<(String, String)>,
     budget: Option<f64>,
+    budget_exceeded_policy: crate::budget::BudgetExceededPolicy,
+    wait_for_budget_raise: bool,
     persistence_dir: Option<String>,
     auto_checkpoint: bool,
     retain_checkpoints: Option<usize>,
     event_log: crate::persistence::EventLog,
+    task_journal: bool,
+    pretty_json: bool,
     resume_from: Option<String>,
     memory_tiers: Vec<(String, Option<usize>)>,
     memory_renames: Vec<(String, String)>,
@@ -132,10 +136,14 @@ impl PyWorkflowBuilder {
             workspace: None,
             agents: Vec::new(),
             budget: None,
+            budget_exceeded_policy: crate::budget::BudgetExceededPolicy::default(),
+            wait_for_budget_raise: false,
             persistence_dir: None,
             auto_checkpoint: true,
             retain_checkpoints: None,
             event_log: crate::persistence::EventLog::Full,
+            task_journal: true,
+            pretty_json: false,
             resume_from: None,
             memory_tiers: Vec::new(),
             memory_renames: Vec::new(),
@@ -170,20 +178,45 @@ impl PyWorkflowBuilder {
         Ok(())
     }
 
+    /// What happens over the budget: `"pause"` (the default: each agent is
+    /// held before its next model request until `set_budget` raises the
+    /// budget; a run the host started raises `AgentPaused`, or waits with
+    /// `wait_for_raise=True`) or `"cancel"` (the agent is cancelled;
+    /// `reopen_agent` continues it).
+    #[pyo3(signature = (policy, wait_for_raise=false))]
+    fn budget_exceeded_policy(&mut self, policy: &str, wait_for_raise: bool) -> PyResult<()> {
+        self.budget_exceeded_policy = match policy {
+            "pause" => crate::budget::BudgetExceededPolicy::Pause,
+            "cancel" => crate::budget::BudgetExceededPolicy::Cancel,
+            other => {
+                return Err(value_error(format!(
+                    "the budget exceeded policy must be \"pause\" or \"cancel\", not {other:?}"
+                )));
+            }
+        };
+        self.wait_for_budget_raise = wait_for_raise;
+        Ok(())
+    }
+
     /// Persist the run in `checkpoint_dir`. As in Rust: a checkpoint after
     /// every finalized agent run (`auto_checkpoint=True`), every checkpoint
     /// and task version kept (`retain_checkpoints=None`; a count of at least
     /// 1 keeps the newest checkpoints and the task versions they refer to,
     /// and 0 raises `ValueError`), and every event logged
     /// (`event_log="full"`; `"lifecycle_only"` leaves out streamed
-    /// fragments).
-    #[pyo3(signature = (checkpoint_dir, auto_checkpoint=true, retain_checkpoints=None, event_log="full"))]
+    /// fragments). Running agents are saved as they run, so a workflow that
+    /// stops resumes them where they were (`task_journal=True`; see
+    /// `interrupted_runs` and `recover_agent`), in compact JSON
+    /// (`pretty_json=False`).
+    #[pyo3(signature = (checkpoint_dir, auto_checkpoint=true, retain_checkpoints=None, event_log="full", task_journal=true, pretty_json=false))]
     fn persistence(
         &mut self,
         checkpoint_dir: String,
         auto_checkpoint: bool,
         retain_checkpoints: Option<usize>,
         event_log: &str,
+        task_journal: bool,
+        pretty_json: bool,
     ) -> PyResult<()> {
         if retain_checkpoints == Some(0) {
             return Err(value_error(
@@ -202,6 +235,8 @@ impl PyWorkflowBuilder {
         self.persistence_dir = Some(checkpoint_dir);
         self.auto_checkpoint = auto_checkpoint;
         self.retain_checkpoints = retain_checkpoints;
+        self.task_journal = task_journal;
+        self.pretty_json = pretty_json;
         Ok(())
     }
 
@@ -335,11 +370,16 @@ impl PyWorkflowBuilder {
         if let Some(b) = self.budget {
             builder = builder.budget(b);
         }
+        builder = builder
+            .budget_exceeded_policy(self.budget_exceeded_policy)
+            .wait_for_budget_raise(self.wait_for_budget_raise);
 
         if let Some(ref directory) = self.persistence_dir {
             let mut config = crate::persistence::PersistenceConfig::new(directory)
                 .auto_checkpoint(self.auto_checkpoint)
-                .event_log(self.event_log);
+                .event_log(self.event_log)
+                .task_journal(self.task_journal)
+                .pretty_json(self.pretty_json);
             if let Some(count) = self.retain_checkpoints {
                 config = config.keep_last_checkpoints(count);
             }
@@ -523,6 +563,79 @@ impl PyWorkflow {
                 .map(PyAgentResult::from)
                 .map_err(run_error)
         })
+    }
+
+    /// The agent runs that were running when the workflow stopped, as the
+    /// checkpoint it resumed from saved them, and orphaned nested runs
+    /// (their parent can no longer resume them); continue each with
+    /// `recover_agent`. Runs started inside a tool call their parent still
+    /// holds open are recovered with that run and not listed.
+    fn interrupted_runs(&self) -> Vec<PyAgentResult> {
+        self.inner
+            .interrupted_runs()
+            .into_iter()
+            .map(PyAgentResult::from)
+            .collect()
+    }
+
+    /// Continue an interrupted agent run (from `interrupted_runs`) where it
+    /// was saved, without a new message.
+    fn recover_agent<'py>(
+        &self,
+        py: Python<'py>,
+        previous: PyAgentResult,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let workflow = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            workflow
+                .recover_agent(&previous.inner)
+                .await
+                .map(PyAgentResult::from)
+                .map_err(run_error)
+        })
+    }
+
+    /// Continue a cancelled agent run (one the budget cancelled under the
+    /// `"cancel"` policy, say) where its task stopped, with `prompt` after a
+    /// note that it was reopened.
+    #[pyo3(signature = (previous, prompt=String::new()))]
+    fn reopen_agent<'py>(
+        &self,
+        py: Python<'py>,
+        previous: PyAgentResult,
+        prompt: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let workflow = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            workflow
+                .reopen_agent(&previous.inner, &prompt)
+                .await
+                .map(PyAgentResult::from)
+                .map_err(run_error)
+        })
+    }
+
+    /// Change the workflow's budget limit (None: no limit) while agents
+    /// run: raising it releases the agents held on it.
+    #[pyo3(signature = (limit=None))]
+    fn set_budget(&self, limit: Option<f64>) -> PyResult<()> {
+        self.inner
+            .set_budget(limit)
+            .map_err(|error| value_error(error.to_string()))
+    }
+
+    /// Change an agent's own budget limit (None: none) while it runs.
+    #[pyo3(signature = (agent, limit=None))]
+    fn set_agent_budget(&self, agent: String, limit: Option<f64>) -> PyResult<()> {
+        self.inner
+            .set_agent_budget(&agent, limit)
+            .map_err(|error| value_error(error.to_string()))
+    }
+
+    /// Whether the budget holds up the whole run: no agent can go on until
+    /// it is raised.
+    fn is_budget_blocked(&self) -> bool {
+        self.inner.is_budget_blocked()
     }
 
     /// The recorded result of agent run `agent_run_id` (as `UserInputRequired`,

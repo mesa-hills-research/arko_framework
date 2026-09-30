@@ -924,7 +924,7 @@ impl ToolResultInterceptor for DistillationInterceptor {
             )
             .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
         }
-        if cost_result.exceeded {
+        if crate::workflow::engine::reports_exceeded(&self.context, &cost_result) {
             crate::workflow::engine::fire_hooks_on_context(
                 &self.context,
                 crate::hooks::HookPoint::OnBudgetExceeded,

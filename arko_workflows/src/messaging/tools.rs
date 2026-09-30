@@ -264,7 +264,8 @@ fn role<'a>(context: &'a SharedContext, agent: &str) -> &'a str {
 
 /// The notices a running agent receives at each safe turn boundary: one
 /// line for every agent it may message that started or finished after the
-/// registry version it has seen.
+/// registry version it has seen. It also holds the agent's requests while
+/// it is over its budget.
 pub(crate) struct ActivityNotices {
     pub context: Arc<SharedContext>,
     pub agent_name: String,
@@ -292,6 +293,12 @@ impl arko_agents::TurnContextSource for ActivityNotices {
                 .collect::<Vec<_>>()
                 .join("\n")
         })
+    }
+
+    /// Under `BudgetExceededPolicy::Pause`, an agent over the workflow's
+    /// budget or its own is held before its next request.
+    fn hold_request(&self, _task_id: uuid::Uuid) -> Option<String> {
+        self.context.budget.hold_reason(&self.agent_name)
     }
 }
 

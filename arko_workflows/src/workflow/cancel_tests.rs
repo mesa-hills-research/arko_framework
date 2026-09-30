@@ -11,6 +11,7 @@ use arko_agents::{ToolCallContext, ToolExecutionContext, ToolExecutionDecision};
 use serde_json::json;
 
 use super::*;
+use crate::budget::BudgetExceededPolicy;
 use crate::durable::{DurableRetryPolicy, DurableStepSpec};
 use crate::freshness::ContextFreshnessConfig;
 use crate::hooks::{HookPoint, HookResult};
@@ -777,6 +778,7 @@ async fn an_agent_stopped_over_budget_records_why() {
     let workflow = builder(&server, &workspace)
         .agent_tool("coder", ProbeTool::new("probe", false))
         .budget(0.0)
+        .budget_exceeded_policy(BudgetExceededPolicy::Cancel)
         .build()
         .unwrap();
     let error = within(workflow.run_agent("coder", "Probe."))
@@ -812,6 +814,7 @@ async fn an_agent_aborted_over_budget_records_why() {
     let workflow = builder(&server, &workspace)
         .agent_tool("coder", ProbeTool::new("block", true))
         .budget(0.0)
+        .budget_exceeded_policy(BudgetExceededPolicy::Cancel)
         .cancel_grace_period(Duration::from_millis(100))
         .build()
         .unwrap();

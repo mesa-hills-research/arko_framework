@@ -49,6 +49,9 @@ pub enum WaitReason {
     AwaitingMessage,
     /// The workflow is paused.
     Paused,
+    /// Held before a model request until the budget is raised (see
+    /// [`BudgetExceededPolicy::Pause`](crate::budget::BudgetExceededPolicy::Pause)).
+    BudgetExceeded,
 }
 
 /// An agent's status in the workflow run.
@@ -89,6 +92,7 @@ impl AgentStatus {
                     WaitReason::AwaitingInput => ("awaiting_input", None),
                     WaitReason::AwaitingMessage => ("awaiting_message", None),
                     WaitReason::Paused => ("paused", None),
+                    WaitReason::BudgetExceeded => ("budget_exceeded", None),
                 };
                 match until {
                     Some(until) => format!(
@@ -168,13 +172,24 @@ struct Run {
     /// The version of the start this run made, if it made one (no other run
     /// of the agent was running).
     started: Option<u64>,
+    /// The run inside whose tool call this one runs, if any.
+    parent: Option<Uuid>,
 }
 
 #[derive(Default)]
 struct RegistryState {
     saved: RegistrySnapshot,
     runs: HashMap<Uuid, Run>,
+    /// Per run being recovered (see
+    /// [`AgentRegistry::claim_recovery`]): a receiver that closes when its
+    /// recovery ends. Closed entries are removed as they are found.
+    recoveries: HashMap<Uuid, watch::Receiver<()>>,
 }
+
+/// A recovery's claim on the interrupted run it recovers (see
+/// [`AgentRegistry::claim_recovery`]). Held until the recovery has recorded
+/// the run's outcome; dropping it wakes the recoveries waiting for it.
+pub(crate) struct RecoveryClaim(#[allow(dead_code)] watch::Sender<()>);
 
 /// The status registry of one workflow run.
 pub(crate) struct AgentRegistry {
@@ -230,6 +245,7 @@ impl AgentRegistry {
         Self::with_state(RegistryState {
             saved,
             runs: HashMap::new(),
+            recoveries: HashMap::new(),
         })
     }
 
@@ -266,7 +282,11 @@ impl AgentRegistry {
     /// new version.
     pub fn start(&self, runs: &[(Uuid, &str)]) {
         let mut guard = self.state.lock();
-        let state = &mut *guard;
+        self.start_locked(&mut guard, runs);
+    }
+
+    /// [`start`](Self::start), with the state lock held.
+    fn start_locked(&self, state: &mut RegistryState, runs: &[(Uuid, &str)]) {
         for (task_id, agent) in runs {
             let already_running = state.runs.values().any(|run| run.agent == *agent);
             let record = state.saved.agents.entry((*agent).to_string()).or_default();
@@ -285,10 +305,67 @@ impl AgentRegistry {
                     awaiting_message: false,
                     previous,
                     started,
+                    parent: None,
                 },
             );
         }
         self.publish(state);
+    }
+
+    /// Whether run `task_id` is marked running.
+    pub fn is_running(&self, task_id: Uuid) -> bool {
+        self.state.lock().runs.contains_key(&task_id)
+    }
+
+    /// Marks run `task_id` of `agent` running, as [`start`](Self::start)
+    /// does, unless it is running already; returns whether it was marked.
+    pub fn start_unless_running(&self, task_id: Uuid, agent: &str) -> bool {
+        let mut guard = self.state.lock();
+        if guard.runs.contains_key(&task_id) {
+            return false;
+        }
+        self.start_locked(&mut guard, &[(task_id, agent)]);
+        true
+    }
+
+    /// Marks interrupted run `task_id` of `agent` running for its recovery,
+    /// as [`start_unless_running`](Self::start_unless_running) does, and
+    /// returns the claim to hold until the recovery has recorded the run's
+    /// outcome. When the run is running already, returns the receiver of
+    /// the recovery running it (see [`recovery`](Self::recovery)), or
+    /// `None` when no recovery does.
+    pub fn claim_recovery(
+        &self,
+        task_id: Uuid,
+        agent: &str,
+    ) -> Result<RecoveryClaim, Option<watch::Receiver<()>>> {
+        let mut guard = self.state.lock();
+        if let Some(recovering) = Self::recovery_locked(&mut guard, task_id) {
+            return Err(Some(recovering));
+        }
+        if guard.runs.contains_key(&task_id) {
+            return Err(None);
+        }
+        self.start_locked(&mut guard, &[(task_id, agent)]);
+        let (claim, recovering) = watch::channel(());
+        guard.recoveries.insert(task_id, recovering);
+        Ok(RecoveryClaim(claim))
+    }
+
+    /// The recovery running run `task_id`, if one does: its receiver's
+    /// `changed` fails once the recovery has ended (and recorded the run's
+    /// outcome).
+    pub fn recovery(&self, task_id: Uuid) -> Option<watch::Receiver<()>> {
+        Self::recovery_locked(&mut self.state.lock(), task_id)
+    }
+
+    fn recovery_locked(state: &mut RegistryState, task_id: Uuid) -> Option<watch::Receiver<()>> {
+        let recovering = state.recoveries.get(&task_id)?;
+        if recovering.has_changed().is_ok() {
+            return Some(recovering.clone());
+        }
+        state.recoveries.remove(&task_id);
+        None
     }
 
     /// Removes a run marked running whose start then failed. When no other
@@ -410,6 +487,37 @@ impl AgentRegistry {
             state.saved.version += 1;
             self.publish(state);
         }
+    }
+
+    /// Records that running run `task_id` runs inside a tool call of run
+    /// `parent`.
+    pub fn set_parent(&self, task_id: Uuid, parent: Option<Uuid>) {
+        if let Some(run) = self.state.lock().runs.get_mut(&task_id) {
+            run.parent = parent;
+        }
+    }
+
+    /// Whether the budget holds up the whole run: some run waits for a
+    /// raise ([`WaitReason::BudgetExceeded`]), and every other running run
+    /// does too, waits for a message, or waits in a tool call for a run it
+    /// started (one of them, in turn). Nothing then runs until the budget
+    /// is raised.
+    pub fn blocked_on_budget(&self) -> bool {
+        let state = self.state.lock();
+        let mut held = false;
+        for (task_id, run) in &state.runs {
+            if run.waiting == Some(WaitReason::BudgetExceeded) {
+                held = true;
+            } else if !run.awaiting_message
+                && !state
+                    .runs
+                    .values()
+                    .any(|other| other.parent == Some(*task_id))
+            {
+                return false;
+            }
+        }
+        held
     }
 
     /// Marks run `task_id` as waiting in `wait_for_message`, or no longer.

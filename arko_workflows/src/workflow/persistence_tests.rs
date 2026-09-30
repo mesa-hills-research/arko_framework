@@ -471,7 +471,9 @@ async fn a_result_is_recorded_when_its_call_is_dropped_while_saving() {
     let server = done_server().await;
     let workflow = Arc::new(
         builder(&server, &workspace)
-            .persistence(PersistenceConfig::new(run_dir(&workspace)))
+            // Without the task journal: its save before a tool call runs
+            // would wait for the held writes.
+            .persistence(PersistenceConfig::new(run_dir(&workspace)).task_journal(false))
             .build()
             .unwrap(),
     );

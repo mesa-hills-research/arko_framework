@@ -13,6 +13,47 @@ use serde::{Deserialize, Serialize};
 /// Scale factor: store cost as integer micro-dollars for lock-free atomics.
 const COST_SCALE: f64 = 1_000_000.0;
 
+/// The stored limit that stands for "no limit".
+const NO_LIMIT: u64 = u64::MAX;
+
+/// A limit in dollars, scaled; `None` is [`NO_LIMIT`].
+fn scaled_limit(limit: Option<f64>) -> u64 {
+    match limit {
+        Some(limit) => ((limit.max(0.0) * COST_SCALE) as u64).min(NO_LIMIT - 1),
+        None => NO_LIMIT,
+    }
+}
+
+/// What a workflow does when its budget, or an agent's
+/// ([`WorkflowBuilder::agent_budget`](crate::WorkflowBuilder::agent_budget)),
+/// is exceeded. Set with
+/// [`WorkflowBuilder::budget_exceeded_policy`](crate::WorkflowBuilder::budget_exceeded_policy).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetExceededPolicy {
+    /// The default: nothing is cancelled. Each agent over the budget is
+    /// held before its next model request, paused for error recovery with
+    /// [`ErrorRecoveryCause::BudgetExceeded`](arko_agents::ErrorRecoveryCause::BudgetExceeded)
+    /// (tool calls it is running finish first). A run inside another
+    /// agent's tool call waits until the budget is raised
+    /// ([`Workflow::set_budget`](crate::Workflow::set_budget),
+    /// [`Workflow::set_agent_budget`](crate::Workflow::set_agent_budget));
+    /// a run the host started returns
+    /// [`WorkflowError::AgentPaused`](crate::WorkflowError::AgentPaused), to
+    /// be continued with [`Workflow::resume_agent`](crate::Workflow::resume_agent)
+    /// once the budget is raised, or waits too with
+    /// [`WorkflowBuilder::wait_for_budget_raise`](crate::WorkflowBuilder::wait_for_budget_raise).
+    /// New runs start and are held at their first request. Spending can go
+    /// past the limit by the requests in flight when it is reached.
+    #[default]
+    Pause,
+    /// Each agent over the budget is cancelled (its run is recorded
+    /// `Cancelled`; [`Workflow::reopen_agent`](crate::Workflow::reopen_agent)
+    /// continues it), and later runs are refused while the budget stays
+    /// exceeded.
+    Cancel,
+}
+
 /// Identifies the origin of a cost entry in the ledger.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CostSource {
@@ -69,6 +110,9 @@ pub struct AddCostResult {
     pub warning_triggered: bool,
     /// True if the budget limit has been exceeded.
     pub exceeded: bool,
+    /// True if this addition exceeded the limit: the first addition over it
+    /// since the budget was last within it (a raise can bring it back).
+    pub exceeded_crossed: bool,
 }
 
 /// Tracks accumulated cost across all agents in a workflow.
@@ -78,12 +122,20 @@ pub struct AddCostResult {
 /// detailed per-entry recording.
 pub struct BudgetManager {
     spent: AtomicU64,
-    limit: Option<u64>,
+    /// The limit, scaled ([`NO_LIMIT`]: none); it can change while agents
+    /// run ([`set_limit`](Self::set_limit)).
+    limit: AtomicU64,
     warning: Option<u64>,
     warned: AtomicBool,
+    /// The spend has been reported over the limit since it was last within.
+    exceeded_reported: AtomicBool,
     ledger: Mutex<CostLedger>,
     agent_limits: RwLock<HashMap<String, u64>>,
     agent_spent: Mutex<HashMap<String, u64>>,
+    policy: BudgetExceededPolicy,
+    wait_for_raise: bool,
+    /// Counts the changes of the limits.
+    changes: tokio::sync::watch::Sender<u64>,
 }
 
 impl BudgetManager {
@@ -91,13 +143,41 @@ impl BudgetManager {
     pub fn new(limit: Option<f64>, warning: Option<f64>) -> Self {
         Self {
             spent: AtomicU64::new(0),
-            limit: limit.map(|l| (l * COST_SCALE) as u64),
+            limit: AtomicU64::new(scaled_limit(limit)),
             warning: warning.map(|w| (w * COST_SCALE) as u64),
             warned: AtomicBool::new(false),
+            exceeded_reported: AtomicBool::new(false),
             ledger: Mutex::new(CostLedger::default()),
             agent_limits: RwLock::new(HashMap::new()),
             agent_spent: Mutex::new(HashMap::new()),
+            policy: BudgetExceededPolicy::default(),
+            wait_for_raise: false,
+            changes: tokio::sync::watch::Sender::new(0),
         }
+    }
+
+    /// Sets what happens when the budget is exceeded (see
+    /// [`BudgetExceededPolicy`]); with `wait_for_raise`, runs the host
+    /// started wait for a raise under `Pause` too.
+    pub fn with_exceeded_policy(
+        mut self,
+        policy: BudgetExceededPolicy,
+        wait_for_raise: bool,
+    ) -> Self {
+        self.policy = policy;
+        self.wait_for_raise = wait_for_raise;
+        self
+    }
+
+    /// What happens when the budget is exceeded.
+    pub fn exceeded_policy(&self) -> BudgetExceededPolicy {
+        self.policy
+    }
+
+    /// Whether runs the host started wait for a raise when held under
+    /// [`BudgetExceededPolicy::Pause`], instead of returning `AgentPaused`.
+    pub fn waits_for_raise(&self) -> bool {
+        self.wait_for_raise
     }
 
     pub fn from_ledger(limit: Option<f64>, warning: Option<f64>, ledger: CostLedger) -> Self {
@@ -111,14 +191,19 @@ impl BudgetManager {
                 *spent = spent.saturating_add((entry.amount * COST_SCALE) as u64);
             }
         }
+        let limit = scaled_limit(limit);
         Self {
             spent: AtomicU64::new(spent),
-            limit: limit.map(|value| (value * COST_SCALE) as u64),
+            limit: AtomicU64::new(limit),
             warning: warning_scaled,
             warned: AtomicBool::new(warning_scaled.is_some_and(|value| spent >= value)),
+            exceeded_reported: AtomicBool::new(spent > limit),
             ledger: Mutex::new(ledger),
             agent_limits: RwLock::new(HashMap::new()),
             agent_spent: Mutex::new(agent_spent),
+            policy: BudgetExceededPolicy::default(),
+            wait_for_raise: false,
+            changes: tokio::sync::watch::Sender::new(0),
         }
     }
 
@@ -150,10 +235,76 @@ impl BudgetManager {
         result
     }
 
+    /// Sets `agent_name`'s own limit, in dollars; it applies from the
+    /// agent's next model request. Raising it releases the agent's runs
+    /// held on it.
     pub fn set_agent_limit(&self, agent_name: impl Into<String>, limit: f64) {
         self.agent_limits
             .write()
-            .insert(agent_name.into(), (limit * COST_SCALE) as u64);
+            .insert(agent_name.into(), scaled_limit(Some(limit)));
+        self.changed();
+    }
+
+    /// Removes `agent_name`'s own limit, releasing its runs held on it.
+    pub fn clear_agent_limit(&self, agent_name: &str) {
+        self.agent_limits.write().remove(agent_name);
+        self.changed();
+    }
+
+    /// The agents' own limits, in dollars.
+    pub fn agent_limits(&self) -> HashMap<String, f64> {
+        self.agent_limits
+            .read()
+            .iter()
+            .map(|(agent, limit)| (agent.clone(), *limit as f64 / COST_SCALE))
+            .collect()
+    }
+
+    /// Sets the workflow's limit, in dollars (`None`: no limit), while
+    /// agents run: it applies from their next model requests, and raising
+    /// it releases the runs held on it. `OnBudgetExceeded` fires again when
+    /// a later charge exceeds a raised limit.
+    pub fn set_limit(&self, limit: Option<f64>) {
+        self.limit.store(scaled_limit(limit), Ordering::Relaxed);
+        if !self.is_exceeded() {
+            self.exceeded_reported.store(false, Ordering::Relaxed);
+        }
+        self.changed();
+    }
+
+    /// Wakes the runs waiting for a raise.
+    fn changed(&self) {
+        self.changes
+            .send_modify(|count| *count = count.wrapping_add(1));
+    }
+
+    /// A receiver that sees every change of the limits.
+    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    /// Why a run of `agent_name` is held before its next model request
+    /// under [`BudgetExceededPolicy::Pause`]: the workflow's budget or the
+    /// agent's is exceeded. `None` under `Cancel`, or within budget.
+    pub fn hold_reason(&self, agent_name: &str) -> Option<String> {
+        if self.policy != BudgetExceededPolicy::Pause {
+            return None;
+        }
+        if self.is_exceeded() {
+            return Some(format!(
+                "Budget exceeded: spent ${:.4} of the workflow's ${:.4} limit. The request waits until the budget is raised.",
+                self.total_spent(),
+                self.limit().unwrap_or(0.0)
+            ));
+        }
+        if self.is_agent_exceeded(agent_name) {
+            return Some(format!(
+                "Agent budget exceeded: agent '{agent_name}' spent ${:.4} of its ${:.4} limit. The request waits until the budget is raised.",
+                self.agent_spent(agent_name),
+                self.agent_limit(agent_name).unwrap_or(0.0)
+            ));
+        }
+        None
     }
 
     pub fn agent_limit(&self, agent_name: &str) -> Option<f64> {
@@ -217,10 +368,12 @@ impl BudgetManager {
         let new_total_scaled = self.spent.fetch_add(scaled, Ordering::Relaxed) + scaled;
         let new_total = new_total_scaled as f64 / COST_SCALE;
 
+        let exceeded = self.is_exceeded();
         AddCostResult {
             new_total,
             warning_triggered: self.check_warning(),
-            exceeded: self.is_exceeded(),
+            exceeded,
+            exceeded_crossed: exceeded && !self.exceeded_reported.swap(true, Ordering::Relaxed),
         }
     }
 
@@ -231,8 +384,8 @@ impl BudgetManager {
 
     /// Returns true if the budget limit has been exceeded.
     pub fn is_exceeded(&self) -> bool {
-        self.limit
-            .is_some_and(|limit| self.spent.load(Ordering::Relaxed) > limit)
+        let limit = self.limit.load(Ordering::Relaxed);
+        limit != NO_LIMIT && self.spent.load(Ordering::Relaxed) > limit
     }
 
     /// Returns true the first time the warning threshold is crossed.
@@ -248,20 +401,27 @@ impl BudgetManager {
 
     /// Returns the remaining budget in dollars, if a limit is set.
     pub fn remaining(&self) -> Option<f64> {
-        self.limit.map(|limit| {
+        let limit = self.limit.load(Ordering::Relaxed);
+        (limit != NO_LIMIT).then(|| {
             let spent = self.spent.load(Ordering::Relaxed);
-            (limit.saturating_sub(spent)) as f64 / COST_SCALE
+            limit.saturating_sub(spent) as f64 / COST_SCALE
         })
     }
 
     /// Returns the budget limit in dollars, if set.
     pub fn limit(&self) -> Option<f64> {
-        self.limit.map(|l| l as f64 / COST_SCALE)
+        let limit = self.limit.load(Ordering::Relaxed);
+        (limit != NO_LIMIT).then(|| limit as f64 / COST_SCALE)
     }
 
     /// Returns a snapshot of the cost ledger for persistence or analysis.
     pub fn snapshot_ledger(&self) -> CostLedger {
         self.ledger.lock().clone()
+    }
+
+    /// How many entries the ledger holds.
+    pub(crate) fn ledger_len(&self) -> usize {
+        self.ledger.lock().entries.len()
     }
 }
 
@@ -269,6 +429,51 @@ impl BudgetManager {
 mod tests {
     use super::*;
     use arko_ai::{BillingKind, Model, UsageInfo};
+
+    #[test]
+    fn the_limit_changes_live_and_each_crossing_is_reported_once() {
+        let budget = BudgetManager::new(Some(1.0), None);
+        let cost = |amount: f64| budget.add_manual_cost(amount, "test", None);
+        let first = cost(1.5);
+        assert!(first.exceeded && first.exceeded_crossed);
+        let second = cost(0.1);
+        assert!(second.exceeded && !second.exceeded_crossed);
+        assert!(budget.hold_reason("coder").is_some());
+
+        let changes = budget.subscribe();
+        budget.set_limit(Some(10.0));
+        assert!(changes.has_changed().unwrap());
+        assert!(!budget.is_exceeded());
+        assert!(budget.hold_reason("coder").is_none());
+        assert_eq!(budget.remaining(), Some(8.4));
+        budget.set_limit(Some(2.0));
+        assert!(cost(0.5).exceeded_crossed, "a new crossing");
+        budget.set_limit(None);
+        assert_eq!(budget.limit(), None);
+        assert!(!cost(100.0).exceeded);
+
+        budget.set_agent_limit("coder", 0.0);
+        let agent = || arko_ai::UsageInfo {
+            billed_cost: Some(0.5),
+            ..arko_ai::UsageInfo::new(1, 1)
+        };
+        budget.add_agent_cost("coder", &agent());
+        assert!(
+            budget
+                .hold_reason("coder")
+                .unwrap()
+                .contains("agent 'coder'")
+        );
+        assert!(budget.hold_reason("reviewer").is_none());
+        budget.clear_agent_limit("coder");
+        assert!(budget.hold_reason("coder").is_none());
+
+        let cancel = BudgetManager::new(Some(0.0), None)
+            .with_exceeded_policy(BudgetExceededPolicy::Cancel, false);
+        cancel.add_manual_cost(1.0, "test", None);
+        assert!(cancel.is_exceeded());
+        assert!(cancel.hold_reason("coder").is_none(), "cancelled, not held");
+    }
 
     #[test]
     fn agent_costs_count_the_billed_amount_and_keep_the_estimate() {

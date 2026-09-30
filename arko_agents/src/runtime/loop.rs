@@ -1018,7 +1018,10 @@ impl AgentLoop {
     /// ([`Task::running_tool_calls`]) and the task is reported to the
     /// snapshot sink, which saves it before this returns (the write-ahead
     /// point): a task that stops while its calls run knows which ones may
-    /// have run.
+    /// have run. A group of calls that recovery simply runs again
+    /// ([`ToolRecovery::Rerun`], without the host's own output) doesn't wait
+    /// for the save: if the task stops before it is saved, those calls are
+    /// run again, or asked for again, which is harmless.
     async fn run_group(&mut self, runs: Vec<ToolRun>) -> GroupRun {
         use futures::StreamExt;
         for run in &runs {
@@ -1032,7 +1035,10 @@ impl AgentLoop {
                 self.task.running_tool_calls.push(run.running());
             }
         }
-        self.report_task(true).await;
+        let durable = runs.iter().any(|run| {
+            run.custom_output.is_some() || run.tool.recovery_mode() != ToolRecovery::Rerun
+        });
+        self.report_task(durable).await;
         let interruptible = runs.iter().all(|run| run.interruptible);
         let environment = self.run_environment();
         let mut outcomes: Vec<Option<_>> = runs.iter().map(|_| None).collect();
@@ -3120,6 +3126,14 @@ impl AgentLoop {
             }
             if let Some(message) = self.cache_pause_pending.take() {
                 self.finish_monitor_pause(message).await?;
+                continue 'main_loop;
+            }
+            if let Some(reason) = self
+                .turn_context
+                .as_ref()
+                .and_then(|source| source.hold_request(self.task.id))
+            {
+                self.hold_request(reason).await?;
                 continue 'main_loop;
             }
             self.observe_committed_tool_context();
@@ -5546,6 +5560,34 @@ impl AgentLoop {
         Ok(())
     }
 
+    /// Holds the next model request for the host
+    /// ([`TurnContextSource::hold_request`](super::TurnContextSource::hold_request)):
+    /// the task pauses for error-recovery approval, whatever the error
+    /// policy, marked as a monitor pause is, so that approving it adds no
+    /// error note. A fallback still to be made survives the pause.
+    async fn hold_request(&mut self, reason: String) -> Result<(), ArkoAgentsError> {
+        log::info!(
+            "Task {}: the host holds the next request: {reason}",
+            self.task.id
+        );
+        self.task
+            .set_state(TaskState::AwaitingErrorRecoveryApproval {
+                error_message: reason.clone(),
+                cause: ErrorRecoveryCause::BudgetExceeded,
+            });
+        self.task.monitor_pause = true;
+        self.emit_event(AgentEvent::TaskStateChanged(
+            self.task.current_state.clone(),
+        ))
+        .await?;
+        self.emit_event(AgentEvent::ErrorEncountered {
+            error_message: reason,
+            requires_approval_to_retry: true,
+            tool_call_id: None,
+        })
+        .await
+    }
+
     /// Before a model request: applies the opt-in plan usage threshold
     /// ([`MonitoringConfig::plan_usage`](crate::agent_config::MonitoringConfig::plan_usage))
     /// to the most recent report. Returns whether to make the request.
@@ -6039,6 +6081,87 @@ mod tests {
             })
             .count();
         assert_eq!(updates, 1);
+    }
+
+    /// Holds every request while its flag is set.
+    struct HoldWhile(Arc<std::sync::atomic::AtomicBool>);
+
+    impl super::super::TurnContextSource for HoldWhile {
+        fn turn_context(&self, _task_id: Uuid) -> Option<String> {
+            None
+        }
+
+        fn hold_request(&self, _task_id: Uuid) -> Option<String> {
+            self.0
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .then(|| "Budget exceeded.".to_string())
+        }
+    }
+
+    /// A held request isn't made: the task pauses with the
+    /// `BudgetExceeded` cause, whatever its LLM error policy, and
+    /// continuing asks again; once released, the request is made without
+    /// an error note.
+    #[tokio::test]
+    async fn a_held_request_pauses_the_task_until_it_is_released() {
+        use futures::StreamExt;
+        let (mut agent, mut events, commands) = super::retry_tests::harness();
+        agent.task.agent_config.llm_error_policy = LLMErrorPolicy::InformAgentAndContinue;
+        let tool_config = &mut agent.task.agent_config.tool_config;
+        tool_config.tool_calling_mode = ToolCallingMode::Native;
+        tool_config.default_auto_approve_tool_use = true;
+        let hold = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        agent.turn_context = Some(Arc::new(HoldWhile(hold.clone())));
+        let turn = futures::stream::iter([Ok(super::retry_tests::complete_response())]);
+        agent
+            .scripted_responses
+            .get_mut()
+            .unwrap()
+            .push_back(Ok(turn.boxed()));
+        let run = tokio::spawn(agent.run());
+        let mut pauses = 0;
+        while let Some(event) = timeout(Duration::from_secs(10), events.recv())
+            .await
+            .unwrap()
+        {
+            match event {
+                AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
+                    cause,
+                    ..
+                }) => assert_eq!(cause, ErrorRecoveryCause::BudgetExceeded),
+                AgentEvent::ErrorEncountered {
+                    requires_approval_to_retry: true,
+                    ..
+                } => {
+                    pauses += 1;
+                    if pauses == 2 {
+                        hold.store(false, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    commands
+                        .send(UserCommand::ContinueAfterError { note: None })
+                        .await
+                        .unwrap();
+                }
+                AgentEvent::TaskStreamEnd => break,
+                _ => {}
+            }
+        }
+        let task = timeout(Duration::from_secs(10), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(pauses, 2);
+        assert!(matches!(task.current_state, TaskState::Completed { .. }));
+        assert!(!task.monitor_pause);
+        let notes = task
+            .conversation
+            .messages
+            .iter()
+            .filter_map(|message| message.content.iter().find_map(ai::Content::as_text))
+            .filter(|text| text.contains("Budget exceeded") || text.contains("error"))
+            .count();
+        assert_eq!(notes, 0, "no note reaches the model");
     }
 
     /// Every context injection queued before a turn boundary reaches the

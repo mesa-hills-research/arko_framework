@@ -74,7 +74,7 @@ which you want, or the architect chooses and explains it.
 | `--target-dir PATH` | the checkout's `target` | The shared Cargo target directory. |
 | `--state-dir PATH` | `~/.arko/forge/runs/<name>-<time>` | Checkpoints, the event log, trial logs and the report. |
 | `--resume STATE_DIR` | | Continue an interrupted run with its saved settings. |
-| `--budget DOLLARS` | none | Stop spending at this amount (API backend). |
+| `--budget DOLLARS` | none | Pause and stop at this spend (billed usage: the API backend, or Claude Code under an API key); with `--resume`, replaces the saved budget. |
 | `--verbose` | off | Print every agent's tool calls and text. |
 
 ## What you get
@@ -89,7 +89,21 @@ which you want, or the architect chooses and explains it.
 If the forge stops (a crash, a closed terminal, a reboot), run it again with
 `--resume <state dir>`; no other flags are needed, because the run's settings and the architect's
 instructions are saved there when it starts. A finished architect task goes straight to the
-checks; an interrupted one continues. Checkpoints are written when an agent run finishes, so a
-build interrupted before that starts a new architect run on the work already in the crate, which
-keeps `DESIGN.md` current for exactly this. Usage limits and provider errors don't stop the forge:
-they're waited out and retried.
+checks. An interrupted one continues where it stopped: the running agents are saved as they run,
+so the architect resumes its conversation (and any explorer it was waiting for resumes too),
+told that a tool call it was running when the forge stopped may or may not have finished. If it
+can't be recovered, a new architect run continues from the work already in the crate, which
+keeps `DESIGN.md` current for exactly this. An explorer run that the architect didn't resume
+itself is recovered after it. Usage limits and provider errors don't stop the forge: they're
+waited out and retried.
+
+With `--budget`, reaching the budget doesn't cancel anything: each agent pauses before its next
+model request (a tool call it is running finishes first), and once every agent is paused the
+forge saves them and exits with status 2, printing how to continue. Resume with a higher budget
+and the agents carry on from their pauses:
+
+```text
+forge --resume <state dir> --budget <dollars>
+```
+
+Spending can go past the budget by the requests already in flight when it is reached.

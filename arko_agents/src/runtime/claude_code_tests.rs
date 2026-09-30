@@ -571,6 +571,83 @@ async fn a_crash_pauses_and_continuing_resumes_the_session() {
     );
 }
 
+/// Holds every request after the first while its flag is set.
+struct HoldAfterFirst {
+    asked: std::sync::atomic::AtomicUsize,
+    hold: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl crate::runtime::TurnContextSource for HoldAfterFirst {
+    fn turn_context(&self, _task_id: uuid::Uuid) -> Option<String> {
+        None
+    }
+
+    fn hold_request(&self, _task_id: uuid::Uuid) -> Option<String> {
+        use std::sync::atomic::Ordering;
+        let asked = self.asked.fetch_add(1, Ordering::SeqCst);
+        (asked > 0 && self.hold.load(Ordering::SeqCst)).then(|| "Budget exceeded.".to_string())
+    }
+}
+
+/// A turn the host holds is interrupted and the task pauses with the
+/// `BudgetExceeded` cause; continuing while it is still held starts no
+/// session, and once released the session resumes.
+#[tokio::test]
+async fn a_held_turn_pauses_until_the_host_releases_it() {
+    let fake = Fake::new(json!([
+        [{"text": "Working."}, {"tool": "Grep", "input": {"pattern": "a"}}],
+        [complete("done")],
+    ]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Search.".into(),
+        fake.workspace(),
+        None,
+    );
+    let hold = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_turn_context(
+        Arc::new(HoldAfterFirst {
+            asked: Default::default(),
+            hold: hold.clone(),
+        }),
+    );
+    let mut run = start_with(task, runtime);
+    let held = |event: &AgentEvent| {
+        matches!(
+            event,
+            AgentEvent::ErrorEncountered {
+                requires_approval_to_retry: true,
+                ..
+            }
+        )
+    };
+    let events = run.events_until(held).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
+            cause: crate::task::ErrorRecoveryCause::BudgetExceeded,
+            ..
+        })
+    )));
+    run.commands
+        .send(UserCommand::ContinueAfterError { note: None })
+        .await
+        .unwrap();
+    run.events_until(held).await;
+    assert_eq!(fake.logged("argv").len(), 1, "no session while held");
+    hold.store(false, std::sync::atomic::Ordering::SeqCst);
+    run.commands
+        .send(UserCommand::ContinueAfterError { note: None })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let argvs = fake.logged("argv");
+    assert_eq!(argvs.len(), 2);
+    let second: Vec<String> = serde_json::from_value(argvs[1]["argv"].clone()).unwrap();
+    assert!(second.iter().any(|arg| arg.starts_with("--resume=")));
+}
+
 #[test]
 fn built_in_tools_are_only_for_claude_code_models() {
     let fake = Fake::new(json!([]));
@@ -1176,6 +1253,45 @@ async fn the_session_is_saved_before_it_is_sent_anything() {
     let (last, _) = snapshots.last().unwrap();
     assert!(matches!(last.current_state, TaskState::Completed { .. }));
     assert!(last.running_tool_calls.is_empty());
+}
+
+/// A read-only built-in call is recorded running without waiting for the
+/// save; any other call waits.
+#[tokio::test]
+async fn only_calls_with_effects_wait_for_the_save() {
+    let fake = Fake::new(json!([[
+        {"tool": "Read", "input": {"file_path": "a.txt"}, "id": "toolu_read"},
+        {
+            "tool": "mcp__arko__write_file",
+            "input": {"path": "b.txt", "content": "x"},
+            "id": "toolu_write",
+        },
+        complete("done"),
+    ]]));
+    std::fs::write(fake.workspace().join("a.txt"), "A").unwrap();
+    let recorder = Arc::new(Recorder::default());
+    let task = Task::new(
+        config(&fake, &["Read", "write_file"]),
+        "Read a, write b.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (task, _) = start_with(task, recording(&recorder)).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let first_report = |call: &str| {
+        recorder
+            .snapshots()
+            .into_iter()
+            .find(|(task, _)| {
+                task.running_tool_calls
+                    .iter()
+                    .any(|running| running.call_id.as_deref() == Some(call))
+            })
+            .map(|(_, durable)| durable)
+            .expect("the call is recorded")
+    };
+    assert!(!first_report("toolu_read"));
+    assert!(first_report("toolu_write"));
 }
 
 #[tokio::test]

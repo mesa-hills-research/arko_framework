@@ -9,17 +9,22 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use arko_agents::{
-    TaskContext, Tool, ToolDefinition, ToolError, ToolParameterDefinition, ToolParameterType,
-    ToolTypeDetails,
+    TaskContext, TaskParent, Tool, ToolDefinition, ToolError, ToolParameterDefinition,
+    ToolParameterType, ToolRecovery, ToolTypeDetails,
 };
 
 use crate::context::SharedContext;
 use crate::error::WorkflowError;
 use crate::persistence::PersistenceManager;
-use crate::workflow::engine::WorkflowEngine;
-use crate::workflow::result::AgentResult;
+use crate::policy::{AgentPause, AgentResume};
+use crate::workflow::engine::{Recovery, WorkflowEngine, is_orphaned, recorded_result};
+use crate::workflow::result::{AgentResult, AgentRunStatus};
 
 pub const RUN_WORKFLOW_AGENT_TOOL_NAME: &str = "run_workflow_agent";
+
+/// `run_workflow_agent`'s optional parameter naming an agent run to resume
+/// instead of starting a new one.
+pub const RESUME_RUN_PARAMETER: &str = "resume_run";
 
 /// Which agents may run which other agents with `run_workflow_agent`.
 ///
@@ -222,18 +227,288 @@ impl WorkflowServices {
         agent_name: &str,
         prompt: &str,
     ) -> Result<AgentResult, WorkflowError> {
-        self.run_agent_at(caller, agent_name, prompt, 0).await
+        self.run_agent_at(caller, agent_name, prompt, 0, None).await
     }
 
-    /// Runs `agent_name` for `caller` at `depth`: inside the tool call of a
-    /// run at `depth - 1`.
+    /// Runs `agent_name` for `caller` at `depth`: inside tool call `parent`
+    /// of a run at `depth - 1`.
     pub(crate) async fn run_agent_at(
         &self,
         caller: &str,
         agent_name: &str,
         prompt: &str,
         depth: u32,
+        parent: Option<TaskParent>,
     ) -> Result<AgentResult, WorkflowError> {
+        self.authorize(caller, agent_name)?;
+        let _guard = self.enter_call(true)?;
+        let context = self.context()?;
+        WorkflowEngine::from_shared(self.client.clone(), self.persistence.clone())
+            .run_nested(agent_name, prompt, &context, depth, parent)
+            .await
+    }
+
+    /// Counts a call running until the guard is dropped, as a test's
+    /// stand-in for one.
+    #[cfg(test)]
+    pub(crate) fn hold_call(&self) -> CallGuard {
+        CallGuard(self.active_calls.clone()).counted()
+    }
+
+    /// Counts a call until the guard is dropped; with `refuse`, fails when
+    /// [`WorkflowServicesConfig::max_active_calls`] are running.
+    fn enter_call(&self, refuse: bool) -> Result<CallGuard, WorkflowError> {
+        let previous = self.active_calls.fetch_add(1, Ordering::AcqRel);
+        let guard = CallGuard(self.active_calls.clone());
+        if refuse && previous >= self.config.max_active_calls.get() {
+            return Err(WorkflowError::Channel(format!(
+                "workflow service active-call limit ({}) reached",
+                self.config.max_active_calls
+            )));
+        }
+        Ok(guard)
+    }
+
+    /// Recovers call `parent` of `caller`, which was running `agent_name`
+    /// with `prompt` (resuming run `resume_run`, if set) at `depth` when the
+    /// workflow stopped: the agent run the call ran ends as the call would
+    /// have. A run that completed returns its result without running again
+    /// (the caller's task wasn't saved with it); an interrupted one is
+    /// recovered and waited for (as is another recovery of it already
+    /// running); a run that ended otherwise returns its error. When the call
+    /// ran no run that was saved with it (it can't have run a tool: runs are
+    /// saved before their first), the call runs now: `agent_name` starts,
+    /// or run `resume_run` is resumed. The call was admitted before the
+    /// stop, so the active-call limit counts it without refusing it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn recover_call(
+        &self,
+        caller: &str,
+        agent_name: &str,
+        prompt: &str,
+        resume_run: Option<uuid::Uuid>,
+        depth: u32,
+        parent: TaskParent,
+    ) -> Result<AgentResult, WorkflowError> {
+        self.authorize(caller, agent_name)?;
+        let _guard = self.enter_call(false)?;
+        let context = self.context()?;
+        let engine = WorkflowEngine::from_shared(self.client.clone(), self.persistence.clone());
+        let started = context
+            .agent_results
+            .read()
+            .iter()
+            .rev()
+            .find(|result| result.task.parent == Some(parent))
+            .cloned();
+        match started {
+            Some(run) if run.status == AgentRunStatus::Interrupted => {
+                log::info!(
+                    "Recovering agent run {} of agent '{}', which agent '{caller}' was running when the workflow stopped",
+                    run.agent_run_id,
+                    run.agent_name
+                );
+                let recovery = Recovery {
+                    depth,
+                    wait: true,
+                    ..Recovery::default()
+                };
+                engine.recover_nested(&run, &context, recovery).await
+            }
+            Some(run) => crate::workflow::engine::run_outcome(run),
+            None => match resume_run {
+                Some(run_id) => {
+                    self.resume_admitted(
+                        parent.task_id,
+                        agent_name,
+                        run_id,
+                        prompt,
+                        depth,
+                        Some(parent),
+                    )
+                    .await
+                }
+                None => {
+                    engine
+                        .run_nested(agent_name, prompt, &context, depth, Some(parent))
+                        .await
+                }
+            },
+        }
+    }
+
+    /// Resumes agent run `run_id` of `agent_name` for `caller`, whose run
+    /// is `caller_run`, at `depth` inside tool call `parent`, with `message`
+    /// (see [`resume_admitted`](Self::resume_admitted)). The call counts
+    /// against the active-call limit, as a new run does.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn resume_run(
+        &self,
+        caller: &str,
+        caller_run: uuid::Uuid,
+        agent_name: &str,
+        run_id: uuid::Uuid,
+        message: &str,
+        depth: u32,
+        parent: Option<TaskParent>,
+    ) -> Result<AgentResult, WorkflowError> {
+        self.authorize(caller, agent_name)?;
+        let _guard = self.enter_call(true)?;
+        self.resume_admitted(caller_run, agent_name, run_id, message, depth, parent)
+            .await
+    }
+
+    /// Resumes agent run `run_id` of `agent_name`, which did not finish, for
+    /// the caller's run `caller_run` (authorized to run `agent_name`): it continues its own task, with
+    /// `message` as a user message, instead of a new run starting. The run
+    /// must be one `caller_run` started (its parent link names it), or an
+    /// orphaned run ([`is_orphaned`]: the run that started it can't resume
+    /// it any more). An interrupted run is recovered (the calls it was
+    /// running are settled first); a completed run, or one waiting for an
+    /// answer, continues; a run paused after an error continues with the
+    /// message as the note. Its parent link then points at `parent`, so
+    /// that a later stop finds it in this call.
+    #[allow(clippy::too_many_arguments)]
+    async fn resume_admitted(
+        &self,
+        caller_run: uuid::Uuid,
+        agent_name: &str,
+        run_id: uuid::Uuid,
+        message: &str,
+        depth: u32,
+        parent: Option<TaskParent>,
+    ) -> Result<AgentResult, WorkflowError> {
+        let refuse = |reason: String| {
+            Err(WorkflowError::BuilderInvalid(format!(
+                "agent run {run_id} can't be resumed: {reason}"
+            )))
+        };
+        let context = self.context()?;
+        let Some(run) = recorded_result(&context, run_id) else {
+            return refuse("the workflow has no such agent run".to_string());
+        };
+        if run.agent_name != agent_name {
+            return refuse(format!(
+                "it is a run of agent '{}', not '{agent_name}'",
+                run.agent_name
+            ));
+        }
+        match run.task.parent {
+            None => {
+                return refuse(
+                    "run_workflow_agent didn't start it; the workflow's host continues it"
+                        .to_string(),
+                );
+            }
+            Some(link) if link.task_id == caller_run || is_orphaned(&context, &run) => {}
+            Some(link) => {
+                return refuse(format!(
+                    "agent run {} started it and can still resume it",
+                    link.task_id
+                ));
+            }
+        }
+        if context.registry.is_running(run_id) {
+            return refuse("it is running".to_string());
+        }
+        let engine = WorkflowEngine::from_shared(self.client.clone(), self.persistence.clone());
+        match run.status {
+            AgentRunStatus::Interrupted => {
+                let recovery = Recovery {
+                    depth,
+                    parent: Some(parent),
+                    message: Some(message),
+                    ..Recovery::default()
+                };
+                engine.recover_nested(&run, &context, recovery).await
+            }
+            AgentRunStatus::Cancelled if crate::workflow::engine::is_superseded(&run) => {
+                refuse("a run that replaced it after a restart superseded it".to_string())
+            }
+            // Cancelled (by the budget, say): reopened where it stopped.
+            AgentRunStatus::Cancelled => {
+                let message = crate::workflow::engine::reopened_message(message);
+                let recovery = Recovery {
+                    depth,
+                    parent: Some(parent),
+                    message: Some(&message),
+                    reopen: true,
+                    ..Recovery::default()
+                };
+                engine.recover_nested(&run, &context, recovery).await
+            }
+            AgentRunStatus::Completed | AgentRunStatus::WaitingForInput => {
+                engine
+                    .continue_nested(&run, message, &context, depth, parent)
+                    .await
+            }
+            AgentRunStatus::Paused => match AgentPause::of(&run.task.current_state) {
+                Some(AgentPause::ErrorRecovery { .. }) => {
+                    let resume = AgentResume::ContinueAfterError {
+                        note: Some(message.to_string()),
+                    };
+                    engine
+                        .resume_nested(&run, resume, &context, depth, parent)
+                        .await
+                }
+                _ => {
+                    refuse("it waits for the workflow's host to decide its tool calls".to_string())
+                }
+            },
+            AgentRunStatus::Failed => refuse(format!(
+                "it ended {}{}; run the agent again instead",
+                format!("{:?}", run.status).to_lowercase(),
+                run.error
+                    .as_deref()
+                    .map_or_else(String::new, |error| format!(" ({error})"))
+            )),
+        }
+    }
+
+    /// What a `run_workflow_agent` call that failed tells `caller` about
+    /// agent run `run`, which it ran and which did not finish: the run's id
+    /// and agent, and how to resume it (or that the host recovers it, when
+    /// the caller may not run its agent). `None` for a run that can't be
+    /// resumed with a message, or is running.
+    fn unfinished_note(&self, caller: &str, run: &AgentResult) -> Option<String> {
+        let context = self.context.upgrade()?;
+        if context.registry.is_running(run.agent_run_id) {
+            return None;
+        }
+        let state = match run.status {
+            AgentRunStatus::Interrupted => "was interrupted and did not finish",
+            AgentRunStatus::Paused
+                if matches!(
+                    AgentPause::of(&run.task.current_state),
+                    Some(AgentPause::ErrorRecovery { .. })
+                ) =>
+            {
+                "is paused after an error"
+            }
+            AgentRunStatus::WaitingForInput => "is waiting for an answer to its questions",
+            _ => return None,
+        };
+        let (id, agent) = (run.agent_run_id, &run.agent_name);
+        let how = if self.is_allowed(caller) && self.is_target_allowed(caller, agent) {
+            format!(
+                "You can resume it instead of starting over: call {RUN_WORKFLOW_AGENT_TOOL_NAME} with agent \"{agent}\", resume_run \"{id}\" and a prompt telling it what happened and what to do next; it continues its own task."
+            )
+        } else {
+            "You may not run that agent, so it stays unfinished for the workflow's host to recover."
+                .to_string()
+        };
+        Some(format!("Agent run {id} of agent '{agent}' {state}. {how}"))
+    }
+
+    /// The workflow the services serve.
+    fn context(&self) -> Result<Arc<SharedContext>, WorkflowError> {
+        self.context.upgrade().ok_or_else(|| {
+            WorkflowError::Channel("workflow services outlived their workflow".to_string())
+        })
+    }
+
+    /// Fails unless `caller` may run `agent_name`.
+    fn authorize(&self, caller: &str, agent_name: &str) -> Result<(), WorkflowError> {
         if !self.is_allowed(caller) {
             return Err(WorkflowError::BuilderInvalid(format!(
                 "agent '{caller}' is not authorized to invoke workflow services"
@@ -250,27 +525,24 @@ impl WorkflowServices {
                 "agent '{caller}' is not authorized to invoke workflow target '{agent_name}'{suffix}"
             )));
         }
-        let previous = self.active_calls.fetch_add(1, Ordering::AcqRel);
-        if previous >= self.config.max_active_calls.get() {
-            self.active_calls.fetch_sub(1, Ordering::AcqRel);
-            return Err(WorkflowError::Channel(format!(
-                "workflow service active-call limit ({}) reached",
-                self.config.max_active_calls
-            )));
-        }
-        struct CallGuard(Arc<AtomicU32>);
-        impl Drop for CallGuard {
-            fn drop(&mut self) {
-                self.0.fetch_sub(1, Ordering::AcqRel);
-            }
-        }
-        let _guard = CallGuard(self.active_calls.clone());
-        let context = self.context.upgrade().ok_or_else(|| {
-            WorkflowError::Channel("workflow services outlived their workflow".to_string())
-        })?;
-        WorkflowEngine::from_shared(self.client.clone(), self.persistence.clone())
-            .run_nested(agent_name, prompt, &context, depth)
-            .await
+        Ok(())
+    }
+}
+
+/// Counts a running call until dropped.
+pub(crate) struct CallGuard(Arc<AtomicU32>);
+
+impl CallGuard {
+    #[cfg(test)]
+    fn counted(self) -> Self {
+        self.0.fetch_add(1, Ordering::AcqRel);
+        self
+    }
+}
+
+impl Drop for CallGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -306,11 +578,12 @@ impl Tool for RunWorkflowAgentTool {
         let target_guidance = self.services.target_guidance(&self.caller);
         ToolDefinition {
             name: RUN_WORKFLOW_AGENT_TOOL_NAME.to_string(),
-            description: "Run another configured workflow agent for a bounded subtask and return its verified completion summary. Use only when delegation is materially useful.".to_string(),
+            description: "Run another configured workflow agent for a bounded subtask and return its verified completion summary. Use only when delegation is materially useful. When a result names an agent run that did not finish and says you can resume it, pass its id as `resume_run` (with the same `agent`) to continue that run's own task instead of starting over; `prompt` is then your message to it.".to_string(),
             output_based_example: None,
             parameters: vec![
                 ToolParameterDefinition { name: "agent".to_string(), description: target_guidance, param_type: ToolParameterType::String, required: true, is_path: false, flag: None, default_value: None },
-                ToolParameterDefinition { name: "prompt".to_string(), description: "Concrete bounded task for that agent.".to_string(), param_type: ToolParameterType::String, required: true, is_path: false, flag: None, default_value: None },
+                ToolParameterDefinition { name: "prompt".to_string(), description: "Concrete bounded task for that agent; with `resume_run`, your message to the resumed run: what happened and what to do next.".to_string(), param_type: ToolParameterType::String, required: true, is_path: false, flag: None, default_value: None },
+                ToolParameterDefinition { name: RESUME_RUN_PARAMETER.to_string(), description: "Optional: the id of an unfinished run of `agent` to resume (one a result told you can be resumed), instead of starting a new run.".to_string(), param_type: ToolParameterType::String, required: false, is_path: false, flag: None, default_value: None },
             ],
             parallel_safe: false,
             tool_type_details: ToolTypeDetails::DeveloperDefined,
@@ -330,9 +603,16 @@ impl Tool for RunWorkflowAgentTool {
         false
     }
 
+    /// A call running when the workflow stopped recovers the agent run it
+    /// ran, or returns its result if it had finished (see
+    /// [`WorkflowServices::recover_call`]).
+    fn recovery_mode(&self) -> ToolRecovery {
+        ToolRecovery::Resume
+    }
+
     async fn execute(
         &self,
-        _context: &TaskContext<'_>,
+        context: &TaskContext<'_>,
         params: HashMap<String, Value>,
     ) -> Result<String, ToolError> {
         let agent = params.get("agent").and_then(Value::as_str).ok_or_else(|| {
@@ -346,11 +626,78 @@ impl Tool for RunWorkflowAgentTool {
             .ok_or_else(|| ToolError::MissingParameter {
                 param_name: "prompt".to_string(),
             })?;
-        self.services
-            .run_agent_at(&self.caller, agent, prompt, self.depth + 1)
-            .await
-            .map(|result| result.summary)
-            .map_err(|error| ToolError::ExecutionFailed(error.to_string()))
+        let resume_run =
+            match params
+                .get(RESUME_RUN_PARAMETER)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                Some(id) => Some(uuid::Uuid::parse_str(id).map_err(|error| {
+                    ToolError::ParameterValidation {
+                        param_name: RESUME_RUN_PARAMETER.to_string(),
+                        message: format!("not an agent run id: {error}"),
+                    }
+                })?),
+                None => None,
+            };
+        // The agent runs inside this call, which its task records.
+        let parent = context.tool_call_id.map(|tool_call_id| TaskParent {
+            task_id: context.task_id,
+            tool_call_id,
+        });
+        let depth = self.depth + 1;
+        let result = match (parent, resume_run) {
+            (Some(parent), _) if context.recovering => {
+                self.services
+                    .recover_call(&self.caller, agent, prompt, resume_run, depth, parent)
+                    .await
+            }
+            (_, Some(run_id)) => {
+                self.services
+                    .resume_run(
+                        &self.caller,
+                        context.task_id,
+                        agent,
+                        run_id,
+                        prompt,
+                        depth,
+                        parent,
+                    )
+                    .await
+            }
+            (_, None) => {
+                self.services
+                    .run_agent_at(&self.caller, agent, prompt, depth, parent)
+                    .await
+            }
+        };
+        result.map(|result| result.summary).map_err(|error| {
+            // The run the call ran, if it did not finish: named, so that
+            // the caller can resume it rather than start over.
+            let ran =
+                self.services
+                    .context
+                    .upgrade()
+                    .and_then(|workflow| match (resume_run, parent) {
+                        (Some(run_id), _) => {
+                            recorded_result(&workflow, run_id).filter(|run| run.agent_name == agent)
+                        }
+                        (None, Some(parent)) => workflow
+                            .agent_results
+                            .read()
+                            .iter()
+                            .rev()
+                            .find(|result| result.task.parent == Some(parent))
+                            .cloned(),
+                        (None, None) => None,
+                    });
+            let note = ran.and_then(|run| self.services.unfinished_note(&self.caller, &run));
+            ToolError::ExecutionFailed(match note {
+                Some(note) => format!("{error}\n\n{note}"),
+                None => error.to_string(),
+            })
+        })
     }
 }
 

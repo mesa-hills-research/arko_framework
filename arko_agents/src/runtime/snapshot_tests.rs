@@ -252,6 +252,54 @@ async fn the_turn_is_reported_and_its_calls_saved_before_they_run() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
+/// A call recovery simply runs again (`Rerun`) is recorded as running
+/// before it runs, but the report doesn't wait for the save.
+#[tokio::test]
+async fn a_rerun_call_is_reported_without_waiting_for_the_save() {
+    let workspace = workspace();
+    let recorder = Arc::new(Recorder::default());
+    let reader = Arc::new(Probe {
+        recorder: Some(recorder.clone()),
+        ..Probe::new("reader", ToolRecovery::Rerun)
+    });
+    let writer = Arc::new(Probe {
+        recorder: Some(recorder.clone()),
+        ..Probe::new("writer", ToolRecovery::InDoubt)
+    });
+    let (mut agent, _events, _commands) = agent(
+        config(ToolCallingMode::Native, &["reader", "writer"]),
+        registry(vec![reader.clone(), writer.clone()]),
+        &workspace,
+    );
+    with_sink(&mut agent, &recorder);
+    agent.scripted_responses.get_mut().unwrap().extend([
+        turn(vec![native_call(
+            "a",
+            "reader",
+            serde_json::json!({"what": "one"}),
+        )]),
+        turn(vec![native_call(
+            "b",
+            "writer",
+            serde_json::json!({"what": "two"}),
+        )]),
+        complete(),
+    ]);
+    let task = timeout(Duration::from_secs(5), agent.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    for (probe, durable) in [(&reader, false), (&writer, true)] {
+        let seen = probe.seen.lock().unwrap().clone();
+        let (saved, reported_durable) = seen[0].snapshot.clone().unwrap();
+        assert_eq!(reported_durable, durable, "{}", probe.name);
+        assert_eq!(saved.running_tool_calls.len(), 1);
+        assert_eq!(saved.running_tool_calls[0].tool_name, probe.name);
+    }
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
 #[tokio::test]
 async fn each_result_is_in_the_task_before_the_next_call_runs() {
     let workspace = workspace();

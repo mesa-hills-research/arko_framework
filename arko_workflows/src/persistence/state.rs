@@ -61,6 +61,25 @@ pub struct WorkflowState {
     /// agents it may message. Absent in checkpoints from before it existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_registry: Option<crate::messaging::registry::RegistrySnapshot>,
+    /// The budget limits in force at the checkpoint, which may have been
+    /// changed while the run was live
+    /// ([`Workflow::set_budget`](crate::Workflow::set_budget)). Absent in
+    /// checkpoints from before it existed. See
+    /// [`WorkflowBuilder::resume_from`](crate::WorkflowBuilder::resume_from)
+    /// for how a resume combines them with the builder's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_limits: Option<BudgetLimits>,
+}
+
+/// The budget limits a checkpoint records.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BudgetLimits {
+    /// The workflow's limit in dollars; `None`: no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<f64>,
+    /// The agents' own limits in dollars, by agent name.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub agent_limits: std::collections::BTreeMap<String, f64>,
 }
 
 /// A finalized agent result in a checkpoint, with its task in a task
@@ -74,8 +93,16 @@ pub struct AgentRunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// The version of the task the checkpoint recorded, relative to the
-    /// run directory: `agents/<agent_run_id>/<content hash>.json`.
+    /// run directory: `agents/<agent_run_id>/<content hash>.json`, or, for
+    /// a run that was running, its live file (`agents/<agent_run_id>/live.json`)
+    /// in the live checkpoint.
     pub task_file: String,
+    /// For a run that was running (status `Interrupted`): how many entries
+    /// of its task's `usage_history` the checkpoint's cost ledger has
+    /// charged. Resuming charges the rest. Absent for a finished run, and in
+    /// checkpoints from before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_charged: Option<usize>,
 }
 
 impl AgentRunRecord {
@@ -87,6 +114,9 @@ impl AgentRunRecord {
             summary: result.summary.clone(),
             error: result.error.clone(),
             task_file,
+            // A recorded interrupted run's usage is all in the ledger.
+            usage_charged: (result.status == AgentRunStatus::Interrupted)
+                .then_some(result.task.usage_history.len()),
         }
     }
 }
@@ -164,9 +194,12 @@ impl WorkflowState {
             }
             let now = AgentRunStatus::of_state(&task.current_state);
             // A cancellation older versions recorded as a failure loads as
-            // cancelled: the same outcome.
+            // cancelled: the same outcome. A run that was running is
+            // interrupted whatever state its task was saved in (a wait the
+            // workflow was answering, say).
             let same = now == record.status
-                || (record.status == AgentRunStatus::Failed && now == AgentRunStatus::Cancelled);
+                || (record.status == AgentRunStatus::Failed && now == AgentRunStatus::Cancelled)
+                || (record.status == AgentRunStatus::Interrupted && record.usage_charged.is_some());
             if !same {
                 warnings.push(format!(
                     "The task file {} of agent '{}' holds another state ({now:?}) than the checkpoint recorded ({:?}).",
@@ -238,6 +271,7 @@ mod tests {
             completed_agents: Vec::new(),
             cancellation: None,
             agent_registry: None,
+            budget_limits: None,
         };
 
         let json = serde_json::to_string_pretty(&state).unwrap();
@@ -282,6 +316,83 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(config.name, "legacy");
+    }
+
+    /// A checkpoint from before the task journal (its run records without
+    /// `usage_charged`, its tasks without `parent` or running calls) still
+    /// loads; a record of a run that was running loads interrupted, without
+    /// a warning, whatever state its task was saved in.
+    #[test]
+    fn records_from_before_the_task_journal_still_load() {
+        let workspace = crate::test_support::Workspace::new();
+        let mut task = arko_agents::Task::new(
+            crate::test_support::agent_config("Coder"),
+            "prompt".into(),
+            workspace.0.clone(),
+            None,
+        );
+        task.set_state(arko_agents::TaskState::Completed {
+            summary: "done".into(),
+        });
+        let mut task_json = serde_json::to_value(&task).unwrap();
+        let fields = task_json.as_object_mut().unwrap();
+        assert!(!fields.contains_key("parent"));
+        assert!(!fields.contains_key("running_tool_calls"));
+        std::fs::create_dir_all(workspace.0.join(format!("agents/{}", task.id))).unwrap();
+        let old_file = format!("agents/{}/old.json", task.id);
+        std::fs::write(workspace.0.join(&old_file), task_json.to_string()).unwrap();
+        let mut running = task.clone();
+        running.id = uuid::Uuid::new_v4();
+        running.set_state(arko_agents::TaskState::AwaitingErrorRecoveryApproval {
+            error_message: "overloaded".into(),
+            cause: arko_agents::ErrorRecoveryCause::Unknown,
+        });
+        std::fs::create_dir_all(workspace.0.join(format!("agents/{}", running.id))).unwrap();
+        let live_file = format!("agents/{}/live.json", running.id);
+        std::fs::write(
+            workspace.0.join(&live_file),
+            serde_json::to_string(&running).unwrap(),
+        )
+        .unwrap();
+        let checkpoint = serde_json::json!({
+            "workflow_run_id": uuid::Uuid::new_v4(),
+            "workflow_name": "journal",
+            "checkpoint_id": uuid::Uuid::new_v4(),
+            "timestamp": "2026-09-01T12:00:00Z",
+            "memory_snapshot": [],
+            "message_queues": {},
+            "budget_spent": 0.0,
+            "agent_runs": [
+                {
+                    "agent_run_id": task.id,
+                    "agent_name": "coder",
+                    "status": "Completed",
+                    "summary": "done",
+                    "task_file": old_file
+                },
+                {
+                    "agent_run_id": running.id,
+                    "agent_name": "coder",
+                    "status": "Interrupted",
+                    "summary": "",
+                    "error": crate::persistence::RUNNING_AT_CHECKPOINT,
+                    "task_file": live_file,
+                    "usage_charged": 0
+                }
+            ]
+        });
+        let state: WorkflowState = serde_json::from_value(checkpoint).unwrap();
+        assert_eq!(state.agent_runs[0].usage_charged, None);
+        assert_eq!(state.agent_runs[1].usage_charged, Some(0));
+        let (results, warnings) = state.agent_results_with_warnings(&workspace.0).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(results[0].status, AgentRunStatus::Completed);
+        assert!(results[0].task.parent.is_none());
+        assert_eq!(results[1].status, AgentRunStatus::Interrupted);
+        assert_eq!(
+            results[1].error.as_deref(),
+            Some(crate::persistence::RUNNING_AT_CHECKPOINT)
+        );
     }
 
     /// An agent cancelled before cancellation had its own task state was
