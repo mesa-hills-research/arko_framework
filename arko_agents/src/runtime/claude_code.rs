@@ -483,6 +483,9 @@ pub(super) struct ClaudeCodeRun {
     /// the reset of a limit it reported reached.
     plan_usage: Option<ai::PlanUsage>,
     limit_reached: Option<Option<u64>>,
+    /// The main conversation's prompt-cache lifetime, as Claude Code's cache
+    /// writes show it (1 hour or 5 minutes).
+    cache_lifetime: Option<Duration>,
     /// The plan-usage threshold's `SlowDown` delay, while usage is over it.
     slow_down: Option<Duration>,
     /// Allowed calls the `SlowDown` holds until their deadline: the request
@@ -555,6 +558,7 @@ impl ClaudeCodeRun {
             subagent_calls: Vec::new(),
             plan_usage: None,
             limit_reached: None,
+            cache_lifetime: None,
             slow_down: None,
             slowed: VecDeque::new(),
             cache_warned: false,
@@ -899,6 +903,15 @@ impl ClaudeCodeRun {
         }
         if generation.anthropic_fast_mode == Some(true) {
             cc_settings.insert("fastMode".into(), json!(true));
+        }
+        if let Some(ttl) = generation.anthropic_cache_ttl {
+            // The main conversation's cache TTL; unset, Claude Code uses 1
+            // hour on a subscription within its limits, 5 minutes otherwise.
+            let ttl = match ttl {
+                ai::AnthropicCacheTtl::FiveMinutes => "5m",
+                ai::AnthropicCacheTtl::OneHour => "1h",
+            };
+            cc_settings.insert("promptCacheTtl".into(), json!(ttl));
         }
         let system = self
             .task
@@ -2175,9 +2188,30 @@ impl ClaudeCodeRun {
         let input = PendingUsage::input(&pending.usage);
         let output = count("output_tokens");
         let model = self.task.agent_config.llm_config.model.clone();
+        let written_1h = pending
+            .usage
+            .pointer("/cache_creation/ephemeral_1h_input_tokens")
+            .and_then(Value::as_u64)
+            .map(|tokens| tokens as usize);
+        let written_5m = pending
+            .usage
+            .pointer("/cache_creation/ephemeral_5m_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if thread.is_none() {
+            // The cache lifetime Claude Code chose, as its writes show.
+            if written_1h.is_some_and(|tokens| tokens > 0) {
+                self.cache_lifetime =
+                    Some(ai::prompt_cache::ANTHROPIC_EXTENDED_PROMPT_CACHE_LIFETIME);
+            } else if written_5m > 0 {
+                self.cache_lifetime = Some(ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME);
+            }
+        }
         let mut info = ai::UsageInfo::new(input, output)
             .with_cached_tokens(cache_read)
             .with_cache_write_tokens(cache_write);
+        // 1-hour cache writes are priced higher than 5-minute ones.
+        info.cache_write_1h_tokens = written_1h;
         info.calculate_cost(
             &model,
             Some(&self.task.agent_config.llm_config.generation_config),
@@ -2265,14 +2299,18 @@ impl ClaudeCodeRun {
             }
             crate::agent_config::PlanUsageAction::SlowDown { delay_ms } => {
                 if self.slow_down.is_none() {
-                    // Claude Code sets its own cache lifetime: five minutes
-                    // (Anthropic's default) at least.
+                    // The configured TTL, else the one Claude Code's writes
+                    // show, else Anthropic's shorter one.
+                    let generation = &self.task.agent_config.llm_config.generation_config;
+                    let lifetime = generation
+                        .anthropic_cache_ttl
+                        .map(ai::AnthropicCacheTtl::duration)
+                        .or(self.cache_lifetime)
+                        .unwrap_or(ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME);
                     super::monitor::warn_if_slow_down_outlasts_cache(
                         self.task.id,
                         delay_ms,
-                        ai::PromptCacheLifetime::Known(
-                            ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME,
-                        ),
+                        ai::PromptCacheLifetime::Known(lifetime),
                     );
                 }
                 self.slow_down = Some(Duration::from_millis(delay_ms));

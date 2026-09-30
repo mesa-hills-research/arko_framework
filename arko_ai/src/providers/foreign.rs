@@ -127,15 +127,14 @@ fn foreign_settings(model: &Model) -> Vec<&'static Setting> {
             &INTERLEAVED_THINKING,
             &OPENROUTER,
         ],
-        // Claude Code takes the reasoning effort and fast mode; it decides
-        // the rest itself.
+        // Claude Code takes the reasoning effort, fast mode and the cache
+        // TTL; it decides the rest itself.
         Provider::ClaudeCode => vec![
             &VERBOSITY,
             &OPENAI_REASONING_MODE,
             &OPENAI_SERVICE_TIER,
             &ANTHROPIC_THINKING_ENABLED,
             &ANTHROPIC_SUMMARIZED_THINKING,
-            &ANTHROPIC_CACHE_TTL,
             &ANTHROPIC_INFERENCE_GEO,
             &LONG_CONTEXT,
             &INTERLEAVED_THINKING,

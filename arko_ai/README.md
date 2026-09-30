@@ -1036,7 +1036,7 @@ session.close().await?;
 | Approvals | `permission_handler` answers the CLI's `can_use_tool` requests (`--permission-prompt-tool stdio`) |
 | Hooks | `hooks` registers host callbacks for events such as `PreToolUse`; `Hook::deny_tool` blocks a call |
 | Host tools | `tool_servers` are served in-process as MCP servers over the same pipes; the model sees `mcp__<server>__<tool>` |
-| Settings | `settings` (`--settings`, for example `{"autoCompactEnabled": false}`) and `setting_sources` (`--setting-sources`; `Some(vec![])` loads none of the user's settings files) |
+| Settings | `settings` (`--settings`, for example `{"autoCompactEnabled": false}` or `{"promptCacheTtl": "1h"}`; unset, Claude Code caches the main conversation for 1 hour on a subscription within its limits and 5 minutes on an API key, and reports each request's split in `usage.cache_creation`) and `setting_sources` (`--setting-sources`; `Some(vec![])` loads none of the user's settings files) |
 | Control | `interrupt`, `set_model`, `set_permission_mode` |
 | Messages | `Message` variants keep their raw JSON, so message types this client does not model are still available. Usage follows Anthropic's exclusive counts: `input_tokens`, `cache_read_input_tokens` and `cache_creation_input_tokens` add up to a request's whole input. An `assistant` message's output count is the one when its stream started (one response can arrive as several messages with the same id), and the turn's `result` sums the turn's requests; with `include_partial_messages`, each request's `message_delta` stream event has its final usage |
 

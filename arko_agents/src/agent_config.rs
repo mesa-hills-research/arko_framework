@@ -924,7 +924,9 @@ pub struct PlanUsageThreshold {
 /// than any wait saves. [`prompt_cache_lifetime`](arko_ai::prompt_cache::prompt_cache_lifetime)
 /// gives the model's lifetime: 5 minutes for Anthropic by default (1 hour
 /// with `AnthropicCacheTtl::OneHour`), a conservative 5 minutes for OpenAI;
-/// Claude Code sets its own, 5 minutes or 1 hour.
+/// for a Claude Code model, `anthropic_cache_ttl` when set (Claude Code's
+/// `promptCacheTtl`), otherwise Claude Code's choice: 1 hour on a Claude
+/// subscription within its usage limits, 5 minutes on an API key.
 ///
 /// - The reset is far off: [`Pause`](Self::Pause), so the rest of the
 ///   window isn't spent before someone decides. Resuming after the cache has

@@ -92,6 +92,10 @@ impl AnthropicCacheTtl {
 ///   key and caching off (explicit mode without breakpoints). Earlier models
 ///   cache automatically, and the ChatGPT OAuth backend caches implicitly,
 ///   so turning caching off doesn't change them.
+/// - Claude Code: `anthropic_cache_ttl`'s lifetime when set (passed on as
+///   its `promptCacheTtl`); otherwise `Unknown`, since Claude Code chooses:
+///   1 hour on a Claude subscription within its usage limits, 5 minutes on
+///   an API key.
 /// - Gemini (implicit caching the provider manages) and other OpenRouter
 ///   models: `Unknown`.
 ///
@@ -122,10 +126,15 @@ pub fn prompt_cache_lifetime(
         Provider::OpenRouter if crate::providers::openrouter::is_claude_family(&model.id) => {
             anthropic()
         }
-        // Claude Code sets its own cache lifetime.
-        Provider::OpenRouter | Provider::Google | Provider::ClaudeCode => {
-            PromptCacheLifetime::Unknown
-        }
+        // Claude Code's main conversation uses `anthropic_cache_ttl` when set
+        // (its `promptCacheTtl`); otherwise it chooses: 1 hour on a Claude
+        // subscription within its usage limits, 5 minutes on an API key.
+        Provider::ClaudeCode => config
+            .anthropic_cache_ttl
+            .map_or(PromptCacheLifetime::Unknown, |ttl| {
+                PromptCacheLifetime::Known(ttl.duration())
+            }),
+        Provider::OpenRouter | Provider::Google => PromptCacheLifetime::Unknown,
         Provider::OpenAI
             if !enabled
                 && !openai_chatgpt_oauth

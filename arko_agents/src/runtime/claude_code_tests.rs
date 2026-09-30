@@ -1021,3 +1021,40 @@ async fn wait_until_reset_waits_out_the_limit_and_continues() {
         serde_json::from_value(fake.logged("argv")[1]["argv"].clone()).unwrap();
     assert!(second.iter().any(|arg| arg.starts_with("--resume=")));
 }
+
+#[tokio::test]
+async fn one_hour_cache_writes_are_recorded_and_the_ttl_is_passed_on() {
+    let fake = Fake::new(json!([[
+        {"text": "Starting.", "input_tokens": 3000, "cached": 0, "written_1h": 2000},
+        complete("done"),
+    ]]));
+    let mut config = config(&fake, &[]);
+    config.llm_config.generation_config.anthropic_cache_ttl =
+        Some(arko_ai::AnthropicCacheTtl::OneHour);
+    let task = Task::new(config, "Do it.".into(), fake.workspace(), None);
+    let (task, _) = start(task).finish().await;
+    let usage = &task.usage_history[0];
+    assert_eq!(usage.cache_write_tokens, Some(2000));
+    assert_eq!(usage.cache_write_1h_tokens, Some(2000));
+    // Opus 5.5's 1-hour write price, $8 per million.
+    let expected = 2000.0 * 8.00 / 1_000_000.0;
+    assert!(
+        (usage.cache_write_cost.unwrap() - expected).abs() < 1e-9,
+        "{:?}",
+        usage.cache_write_cost
+    );
+    let argv: Vec<String> = serde_json::from_value(fake.logged("argv")[0]["argv"].clone()).unwrap();
+    let settings = argv.iter().position(|arg| arg == "--settings").unwrap();
+    assert!(
+        argv[settings + 1].contains("\"promptCacheTtl\":\"1h\""),
+        "{argv:?}"
+    );
+    assert_eq!(
+        arko_ai::prompt_cache::prompt_cache_lifetime(
+            &task.agent_config.llm_config.model,
+            &task.agent_config.llm_config.generation_config,
+            false
+        ),
+        arko_ai::PromptCacheLifetime::Known(Duration::from_secs(3600))
+    );
+}

@@ -87,8 +87,11 @@ def usage(step, output):
     # Anthropic's input counts are exclusive: these add up to input_tokens.
     tokens = step.get("input_tokens", 10)
     cached = step.get("cached", tokens - 2)
-    return {"input_tokens": tokens - cached, "cache_read_input_tokens": cached,
-            "cache_creation_input_tokens": 0, "output_tokens": output}
+    written_1h = step.get("written_1h", 0)
+    return {"input_tokens": tokens - cached - written_1h, "cache_read_input_tokens": cached,
+            "cache_creation_input_tokens": written_1h, "output_tokens": output,
+            "cache_creation": {"ephemeral_5m_input_tokens": 0,
+                               "ephemeral_1h_input_tokens": written_1h}}
 
 
 def stream_event(event):

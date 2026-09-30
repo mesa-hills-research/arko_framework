@@ -833,8 +833,9 @@ carries it), and how long the prompt cache lasts. A request made after the cache
 expired reads the whole context again, uncached, and that costs more usage than any wait
 saves. `arko_ai::prompt_cache::prompt_cache_lifetime` (or `LLMClient::prompt_cache_lifetime`)
 gives a model's lifetime: 5 minutes for Anthropic by default (1 hour with
-`AnthropicCacheTtl::OneHour`), a conservative 5 minutes for OpenAI; Claude Code sets its
-own, 5 minutes or 1 hour.
+`AnthropicCacheTtl::OneHour`), a conservative 5 minutes for OpenAI. For a Claude Code
+model it is `anthropic_cache_ttl` when set, otherwise Claude Code's choice: 1 hour on a
+Claude subscription within its usage limits, 5 minutes on an API key.
 
 | Situation | Action | Cost |
 | --- | --- | --- |
@@ -911,8 +912,12 @@ through an interpreter), `env`, whether the agent's system prompt replaces Claud
 (`replace_system_prompt`; by default it is appended), and the user's settings files the
 session loads (`setting_sources`: none by default, with `--strict-mcp-config`, so the
 agent behaves the same on any machine). The reasoning effort of an `Anthropic` or
-`AnthropicAdaptive` reasoning config becomes `--effort`, and `anthropic_fast_mode`
-Claude Code's fast mode. The session lives while the task is in progress: a wait for an
+`AnthropicAdaptive` reasoning config becomes `--effort`, `anthropic_fast_mode` Claude
+Code's fast mode, and `anthropic_cache_ttl` the main conversation's prompt-cache TTL
+(Claude Code's `promptCacheTtl` setting). Without it, Claude Code caches for 1 hour on a
+Claude subscription within its usage limits and 5 minutes on an API key (subagents: 5
+minutes); its 1-hour cache writes are recorded (`UsageInfo::cache_write_1h_tokens`) and
+priced at the 1-hour rate. The session lives while the task is in progress: a wait for an
 answer (`ask_user`) or an error-recovery decision closes it, and the task resumes it
 (`Task::claude_code_session`) when it continues. A turn that ends without `complete_task`
 gets a note asking the model to continue or complete; after 10 in a row the task is
