@@ -36,5 +36,5 @@ pub use protocol::{
     AssistantMessage, ContentBlock, Message, PermissionDecision, PermissionHandler,
     PermissionRequest, ResultMessage, SystemMessage, UserMessage,
 };
-pub use session::{ClaudeError, ClaudeSession, Turn};
+pub use session::{ClaudeError, ClaudeSession, Turn, WIRE_LOG};
 pub use tools::{ClaudeTool, ToolOutput, ToolServer};

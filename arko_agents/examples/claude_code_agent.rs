@@ -6,7 +6,11 @@
 //!     --workspace arko_ai/src/providers/claude_code --handover-at 20000
 //! ```
 //!
-//! It uses the CLI's login and counts against its plan usage.
+//! It uses the CLI's login and counts against its plan usage. For the raw
+//! stream-json traffic (every line to and from the CLI), add
+//! `RUST_LOG=arko_ai::claude_code::wire=trace`; `--prompt-file` reads the
+//! task from a file, and `--refusal-fallback` sets the model arko switches to
+//! for one turn when a refusal stands.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,6 +35,9 @@ struct Args {
         default_value = "Read each .rs file in this directory, one at a time, and note its public items. When you have read them all, call complete_task with the list, file by file."
     )]
     prompt: String,
+    /// Read the task from this file instead of `--prompt`.
+    #[arg(long)]
+    prompt_file: Option<PathBuf>,
     /// An Anthropic model id, run through Claude Code.
     #[arg(long, default_value = "claude-sonnet-5-5")]
     model: String,
@@ -40,6 +47,10 @@ struct Args {
     /// Replace Claude Code's system prompt with the agent's.
     #[arg(long)]
     replace_system_prompt: bool,
+    /// An Anthropic model id to answer one turn when the model's refusal
+    /// stands (Claude Code didn't retry it on its own fallback model).
+    #[arg(long)]
+    refusal_fallback: Option<String>,
 }
 
 #[tokio::main]
@@ -69,9 +80,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(tokens) = args.handover_at {
         builder = builder.handover(HandoverConfig::at_input_tokens(tokens));
     }
+    if let Some(fallback) = &args.refusal_fallback {
+        builder = builder.refusal_fallback(AgentLLMConfig {
+            model: Model::claude_code(Model::get(arko_ai::Provider::Anthropic, fallback)?),
+            generation_config: Default::default(),
+        });
+    }
     let config = builder.build()?;
+    let prompt = match &args.prompt_file {
+        Some(path) => std::fs::read_to_string(path)?,
+        None => args.prompt.clone(),
+    };
     let workspace = std::fs::canonicalize(&args.workspace)?;
-    let task = Task::new(config, args.prompt, workspace, None);
+    let task = Task::new(config, prompt, workspace, None);
 
     let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()));
     let (mut events, _commands, handle) = runtime.run_task(
@@ -105,6 +126,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
             AgentEvent::RefusalReceived(refusal) => println!("[refusal] {refusal:?}"),
             AgentEvent::RefusalFallback { model_id } => println!("[refusal fallback] {model_id}"),
+            AgentEvent::ModelRerouted {
+                requested_model,
+                served_model,
+                ..
+            } => println!("[rerouted] {requested_model} -> {served_model}"),
             AgentEvent::HandoverRequested { input_tokens } => {
                 println!("=== handover requested at {input_tokens} input tokens ===")
             }

@@ -317,10 +317,16 @@ async fn write_line(stdin: &Mutex<Option<ChildStdin>>, message: &Value) -> std::
         .as_mut()
         .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::BrokenPipe))?;
     let mut line = message.to_string();
+    log::trace!(target: WIRE_LOG, "-> {line}");
     line.push('\n');
     pipe.write_all(line.as_bytes()).await?;
     pipe.flush().await
 }
+
+/// The log target of the raw stream-json traffic, one line per message
+/// (`->` to the CLI, `<-` from it), at trace level:
+/// `RUST_LOG=arko_ai::claude_code::wire=trace`.
+pub const WIRE_LOG: &str = "arko_ai::claude_code::wire";
 
 async fn collect_stderr(mut pipe: tokio::process::ChildStderr, tail: Arc<StdMutex<String>>) {
     let mut buffer = [0u8; 4096];
@@ -355,6 +361,7 @@ async fn read_stdout(
     let mut lines = BufReader::new(stdout).lines();
     let in_flight: Arc<StdMutex<HashMap<String, JoinHandle<()>>>> = Arc::default();
     while let Ok(Some(line)) = lines.next_line().await {
+        log::trace!(target: WIRE_LOG, "<- {line}");
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             if !line.trim().is_empty() {
                 log::debug!("claude stdout (not JSON): {line}");

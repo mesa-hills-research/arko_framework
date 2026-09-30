@@ -1072,7 +1072,9 @@ output limit), between 1,024 and 16,000 tokens. `--reasoning-level` and
 `claude_code_live` runs a short conversation against the installed Claude Code CLI (a
 tool call, a hook, a second turn, and a resume), and `claude_code_delivery_probe`
 measures when a message sent mid-turn reaches the model. Both use the CLI's login and
-count against its usage.
+count against its usage. `RUST_LOG=arko_ai::claude_code::wire=trace` logs the raw
+stream-json traffic of any Claude Code session, one line per message (`->` to the CLI,
+`<-` from it); `claude_code::WIRE_LOG` names the target.
 
 `embeddings_demo` requests Voyage embeddings with `VOYAGE_API_KEY`, and
 `oauth_cache_probe` measures prompt-cache hits on the ChatGPT OAuth path with the
