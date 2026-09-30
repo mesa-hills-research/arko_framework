@@ -76,6 +76,38 @@ impl Default for ContextFreshnessConfig {
                         parameter: "path".to_string(),
                     },
                 ),
+                // Claude Code's file tools, for agents whose model runs in
+                // Claude Code (arko_agents::claude_code).
+                (
+                    "Read".to_string(),
+                    ToolResourceEffect::ReadFile {
+                        parameter: "file_path".to_string(),
+                    },
+                ),
+                (
+                    "Write".to_string(),
+                    ToolResourceEffect::WriteFile {
+                        parameter: "file_path".to_string(),
+                    },
+                ),
+                (
+                    "Edit".to_string(),
+                    ToolResourceEffect::WriteFile {
+                        parameter: "file_path".to_string(),
+                    },
+                ),
+                (
+                    "MultiEdit".to_string(),
+                    ToolResourceEffect::WriteFile {
+                        parameter: "file_path".to_string(),
+                    },
+                ),
+                (
+                    "NotebookEdit".to_string(),
+                    ToolResourceEffect::WriteFile {
+                        parameter: "notebook_path".to_string(),
+                    },
+                ),
             ]),
         }
     }

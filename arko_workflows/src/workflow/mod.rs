@@ -1193,6 +1193,25 @@ impl WorkflowBuilder {
             }
         }
 
+        // Claude Code runs its built-in tools itself: their output can't be
+        // replaced.
+        for distiller in &self.distillation_configs {
+            let claude_code_target = self.agents.iter().any(|(name, config)| {
+                distiller.target_agents.contains(name) && config.runs_in_claude_code()
+            });
+            if let Some(tool) = distiller
+                .target_tools
+                .iter()
+                .find(|tool| arko_agents::claude_code::is_built_in_tool(tool))
+                .filter(|_| claude_code_target)
+            {
+                return Err(WorkflowError::BuilderInvalid(format!(
+                    "distiller '{}' targets Claude Code's '{tool}', whose output can't be distilled: Claude Code runs its built-in tools itself.",
+                    distiller.name
+                )));
+            }
+        }
+
         if let Some(config) = &self.memory_config {
             config.validate(&agent_names)?;
         }

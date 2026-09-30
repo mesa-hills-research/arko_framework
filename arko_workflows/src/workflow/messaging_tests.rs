@@ -1061,3 +1061,107 @@ async fn a_kept_message_reaches_a_continued_agent_in_its_first_request() {
     assert!(resumed.contains("hello"), "{resumed}");
     assert!(workflow.context().messages.pending("lead").is_empty());
 }
+
+/// A Claude Code agent in a workflow (against the scripted fake CLI of
+/// arko_agents' tests): it gets its messages in its prompt, its built-in
+/// `Read` is tracked for freshness through the workflow's middleware, and
+/// its completion acknowledges the messages.
+#[tokio::test]
+async fn a_claude_code_agent_runs_in_a_workflow() {
+    let workspace = Workspace::new();
+    std::fs::write(workspace.0.join("notes.txt"), "notes").unwrap();
+    let fake = std::env::temp_dir().join(format!("arko-wf-fake-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&fake).unwrap();
+    let notes = workspace.0.join("notes.txt").display().to_string();
+    std::fs::write(
+        fake.join("script.json"),
+        json!([[
+            {"tool": "Read", "input": {"file_path": notes}},
+            {"tool": "mcp__arko__complete_task", "input": {"summary": "read the notes"}},
+        ]])
+        .to_string(),
+    )
+    .unwrap();
+    let python = std::env::var("ARKO_TEST_PYTHON")
+        .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.into());
+    let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../arko_agents/tests/fixtures/fake_claude_agent.py");
+    let path = |name: &str| fake.join(name).display().to_string();
+    let mut reader = agent("reader");
+    reader.llm_config.model =
+        arko_ai::Model::claude_code(arko_ai::Model::anthropic_claude_opus_5_5());
+    reader.tool_config.available_tool_names.push("Read".into());
+    reader.claude_code = Some(arko_agents::ClaudeCodeSettings {
+        cli_path: Some(python.into()),
+        cli_args: vec![script.display().to_string()],
+        env: std::collections::BTreeMap::from([
+            ("FAKE_CLAUDE_SCRIPT".to_string(), path("script.json")),
+            ("FAKE_CLAUDE_LOG".to_string(), path("log.jsonl")),
+            ("FAKE_CLAUDE_STATE".to_string(), path("state")),
+        ]),
+        ..Default::default()
+    });
+    let workflow = builder(&workspace, &["lead"])
+        .agent("reader", reader)
+        .context_freshness(crate::freshness::ContextFreshnessConfig::default())
+        .build()
+        .unwrap();
+    let context = workflow.context();
+    context
+        .messages
+        .send("lead", None, "reader", "Look at the notes.".into(), vec![])
+        .await
+        .unwrap();
+
+    let result = workflow
+        .run_agent("reader", "Read the notes.")
+        .await
+        .unwrap();
+    assert_eq!(
+        result.status,
+        AgentRunStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    assert_eq!(result.summary, "read the notes");
+    let log = std::fs::read_to_string(fake.join("log.jsonl")).unwrap();
+    assert!(log.contains("Look at the notes."), "{log}");
+    assert!(log.contains("builtin Read ran"), "{log}");
+    assert!(context.messages.pending("reader").is_empty());
+    // The read is tracked: a later write by someone else is a change since.
+    let tracker = context.resource_tracker.as_ref().unwrap();
+    let file = crate::freshness::ResourceId::File(
+        std::fs::canonicalize(workspace.0.join("notes.txt")).unwrap(),
+    );
+    tracker.record_write(
+        &crate::freshness::ActorId::new(uuid::Uuid::new_v4(), "lead"),
+        file.clone(),
+    );
+    let actor = crate::freshness::ActorId::new(result.agent_run_id, "reader");
+    assert_eq!(tracker.changed_since_read(&actor), [file]);
+    let _ = std::fs::remove_dir_all(&fake);
+}
+
+#[test]
+fn a_distiller_cant_target_a_claude_code_built_in() {
+    let workspace = Workspace::new();
+    let mut reader = agent("reader");
+    reader.llm_config.model =
+        arko_ai::Model::claude_code(arko_ai::Model::anthropic_claude_opus_5_5());
+    reader.tool_config.available_tool_names.push("Read".into());
+    let distiller = crate::distillation::DistillationConfig::new(
+        "shorten",
+        arko_ai::Model::anthropic_claude_sonnet_5_5(),
+    )
+    .target_agent("reader")
+    .target_tool("Read");
+    let built = builder(&workspace, &["lead"])
+        .agent("reader", reader)
+        .distiller(distiller)
+        .build();
+    assert!(
+        matches!(&built, Err(WorkflowError::BuilderInvalid(message)) if message.contains("can't be distilled")),
+        "{:?}",
+        built.err()
+    );
+}
