@@ -1036,3 +1036,28 @@ async fn a_running_agent_is_told_when_a_recipient_finishes() {
         );
     }
 }
+
+/// With `keep_messages_for_finished`, a message sent after an agent finished
+/// reaches it in the first request of its continuation.
+#[tokio::test]
+async fn a_kept_message_reaches_a_continued_agent_in_its_first_request() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|_, _| Some(complete_turn("done", "ok"))).await;
+    let workflow = builder_with(server.client(), &workspace, &["lead", "worker"])
+        .messaging(MessagingPolicy::all().keep_messages_for_finished())
+        .build()
+        .unwrap();
+    let first = workflow.run_agent("lead", "Lead the work.").await.unwrap();
+    assert_eq!(first.status, AgentRunStatus::Completed);
+    let queued = send(&workflow, "worker", "lead", &workspace).await.unwrap();
+    assert!(queued.contains("queued for agent 'lead'"), "{queued}");
+
+    let continued = workflow.continue_agent(&first, "Carry on.").await.unwrap();
+    assert_eq!(continued.agent_run_id, first.agent_run_id);
+    let bodies = server.bodies();
+    assert_eq!(bodies.len(), 2);
+    let resumed = user_text(&bodies[1]);
+    assert!(resumed.contains("Carry on."), "{resumed}");
+    assert!(resumed.contains("hello"), "{resumed}");
+    assert!(workflow.context().messages.pending("lead").is_empty());
+}
