@@ -863,6 +863,52 @@ async fn claude_codes_own_refusal_retry_is_reported() {
 }
 
 #[tokio::test]
+async fn claude_codes_retry_is_recorded_as_live() {
+    // As Claude Code 2.1.285 sends it: the refused response's stop_details
+    // carry the explanation the system message leaves out, and the rest of
+    // the session runs on the fallback model.
+    let fake = Fake::new(json!([[
+        {"refused": {"category": "cyber", "explanation": "Blocked under the usage policy."}},
+        {"system": {
+            "subtype": "model_refusal_fallback", "trigger": "refusal", "direction": "retry",
+            "scope": "session", "original_model": "claude-opus-5-5",
+            "fallback_model": "claude-opus-4-8", "api_refusal_category": "cyber",
+            "api_refusal_explanation": null,
+        }},
+        dict_with(complete("done"), "model", "claude-opus-4-8"),
+    ]]));
+    let task = Task::new(config(&fake, &[]), "Do it.".into(), fake.workspace(), None);
+    let (task, events) = start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::RefusalReceived(refusal)
+            if refusal.category.as_deref() == Some("cyber")
+                && refusal.explanation.as_deref() == Some("Blocked under the usage policy.")
+    )));
+    let calls: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ModelCallUsageReported(call) => Some(call),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].stop_reason.as_deref(), Some("refusal"));
+    assert_eq!(calls[0].stop_details.as_ref().unwrap()["category"], "cyber");
+    assert_eq!(calls[1].model, "claude-opus-4-8");
+    // The fallback's call is priced as the fallback model.
+    let mut expected = arko_ai::UsageInfo::new(10, 5).with_cached_tokens(8);
+    expected.calculate_cost(&arko_ai::Model::anthropic_claude_opus_4_8(), None);
+    assert_eq!(task.usage_history[1].total_cost, expected.total_cost);
+}
+
+fn dict_with(mut step: Value, field: &str, value: &str) -> Value {
+    step[field] = json!(value);
+    step
+}
+
+#[tokio::test]
 async fn a_standing_refusal_goes_to_the_fallback_for_one_turn() {
     let fake = Fake::new(json!([
         [refusal_message("model_refusal"), {"text": "I can't help with that."}],

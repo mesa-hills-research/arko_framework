@@ -958,7 +958,13 @@ requests.
 
 **Refusals.** By default Claude Code retries a refused request on a fallback model it
 chooses; the runtime reports it as `RefusalReceived` then `RefusalFallback`, and a model
-switch for availability as `ModelRerouted`. A refusal that stands (no retry ran) is
+switch for availability as `ModelRerouted`. Claude Code keeps the rest of that session on
+the fallback model (seen live: Opus 5.5 to Opus 4.8 for a `cyber` classifier refusal);
+each call's `ModelCallUsage` names the model that served it, and the list-price estimate
+uses that model's prices. A handover starts a new session, on the configured model. The
+refused call's `ModelCallUsage` has `stop_reason` `"refusal"` and the API's `stop_details`,
+and `RefusalReceived` takes its explanation from them when Claude Code's message leaves
+it out. A refusal that stands (no retry ran) is
 `RefusalReceived`; with `refusal_fallback` (a Claude Code model), the session switches to
 that model (`set_model`) for one turn, asks it to continue, and switches back, and a
 refusal on that turn stands. Without it, the task pauses with `ErrorRecoveryCause::Refusal`

@@ -16,6 +16,11 @@ the next turn's index). Steps:
   {"rate_limit": {...}}                  a rate_limit_event with this info
   {"fail": "..."}                        the turn ends in this error
   {"system": {"subtype": ...}}           a system message
+  {"refused": {"category": ...}}         a response the API refused: its
+                                         message_delta stops with
+                                         "refusal" and these stop_details
+
+Text and tool steps take "model", the model that served them.
 
 A turn's result is its last text. FAKE_CLAUDE_LOG receives one JSON line per
 event: argv, tools, user messages, hook and permission answers, tool results.
@@ -100,6 +105,14 @@ def stream_event(event):
               "session_id": SESSION})
 
 
+def delta(step):
+    stop = {"stop_reason": "end_turn"}
+    if "refused" in step:
+        stop = {"stop_reason": "refusal", "stop_details": dict(type="refusal", **step["refused"])}
+    stream_event({"type": "message_delta", "delta": stop,
+                  "usage": usage(step, step.get("output_tokens", 5))})
+
+
 def assistant(content, step):
     # "continues": part of the previous message's response (the same id),
     # as Claude Code sends a response's text and its call. Like Claude
@@ -108,14 +121,14 @@ def assistant(content, step):
     if not step.get("continues"):
         state["message"] += 1
         stream_event({"type": "message_start", "message": {
-            "id": "msg_%d" % state["message"], "model": "claude-opus-5-5",
+            "id": "msg_%d" % state["message"], "model": step.get("model", "claude-opus-5-5"),
             "usage": usage(step, 1)}})
     send({"type": "assistant", "parent_tool_use_id": None, "session_id": SESSION,
           "message": {"id": "msg_%d" % state["message"], "role": "assistant",
-                      "model": "claude-opus-5-5", "content": content,
+                      "model": step.get("model", "claude-opus-5-5"), "content": content,
                       "usage": usage(step, 1)}})
     if step.get("closes", True):
-        stream_event({"type": "message_delta", "usage": usage(step, step.get("output_tokens", 5))})
+        delta(step)
 
 
 def hook(event, fields, tool_use_id):
@@ -191,6 +204,14 @@ def turn(text):
             continue
         if "system" in step:
             send(dict({"type": "system", "session_id": SESSION}, **step["system"]))
+            continue
+        if "refused" in step:
+            # Claude Code keeps no content from a refused response.
+            state["message"] += 1
+            stream_event({"type": "message_start", "message": {
+                "id": "msg_%d" % state["message"], "model": step.get("model", "claude-opus-5-5"),
+                "usage": usage(step, 1)}})
+            delta(step)
             continue
         if "fail" in step:
             send({"type": "result", "subtype": "error_during_execution", "is_error": True,

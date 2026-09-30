@@ -402,6 +402,10 @@ struct PendingUsage {
     key: String,
     usage: Value,
     model: Option<String>,
+    /// Why the response stopped, and the details (a refusal's category
+    /// and explanation), from its `message_delta`.
+    stop_reason: Option<String>,
+    stop_details: Option<Value>,
 }
 
 impl PendingUsage {
@@ -497,6 +501,9 @@ pub(super) struct ClaudeCodeRun {
     cache_interrupt: bool,
     /// A refusal Claude Code reported standing in this turn (no retry ran).
     refused: Option<ai::Refusal>,
+    /// The `stop_details` of the last response the API refused. Claude
+    /// Code's refusal message can leave the explanation out; these have it.
+    refusal_details: Option<Value>,
     /// The refusal fallback model answers this turn; the configured model
     /// takes over again when it ends.
     fallback_turn: bool,
@@ -565,6 +572,7 @@ impl ClaudeCodeRun {
             cache_pause_episode: false,
             cache_interrupt: false,
             refused: None,
+            refusal_details: None,
             fallback_turn: false,
             context_size: None,
             first_context_size: None,
@@ -1935,6 +1943,13 @@ impl ClaudeCodeRun {
                                 fields.insert(field.clone(), value.clone());
                             }
                         }
+                        let delta = &event["delta"];
+                        pending.stop_reason = delta["stop_reason"].as_str().map(str::to_string);
+                        pending.stop_details = Some(delta["stop_details"].clone())
+                            .filter(|details| !details.is_null());
+                        if pending.stop_reason.as_deref() == Some("refusal") {
+                            self.refusal_details = pending.stop_details.clone();
+                        }
                         self.flush_thread(&parent_tool_use_id).await?;
                     }
                 }
@@ -1944,8 +1959,8 @@ impl ClaudeCodeRun {
             cc::Message::System(system) if system.subtype == "model_refusal_fallback" => {
                 // Claude Code retried the refused request on its fallback
                 // model.
-                self.emit(AgentEvent::RefusalReceived(refusal_of(&system.raw)))
-                    .await?;
+                let refusal = refusal_of(&system.raw, self.refusal_details.take());
+                self.emit(AgentEvent::RefusalReceived(refusal)).await?;
                 let model_id = system.raw["fallback_model"].as_str().unwrap_or_default();
                 self.emit(AgentEvent::RefusalFallback {
                     model_id: model_id.to_string(),
@@ -1954,7 +1969,7 @@ impl ClaudeCodeRun {
             }
             cc::Message::System(system) if system.subtype == "model_refusal" => {
                 // The refusal stands: no retry ran.
-                let refusal = refusal_of(&system.raw);
+                let refusal = refusal_of(&system.raw, self.refusal_details.take());
                 self.emit(AgentEvent::RefusalReceived(refusal.clone()))
                     .await?;
                 self.refused = Some(refusal);
@@ -2155,8 +2170,16 @@ impl ClaudeCodeRun {
         match self.pending_usage.get_mut(&parent) {
             Some(pending) => pending.usage = usage,
             None => {
-                self.pending_usage
-                    .insert(parent, PendingUsage { key, usage, model });
+                self.pending_usage.insert(
+                    parent,
+                    PendingUsage {
+                        key,
+                        usage,
+                        model,
+                        stop_reason: None,
+                        stop_details: None,
+                    },
+                );
             }
         }
         Ok(())
@@ -2187,7 +2210,14 @@ impl ClaudeCodeRun {
         let cache_write = count("cache_creation_input_tokens");
         let input = PendingUsage::input(&pending.usage);
         let output = count("output_tokens");
-        let model = self.task.agent_config.llm_config.model.clone();
+        // Claude Code may serve another model: its refusal fallback keeps
+        // the rest of the session on the fallback model.
+        let model = pending
+            .model
+            .as_deref()
+            .and_then(|id| ai::Model::get(ai::Provider::Anthropic, id).ok())
+            .map(ai::Model::claude_code)
+            .unwrap_or_else(|| self.task.agent_config.llm_config.model.clone());
         let written_1h = pending
             .usage
             .pointer("/cache_creation/ephemeral_1h_input_tokens")
@@ -2223,7 +2253,7 @@ impl ClaudeCodeRun {
         self.task.usage_history.push(info.clone());
         self.emit(AgentEvent::UsageReported(info)).await?;
         let served = pending.model.unwrap_or_else(|| model.id.clone());
-        let call = ai::ModelCallUsage::new(
+        let mut call = ai::ModelCallUsage::new(
             pending.key,
             ai::Provider::ClaudeCode.as_telemetry_str().to_string(),
             served,
@@ -2232,6 +2262,8 @@ impl ClaudeCodeRun {
             model.max_input_tokens,
         )
         .with_plan_usage(self.plan_usage.clone());
+        call.stop_reason = pending.stop_reason;
+        call.stop_details = pending.stop_details;
         let call = self.task.record_model_call_usage(call);
         self.emit(AgentEvent::ModelCallUsageReported(call)).await?;
         if thread.is_none() {
@@ -2821,10 +2853,19 @@ fn plan_usage_of(info: &Value) -> ai::PlanUsage {
 
 /// A refusal Claude Code reported (`model_refusal`,
 /// `model_refusal_fallback`): the API's refusal category and explanation.
-fn refusal_of(raw: &Value) -> ai::Refusal {
+/// `details` are the refused response's `stop_details`, for what the message
+/// leaves out.
+fn refusal_of(raw: &Value, details: Option<Value>) -> ai::Refusal {
+    let details = details.unwrap_or_default();
+    let field = |name: &str, detail: &str| {
+        raw[name]
+            .as_str()
+            .or_else(|| details[detail].as_str())
+            .map(str::to_string)
+    };
     let mut refusal = ai::Refusal::new(ai::RefusalSource::SafetyClassifier);
-    refusal.category = raw["api_refusal_category"].as_str().map(str::to_string);
-    refusal.explanation = raw["api_refusal_explanation"].as_str().map(str::to_string);
+    refusal.category = field("api_refusal_category", "category");
+    refusal.explanation = field("api_refusal_explanation", "explanation");
     refusal.provider_details = raw.clone();
     refusal
 }
