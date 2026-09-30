@@ -102,6 +102,11 @@ same environment variables. The Python API covers a subset of the Rust API; see
 For a complete orchestrator, coder, and verifier workflow, see the
 [DeepCoder example](examples/deepcoder/README.md).
 
+To have a workflow built for you, describe your use case to the
+[forge](examples/forge/README.md): an architect agent, helped by explorer agents, designs and
+writes an `arko_workflows` crate for it, checks that it builds and passes its tests, and
+documents it.
+
 For a compact end-to-end example that exercises the workflow primitives together, see
 [`complete_workflow.rs`](examples/complete_workflow.rs). It supports a credential-free
 `--dry-run`, checkpoint resume, `continue_agent`, and `resume_agent`.

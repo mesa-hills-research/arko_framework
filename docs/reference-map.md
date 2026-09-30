@@ -1329,6 +1329,8 @@ Agents are named by their registration name (the one given to `WorkflowBuilder::
 | `deepcoder --state-dir`, `--resume`, `--ephemeral` | Run directory, resuming a run, and running without persistence. | `arko_workflows/examples/deepcoder.rs` | [Example binaries](#example-binaries-arko_workflows) |
 | `deepcoder --budget`, `--max-minor-corrections`, `--max-efficiency-corrections`, `--max-final-corrections` | Budget and the verifiers' minor-correction caps. | `arko_workflows/examples/deepcoder.rs` | [Example binaries](#example-binaries-arko_workflows) |
 | `deepcoder --shell-timeout-seconds`, `--shell-output-bytes` | Default and maximum `run_shell` timeout, and the output returned to an agent. | `arko_workflows/examples/deepcoder.rs` | [Shell tool and isolation](../arko_workflows/examples/deepcoder/README.md#shell-tool-and-isolation) |
+| `forge --use-case`, `--output`, `--involvement`, `--backend` | A workflow that builds workflows: describe a use case, get a checked, documented crate. | `arko_workflows/examples/forge/main.rs` | [Forge](../arko_workflows/examples/forge/README.md) |
+| `forge --trial-runs`, `--no-explorers`, `--max-active-calls`, `--resume` | Live trial runs, the explorer agents, and resuming a run. | `arko_workflows/examples/forge/main.rs` | [Example binaries](#example-binaries-arko_workflows) |
 | `complete_workflow --data-dir DIR`, `--dry-run`, `--resume PATH`, `--owner TEXT` | Complete three-agent incident-report workflow; validates without credentials in dry-run mode and can resume a checkpoint. | `arko_workflows/examples/complete_workflow.rs` | [Complete workflow example](#complete-workflow-example) |
 
 ### Builder defaults (arko_workflows)
@@ -1494,6 +1496,15 @@ Behind the `python` feature. The defaults match Rust (auto-checkpoint on, approv
 | `--shell-timeout-seconds`, `--shell-output-bytes` | 1800, 65,536 | |
 
 `deepcoder` configures only OpenAI (the `OPENAI_OAUTH_*` variables, then the Codex `auth.json`, then `OPENAI_API_KEY`), auto-approves every tool, and asks `ask_user` questions at the terminal. Its agents use `LLMErrorPolicy::PauseAndAwaitApproval`, so a failed model request goes straight to the workflow's automatic recovery. It declares Linux and macOS only, so `build` fails on other hosts. See the [DeepCoder README](../arko_workflows/examples/deepcoder/README.md).
+
+**`forge`**: `--output` is required for a new run (a new or empty directory), and the use case
+comes from `--use-case`, `--use-case-file`, or the terminal. The agents run in the installed Claude
+Code CLI by default (`--backend api` uses `ANTHROPIC_API_KEY`): an architect (`claude-opus-5-5`,
+xhigh) and up to `--max-active-calls` (4) explorers (`claude-sonnet-5-5`, high). `--involvement`
+is `clarify` (one batch of questions) or `none`; `--trial-runs` (0) allows live runs of the new
+workflow. The run's settings are saved in its state directory (`~/.arko/forge/runs/...`), so
+`--resume <state dir>` takes no other flags. Lessons are kept in `~/.arko/forge/lessons.md`. See
+the [forge README](../arko_workflows/examples/forge/README.md).
 
 **`complete_workflow`**: `--data-dir` is required; `--dry-run` builds and checkpoints without
 credentials or model requests; `--resume` restores a checkpoint; and `--owner` supplies the
