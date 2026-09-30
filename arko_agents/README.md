@@ -913,10 +913,13 @@ prices).
 **Monitors and limits.** Claude Code's `rate_limit_event` is reported as
 `PlanUsageReported` (its five-hour window as the primary one, its seven-day window as the
 secondary) and attached to the requests after it, and the plan-usage threshold applies:
-`Pause` interrupts the turn and pauses as a monitor, `SlowDown` delays each tool call while
-usage stays over the threshold. A turn that fails while Claude Code reports the plan limit
-reached pauses with `ErrorRecoveryCause::UsageLimit` and its reset (`UsageLimitReached`),
-so automatic recovery waits for it. The cache monitor judges the main conversation's
+`Pause` interrupts the turn and pauses as a monitor; `SlowDown` holds each tool call (and
+so the request after it) for its delay while usage stays over the threshold, and a
+cancellation or suspension ends the hold at once. A turn that fails while Claude Code
+reports the plan limit reached pauses with `ErrorRecoveryCause::UsageLimit` and its reset
+(`UsageLimitReached`), so a workflow's automatic recovery waits for it; under
+`UsageLimitPolicy::WaitUntilReset` the runtime waits until the reset itself (as for other
+agents, when the wait fits `max_wait_ms`) and resumes the session. The cache monitor judges the main conversation's
 requests.
 
 **Refusals.** By default Claude Code retries a refused request on a fallback model it

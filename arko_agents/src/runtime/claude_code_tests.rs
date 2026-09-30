@@ -914,3 +914,110 @@ async fn without_a_fallback_a_standing_refusal_pauses() {
     run.commands.send(UserCommand::CancelTask).await.unwrap();
     run.finish().await;
 }
+
+fn slow_down_config(fake: &Fake, delay_ms: u64) -> AgentConfig {
+    let mut config = config(fake, &["Grep"]);
+    config.monitoring.plan_usage = Some(crate::agent_config::PlanUsageThreshold {
+        percent: 80.0,
+        action: crate::agent_config::PlanUsageAction::SlowDown { delay_ms },
+    });
+    config
+}
+
+#[tokio::test]
+async fn slow_down_holds_each_call_while_usage_is_over_the_threshold() {
+    let fake = Fake::new(json!([[
+        {"rate_limit": {"status": "allowed_warning", "unifiedWindows": windows(0.9, 0.1)}},
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        {"tool": "Grep", "input": {"pattern": "b"}},
+        complete("done"),
+    ]]));
+    let task = Task::new(
+        slow_down_config(&fake, 300),
+        "Search.".into(),
+        fake.workspace(),
+        None,
+    );
+    let started = std::time::Instant::now();
+    let (task, _) = start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    // Three calls, each held 300 ms.
+    assert!(
+        started.elapsed() >= Duration::from_millis(900),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn a_cancellation_ends_a_slow_down_at_once() {
+    let fake = Fake::new(json!([[
+        {"rate_limit": {"status": "allowed_warning", "unifiedWindows": windows(0.9, 0.1)}},
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        complete("done"),
+    ]]));
+    let task = Task::new(
+        slow_down_config(&fake, 60_000),
+        "Search.".into(),
+        fake.workspace(),
+        None,
+    );
+    let mut run = start(task);
+    run.events_until(|event| matches!(event, AgentEvent::ToolCallFormatted { .. }))
+        .await;
+    let cancelled = std::time::Instant::now();
+    run.commands.send(UserCommand::CancelTask).await.unwrap();
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Cancelled { .. }));
+    assert!(
+        cancelled.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        cancelled.elapsed()
+    );
+    let posts = fake.logged("post");
+    assert!(
+        posts[0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("the agent is stopping")
+    );
+}
+
+#[tokio::test]
+async fn wait_until_reset_waits_out_the_limit_and_continues() {
+    let resets_at = chrono::Utc::now().timestamp() as u64 + 1;
+    let fake = Fake::new(json!([
+        [
+            {"rate_limit": {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": resets_at,
+                            "unifiedWindows": windows(1.0, 0.2)}},
+            {"fail": "Claude usage limit reached."},
+        ],
+        [complete("done after the reset")],
+    ]));
+    let mut config = config(&fake, &[]);
+    config.llm_retry_config.jitter = false;
+    config.llm_retry_config.usage_limit_policy =
+        crate::agent_config::UsageLimitPolicy::WaitUntilReset {
+            max_wait_ms: 60_000,
+        };
+    let task = Task::new(config, "Do it.".into(), fake.workspace(), None);
+    let (task, events) = start(task).finish().await;
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "done after the reset"),
+        "{:?}",
+        task.current_state
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::UsageLimitReached { waiting_until_unix_ms: Some(_), resets_at_unix_ms: Some(at), .. }
+            if *at == resets_at * 1000
+    )));
+    // No pause: the task waited and resumed its session.
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+    )));
+    let second: Vec<String> =
+        serde_json::from_value(fake.logged("argv")[1]["argv"].clone()).unwrap();
+    assert!(second.iter().any(|arg| arg.starts_with("--resume=")));
+}

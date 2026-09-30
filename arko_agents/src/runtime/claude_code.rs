@@ -50,6 +50,11 @@ pub const ARKO_TOOL_SERVER: &str = "arko";
 /// decides at once, except for a built-in call's middleware `before`.
 const HOOK_TIMEOUT_SECONDS: f64 = 600.0;
 
+/// Past a plan limit's reset before continuing, and the most added to
+/// spread agents sharing a plan (as for other agents).
+const USAGE_LIMIT_RESET_MARGIN: Duration = Duration::from_secs(1);
+const USAGE_LIMIT_RESET_JITTER: Duration = Duration::from_secs(30);
+
 /// Turns in a row that end without `complete_task` before the task is
 /// interrupted (the native runtime's limit on unusable responses).
 const MAX_OPEN_TURNS: u32 = 10;
@@ -480,6 +485,9 @@ pub(super) struct ClaudeCodeRun {
     limit_reached: Option<Option<u64>>,
     /// The plan-usage threshold's `SlowDown` delay, while usage is over it.
     slow_down: Option<Duration>,
+    /// Allowed calls the `SlowDown` holds until their deadline: the request
+    /// after each call waits with it. Commands are handled meanwhile.
+    slowed: VecDeque<(tokio::time::Instant, oneshot::Sender<Value>, Value)>,
     cache_warned: bool,
     cache_pause_episode: bool,
     /// The cache monitor asked for a pause; the turn is interrupted.
@@ -548,6 +556,7 @@ impl ClaudeCodeRun {
             plan_usage: None,
             limit_reached: None,
             slow_down: None,
+            slowed: VecDeque::new(),
             cache_warned: false,
             cache_pause_episode: false,
             cache_interrupt: false,
@@ -1105,12 +1114,27 @@ impl ClaudeCodeRun {
                 biased;
                 command = self.commands.recv() => {
                     self.handle_command(command, &session).await?;
+                    if self.stopping.is_some() || self.task.current_state.is_terminal() {
+                        // Calls held by the SlowDown don't run.
+                        for (_, reply, _) in self.slowed.drain(..) {
+                            let _ = reply.send(cc::Hook::deny_tool(
+                                "arko did not run this call: the agent is stopping.",
+                            ));
+                        }
+                    }
                 }
                 Some(request) = requests.recv() => {
                     self.handle_request(request, &session).await?;
                 }
                 _ = sleep_until(approval_deadline), if approval_deadline.is_some() => {
                     self.approval_timed_out().await?;
+                }
+                _ = sleep_until(self.slowed.front().map(|(deadline, ..)| *deadline)), if !self.slowed.is_empty() => {
+                    let now = tokio::time::Instant::now();
+                    while self.slowed.front().is_some_and(|(deadline, ..)| *deadline <= now) {
+                        let (_, reply, answer) = self.slowed.pop_front().expect("checked");
+                        let _ = reply.send(answer);
+                    }
                 }
                 message = session.next_message() => match message {
                     None => {
@@ -1130,6 +1154,7 @@ impl ClaudeCodeRun {
         };
         // Late hook requests get their stopping answer.
         drop(requests);
+        self.slowed.clear();
         self.flush_usage().await?;
         if let Some(approval) = self.approval.take() {
             let _ = approval
@@ -1247,7 +1272,16 @@ impl ClaudeCodeRun {
                 reply,
             } => {
                 let answer = self.gate(tool_use_id, &tool_name, input, session).await?;
-                let _ = reply.send(answer);
+                let allowed = answer["hookSpecificOutput"]["permissionDecision"] == "allow";
+                match self.slow_down.filter(|_| allowed) {
+                    Some(delay) => {
+                        self.slowed
+                            .push_back((tokio::time::Instant::now() + delay, reply, answer))
+                    }
+                    None => {
+                        let _ = reply.send(answer);
+                    }
+                }
             }
             HostRequest::Permission { request, reply } => {
                 self.permission(request, reply).await?;
@@ -1405,11 +1439,6 @@ impl ClaudeCodeRun {
                     return self.reject_call(id, &name, reason).await;
                 }
             }
-        }
-        if let Some(delay) = self.slow_down {
-            // The plan-usage threshold's SlowDown: each call waits, and the
-            // request after it with it.
-            tokio::time::sleep(delay).await;
         }
         let needs_approval = !self.task.agent_config.should_auto_approve_tool(&name);
         if needs_approval || outside.is_some() {
@@ -2492,6 +2521,11 @@ impl ClaudeCodeRun {
         }
         // A plan limit Claude Code reported reached: the pause waits for its
         // reset (a workflow's automatic recovery waits until then).
+        if let Some(Some(resets_at)) = self.limit_reached
+            && let Some(wait) = self.usage_limit_wait(resets_at)
+        {
+            return self.wait_for_reset(message, resets_at, wait).await;
+        }
         let cause = match self.limit_reached {
             Some(resets_at) => {
                 let resets_at_unix_ms = resets_at.map(|seconds| seconds.saturating_mul(1000));
@@ -2515,6 +2549,83 @@ impl ClaudeCodeRun {
                 SessionEnd::Wait
             },
         )
+    }
+
+    /// Under [`UsageLimitPolicy::WaitUntilReset`](crate::agent_config::UsageLimitPolicy::WaitUntilReset),
+    /// the wait for a limit that resets at `resets_at` (Unix seconds): until a
+    /// little past the reset, when the whole wait fits `max_wait_ms`.
+    fn usage_limit_wait(&self, resets_at: u64) -> Option<Duration> {
+        let retry = &self.task.agent_config.llm_retry_config;
+        let crate::agent_config::UsageLimitPolicy::WaitUntilReset { max_wait_ms } =
+            retry.usage_limit_policy
+        else {
+            return None;
+        };
+        let now = chrono::Utc::now().timestamp().max(0) as u64;
+        let reset_in = Duration::from_secs(resets_at.saturating_sub(now));
+        let longest = reset_in + USAGE_LIMIT_RESET_MARGIN + USAGE_LIMIT_RESET_JITTER;
+        if longest > Duration::from_millis(max_wait_ms) {
+            return None;
+        }
+        // A little past the reset, spread so that agents sharing a plan
+        // don't all continue at once.
+        let jitter = if retry.jitter {
+            ai::retry::random_sample() % (USAGE_LIMIT_RESET_JITTER.as_millis() as u64 + 1)
+        } else {
+            0
+        };
+        Some(reset_in + USAGE_LIMIT_RESET_MARGIN + Duration::from_millis(jitter))
+    }
+
+    /// Waits out a reached plan limit, handling commands meanwhile (a
+    /// cancellation or suspension ends the wait), then continues the task in
+    /// its session.
+    async fn wait_for_reset(
+        &mut self,
+        message: String,
+        resets_at: u64,
+        wait: Duration,
+    ) -> Result<SessionEnd, ArkoAgentsError> {
+        let until = tokio::time::Instant::now() + wait;
+        let waiting_until_unix_ms = (chrono::Utc::now().timestamp_millis().max(0) as u64)
+            .saturating_add(wait.as_millis() as u64);
+        self.emit(AgentEvent::UsageLimitReached {
+            resets_at_unix_ms: Some(resets_at.saturating_mul(1000)),
+            waiting_until_unix_ms: Some(waiting_until_unix_ms),
+            error_message: message,
+        })
+        .await?;
+        let sleep = tokio::time::sleep_until(until);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                biased;
+                command = self.commands.recv() => match command {
+                    Some(UserCommand::InjectContext { content }) => self.queue_context(content),
+                    Some(UserCommand::RequestHandover) => self.note_handover_request().await?,
+                    Some(UserCommand::CancelTask) => {
+                        self.set_state(TaskState::Cancelled {
+                            reason: crate::task::CANCELLED_BY_USER.into(),
+                        })
+                        .await?;
+                        return Ok(SessionEnd::Stop);
+                    }
+                    Some(UserCommand::SuspendTask) => return Ok(SessionEnd::Stop),
+                    None => {
+                        self.set_state(TaskState::Interrupted {
+                            reason: "Command channel disconnected.".into(),
+                        })
+                        .await?;
+                        return Ok(SessionEnd::Stop);
+                    }
+                    Some(_) => {}
+                },
+                _ = &mut sleep => break,
+            }
+        }
+        self.limit_reached = None;
+        // The session resumes, and the model is asked to continue.
+        Ok(SessionEnd::Wait)
     }
 
     /// Pauses for an error-recovery decision under a pausing error policy,
