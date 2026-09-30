@@ -1076,7 +1076,7 @@ async fn a_claude_code_agent_runs_in_a_workflow() {
     std::fs::write(
         fake.join("script.json"),
         json!([[
-            {"tool": "Read", "input": {"file_path": notes}},
+            {"tool": "Read", "input": {"file_path": notes.clone()}},
             {"tool": "mcp__arko__complete_task", "input": {"summary": "read the notes"}},
         ]])
         .to_string(),
@@ -1130,9 +1130,13 @@ async fn a_claude_code_agent_runs_in_a_workflow() {
     assert!(context.messages.pending("reader").is_empty());
     // The read is tracked: a later write by someone else is a change since.
     let tracker = context.resource_tracker.as_ref().unwrap();
-    let file = crate::freshness::ResourceId::File(
-        std::fs::canonicalize(workspace.0.join("notes.txt")).unwrap(),
-    );
+    // The resource as the tracker names it (paths resolve per platform).
+    let (file, _) = tracker
+        .resource_for_tool(
+            "Read",
+            &HashMap::from([("file_path".to_string(), json!(notes))]),
+        )
+        .unwrap();
     tracker.record_write(
         &crate::freshness::ActorId::new(uuid::Uuid::new_v4(), "lead"),
         file.clone(),

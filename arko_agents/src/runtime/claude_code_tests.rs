@@ -285,9 +285,14 @@ async fn a_turn_without_complete_task_gets_a_note() {
 
 #[tokio::test]
 async fn built_ins_are_offered_only_when_listed_and_pass_the_gate() {
+    // An absolute path outside the workspace on every platform.
+    let outside = std::env::temp_dir()
+        .join(format!("arko-outside-{}.txt", uuid::Uuid::new_v4()))
+        .display()
+        .to_string();
     let fake = Fake::new(json!([[
         {"tool": "Read", "input": {"file_path": "notes.txt"}},
-        {"tool": "Read", "input": {"file_path": "/etc/hostname"}},
+        {"tool": "Read", "input": {"file_path": outside}},
         {"tool": "Bash", "input": {"command": "ls"}},
         complete("Read it"),
     ]]));
