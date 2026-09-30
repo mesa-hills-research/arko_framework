@@ -130,6 +130,16 @@ fn extract_parameters_from_schema(schema: &Value) -> Vec<ToolParameterDefinition
 
 #[async_trait]
 impl Tool for McpTool {
+    /// A tool the server marks read-only runs again when its call was
+    /// running as the task stopped; any other is in doubt.
+    fn recovery_mode(&self) -> crate::tool::ToolRecovery {
+        if self.definition.parallel_safe {
+            crate::tool::ToolRecovery::Rerun
+        } else {
+            crate::tool::ToolRecovery::InDoubt
+        }
+    }
+
     fn definition(&self) -> ToolDefinition {
         self.definition.clone()
     }

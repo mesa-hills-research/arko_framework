@@ -13,6 +13,10 @@ the next turn's index). Steps:
   {"tool": "mcp__arko__probe", "input": {...}, "input_tokens": 500}
                                          a tool call
   {"exit": 3}                            the CLI crashes
+  a tool step with "crash": "pre"        the CLI crashes once the call is
+                                         allowed, before it runs; "post":
+                                         after its PostToolUse hook, before
+                                         its result is reported
   {"rate_limit": {...}}                  a rate_limit_event with this info
   {"fail": "..."}                        the turn ends in this error
   {"system": {"subtype": ...}}           a system message
@@ -157,6 +161,8 @@ def call_tool(step, index):
         log("permission", tool=name, answer=answer)
         if answer.get("behavior") != "allow":
             output, is_error = answer.get("message", ""), True
+    if output is None and step.get("crash") == "pre":
+        sys.exit(3)
     if output is None:
         if name.startswith("mcp__arko__"):
             response = ask({"subtype": "mcp_message", "server_name": "arko",
@@ -171,6 +177,8 @@ def call_tool(step, index):
     post = hook("PostToolUse", {"tool_name": name, "tool_input": tool_input,
                                 "tool_response": output}, tool_use_id)
     log("post", tool=name, answer=post, output=output, is_error=is_error)
+    if step.get("crash") == "post":
+        sys.exit(3)
     send({"type": "user", "parent_tool_use_id": None, "session_id": SESSION,
           "message": {"role": "user", "content": [
               {"type": "tool_result", "tool_use_id": tool_use_id, "content": output,

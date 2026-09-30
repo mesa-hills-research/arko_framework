@@ -464,6 +464,8 @@ pub(crate) mod tests {
             agent_name: "researcher",
             initial_task_prompt: "find the failing test",
             current_working_directory: &workflow.context().workspace,
+            tool_call_id: None,
+            recovering: false,
         };
         let outcome = interceptor
             .intercept(

@@ -3438,6 +3438,8 @@ mod tests {
             agent_name: "Friendly Coder Display Name",
             initial_task_prompt: "find the failing test",
             current_working_directory: &workflow.context().workspace,
+            tool_call_id: None,
+            recovering: false,
         };
         let raw = "raw tool output ".repeat(10);
         let outcome = interceptor
@@ -3506,6 +3508,8 @@ mod tests {
                 agent_name: "coder",
                 initial_task_prompt: "find the failing test",
                 current_working_directory: &workflow.context().workspace,
+                tool_call_id: None,
+                recovering: false,
             };
             let outcome = interceptor
                 .intercept(
@@ -3712,6 +3716,8 @@ mod tests {
             agent_name: "coder",
             initial_task_prompt: "task",
             current_working_directory: &workspace,
+            tool_call_id: None,
+            recovering: false,
         };
         let search = chain
             .intercept("search", "output", &HashMap::new(), &task)

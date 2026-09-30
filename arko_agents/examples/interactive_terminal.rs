@@ -18,6 +18,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent_name: "demo",
         initial_task_prompt: "Exercise interactive input",
         current_working_directory: &cwd,
+        tool_call_id: None,
+        recovering: false,
     };
     let (sender, mut notices) = mpsc::channel(8);
     manager.bind_runtime(owner, sender.downgrade());

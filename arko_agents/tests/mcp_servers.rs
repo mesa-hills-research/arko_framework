@@ -49,6 +49,8 @@ async fn a_server_is_started_its_tools_called_and_its_exit_survived() {
         agent_name: "tester",
         initial_task_prompt: "test",
         current_working_directory: &workspace,
+        tool_call_id: None,
+        recovering: false,
     };
     let call = |text: &str| HashMap::from([("text".to_string(), json!(text))]);
     assert_eq!(

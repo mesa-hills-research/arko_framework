@@ -34,11 +34,12 @@ use crate::handover::{
 };
 use crate::parsing::{PromptBuilder, ToolParsingConfig};
 use crate::skill::SkillPromptContext;
-use crate::task::{ApprovalReason, ErrorRecoveryCause, Task, TaskState};
+use crate::snapshot::TaskSnapshots;
+use crate::task::{ApprovalReason, ErrorRecoveryCause, RunningToolCall, Task, TaskState};
 use crate::tool::builtins::{ASK_USER_TOOL_NAME, COMPLETE_TASK_TOOL_NAME};
 use crate::tool::{
     InterceptorConfig, ToolCallContext, ToolExecutionContext, ToolExecutionDecision,
-    ToolExecutionMiddleware, ToolExecutionOutcome, ToolRegistry,
+    ToolExecutionMiddleware, ToolExecutionOutcome, ToolRecovery, ToolRegistry,
 };
 use arko_ai::claude_code as cc;
 use arko_ai::{self as ai};
@@ -68,6 +69,10 @@ const TASK_COMPLETE: &str = "The task is complete; end your turn without calling
 const ASKED: &str = "Your questions were sent to the user. End your turn now without calling tools; the answer arrives as the next message.";
 
 const CONTINUE: &str = "Continue the task from where you left off.";
+
+/// Heads the note on the calls that were open when the task stopped; see
+/// [`ClaudeCodeRun::recover_open_calls`].
+const RESTARTED_NOTE: &str = "The task stopped while tool calls were open (arko's host or Claude Code stopped). As arko recorded them, and whatever Claude Code reports of them (it may call them interrupted):";
 
 /// The arko tool a Claude Code tool name serves, if it is one.
 fn arko_name(served: &str) -> Option<&str> {
@@ -282,6 +287,24 @@ impl ToolHost {
             ));
         };
         let id = admitted.id;
+        let (outcome, output) = self
+            .run(name, tool, &arguments, id, admitted.custom_output, false)
+            .await;
+        self.outcomes.lock().unwrap().insert(id, outcome);
+        output
+    }
+
+    /// Runs a call to `tool` (`recovering`: again, after the task stopped
+    /// while it ran), and returns its outcome and what Claude Code reads.
+    async fn run(
+        &self,
+        name: &str,
+        tool: Arc<dyn crate::tool::Tool>,
+        arguments: &Value,
+        id: Uuid,
+        custom_output: Option<String>,
+        recovering: bool,
+    ) -> (CallOutcome, cc::ToolOutput) {
         let run = ToolRun {
             tool_call_id: id,
             tool_name: name.to_string(),
@@ -292,15 +315,18 @@ impl ToolHost {
             parallel_safe: false,
             interception: self.interception_for(name, tool.as_ref()),
             interruptible: tool.interruptible(),
-            params: params_of(&arguments),
-            custom_output: admitted.custom_output,
+            params: params_of(arguments),
+            custom_output,
             tool,
+            call_id: None,
+            message_to_agent: None,
+            recovering,
         };
         let outcome = match tool_run::run_tool(self.environment.clone(), run).await {
             Ok(outcome) => outcome,
             Err(error) => RunOutcome::Failed(error),
         };
-        let (outcome, output) = match outcome {
+        match outcome {
             RunOutcome::Finished {
                 output,
                 effective,
@@ -367,9 +393,7 @@ impl ToolHost {
                     cc::ToolOutput::error(text),
                 )
             }
-        };
-        self.outcomes.lock().unwrap().insert(id, outcome);
-        output
+        }
     }
 }
 
@@ -526,6 +550,8 @@ pub(super) struct ClaudeCodeRun {
     stopping: Option<Stopping>,
     handover_skip_warned: bool,
     host: Option<Arc<ToolHost>>,
+    /// Receives the task at its safe points.
+    pub(super) snapshots: TaskSnapshots,
 }
 
 impl ClaudeCodeRun {
@@ -586,6 +612,7 @@ impl ClaudeCodeRun {
             stopping: None,
             handover_skip_warned: false,
             host: None,
+            snapshots: TaskSnapshots::default(),
         }
     }
 
@@ -610,7 +637,57 @@ impl ClaudeCodeRun {
         self.emit(AgentEvent::TaskStateChanged(
             self.task.current_state.clone(),
         ))
-        .await
+        .await?;
+        self.report(false).await;
+        Ok(())
+    }
+
+    /// Reports the task to the snapshot sink, if there is one; with
+    /// `durable`, returns once the sink has saved it.
+    async fn report(&mut self, durable: bool) {
+        self.snapshots.report(&self.task, durable).await;
+    }
+
+    /// Records the call Claude Code's `tool_use_id` names as running before
+    /// it is allowed to run, and waits until the task is saved with it (the
+    /// write-ahead point): a task that stops while it runs knows it may have
+    /// run.
+    async fn record_running(
+        &mut self,
+        tool_use_id: Option<&String>,
+        custom_output: Option<String>,
+    ) {
+        let Some(call) = tool_use_id.and_then(|tool_use_id| self.calls.get(tool_use_id)) else {
+            return;
+        };
+        let running = RunningToolCall {
+            tool_call_id: call.id,
+            call_id: tool_use_id.cloned(),
+            tool_name: call.name.clone(),
+            parameters: params_of(&call.input),
+            custom_output,
+            message_to_agent: None,
+            built_in: call.built_in,
+            output: None,
+        };
+        self.task
+            .running_tool_calls
+            .retain(|recorded| recorded.call_id != running.call_id);
+        self.task.running_tool_calls.push(running);
+        self.report(true).await;
+    }
+
+    /// A call's result, as Claude Code reported it: kept with the running
+    /// call until the model's next message shows Claude Code has it (its
+    /// transcript is saved a little after the result is reported).
+    fn record_output(&mut self, tool_use_id: Option<&String>, output: String) {
+        if let Some(running) =
+            self.task.running_tool_calls.iter_mut().find(|running| {
+                running.call_id.is_some() && running.call_id.as_ref() == tool_use_id
+            })
+        {
+            running.output = Some(output);
+        }
     }
 
     pub(super) async fn run(mut self) -> Result<Task, ArkoAgentsError> {
@@ -641,6 +718,7 @@ impl ClaudeCodeRun {
             self.set_state(TaskState::InProgress).await?;
         }
         let result = self.drive().await;
+        self.report(false).await;
         let _ = self.emit(AgentEvent::TaskStreamEnd).await;
         result?;
         log::info!(
@@ -677,6 +755,144 @@ impl ClaudeCodeRun {
         Ok(())
     }
 
+    /// Before a session resumes after the task stopped while tool calls ran
+    /// (its host stopped after saving it, or Claude Code exited): Claude
+    /// Code settles the calls its transcript holds as interrupted, without
+    /// running them again, and its transcript can lack calls arko already
+    /// ran. The task's record of them is what counts: the resumed session's
+    /// input tells the model each call's outcome. A call whose result arko
+    /// had is reported completed, with its result; an arko call whose tool
+    /// is [`Rerun`](ToolRecovery::Rerun) or [`Resume`](ToolRecovery::Resume)
+    /// runs again now (with
+    /// [`TaskContext::recovering`](crate::tool::TaskContext::recovering)
+    /// set), and its result is reported; any other call's outcome is
+    /// unknown.
+    async fn recover_open_calls(&mut self) -> Result<(), ArkoAgentsError> {
+        if self.task.claude_code_session.is_none() || self.task.current_state.is_terminal() {
+            // No session to tell (a new one starts from the conversation).
+            self.task.running_tool_calls.clear();
+            return Ok(());
+        }
+        // Kept until they are settled: a call run again stays recorded
+        // while it runs.
+        let open = self.task.running_tool_calls.clone();
+        if open.is_empty() {
+            return Ok(());
+        }
+        log::info!(
+            "Task {}: {} tool call(s) were open when the task stopped.",
+            self.task.id,
+            open.len()
+        );
+        let mut lines = Vec::new();
+        for call in open {
+            let served = if call.built_in {
+                call.tool_name.clone()
+            } else {
+                format!("mcp__{ARKO_TOOL_SERVER}__{}", call.tool_name)
+            };
+            let named = match &call.call_id {
+                Some(id) => format!("`{served}` ({id})"),
+                None => format!("`{served}`"),
+            };
+            if let Some(output) = &call.output {
+                lines.push(format!(
+                    "- {named} had completed. Its result was: {}",
+                    bounded(output)
+                ));
+                continue;
+            }
+            let tool = (!call.built_in)
+                .then(|| self.registry.get(&call.tool_name))
+                .flatten()
+                .filter(|_| {
+                    // Their outcomes change the task; the model calls them
+                    // again.
+                    ![COMPLETE_TASK_TOOL_NAME, ASK_USER_TOOL_NAME]
+                        .contains(&call.tool_name.as_str())
+                });
+            let mode = match (&tool, &call.custom_output) {
+                (Some(_), Some(_)) => ToolRecovery::Rerun,
+                (Some(tool), None) => tool.recovery_mode(),
+                (None, _) => ToolRecovery::InDoubt,
+            };
+            let Some(tool) = tool.filter(|_| mode != ToolRecovery::InDoubt) else {
+                let mut line = format!(
+                    "- {named} was running, so its outcome is unknown: it may have run partly or fully. Check its effects before calling it again."
+                );
+                if call.built_in {
+                    line.push_str(" Commands it started may still be running.");
+                }
+                lines.push(line);
+                continue;
+            };
+            let arguments = Value::Object(call.parameters.clone().into_iter().collect());
+            let (outcome, output) = self
+                .tool_host()
+                .run(
+                    &call.tool_name,
+                    tool,
+                    &arguments,
+                    call.tool_call_id,
+                    call.custom_output.clone(),
+                    true,
+                )
+                .await;
+            match outcome {
+                CallOutcome::Finished { raw, .. } => {
+                    self.emit(AgentEvent::ToolResult {
+                        tool_call_id: call.tool_call_id,
+                        tool_name: call.tool_name.clone(),
+                        output: raw,
+                    })
+                    .await?;
+                }
+                CallOutcome::Rejected(reason) | CallOutcome::Failed(reason) => {
+                    self.emit(AgentEvent::ToolRejected {
+                        tool_call_id: call.tool_call_id,
+                        tool_name: call.tool_name.clone(),
+                        reason: Some(reason),
+                    })
+                    .await?;
+                }
+                CallOutcome::Stop { reason, cancel } => {
+                    self.set_state(if cancel {
+                        TaskState::Cancelled { reason }
+                    } else {
+                        TaskState::Failed { reason }
+                    })
+                    .await?;
+                }
+                CallOutcome::Pause { reason, .. } => {
+                    self.pause(reason, ErrorRecoveryCause::Middleware).await?;
+                }
+            }
+            lines.push(format!(
+                "- {named} was running, so it was run again. Its result: {}",
+                bounded(&output.text)
+            ));
+        }
+        self.task.running_tool_calls.clear();
+        if self.task.current_state.is_terminal() {
+            self.report(false).await;
+            return Ok(());
+        }
+        let synced = self
+            .task
+            .claude_code_synced
+            .min(self.task.conversation.messages.len());
+        let unsent = self.task.conversation.messages[synced..]
+            .iter()
+            .any(|message| message.role == ai::Role::User);
+        let mut note = format!("{RESTARTED_NOTE}\n{}", lines.join("\n"));
+        if !unsent {
+            note.push_str(&format!("\n\n{CONTINUE}"));
+        }
+        self.add_user_message(&note)?;
+        self.report(false).await;
+        Ok(())
+    }
+
     async fn drive(&mut self) -> Result<(), ArkoAgentsError> {
         loop {
             match self.task.current_state.clone() {
@@ -695,6 +911,11 @@ impl ClaudeCodeRun {
                     continue;
                 }
                 _ => {}
+            }
+            if !self.task.running_tool_calls.is_empty() {
+                // Claude Code (or the host) stopped while calls ran.
+                self.recover_open_calls().await?;
+                continue;
             }
             let session = match self.start_session().await {
                 Ok(session) => session,
@@ -1120,12 +1341,16 @@ impl ClaudeCodeRun {
         (mut session, mut requests): (cc::ClaudeSession, mpsc::UnboundedReceiver<HostRequest>),
     ) -> Result<SessionEnd, ArkoAgentsError> {
         let input = self.unsent_input()?;
+        // The session (and what it was sent) is saved before it runs.
+        self.report(true).await;
         if let Err(error) = session.send(input).await {
             let end = self.session_failed(error.to_string()).await?;
             let _ = session.close().await;
             return Ok(end);
         }
         self.questions = None;
+        // Claude Code exited on its own: it may not have saved every call.
+        let mut cli_exited = false;
         let end = loop {
             let approval_deadline = self
                 .approval
@@ -1159,6 +1384,7 @@ impl ClaudeCodeRun {
                 }
                 message = session.next_message() => match message {
                     None => {
+                        cli_exited = true;
                         if self.task.current_state.is_terminal() || self.stopping.is_some() {
                             break SessionEnd::Stop;
                         }
@@ -1182,9 +1408,14 @@ impl ClaudeCodeRun {
                 .reply
                 .send(cc::PermissionDecision::deny("The agent is stopping."));
         }
-        if let Err(error) = session.close().await {
-            log::warn!("Task {}: closing Claude Code: {error}", self.task.id);
+        match session.close().await {
+            // Claude Code saved the session as it closed: its transcript
+            // holds every call's outcome.
+            Ok(_) if !cli_exited => self.task.running_tool_calls.clear(),
+            Ok(_) => {}
+            Err(error) => log::warn!("Task {}: closing Claude Code: {error}", self.task.id),
         }
+        self.report(false).await;
         Ok(end)
     }
 
@@ -1292,8 +1523,13 @@ impl ClaudeCodeRun {
                 input,
                 reply,
             } => {
-                let answer = self.gate(tool_use_id, &tool_name, input, session).await?;
+                let answer = self
+                    .gate(tool_use_id.clone(), &tool_name, input, session)
+                    .await?;
                 let allowed = answer["hookSpecificOutput"]["permissionDecision"] == "allow";
+                if allowed {
+                    self.record_running(tool_use_id.as_ref(), None).await;
+                }
                 match self.slow_down.filter(|_| allowed) {
                     Some(delay) => {
                         self.slowed
@@ -1313,6 +1549,8 @@ impl ClaudeCodeRun {
                 response,
                 reply,
             } => {
+                self.record_output(tool_use_id.as_ref(), result_text(&response));
+                self.report(false).await;
                 let answer = self.after_tool(tool_use_id, &tool_name, response).await?;
                 let _ = reply.send(answer);
             }
@@ -1705,9 +1943,15 @@ impl ClaudeCodeRun {
         let decision = if built_in {
             match custom_output {
                 Some(output) => cc::PermissionDecision::deny(output),
-                None => cc::PermissionDecision::allow(),
+                None => {
+                    self.record_running(approval.tool_use_id.as_ref(), None)
+                        .await;
+                    cc::PermissionDecision::allow()
+                }
             }
         } else {
+            self.record_running(approval.tool_use_id.as_ref(), custom_output.clone())
+                .await;
             self.tool_host()
                 .admitted
                 .lock()
@@ -1873,6 +2117,12 @@ impl ClaudeCodeRun {
                     let mut message = ai::Message::new_assistant(&text);
                     message.tool_calls = calls;
                     self.commit(message);
+                    // The model read the results of the calls that finished,
+                    // so Claude Code has saved them.
+                    self.task
+                        .running_tool_calls
+                        .retain(|running| running.output.is_none());
+                    self.report(false).await;
                 }
                 self.check_handover_threshold().await?;
             }
@@ -1889,6 +2139,7 @@ impl ClaudeCodeRun {
                         continue;
                     };
                     let text = result_text(content);
+                    self.record_output(Some(tool_use_id), text.clone());
                     let Some(call) = self.calls.get(tool_use_id) else {
                         continue;
                     };
@@ -1910,6 +2161,7 @@ impl ClaudeCodeRun {
                         self.observe_last();
                     }
                     self.task.claude_code_synced = self.task.conversation.messages.len();
+                    self.report(false).await;
                 }
             }
             cc::Message::StreamEvent {
@@ -2793,6 +3045,8 @@ impl ClaudeCodeRun {
             }
         }
         self.calls.clear();
+        // The session's calls ended with it.
+        self.task.running_tool_calls.clear();
         self.pending_usage.clear();
         self.streamed.clear();
         self.cache_warned = false;
@@ -2807,6 +3061,7 @@ impl ClaudeCodeRun {
             self.task.id
         );
         let handovers = self.task.handovers.len();
+        self.report(false).await;
         self.emit(AgentEvent::ConversationHandedOver {
             report,
             input_tokens,
@@ -2868,6 +3123,17 @@ fn refusal_of(raw: &Value, details: Option<Value>) -> ai::Refusal {
     refusal.explanation = field("api_refusal_explanation", "explanation");
     refusal.provider_details = raw.clone();
     refusal
+}
+
+/// How much of a recovered call's result the recovery note quotes.
+const RECOVERED_RESULT_CHARS: usize = 2000;
+
+/// `text`, cut to [`RECOVERED_RESULT_CHARS`].
+fn bounded(text: &str) -> String {
+    match text.char_indices().nth(RECOVERED_RESULT_CHARS) {
+        Some((end, _)) => format!("{}… [cut]", &text[..end]),
+        None => text.to_string(),
+    }
 }
 
 /// A tool result's text, from its content (a string or text blocks).

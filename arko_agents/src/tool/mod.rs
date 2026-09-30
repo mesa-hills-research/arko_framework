@@ -72,6 +72,42 @@ pub struct TaskContext<'a> {
     pub agent_name: &'a str,
     pub initial_task_prompt: &'a str,
     pub current_working_directory: &'a Path,
+    /// The runtime's id of the call being executed, as its events and the
+    /// execution middleware see it (`None` outside a call, such as for a
+    /// result interceptor run by a host). A call recovered after its host
+    /// stopped keeps its id; see [`Tool::recovery_mode`].
+    pub tool_call_id: Option<uuid::Uuid>,
+    /// The call is being run again because the task stopped while it ran
+    /// (its host crashed, say): its tool declared
+    /// [`ToolRecovery::Rerun`] or [`ToolRecovery::Resume`]. A
+    /// [`Resume`](ToolRecovery::Resume) tool finds the work the first run
+    /// started, by [`tool_call_id`](Self::tool_call_id), and continues it.
+    pub recovering: bool,
+}
+
+/// How a tool call that was running when its task stopped (its host
+/// crashed, say) is settled when the task runs again; see
+/// [`Tool::recovery_mode`] and
+/// [`Task::running_tool_calls`](crate::task::Task::running_tool_calls).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRecovery {
+    /// The call is not run again: its result tells the model the task
+    /// restarted while the call ran, that it may have run partly or fully,
+    /// and to check its effects before calling it again. For a tool with
+    /// effects outside the task (writing files, running commands).
+    #[default]
+    InDoubt,
+    /// The call runs again, as it was made: for a tool without side
+    /// effects, which returns the same result (reading a file, listing a
+    /// directory, loading a skill).
+    Rerun,
+    /// The call runs again with
+    /// [`TaskContext::recovering`] set and its original
+    /// [`TaskContext::tool_call_id`]: the tool reattaches to the work its
+    /// first run started (a workflow's `run_workflow_agent` recovers the
+    /// agent run it started) and returns its result, or else runs the call.
+    Resume,
 }
 
 /// A trait for tools that an agent can use.
@@ -104,6 +140,14 @@ pub trait Tool: Debug + Send + Sync {
     /// returns.
     fn interruptible(&self) -> bool {
         true
+    }
+
+    /// How a call of this tool that was running when its task stopped (its
+    /// host crashed while the call ran) is settled when the task runs
+    /// again: by default [`ToolRecovery::InDoubt`], answered without
+    /// running it again. Read-only tools return [`ToolRecovery::Rerun`].
+    fn recovery_mode(&self) -> ToolRecovery {
+        ToolRecovery::InDoubt
     }
 
     /// Discard delivery baselines when a task starts or resumes in a runtime.

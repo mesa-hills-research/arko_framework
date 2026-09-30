@@ -1104,3 +1104,273 @@ async fn one_hour_cache_writes_are_recorded_and_the_ttl_is_passed_on() {
         arko_ai::PromptCacheLifetime::Known(Duration::from_secs(3600))
     );
 }
+
+/// Keeps every task snapshot the runtime reports.
+#[derive(Default)]
+struct Recorder(std::sync::Mutex<Vec<(Task, bool)>>);
+
+#[async_trait::async_trait]
+impl crate::snapshot::TaskSnapshotSink for Recorder {
+    async fn task_changed(&self, task: &Task, durable: bool) -> Result<(), String> {
+        self.0.lock().unwrap().push((task.clone(), durable));
+        Ok(())
+    }
+}
+
+impl Recorder {
+    fn snapshots(&self) -> Vec<(Task, bool)> {
+        self.0.lock().unwrap().clone()
+    }
+
+    /// The latest snapshot `pick` accepts.
+    fn latest(&self, pick: impl Fn(&Task) -> bool) -> Task {
+        self.snapshots()
+            .into_iter()
+            .rev()
+            .find(|(task, _)| pick(task))
+            .map(|(task, _)| task)
+            .expect("a snapshot")
+    }
+}
+
+fn recording(recorder: &Arc<Recorder>) -> AgentRuntime {
+    AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_task_snapshots(recorder.clone())
+}
+
+/// Runs a task saved by the host that crashed (what the recorder saved)
+/// again, and returns it with the fake's first message to the resumed
+/// session.
+async fn run_saved(fake: &Fake, saved: &Task) -> (Task, String) {
+    let saved: Task = serde_json::from_str(&serde_json::to_string(saved).unwrap()).unwrap();
+    let sent_before = fake.logged("user").len();
+    let (task, _) = start(saved).finish().await;
+    let resumed = fake.logged("user")[sent_before]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let argvs = fake.logged("argv");
+    let argv: Vec<String> = serde_json::from_value(argvs.last().unwrap()["argv"].clone()).unwrap();
+    assert!(
+        argv.iter().any(|arg| arg.starts_with("--resume=")),
+        "{argv:?}"
+    );
+    (task, resumed)
+}
+
+#[tokio::test]
+async fn the_session_is_saved_before_it_is_sent_anything() {
+    let fake = Fake::new(json!([[complete("done")]]));
+    let recorder = Arc::new(Recorder::default());
+    let task = Task::new(config(&fake, &[]), "Do it.".into(), fake.workspace(), None);
+    let (task, _) = start_with(task, recording(&recorder)).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let snapshots = recorder.snapshots();
+    let (first_durable, _) = snapshots
+        .iter()
+        .find(|(_, durable)| *durable)
+        .expect("a durable snapshot");
+    assert_eq!(first_durable.claude_code_session, task.claude_code_session);
+    assert!(first_durable.claude_code_session.is_some());
+    // What the session is sent first (the task prompt) is saved with it.
+    assert_eq!(first_durable.claude_code_synced, 1);
+    let (last, _) = snapshots.last().unwrap();
+    assert!(matches!(last.current_state, TaskState::Completed { .. }));
+    assert!(last.running_tool_calls.is_empty());
+}
+
+#[tokio::test]
+async fn a_call_running_when_the_host_stopped_is_reported_when_the_session_resumes() {
+    let fake = Fake::new(json!([
+        [{
+            "tool": "mcp__arko__write_file",
+            "input": {"path": "a.txt", "content": "x"},
+            "id": "toolu_write",
+            "crash": "pre",
+        }],
+        [complete("Recovered")],
+    ]));
+    let recorder = Arc::new(Recorder::default());
+    let task = Task::new(
+        config(&fake, &["write_file"]),
+        "Write a.".into(),
+        fake.workspace(),
+        None,
+    );
+    let mut run = start_with(task, recording(&recorder));
+    run.events_until(|event| {
+        matches!(
+            event,
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+        )
+    })
+    .await;
+    // The host crashed while the call ran: what it saved last then is what
+    // it runs again.
+    run.handle.abort();
+    let saved = recorder.latest(|task| {
+        !task.running_tool_calls.is_empty() && task.current_state == TaskState::InProgress
+    });
+    let open = &saved.running_tool_calls[0];
+    assert_eq!(open.call_id.as_deref(), Some("toolu_write"));
+    assert_eq!(open.tool_name, "write_file");
+    assert!(!open.built_in && open.output.is_none());
+    // The call was saved before it was allowed.
+    let durable = recorder
+        .snapshots()
+        .into_iter()
+        .find(|(task, _)| !task.running_tool_calls.is_empty())
+        .unwrap();
+    assert!(durable.1, "the first snapshot with the call is durable");
+
+    let (task, resumed) = run_saved(&fake, &saved).await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(
+        resumed.contains("`mcp__arko__write_file` (toolu_write)"),
+        "{resumed}"
+    );
+    assert!(resumed.contains("its outcome is unknown"), "{resumed}");
+    assert!(resumed.contains("Continue the task"), "{resumed}");
+    assert!(task.running_tool_calls.is_empty());
+}
+
+#[tokio::test]
+async fn a_rerun_tool_open_at_the_stop_runs_again_for_the_resumed_session() {
+    let fake = Fake::new(json!([
+        [{
+            "tool": "mcp__arko__read_file",
+            "input": {"path": "a.txt"},
+            "id": "toolu_read",
+            "crash": "pre",
+        }],
+        [complete("Recovered")],
+    ]));
+    std::fs::write(fake.workspace().join("a.txt"), "CONTENTS-OF-A").unwrap();
+    let recorder = Arc::new(Recorder::default());
+    let task = Task::new(
+        config(&fake, &["read_file"]),
+        "Read a.".into(),
+        fake.workspace(),
+        None,
+    );
+    let mut run = start_with(task, recording(&recorder));
+    run.events_until(|event| {
+        matches!(
+            event,
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+        )
+    })
+    .await;
+    run.handle.abort();
+    let saved = recorder.latest(|task| {
+        !task.running_tool_calls.is_empty() && task.current_state == TaskState::InProgress
+    });
+    let (task, resumed) = run_saved(&fake, &saved).await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(
+        resumed.contains("`mcp__arko__read_file` (toolu_read) was running, so it was run again."),
+        "{resumed}"
+    );
+    assert!(resumed.contains("CONTENTS-OF-A"), "{resumed}");
+}
+
+#[tokio::test]
+async fn a_call_that_finished_before_claude_code_exited_is_reported_completed() {
+    let fake = Fake::new(json!([
+        [{
+            "tool": "mcp__arko__write_file",
+            "input": {"path": "a.txt", "content": "x"},
+            "id": "toolu_write",
+            "crash": "post",
+        }],
+        [complete("Recovered")],
+    ]));
+    let recorder = Arc::new(Recorder::default());
+    let task = Task::new(
+        config(&fake, &["write_file"]),
+        "Write a.".into(),
+        fake.workspace(),
+        None,
+    );
+    let mut run = start_with(task, recording(&recorder));
+    run.events_until(|event| {
+        matches!(
+            event,
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+        )
+    })
+    .await;
+    assert!(fake.workspace().join("a.txt").exists(), "the call ran");
+    let saved = recorder.latest(|task| !task.running_tool_calls.is_empty());
+    assert!(
+        saved.running_tool_calls[0].output.is_some(),
+        "its result is saved"
+    );
+    // Claude Code exited on its own; the host continues the task.
+    run.commands
+        .send(UserCommand::ContinueAfterError { note: None })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let resumed = fake.logged("user")[1]["text"].as_str().unwrap().to_string();
+    assert!(
+        resumed.contains("`mcp__arko__write_file` (toolu_write) had completed. Its result was:"),
+        "{resumed}"
+    );
+    // The note follows the host's continue note, and isn't a second one.
+    assert_eq!(resumed.matches("Continue the task").count(), 1, "{resumed}");
+    assert!(task.running_tool_calls.is_empty());
+}
+
+#[tokio::test]
+async fn calls_that_ended_normally_are_not_reported_again() {
+    let fake = Fake::new(json!([
+        [
+            {"tool": "mcp__arko__read_file", "input": {"path": "a.txt"}},
+            {"tool": "mcp__arko__ask_user", "input": {"questions": "Which one?"}},
+        ],
+        [complete("done")],
+    ]));
+    std::fs::write(fake.workspace().join("a.txt"), "A").unwrap();
+    let recorder = Arc::new(Recorder::default());
+    let task = Task::new(
+        config(&fake, &["read_file", "ask_user"]),
+        "Read and ask.".into(),
+        fake.workspace(),
+        None,
+    );
+    let mut run = start_with(task, recording(&recorder));
+    run.events_until(|event| matches!(event, AgentEvent::UserQuestionsAsked { .. }))
+        .await;
+    // Until the session closes, the finished calls are kept with their
+    // results; once it closed cleanly for the wait, nothing is open.
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let waiting = recorder.latest(|task| {
+                matches!(task.current_state, TaskState::AwaitingUserResponse { .. })
+            });
+            if waiting.running_tool_calls.is_empty() {
+                break;
+            }
+            assert!(
+                waiting
+                    .running_tool_calls
+                    .iter()
+                    .all(|call| call.output.is_some())
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the closed session's calls are dropped");
+    run.commands
+        .send(UserCommand::SubmitUserResponse {
+            response: "The first.".into(),
+        })
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let resumed = fake.logged("user")[1]["text"].as_str().unwrap().to_string();
+    assert!(!resumed.contains("tool calls were open"), "{resumed}");
+}

@@ -34,6 +34,14 @@ httpdate = "1.0"
 uuid.workspace = true
 sha2.workspace = true
 
+# The Claude Code CLI runs in its own process group (Unix) or job object
+# (Windows), so the programs it starts stop with it.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31.2", features = ["process", "signal"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 clap.workspace = true

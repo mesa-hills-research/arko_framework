@@ -26,6 +26,12 @@ impl Default for ReadFileTool {
 
 #[async_trait]
 impl Tool for ReadFileTool {
+    /// Reading has no side effects: a call running when its task stopped
+    /// reads again.
+    fn recovery_mode(&self) -> crate::tool::ToolRecovery {
+        crate::tool::ToolRecovery::Rerun
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: READ_FILE_TOOL_NAME.to_string(),

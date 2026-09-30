@@ -108,6 +108,8 @@ async fn call(
         agent_name: agent,
         initial_task_prompt: "",
         current_working_directory: &context.workspace,
+        tool_call_id: None,
+        recovering: false,
     };
     let params = params
         .iter()
@@ -419,6 +421,8 @@ async fn an_automatic_limit_counts_from_the_last_model_request() {
             agent_name: "lead",
             initial_task_prompt: "",
             current_working_directory: &context.workspace,
+            tool_call_id: None,
+            recovering: false,
         };
         let started = tokio::time::Instant::now();
         let result = tool.execute(&task_context, HashMap::new()).await.unwrap();
@@ -456,6 +460,8 @@ async fn an_automatic_limit_leaves_a_wait_at_least_a_second() {
         agent_name: "lead",
         initial_task_prompt: "",
         current_working_directory: &context.workspace,
+        tool_call_id: None,
+        recovering: false,
     };
     let started = tokio::time::Instant::now();
     let result = tool.execute(&task_context, HashMap::new()).await.unwrap();
@@ -497,6 +503,8 @@ async fn a_wait_whose_message_is_seen_before_its_forward_does_not_spin() {
                 agent_name: "lead",
                 initial_task_prompt: "",
                 current_working_directory: &cwd,
+                tool_call_id: None,
+                recovering: false,
             };
             tool.execute(&task_context, HashMap::new()).await
         });

@@ -30,6 +30,12 @@ impl Default for CompleteTaskTool {
 
 #[async_trait]
 impl Tool for CompleteTaskTool {
+    /// Completing again completes the task once (its host's checks, such as
+    /// a workflow's completion review, run again).
+    fn recovery_mode(&self) -> crate::tool::ToolRecovery {
+        crate::tool::ToolRecovery::Rerun
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: COMPLETE_TASK_TOOL_NAME.to_string(),

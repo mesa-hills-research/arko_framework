@@ -43,6 +43,21 @@ const PARENT_SESSION_VARIABLES: &[&str] = &[
     "CLAUDE_EFFORT",
 ];
 
+/// Variables a Claude Code session (or the environment it runs in) sets that
+/// change how a CLI started under it behaves: its subagents run in the
+/// background (their calls return at once, and a crash leaves them
+/// unfinished), it compacts at another threshold, and it reads other
+/// directories' instructions and the user's email into its context. Like
+/// [`PARENT_SESSION_VARIABLES`], removed unless the session's options set
+/// them ([`ClaudeOptions::env`]).
+const PARENT_BEHAVIOUR_VARIABLES: &[&str] = &[
+    "CLAUDE_AUTO_BACKGROUND_TASKS",
+    "CLAUDE_CODE_BG_TASKS_REPORT_RUNNING",
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
+    "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD",
+    "CLAUDE_CODE_USER_EMAIL",
+];
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClaudeError {
     #[error("could not start `{program}`: {source}")]
@@ -77,9 +92,15 @@ struct Handlers {
 }
 
 /// A running Claude Code process holding one conversation.
+///
+/// The CLI runs in a process group of its own (a job object on Windows)
+/// with the programs it starts, such as a Bash call's commands: closing or
+/// dropping the session stops them all, a command left running in the
+/// background included.
 pub struct ClaudeSession {
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     child: Child,
+    tree: ProcessTree,
     messages: mpsc::UnboundedReceiver<Message>,
     pending: Pending,
     counter: AtomicU64,
@@ -102,7 +123,11 @@ impl ClaudeSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        for variable in PARENT_SESSION_VARIABLES {
+        ProcessTree::configure(&mut command);
+        for variable in PARENT_SESSION_VARIABLES
+            .iter()
+            .chain(PARENT_BEHAVIOUR_VARIABLES)
+        {
             command.env_remove(variable);
         }
         command.envs(&options.env);
@@ -113,6 +138,7 @@ impl ClaudeSession {
             program: program.display().to_string(),
             source,
         })?;
+        let tree = ProcessTree::adopt(&child);
         let stdin = Arc::new(Mutex::new(child.stdin.take()));
         let stdout = child.stdout.take().expect("stdout is piped");
         let stderr_pipe = child.stderr.take().expect("stderr is piped");
@@ -164,6 +190,7 @@ impl ClaudeSession {
         let mut session = Self {
             stdin,
             child,
+            tree,
             messages,
             pending,
             counter: AtomicU64::new(0),
@@ -262,19 +289,21 @@ impl ClaudeSession {
 
     /// Ends the conversation: closes stdin so the CLI finishes and saves its
     /// transcript, and kills it if it has not exited within a grace period.
+    /// The programs it started that still run are killed with it.
     /// Interrupt a running turn first, or its prompt may be missing from the
     /// transcript.
     pub async fn close(mut self) -> Result<ExitStatus, ClaudeError> {
         self.stdin.lock().await.take();
         let status = match tokio::time::timeout(EXIT_GRACE, self.child.wait()).await {
-            Ok(status) => status?,
-            Err(_) => {
-                self.child.kill().await?;
-                self.child.wait().await?
-            }
+            Ok(status) => status,
+            Err(_) => match self.child.kill().await {
+                Ok(()) => self.child.wait().await,
+                Err(error) => Err(error),
+            },
         };
+        self.tree.kill();
         self.reader.abort();
-        Ok(status)
+        Ok(status?)
     }
 
     async fn write(&self, message: &Value) -> Result<(), ClaudeError> {
@@ -308,6 +337,125 @@ impl ClaudeSession {
         ClaudeError::Exited {
             stderr: self.stderr.lock().unwrap().trim().to_string(),
         }
+    }
+}
+
+/// The CLI's process group: the CLI and the programs it starts, killed
+/// together ([`kill`](Self::kill), or on drop).
+#[cfg(unix)]
+struct ProcessTree {
+    group: Option<nix::unistd::Pid>,
+}
+
+#[cfg(unix)]
+impl ProcessTree {
+    /// The CLI leads a process group of its own.
+    fn configure(command: &mut Command) {
+        command.process_group(0);
+    }
+
+    fn adopt(child: &Child) -> Self {
+        Self {
+            group: child
+                .id()
+                .and_then(|id| i32::try_from(id).ok())
+                .map(nix::unistd::Pid::from_raw),
+        }
+    }
+
+    fn kill(&mut self) {
+        if let Some(group) = self.group.take() {
+            // The group is gone once all its processes have exited.
+            let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
+        }
+    }
+}
+
+/// The CLI's job object: the CLI and the programs it starts, killed
+/// together ([`kill`](Self::kill), or on drop: the job kills its processes
+/// when its last handle closes).
+#[cfg(windows)]
+struct ProcessTree {
+    job: Option<std::os::windows::io::OwnedHandle>,
+}
+
+#[cfg(windows)]
+impl ProcessTree {
+    /// The CLI starts a process group of its own.
+    fn configure(command: &mut Command) {
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+    }
+
+    /// Puts the CLI in a new job object, before it has started any program.
+    fn adopt(child: &Child) -> Self {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+        let Some(process) = child.raw_handle() else {
+            return Self { job: None };
+        };
+        // SAFETY: the job handle is owned from creation on, the limits
+        // structure is fully initialized (zeroed, then its flag set) and
+        // outlives the call, and `process` is the live child's handle.
+        let job = unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                log::warn!(
+                    "Claude Code's job object could not be created: {}",
+                    std::io::Error::last_os_error()
+                );
+                return Self { job: None };
+            }
+            let job = OwnedHandle::from_raw_handle(job);
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let limited = SetInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) != 0;
+            if !limited || AssignProcessToJobObject(job.as_raw_handle(), process) == 0 {
+                log::warn!(
+                    "Claude Code could not be put in a job object: {}",
+                    std::io::Error::last_os_error()
+                );
+                return Self { job: None };
+            }
+            job
+        };
+        Self { job: Some(job) }
+    }
+
+    fn kill(&mut self) {
+        use std::os::windows::io::AsRawHandle;
+        if let Some(job) = self.job.take() {
+            // SAFETY: the job handle is owned and open.
+            unsafe {
+                windows_sys::Win32::System::JobObjects::TerminateJobObject(job.as_raw_handle(), 1);
+            }
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+struct ProcessTree;
+
+#[cfg(not(any(unix, windows)))]
+impl ProcessTree {
+    fn configure(_command: &mut Command) {}
+    fn adopt(_child: &Child) -> Self {
+        Self
+    }
+    fn kill(&mut self) {}
+}
+
+impl Drop for ProcessTree {
+    fn drop(&mut self) {
+        self.kill();
     }
 }
 

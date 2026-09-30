@@ -71,6 +71,8 @@ fn task_context(workspace: &Workspace) -> TaskContext<'_> {
         agent_name: "Friendly sender",
         initial_task_prompt: "coordinate",
         current_working_directory: &workspace.0,
+        tool_call_id: None,
+        recovering: false,
     }
 }
 

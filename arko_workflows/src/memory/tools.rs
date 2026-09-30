@@ -391,6 +391,8 @@ mod tests {
             agent_name: "reader",
             initial_task_prompt: "read",
             current_working_directory: &workflow.context().workspace,
+            tool_call_id: None,
+            recovering: false,
         };
         let full = tool
             .execute(&task, params(serde_json::json!({"tier":"notes"})))
@@ -450,6 +452,8 @@ mod tests {
             agent_name: "reader",
             initial_task_prompt: "read",
             current_working_directory: &context.workspace,
+            tool_call_id: None,
+            recovering: false,
         };
         let resource = ResourceId::MemoryTier("notes".into());
         let reader = ActorId::new(task.task_id, "reader");

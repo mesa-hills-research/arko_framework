@@ -1045,7 +1045,15 @@ run without a shell. The client follows it to the package's `bin/claude.exe`, or
 `cli.js` run with `node` for older releases, as T3 Code does; native installs are used as
 found. A program running inside a Claude Code session inherits variables that describe
 that session (`CLAUDE_CODE_SESSION_ID`, its messaging socket, its effort); the client
-removes them, so the CLI it starts runs as its own session.
+removes them, so the CLI it starts runs as its own session. It also removes variables such
+a session's environment sets that change how the CLI behaves (`CLAUDE_AUTO_BACKGROUND_TASKS`
+runs subagents in the background, `CLAUDE_CODE_BG_TASKS_REPORT_RUNNING`,
+`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD`,
+`CLAUDE_CODE_USER_EMAIL`), unless `ClaudeOptions::env` sets them.
+
+The CLI runs in a process group of its own (on Windows, a job object that kills its
+processes when closed), with the programs it starts: `close`, or dropping the session,
+kills a command a Bash call left running as well as the CLI.
 
 ## Examples and tests
 

@@ -431,7 +431,10 @@ the agent's time limit with `uses_host_timeout`, and out of being stopped mid-ca
 can opt out of result interception with `allow_result_interception`, and track what
 reached the conversation with `reset_context` and `observe_context`. `bind_runtime` gives
 a background tool a weak command sender for the task, through which it can send
-`UserCommand::InjectContext`.
+`UserCommand::InjectContext`. `TaskContext::tool_call_id` is the runtime's id of the call
+(as its events and the execution middleware see it), and `recovering` is set when the call
+runs again after its task stopped while it ran; `recovery_mode` says whether it may (see
+[Task snapshots and recovery](#task-snapshots-and-recovery)).
 
 A tool can return images with `execute_with_output`, each with a `description`. In native
 mode they go inside the call's own result, after its text, each after its description;
@@ -657,6 +660,54 @@ outcome of the wait.
 `Task::total_usage()` sums the usage of every model call. `Task::total_usage_cost()` is
 what the account is billed: ChatGPT OAuth calls are covered by the subscription and add
 zero, while their `UsageInfo::total_cost` keeps the list-price estimate.
+
+## Task snapshots and recovery
+
+A task is returned when its run ends. A host that must survive its own crash gives the
+runtime a `TaskSnapshotSink` (`AgentRuntime::with_task_snapshots`), which receives the
+running task at its safe points and saves it; arko_workflows does this for its agents.
+After a crash, the saved task runs again from where it was saved.
+
+The runtime reports the task after the model's turn is added (before its calls run),
+before each group of tool calls starts, after each group's results are recorded, at every
+turn boundary (which covers pauses and waits), after a handover, and when the run ends. A
+safe point where nothing changed reports nothing. Before a group of calls starts, the calls
+are recorded in `Task::running_tool_calls` and the report is *durable*:
+`TaskSnapshotSink::task_changed(task, true)` returns only once the task is saved, and the
+calls start afterwards. The other reports may be saved later, the latest one replacing any
+not yet saved. A sink error is logged and the run goes on. Results are recorded in the
+task as their calls end (`pending_native_tool_results`, `pending_text_tool_results`), so
+a snapshot holds every result produced so far; the conversation the task ends up with is
+the same with or without a sink. An approval decision puts the task back in progress
+before the approved calls run, so a snapshot taken meanwhile no longer waits for it; a
+task saved while it waited for an approval, an answer or a recovery decision waits for it
+again.
+
+When a task with running calls runs again, each is settled first, by its tool's
+`Tool::recovery_mode`:
+
+| `ToolRecovery` | The call |
+| --- | --- |
+| `InDoubt` (default) | Is not run again. Its result says the task was restarted while it ran, that it may have run partly or fully, and to check its effects before calling it again. |
+| `Rerun` | Runs again as it was made, with `TaskContext::recovering` set. `read_file`, `list_files`, `load_skill`, `ask_user`, `complete_task` (the host's completion checks run again) and MCP tools the server marks read-only. |
+| `Resume` | Runs again with `recovering` set and its original `TaskContext::tool_call_id`, so the tool can find the work its first run started and return its result (a workflow's `run_workflow_agent` recovers the agent run it started). |
+
+A call the host answered with its own output gives that output again, and a call to a tool
+the run no longer offers is in doubt. The calls of the turn that never started are
+answered as not run, a pause on the turn's tool errors still happens, and the results go
+to the model as at the end of the turn (in output-based mode, with a note that calls
+without a result were not run). A task saved by a version that did not record running
+calls, with a native turn whose calls have no result, has them answered as not run
+before any other message.
+
+In a Claude Code session, a call is recorded before the gate allows it (or an approval
+does), and its result as Claude Code reports it, until the model's next message shows
+Claude Code has it. When the session resumes after a crash, Claude Code settles the calls
+its transcript holds as interrupted without running them, and its transcript can lack
+calls arko already ran, so the resumed session's first message lists each open call's
+outcome as arko recorded it: completed (with its result), run again now (an arko tool
+that is `Rerun` or `Resume`), or unknown (the others; for a built-in, commands it started
+may still be running). The same note follows a Claude Code crash the host survives.
 
 ## Model-call recovery
 
@@ -1129,7 +1180,7 @@ data (pricing and limits); an unknown ID keeps its saved copy, and an OpenRouter
 without a saved copy loads without catalog metadata. A hand-written configuration can
 therefore give only `provider` and `model_id` for a registry model or an OpenRouter slug.
 Optional fields of `AgentConfig` and `Task` have serde defaults, so files saved by older
-versions still load.
+versions still load (a task saved without `running_tool_calls` has none).
 
 ## Testing
 

@@ -75,6 +75,8 @@ mod tests {
             agent_name: "tester",
             initial_task_prompt: "",
             current_working_directory: &workspace,
+            tool_call_id: None,
+            recovering: false,
         };
         for (path, inside) in [
             ("~/a.txt", true),
@@ -134,6 +136,8 @@ mod tests {
             agent_name: "tester",
             initial_task_prompt: "",
             current_working_directory: &workspace,
+            tool_call_id: None,
+            recovering: false,
         };
         // `\` separates components on Windows, as `/` does.
         for directory in [r"sub\inner", "sub/inner", r"sub/inner\", r"sub\x\..\inner"] {

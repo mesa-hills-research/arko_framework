@@ -421,10 +421,57 @@ pub struct Task {
     /// a completed task, say) are sent when the task runs again.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub claude_code_synced: usize,
+    /// The tool calls that started running and have no recorded result yet,
+    /// in the order they started. The runtime records a call here before it
+    /// runs (and reports the task to its
+    /// [`TaskSnapshotSink`](crate::snapshot::TaskSnapshotSink) before the
+    /// call starts), and drops it once the call's result is in the task. A
+    /// task saved while calls ran (by a host that crashed) still lists them:
+    /// when the task runs again, each is settled by its tool's
+    /// [`recovery_mode`](crate::tool::Tool::recovery_mode) before anything
+    /// else happens.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub running_tool_calls: Vec<RunningToolCall>,
 }
 
 fn is_zero(value: &usize) -> bool {
     *value == 0
+}
+
+/// A tool call that started running and has no recorded result yet; see
+/// [`Task::running_tool_calls`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RunningToolCall {
+    /// The runtime's id of the call, as the tool
+    /// ([`TaskContext::tool_call_id`](crate::tool::TaskContext::tool_call_id)),
+    /// the execution middleware and the call's events see it. A recovered
+    /// call keeps it.
+    pub tool_call_id: Uuid,
+    /// The model's id of the call (the provider's tool-call id, or Claude
+    /// Code's `tool_use_id`), which its result answers. Output-based calls
+    /// have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    /// The tool's name (the arko tool's, or a Claude Code built-in's).
+    pub tool_name: String,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub parameters: HashMap<String, Value>,
+    /// Output the host gave with the call's approval instead of running the
+    /// tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_output: Option<String>,
+    /// The host's message given with the call's approval, added to its
+    /// result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_to_agent: Option<String>,
+    /// A Claude Code built-in (Claude Code runs it, not arko).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub built_in: bool,
+    /// Claude Code: the arko call's result once it finished, until the
+    /// session reports the result (and the conversation records it). A
+    /// call recovered with its output completed before the host stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
 }
 
 /// A failed tool call the task will pause on; see
@@ -496,6 +543,7 @@ impl Task {
             conversation_model_call_start: 0,
             claude_code_session: None,
             claude_code_synced: 0,
+            running_tool_calls: Vec::new(),
         }
     }
 

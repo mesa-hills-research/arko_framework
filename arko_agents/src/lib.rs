@@ -7,6 +7,7 @@ pub mod mcp;
 pub mod parsing;
 pub mod runtime;
 pub mod skill;
+pub mod snapshot;
 pub mod task;
 #[cfg(any(unix, windows))]
 pub mod terminal;
@@ -39,16 +40,18 @@ pub use skill::{
     AutoLoadedSkillContent, InvalidSkillPolicy, LOAD_SKILL_TOOL_NAME, LoadSkillTool, SkillManager,
     SkillPromptContext, SkillSource, SkillSummary, SkillsConfig,
 };
+pub use snapshot::TaskSnapshotSink;
 pub use task::{
     ApprovalReason, DeferredToolError, ErrorRecoveryCause, PendingToolCallInfo,
-    PlanUsageWindowMark, RefusalResolution, RefusedInput, RefusedMessage, RefusedToolResult, Task,
-    TaskState,
+    PlanUsageWindowMark, RefusalResolution, RefusedInput, RefusedMessage, RefusedToolResult,
+    RunningToolCall, Task, TaskState,
 };
 pub use tool::{
     InterceptedResult, InterceptionFailurePolicy, InterceptorConfig, TaskContext, Tool,
     ToolCallContext, ToolDefinition, ToolError, ToolExecutionContext, ToolExecutionDecision,
     ToolExecutionMiddleware, ToolExecutionOutcome, ToolImage, ToolOutput, ToolParameterDefinition,
-    ToolParameterType, ToolRegistry, ToolResultInterceptor, ToolTypeDetails, builtins,
+    ToolParameterType, ToolRecovery, ToolRegistry, ToolResultInterceptor, ToolTypeDetails,
+    builtins,
 };
 
 pub use arko_ai::ModelCallUsage;

@@ -25,12 +25,15 @@ pub(super) struct RunEnvironment {
 }
 
 impl RunEnvironment {
-    fn task_context(&self) -> TaskContext<'_> {
+    /// What the tool (or the interceptor) of `run` sees of the task.
+    fn task_context(&self, run: &ToolRun) -> TaskContext<'_> {
         TaskContext {
             task_id: self.task_id,
             agent_name: &self.agent_name,
             initial_task_prompt: &self.initial_task_prompt,
             current_working_directory: &self.working_directory,
+            tool_call_id: Some(run.tool_call_id),
+            recovering: run.recovering,
         }
     }
 
@@ -68,6 +71,31 @@ pub(super) struct ToolRun {
     /// A cancellation or suspension stops the call while it runs
     /// ([`Tool::interruptible`]).
     pub interruptible: bool,
+    /// The model's id of the call, recorded with it while it runs
+    /// ([`RunningToolCall::call_id`](crate::task::RunningToolCall::call_id)).
+    pub call_id: Option<String>,
+    /// The host's message given with the call's approval, recorded with it
+    /// while it runs.
+    pub message_to_agent: Option<String>,
+    /// The call runs again after its task stopped while it ran; see
+    /// [`TaskContext::recovering`].
+    pub recovering: bool,
+}
+
+impl ToolRun {
+    /// The call as recorded while it runs.
+    pub fn running(&self) -> crate::task::RunningToolCall {
+        crate::task::RunningToolCall {
+            tool_call_id: self.tool_call_id,
+            call_id: self.call_id.clone(),
+            tool_name: self.tool_name.clone(),
+            parameters: self.params.clone(),
+            custom_output: self.custom_output.clone(),
+            message_to_agent: self.message_to_agent.clone(),
+            built_in: false,
+            output: None,
+        }
+    }
 }
 
 /// How a call ended.
@@ -178,7 +206,7 @@ pub(super) async fn run_tool(
                     },
                 }
             }
-            let context = environment.task_context();
+            let context = environment.task_context(&run);
             let execution_future = run.tool.execute_with_output(&context, run.params.clone());
             // Dropping the call at the limit stops it: a command it started
             // is killed with it.
@@ -252,16 +280,7 @@ async fn intercepted_output(
     raw_output: &str,
 ) -> (String, bool) {
     match &run.interception {
-        Some(interception) => {
-            intercept(
-                environment,
-                interception,
-                &run.tool_name,
-                raw_output,
-                &run.params,
-            )
-            .await
-        }
+        Some(interception) => intercept(environment, interception, run, raw_output).await,
         None => (raw_output.to_string(), false),
     }
 }
@@ -276,12 +295,12 @@ fn middleware_error_reason(phase: &str, tool_name: &str, error: &ToolError) -> S
 async fn intercept(
     environment: &RunEnvironment,
     interception: &Interception,
-    tool_name: &str,
+    run: &ToolRun,
     raw_result: &str,
-    params: &HashMap<String, Value>,
 ) -> (String, bool) {
+    let (tool_name, params) = (run.tool_name.as_str(), &run.params);
     let max_attempts = interception.policy.max_attempts();
-    let context = environment.task_context();
+    let context = environment.task_context(run);
     let mut last_error = None;
     for attempt in 1..=max_attempts {
         match interception

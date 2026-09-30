@@ -26,6 +26,8 @@ impl Fixture {
             agent_name: "tester",
             initial_task_prompt: "test interactive jobs",
             current_working_directory: &self.root,
+            tool_call_id: None,
+            recovering: false,
         }
     }
     fn command(&self, code: &str) -> String {

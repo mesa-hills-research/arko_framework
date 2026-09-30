@@ -10,6 +10,7 @@ pub use self::turn_context::TurnContextSource;
 use crate::error::ArkoAgentsError;
 use crate::handover::HandoverHook;
 use crate::skill::SkillPromptContext;
+use crate::snapshot::{TaskSnapshotSink, TaskSnapshots};
 use crate::task::Task;
 use crate::tool::{InterceptorConfig, ToolExecutionMiddleware, ToolRegistry};
 use arko_ai::LLMClient;
@@ -65,6 +66,7 @@ pub struct AgentRuntime {
     turn_context: Option<Arc<dyn TurnContextSource>>,
     host_decisions: HostDecisions,
     handover_hook: Option<Arc<dyn HandoverHook>>,
+    task_snapshots: Option<Arc<dyn TaskSnapshotSink>>,
 }
 
 impl AgentRuntime {
@@ -75,6 +77,7 @@ impl AgentRuntime {
             turn_context: None,
             host_decisions: HostDecisions::default(),
             handover_hook: None,
+            task_snapshots: None,
         }
     }
 
@@ -100,6 +103,16 @@ impl AgentRuntime {
         self
     }
 
+    /// Reports the tasks this runtime runs to `sink` at their safe points,
+    /// so that the host can save a task while it runs and continue it after
+    /// a crash; see [`TaskSnapshotSink`]. Before tool calls start, the run
+    /// waits until the sink has saved the task with the calls recorded as
+    /// running ([`Task::running_tool_calls`]).
+    pub fn with_task_snapshots(mut self, sink: Arc<dyn TaskSnapshotSink>) -> Self {
+        self.task_snapshots = Some(sink);
+        self
+    }
+
     /// Runs a task with the given agent configuration and tool registry.
     ///
     /// The task runs only the registry's tools its configuration offers
@@ -111,6 +124,11 @@ impl AgentRuntime {
     /// allowing results to be transformed (e.g., distilled) before they
     /// enter the agent's conversation. `complete_task` and `ask_user`
     /// results are never intercepted.
+    ///
+    /// A task that stopped while tool calls ran (saved through a
+    /// [`TaskSnapshotSink`] by a host that crashed) settles those calls
+    /// first, each by its tool's
+    /// [`recovery_mode`](crate::tool::Tool::recovery_mode).
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn run_task(
         &self,
@@ -142,6 +160,7 @@ impl AgentRuntime {
             run.turn_context = self.turn_context.clone();
             run.host_decisions = self.host_decisions.clone();
             run.handover_hook = self.handover_hook.clone();
+            run.snapshots = TaskSnapshots::new(self.task_snapshots.clone());
             run.bind_tools(&command_sender);
             let join_handle = tokio::spawn(async move { run.run().await });
             return (event_receiver, command_sender, join_handle);
@@ -161,6 +180,7 @@ impl AgentRuntime {
         agent_loop.turn_context = self.turn_context.clone();
         agent_loop.host_decisions = self.host_decisions.clone();
         agent_loop.handover_hook = self.handover_hook.clone();
+        agent_loop.snapshots = TaskSnapshots::new(self.task_snapshots.clone());
         agent_loop.bind_tools(&command_sender);
 
         let task_join_handle = tokio::spawn(async move { agent_loop.run().await });

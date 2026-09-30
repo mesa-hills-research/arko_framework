@@ -160,6 +160,8 @@ async fn memory_tools_follow_each_agents_access() {
         agent_name: "Friendly reader",
         initial_task_prompt: "read",
         current_working_directory: &workspace.0,
+        tool_call_id: None,
+        recovering: false,
     };
     let listed = list("reader").execute(&task, HashMap::new()).await.unwrap();
     assert_eq!(

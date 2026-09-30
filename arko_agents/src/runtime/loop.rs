@@ -14,7 +14,7 @@ use crate::parsing::{
 use crate::skill::SkillPromptContext;
 use crate::task::{
     ApprovalReason, CANCELLED_BY_USER, DeferredToolError, ErrorRecoveryCause, PendingToolCallInfo,
-    PlanUsageWindowMark, Task, TaskState,
+    PlanUsageWindowMark, RunningToolCall, Task, TaskState,
 };
 // Names the test modules (`use super::*`) rely on.
 #[cfg(test)]
@@ -25,7 +25,8 @@ use crate::tool::{
     ToolExecutionOutcome, ToolOutput,
 };
 use crate::tool::{
-    InterceptorConfig, Tool, ToolDefinition, ToolExecutionMiddleware, ToolImage, ToolRegistry,
+    InterceptorConfig, Tool, ToolDefinition, ToolExecutionMiddleware, ToolImage, ToolRecovery,
+    ToolRegistry,
     builtins::{ASK_USER_TOOL_NAME, COMPLETE_TASK_TOOL_NAME},
 };
 use arko_ai::{self as ai};
@@ -121,6 +122,13 @@ const UNREACHED_CALL: &str = "The turn ended before this call ran; it was not ru
 /// that way by an older version.
 const UNDECIDED_CALL: &str =
     "The approval wait ended without a decision, so this call was not run.";
+/// The result of a call that was running when the task stopped (its host
+/// crashed, say), settled as [`ToolRecovery::InDoubt`] when the task runs
+/// again.
+const RESTARTED_CALL: &str = "The task was restarted while this call was running (its host stopped), so it may have run partly or fully. Check its effects before calling it again.";
+/// Added to the output-based results of a turn the task stopped in the
+/// middle of, once they are settled when it runs again.
+const RESTARTED_TURN: &str = "The task was restarted while this turn's tool calls ran (its host stopped). A call of the turn without a result here was not run; call it again if it is still needed.";
 /// When the host's command channel closed during the wait.
 const HOST_STOPPED_CALL: &str =
     "The approval wait ended because the host stopped responding, so this call was not run.";
@@ -190,6 +198,70 @@ struct NativeRun {
     run: ToolRun,
     /// The host's message with its approval, added to its result.
     message_to_agent: Option<String>,
+}
+
+/// The results of a turn's (or an approval's) native calls, recorded in the
+/// task ([`Task::pending_native_tool_results`]) as they are produced, so
+/// that a snapshot taken meanwhile holds them; [`finish`](Self::finish)
+/// puts them in call order.
+struct NativeResults {
+    /// Where the recorded results start in the task's pending results.
+    start: usize,
+    /// Each recorded result's position in its turn, in the order recorded.
+    positions: Vec<usize>,
+}
+
+impl NativeResults {
+    fn new(task: &Task) -> Self {
+        Self {
+            start: task.pending_native_tool_results.len(),
+            positions: Vec::new(),
+        }
+    }
+
+    fn record(&mut self, task: &mut Task, position: usize, result: ai::ToolResult) {
+        task.pending_native_tool_results.push(result);
+        self.positions.push(position);
+    }
+
+    /// The recorded results, with their positions.
+    fn recorded<'a>(&'a self, task: &'a Task) -> impl Iterator<Item = (usize, &'a ai::ToolResult)> {
+        self.positions
+            .iter()
+            .copied()
+            .zip(task.pending_native_tool_results.iter().skip(self.start))
+    }
+
+    /// The positions of the recorded results that are errors (the calls
+    /// that were rejected or failed).
+    fn failed(&self, task: &Task) -> std::collections::BTreeSet<usize> {
+        self.recorded(task)
+            .filter(|(_, result)| result.is_error)
+            .map(|(position, _)| position)
+            .collect()
+    }
+
+    /// Whether a call before `position` was rejected or failed.
+    fn failed_before(&self, task: &Task, position: usize) -> bool {
+        self.recorded(task)
+            .any(|(recorded, result)| recorded < position && result.is_error)
+    }
+
+    /// Puts the recorded results in call order.
+    fn finish(self, task: &mut Task) {
+        let results = &mut task.pending_native_tool_results;
+        if results.len() != self.start + self.positions.len() {
+            debug_assert!(false, "pending native results changed while recorded");
+            return;
+        }
+        let mut recorded: Vec<_> = self
+            .positions
+            .into_iter()
+            .zip(results.drain(self.start..))
+            .collect();
+        recorded.sort_by_key(|(position, _)| *position);
+        results.extend(recorded.into_iter().map(|(_, result)| result));
+    }
 }
 
 /// The current wait for a command, timed by the opt-in
@@ -389,6 +461,8 @@ pub struct AgentLoop {
     pub(super) turn_context: Option<Arc<dyn super::TurnContextSource>>,
     /// Called when the conversation is handed over.
     pub(super) handover_hook: Option<Arc<dyn HandoverHook>>,
+    /// Receives the task at its safe points; see [`report_task`](Self::report_task).
+    pub(super) snapshots: crate::snapshot::TaskSnapshots,
     /// The plan-usage SlowDown's delay was checked against the prompt-cache
     /// lifetime (once per run).
     slow_down_cache_checked: bool,
@@ -481,6 +555,7 @@ impl AgentLoop {
             execution_middleware,
             turn_context: None,
             handover_hook: None,
+            snapshots: Default::default(),
             slow_down_cache_checked: false,
             handover_skip_warned: false,
             tool_context_cursor: 0,
@@ -663,6 +738,8 @@ impl AgentLoop {
             replaced_messages
         );
         let handovers = self.task.handovers.len();
+        // The fresh conversation replaces the saved one.
+        self.report_task(false).await;
         self.emit_event(AgentEvent::ConversationHandedOver {
             report,
             input_tokens,
@@ -921,6 +998,9 @@ impl AgentLoop {
             tool,
             params,
             custom_output,
+            call_id: None,
+            message_to_agent: None,
+            recovering: false,
         }
     }
 
@@ -933,8 +1013,26 @@ impl AgentLoop {
     /// runs to its end, and a stop that arrived meanwhile is returned with
     /// the outcomes. A closed channel doesn't stop the calls: the boundary
     /// after them handles it.
+    ///
+    /// Before any call starts, the calls are recorded as running
+    /// ([`Task::running_tool_calls`]) and the task is reported to the
+    /// snapshot sink, which saves it before this returns (the write-ahead
+    /// point): a task that stops while its calls run knows which ones may
+    /// have run.
     async fn run_group(&mut self, runs: Vec<ToolRun>) -> GroupRun {
         use futures::StreamExt;
+        for run in &runs {
+            // A recovered call is recorded already.
+            if !self
+                .task
+                .running_tool_calls
+                .iter()
+                .any(|running| running.tool_call_id == run.tool_call_id)
+            {
+                self.task.running_tool_calls.push(run.running());
+            }
+        }
+        self.report_task(true).await;
         let interruptible = runs.iter().all(|run| run.interruptible);
         let environment = self.run_environment();
         let mut outcomes: Vec<Option<_>> = runs.iter().map(|_| None).collect();
@@ -996,6 +1094,37 @@ impl AgentLoop {
         }
     }
 
+    /// Reports the task to the snapshot sink, if there is one: a safe point
+    /// (see [`TaskSnapshotSink`](crate::snapshot::TaskSnapshotSink)). With
+    /// `durable`, returns once the sink has saved it.
+    async fn report_task(&mut self, durable: bool) {
+        self.snapshots.report(&self.task, durable).await;
+    }
+
+    /// Records an output-based call's result (nothing for an empty one) in
+    /// the task as it is produced ([`Task::pending_text_tool_results`]), so
+    /// that a snapshot taken meanwhile holds it, and reports the task.
+    async fn record_text_result(&mut self, result: String) {
+        if !result.is_empty() {
+            self.task.pending_text_tool_results.push(result);
+        }
+        self.report_task(false).await;
+    }
+
+    /// Takes the output-based results recorded since `start` back out of
+    /// the task, in order.
+    fn take_text_results(&mut self, start: usize) -> Vec<String> {
+        let results = &mut self.task.pending_text_tool_results;
+        results.split_off(start.min(results.len()))
+    }
+
+    /// Drops a call from the running calls once its result is in the task.
+    fn call_settled(&mut self, tool_call_id: Uuid) {
+        self.task
+            .running_tool_calls
+            .retain(|running| running.tool_call_id != tool_call_id);
+    }
+
     /// Applies a command that stopped running tool calls, once the calls
     /// that finished are handled: a cancellation ends the task (unless one
     /// of the calls already ended it), and a suspension stops the loop after
@@ -1031,14 +1160,15 @@ impl AgentLoop {
     /// run. `complete_task` after an earlier call of the turn that was
     /// rejected or failed (`failed` holds those calls' positions, and the
     /// calls here that fail join them) doesn't run: its result says so.
-    /// Returns each call's result with its index.
+    /// Each call's result is recorded in `results` (in the task) as its group
+    /// ends, and the task reported to the snapshot sink.
     async fn run_native_calls(
         &mut self,
         runs: Vec<NativeRun>,
         keep_going: fn(&TaskState) -> bool,
         mut failed: std::collections::BTreeSet<usize>,
-    ) -> Result<Vec<(usize, ai::ToolResult)>, ArkoAgentsError> {
-        let mut results = Vec::new();
+        results: &mut NativeResults,
+    ) -> Result<(), ArkoAgentsError> {
         let mut unreached = Vec::new();
         for group in tool_run::groups(runs, |run| run.run.parallel_safe) {
             if !keep_going(&self.task.current_state) || self.stop_requested {
@@ -1056,10 +1186,12 @@ impl AgentLoop {
                         reason: Some(COMPLETION_AFTER_FAILURE.to_string()),
                     })
                     .await?;
-                    results.push((
+                    results.record(
+                        &mut self.task,
                         native.index,
                         ai::ToolResult::from_tool_call(&native.call, COMPLETION_AFTER_FAILURE),
-                    ));
+                    );
+                    self.call_settled(native.run.tool_call_id);
                 } else {
                     to_run.push(native);
                 }
@@ -1071,9 +1203,12 @@ impl AgentLoop {
                 .into_iter()
                 .map(|native| {
                     let id = native.run.tool_call_id;
+                    let mut run = native.run;
+                    run.call_id = native.call.id.clone();
+                    run.message_to_agent = native.message_to_agent.clone();
                     (
                         (native.index, native.call, id, native.message_to_agent),
-                        native.run,
+                        run,
                     )
                 })
                 .unzip();
@@ -1088,7 +1223,8 @@ impl AgentLoop {
                         if result.is_error {
                             failed.insert(index);
                         }
-                        results.push((index, result));
+                        results.record(&mut self.task, index, result);
+                        self.call_settled(id);
                     }
                     None => stopped.push((index, call, id)),
                 }
@@ -1103,9 +1239,15 @@ impl AgentLoop {
                         reason: Some(reason.to_string()),
                     })
                     .await?;
-                    results.push((index, ai::ToolResult::error_from_tool_call(&call, reason)));
+                    results.record(
+                        &mut self.task,
+                        index,
+                        ai::ToolResult::error_from_tool_call(&call, reason),
+                    );
+                    self.call_settled(id);
                 }
             }
+            self.report_task(false).await;
         }
         if !unreached.is_empty() {
             let not_run = self.not_run_after_stop();
@@ -1116,13 +1258,16 @@ impl AgentLoop {
                     reason: Some(not_run.clone()),
                 })
                 .await?;
-                results.push((
+                results.record(
+                    &mut self.task,
                     native.index,
                     ai::ToolResult::error_from_tool_call(&native.call, &not_run),
-                ));
+                );
+                // A recovered call that doesn't run again.
+                self.call_settled(native.run.tool_call_id);
             }
         }
-        Ok(results)
+        Ok(())
     }
 
     /// The result of a native call that ran, with its events and the state
@@ -1989,6 +2134,17 @@ impl AgentLoop {
             self.task.set_state(TaskState::InProgress);
             self.task.monitor_pause = false;
         }
+        // Calls run only once their approval is decided: a task saved while
+        // they ran no longer waits for it.
+        if !self.task.running_tool_calls.is_empty()
+            && matches!(
+                self.task.current_state,
+                TaskState::AwaitingToolApproval { .. }
+                    | TaskState::AwaitingBatchToolApproval { .. }
+            )
+        {
+            self.task.set_state(TaskState::InProgress);
+        }
 
         if matches!(self.task.current_state, TaskState::InProgress) {
             self.emit_event(AgentEvent::TaskStateChanged(
@@ -1996,11 +2152,17 @@ impl AgentLoop {
             ))
             .await?;
         }
+        // A task saved while its tool calls ran (by a host that stopped)
+        // settles them before anything else.
+        let recovered = self.recover_running_calls().await?;
         if interrupted {
             // Older versions left a native turn without results when an
             // approval wait ended this way.
             self.settle_interrupted_wait(UNDECIDED_CALL, UNDECIDED_CALL)
                 .await?;
+            self.end_tool_batch().await?;
+        } else {
+            self.settle_open_turn(recovered).await?;
         }
 
         if self.task.conversation.system_message.is_none() {
@@ -2047,6 +2209,8 @@ impl AgentLoop {
         }
 
         'main_loop: loop {
+            // Every turn boundary, pause and wait passes here.
+            self.report_task(false).await;
             if self.stop_requested {
                 // Suspended while tool calls ran, in the state the turn left
                 // it in, which is reported as a suspension always is, unless
@@ -2143,6 +2307,9 @@ impl AgentLoop {
                                     }
 
                                     self.begin_tool_batch();
+                                    // Decided: a snapshot taken while the
+                                    // call runs no longer waits for it.
+                                    self.task.set_state(TaskState::InProgress);
                                     if self.is_native_mode() {
                                         let mut approved = Vec::new();
                                         let mut results = Vec::new();
@@ -2181,6 +2348,7 @@ impl AgentLoop {
                                         }
                                         native_handled = true;
                                     } else {
+                                        let start = self.task.pending_text_tool_results.len();
                                         match self
                                             .execute_tool_and_handle_result(
                                                 &tool_name,
@@ -2191,9 +2359,7 @@ impl AgentLoop {
                                             )
                                             .await
                                         {
-                                            Ok(msg_part) => {
-                                                next_user_message_from_command = msg_part
-                                            }
+                                            Ok(msg_part) => self.record_text_result(msg_part).await,
                                             Err(e) => {
                                                 log::error!(
                                                     "Task {}: Error during approved tool execution: {}",
@@ -2202,6 +2368,8 @@ impl AgentLoop {
                                                 );
                                             }
                                         }
+                                        next_user_message_from_command =
+                                            self.take_text_results(start).join("\n\n---\n\n");
                                         if matches!(self.task.current_state, TaskState::AwaitingToolApproval { tool_call_id: current_id, .. } if current_id == tool_call_id)
                                         {
                                             self.task.set_state(TaskState::InProgress);
@@ -2249,6 +2417,7 @@ impl AgentLoop {
                                         }
                                         // Calls held for this one run now.
                                         self.begin_tool_batch();
+                                        self.task.set_state(TaskState::InProgress);
                                         self.run_decided_native_calls(Vec::new(), results).await?;
                                         if matches!(
                                             self.task.current_state,
@@ -2308,6 +2477,9 @@ impl AgentLoop {
                                     }
 
                                     self.begin_tool_batch();
+                                    // Decided: a snapshot taken while the
+                                    // calls run no longer waits for them.
+                                    self.task.set_state(TaskState::InProgress);
                                     if self.is_native_mode() {
                                         // Rejections are answered at once;
                                         // the approved calls then run like a
@@ -2399,7 +2571,7 @@ impl AgentLoop {
                                         }
                                         native_handled = true;
                                     } else {
-                                        let mut combined_results_for_llm = Vec::new();
+                                        let start = self.task.pending_text_tool_results.len();
                                         for pending_call_info in pending_calls {
                                             match decisions.get(&pending_call_info.tool_call_id) {
                                                 Some(ToolApprovalDecision::Approve {
@@ -2417,7 +2589,7 @@ impl AgentLoop {
                                                         .await
                                                     {
                                                         Ok(msg_part) => {
-                                                            combined_results_for_llm.push(msg_part)
+                                                            self.record_text_result(msg_part).await
                                                         }
                                                         Err(e) => log::error!(
                                                             "Task {}: Error during approved batched tool execution: {}",
@@ -2442,12 +2614,13 @@ impl AgentLoop {
                                                         &self.parsing_config,
                                                         None,
                                                     );
-                                                    combined_results_for_llm.push(
+                                                    self.record_text_result(
                                                         pb.format_tool_rejection_as_user_message(
                                                             &pending_call_info.tool_name,
                                                             (*reason).as_deref(),
                                                         ),
-                                                    );
+                                                    )
+                                                    .await;
                                                 }
                                                 None => {
                                                     self.emit_event(AgentEvent::ToolRejected {
@@ -2467,26 +2640,22 @@ impl AgentLoop {
                                                         &self.parsing_config,
                                                         None,
                                                     );
-                                                    combined_results_for_llm.push(pb.format_tool_rejection_as_user_message(&pending_call_info.tool_name, Some("Implicitly rejected: No decision provided.")));
+                                                    self.record_text_result(pb.format_tool_rejection_as_user_message(&pending_call_info.tool_name, Some("Implicitly rejected: No decision provided."))).await;
                                                 }
                                             }
+                                            // A call that changed the state (asked
+                                            // the user, completed or ended the
+                                            // task) ends the batch.
                                             if !matches!(
                                                 self.task.current_state,
-                                                TaskState::AwaitingBatchToolApproval { .. }
+                                                TaskState::InProgress
                                             ) || self.stop_requested
                                             {
                                                 break;
                                             }
                                         }
-                                        next_user_message_from_command = combined_results_for_llm
-                                            .into_iter()
-                                            .filter(|result| !result.is_empty())
-                                            .collect::<Vec<_>>()
-                                            .join("\n\n---\n\n");
-                                        if matches!(self.task.current_state, TaskState::AwaitingBatchToolApproval { batch_id: current_state_batch_id, .. } if current_state_batch_id == cmd_batch_id)
-                                        {
-                                            self.task.set_state(TaskState::InProgress);
-                                        }
+                                        next_user_message_from_command =
+                                            self.take_text_results(start).join("\n\n---\n\n");
                                         self.end_tool_batch().await?;
                                     }
                                 } else if matches!(
@@ -3190,6 +3359,8 @@ impl AgentLoop {
                 }
                 continue 'main_loop;
             }
+            // The model's turn is in the conversation; its calls haven't run.
+            self.report_task(false).await;
 
             if self.is_native_mode() {
                 let tool_calls = final_generation_response
@@ -3229,7 +3400,7 @@ impl AgentLoop {
                 // Every call gets exactly one result, in the order the model
                 // made them: checks answer some at once, the auto-approved
                 // calls run, and the calls that need approval wait for it.
-                let mut results: Vec<Option<ai::ToolResult>> = vec![None; tool_calls.len()];
+                let mut results = NativeResults::new(&self.task);
                 let mut calls_needing_approval: Vec<(usize, PendingToolCallInfo)> = Vec::new();
                 let mut runs: Vec<NativeRun> = Vec::new();
                 // Auto-approved calls that must wait for a call awaiting
@@ -3266,8 +3437,11 @@ impl AgentLoop {
                             reason: Some(reason.clone()),
                         })
                         .await?;
-                        results[call_index] =
-                            Some(ai::ToolResult::error_from_tool_call(ai_tool_call, &reason));
+                        results.record(
+                            &mut self.task,
+                            call_index,
+                            ai::ToolResult::error_from_tool_call(ai_tool_call, &reason),
+                        );
                         continue;
                     }
 
@@ -3278,18 +3452,19 @@ impl AgentLoop {
                             reason: Some(HANDOVER_REPORT_DUE.to_string()),
                         })
                         .await?;
-                        results[call_index] = Some(ai::ToolResult::error_from_tool_call(
-                            ai_tool_call,
-                            HANDOVER_REPORT_DUE,
-                        ));
+                        results.record(
+                            &mut self.task,
+                            call_index,
+                            ai::ToolResult::error_from_tool_call(ai_tool_call, HANDOVER_REPORT_DUE),
+                        );
                         continue;
                     }
 
                     let tool_arc = match self.tool_registry.get(&ai_tool_call.name) {
                         Some(t) => t,
                         None => {
-                            results[call_index] =
-                                Some(self.unavailable_native_tool(ai_tool_call).await?);
+                            let result = self.unavailable_native_tool(ai_tool_call).await?;
+                            results.record(&mut self.task, call_index, result);
                             continue;
                         }
                     };
@@ -3327,8 +3502,11 @@ impl AgentLoop {
                             reason: Some(reason.clone()),
                         })
                         .await?;
-                        results[call_index] =
-                            Some(ai::ToolResult::error_from_tool_call(ai_tool_call, &reason));
+                        results.record(
+                            &mut self.task,
+                            call_index,
+                            ai::ToolResult::error_from_tool_call(ai_tool_call, &reason),
+                        );
                         continue;
                     }
 
@@ -3383,18 +3561,14 @@ impl AgentLoop {
                         }
                     }
                 }
-                let failed = results
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, result)| result.as_ref().is_some_and(|result| result.is_error))
-                    .map(|(index, _)| index)
-                    .collect();
-                for (index, result) in self
-                    .run_native_calls(runs, |state| matches!(state, TaskState::InProgress), failed)
-                    .await?
-                {
-                    results[index] = Some(result);
-                }
+                let failed = results.failed(&self.task);
+                self.run_native_calls(
+                    runs,
+                    |state| matches!(state, TaskState::InProgress),
+                    failed,
+                    &mut results,
+                )
+                .await?;
                 // A turn a call stopped (a tool error that fails the task,
                 // `complete_task` or `ask_user`, a cancellation or a
                 // suspension) still answers every call once, including the
@@ -3414,8 +3588,11 @@ impl AgentLoop {
                                 reason: Some(not_run.clone()),
                             })
                             .await?;
-                            results[index] =
-                                Some(ai::ToolResult::error_from_tool_call(&call, &not_run));
+                            results.record(
+                                &mut self.task,
+                                index,
+                                ai::ToolResult::error_from_tool_call(&call, &not_run),
+                            );
                         }
                     }
                     for native in held.drain(..) {
@@ -3425,8 +3602,11 @@ impl AgentLoop {
                             reason: Some(not_run.clone()),
                         })
                         .await?;
-                        results[native.index] =
-                            Some(ai::ToolResult::error_from_tool_call(&native.call, &not_run));
+                        results.record(
+                            &mut self.task,
+                            native.index,
+                            ai::ToolResult::error_from_tool_call(&native.call, &not_run),
+                        );
                     }
                 }
                 if matches!(self.task.current_state, TaskState::InProgress) && !self.stop_requested
@@ -3435,9 +3615,7 @@ impl AgentLoop {
                     // rejected or failed is answered now, not asked about.
                     let mut still_awaiting = Vec::new();
                     for (index, pending) in calls_needing_approval.drain(..) {
-                        let after_failure = results[..index]
-                            .iter()
-                            .any(|result| result.as_ref().is_some_and(|result| result.is_error));
+                        let after_failure = results.failed_before(&self.task, index);
                         if pending.tool_name != COMPLETE_TASK_TOOL_NAME || !after_failure {
                             still_awaiting.push((index, pending));
                             continue;
@@ -3453,33 +3631,24 @@ impl AgentLoop {
                                 reason: Some(COMPLETION_AFTER_FAILURE.to_string()),
                             })
                             .await?;
-                            results[index] = Some(ai::ToolResult::from_tool_call(
-                                &call,
-                                COMPLETION_AFTER_FAILURE,
-                            ));
+                            results.record(
+                                &mut self.task,
+                                index,
+                                ai::ToolResult::from_tool_call(&call, COMPLETION_AFTER_FAILURE),
+                            );
                         }
                     }
                     calls_needing_approval = still_awaiting;
                     // With no approval left to wait for, held calls run now.
                     if calls_needing_approval.is_empty() && !held.is_empty() {
-                        let failed = results
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, result)| {
-                                result.as_ref().is_some_and(|result| result.is_error)
-                            })
-                            .map(|(index, _)| index)
-                            .collect();
-                        for (index, result) in self
-                            .run_native_calls(
-                                std::mem::take(&mut held),
-                                |state| matches!(state, TaskState::InProgress),
-                                failed,
-                            )
-                            .await?
-                        {
-                            results[index] = Some(result);
-                        }
+                        let failed = results.failed(&self.task);
+                        self.run_native_calls(
+                            std::mem::take(&mut held),
+                            |state| matches!(state, TaskState::InProgress),
+                            failed,
+                            &mut results,
+                        )
+                        .await?;
                     }
                 }
                 // Held calls wait with the calls awaiting approval (and are
@@ -3489,9 +3658,7 @@ impl AgentLoop {
                         .pending_native_tool_calls
                         .insert(native.run.tool_call_id, native.call);
                 }
-                self.task
-                    .pending_native_tool_results
-                    .extend(results.into_iter().flatten());
+                results.finish(&mut self.task);
                 // Calls announced while streaming that the response doesn't
                 // hold (for example cut off at the token limit) are not run.
                 self.reject_announced_calls(&mut native_stream_call_ids, UNDELIVERED_CALL)
@@ -3732,7 +3899,9 @@ impl AgentLoop {
                             }
 
                             let mut calls_needing_approval = Vec::new();
-                            let mut auto_approved_call_results = Vec::new();
+                            // The results of the calls handled, recorded in
+                            // the task as they are produced.
+                            let start = self.task.pending_text_tool_results.len();
                             let overall_batch_id = if calls_to_process_with_ids.len() > 1 {
                                 Some(Uuid::new_v4())
                             } else {
@@ -3766,7 +3935,7 @@ impl AgentLoop {
                                         reason: Some(HANDOVER_REPORT_DUE.to_string()),
                                     })
                                     .await?;
-                                    auto_approved_call_results.push(
+                                    self.record_text_result(
                                         PromptBuilder::new(
                                             &self.task.agent_config,
                                             vec![],
@@ -3777,7 +3946,8 @@ impl AgentLoop {
                                             &parsed_tool_call_ref.name,
                                             HANDOVER_REPORT_DUE,
                                         ),
-                                    );
+                                    )
+                                    .await;
                                     continue;
                                 }
 
@@ -3789,10 +3959,11 @@ impl AgentLoop {
                                                 tool_name: parsed_tool_call_ref.name.clone(),
                                             })
                                             .await?;
-                                            auto_approved_call_results.push(format!(
+                                            self.record_text_result(format!(
                                                 "Error: Tool '{}' is not available.",
                                                 parsed_tool_call_ref.name
-                                            ));
+                                            ))
+                                            .await;
                                             continue;
                                         }
                                     };
@@ -3838,7 +4009,7 @@ impl AgentLoop {
                                             Some(tool_call_id),
                                         )
                                         .await?;
-                                    auto_approved_call_results.push(error_message_for_llm);
+                                    self.record_text_result(error_message_for_llm).await;
                                     // Under `FailTask` the rest of the batch stops.
                                     if self.task.current_state.is_terminal() {
                                         break;
@@ -3873,7 +4044,7 @@ impl AgentLoop {
                                         )
                                         .await
                                     {
-                                        Ok(msg_part) => auto_approved_call_results.push(msg_part),
+                                        Ok(msg_part) => self.record_text_result(msg_part).await,
                                         Err(e) => log::error!(
                                             "Task {}: Error during auto-approved tool execution: {}",
                                             self.task.id,
@@ -3899,8 +4070,11 @@ impl AgentLoop {
                                         reason: Some(not_run.clone()),
                                     })
                                     .await?;
-                                    auto_approved_call_results
-                                        .push(format!("Tool {}: {not_run}", pending.tool_name));
+                                    self.record_text_result(format!(
+                                        "Tool {}: {not_run}",
+                                        pending.tool_name
+                                    ))
+                                    .await;
                                 }
                             }
                             if !calls_needing_approval.is_empty()
@@ -3956,11 +4130,8 @@ impl AgentLoop {
                             self.end_tool_batch().await?;
                             // The results of the calls that ran, which wait
                             // with the task below if it now waits.
-                            next_user_message_str_accumulated = auto_approved_call_results
-                                .into_iter()
-                                .filter(|result| !result.is_empty())
-                                .collect::<Vec<_>>()
-                                .join("\n\n---\n\n");
+                            next_user_message_str_accumulated =
+                                self.take_text_results(start).join("\n\n---\n\n");
                         }
                     }
                     Err(e) => {
@@ -4050,6 +4221,7 @@ impl AgentLoop {
 
         // Whatever stopped the loop, context it took is not lost.
         self.keep_taken_context()?;
+        self.report_task(false).await;
         self.flush_throttled_text().await?;
         self.flush_throttled_reasoning().await?;
         self.emit_event(AgentEvent::TaskStreamEnd)
@@ -4319,6 +4491,253 @@ impl AgentLoop {
         Ok(())
     }
 
+    /// The tool and recovery mode of a call that was running when its task
+    /// stopped: [`ToolRecovery::InDoubt`] for a tool this run doesn't offer,
+    /// and [`ToolRecovery::Rerun`] for a call the host answered with its own
+    /// output (only that output is given again).
+    fn recovery_of(&self, call: &RunningToolCall) -> (Option<Arc<dyn Tool>>, ToolRecovery) {
+        let Some(tool) = self.tool_registry.get(&call.tool_name) else {
+            return (None, ToolRecovery::InDoubt);
+        };
+        let mode = if call.custom_output.is_some() {
+            ToolRecovery::Rerun
+        } else {
+            tool.recovery_mode()
+        };
+        (Some(tool), mode)
+    }
+
+    /// Settles the calls a task was running when it stopped (saved at a
+    /// safe point by a host that stopped; see [`Task::running_tool_calls`]),
+    /// each by its tool's [`recovery_mode`](Tool::recovery_mode):
+    /// [`InDoubt`](ToolRecovery::InDoubt) calls are answered with
+    /// [`RESTARTED_CALL`], [`Rerun`](ToolRecovery::Rerun) and
+    /// [`Resume`](ToolRecovery::Resume) calls run again (with
+    /// [`TaskContext::recovering`](crate::tool::TaskContext::recovering)
+    /// set), in call order under the parallel-safety rule. Their tool errors
+    /// are handled as a batch's, by [`settle_open_turn`](Self::settle_open_turn)
+    /// (or with the interrupted wait). Returns whether any call was running.
+    async fn recover_running_calls(&mut self) -> Result<bool, ArkoAgentsError> {
+        let running = self.task.running_tool_calls.clone();
+        if running.is_empty() {
+            return Ok(false);
+        }
+        log::info!(
+            "Task {}: settling {} tool call(s) that were running when the task stopped.",
+            self.task.id,
+            running.len()
+        );
+        self.begin_tool_batch();
+        if self.is_native_mode() {
+            self.recover_native_calls(running).await?;
+        } else {
+            self.recover_text_calls(running).await?;
+        }
+        Ok(true)
+    }
+
+    async fn recover_native_calls(
+        &mut self,
+        running: Vec<RunningToolCall>,
+    ) -> Result<(), ArkoAgentsError> {
+        let turn_calls = self
+            .task
+            .conversation
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == ai::Role::Assistant)
+            .map(|turn| turn.tool_calls.clone())
+            .unwrap_or_default();
+        // The turn's calls that were rejected or failed before the stop.
+        let mut failed: std::collections::BTreeSet<usize> = self
+            .task
+            .pending_native_tool_results
+            .iter()
+            .filter(|result| result.is_error && result.call_id.is_some())
+            .filter_map(|result| turn_calls.iter().position(|call| call.id == result.call_id))
+            .collect();
+        let mut results = NativeResults::new(&self.task);
+        let mut runs = Vec::new();
+        for entry in running {
+            let call = turn_calls
+                .iter()
+                .find(|call| match &entry.call_id {
+                    Some(id) => call.id.as_ref() == Some(id),
+                    None => {
+                        call.id.is_none()
+                            && call.name == entry.tool_name
+                            && Self::tool_call_args_to_map(call) == entry.parameters
+                    }
+                })
+                .cloned();
+            let answered = |task: &Task, call: &ai::ToolCall| {
+                call.id.is_some()
+                    && task
+                        .pending_native_tool_results
+                        .iter()
+                        .any(|result| result.call_id == call.id)
+            };
+            let Some(call) = call.filter(|call| !answered(&self.task, call)) else {
+                // Answered already, or not a call of the last turn: nothing
+                // to settle.
+                self.call_settled(entry.tool_call_id);
+                continue;
+            };
+            let index = self.turn_position(&call);
+            match self.recovery_of(&entry) {
+                (Some(tool), ToolRecovery::Rerun | ToolRecovery::Resume) => {
+                    let mut run = self.tool_run(
+                        entry.tool_call_id,
+                        &entry.tool_name,
+                        tool,
+                        entry.parameters.clone(),
+                        entry.custom_output.clone(),
+                    );
+                    run.recovering = true;
+                    runs.push(NativeRun {
+                        index,
+                        call,
+                        run,
+                        message_to_agent: entry.message_to_agent.clone(),
+                    });
+                }
+                _ => {
+                    self.emit_event(AgentEvent::ToolRejected {
+                        tool_call_id: entry.tool_call_id,
+                        tool_name: entry.tool_name.clone(),
+                        reason: Some(RESTARTED_CALL.to_string()),
+                    })
+                    .await?;
+                    results.record(
+                        &mut self.task,
+                        index,
+                        ai::ToolResult::error_from_tool_call(&call, RESTARTED_CALL),
+                    );
+                    self.call_settled(entry.tool_call_id);
+                }
+            }
+        }
+        failed.extend(results.failed(&self.task));
+        runs.sort_by_key(|run| run.index);
+        self.run_native_calls(runs, |state| !state.is_terminal(), failed, &mut results)
+            .await?;
+        results.finish(&mut self.task);
+        Ok(())
+    }
+
+    async fn recover_text_calls(
+        &mut self,
+        running: Vec<RunningToolCall>,
+    ) -> Result<(), ArkoAgentsError> {
+        for entry in running {
+            if self.task.current_state.is_terminal() {
+                // A call before it ended the task.
+                self.call_settled(entry.tool_call_id);
+                continue;
+            }
+            let result = match self.recovery_of(&entry) {
+                (Some(_), ToolRecovery::Rerun | ToolRecovery::Resume) => {
+                    self.execute_text_call(
+                        &entry.tool_name,
+                        entry.parameters.clone(),
+                        entry.tool_call_id,
+                        entry.custom_output.clone(),
+                        entry.message_to_agent.clone(),
+                        true,
+                    )
+                    .await?
+                }
+                _ => {
+                    self.emit_event(AgentEvent::ToolRejected {
+                        tool_call_id: entry.tool_call_id,
+                        tool_name: entry.tool_name.clone(),
+                        reason: Some(RESTARTED_CALL.to_string()),
+                    })
+                    .await?;
+                    self.call_settled(entry.tool_call_id);
+                    PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None)
+                        .format_tool_execution_error_as_user_message(
+                            &entry.tool_name,
+                            RESTARTED_CALL,
+                        )
+                }
+            };
+            self.record_text_result(result).await;
+        }
+        Ok(())
+    }
+
+    /// When a task runs again (not after an interruption, which
+    /// [`settle_interrupted_wait`](Self::settle_interrupted_wait) settles):
+    /// the last turn's calls that have no result (the task stopped before
+    /// they ran, or a version that didn't record running calls saved it)
+    /// are answered as unreached, a pause on the recovered calls' tool
+    /// errors starts, and the turn's results go into the conversation, as
+    /// at the end of a turn. In output-based mode the results waiting (the
+    /// turn's, and the recovered calls') are sent with [`RESTARTED_TURN`].
+    /// A wait for an approval goes on, with the results that wait with it.
+    /// `recovered`: calls were running when the task stopped.
+    async fn settle_open_turn(&mut self, recovered: bool) -> Result<(), ArkoAgentsError> {
+        let approval_wait = matches!(
+            self.task.current_state,
+            TaskState::AwaitingToolApproval { .. } | TaskState::AwaitingBatchToolApproval { .. }
+        );
+        let in_progress = matches!(self.task.current_state, TaskState::InProgress);
+        if approval_wait || !(recovered || in_progress) {
+            self.end_tool_batch().await?;
+            return Ok(());
+        }
+        if self.is_native_mode() {
+            let open_turn = self
+                .task
+                .conversation
+                .messages
+                .last()
+                .is_some_and(|message| {
+                    message.role == ai::Role::Assistant && !message.tool_calls.is_empty()
+                });
+            let waiting = !self.task.pending_native_tool_results.is_empty()
+                || !self.task.pending_native_tool_calls.is_empty();
+            if !(recovered || open_turn || waiting) {
+                self.end_tool_batch().await?;
+                return Ok(());
+            }
+            self.answer_open_native_calls(UNREACHED_CALL, UNREACHED_CALL)
+                .await?;
+            self.end_tool_batch().await?;
+            if self.native_results_are_due() {
+                self.flush_native_results_to_conversation(None)?;
+            }
+            return Ok(());
+        }
+        if !recovered && self.task.pending_text_tool_results.is_empty() {
+            self.end_tool_batch().await?;
+            return Ok(());
+        }
+        self.task
+            .pending_text_tool_results
+            .push(RESTARTED_TURN.to_string());
+        self.end_tool_batch().await?;
+        if self.task.current_state.is_terminal() {
+            // As at the end of a turn that ended the task.
+            self.task.pending_text_tool_results.clear();
+        } else if !self.task.current_state.is_awaiting_approval() {
+            let results = self.task.with_pending_text_tool_results(String::new());
+            let message =
+                PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None)
+                    .augment_user_message_with_env_details_and_reminder(
+                        &self.task,
+                        &results,
+                        self.task.user_message_count + 1,
+                    )?;
+            self.add_text_tool_results_to_conversation(&message);
+            self.mark_details_sent();
+            self.task.increment_user_message_count();
+        }
+        Ok(())
+    }
+
     /// Whether the last `TaskStateChanged` reported the task's current
     /// state.
     fn state_reported(&self) -> bool {
@@ -4356,11 +4775,26 @@ impl AgentLoop {
             run: self.tool_run(internal_id, &ai_tool_call.name, tool, params, None),
             message_to_agent: None,
         };
-        Ok(self
-            .run_native_calls(vec![run], |_| true, Default::default())
-            .await?
-            .pop()
-            .map(|(_, result)| result))
+        self.run_native_calls_for_result(run, |_| true).await
+    }
+
+    /// Runs one native call and takes its result out of the task.
+    #[cfg(test)]
+    async fn run_native_calls_for_result(
+        &mut self,
+        run: NativeRun,
+        keep_going: fn(&TaskState) -> bool,
+    ) -> Result<Option<ai::ToolResult>, ArkoAgentsError> {
+        let mut results = NativeResults::new(&self.task);
+        self.run_native_calls(vec![run], keep_going, Default::default(), &mut results)
+            .await?;
+        let recorded = results.positions.len();
+        results.finish(&mut self.task);
+        Ok(if recorded > 0 {
+            self.task.pending_native_tool_results.pop()
+        } else {
+            None
+        })
     }
 
     /// The error result of a native call to a tool the task is not offered
@@ -4409,29 +4843,14 @@ impl AgentLoop {
     /// [`AgentToolConfig`](crate::agent_config::AgentToolConfig): auto-approved
     /// calls that aren't parallel-safe wait for an earlier call's approval),
     /// in call order under the parallel-safety rule, and adds every result,
-    /// `results` (rejections) included, in call order.
+    /// `decided` (rejections) included, in call order.
     async fn run_decided_native_calls(
         &mut self,
         mut runs: Vec<NativeRun>,
-        mut results: Vec<(usize, ai::ToolResult)>,
+        decided: Vec<(usize, ai::ToolResult)>,
     ) -> Result<(), ArkoAgentsError> {
-        let held: Vec<(Uuid, ai::ToolCall)> = self.task.pending_native_tool_calls.drain().collect();
-        for (tool_call_id, call) in held {
-            let index = self.turn_position(&call);
-            let params = Self::tool_call_args_to_map(&call);
-            match self.tool_registry.get(&call.name) {
-                Some(tool) => runs.push(NativeRun {
-                    index,
-                    run: self.tool_run(tool_call_id, &call.name, tool, params, None),
-                    call,
-                    message_to_agent: None,
-                }),
-                None => results.push((index, self.unavailable_native_tool(&call).await?)),
-            }
-        }
-        runs.sort_by_key(|run| run.index);
-        // The turn's calls that were rejected or failed: those answered
-        // before the approvals were decided, and the rejections now.
+        // The turn's calls that were rejected or failed before the
+        // approvals were decided.
         let mut failed: std::collections::BTreeSet<usize> = self
             .task
             .pending_native_tool_results
@@ -4449,20 +4868,33 @@ impl AgentLoop {
                 })
             })
             .collect();
-        failed.extend(
-            results
-                .iter()
-                .filter(|(_, result)| result.is_error)
-                .map(|(index, _)| *index),
-        );
-        results.extend(
-            self.run_native_calls(runs, |state| !state.is_terminal(), failed)
-                .await?,
-        );
-        results.sort_by_key(|(index, _)| *index);
-        self.task
-            .pending_native_tool_results
-            .extend(results.into_iter().map(|(_, result)| result));
+        let mut results = NativeResults::new(&self.task);
+        for (index, result) in decided {
+            results.record(&mut self.task, index, result);
+        }
+        let held: Vec<(Uuid, ai::ToolCall)> = self.task.pending_native_tool_calls.drain().collect();
+        for (tool_call_id, call) in held {
+            let index = self.turn_position(&call);
+            let params = Self::tool_call_args_to_map(&call);
+            match self.tool_registry.get(&call.name) {
+                Some(tool) => runs.push(NativeRun {
+                    index,
+                    run: self.tool_run(tool_call_id, &call.name, tool, params, None),
+                    call,
+                    message_to_agent: None,
+                }),
+                None => {
+                    let result = self.unavailable_native_tool(&call).await?;
+                    results.record(&mut self.task, index, result);
+                }
+            }
+        }
+        runs.sort_by_key(|run| run.index);
+        // And the rejections now.
+        failed.extend(results.failed(&self.task));
+        self.run_native_calls(runs, |state| !state.is_terminal(), failed, &mut results)
+            .await?;
+        results.finish(&mut self.task);
         Ok(())
     }
 
@@ -4487,11 +4919,10 @@ impl AgentLoop {
             custom_output,
             message_to_agent,
         ) {
-            Ok(run) => Ok(self
-                .run_native_calls(vec![run], |state| !state.is_terminal(), Default::default())
-                .await?
-                .pop()
-                .map(|(_, result)| result)),
+            Ok(run) => {
+                self.run_native_calls_for_result(run, |state| !state.is_terminal())
+                    .await
+            }
             Err(()) => self.unavailable_native_tool(ai_call).await.map(Some),
         }
     }
@@ -5313,6 +5744,54 @@ impl AgentLoop {
         custom_tool_output: Option<String>,
         message_to_agent_on_approval: Option<String>,
     ) -> Result<String, ArkoAgentsError> {
+        self.execute_text_call(
+            tool_name,
+            parameters,
+            tool_call_id,
+            custom_tool_output,
+            message_to_agent_on_approval,
+            false,
+        )
+        .await
+    }
+
+    /// [`execute_tool_and_handle_result`](Self::execute_tool_and_handle_result);
+    /// `recovering`: the call runs again after the task stopped while it ran
+    /// (see [`TaskContext::recovering`](crate::tool::TaskContext::recovering)).
+    async fn execute_text_call(
+        &mut self,
+        tool_name: &str,
+        parameters: HashMap<String, Value>,
+        tool_call_id: Uuid,
+        custom_tool_output: Option<String>,
+        message_to_agent_on_approval: Option<String>,
+        recovering: bool,
+    ) -> Result<String, ArkoAgentsError> {
+        let result = self
+            .run_text_call(
+                tool_name,
+                parameters,
+                tool_call_id,
+                custom_tool_output,
+                message_to_agent_on_approval,
+                recovering,
+            )
+            .await;
+        // Its result is the caller's to record.
+        self.call_settled(tool_call_id);
+        result
+    }
+
+    /// The call itself; see [`execute_text_call`](Self::execute_text_call).
+    async fn run_text_call(
+        &mut self,
+        tool_name: &str,
+        parameters: HashMap<String, Value>,
+        tool_call_id: Uuid,
+        custom_tool_output: Option<String>,
+        message_to_agent_on_approval: Option<String>,
+        recovering: bool,
+    ) -> Result<String, ArkoAgentsError> {
         // A call saved awaiting approval whose tool this run does not offer
         // is answered like any unavailable tool.
         let Some(tool_arc) = self.tool_registry.get(tool_name) else {
@@ -5327,13 +5806,15 @@ impl AgentLoop {
             PromptBuilder::new(&this.task.agent_config, vec![], &this.parsing_config, None)
                 .format_tool_execution_error_as_user_message(tool_name, message)
         };
-        let run = self.tool_run(
+        let mut run = self.tool_run(
             tool_call_id,
             tool_name,
             tool_arc.clone(),
             parameters,
             custom_tool_output,
         );
+        run.message_to_agent = message_to_agent_on_approval.clone();
+        run.recovering = recovering;
         let mut group = self.run_group(vec![run]).await;
         let outcome = match group.outcomes.pop().flatten() {
             Some(outcome) => outcome?,
@@ -5789,3 +6270,7 @@ mod command_wait_tests;
 #[cfg(test)]
 #[path = "handover_tests.rs"]
 mod handover_tests;
+
+#[cfg(test)]
+#[path = "snapshot_tests.rs"]
+mod snapshot_tests;
