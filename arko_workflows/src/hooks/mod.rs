@@ -55,8 +55,13 @@ pub enum HookResult {
     /// cancelled, and every run call in progress or made later returns
     /// [`WorkflowError::AbortedByHook`](crate::WorkflowError::AbortedByHook).
     Abort(String),
-    /// Skip the current operation.
+    /// Skip the current operation. At `PreToolExecution` the call is
+    /// rejected with the message `Skipped by PreToolExecution hook`.
     Skip,
+    /// Skip the current operation, with the reason. At `PreToolExecution`
+    /// the call is rejected and the agent is told this message, so it knows
+    /// why and what to do instead; at other points it acts as `Skip`.
+    Reject(String),
 }
 
 /// A synchronous hook callback.

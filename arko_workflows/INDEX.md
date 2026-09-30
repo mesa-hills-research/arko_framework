@@ -420,7 +420,7 @@ Source: [hooks/mod.rs](src/hooks/mod.rs), [hooks/context.rs](src/hooks/context.r
 type HookCallback = Arc<
     dyn Fn(&hooks::context::HookContext) -> HookResult + Send + Sync + 'static
 >;
-enum HookResult { Continue, Abort(String), Skip }
+enum HookResult { Continue, Abort(String), Skip, Reject(String) }
 
 // hooks::HookRegistry (also Default)
 fn new() -> Self;
@@ -429,7 +429,7 @@ fn get(&self, point: &HookPoint) -> Option<&Vec<HookCallback>>;
 fn has_hooks(&self, point: &HookPoint) -> bool;
 ```
 
-Callbacks are synchronous and receive an immutable context; capture shared state to act on it. `register` appends to a point's list, `get` borrows the ordered list, and `has_hooks` reports whether the list is nonempty. `Continue` proceeds to the next callback; the first `Skip` or `Abort` ends the chain for that point. `Skip` has an effect only at `PreToolExecution`, where it rejects the tool call with the message `Skipped by PreToolExecution hook`; at other points it only ends the chain. Hooks cannot replace tool output; use a tool result interceptor for that.
+Callbacks are synchronous and receive an immutable context; capture shared state to act on it. `register` appends to a point's list, `get` borrows the ordered list, and `has_hooks` reports whether the list is nonempty. `Continue` proceeds to the next callback; the first `Skip`, `Reject` or `Abort` ends the chain for that point. `Skip` and `Reject` have an effect only at `PreToolExecution`, where they reject the tool call: `Skip` with the message `Skipped by PreToolExecution hook`, `Reject(message)` with `message`, so the agent learns why the call was refused and what to do instead. At other points they only end the chain. Hooks cannot replace tool output; use a tool result interceptor for that.
 
 `Abort(reason)` at any point stops the whole run with `CancelCause::AbortedByHook { hook_point, reason }`, where `hook_point` is the point's variant name: running agents are cancelled, and run calls in progress or made later return `AbortedByHook`. On a run that is already stopped, the first cause stands, and its error is returned wherever the abort surfaces. See [Stopping a run](#stopping-a-run). Where the abort surfaces depends on the point:
 
@@ -453,7 +453,7 @@ The result of `OnWorkflowCancelled` is ignored. Hooks do not roll back work alre
 | `PostAgentInterruption` | A task finalized as interrupted or in a nonterminal state. Agent name, run ID, and the reason in `error_message`. |
 | `OnUserInputRequired` | A task finalized while awaiting user input. Agent name, run ID, and the questions in `error_message`. Not fired when a `UserInputHandler` answers the question. |
 | `OnAgentPaused` | A task finalized paused for a decision the approval or error recovery policy leaves to the caller (`AgentRunStatus::Paused`); fires once per pause. Agent name, run ID, the pause's description in `error_message`, `metadata["pause"]` (`"tool_approval"` or `"error_recovery"`), and `metadata["cause"]` (such as `"retries_exhausted"`, `"monitor"`) or `metadata["tools"]` (each call's `tool_call_id`, `tool_name`, and `reason`). |
-| `PreToolExecution` | Before a tool call executes. Agent name and run ID, `tool_name`, `tool_call_id`, and `tool_params`; `approval_reason` for a call that awaited approval. `Skip` rejects the call. |
+| `PreToolExecution` | Before a tool call executes. Agent name and run ID, `tool_name`, `tool_call_id`, and `tool_params`; `approval_reason` for a call that awaited approval. `Skip` or `Reject(message)` rejects the call. |
 | `PostToolExecution` | After a tool call, before result interception. The same fields, plus `tool_result` and `original_tool_result`, both holding the raw output or error text. |
 | `PostToolResultInterception` | The managed driver receives an intercepted result. Agent name and run ID, tool name and call ID, the raw output in `original_tool_result`, and the delivered output in `effective_tool_result` and `tool_result`. |
 | `OnWorkflowPause` | The pause flag changes from false to true. |

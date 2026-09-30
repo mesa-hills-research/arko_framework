@@ -318,3 +318,63 @@ impl Tool for RunShell {
         Ok(format!("stdout:\n{stdout}\nstderr:\n{stderr}"))
     }
 }
+
+/// Why the forge refuses a shell `command`, if it does: version control and
+/// publishing are the user's, never the agents'.
+pub fn refused_command(command: &str) -> Option<&'static str> {
+    let words: Vec<&str> = command
+        .split(|c: char| c.is_whitespace() || ";|&()`$<>'\"{}".contains(c))
+        .filter(|word| !word.is_empty())
+        .collect();
+    let program = |word: &str| {
+        let name = word.rsplit(['/', '\\']).next().unwrap_or(word);
+        name.strip_suffix(".exe").unwrap_or(name).to_string()
+    };
+    for (index, word) in words.iter().enumerate() {
+        match program(word).as_str() {
+            "git" | "gh" => {
+                return Some(
+                    "The forge doesn't run git or gh: version control and publishing are the user's. Leave the crate's files as they are; the user reviews and commits them.",
+                );
+            }
+            "cargo"
+                if words.get(index + 1).is_some_and(|next| {
+                    ["publish", "login", "logout", "owner", "yank"].contains(next)
+                }) =>
+            {
+                return Some("The forge doesn't publish crates or change registry logins.");
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::refused_command;
+
+    #[test]
+    fn version_control_and_publishing_are_refused() {
+        for command in [
+            "git status",
+            "cd /repo && git commit -am wip",
+            "/usr/bin/git push origin main",
+            "echo $(git rev-parse HEAD)",
+            "gh pr create",
+            "cargo publish --dry-run",
+            "(cargo login token)",
+        ] {
+            assert!(refused_command(command).is_some(), "{command}");
+        }
+        for command in [
+            "cargo build --all-targets",
+            "grep -rn digit src",
+            "cat .gitignore",
+            "rg legit_name",
+            "cargo test publish_tests",
+        ] {
+            assert!(refused_command(command).is_none(), "{command}");
+        }
+    }
+}

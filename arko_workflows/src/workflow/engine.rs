@@ -2960,6 +2960,11 @@ impl WorkflowExecutionMiddleware {
                     message_to_agent: "Skipped by PreToolExecution hook".to_string(),
                 });
             }
+            HookResult::Reject(message) => {
+                return Ok(ToolExecutionDecision::Reject {
+                    message_to_agent: message,
+                });
+            }
             // The call doesn't run, and the whole run stops.
             HookResult::Abort(reason) => {
                 let error = abort_run(&self.context, &HookPoint::PreToolExecution, reason);

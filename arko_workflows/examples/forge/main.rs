@@ -376,6 +376,35 @@ async fn main() -> ForgeResult<()> {
     if settings.involvement == Involvement::Clarify {
         builder = builder.user_input_handler(Arc::new(TerminalInput));
     }
+    // Version control and publishing stay with the user, whatever the
+    // agents' shells are asked to run.
+    builder = builder.hook(
+        HookPoint::PreToolExecution,
+        Arc::new(|context| {
+            let command = match context.tool_name.as_deref() {
+                Some("Bash" | "PowerShell" | "run_shell") => context
+                    .tool_params
+                    .as_ref()
+                    .and_then(|params| params.get("command"))
+                    .and_then(|command| command.as_str()),
+                _ => None,
+            };
+            match command.and_then(tools::refused_command) {
+                Some(reason) => {
+                    eprintln!(
+                        "forge: refused `{}`",
+                        command
+                            .unwrap_or_default()
+                            .chars()
+                            .take(120)
+                            .collect::<String>()
+                    );
+                    HookResult::Reject(reason.to_string())
+                }
+                None => HookResult::Continue,
+            }
+        }),
+    );
     if let Some(budget) = settings.budget {
         builder = builder.budget(budget);
     }

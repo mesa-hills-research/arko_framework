@@ -57,7 +57,9 @@ when the use case needs them; say why in DESIGN.md. Settle these before writing 
   the build is interrupted, a restarted architect continues from it and the code.
 - Write idiomatic Rust that reads like the arko examples. Keep it in as few files as is clear.
 - Unit-test the logic that doesn't call a model: tools, parsing, file handling, state.
-- Never make live model calls with your shell: no running the workflow for real through Bash.{trials}
+- Never make live model calls with your shell: no running the workflow for real through Bash.
+- Don't use git, gh or any publishing command: the forge refuses them. Version control is the
+  user's; they review and commit the crate themselves.{trials}
 - Write `README.md` (what it does, requirements and credentials, how to run and resume it, every
   flag, what it asks of the user, what it costs or uses) and `DESIGN.md` (the use case restated,
   the topology and why, the autonomy level, models and effort, alternatives you rejected, known

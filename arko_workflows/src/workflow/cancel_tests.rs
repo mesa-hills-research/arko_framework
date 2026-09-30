@@ -461,6 +461,41 @@ async fn a_pre_tool_hook_abort_aborts_the_run_before_the_call() {
     assert!(!workflow.cancel());
 }
 
+/// `PreToolExecution` reject: the call doesn't run, the agent reads the
+/// hook's reason, and the run goes on.
+#[tokio::test]
+async fn a_pre_tool_hook_reject_tells_the_agent_why() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start(|index, _| match index {
+        0 => Some(tool_call_turn("probe", "probe", json!({}))),
+        1 => Some(tool_call_turn(
+            "done",
+            "complete_task",
+            json!({"summary": "Probing is off; done."}),
+        )),
+        _ => None,
+    })
+    .await;
+    let probe = ProbeTool::new("probe", false);
+    let workflow = builder(&server, &workspace)
+        .agent_tool("coder", probe.clone())
+        .hook(
+            HookPoint::PreToolExecution,
+            Arc::new(|context| match context.tool_name.as_deref() {
+                Some("probe") => HookResult::Reject("Probing is off in this run.".into()),
+                _ => HookResult::Continue,
+            }),
+        )
+        .build()
+        .unwrap();
+
+    let result = within(workflow.run_agent("coder", "Probe.")).await.unwrap();
+    assert_eq!(result.status, AgentRunStatus::Completed);
+    assert_eq!(probe.calls(), 0);
+    assert!(server.bodies()[1].contains("Probing is off in this run."));
+    assert!(workflow.cancellation().is_none());
+}
+
 /// `PostToolExecution` abort: the call has run; the agent makes no further
 /// model call and the run is aborted.
 #[tokio::test]
