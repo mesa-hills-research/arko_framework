@@ -74,7 +74,8 @@ which you want, or the architect chooses and explains it.
 | `--target-dir PATH` | the checkout's `target` | The shared Cargo target directory. |
 | `--state-dir PATH` | `~/.arko/forge/runs/<name>-<time>` | Checkpoints, the event log, trial logs and the report. |
 | `--resume STATE_DIR` | | Continue an interrupted run with its saved settings. |
-| `--budget DOLLARS` | none | Pause and stop at this spend (billed usage: the API backend, or Claude Code under an API key); with `--resume`, replaces the saved budget. |
+| `--budget DOLLARS` | none | Pause and stop at this spend (billed usage: the API backend, or Claude Code with `--metered`); with `--resume`, replaces the saved budget. |
+| `--metered` | off | The Claude Code CLI is billed per token (an API key, cloud credits, a host-managed provider): count its list-price estimate as spend, so costs and `--budget` apply. |
 | `--verbose` | off | Print every agent's tool calls and text. |
 
 ## What you get

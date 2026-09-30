@@ -2522,7 +2522,17 @@ impl ClaudeCodeRun {
             &model,
             Some(&self.task.agent_config.llm_config.generation_config),
         );
-        let info = info.with_billing(ai::BillingKind::Subscription);
+        let metered = self
+            .task
+            .agent_config
+            .claude_code
+            .as_ref()
+            .is_some_and(|settings| settings.metered_billing);
+        let info = info.with_billing(if metered {
+            ai::BillingKind::Metered
+        } else {
+            ai::BillingKind::Subscription
+        });
         if thread.is_some() {
             self.subagent_calls.push(self.task.usage_history.len());
         }

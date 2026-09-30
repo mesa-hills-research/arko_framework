@@ -35,7 +35,6 @@ use arko_ai::{AnthropicReasoningEffort, GenerationConfig, LLMClient, Model, Reas
 use arko_workflows::prelude::*;
 use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
-use serde_json::json;
 
 type ForgeResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -183,10 +182,18 @@ struct Settings {
     #[arg(long)]
     no_lessons: bool,
 
-    /// Stop spending at this many dollars (API backend; a plan subscription
-    /// isn't billed per token).
+    /// Stop spending at this many dollars: the API backend, or a Claude
+    /// Code CLI billed per token (`--metered`). A plan subscription isn't
+    /// billed per token.
     #[arg(long)]
     budget: Option<f64>,
+
+    /// The Claude Code CLI is billed per token (an API key, cloud credits, a
+    /// host-managed provider), not covered by a plan: count its usage in
+    /// costs and budgets.
+    #[arg(long)]
+    #[serde(default)]
+    metered: bool,
 }
 
 /// A run's fixed inputs, saved in its state directory. A resume reuses them
@@ -289,6 +296,7 @@ async fn main() -> ForgeResult<()> {
     let agents = Agents {
         backend: settings.backend,
         target_dir: manifest.target_dir.clone(),
+        metered: settings.metered,
     };
     let mut architect_tools = match settings.backend {
         Backend::ClaudeCode => {
@@ -441,7 +449,6 @@ async fn main() -> ForgeResult<()> {
     let plan_usage = Arc::new(Mutex::new(None::<String>));
     let printer = tokio::spawn(print_events(
         workflow.subscribe_events(),
-        state_dir.join("events.jsonl"),
         args.verbose,
         plan_usage.clone(),
     ));
@@ -712,6 +719,7 @@ fn architect_instructions(manifest: &RunManifest) -> String {
 struct Agents {
     backend: Backend,
     target_dir: PathBuf,
+    metered: bool,
 }
 
 impl Agents {
@@ -773,6 +781,7 @@ impl Agents {
                     "CARGO_TARGET_DIR".to_string(),
                     self.target_dir.display().to_string(),
                 )]),
+                metered_billing: self.metered,
                 ..ClaudeCodeSettings::default()
             });
         }
@@ -872,18 +881,13 @@ impl UserInputHandler for TerminalInput {
     }
 }
 
-/// Prints the run as it goes, and logs every event to `log`.
+/// Prints the run as it goes. The workflow's persistence journals every
+/// event in the state directory's `events.jsonl`.
 async fn print_events(
     mut events: tokio::sync::broadcast::Receiver<WorkflowEvent>,
-    log: PathBuf,
     verbose: bool,
     plan_usage: Arc<Mutex<Option<String>>>,
 ) {
-    let mut log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log)
-        .ok();
     let mut requests: HashMap<String, usize> = HashMap::new();
     loop {
         let event = match events.recv().await {
@@ -891,15 +895,6 @@ async fn print_events(
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
             Err(_) => break,
         };
-        if let Some(file) = &mut log {
-            let line = json!({
-                "time": event.timestamp,
-                "agent": event.agent_name,
-                "run": event.agent_run_id,
-                "event": event.event,
-            });
-            let _ = writeln!(file, "{line}");
-        }
         let who = &event.agent_name;
         let shown = verbose || who == ARCHITECT;
         match event.event {

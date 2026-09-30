@@ -940,6 +940,31 @@ async fn claude_codes_own_refusal_retry_is_reported() {
 }
 
 #[tokio::test]
+async fn arko_tools_get_long_mcp_limits() {
+    // An inherited short limit (a cloud session sets 60 seconds) would cut
+    // off a delegated agent run that takes minutes.
+    let fake = Fake::new(json!([[complete("done")]]));
+    let task = Task::new(config(&fake, &[]), "Do it.".into(), fake.workspace(), None);
+    start(task).finish().await;
+    let env = &fake.logged("argv")[0]["env"];
+    assert_eq!(env["MCP_TOOL_TIMEOUT"], "604800000");
+    assert_eq!(env["CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"], "0");
+}
+
+#[tokio::test]
+async fn metered_billing_bills_the_estimate() {
+    let fake = Fake::new(json!([[complete("done")]]));
+    let mut config = config(&fake, &[]);
+    config.claude_code.as_mut().unwrap().metered_billing = true;
+    let task = Task::new(config, "Do it.".into(), fake.workspace(), None);
+    let (task, _) = start(task).finish().await;
+    let usage = &task.usage_history[0];
+    assert_eq!(usage.billing, arko_ai::BillingKind::Metered);
+    assert!(usage.billed() > 0.0);
+    assert_eq!(usage.billed(), usage.total_cost);
+}
+
+#[tokio::test]
 async fn claude_codes_retry_is_recorded_as_live() {
     // As Claude Code 2.1.285 sends it: the refused response's stop_details
     // carry the explanation the system message leaves out, and the rest of

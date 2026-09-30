@@ -243,7 +243,8 @@ def handle(message):
             for event, matchers in (request.get("hooks") or {}).items():
                 state["hooks"][event] = matchers[0]["hookCallbackIds"][0]
             reply(message["request_id"], {"commands": []})
-            log("argv", argv=ARGS)
+            log("argv", argv=ARGS, env={name: os.environ.get(name) for name in (
+                "MCP_TOOL_TIMEOUT", "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT")})
         elif subtype == "set_model":
             log("set_model", model=request.get("model"))
             reply(message["request_id"], {})

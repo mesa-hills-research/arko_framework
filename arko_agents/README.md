@@ -993,7 +993,9 @@ than about 4½ minutes (an `ask_user` answer, an approval, an error-recovery dec
 conversation's lasts an hour. 1-hour cache writes are recorded
 (`UsageInfo::cache_write_1h_tokens`) and counted at the 1-hour write rate in the list-price
 estimate; under a subscription nothing is billed, and they count against the plan's
-usage. The session lives while the task is in progress: a wait for an
+usage. When the CLI is billed per token instead (an API key, cloud credits, a host-managed
+provider), set `ClaudeCodeSettings::metered_billing`: each call's list-price estimate is then
+its billed cost and counts against workflow budgets. The session lives while the task is in progress: a wait for an
 answer (`ask_user`) or an error-recovery decision closes it, and the task resumes it
 (`Task::claude_code_session`) when it continues. A turn that ends without `complete_task`
 gets a note asking the model to continue or complete; after 10 in a row the task is

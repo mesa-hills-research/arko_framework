@@ -172,6 +172,13 @@ pub struct ClaudeCodeSettings {
     /// Turn the command guard off: every command runs as written.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub dangerously_allow_all_commands: bool,
+    /// Whether the CLI's usage is billed per token. `false` (the default):
+    /// it's covered by a Claude subscription, so nothing is billed per call
+    /// and budgets don't count it. `true`: the CLI is billed per token (an
+    /// API key, cloud credits, a host-managed provider), so each call's
+    /// list-price estimate is its billed cost and counts against budgets.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub metered_billing: bool,
 }
 
 impl ClaudeCodeSettings {

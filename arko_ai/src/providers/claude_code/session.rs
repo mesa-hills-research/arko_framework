@@ -58,6 +58,19 @@ const PARENT_BEHAVIOUR_VARIABLES: &[&str] = &[
     "CLAUDE_CODE_USER_EMAIL",
 ];
 
+/// Claude Code's limits on one MCP tool call, set for every session unless
+/// its options set them ([`ClaudeOptions::env`]). A host's in-process tools
+/// can run for as long as their work takes (a delegated agent run takes
+/// minutes or hours, and sends no progress while it runs), and an
+/// environment may set a short limit that the CLI would otherwise inherit
+/// (a cloud session sets `MCP_TOOL_TIMEOUT` to 60 seconds). The call limit
+/// is 7 days in milliseconds, below the largest timer the CLI can set; an
+/// idle limit of 0 turns the idle check off.
+const MCP_TOOL_LIMITS: &[(&str, &str)] = &[
+    ("MCP_TOOL_TIMEOUT", "604800000"),
+    ("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", "0"),
+];
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClaudeError {
     #[error("could not start `{program}`: {source}")]
@@ -130,6 +143,7 @@ impl ClaudeSession {
         {
             command.env_remove(variable);
         }
+        command.envs(MCP_TOOL_LIMITS.iter().copied());
         command.envs(&options.env);
         if let Some(directory) = &options.working_directory {
             command.current_dir(directory);
