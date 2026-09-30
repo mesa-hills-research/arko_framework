@@ -146,9 +146,25 @@ impl cc::HookCallback for HookForwarder {
 
 fn stopping_answer(event: &cc::HookEvent) -> Value {
     match event {
-        cc::HookEvent::PreToolUse => cc::Hook::deny_tool("The agent is stopping."),
+        cc::HookEvent::PreToolUse => {
+            cc::Hook::deny_tool("arko did not run this call: the agent is stopping.")
+        }
         _ => cc::Hook::proceed(),
     }
+}
+
+/// What the model reads for a call the runtime refused. Claude Code shows
+/// a hook's refusal as `PreToolUse:<tool> hook error: <text>`, so the text
+/// says who refused the call and why.
+fn refused(tool: &str, reason: &str) -> Value {
+    cc::Hook::deny_tool(format!("arko did not run this {tool} call: {reason}"))
+}
+
+/// A call held while the handover report is due: not an error.
+fn held_for_report(tool: &str, request: &str) -> Value {
+    cc::Hook::deny_tool(format!(
+        "Not an error: arko held this {tool} call so you can write your handover report now. {request}"
+    ))
 }
 
 fn allow_tool() -> Value {
@@ -1271,7 +1287,13 @@ impl ClaudeCodeRun {
         if self.handover_due() && name != COMPLETE_TASK_TOOL_NAME {
             self.report_delivered = true;
             let request = self.report_request();
-            return self.reject_call(id, &name, request).await;
+            self.emit(AgentEvent::ToolRejected {
+                tool_call_id: id,
+                tool_name: name.clone(),
+                reason: Some(request.clone()),
+            })
+            .await?;
+            return Ok(held_for_report(&name, &request));
         }
         let offered = if built_in {
             self.task
@@ -1286,6 +1308,29 @@ impl ClaudeCodeRun {
             return self
                 .reject_call(id, &name, format!("Tool '{name}' is not available."))
                 .await;
+        }
+        // Claude Code's shell tools pass arko's command guard.
+        #[cfg(any(unix, windows))]
+        if built_in
+            && let Some(dialect) = match name.as_str() {
+                "Bash" => Some(crate::terminal::ShellDialect::Posix),
+                "PowerShell" => Some(crate::terminal::ShellDialect::PowerShell),
+                _ => None,
+            }
+            && let Some(command) = params.get("command").and_then(Value::as_str)
+        {
+            let guard = self
+                .task
+                .agent_config
+                .claude_code
+                .clone()
+                .unwrap_or_default()
+                .command_guard();
+            if let Err(refusal) =
+                guard.check(command, dialect, &self.task.current_working_directory)
+            {
+                return self.reject_call(id, &name, refusal.message).await;
+            }
         }
         // The workspace path policy.
         let path_params: Vec<String> = if built_in {
@@ -1354,7 +1399,7 @@ impl ClaudeCodeRun {
             reason: Some(reason.clone()),
         })
         .await?;
-        Ok(cc::Hook::deny_tool(reason))
+        Ok(refused(name, &reason))
     }
 
     /// An approved (or auto-approved) call: a built-in passes the
@@ -1382,7 +1427,9 @@ impl ClaudeCodeRun {
         if let Some(output) = custom_output {
             // Claude Code runs a built-in itself: output the host supplies
             // is its result instead of running it.
-            return Ok(cc::Hook::deny_tool(output));
+            return Ok(cc::Hook::deny_tool(format!(
+                "Not an error: the host supplied this {name} call's result instead of running it. Result: {output}"
+            )));
         }
         let Some(middleware) = self.middleware.clone() else {
             return Ok(allow_tool());
@@ -1402,17 +1449,16 @@ impl ClaudeCodeRun {
         let decision = middleware.before(&execution, &call).await;
         let (answer, event_reason) = match decision {
             Ok(ToolExecutionDecision::Continue) => return Ok(allow_tool()),
-            Ok(ToolExecutionDecision::Reject { message_to_agent }) => (
-                cc::Hook::deny_tool(message_to_agent.clone()),
-                message_to_agent,
-            ),
+            Ok(ToolExecutionDecision::Reject { message_to_agent }) => {
+                (refused(name, &message_to_agent), message_to_agent)
+            }
             Ok(ToolExecutionDecision::FailTask { reason }) => {
                 self.set_state(TaskState::Failed {
                     reason: reason.clone(),
                 })
                 .await?;
                 let _ = session.interrupt().await;
-                (cc::Hook::deny_tool(reason.clone()), reason)
+                (refused(name, &reason), reason)
             }
             Ok(ToolExecutionDecision::CancelTask { reason }) => {
                 self.set_state(TaskState::Cancelled {
@@ -1420,7 +1466,7 @@ impl ClaudeCodeRun {
                 })
                 .await?;
                 let _ = session.interrupt().await;
-                (cc::Hook::deny_tool(reason.clone()), reason)
+                (refused(name, &reason), reason)
             }
             Ok(ToolExecutionDecision::PauseTask {
                 message_to_agent,
@@ -1428,16 +1474,13 @@ impl ClaudeCodeRun {
             }) => {
                 self.pause_after_turn = Some((reason, ErrorRecoveryCause::Middleware));
                 let _ = session.interrupt().await;
-                (
-                    cc::Hook::deny_tool(message_to_agent.clone()),
-                    message_to_agent,
-                )
+                (refused(name, &message_to_agent), message_to_agent)
             }
             Err(error) => {
                 let reason = format!("The execution middleware failed before '{name}': {error}");
                 self.pause_after_turn = Some((reason.clone(), ErrorRecoveryCause::Middleware));
                 let _ = session.interrupt().await;
-                (cc::Hook::deny_tool(reason.clone()), reason)
+                (refused(name, &reason), reason)
             }
         };
         self.emit(AgentEvent::ToolRejected {

@@ -626,3 +626,76 @@ async fn a_response_sent_as_several_messages_is_counted_once_in_full() {
         .count();
     assert_eq!(reported, 1);
 }
+
+#[tokio::test]
+async fn shell_commands_pass_the_command_guard() {
+    let fake = Fake::new(json!([[
+        {"tool": "Bash", "input": {"command": "ls -la"}},
+        {"tool": "Bash", "input": {"command": "rm -rf ~"}},
+        complete("Listed"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["Bash"]),
+        "List files.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (task, _) = start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let posts = fake.logged("post");
+    assert_eq!(posts[0]["output"], "builtin Bash ran");
+    let refused = posts[1]["output"].as_str().unwrap();
+    assert_eq!(posts[1]["is_error"], true);
+    // Claude Code shows it as "PreToolUse:Bash hook error: <this>".
+    assert!(
+        refused.starts_with("arko did not run this Bash call: "),
+        "{refused}"
+    );
+
+    // Turned off, the command runs.
+    let fake = Fake::new(json!([[
+        {"tool": "Bash", "input": {"command": "rm -rf ~"}},
+        complete("Ran"),
+    ]]));
+    let mut config = config(&fake, &["Bash"]);
+    config
+        .claude_code
+        .as_mut()
+        .unwrap()
+        .dangerously_allow_all_commands = true;
+    let task = Task::new(config, "Run it.".into(), fake.workspace(), None);
+    let (task, _) = start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(fake.logged("post")[0]["output"], "builtin Bash ran");
+}
+
+#[tokio::test]
+async fn a_call_held_for_the_report_says_it_is_not_an_error() {
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}},
+        {"text": "REPORT"},
+    ], [complete("done")]]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Search.".into(),
+        fake.workspace(),
+        None,
+    );
+    let run = start(task);
+    run.commands
+        .send(UserCommand::RequestHandover)
+        .await
+        .unwrap();
+    let (task, _) = run.finish().await;
+    assert_eq!(task.handovers.len(), 1);
+    let held = fake.logged("post")[0]["output"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        held.starts_with(
+            "Not an error: arko held this Grep call so you can write your handover report now."
+        ),
+        "{held}"
+    );
+}

@@ -108,6 +108,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } => println!(
                 "=== handover {handovers} done ({input_tokens} tokens); report:\n{report}\n==="
             ),
+            AgentEvent::ToolResult {
+                tool_name, output, ..
+            } => {
+                let shown: String = output.chars().take(300).collect();
+                println!("← {tool_name}: {shown}")
+            }
             AgentEvent::AssistantResponseChunk(text) => println!("  {}", text.trim()),
             AgentEvent::TaskStateChanged(state) => println!("[state] {state:?}"),
             AgentEvent::ErrorEncountered { error_message, .. } => {

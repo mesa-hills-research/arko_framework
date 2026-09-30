@@ -142,6 +142,32 @@ pub struct ClaudeCodeSettings {
     /// Environment variables for the CLI.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// Commands the `Bash` and `PowerShell` tools run pass arko's terminal
+    /// command guard (see [`CommandGuard`](crate::terminal::CommandGuard)):
+    /// one that would delete, move, overwrite or reformat a protected path
+    /// (a root, the home directory, system directories) or a path outside the
+    /// workspace is refused. This allows destructive commands outside the
+    /// workspace; protected paths stay refused.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub allow_commands_outside_workspace: bool,
+    /// Paths outside the workspace that destructive commands may target.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub allowed_command_paths: Vec<PathBuf>,
+    /// Turn the command guard off: every command runs as written.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dangerously_allow_all_commands: bool,
+}
+
+impl ClaudeCodeSettings {
+    /// The command guard these settings describe.
+    #[cfg(any(unix, windows))]
+    pub fn command_guard(&self) -> crate::terminal::CommandGuard {
+        crate::terminal::CommandGuard {
+            allow_outside_workspace: self.allow_commands_outside_workspace,
+            allowed_paths: self.allowed_command_paths.clone(),
+            dangerously_allow_all_commands: self.dangerously_allow_all_commands,
+        }
+    }
 }
 
 #[cfg(test)]
