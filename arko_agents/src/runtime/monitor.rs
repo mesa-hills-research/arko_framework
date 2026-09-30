@@ -50,20 +50,25 @@ pub(super) fn cache_efficiency(
     })
 }
 
-/// Logs a warning when a plan-usage `SlowDown` delay reaches the model's
-/// prompt-cache lifetime: the request after the delay would miss the cache
-/// and read the whole context again, costing more usage than the delay
-/// saves.
+/// How close to the prompt-cache lifetime a delay may come: 4½ minutes of
+/// a 5-minute cache.
+const CACHE_HEADROOM: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Logs a warning when a plan-usage `SlowDown` delay comes within
+/// [`CACHE_HEADROOM`] of the model's prompt-cache lifetime: the request after
+/// the delay could miss the cache and read the whole context again as
+/// uncached input, using more of the plan than the delay saves.
 pub(super) fn warn_if_slow_down_outlasts_cache(
     task_id: uuid::Uuid,
     delay_ms: u64,
     lifetime: arko_ai::PromptCacheLifetime,
 ) {
     if let arko_ai::PromptCacheLifetime::Known(lifetime) = lifetime
-        && std::time::Duration::from_millis(delay_ms) >= lifetime
+        && std::time::Duration::from_millis(delay_ms) + CACHE_HEADROOM > lifetime
     {
         log::warn!(
-            "Task {task_id}: the plan-usage SlowDown delay ({delay_ms} ms) is at least the prompt-cache lifetime ({} s): each request after it misses the cache and reads the whole context again, which costs more usage than the delay saves. Keep the delay well under the lifetime.",
+            "Task {task_id}: the plan-usage SlowDown delay ({delay_ms} ms) comes within {} s of the prompt-cache lifetime ({} s): a request after it can miss the cache and read the whole context again as uncached input, which uses more of the plan than the delay saves. Keep the delay well under the lifetime.",
+            CACHE_HEADROOM.as_secs(),
             lifetime.as_secs()
         );
     }

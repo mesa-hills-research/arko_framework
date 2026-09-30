@@ -2210,7 +2210,7 @@ impl ClaudeCodeRun {
         let mut info = ai::UsageInfo::new(input, output)
             .with_cached_tokens(cache_read)
             .with_cache_write_tokens(cache_write);
-        // 1-hour cache writes are priced higher than 5-minute ones.
+        // The list-price estimate counts 1-hour writes at their own rate.
         info.cache_write_1h_tokens = written_1h;
         info.calculate_cost(
             &model,
@@ -2300,13 +2300,25 @@ impl ClaudeCodeRun {
             crate::agent_config::PlanUsageAction::SlowDown { delay_ms } => {
                 if self.slow_down.is_none() {
                     // The configured TTL, else the one Claude Code's writes
-                    // show, else Anthropic's shorter one.
-                    let generation = &self.task.agent_config.llm_config.generation_config;
-                    let lifetime = generation
-                        .anthropic_cache_ttl
-                        .map(ai::AnthropicCacheTtl::duration)
-                        .or(self.cache_lifetime)
-                        .unwrap_or(ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME);
+                    // show, else Anthropic's shorter one; Claude Code's
+                    // subagents cache for 5 minutes whatever the main TTL.
+                    let config = &self.task.agent_config;
+                    let subagents = config
+                        .tool_config
+                        .available_tool_names
+                        .iter()
+                        .any(|tool| tool == "Agent" || tool == "Task");
+                    let lifetime = if subagents {
+                        ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME
+                    } else {
+                        config
+                            .llm_config
+                            .generation_config
+                            .anthropic_cache_ttl
+                            .map(ai::AnthropicCacheTtl::duration)
+                            .or(self.cache_lifetime)
+                            .unwrap_or(ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME)
+                    };
                     super::monitor::warn_if_slow_down_outlasts_cache(
                         self.task.id,
                         delay_ms,

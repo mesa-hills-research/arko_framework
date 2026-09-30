@@ -916,24 +916,28 @@ pub struct PlanUsageThreshold {
 
 /// What a [`PlanUsageThreshold`] does.
 ///
-/// Neither action saves usage: the task's requests cost the same whenever
-/// they are made. What differs is whether the task keeps going as the limit
-/// nears. Choose with the window's reset in mind (the threshold event
-/// carries it) and the prompt cache: a request made after the cache has
-/// expired reads the whole context again, uncached, which costs more usage
-/// than any wait saves. [`prompt_cache_lifetime`](arko_ai::prompt_cache::prompt_cache_lifetime)
+/// Neither action saves usage: the task's requests count the same against
+/// the plan whenever they are made. What differs is whether the task keeps
+/// going as the limit nears. Choose with the window's reset in mind (the
+/// threshold event carries it) and the prompt cache: a request made after
+/// the cache has expired reads the whole context again as uncached input,
+/// which uses more of the plan than cached input, more than any wait saves. [`prompt_cache_lifetime`](arko_ai::prompt_cache::prompt_cache_lifetime)
 /// gives the model's lifetime: 5 minutes for Anthropic by default (1 hour
 /// with `AnthropicCacheTtl::OneHour`), a conservative 5 minutes for OpenAI;
 /// for a Claude Code model, `anthropic_cache_ttl` when set (Claude Code's
 /// `promptCacheTtl`), otherwise Claude Code's choice: 1 hour on a Claude
-/// subscription within its usage limits, 5 minutes on an API key.
+/// subscription within its usage limits, 5 minutes on an API key. Claude
+/// Code's subagents (its `Agent` tool) and helper requests cache for 5
+/// minutes whatever the main conversation's TTL, so a stop of more than
+/// about 4½ minutes loses their caches even when the main conversation's
+/// lasts an hour.
 ///
 /// - The reset is far off: [`Pause`](Self::Pause), so the rest of the
-///   window isn't spent before someone decides. Resuming after the cache has
-///   expired costs one uncached request.
+///   window isn't spent before someone decides. The request that resumes
+///   after the cache expired reads the context uncached, once.
 /// - The reset is close: let the task run, with
 ///   [`UsageLimitPolicy::WaitUntilReset`] to wait out the limit if it is
-///   reached first (again, one uncached request once the wait ends), or
+///   reached first (again, one uncached read once the wait ends), or
 ///   [`SlowDown`](Self::SlowDown) to stretch what is left until the reset.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub enum PlanUsageAction {
@@ -949,8 +953,10 @@ pub enum PlanUsageAction {
     ///
     /// Keep `delay_ms` well under the model's prompt-cache lifetime (see
     /// [`PlanUsageAction`]): a delay that reaches it makes every request after
-    /// it miss the cache, which drains usage faster than no delay at all.
-    /// The runtime logs a warning once per run when it does. For an agent
+    /// it miss the cache, which uses the window up faster than no delay at
+    /// all. The runtime logs a warning, once per run, for a delay within 30
+    /// seconds of the lifetime; for a Claude Code agent offered the `Agent`
+    /// or `Task` tool, of its subagents' 5 minutes. For an agent
     /// running in Claude Code, each tool call is held instead (and the
     /// request that follows it with it), since Claude Code makes the
     /// requests.

@@ -826,27 +826,30 @@ A monitor pause waits in `AwaitingErrorRecoveryApproval` under the pausing error
 and returns the task `Interrupted` under the others. Approving it continues without an
 error note; a message given with the approval is added as a user message.
 
-**Choosing a plan-usage action.** Neither action saves usage: a task's requests cost the
-same whenever they're made. The choice is whether the task keeps going as the limit
+**Choosing a plan-usage action.** Neither action saves usage: a task's requests count the
+same against the plan whenever they're made. The choice is whether the task keeps going as the limit
 nears, and it turns on two times: when the window resets (`PlanUsageThresholdReached`
 carries it), and how long the prompt cache lasts. A request made after the cache has
-expired reads the whole context again, uncached, and that costs more usage than any wait
-saves. `arko_ai::prompt_cache::prompt_cache_lifetime` (or `LLMClient::prompt_cache_lifetime`)
+expired reads the whole context again as uncached input, which uses more of the plan than
+cached input, more than any wait saves. `arko_ai::prompt_cache::prompt_cache_lifetime` (or `LLMClient::prompt_cache_lifetime`)
 gives a model's lifetime: 5 minutes for Anthropic by default (1 hour with
 `AnthropicCacheTtl::OneHour`), a conservative 5 minutes for OpenAI. For a Claude Code
 model it is `anthropic_cache_ttl` when set, otherwise Claude Code's choice: 1 hour on a
-Claude subscription within its usage limits, 5 minutes on an API key.
+Claude subscription within its usage limits, 5 minutes on an API key. Claude Code's
+subagents (its `Agent` tool) and helper requests cache for 5 minutes whatever the main
+conversation's TTL, so a stop of more than about 4½ minutes loses their caches.
 
-| Situation | Action | Cost |
+| Situation | Action | Cache effect |
 | --- | --- | --- |
-| The reset is far off | `Pause`, so the rest of the window isn't spent before someone decides | Resuming after the cache expired costs one uncached request |
-| The reset is close | Keep going, with `UsageLimitPolicy::WaitUntilReset` to wait out the limit if it's reached first | One uncached request once a long wait ends |
-| The reset is close and the task shouldn't stop | `SlowDown { delay_ms }`, to stretch what is left until the reset | Nothing extra while `delay_ms` stays well under the cache lifetime |
+| The reset is far off | `Pause`, so the rest of the window isn't spent before someone decides | The request that resumes after the cache expired reads the context uncached, once |
+| The reset is close | Keep going, with `UsageLimitPolicy::WaitUntilReset` to wait out the limit if it's reached first | One uncached read once a long wait ends |
+| The reset is close and the task shouldn't stop | `SlowDown { delay_ms }`, to stretch what is left until the reset | None while `delay_ms` stays well under the cache lifetime |
 
 `SlowDown` spends the same usage over more time, so it only helps when the reset comes
 before the rest of the window runs out. A delay that reaches the cache lifetime makes every
-request after it miss the cache, which drains usage faster than no delay at all; the
-runtime logs a warning, once per run, when it does.
+request after it miss the cache, which uses the window up faster than no delay at all. The
+runtime logs a warning, once per run, for a delay within 30 seconds of the lifetime (for a
+Claude Code agent offered the `Agent` or `Task` tool, of its subagents' 5 minutes).
 
 ## Claude Code models
 
@@ -915,9 +918,14 @@ agent behaves the same on any machine). The reasoning effort of an `Anthropic` o
 `AnthropicAdaptive` reasoning config becomes `--effort`, `anthropic_fast_mode` Claude
 Code's fast mode, and `anthropic_cache_ttl` the main conversation's prompt-cache TTL
 (Claude Code's `promptCacheTtl` setting). Without it, Claude Code caches for 1 hour on a
-Claude subscription within its usage limits and 5 minutes on an API key (subagents: 5
-minutes); its 1-hour cache writes are recorded (`UsageInfo::cache_write_1h_tokens`) and
-priced at the 1-hour rate. The session lives while the task is in progress: a wait for an
+Claude subscription within its usage limits and 5 minutes on an API key. Its subagents
+(the `Agent` tool) and helper requests cache for 5 minutes regardless, so any stop longer
+than about 4½ minutes (an `ask_user` answer, an approval, an error-recovery decision, a
+`SlowDown` hold, a paused workflow) loses the subagents' caches, even when the main
+conversation's lasts an hour. 1-hour cache writes are recorded
+(`UsageInfo::cache_write_1h_tokens`) and counted at the 1-hour write rate in the list-price
+estimate; under a subscription nothing is billed, and they count against the plan's
+usage. The session lives while the task is in progress: a wait for an
 answer (`ask_user`) or an error-recovery decision closes it, and the task resumes it
 (`Task::claude_code_session`) when it continues. A turn that ends without `complete_task`
 gets a note asking the model to continue or complete; after 10 in a row the task is
