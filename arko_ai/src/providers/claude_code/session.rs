@@ -71,6 +71,12 @@ const MCP_TOOL_LIMITS: &[(&str, &str)] = &[
     ("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", "0"),
 ];
 
+/// Each `Bash` call starts in the session's working directory, as a host
+/// that checks a call's command from there (arko's command guard) expects:
+/// by default the CLI keeps a `cd` from one call to the next. Set for every
+/// session unless its options set it ([`ClaudeOptions::env`]).
+const BASH_WORKING_DIRECTORY: (&str, &str) = ("CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR", "1");
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClaudeError {
     #[error("could not start `{program}`: {source}")]
@@ -144,6 +150,7 @@ impl ClaudeSession {
             command.env_remove(variable);
         }
         command.envs(MCP_TOOL_LIMITS.iter().copied());
+        command.env(BASH_WORKING_DIRECTORY.0, BASH_WORKING_DIRECTORY.1);
         command.envs(&options.env);
         if let Some(directory) = &options.working_directory {
             command.current_dir(directory);

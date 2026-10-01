@@ -642,15 +642,13 @@ async fn main() -> ExampleResult<()> {
                 SupportedPlatform::new("linux"),
                 SupportedPlatform::new("macos"),
             ],
-            required_dependencies: vec![WorkflowDependency {
-                name: "shell".to_string(),
-                description: "Local command runner used for deterministic project checks"
-                    .to_string(),
-                executable: Some("bash".to_string()),
-                install_hint: None,
-                os: None,
-                arch: None,
-            }],
+            required_dependencies: vec![
+                WorkflowDependency::new(
+                    "shell",
+                    "Local command runner used for deterministic project checks",
+                )
+                .executable("bash"),
+            ],
             tags: vec![
                 "coding".to_string(),
                 "verification".to_string(),

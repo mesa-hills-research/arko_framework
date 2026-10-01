@@ -37,7 +37,7 @@ Root re-exports: `Workflow`, `WorkflowBuilder`, `AgentHandle`, `WorkflowError`, 
 | Module | Prelude exports |
 | --- | --- |
 | `workflow`, `workflow::cancel`, `workflow::config`, `workflow::result`, `error` | All root re-exports above **except `AgentHandle`** |
-| `budget` | `AddCostResult`, `BudgetExceededPolicy`, `BudgetManager`, `CostEntry`, `CostLedger`, `CostSource`, `PlanBudget`, `PlanUsageSpent`, `PlanWindow` |
+| `budget` | `AddCostResult`, `BudgetExceededPolicy`, `BudgetManager`, `CostEntry`, `CostLedger`, `CostSource`, `PlanBudget`, `PlanLimits`, `PlanUsageSpent`, `PlanWindow` |
 | `distillation` | `DistillationConfig`, `DistillationRecord` |
 | `durable` | `DurableRetryPolicy`, `DurableStepContext`, `DurableStepSpec`, `DurableStepStatus`, `InDoubtContext`, `InDoubtResolution`, `ResolveInDoubt` |
 | `freshness` | `ActorId`, `ContextFreshnessConfig`, `FreshnessConflict`, `ResourceId`, `ResourceTracker`, `ToolResourceEffect` |
@@ -92,7 +92,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 | `budget(self, limit: f64) -> Self` | Workflow cost limit in dollars; finite and nonnegative. Default: unlimited. |
 | `budget_warning(self, threshold: f64) -> Self` | One-time warning threshold in dollars; finite and nonnegative. Default: none. |
 | `agent_budget(self, agent: impl Into<String>, limit: f64) -> Self` | Limit on the named agent's cumulative LLM spend across all its runs; finite and nonnegative. Default: unlimited. |
-| `plan_budget(self, budget: PlanBudget) -> Self` | Limits on the subscription plan's five-hour and seven-day usage windows, in percentage points used since the run started (`PlanBudget { five_hour, seven_day }`, each `Option<f64>`, finite and nonnegative). Default: none. See [Plan budgets](#plan-budgets). |
+| `plan_budget(self, budget: PlanBudget) -> Self` | Limits on the subscription plans' five-hour and seven-day usage windows, in percentage points used since the run started (`PlanBudget { five_hour, seven_day, chatgpt, claude_code }`: `five_hour` and `seven_day` for each plan's windows, and a plan's own `PlanLimits { five_hour, seven_day }` in place of them for that plan; each limit an `Option<f64>`, finite and nonnegative). Default: none. See [Plan budgets](#plan-budgets). |
 | `budget_exceeded_policy(self, policy: BudgetExceededPolicy) -> Self` | What happens over the workflow's budget or an agent's. **Default: `Pause`**: each agent over it is held before its next model request until the budget is raised; nothing is cancelled. `Cancel`: the agent is cancelled, as before this setting existed. See [Budget holds](#budget-holds). |
 | `wait_for_budget_raise(self, enabled: bool) -> Self` | Under `Pause`, whether a run the host started waits in its call for a live raise (as runs inside another agent's tool call always do) instead of returning `AgentPaused`. Default: off. |
 | `hook(self, point: HookPoint, callback: HookCallback) -> Self` | Append a synchronous callback at a lifecycle point. Callbacks run in registration order. |
@@ -140,7 +140,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 - a distiller that targets one of Claude Code's built-in tools for an agent whose model runs in Claude Code (`distiller '<name>' targets Claude Code's '<tool>', whose output can't be distilled`): Claude Code produces that output itself;
 - `resume_from` without `persistence`, a checkpoint for a different workflow name, a checkpoint run ID that differs from the persistence directory's, or a resumable task whose user agent configuration changed.
 
-Checkpoint read and parse failures return `Io` or `Json`. A warning threshold may exceed the budget limit. Tool names are only warned about, since MCP servers and skills add tools whose names aren't known at build: a tool the context freshness mapping or a distiller's targets name that no agent is configured with (`available_tool_names`), no workflow or custom tool has, and no `arko_agents` or Claude Code built-in has is logged as a warning. Workflow services that name no caller are logged as a warning too: no agent is offered `run_workflow_agent`. Metadata dependencies are descriptive: the builder neither installs nor checks executables.
+Checkpoint read and parse failures return `Io` or `Json`. A warning threshold may exceed the budget limit. Tool names are only warned about, since MCP servers and skills add tools whose names aren't known at build: a tool the context freshness mapping or a distiller's targets name that no agent is configured with (`available_tool_names`), no workflow or custom tool has, and no `arko_agents` or Claude Code built-in has is logged as a warning. Workflow services that name no caller are logged as a warning too: no agent is offered `run_workflow_agent`. The builder neither installs nor checks metadata dependencies; `WorkflowMetadata::missing_dependencies` reports the missing ones, for the workflow to act on at startup.
 
 Tool names: duplicate global tool names, duplicate names within one agent's tools, and a name shared by a global and an agent-local tool are rejected. Global tools cannot use the reserved names `complete_task`, `ask_user`, `read_memory`, `write_memory`, `list_memories`, `run_workflow_agent`, or `cast_vote`, nor `send_message` or `list_recipients` while any agent is offered the workflow's messaging tools, nor `wait_for_message` while any agent is offered it; an agent-local tool with one of these names is rejected for an agent that is offered the workflow's tool. Agent-local tools are not checked against reserved names: an agent-local tool with a reserved name replaces that workflow or built-in tool for its agent, except `complete_task`, which `arko_agents` never lets a non-built-in tool replace. Custom tools are registered after the workflow tools, so a custom tool named like an `arko_agents` built-in (for example `read_file`) replaces it for the agents that receive it.
 
@@ -155,8 +155,8 @@ Source: [workflow/config.rs](src/workflow/config.rs). All four types implement S
 | Type | Public fields and meaning |
 | --- | --- |
 | `SupportedPlatform` | `os: String`, a Rust host OS name (`std::env::consts::OS`); `arch: Option<String>`, an optional architecture restriction (`None` when omitted in JSON). |
-| `WorkflowDependency` | `name: String`, `description: String` (required); `executable`, `install_hint`, `os`, `arch`: `Option<String>`, each `None` when omitted in JSON. Descriptive only; nothing enforces it. |
-| `WorkflowMetadata` | `description: String` and `version: String`, default `""`; `supported_platforms: Vec<SupportedPlatform>`, `required_dependencies: Vec<WorkflowDependency>`, and `tags: Vec<String>`, default empty. Every field may be omitted in JSON. An empty platform list means any host. |
+| `WorkflowDependency` | `name: String`, `description: String` (required); `executable`, `install_hint`, `os`, `arch`: `Option<String>`, each `None` when omitted in JSON; `optional: bool`, `false` (required) when omitted. An optional dependency helps but isn't required: the workflow works without it. |
+| `WorkflowMetadata` | `description: String` and `version: String`, default `""`; `supported_platforms: Vec<SupportedPlatform>`, `required_dependencies: Vec<WorkflowDependency>` (required and optional ones, despite the name), and `tags: Vec<String>`, default empty. Every field may be omitted in JSON. An empty platform list means any host. |
 | `WorkflowConfig` | `name: String`, `workspace: PathBuf`, `metadata: WorkflowMetadata` (default when omitted in JSON). A serializable descriptor; workflows are constructed with the builder. Unknown JSON fields are ignored. |
 
 `SupportedPlatform` methods:
@@ -168,6 +168,39 @@ fn matches_host(&self) -> bool;
 ```
 
 `new` sets no architecture restriction. `matches_host` compares the OS and, when set, the architecture case-insensitively with `std::env::consts::{OS, ARCH}`. Multiple supported platforms are alternatives.
+
+`WorkflowDependency` and `WorkflowMetadata` methods:
+
+```rust
+// WorkflowDependency: a required dependency on any host, then optional settings.
+fn new(name: impl Into<String>, description: impl Into<String>) -> Self;
+fn executable(self, executable: impl Into<String>) -> Self;
+fn install_hint(self, hint: impl Into<String>) -> Self;
+fn os(self, os: impl Into<String>) -> Self;
+fn arch(self, arch: impl Into<String>) -> Self;
+fn optional(self) -> Self;
+// WorkflowMetadata
+fn missing_dependencies(&self) -> Vec<&WorkflowDependency>;
+```
+
+`missing_dependencies` returns, in declaration order, the dependencies that apply to this host (`os` and `arch` unset or equal, ignoring case, to `std::env::consts::{OS, ARCH}`) whose `executable` isn't found, required and optional alike; filter them by `optional`. A name is looked for in each `PATH` directory, on Windows also with each `PATHEXT` extension (`.COM;.EXE;.BAT;.CMD` when unset); an `executable` containing `/` or `\` is checked as a file. On Unix the file must have an execute bit. A dependency without an `executable` (a login, a service) is never reported. It prints nothing and installs nothing: the workflow decides, for example stopping with each missing required dependency's description and `install_hint` before any model call, and warning about optional ones.
+
+```rust,ignore
+let metadata = WorkflowMetadata {
+    required_dependencies: vec![
+        WorkflowDependency::new("cargo", "Builds the crate").executable("cargo"),
+        WorkflowDependency::new("ripgrep", "Fast code search")
+            .executable("rg")
+            .install_hint("apt install ripgrep")
+            .optional(),
+    ],
+    ..WorkflowMetadata::default()
+};
+let (optional, required): (Vec<_>, Vec<_>) = metadata
+    .missing_dependencies()
+    .into_iter()
+    .partition(|dependency| dependency.optional);
+```
 
 ## Workflow execution and lifecycle
 
@@ -288,7 +321,8 @@ Dropping a handle without calling `wait` or `into_parts` aborts the agent's runt
 | `budget(&self) -> Option<f64>` | The workflow's current limit. |
 | `set_plan_budget(&self, budget: PlanBudget) -> Result<(), WorkflowError>` | Change the plan budget's limits while agents run, as `set_budget` does for the dollar limit: raising a window's limit releases the agents held on it, and the limits are saved with the next checkpoint. A non-finite or negative limit returns `BuilderInvalid`. See [Plan budgets](#plan-budgets). |
 | `plan_budget(&self) -> PlanBudget` | The plan budget's current limits. |
-| `plan_usage_spent(&self) -> PlanUsageSpent` | The points of each window used so far (`five_hour`, `seven_day`; `None` for a window no report has shown). |
+| `plan_usage_spent(&self) -> PlanUsageSpent` | The points of each window used so far (`five_hour`, `seven_day`; `None` for a window no report has shown): with several plans, the most any plan has used of the window. |
+| `plan_usage_spent_of(&self, plan: arko_ai::SubscriptionPlan) -> PlanUsageSpent` | The points of each of `plan`'s windows used so far; `None` for a window no report of the plan has shown. |
 | `is_budget_blocked(&self) -> bool` | Under `Pause`: some run waits for a raise and every other running run does too, waits for a run it delegated to, or waits for a message, so nothing runs until the budget is raised. |
 | `async budget_blocked(&self)` | Waits until `is_budget_blocked` holds (never, while agents make progress). A host that can't raise the budget live stops there (see [Budget holds](#budget-holds)). |
 | `add_manual_cost(&self, amount: f64, description: &str, metadata: Option<String>) -> Result<AddCostResult, WorkflowError>` | Record a finite, nonnegative dollar cost with a description and optional free-form metadata. Fires `OnBudgetWarning` and `OnBudgetExceeded` as applicable; a hook `Abort` stops the run and returns the stop's error. Returns `BudgetExceeded` when spending exceeds the limit; the cost stays recorded. An invalid amount returns `InvalidCost` and records nothing. |
@@ -475,7 +509,7 @@ The result of `OnWorkflowCancelled` is ignored. Hooks do not roll back work alre
 | `OnWorkflowResume` | The pause flag changes from true to false, before paused drivers are woken. |
 | `OnWorkflowFailed` | `run_agent`, `continue_agent`, `resume_agent`, or `run_agents_parallel` is about to return a failure: an error other than `Cancelled`, `UserInputRequired`, `AgentPaused`, or `VerifierFailed`, including `AbortedByHook`. Fires at most once per call, also when several parallel agents fail. Not fired by a call refused because the run is already stopped. `error_message`; the agent name (and, for a continuation or resume, run ID) when available. |
 | `OnWorkflowCancelled` | A `WorkflowCancelHandle` (or `Workflow::cancel`) cancelled the run. Fires once, from the task that called `cancel`; its result is ignored. A hook's abort does not fire it. |
-| `OnBudgetExceeded` | Under `BudgetExceededPolicy::Pause` (the default), the automatic, manual, or distillation cost that takes workflow spending strictly over the limit: once per crossing (again after a raise brings spend within the limit and it is exceeded anew). Under `Cancel`, each such cost recorded while spending exceeds the limit. `budget_spent` is the new total. Also the plan usage report that takes a [plan budget](#plan-budgets) window strictly over its limit, once per crossing under either policy, with `agent_name`, `agent_run_id` and `metadata` `plan_window` (`"five_hour"` or `"seven_day"`), `plan_points_used` and `plan_points_limit`. |
+| `OnBudgetExceeded` | Under `BudgetExceededPolicy::Pause` (the default), the automatic, manual, or distillation cost that takes workflow spending strictly over the limit: once per crossing (again after a raise brings spend within the limit and it is exceeded anew). Under `Cancel`, each such cost recorded while spending exceeds the limit. `budget_spent` is the new total. Also the plan usage report that takes a [plan budget](#plan-budgets) window strictly over its limit, once per crossing under either policy, with `agent_name`, `agent_run_id` and `metadata` `plan` (`"chatgpt"` or `"claude_code"`; `null` for counting without a plan), `plan_window` (`"five_hour"` or `"seven_day"`), `plan_points_used` and `plan_points_limit`. |
 | `OnBudgetWarning` | The first recorded cost that brings spending to or above the warning threshold. `budget_spent` is the new total. |
 | `OnAgentMessage` | The `send_message` tool queued a message. Sender name and run ID; `metadata["message_id"]`, `metadata["recipient"]`, and `metadata["content"]`. Direct `MessageBus::send` calls do not fire it. |
 | `OnFreshnessConflict` | A successful tracked write (a mapped file tool, `write_memory`, or `mark_resource_dirty`) made another actor's read stale; fires once per stale reader. The reader's `agent_name` and `agent_run_id`, `metadata["resource"]` (the `ResourceId` in debug form, or `memory:<tier>`), and `metadata["writer"]` (the writer's agent name). A blocked write does not fire it. Its former name, `"OnMesiConflict"`, still deserializes to this variant. |
@@ -1066,7 +1100,7 @@ Thread-safe workflow spend, per-agent LLM spend and limits, and a detailed ledge
 | `pub fn set_agent_limit(&self, agent_name: impl Into<String>, limit: f64)`, `clear_agent_limit(&self, agent_name: &str)` | Set, replace, or remove the agent's limit; wakes the runs waiting for a raise. |
 | `pub fn agent_limits(&self) -> HashMap<String, f64>` | The agents' limits. |
 | `pub fn hold_reason(&self, agent_name: &str) -> Option<String>` | Under `Pause`, why a run of the agent is held (the workflow's or its own limit is exceeded, or a plan budget window); `None` under `Cancel` or within budget. |
-| `pub fn record_plan_usage(&self, usage: &arko_ai::PlanUsage) -> Vec<PlanBudgetCrossing>`, `set_plan_limits(&self, limits: PlanBudget)`, `plan_limits(&self)`, `plan_spent(&self) -> PlanUsageSpent`, `plan_exceeded(&self) -> Option<PlanBudgetCrossing>`, `plan_state(&self) -> PlanBudgetState` | The [plan budget](#plan-budgets): take a report (returns the windows it took over their limits, each once per crossing), set the limits (wakes the runs waiting for a raise), and read the limits, points used, a window over its limit (`window`, `used`, `limit`; `describe()` gives `five-hour window 25.4 of 25 points`), and the state a checkpoint records. |
+| `pub fn record_plan_usage(&self, usage: &arko_ai::PlanUsage) -> Vec<PlanBudgetCrossing>`, `set_plan_limits(&self, limits: PlanBudget)`, `plan_limits(&self)`, `plan_spent(&self) -> PlanUsageSpent`, `plan_spent_of(&self, plan: arko_ai::SubscriptionPlan) -> PlanUsageSpent`, `plan_exceeded(&self) -> Option<PlanBudgetCrossing>`, `plan_state(&self) -> PlanBudgetState` | The [plan budget](#plan-budgets): take a report, counted with the windows of the plan it names (returns the windows it took over their limits, each once per crossing), set the limits (wakes the runs waiting for a raise), and read the limits, the points used (the most any plan has used, or one plan's), a window over its limit (`plan`, `window`, `used`, `limit`; `describe()` gives `Claude Code five-hour window 25.4 of 25 points`), and the state a checkpoint records. |
 | `pub fn agent_limit(&self, agent_name: &str) -> Option<f64>` | The agent's limit, if set. |
 | `pub fn agent_spent(&self, agent_name: &str) -> f64` | Recorded agent LLM spend; zero for an unknown name. |
 | `pub fn is_agent_exceeded(&self, agent_name: &str) -> bool` | Whether agent spend is strictly greater than its limit. |
@@ -1130,13 +1164,32 @@ A host that can raise the budget while the run is live calls `set_budget` (from 
 
 ### Plan budgets
 
-A plan budget limits how much of a subscription plan's usage windows a run uses, in percentage points: `WorkflowBuilder::plan_budget(PlanBudget::none().five_hour(25.0).seven_day(5.0))` lets the run use 25 points of the five-hour window and 5 of the seven-day window. The points come from the plan usage agents report (`AgentEvent::PlanUsageReported`: Claude Code's `rate_limit_event`, ChatGPT OAuth's `x-codex-*` headers) and count from each window's level in the first report the run sees: points used = the latest level minus that baseline, plus the points of earlier periods. A window is told by its reported length (300 minutes: five-hour; 10,080: seven-day; another length is not counted) or, without one, by position (primary: five-hour, secondary: seven-day). When a window resets (its reset time moves more than a minute later, or, without reset times, its level drops), the points used before the reset are kept and the new period counts from 0; a lower level with the same reset time is an earlier report arriving late, and is ignored.
+A plan budget limits how much of subscription plans' usage windows a run uses, in percentage points: `WorkflowBuilder::plan_budget(PlanBudget::none().five_hour(25.0).seven_day(5.0))` lets the run use 25 points of the five-hour window and 5 of the seven-day window. The points come from the plan usage agents report (`AgentEvent::PlanUsageReported`: Claude Code's `rate_limit_event`, ChatGPT OAuth's `x-codex-*` headers) and count from each window's level in the first report the run sees: points used = the latest level minus that baseline, plus the points of earlier periods. A window is told by its reported length (300 minutes: five-hour; 10,080: seven-day; another length is not counted) or, without one, by position (primary: five-hour, secondary: seven-day). When a window resets (its reset time moves more than a minute later, or, without reset times, its level drops), the points used before the reset are kept and the new period counts from 0; a lower level with the same reset time is an earlier report arriving late, and is ignored.
 
-Plan usage is account-wide: reports from every agent update the same windows, the latest winning, and other use of the same plan during the run (another run, an interactive session) counts too. Like a dollar budget it is a soft limit: the points are only known after a request completes, so the requests in flight when a limit is reached complete and can take the run past it.
+Each plan is counted on its own. A report names its plan (`PlanUsage::plan`: `SubscriptionPlan::ChatGpt` for ChatGPT OAuth, `SubscriptionPlan::ClaudeCode` for Claude Code), so a run with agents on both counts the ChatGPT plan's windows and the Claude Code plan's windows separately, each from its own first report. `five_hour` and `seven_day` limit each plan's window of that length; a plan's own limits (`PlanBudget::chatgpt`, `PlanBudget::claude_code`, each a `PlanLimits { five_hour, seven_day }`) replace them for that plan's windows:
 
-A window over its limit is handled as an exceeded dollar budget under the same `BudgetExceededPolicy`: under `Pause` each agent is held before its next request (the pause's error names the window, for example `five-hour window 25.4 of 25 points`), a nested run waits, `budget_blocked()` covers it, and `set_plan_budget` releases the held runs; under `Cancel` the agent is cancelled and later runs are refused, with `WorkflowError::PlanBudgetExceeded`. `OnBudgetExceeded` fires once per crossing with the window in its metadata (see [HookPoint variants](#hookpoint-variants)).
+```rust
+// ChatGPT: 25 points of its seven-day window; Claude Code: 85 points of its
+// five-hour window. The dollar budget counts only what is billed:
+// subscription calls (ChatGPT OAuth, Claude Code without metered billing)
+// count as $0.
+let workflow = Workflow::builder()
+    .budget(35.0)
+    .plan_budget(
+        PlanBudget::none()
+            .chatgpt(PlanLimits::none().seven_day(25.0))
+            .claude_code(PlanLimits::none().five_hour(85.0)),
+    )
+    .build()?;
+```
 
-Checkpoints record the limits and the counting (`WorkflowState::plan_budget`), so a resumed run keeps counting from the levels the run first saw, not from the levels at the resume. On `resume_from`, each window's limit follows the dollar rule above: the builder's unless the recorded one is higher; none when the builder sets none; a checkpoint without `plan_budget` (an earlier version's) leaves the builder's and counts afresh.
+`PlanBudget::limit_for(plan, window)` gives the limit that applies to a plan's window. `Workflow::plan_usage_spent_of(plan)` gives one plan's points, and `plan_usage_spent()` the most any plan has used of each window: for a run on one plan, that plan's.
+
+Plan usage is account-wide: reports from every agent update the same windows of their plan, the latest winning, and other use of the same plan during the run (another run, an interactive session) counts too. Like a dollar budget it is a soft limit: the points are only known after a request completes, so the requests in flight when a limit is reached complete and can take the run past it.
+
+A window over its limit, of any plan, is handled as an exceeded dollar budget under the same `BudgetExceededPolicy`, for all the run's agents whatever their plan: under `Pause` each agent is held before its next request (the pause's error names the plan and window, for example `Claude Code five-hour window 85.4 of 85 points`), a nested run waits, `budget_blocked()` covers it, and `set_plan_budget` releases the held runs; under `Cancel` the agent is cancelled and later runs are refused, with `WorkflowError::PlanBudgetExceeded`. `OnBudgetExceeded` fires once per crossing with the plan and window in its metadata (see [HookPoint variants](#hookpoint-variants)).
+
+Checkpoints record the limits and each plan's counting (`WorkflowState::plan_budget`), so a resumed run keeps counting from the levels the run first saw, not from the levels at the resume. On `resume_from`, each limit (each window's, and each plan's own) follows the dollar rule above: the builder's unless the recorded one is higher; none when the builder sets none; a checkpoint without `plan_budget` (an earlier version's) leaves the builder's and counts afresh. A checkpoint written before plans were counted apart holds counting without a plan: it goes on under the general limits, and the first plan to report after the resume takes it over, whichever plan that is, so such a run is resumed with its agents on the plan it used.
 
 ## Durable steps
 
@@ -1362,7 +1415,7 @@ No nested run is orphaned silently. When a parent can't recover a run it started
 | `completed_agents` | `Vec<SerializableAgentResult>` | Name and summary of each recorded result; empty. |
 | `cancellation` | `Option<crate::workflow::cancel::Cancellation>` | The run's stop, in checkpoints written after it (omitted from JSON when `None`); `None`. |
 | `agent_registry` | `Option<crate::messaging::registry::RegistrySnapshot>` | Agent statuses and what each agent run has seen of them (omitted from JSON when `None`); `None`. |
-| `plan_budget` | `Option<PlanBudgetState>` | The plan budget's `limits: PlanBudget` and `usage: PlanUsageTracking` (per window `five_hour`/`seven_day`: `PlanWindowUsage { baseline, latest, accumulated, resets_at }`); written once the run has a plan budget or has seen plan usage; omitted from JSON when `None`; `None`. See [Plan budgets](#plan-budgets). |
+| `plan_budget` | `Option<PlanBudgetState>` | The plan budget's `limits: PlanBudget`, each plan's counting in `plans: BTreeMap<SubscriptionPlan, PlanUsageTracking>` (keys `chatgpt`, `claude_code`; omitted when empty), and `usage: PlanUsageTracking`, the counting without a plan (an earlier version's, until a plan takes it over). A `PlanUsageTracking` has per window `five_hour`/`seven_day`: `PlanWindowUsage { baseline, latest, accumulated, resets_at }`. Written once the run has a plan budget or has seen plan usage; omitted from JSON when `None`; `None`. See [Plan budgets](#plan-budgets). |
 | `budget_limits` | `Option<BudgetLimits>` | The limits in force: `limit: Option<f64>` (none: no limit; omitted when `None`) and `agent_limits: BTreeMap<String, f64>` (omitted when empty); omitted from JSON when `None`; `None`. See [Budget holds](#budget-holds). |
 
 `RegistrySnapshot` has public fields `version: u64`, which every status change increases; `agents: std::collections::BTreeMap<String, AgentRecord>`, keyed by registration name; and `seen: HashMap<Uuid, u64>`, the registry version each agent run (by task ID) has been told about. `AgentRecord` has `last_start: u64`, the version at the agent's latest start (`0` if it never started), `finished: Option<AgentRunStatus>`, how its latest run ended when none is running (omitted from JSON when `None`), and `last_finish: u64`, the version at which its last running run ended (`0` if it never finished, or in a record saved before finish notices). Every field defaults when missing. Both types implement `Debug`, `Clone`, `Default`, `PartialEq`, `Eq`, and Serde. What a run that cannot be continued (any status other than `Completed` or `WaitingForInput`) has seen is dropped when it ends.
@@ -1485,7 +1538,7 @@ Source: [error.rs](src/error.rs). `WorkflowError` is re-exported at the root and
 | `MemoryLimitExceeded { tier: String, attempted: usize, limit: usize }` | The write would exceed the tier's byte limit. |
 | `BudgetExceeded { spent: f64, limit: f64 }` | Workflow spending strictly exceeds the dollar limit. |
 | `AgentBudgetExceeded { agent: String, spent: f64, limit: f64 }` | The agent's cumulative LLM spending strictly exceeds its limit. |
-| `PlanBudgetExceeded { window: String, used: f64, limit: f64 }` | Under `BudgetExceededPolicy::Cancel`, a plan budget window (`five-hour`, `seven-day`) is strictly over its limit, in points. |
+| `PlanBudgetExceeded { plan: Option<String>, window: String, used: f64, limit: f64 }` | Under `BudgetExceededPolicy::Cancel`, a plan budget window (`plan`: `ChatGPT`, `Claude Code`, or `None` for counting without a plan; `window`: `five-hour`, `seven-day`) is strictly over its limit, in points. |
 | `InvalidCost(f64)` | A manual cost is negative or non-finite. |
 | `AbortedByHook { hook_point: String, reason: String }` | A hook returned `Abort`, which stopped the run. Returned by the operation that fired a lifecycle hook and by every run call in progress or made later. `hook_point` is the `HookPoint` variant name. A later hook `Abort` on the stopped run returns this first cause's error, not a new `AbortedByHook`. |
 | `Persistence(String)` | Run identity, journal, or other persisted-state failure. |

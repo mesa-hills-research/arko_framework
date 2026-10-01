@@ -77,6 +77,7 @@ Choose tools according to that level. `ask_user`, approval requests, error-recov
 
 - Inspect existing workflow code and saved-data formats before changing them.
 - Use the framework’s actual builder and execution APIs; do not invent a separate scheduler or graph layer.
+- Declare the external programs the workflow runs in its `WorkflowMetadata`, required and optional, with install hints, and check them at startup with `missing_dependencies()`: stop before any model call when a required one is missing, and warn about optional ones.
 - Run `cargo fmt --all -- --check` and the repository’s required locked checks after implementation.
 - Exercise a dry run before provider calls when the workflow supports one.
 - Workflow runs are expensive. Gauge the user's budget before running live tests of the pause, error, verification-rejection, cancellation, budget, persistence, and resume paths, or iterating on the workflow against tests or benchmarks; when the user authorizes extensive testing and refinement, go ahead. At any level of testing, start simple and change the workflow only where the results show it's necessary.

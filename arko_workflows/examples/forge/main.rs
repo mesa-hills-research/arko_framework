@@ -472,6 +472,7 @@ async fn main() -> ForgeResult<()> {
     builder = builder.plan_budget(PlanBudget {
         five_hour: settings.plan_budget_5h,
         seven_day: settings.plan_budget_7d,
+        ..PlanBudget::none()
     });
     // Running agents are saved as they run, so the latest checkpoint holds
     // the architect as it was when the forge stopped. Without one (the forge

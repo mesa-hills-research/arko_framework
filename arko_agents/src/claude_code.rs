@@ -169,9 +169,16 @@ pub struct ClaudeCodeSettings {
     /// Paths outside the workspace that destructive commands may target.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub allowed_command_paths: Vec<PathBuf>,
-    /// Turn the command guard off: every command runs as written.
+    /// Turn the command guard off: every command runs as written, and
+    /// `command_rules` don't apply.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub dangerously_allow_all_commands: bool,
+    /// Programs and arguments the `Bash` and `PowerShell` tools may or may
+    /// not run: the guard's [`rules`](crate::terminal::CommandGuard::rules),
+    /// such as read-only git only. Empty (the default): none.
+    #[cfg(any(unix, windows))]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub command_rules: Vec<crate::terminal::CommandRule>,
     /// Whether the CLI's usage is billed per token. `false` (the default):
     /// it's covered by a Claude subscription, so nothing is billed per call
     /// and budgets don't count it. `true`: the CLI is billed per token (an
@@ -189,6 +196,7 @@ impl ClaudeCodeSettings {
             allow_outside_workspace: self.allow_commands_outside_workspace,
             allowed_paths: self.allowed_command_paths.clone(),
             dangerously_allow_all_commands: self.dangerously_allow_all_commands,
+            rules: self.command_rules.clone(),
         }
     }
 }
@@ -217,5 +225,44 @@ mod tests {
         let settings: ClaudeCodeSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(settings, ClaudeCodeSettings::default());
         assert_eq!(serde_json::to_string(&settings).unwrap(), "{}");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn command_rules_round_trip_and_reach_the_guard() {
+        use crate::terminal::{CommandRule, RuleAction};
+
+        // Settings saved before command rules existed load without them.
+        let old: ClaudeCodeSettings =
+            serde_json::from_str(r#"{"allow_commands_outside_workspace": true}"#).unwrap();
+        assert!(old.command_rules.is_empty());
+        assert!(old.command_guard().rules.is_empty());
+
+        let settings = ClaudeCodeSettings {
+            command_rules: vec![
+                CommandRule::allow("git log *"),
+                CommandRule::deny("cargo * publish *")
+                    .within("crate")
+                    .because("Publishing is the user's."),
+            ],
+            ..ClaudeCodeSettings::default()
+        };
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"command_rules": [
+                {"action": "allow", "pattern": "git log *"},
+                {
+                    "action": "deny",
+                    "pattern": "cargo * publish *",
+                    "within": "crate",
+                    "reason": "Publishing is the user's."
+                },
+            ]})
+        );
+        let loaded: ClaudeCodeSettings = serde_json::from_value(json).unwrap();
+        assert_eq!(loaded, settings);
+        assert_eq!(loaded.command_rules[1].action, RuleAction::Deny);
+        assert_eq!(settings.command_guard().rules, settings.command_rules);
     }
 }

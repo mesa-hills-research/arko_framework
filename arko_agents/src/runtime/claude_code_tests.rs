@@ -746,6 +746,37 @@ async fn shell_commands_pass_the_command_guard() {
     assert_eq!(fake.logged("post")[0]["output"], "builtin Bash ran");
 }
 
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn command_rules_refuse_shell_commands() {
+    let fake = Fake::new(json!([[
+        {"tool": "Bash", "input": {"command": "git status --short"}},
+        {"tool": "Bash", "input": {"command": "cd sub && git push"}},
+        complete("Checked"),
+    ]]));
+    let mut config = config(&fake, &["Bash"]);
+    config.claude_code.as_mut().unwrap().command_rules =
+        vec![crate::terminal::CommandRule::allow("git status *").because("Only status here.")];
+    let task = Task::new(config, "Check.".into(), fake.workspace(), None);
+    let (task, events) = start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let posts = fake.logged("post");
+    assert_eq!(posts[0]["output"], "builtin Bash ran");
+    assert_eq!(posts[1]["is_error"], true);
+    let refused = posts[1]["output"].as_str().unwrap();
+    assert!(
+        refused.contains("Refused: `git push` isn't one of the `git` commands allowed here")
+            && refused.contains("Only status here."),
+        "{refused}"
+    );
+    // The host sees the refusal as a rejected call.
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolRejected { tool_name, reason: Some(reason), .. }
+            if tool_name == "Bash" && reason.starts_with("Refused: `git push`")
+    )));
+}
+
 #[tokio::test]
 async fn a_call_held_for_the_report_says_it_is_not_an_error() {
     let fake = Fake::new(json!([[
@@ -817,6 +848,7 @@ async fn plan_usage_is_reported_and_the_threshold_pauses() {
     else {
         panic!("{events:#?}");
     };
+    assert_eq!(usage.plan, Some(arko_ai::SubscriptionPlan::ClaudeCode));
     assert_eq!(usage.primary.as_ref().unwrap().used_percent, 90.0);
     assert_eq!(usage.primary.as_ref().unwrap().window_minutes, Some(300));
     assert!((usage.secondary.as_ref().unwrap().used_percent - 20.0).abs() < 1e-9);
@@ -949,6 +981,25 @@ async fn arko_tools_get_long_mcp_limits() {
     let env = &fake.logged("argv")[0]["env"];
     assert_eq!(env["MCP_TOOL_TIMEOUT"], "604800000");
     assert_eq!(env["CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"], "0");
+}
+
+#[tokio::test]
+async fn bash_calls_start_in_the_workspace() {
+    // The command guard checks each Bash call from the workspace; by default
+    // the CLI would keep a `cd` from the call before. The settings' `env`
+    // can still change it.
+    const VARIABLE: &str = "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR";
+    let fake = Fake::new(json!([[complete("done")], [complete("done")]]));
+    let task = Task::new(config(&fake, &[]), "Do it.".into(), fake.workspace(), None);
+    start(task).finish().await;
+    let mut config = config(&fake, &[]);
+    let settings = config.claude_code.as_mut().unwrap();
+    settings.env.insert(VARIABLE.into(), "0".into());
+    let task = Task::new(config, "Do it.".into(), fake.workspace(), None);
+    start(task).finish().await;
+    let runs = fake.logged("argv");
+    assert_eq!(runs[0]["env"][VARIABLE], "1");
+    assert_eq!(runs[1]["env"][VARIABLE], "0");
 }
 
 #[tokio::test]

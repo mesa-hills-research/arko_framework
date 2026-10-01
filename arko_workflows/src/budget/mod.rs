@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 mod plan;
 
 pub use plan::{
-    PlanBudget, PlanBudgetCrossing, PlanBudgetState, PlanUsageSpent, PlanUsageTracking, PlanWindow,
-    PlanWindowUsage,
+    PlanBudget, PlanBudgetCrossing, PlanBudgetState, PlanLimits, PlanUsageSpent, PlanUsageTracking,
+    PlanWindow, PlanWindowUsage,
 };
 
 /// Scale factor: store cost as integer micro-dollars for lock-free atomics.
@@ -325,8 +325,9 @@ impl BudgetManager {
     }
 
     /// Takes a plan usage report (from any agent: plan usage is
-    /// account-wide); returns the windows it took over their plan budget
-    /// limits, each once per crossing.
+    /// account-wide), counted with the windows of the plan it names;
+    /// returns the windows it took over their plan budget limits, each once
+    /// per crossing.
     pub fn record_plan_usage(&self, usage: &arko_ai::PlanUsage) -> Vec<PlanBudgetCrossing> {
         let now = Utc::now().timestamp().max(0) as u64;
         self.plan.lock().observe(usage, now)
@@ -344,9 +345,15 @@ impl BudgetManager {
         self.plan.lock().limits
     }
 
-    /// The points of each plan window the run has used.
+    /// The points of each plan window the run has used: the most any plan
+    /// has used.
     pub fn plan_spent(&self) -> PlanUsageSpent {
-        self.plan.lock().usage.spent()
+        self.plan.lock().spent()
+    }
+
+    /// The points of each of `plan`'s windows the run has used.
+    pub fn plan_spent_of(&self, plan: arko_ai::SubscriptionPlan) -> PlanUsageSpent {
+        self.plan.lock().spent_of(plan)
     }
 
     /// A window over its plan budget limit, if any.
@@ -356,17 +363,13 @@ impl BudgetManager {
 
     /// The plan budget's limits and tracking, for a checkpoint.
     pub fn plan_state(&self) -> PlanBudgetState {
-        let plan = self.plan.lock();
-        PlanBudgetState {
-            limits: plan.limits,
-            usage: plan.usage.clone(),
-        }
+        self.plan.lock().state()
     }
 
     /// Restores the plan usage tracking a checkpoint recorded (the limits
     /// are set with [`set_plan_limits`](Self::set_plan_limits)).
-    pub(crate) fn restore_plan_usage(&self, usage: PlanUsageTracking) {
-        self.plan.lock().restore(usage);
+    pub(crate) fn restore_plan_usage(&self, state: PlanBudgetState) {
+        self.plan.lock().restore(state.usage, state.plans);
     }
 
     pub fn agent_limit(&self, agent_name: &str) -> Option<f64> {
@@ -558,5 +561,25 @@ mod tests {
         };
         assert!(usage.total_cost > 0.0, "the subscription estimate is kept");
         assert_eq!(ledger.entries[0].amount, 0.0);
+    }
+
+    /// Subscription calls (ChatGPT OAuth, Claude Code unless billed per
+    /// token) never count toward a dollar budget, the workflow's or an
+    /// agent's, whatever their estimate.
+    #[test]
+    fn a_subscription_call_never_counts_toward_the_dollar_budget() {
+        let budget = BudgetManager::new(Some(0.0), None);
+        budget.set_agent_limit("coder", 0.0);
+        let mut subscription =
+            UsageInfo::new(10_000_000, 1_000_000).with_billing(BillingKind::Subscription);
+        subscription.calculate_cost(&Model::openai_gpt_6_luna(), None);
+        assert!(subscription.total_cost > 0.0);
+        let result = budget.add_agent_cost("coder", &subscription);
+        assert_eq!(result.new_total, 0.0);
+        assert!(!result.exceeded);
+        assert!(!budget.is_exceeded() && !budget.is_agent_exceeded("coder"));
+        assert!(budget.hold_reason("coder").is_none());
+        assert_eq!(budget.total_spent(), 0.0);
+        assert_eq!(budget.snapshot_ledger().total(), 0.0);
     }
 }

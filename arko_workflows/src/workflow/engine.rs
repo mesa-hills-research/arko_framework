@@ -346,6 +346,7 @@ fn plan_budget_error(ctx: &SharedContext) -> Option<WorkflowError> {
     ctx.budget
         .plan_exceeded()
         .map(|crossing| WorkflowError::PlanBudgetExceeded {
+            plan: crossing.plan.map(|plan| plan.label().to_string()),
             window: crossing.window.label().to_string(),
             used: crossing.used,
             limit: crossing.limit,
@@ -957,6 +958,10 @@ async fn drive_events(
                     let _ = fire_hooks_on_context(ctx, HookPoint::OnBudgetExceeded, |hook| {
                         hook.agent_name = Some(agent_name.to_string());
                         hook.agent_run_id = Some(agent_run_id);
+                        hook.metadata.insert(
+                            "plan".to_string(),
+                            crossing.plan.map(|plan| plan.key()).into(),
+                        );
                         hook.metadata
                             .insert("plan_window".to_string(), crossing.window.key().into());
                         hook.metadata

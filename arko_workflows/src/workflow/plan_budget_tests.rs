@@ -1,6 +1,7 @@
 //! Plan budgets: agents held once a plan usage window's points are used
-//! (as reported with each response), released by a raise; the counting
-//! saved with checkpoints and kept by a resume.
+//! (as reported with each response), released by a raise; each plan
+//! counted and limited on its own; the counting saved with checkpoints and
+//! kept by a resume.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -8,11 +9,12 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use arko_agents::tool::{TaskContext, Tool, ToolDefinition, ToolError, ToolTypeDetails};
+use arko_ai::SubscriptionPlan;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::budget::{BudgetExceededPolicy, PlanBudget, PlanWindow};
+use crate::budget::{BudgetExceededPolicy, PlanBudget, PlanLimits, PlanUsageSpent, PlanWindow};
 use crate::context::SharedContext;
 use crate::hooks::{HookPoint, HookResult};
 use crate::persistence::PersistenceConfig;
@@ -193,7 +195,7 @@ async fn a_plan_window_over_its_limit_holds_the_agent_until_it_is_raised() {
         panic!("expected a budget pause, got {error:?}");
     };
     assert!(
-        error.contains("five-hour window 20.0 of 10 points"),
+        error.contains("ChatGPT five-hour window 20.0 of 10 points"),
         "{error}"
     );
     assert_eq!(server.requests(), 2, "the next request is held");
@@ -203,6 +205,7 @@ async fn a_plan_window_over_its_limit_holds_the_agent_until_it_is_raised() {
     {
         let crossings = crossings.lock();
         assert_eq!(crossings.len(), 1);
+        assert_eq!(crossings[0]["plan"], "chatgpt");
         assert_eq!(crossings[0]["plan_window"], "five_hour");
         assert_eq!(crossings[0]["plan_points_limit"], 10.0);
     }
@@ -238,9 +241,13 @@ async fn a_plan_window_over_its_limit_holds_the_agent_until_it_is_raised() {
     let plan = state.plan_budget.unwrap();
     assert_eq!(plan.limits.five_hour, Some(30.0));
     assert_eq!(
-        plan.usage.window(PlanWindow::FiveHour).unwrap().baseline,
+        plan.plans[&SubscriptionPlan::ChatGpt]
+            .window(PlanWindow::FiveHour)
+            .unwrap()
+            .baseline,
         40.0
     );
+    assert_eq!(plan.usage, Default::default());
     drop(workflow);
 
     // Resumed: the higher limit applies, and the counting goes on from the
@@ -278,6 +285,36 @@ async fn a_plan_window_over_its_limit_holds_the_agent_until_it_is_raised() {
     assert_eq!(resumed.plan_budget(), PlanBudget::none());
     assert_close(resumed.plan_usage_spent().five_hour, 21.0);
     drop(resumed);
+
+    // A checkpoint from before plans were counted apart: its counting goes
+    // on, taken over by the first plan to report.
+    let mut json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let plan = json["plan_budget"].as_object_mut().unwrap();
+    let chatgpt = plan.remove("plans").unwrap()["chatgpt"].take();
+    plan.insert("usage".to_string(), chatgpt);
+    std::fs::write(&path, json.to_string()).unwrap();
+    let resumed = build(
+        &server,
+        &workspace,
+        |builder| {
+            builder
+                .plan_budget(PlanBudget::none().five_hour(22.0))
+                .resume_from(&path)
+        },
+        &crossings,
+    );
+    assert_close(resumed.plan_usage_spent().five_hour, 21.0);
+    let chatgpt = || resumed.plan_usage_spent_of(SubscriptionPlan::ChatGpt);
+    assert_eq!(chatgpt(), PlanUsageSpent::default());
+    let result = within(resumed.run_agent("coder", "Write again."))
+        .await
+        .unwrap();
+    assert_eq!(result.status, AgentRunStatus::Completed);
+    assert_close(chatgpt().five_hour, 21.0);
+    assert_close(resumed.plan_usage_spent().five_hour, 21.0);
+    resumed.checkpoint().await.unwrap();
+    drop(resumed);
+    let path = latest(&workspace);
 
     // A checkpoint from before plan budgets: the builder's, counting afresh.
     let mut json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -318,8 +355,18 @@ async fn under_cancel_a_plan_window_over_its_limit_cancels_the_agent() {
         .await
         .unwrap_err();
     assert!(
-        matches!(&error, WorkflowError::PlanBudgetExceeded { window, .. } if window == "seven-day"),
+        matches!(
+            &error,
+            WorkflowError::PlanBudgetExceeded { plan: Some(plan), window, .. }
+                if plan == "ChatGPT" && window == "seven-day"
+        ),
         "{error:?}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("ChatGPT seven-day window used 1.0 of 0.5 points"),
+        "{error}"
     );
     assert_eq!(crossings.lock()[0]["plan_window"], "seven_day");
     let error = within(workflow.run_agent("coder", "Write."))
@@ -328,5 +375,64 @@ async fn under_cancel_a_plan_window_over_its_limit_cancels_the_agent() {
     assert!(
         matches!(error, WorkflowError::PlanBudgetExceeded { .. }),
         "{error:?}"
+    );
+}
+
+/// A plan's own limit counts only that plan's reports: a Claude Code limit
+/// leaves the ChatGPT agent going, and a ChatGPT limit, replacing the
+/// general one for ChatGPT, holds it.
+#[tokio::test]
+async fn a_plans_own_limit_holds_agents_on_its_own_reports_only() {
+    let workspace = Workspace::new();
+    let server = server().await;
+    let crossings = Crossings::default();
+    let workflow = build(
+        &server,
+        &workspace,
+        |builder| {
+            builder.plan_budget(PlanBudget::none().claude_code(PlanLimits::none().five_hour(10.0)))
+        },
+        &crossings,
+    );
+    let result = within(workflow.run_agent("coder", "Write.")).await.unwrap();
+    assert_eq!(result.status, AgentRunStatus::Completed);
+    assert_close(
+        workflow
+            .plan_usage_spent_of(SubscriptionPlan::ChatGpt)
+            .five_hour,
+        21.0,
+    );
+    assert_eq!(
+        workflow.plan_usage_spent_of(SubscriptionPlan::ClaudeCode),
+        PlanUsageSpent::default()
+    );
+    assert!(crossings.lock().is_empty());
+
+    workflow
+        .set_plan_budget(
+            PlanBudget::none()
+                .five_hour(50.0)
+                .chatgpt(PlanLimits::none().five_hour(10.0)),
+        )
+        .unwrap();
+    let error = within(workflow.run_agent("coder", "Write again."))
+        .await
+        .unwrap_err();
+    let WorkflowError::AgentPaused {
+        pause: AgentPause::ErrorRecovery { error, .. },
+        ..
+    } = &error
+    else {
+        panic!("expected a budget pause, got {error:?}");
+    };
+    assert!(
+        error.contains("ChatGPT five-hour window 21.0 of 10 points"),
+        "{error}"
+    );
+    assert_eq!(server.requests(), 3, "held before its first request");
+    assert!(
+        workflow
+            .set_plan_budget(PlanBudget::none().chatgpt(PlanLimits::none().seven_day(-1.0)))
+            .is_err()
     );
 }

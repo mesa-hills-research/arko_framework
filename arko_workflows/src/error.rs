@@ -86,9 +86,14 @@ pub enum WorkflowError {
     },
 
     /// Under `BudgetExceededPolicy::Cancel`, the plan budget is exceeded
-    /// (`window`: `five-hour` or `seven-day`; points of the window).
-    #[error("Plan budget exceeded: {window} window used {used:.1} of {limit} points")]
+    /// (`plan`: `ChatGPT` or `Claude Code`, `None` for tracking without a
+    /// plan; `window`: `five-hour` or `seven-day`; points of the window).
+    #[error(
+        "Plan budget exceeded: {}{window} window used {used:.1} of {limit} points",
+        plan.as_ref().map_or(String::new(), |plan| format!("{plan} "))
+    )]
     PlanBudgetExceeded {
+        plan: Option<String>,
         window: String,
         used: f64,
         limit: f64,

@@ -64,11 +64,16 @@ pub struct ModelCallUsage {
 
 /// How much of a subscription plan's usage limits is used, as the ChatGPT
 /// backend reports it on every ChatGPT OAuth response (`x-codex-*` headers,
-/// which Codex shows as its rate-limit status). Requests fail with a usage
-/// limit error ([`RetryClass::UsageLimit`](crate::error::RetryClass::UsageLimit))
-/// once a window is used up, until it resets.
+/// which Codex shows as its rate-limit status) and the Claude Code CLI in
+/// its `rate_limit_event`s. Requests fail with a usage limit error
+/// ([`RetryClass::UsageLimit`](crate::error::RetryClass::UsageLimit)) once a
+/// window is used up, until it resets.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlanUsage {
+    /// The subscription the report is of, set by the component that reads
+    /// it. Records saved before it existed have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<SubscriptionPlan>,
     /// The account's plan (`x-codex-plan-type`, such as `plus` or `pro`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_type: Option<String>,
@@ -81,6 +86,41 @@ pub struct PlanUsage {
     /// The secondary window (`x-codex-secondary-*`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secondary: Option<PlanUsageWindow>,
+}
+
+/// The subscription a [`PlanUsage`] report is of. Each has its own usage
+/// windows, with their own levels and reset times.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum SubscriptionPlan {
+    /// A ChatGPT plan, as a ChatGPT OAuth login reports it (`x-codex-*`
+    /// headers).
+    #[serde(rename = "chatgpt")]
+    ChatGpt,
+    /// A Claude plan, as the Claude Code CLI's login reports it
+    /// (`rate_limit_event`).
+    #[serde(rename = "claude_code")]
+    ClaudeCode,
+}
+
+impl SubscriptionPlan {
+    pub const ALL: [SubscriptionPlan; 2] =
+        [SubscriptionPlan::ChatGpt, SubscriptionPlan::ClaudeCode];
+
+    /// `"chatgpt"` or `"claude_code"`.
+    pub fn key(self) -> &'static str {
+        match self {
+            SubscriptionPlan::ChatGpt => "chatgpt",
+            SubscriptionPlan::ClaudeCode => "claude_code",
+        }
+    }
+
+    /// `"ChatGPT"` or `"Claude Code"`.
+    pub fn label(self) -> &'static str {
+        match self {
+            SubscriptionPlan::ChatGpt => "ChatGPT",
+            SubscriptionPlan::ClaudeCode => "Claude Code",
+        }
+    }
 }
 
 /// One usage-limit window of a [`PlanUsage`].
@@ -101,8 +141,9 @@ pub struct PlanUsageWindow {
 }
 
 impl PlanUsage {
-    /// Reads the ChatGPT backend's `x-codex-*` plan usage headers. `None`
-    /// when the response has none.
+    /// Reads the ChatGPT backend's `x-codex-*` plan usage headers, as a
+    /// report of [`SubscriptionPlan::ChatGpt`]. `None` when the response
+    /// has none.
     pub fn from_codex_headers(headers: &reqwest::header::HeaderMap) -> Option<Self> {
         let text = |name: &str| {
             headers
@@ -132,12 +173,16 @@ impl PlanUsage {
                 .then_some(window)
         };
         let usage = Self {
+            plan: None,
             plan_type: text("x-codex-plan-type").map(String::from),
             active_limit: text("x-codex-active-limit").map(String::from),
             primary: window("primary"),
             secondary: window("secondary"),
         };
-        (usage != Self::default()).then_some(usage)
+        (usage != Self::default()).then_some(Self {
+            plan: Some(SubscriptionPlan::ChatGpt),
+            ..usage
+        })
     }
 
     /// The window with the highest used percentage, named `"primary"` or
@@ -688,6 +733,8 @@ mod tests {
             headers.insert(name, value.parse().unwrap());
         }
         let usage = PlanUsage::from_codex_headers(&headers).unwrap();
+        assert_eq!(usage.plan, Some(SubscriptionPlan::ChatGpt));
+        assert_eq!(serde_json::to_value(&usage).unwrap()["plan"], "chatgpt");
         assert_eq!(usage.plan_type.as_deref(), Some("prolite"));
         assert_eq!(usage.active_limit.as_deref(), Some("premium"));
         assert_eq!(
@@ -717,6 +764,10 @@ mod tests {
         let old: ModelCallUsage = serde_json::from_str(old).unwrap();
         assert_eq!(old.plan_usage, None);
         assert!(!serde_json::to_string(&old).unwrap().contains("plan_usage"));
+        // Reports saved before the plan was named load without it.
+        let old: PlanUsage =
+            serde_json::from_str(r#"{"plan_type":"pro","primary":{"used_percent":5.0}}"#).unwrap();
+        assert_eq!(old.plan, None);
     }
 
     fn priced(model: &Model, usage: UsageInfo, config: Option<&GenerationConfig>) -> UsageInfo {

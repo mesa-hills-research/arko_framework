@@ -9,7 +9,7 @@ mod runner;
 mod tools;
 
 pub use detection::PromptRule;
-pub use guard::{CommandGuard, CommandRefusal, ShellDialect};
+pub use guard::{CommandGuard, CommandRefusal, CommandRule, RuleAction, ShellDialect};
 pub use tools::TerminalTool;
 
 use std::collections::{HashMap, HashSet, VecDeque};

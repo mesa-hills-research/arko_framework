@@ -3136,9 +3136,11 @@ impl ClaudeCodeRun {
     }
 }
 
-/// Claude Code's `rate_limit_info` as plan usage: the five-hour window is
-/// the primary one and the seven-day window the secondary, as in its
-/// `unifiedWindows`; an event without them reports its one window.
+/// Claude Code's `rate_limit_info` as plan usage of
+/// [`SubscriptionPlan::ClaudeCode`](ai::SubscriptionPlan::ClaudeCode): the
+/// five-hour window is the primary one and the seven-day window the
+/// secondary, as in its `unifiedWindows`; an event without them reports its
+/// one window.
 fn plan_usage_of(info: &Value) -> ai::PlanUsage {
     let window = |value: &Value, minutes: u64| {
         value
@@ -3164,6 +3166,7 @@ fn plan_usage_of(info: &Value) -> ai::PlanUsage {
         },
     };
     ai::PlanUsage {
+        plan: Some(ai::SubscriptionPlan::ClaudeCode),
         plan_type: None,
         active_limit: limit_type,
         primary,

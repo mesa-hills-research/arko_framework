@@ -391,9 +391,10 @@ message by index and by a hash of the message, so editing `messages` directly (r
 and pushing a different message at the same index) also drops it.
 
 **Plan usage.** Every ChatGPT OAuth response reports the plan's usage-limit windows in
-`x-codex-*` headers; they are parsed into `ModelCallUsage::plan_usage` (`PlanUsage`: plan
-type, active limit, and the primary and secondary windows' used percentage, length, and
-reset time). arko_agents reports them as events and can act on a threshold.
+`x-codex-*` headers; they are parsed into `ModelCallUsage::plan_usage` (`PlanUsage`: the
+plan it is of, `SubscriptionPlan::ChatGpt`; plan type, active limit, and the primary and
+secondary windows' used percentage, length, and reset time). arko_agents reports them as
+events and can act on a threshold.
 
 **Reroutes.** `ModelCallUsage::served_model` is the model the provider reports
 (`openai-model` / `x-openai-model` header, else the response's `model`, else
@@ -1049,7 +1050,10 @@ removes them, so the CLI it starts runs as its own session. It also removes vari
 a session's environment sets that change how the CLI behaves (`CLAUDE_AUTO_BACKGROUND_TASKS`
 runs subagents in the background, `CLAUDE_CODE_BG_TASKS_REPORT_RUNNING`,
 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD`,
-`CLAUDE_CODE_USER_EMAIL`), unless `ClaudeOptions::env` sets them.
+`CLAUDE_CODE_USER_EMAIL`), unless `ClaudeOptions::env` sets them. Unless `ClaudeOptions::env`
+sets it, the client also sets `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1`, so each `Bash`
+call starts in the session's working directory (by default the CLI keeps a `cd` from one
+call to the next), as a host that checks each call's command from there expects.
 
 The CLI runs in a process group of its own (on Windows, a job object that kills its
 processes when closed), with the programs it starts: `close`, or dropping the session,

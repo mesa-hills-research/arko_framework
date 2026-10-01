@@ -444,13 +444,7 @@ impl Workflow {
     /// a limit releases the agents held on it, and the limits are saved
     /// with the next checkpoint.
     pub fn set_plan_budget(&self, budget: crate::budget::PlanBudget) -> Result<(), WorkflowError> {
-        for limit in [budget.five_hour, budget.seven_day].into_iter().flatten() {
-            if !limit.is_finite() || limit < 0.0 {
-                return Err(WorkflowError::BuilderInvalid(
-                    "plan budget limits must be finite and non-negative".to_string(),
-                ));
-            }
-        }
+        budget.validate().map_err(WorkflowError::BuilderInvalid)?;
         self.context.budget.set_plan_limits(budget);
         self.budget_changed();
         Ok(())
@@ -462,10 +456,22 @@ impl Workflow {
     }
 
     /// The points of each plan window the run has used so far, counted
-    /// from the levels it first saw (see [`WorkflowBuilder::plan_budget`]);
-    /// `None` for a window no report has shown yet.
+    /// from the levels it first saw (see [`WorkflowBuilder::plan_budget`]):
+    /// with several plans, the most any plan has used of each window (see
+    /// [`plan_usage_spent_of`](Self::plan_usage_spent_of)). `None` for a
+    /// window no report has shown yet.
     pub fn plan_usage_spent(&self) -> crate::budget::PlanUsageSpent {
         self.context.budget.plan_spent()
+    }
+
+    /// The points of each of `plan`'s windows the run has used so far, as
+    /// [`plan_usage_spent`](Self::plan_usage_spent) counts them; `None` for
+    /// a window no report of the plan has shown yet.
+    pub fn plan_usage_spent_of(
+        &self,
+        plan: arko_ai::SubscriptionPlan,
+    ) -> crate::budget::PlanUsageSpent {
+        self.context.budget.plan_spent_of(plan)
     }
 
     /// With the task journal saving running agents, a live checkpoint
@@ -1074,27 +1080,30 @@ impl WorkflowBuilder {
     }
 
     /// Set a plan budget: how many percentage points of the subscription
-    /// plan's five-hour and seven-day usage windows the run may use,
+    /// plans' five-hour and seven-day usage windows the run may use,
     /// counted from each window's level in the first plan usage report the
     /// run sees (Claude Code's `rate_limit_event`, ChatGPT OAuth's usage
-    /// headers). After a window resets, the points used before the reset
-    /// still count and the new period counts from 0. Plan usage is
-    /// account-wide: reports from every agent update the same windows, and
-    /// use of the same plan outside the run while it runs counts too. The
-    /// points are known once a request completes, so, as with a dollar
-    /// budget, the requests in flight when the limit is reached complete
-    /// and can take the run past it.
+    /// headers). Each plan's windows are counted separately: `five_hour`
+    /// and `seven_day` limit each plan's, and a plan's own limits
+    /// (`chatgpt`, `claude_code`) replace them for that plan. After a
+    /// window resets, the points used before the reset still count and the
+    /// new period counts from 0. Plan usage is account-wide: reports from
+    /// every agent update the same windows of their plan, and use of the
+    /// same plan outside the run while it runs counts too. The points are
+    /// known once a request completes, so, as with a dollar budget, the
+    /// requests in flight when the limit is reached complete and can take
+    /// the run past it.
     ///
-    /// Exceeding a window's limit is handled as exceeding the dollar budget
-    /// is (see [`budget_exceeded_policy`](Self::budget_exceeded_policy)):
+    /// Exceeding any plan's window's limit is handled as exceeding the
+    /// dollar budget is (see [`budget_exceeded_policy`](Self::budget_exceeded_policy)):
     /// by default agents are held until it is raised
     /// ([`Workflow::set_plan_budget`]); `OnBudgetExceeded` fires once per
-    /// crossing, with `plan_window` (`five_hour` or `seven_day`),
-    /// `plan_points_used` and `plan_points_limit` in its metadata.
-    /// Checkpoints record the limits and the counting, so a resumed run
-    /// counts from where the run started; on resume, each window's limit
-    /// combines with the recorded one as dollar limits do (see
-    /// [`resume_from`](Self::resume_from)).
+    /// crossing, with `plan` (`chatgpt` or `claude_code`), `plan_window`
+    /// (`five_hour` or `seven_day`), `plan_points_used` and
+    /// `plan_points_limit` in its metadata. Checkpoints record the limits
+    /// and the counting, so a resumed run counts from where the run
+    /// started; on resume, each limit combines with the recorded one as
+    /// dollar limits do (see [`resume_from`](Self::resume_from)).
     pub fn plan_budget(mut self, budget: crate::budget::PlanBudget) -> Self {
         self.plan_budget = budget;
         self
@@ -1202,10 +1211,12 @@ impl WorkflowBuilder {
     /// checkpoint recorded; a checkpoint written before limits were
     /// recorded leaves the builder's. So resuming with a higher budget
     /// raises it, and resuming with the budget the run was built with keeps
-    /// a raise made while it was live (a lowering is not kept). Each window
-    /// of a [`plan_budget`](Self::plan_budget) follows the same rule, and
-    /// the resumed run keeps counting plan usage from the levels the run
-    /// first saw, not from the levels at the resume.
+    /// a raise made while it was live (a lowering is not kept). Each limit
+    /// of a [`plan_budget`](Self::plan_budget) (each window's, and each
+    /// plan's own) follows the same rule, and the resumed run keeps
+    /// counting plan usage from the levels the run first saw, not from the
+    /// levels at the resume. The counting of a checkpoint written before
+    /// plans were counted apart is taken over by the first plan to report.
     ///
     /// Memory: the current configuration decides each tier's readers,
     /// writers, limit and write mode, and the checkpoint supplies content
@@ -1468,8 +1479,6 @@ impl WorkflowBuilder {
         for (label, value) in [
             ("budget limit", self.budget_limit),
             ("budget warning", self.budget_warning),
-            ("five-hour plan budget", self.plan_budget.five_hour),
-            ("seven-day plan budget", self.plan_budget.seven_day),
         ] {
             if let Some(value) = value
                 && (!value.is_finite() || value < 0.0)
@@ -1479,6 +1488,9 @@ impl WorkflowBuilder {
                 )));
             }
         }
+        self.plan_budget
+            .validate()
+            .map_err(WorkflowError::BuilderInvalid)?;
 
         let mut agent_names = HashSet::new();
         for (agent_name, _) in &self.agents {
@@ -1831,16 +1843,20 @@ impl WorkflowBuilder {
             .and_then(|state| state.plan_budget.clone());
         let mut plan_budget = self.plan_budget;
         if let Some(recorded) = &recorded_plan {
-            for window in crate::budget::PlanWindow::ALL {
+            for (plan, window) in crate::budget::PlanBudget::slots() {
                 plan_budget.set(
+                    plan,
                     window,
-                    resumed_limit(plan_budget.limit(window), recorded.limits.limit(window)),
+                    resumed_limit(
+                        plan_budget.own(plan, window),
+                        recorded.limits.own(plan, window),
+                    ),
                 );
             }
         }
         budget.set_plan_limits(plan_budget);
         if let Some(recorded) = recorded_plan {
-            budget.restore_plan_usage(recorded.usage);
+            budget.restore_plan_usage(recorded);
         }
         // On resume the configuration decides access, limits and write
         // modes; the checkpoint supplies content and history by tier name.

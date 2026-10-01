@@ -7,9 +7,13 @@
 //! text: the shell's own words, variables it can resolve, `cd`, redirections,
 //! pipelines, and nested `sh -c`, `cmd /c`, and `powershell -Command`
 //! strings. A script or program the command runs is not inspected.
+//!
+//! [`CommandRule`]s, off by default, allow or refuse programs and their
+//! arguments, matched against each command the guard finds.
 
 mod lex;
 mod paths;
+mod rules;
 #[cfg(test)]
 mod tests;
 
@@ -17,8 +21,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use lex::{Command, Piece, VarForm, Word};
+use lex::{Command, Piece, Subshell, VarForm, Word};
 use paths::{AbsPath, MAYBE_EMPTY, NONEMPTY, PathStyle};
+use rules::Rules;
+pub use rules::{CommandRule, RuleAction};
 
 /// The command language a shell speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,8 +65,21 @@ pub struct CommandGuard {
     /// except a top-level directory named exactly.
     pub allowed_paths: Vec<PathBuf>,
     /// Turn the guard off: every command runs as written, including ones
-    /// that delete the filesystem root or the home directory.
+    /// that delete the filesystem root or the home directory, and the
+    /// `rules` don't apply.
     pub dangerously_allow_all_commands: bool,
+    /// Programs and arguments to allow or refuse, matched against every
+    /// command the guard finds in the line: each pipeline and list item,
+    /// commands after `cd` and wrappers (`sudo`, `env`, `timeout`, …), in
+    /// `sh -c`, `eval`, `$(…)` and backticks, and run by `xargs` and
+    /// `find -exec`. Empty (the default): none.
+    ///
+    /// A command is refused when a [`Deny`](RuleAction::Deny) rule matches
+    /// it, or when its program has [`Allow`](RuleAction::Allow) rules and
+    /// none matches it; otherwise only the path checks apply. While there
+    /// are rules, a command whose program, or nested command text, is only
+    /// known when it runs is refused too, since the rules can't check it.
+    pub rules: Vec<CommandRule>,
 }
 
 /// Why the guard refused a command. The message is written for the model:
@@ -69,7 +88,8 @@ pub struct CommandGuard {
 #[error("{message}")]
 pub struct CommandRefusal {
     pub message: String,
-    /// The path the command would have affected, as the guard resolved it.
+    /// The path the command would have affected, as the guard resolved it;
+    /// for a refusal by the [`rules`](CommandGuard::rules), the command.
     pub target: String,
     /// The path is protected: only `dangerously_allow_all_commands` allows it.
     pub protected: bool,
@@ -103,9 +123,12 @@ impl CommandGuard {
         if self.dangerously_allow_all_commands {
             return Ok(());
         }
+        let rules = Rules::new(&self.rules, host.style, host.workspace.as_ref());
         let mut analysis = Analysis {
             host,
+            rules: &rules,
             findings: Vec::new(),
+            refusal: None,
             pipeline: 0,
         };
         let mut scope = Scope::new(host.workspace.clone());
@@ -119,6 +142,9 @@ impl CommandGuard {
                 }
                 _ => {}
             }
+        }
+        if let Some(refusal) = analysis.refusal {
+            return Err(refusal);
         }
         outside.map_or(Ok(()), |finding| Err(finding.refusal(host)))
     }
@@ -558,7 +584,7 @@ impl Finding {
 
 // -------------------------------------------------------------- analysis
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum Value {
     Known(String),
     Unknown,
@@ -573,6 +599,9 @@ struct Scope {
     /// Paths listed by the first command of each pipeline (`find`, `ls`,
     /// `Get-ChildItem`), which `xargs rm` or `Remove-Item` downstream receive.
     listings: HashMap<usize, Vec<Located>>,
+    /// Paths listed in a POSIX subshell, group or compound command that is a
+    /// pipeline's member, by the pipeline of the member after it.
+    fed_listings: HashMap<usize, Vec<Located>>,
 }
 
 impl Scope {
@@ -582,6 +611,7 @@ impl Scope {
             vars: HashMap::new(),
             opaque: false,
             listings: HashMap::new(),
+            fed_listings: HashMap::new(),
         }
     }
 
@@ -592,7 +622,45 @@ impl Scope {
             ..Self::new(self.cwd.clone())
         }
     }
+
+    /// A subshell (`$(…)`, a command `find` runs): the same directory and
+    /// variables.
+    fn subshell(&self, cwd: Option<AbsPath>) -> Self {
+        Self {
+            vars: self.vars.clone(),
+            opaque: self.opaque,
+            ..Self::new(cwd)
+        }
+    }
+
+    /// What a subshell in the line (`( … )`, a background list, a pipeline's
+    /// member) can change and loses when it ends: the directory and the
+    /// variables.
+    fn save(&self) -> Saved {
+        (self.cwd.clone(), self.vars.clone())
+    }
+
+    /// The shell after a subshell ends.
+    fn restore(&mut self, (cwd, vars): Saved) {
+        self.cwd = cwd;
+        self.vars = vars;
+    }
+
+    /// The shell after commands that may have run in a subshell or in this
+    /// shell: what they changed is only known when they run.
+    fn merge(&mut self, (cwd, vars): Saved) {
+        if self.cwd != cwd {
+            self.cwd = None;
+        }
+        for (name, value) in &mut self.vars {
+            if vars.get(name) != Some(value) {
+                *value = Value::Unknown;
+            }
+        }
+    }
 }
+
+type Saved = (Option<AbsPath>, HashMap<String, Value>);
 
 #[derive(Debug, Default)]
 struct Resolved {
@@ -616,7 +684,10 @@ static DOTNET_DELETE: LazyLock<regex::Regex> = LazyLock::new(|| {
 
 struct Analysis<'h> {
     host: &'h Host,
+    rules: &'h Rules<'h>,
     findings: Vec<Finding>,
+    /// The first refusal by the rules.
+    refusal: Option<CommandRefusal>,
     /// The pipeline of the command being checked.
     pipeline: usize,
 }
@@ -624,6 +695,9 @@ struct Analysis<'h> {
 impl Analysis<'_> {
     fn run(&mut self, dialect: ShellDialect, source: &str, scope: &mut Scope, depth: usize) {
         if depth > MAX_NESTING {
+            if !self.rules.is_empty() && self.refusal.is_none() {
+                self.refusal = Some(rules::too_deep());
+            }
             return;
         }
         let commands = lex::lex(dialect, source);
@@ -644,8 +718,19 @@ impl Analysis<'_> {
                 }
             }
         }
+        // What a POSIX subshell changes ends with it; what a pipeline's last
+        // member changes is only known when it runs.
+        let mut subshells = Vec::new();
         for command in &commands {
+            subshells.extend(command.opens.iter().map(|kind| (*kind, scope.save())));
             self.command(dialect, command, scope, depth);
+            for _ in 0..command.closes {
+                match subshells.pop() {
+                    Some((Subshell::Always, saved)) => scope.restore(saved),
+                    Some((Subshell::Maybe, saved)) => scope.merge(saved),
+                    None => {}
+                }
+            }
         }
     }
 
@@ -656,6 +741,7 @@ impl Analysis<'_> {
         scope: &mut Scope,
         depth: usize,
     ) {
+        self.substitutions(dialect, command, scope, depth);
         self.pipeline = command.pipeline;
         for redirect in &command.redirects {
             let op = if redirect.append {
@@ -681,12 +767,35 @@ impl Analysis<'_> {
             ShellDialect::PowerShell if self.assign_powershell(scope, words) => return,
             _ => {}
         }
+        // PowerShell runs a quoted or computed first word only after `&`;
+        // otherwise the statement is an expression.
+        let expression = dialect == ShellDialect::PowerShell
+            && !command.call
+            && words
+                .first()
+                .is_some_and(|word| word.quoted || word.literal().is_none());
+        if !expression {
+            self.check_rules(dialect, &command.words, scope);
+        }
+        // The directory a wrapper (`env -C`, `sudo -D`, `unshare -w`) runs
+        // the command in.
+        let mut directory = None;
         loop {
             let Some(name) = words.first().and_then(command_name) else {
                 return;
             };
             match skip_prefix(dialect, &name, &words[1..]) {
-                Some(skipped) => words = &words[1 + skipped..],
+                Some(skipped) => {
+                    let end = (1 + skipped).min(words.len());
+                    let from = directory.clone().unwrap_or_else(|| scope.cwd.clone());
+                    if dialect == ShellDialect::Posix
+                        && let Some(changed) =
+                            self.wrapper_directory(&name, &words[1..end], scope, from.as_ref())
+                    {
+                        directory = Some(changed);
+                    }
+                    words = &words[end..];
+                }
                 None => break,
             }
         }
@@ -695,9 +804,15 @@ impl Analysis<'_> {
         };
         let program = words[0].literal().unwrap_or_else(|| name.clone());
         let rest = &words[1..];
+        // The command runs there; the shell stays where it is.
+        let shell_directory = directory.map(|cwd| std::mem::replace(&mut scope.cwd, cwd));
         if !command.piped
             && let Some(listing) = self.listing(dialect, &name, rest, scope)
         {
+            for pipeline in &command.feeds {
+                let fed = scope.fed_listings.entry(*pipeline).or_default();
+                fed.extend(listing.iter().cloned());
+            }
             scope.listings.insert(command.pipeline, listing);
         }
         match dialect {
@@ -706,6 +821,209 @@ impl Analysis<'_> {
             ShellDialect::PowerShell => {
                 self.powershell(&name, &program, rest, command, scope, depth)
             }
+        }
+        if let Some(cwd) = shell_directory {
+            scope.cwd = cwd;
+        }
+    }
+
+    // -------------------------------------------------------------- rules
+
+    /// Checks the command `words` run against the rules, with the commands
+    /// that wrappers (`sudo`, `env`, `timeout`, …) in front of it run.
+    fn check_rules(&mut self, dialect: ShellDialect, words: &[Word], scope: &Scope) {
+        if self.rules.is_empty() || self.refusal.is_some() {
+            return;
+        }
+        let assignments = match dialect {
+            ShellDialect::Posix => words.iter().take_while(|w| assignment(w).is_some()).count(),
+            _ => 0,
+        };
+        // A git command run with another repository's variables isn't in
+        // the directory it runs in.
+        let mut elsewhere = words[..assignments]
+            .iter()
+            .filter_map(assignment)
+            .any(|(name, _)| names_repository(&name))
+            || REPOSITORY_VARIABLES.iter().any(|&name| {
+                // Shell variables as each dialect stores them.
+                let lower = name.to_ascii_lowercase();
+                let set = [name.to_string(), format!("env:{lower}"), lower]
+                    .iter()
+                    .filter_map(|key| scope.vars.get(key))
+                    .any(|value| !matches!(value, Value::Known(text) if text.is_empty()));
+                set || self.host.env(name).is_some_and(|value| !value.is_empty())
+            });
+        let mut directory = scope.cwd.clone();
+        let words = self.rule_words(dialect, scope, &words[assignments..]);
+        let mut rest = words.as_slice();
+        while let Some(program) = rest.first() {
+            let name = program.as_deref().map(base_name);
+            if let Err(refusal) = self.rules.check(rest, directory.as_ref(), elsewhere) {
+                self.refusal = Some(refusal);
+                return;
+            }
+            let Some(name) = name else {
+                return;
+            };
+            let arguments: Vec<Word> = rest[1..]
+                .iter()
+                .map(|word| match word {
+                    Some(text) => literal_word(text),
+                    None => Word {
+                        pieces: vec![Piece::Unknown],
+                        quoted: false,
+                    },
+                })
+                .collect();
+            let Some(skipped) = skip_prefix(dialect, &name, &arguments) else {
+                return;
+            };
+            let (options, command) = rest.split_at((1 + skipped).min(rest.len()));
+            let any = |test: fn(&str) -> bool| options[1..].iter().flatten().any(|o| test(o));
+            match name.as_str() {
+                // `command -v git` only looks the program up.
+                "command" if any(|o| o == "-v" || o == "-V") => return,
+                // `env -C`, `sudo -D` and `unshare -w` run the command in
+                // another directory, `unshare -R` under another root.
+                "env" | "sudo" if any(|o| matches!(o, "-C" | "-D") || o.starts_with("--chdir")) => {
+                    directory = None;
+                }
+                "unshare"
+                    if any(|o| {
+                        ["-w", "--wd", "-R", "--root"]
+                            .iter()
+                            .any(|option| o.starts_with(option))
+                    }) =>
+                {
+                    directory = None;
+                }
+                _ => {}
+            }
+            elsewhere |= matches!(name.as_str(), "env" | "sudo" | "strace") && any(sets_repository);
+            rest = command;
+        }
+    }
+
+    /// `words` as the rules see them: resolved, with an unquoted variable
+    /// split into words as the shell splits it (PowerShell doesn't), and
+    /// `None` for a word only known when the command runs.
+    fn rule_words(
+        &self,
+        dialect: ShellDialect,
+        scope: &Scope,
+        words: &[Word],
+    ) -> Vec<Option<String>> {
+        let mut resolved_words = Vec::new();
+        for word in words {
+            if let Some(text) = word.literal() {
+                resolved_words.push(Some(text));
+                continue;
+            }
+            let resolved = self.resolve(dialect, scope, word);
+            let splits = !word.quoted
+                && dialect != ShellDialect::PowerShell
+                && word
+                    .pieces
+                    .iter()
+                    .any(|piece| matches!(piece, Piece::Var(..)));
+            if resolved.unknown || resolved.aborts {
+                resolved_words.push(None);
+            } else if splits {
+                resolved_words.extend(
+                    resolved
+                        .text
+                        .split_whitespace()
+                        .map(|text| Some(text.to_string())),
+                );
+            } else {
+                resolved_words.push(Some(resolved.text));
+            }
+        }
+        resolved_words
+    }
+
+    /// Checks the commands in `command`'s substitutions (`$(…)`, backticks,
+    /// PowerShell's `(…)`) against the rules. Only the rules: the guard
+    /// doesn't follow the paths they act on.
+    fn substitutions(
+        &mut self,
+        dialect: ShellDialect,
+        command: &Command,
+        scope: &Scope,
+        depth: usize,
+    ) {
+        if self.rules.is_empty() {
+            return;
+        }
+        let words = command
+            .words
+            .iter()
+            .chain(command.redirects.iter().map(|redirect| &redirect.target));
+        for piece in words.flat_map(|word| &word.pieces) {
+            if let Piece::Substitution(text) | Piece::Group(text) = piece {
+                let mut subshell = scope.subshell(scope.cwd.clone());
+                self.rules_only(|analysis| analysis.run(dialect, text, &mut subshell, depth + 1));
+            }
+        }
+    }
+
+    /// The commands `find -exec`, `-execdir`, `-ok` and `-okdir` run,
+    /// checked against the rules only: the deletes `find` itself does are
+    /// checked with its other arguments.
+    fn find_commands(&mut self, rest: &[Word], command: &Command, scope: &Scope, depth: usize) {
+        if self.rules.is_empty() {
+            return;
+        }
+        let mut index = 0;
+        while let Some(word) = rest.get(index) {
+            index += 1;
+            let flag = word.literal().unwrap_or_default();
+            if !matches!(flag.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir") {
+                continue;
+            }
+            let end = rest[index..]
+                .iter()
+                .position(|word| matches!(word.literal().as_deref(), Some(";" | "+")))
+                .map_or(rest.len(), |at| index + at);
+            let inner = &rest[index..end];
+            index = end + 1;
+            // `-execdir` runs the command in each found file's directory.
+            let cwd = (!flag.ends_with("dir"))
+                .then(|| scope.cwd.clone())
+                .flatten();
+            let mut subshell = scope.subshell(cwd);
+            self.check_rules(ShellDialect::Posix, inner, &subshell);
+            if let Some(name) = inner.first().and_then(command_name) {
+                let program = inner[0].literal().unwrap_or_else(|| name.clone());
+                self.rules_only(|analysis| {
+                    analysis.posix(
+                        &name,
+                        &program,
+                        &inner[1..],
+                        command,
+                        &mut subshell,
+                        depth + 1,
+                    )
+                });
+            }
+        }
+    }
+
+    /// Runs `check` for the rules only: the path findings it adds are
+    /// dropped.
+    fn rules_only(&mut self, check: impl FnOnce(&mut Self)) {
+        let (findings, pipeline) = (self.findings.len(), self.pipeline);
+        check(self);
+        self.findings.truncate(findings);
+        self.pipeline = pipeline;
+    }
+
+    /// A command the guard can't read in advance, which `what` runs:
+    /// refused while there are rules, since they can't check it.
+    fn unchecked(&mut self, what: &str) {
+        if !self.rules.is_empty() && self.refusal.is_none() {
+            self.refusal = Some(rules::unchecked(what));
         }
     }
 
@@ -770,7 +1088,7 @@ impl Analysis<'_> {
     /// or the working directory's contents when that is unknown.
     fn pipeline_input(&mut self, scope: &Scope, op: Op, program: &str) {
         let listed = scope.listings.get(&self.pipeline).cloned();
-        let places = listed.unwrap_or_else(|| match &scope.cwd {
+        let mut places = listed.unwrap_or_else(|| match &scope.cwd {
             Some(cwd) => vec![Located {
                 path: Some(cwd.clone()),
                 span: Span::Contents,
@@ -778,6 +1096,9 @@ impl Analysis<'_> {
             }],
             None => vec![Located::unknown()],
         });
+        if let Some(fed) = scope.fed_listings.get(&self.pipeline) {
+            places.extend(fed.iter().cloned());
+        }
         for place in places {
             self.record(&place, op, program, "the pipeline input", None);
         }
@@ -873,7 +1194,7 @@ impl Analysis<'_> {
                         resolved.unknown = true;
                     }
                 },
-                Piece::Unknown | Piece::Group(_) => {
+                Piece::Unknown | Piece::Substitution(_) | Piece::Group(_) => {
                     resolved.text.push(MAYBE_EMPTY);
                     resolved.unknown = true;
                 }
@@ -1067,6 +1388,49 @@ impl Analysis<'_> {
         true
     }
 
+    /// The directory a wrapper's `options` run its command in, when they name
+    /// one (`env -C`, `env --chdir=`, `sudo -D`, `unshare -w`): resolved from
+    /// `from` as `cd` resolves it, `None` inside when it is only known when the
+    /// command runs.
+    fn wrapper_directory(
+        &self,
+        name: &str,
+        options: &[Word],
+        scope: &Scope,
+        from: Option<&AbsPath>,
+    ) -> Option<Option<AbsPath>> {
+        let (short, long) = match name {
+            "env" => ("-C", "--chdir"),
+            "sudo" => ("-D", "--chdir"),
+            "unshare" => ("-w", "--wd"),
+            _ => return None,
+        };
+        let mut value = None;
+        let mut words = options.iter();
+        while let Some(word) = words.next() {
+            match word.literal().as_deref() {
+                Some(option) if option == short || option == long => {
+                    value = words.next().cloned();
+                }
+                _ => {
+                    if let Some(attached) = strip_word_prefix(word, &format!("{long}="))
+                        .or_else(|| strip_word_prefix(word, short))
+                    {
+                        value = Some(attached);
+                    }
+                }
+            }
+        }
+        let resolved = self.resolve(ShellDialect::Posix, scope, &value?);
+        Some(
+            if resolved.unknown || resolved.aborts || resolved.text.is_empty() {
+                None
+            } else {
+                AbsPath::parse(self.host.style, &resolved.text, from)
+            },
+        )
+    }
+
     fn change_directory(&self, dialect: ShellDialect, scope: &mut Scope, rest: &[Word]) {
         let operand = match dialect {
             ShellDialect::Posix => posix_operands(rest, &[]).first().copied(),
@@ -1122,6 +1486,20 @@ impl Analysis<'_> {
         Some(parts.join(" "))
     }
 
+    /// Checks command `text` a program runs through a POSIX shell; `what`
+    /// names it when the text is only known when it runs.
+    fn shell_text(&mut self, text: Option<&Word>, what: &str, scope: &Scope, depth: usize) {
+        let Some(word) = text else {
+            return;
+        };
+        let resolved = self.resolve(ShellDialect::Posix, scope, word);
+        if resolved.unknown {
+            self.unchecked(what);
+        } else {
+            self.nested(ShellDialect::Posix, &resolved.text, scope, depth);
+        }
+    }
+
     fn posix_shell(&mut self, dialect: ShellDialect, rest: &[Word], scope: &Scope, depth: usize) {
         let mut index = 0;
         let mut script = false;
@@ -1138,6 +1516,8 @@ impl Analysis<'_> {
             let resolved = self.resolve(dialect, scope, word);
             if !resolved.unknown {
                 self.nested(ShellDialect::Posix, &resolved.text, scope, depth);
+            } else {
+                self.unchecked("`sh -c`");
             }
         }
     }
@@ -1148,10 +1528,11 @@ impl Analysis<'_> {
                 matches!(flag.to_ascii_lowercase().as_str(), "/c" | "/k" | "/r")
             })
         });
-        if let Some(start) = start
-            && let Some(text) = self.join(dialect, scope, &rest[start + 1..])
-        {
-            self.nested(ShellDialect::Cmd, &text, scope, depth);
+        if let Some(start) = start {
+            match self.join(dialect, scope, &rest[start + 1..]) {
+                Some(text) => self.nested(ShellDialect::Cmd, &text, scope, depth),
+                None => self.unchecked("`cmd /c`"),
+            }
         }
     }
 
@@ -1188,26 +1569,29 @@ impl Analysis<'_> {
                 .and_then(|text| text.strip_prefix('-').map(str::to_ascii_lowercase))
             else {
                 // powershell.exe runs a bare argument as a command; pwsh runs it as a file.
-                if name == "powershell"
-                    && let Some(text) = self.join(dialect, scope, &rest[index..])
-                {
-                    self.nested(ShellDialect::PowerShell, &text, scope, depth);
+                if name == "powershell" {
+                    match self.join(dialect, scope, &rest[index..]) {
+                        Some(text) => self.nested(ShellDialect::PowerShell, &text, scope, depth),
+                        None => self.unchecked("`powershell`"),
+                    }
                 }
                 return;
             };
             if !flag.is_empty() && "command".starts_with(&flag) && flag != "co" {
-                if let Some(text) = self.join(dialect, scope, &rest[index + 1..]) {
-                    self.nested(ShellDialect::PowerShell, &text, scope, depth);
+                match self.join(dialect, scope, &rest[index + 1..]) {
+                    Some(text) => self.nested(ShellDialect::PowerShell, &text, scope, depth),
+                    None => self.unchecked("`powershell -Command`"),
                 }
                 return;
             }
             if !flag.is_empty() && "encodedcommand".starts_with(&flag) || flag == "ec" {
-                if let Some(text) = rest
+                match rest
                     .get(index + 1)
                     .and_then(Word::literal)
                     .and_then(|encoded| decode_utf16_base64(&encoded))
                 {
-                    self.nested(ShellDialect::PowerShell, &text, scope, depth);
+                    Some(text) => self.nested(ShellDialect::PowerShell, &text, scope, depth),
+                    None => self.unchecked("`powershell -EncodedCommand`"),
                 }
                 return;
             }
@@ -1255,17 +1639,45 @@ impl Analysis<'_> {
                     scope.vars.insert(name, Value::Unknown);
                 }
             }
-            "eval" => {
-                if let Some(text) = self.join(DIALECT, scope, rest) {
-                    self.run(DIALECT, &text, scope, depth + 1);
-                }
-            }
+            "eval" => match self.join(DIALECT, scope, rest) {
+                Some(text) => self.run(DIALECT, &text, scope, depth + 1),
+                None => self.unchecked("`eval`"),
+            },
             "sh" | "bash" | "zsh" | "dash" | "ksh" | "mksh" | "ash" | "fish" => {
                 self.posix_shell(DIALECT, rest, scope, depth)
             }
             "cmd" => self.cmd_shell(DIALECT, rest, scope, depth),
             "powershell" | "pwsh" => self.powershell_shell(DIALECT, name, rest, scope, depth),
+            // Programs that run command text through a shell.
+            "su" => {
+                let text = command_option(rest, &["--command", "--session-command"]);
+                self.shell_text(text.as_ref(), "`su -c`", scope, depth);
+            }
+            "script" => {
+                let text = command_option(rest, &["--command"]);
+                self.shell_text(text.as_ref(), "`script -c`", scope, depth);
+            }
+            "flock" => {
+                let lock = leading_options(rest, FLOCK_VALUED, false);
+                if matches!(
+                    rest.get(lock + 1).and_then(Word::literal).as_deref(),
+                    Some("-c" | "--command")
+                ) {
+                    self.shell_text(rest.get(lock + 2), "`flock -c`", scope, depth);
+                }
+            }
+            "watch" => {
+                let start = leading_options(rest, WATCH_VALUED, false).min(rest.len());
+                match self.join(DIALECT, scope, &rest[start..]) {
+                    Some(text) => self.nested(DIALECT, &text, scope, depth),
+                    None => self.unchecked("`watch`"),
+                }
+            }
             "xargs" => self.xargs(rest, command, scope, depth),
+            "find" => {
+                self.find_commands(rest, command, scope, depth);
+                self.posix_rules(name, program, rest, scope);
+            }
             _ => self.posix_rules(name, program, rest, scope),
         }
     }
@@ -1460,6 +1872,7 @@ impl Analysis<'_> {
             };
         }
         let inner = &rest[index.min(rest.len())..];
+        self.check_rules(ShellDialect::Posix, inner, scope);
         let Some(name) = inner.first().and_then(command_name) else {
             return;
         };
@@ -1509,12 +1922,7 @@ impl Analysis<'_> {
         if !force {
             return;
         }
-        let scope = Scope {
-            cwd: directory.clone(),
-            vars: scope.vars.clone(),
-            opaque: scope.opaque,
-            listings: HashMap::new(),
-        };
+        let scope = scope.subshell(directory.clone());
         let paths = posix_operands(args, &["-e", "--exclude"]);
         if paths.is_empty() {
             let place = Located {
@@ -1740,11 +2148,14 @@ impl Analysis<'_> {
                 self.disk(program, "a disk");
             }
             "invoke-expression" | "iex" => {
-                if let Some(word) = arguments.positional.first() {
-                    let resolved = self.resolve(DIALECT, scope, word);
-                    if !resolved.unknown {
-                        self.run(DIALECT, &resolved.text, scope, depth + 1);
-                    }
+                let resolved = arguments
+                    .positional
+                    .first()
+                    .map(|word| self.resolve(DIALECT, scope, word))
+                    .filter(|resolved| !resolved.unknown);
+                match resolved {
+                    Some(resolved) => self.run(DIALECT, &resolved.text, scope, depth + 1),
+                    None => self.unchecked("`Invoke-Expression`"),
                 }
             }
             "foreach" | "for" => {
@@ -1859,48 +2270,260 @@ fn is_remote(text: &str) -> bool {
     colon.is_some_and(|colon| colon > 1 && slash.is_none_or(|slash| colon < slash))
 }
 
+/// git's variables that point it at another repository, work tree, index or
+/// object store than the directory's.
+const REPOSITORY_VARIABLES: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+];
+
+fn names_repository(name: &str) -> bool {
+    REPOSITORY_VARIABLES.contains(&name)
+}
+
+/// Whether a wrapper's option sets one of git's repository variables:
+/// `env GIT_DIR=…`, `sudo GIT_DIR=…`, `strace -E GIT_DIR=…`.
+fn sets_repository(option: &str) -> bool {
+    let option = option
+        .strip_prefix("--env=")
+        .or_else(|| option.strip_prefix("-E"))
+        .unwrap_or(option);
+    option
+        .split_once('=')
+        .is_some_and(|(name, _)| names_repository(name))
+}
+
+/// How many of `rest`'s first words are options (and with `assignments`,
+/// `NAME=value` words): `valued` options take the next word as their value.
+fn leading_options(rest: &[Word], valued: &[&str], assignments: bool) -> usize {
+    let mut index = 0;
+    while let Some(word) = rest.get(index) {
+        let Some(text) = word.literal() else {
+            break;
+        };
+        if assignments && assignment(word).is_some() {
+            index += 1;
+        } else if text.starts_with('-') && text.len() > 1 {
+            index += if valued.contains(&text.as_str()) {
+                2
+            } else {
+                1
+            };
+        } else {
+            break;
+        }
+    }
+    index
+}
+
+/// `flock`'s options that take a value.
+const FLOCK_VALUED: &[&str] = &["-w", "--timeout", "-E", "--conflict-exit-code"];
+
+/// `watch`'s options that take a value.
+const WATCH_VALUED: &[&str] = &["-n", "--interval", "-q", "--equexit"];
+
+/// The text a program runs through a shell from its `-c` option or one of
+/// its `long` options: `su -c 'git push'`, `script -qc make log`,
+/// `su --command='git push'`.
+fn command_option(rest: &[Word], long: &[&str]) -> Option<Word> {
+    let mut words = rest.iter();
+    while let Some(word) = words.next() {
+        let Some(Piece::Text(text)) = word.pieces.first() else {
+            continue;
+        };
+        // `-c`, short options ending with it (`-qc`), or a long option: the
+        // text is the next word.
+        let short = text.len() > 1
+            && text.starts_with('-')
+            && text[1..].chars().all(|c| c.is_ascii_alphabetic());
+        let whole = word.pieces.len() == 1;
+        if whole && ((short && text.ends_with('c')) || long.contains(&text.as_str())) {
+            return words.next().cloned();
+        }
+        // `--command=…`, `-c…`.
+        if let Some(value) = long
+            .iter()
+            .find_map(|option| strip_word_prefix(word, &format!("{option}=")))
+        {
+            return Some(value);
+        }
+        if text.starts_with("-c") {
+            return strip_word_prefix(word, "-c");
+        }
+    }
+    None
+}
+
 /// Words that name what `name` runs, if `name` only prefixes another command
 /// (`sudo`, `env`, `then`): how many following words belong to it.
 fn skip_prefix(dialect: ShellDialect, name: &str, rest: &[Word]) -> Option<usize> {
-    let options = |valued: &[&str], skip_assignments: bool| {
-        let mut index = 0;
-        while let Some(word) = rest.get(index) {
-            let Some(text) = word.literal() else {
-                break;
-            };
-            if skip_assignments && assignment(word).is_some() {
-                index += 1;
-            } else if text.starts_with('-') && text.len() > 1 {
-                index += if valued.contains(&text.as_str()) {
-                    2
-                } else {
-                    1
-                };
-            } else {
-                break;
-            }
-        }
-        index
-    };
+    let options =
+        |valued: &[&str], skip_assignments: bool| leading_options(rest, valued, skip_assignments);
     match dialect {
         ShellDialect::Posix => match name {
             "if" | "then" | "else" | "elif" | "fi" | "do" | "done" | "while" | "until" | "!"
             | "{" | "}" | "nohup" | "builtin" | "noglob" | "nocorrect" | "unbuffer"
             | "caffeinate" => Some(0),
+            // sudo, like env, takes `NAME=value` assignments for the command.
             "sudo" => Some(options(
                 &[
-                    "-u", "-g", "-h", "-p", "-U", "-C", "-D", "-r", "-t", "-T", "-R",
+                    "-u",
+                    "-g",
+                    "-h",
+                    "-p",
+                    "-U",
+                    "-C",
+                    "-D",
+                    "-r",
+                    "-t",
+                    "-T",
+                    "-R",
+                    "--user",
+                    "--group",
+                    "--host",
+                    "--prompt",
+                    "--other-user",
+                    "--close-from",
+                    "--chdir",
+                    "--role",
+                    "--type",
+                    "--command-timeout",
+                    "--chroot",
                 ],
-                false,
+                true,
             )),
             "doas" => Some(options(&["-u", "-C"], false)),
             "env" => Some(options(&["-u", "-C", "-S", "--unset", "--chdir"], true)),
             "nice" => Some(options(&["-n", "--adjustment"], false)),
             "ionice" => Some(options(&["-c", "-n", "-p", "-t"], false)),
-            "time" | "command" => Some(options(&[], false)),
+            "time" | "command" | "setsid" | "chronic" => Some(options(&[], false)),
             "exec" => Some(options(&["-a"], false)),
             "stdbuf" => Some(options(&["-i", "-o", "-e"], false)),
             "timeout" => Some(options(&["-s", "-k", "--signal", "--kill-after"], false) + 1),
+            // `flock <lock> <command>`. After the lock, `-c <text>` runs the
+            // text through a shell instead (checked as nested shell text).
+            "flock" => {
+                let lock = options(FLOCK_VALUED, false);
+                match rest.get(lock + 1).and_then(Word::literal).as_deref() {
+                    Some("-c" | "--command") => None,
+                    _ => Some(lock + 1),
+                }
+            }
+            // `taskset <mask> <command>` (`-c`: a list for the mask); with
+            // `-p` it changes a running process instead.
+            "taskset" => {
+                let skipped = options(&[], false);
+                let process = rest[..skipped.min(rest.len())]
+                    .iter()
+                    .filter_map(Word::literal)
+                    .any(|option| {
+                        option == "--pid" || (!option.starts_with("--") && option.contains('p'))
+                    });
+                (!process).then_some(skipped + 1)
+            }
+            "unshare" => Some(options(
+                &[
+                    "-l",
+                    "--load-interp",
+                    "--propagation",
+                    "-R",
+                    "--root",
+                    "-w",
+                    "--wd",
+                    "-S",
+                    "--setuid",
+                    "-G",
+                    "--setgid",
+                    "--map-user",
+                    "--map-group",
+                    "--map-users",
+                    "--map-groups",
+                    "--owner",
+                    "--setgroups",
+                    "--monotonic",
+                    "--boottime",
+                ],
+                false,
+            )),
+            "strace" => Some(options(
+                &[
+                    "-a",
+                    "-b",
+                    "-e",
+                    "-E",
+                    "-I",
+                    "-o",
+                    "-O",
+                    "-p",
+                    "-P",
+                    "-s",
+                    "-S",
+                    "-u",
+                    "-U",
+                    "-X",
+                    "--attach",
+                    "--argv0",
+                    "--columns",
+                    "--const-print-style",
+                    "--detach-on",
+                    "--env",
+                    "--inject",
+                    "--interruptible",
+                    "--output",
+                    "--signal",
+                    "--status",
+                    "--string-limit",
+                    "--summary-columns",
+                    "--summary-sort-by",
+                    "--summary-syscall-overhead",
+                    "--syscall-limit",
+                    "--trace",
+                    "--trace-path",
+                    "--user",
+                ],
+                false,
+            )),
+            "ltrace" => Some(options(
+                &[
+                    "-a",
+                    "-A",
+                    "-D",
+                    "-e",
+                    "-F",
+                    "-l",
+                    "-n",
+                    "-o",
+                    "-p",
+                    "-s",
+                    "-u",
+                    "-w",
+                    "-x",
+                    "--align",
+                    "--config",
+                    "--debug",
+                    "--indent",
+                    "--library",
+                    "--output",
+                    "--where",
+                ],
+                false,
+            )),
+            // `watch -x` runs its arguments; without `-x`, their text
+            // through `sh -c` (checked as nested shell text).
+            "watch" => {
+                let skipped = options(WATCH_VALUED, false);
+                let exec = rest[..skipped.min(rest.len())]
+                    .iter()
+                    .filter_map(Word::literal)
+                    .any(|option| {
+                        option == "--exec" || (!option.starts_with("--") && option.contains('x'))
+                    });
+                exec.then_some(skipped)
+            }
             _ => None,
         },
         ShellDialect::Cmd => match name {

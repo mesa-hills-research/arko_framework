@@ -528,6 +528,818 @@ fn dialects_come_from_the_shell_program() {
     );
 }
 
+// ------------------------------------------------------------------ rules
+
+/// Checks each command under `rules` on `host`: `true` when it may run.
+#[track_caller]
+fn expect_ruled(rules: &[CommandRule], host: &Host, dialect: ShellDialect, cases: &[(bool, &str)]) {
+    let guard = CommandGuard {
+        rules: rules.to_vec(),
+        ..CommandGuard::default()
+    };
+    let failures: Vec<String> = cases
+        .iter()
+        .filter_map(|(runs, command)| {
+            let result = guard.check_on(host, dialect, command);
+            (result.is_ok() != *runs).then(|| {
+                format!(
+                    "{command:?}: expected {}, got {}",
+                    if *runs { "to run" } else { "a refusal" },
+                    result
+                        .err()
+                        .map_or("none".into(), |refusal| refusal.message)
+                )
+            })
+        })
+        .collect();
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+fn read_only_git() -> Vec<CommandRule> {
+    vec![
+        CommandRule::allow("git status *"),
+        CommandRule::allow("git log *"),
+        CommandRule::allow("git diff *"),
+        CommandRule::deny("git * --output* *"),
+    ]
+}
+
+#[test]
+fn an_allow_list_allows_only_its_commands_and_a_deny_wins() {
+    expect_ruled(
+        &read_only_git(),
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (true, "git status"),
+            (true, "git status --short"),
+            (true, "git log --oneline -5 -- src"),
+            (true, "/usr/bin/git diff HEAD~1"),
+            (true, "\"git\" log"),
+            (true, "git -C repo log"),
+            (true, "git --no-pager log -p"),
+            (true, "git -P diff"),
+            (true, "git --no-optional-locks status"),
+            (true, "git log $BUILD"),
+            (true, "cargo build && ls -la"),
+            (false, "git"),
+            (false, "git push origin main"),
+            (false, "git commit -am wip"),
+            (false, "git log --output=log.txt"),
+            (false, "git diff --output log.txt"),
+            (false, "git -c core.pager=less log"),
+            (false, "git --git-dir=other/.git log"),
+            (false, "git --work-tree other status"),
+            // An alias isn't one of the allowed commands.
+            (false, "git lg"),
+            (false, "git status && git push"),
+        ],
+    );
+}
+
+#[test]
+fn rules_match_commands_not_mentions_of_a_program() {
+    expect_ruled(
+        &read_only_git(),
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (true, "ls /usr/share/doc/git"),
+            (true, "grep -rn git ."),
+            (true, "echo git push"),
+            (true, "cat <<EOF\ngit push\nEOF"),
+            (
+                true,
+                "cat <<'EOF' > notes.md\ngit commit -am x\nEOF\necho ok",
+            ),
+            (true, "echo \"git push\" > notes.txt"),
+            (true, "# git push\nls"),
+            (true, "rg 'git push' src"),
+            (true, "which git && command -v git"),
+            (true, "cat .gitignore"),
+            (true, "for f in $(git diff --name-only); do echo $f; done"),
+        ],
+    );
+}
+
+#[test]
+fn rules_follow_commands_through_the_shell() {
+    expect_ruled(
+        &read_only_git(),
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (true, "bash -c 'git status'"),
+            (true, "ls | xargs git log"),
+            (true, "sudo git status"),
+            (false, "bash -c 'git push'"),
+            (false, "sh -c \"cd sub && git commit -m x\""),
+            (false, "eval 'git push'"),
+            (false, "env X=1 git push"),
+            (false, "FOO=1 git push"),
+            (false, "sudo -u luke git push"),
+            (false, "timeout 10 nice -n 5 git push"),
+            (false, "ls | xargs git add"),
+            (false, "find . -name '*.rs' | xargs -n 1 git add"),
+            (false, "find . -name '*.rs' -exec git add {} +"),
+            (
+                false,
+                "find . -name '*.rs' -execdir sh -c 'git add \"$1\"' _ {} \\;",
+            ),
+            (false, "cd sub && git commit -m x"),
+            (false, "true && git push || echo failed"),
+            (false, "if git diff --quiet; then git push; fi"),
+            (false, "(git push)"),
+            (false, "echo \"pushed: $(git push)\""),
+            (false, "echo `git push`"),
+            (false, "OUT=$(git push 2>&1)"),
+            (false, "G=git; $G push"),
+            (false, "ARGS='push origin'; git $ARGS"),
+            (false, "nohup git push &"),
+        ],
+    );
+}
+
+#[test]
+fn a_deny_pattern_spans_words() {
+    expect_ruled(
+        &[CommandRule::deny("cargo * publish *")],
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (false, "cargo publish"),
+            (false, "cargo +nightly publish --dry-run"),
+            (false, "cargo publish -p arko_ai"),
+            (true, "cargo test publish_tests"),
+            (true, "cargo build --release"),
+            (true, "git push"),
+        ],
+    );
+}
+
+#[test]
+fn an_allow_list_catches_arguments_a_deny_rule_cant_read() {
+    // As the docs say: a deny rule matches the words the guard reads; an
+    // argument only known when the command runs matches only `*`.
+    let hidden = ["cargo $(printf publish)", "sh -c 'cargo \"$1\"' _ publish"];
+    for command in hidden {
+        expect_ruled(
+            &[CommandRule::deny("cargo publish *")],
+            &linux(),
+            ShellDialect::Posix,
+            &[(true, command)],
+        );
+        expect_ruled(
+            &[
+                CommandRule::allow("cargo build *"),
+                CommandRule::allow("cargo test *"),
+            ],
+            &linux(),
+            ShellDialect::Posix,
+            &[(false, command), (true, "cargo test -p arko_ai")],
+        );
+    }
+}
+
+#[test]
+fn a_rule_within_a_directory_needs_the_command_there() {
+    let rules = [
+        CommandRule::allow("git status *"),
+        CommandRule::allow("git *").within("scratch"),
+    ];
+    expect_ruled(
+        &rules,
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (true, "git status"),
+            (true, "cd scratch && git init && git commit -m x"),
+            (true, "cd scratch/spike-1 && git reset --hard HEAD~1"),
+            (true, "git -C scratch rebase -i HEAD~2"),
+            (true, "git -C /home/luke/proj/scratch/spike-2 commit -m x"),
+            (true, "cd /tmp && git -C /home/luke/proj/scratch log"),
+            (false, "git commit -m x"),
+            (false, "cd scratch && cd .. && git commit -m x"),
+            (false, "cd scratch && git -C .. commit -m x"),
+            (false, "git -C other commit -m x"),
+            (false, "cd scratch-other && git commit -m x"),
+            // The directory isn't known: never within.
+            (
+                false,
+                "cd \"$(git rev-parse --show-toplevel)\" && git commit -m x",
+            ),
+            (false, "git -C \"$(cat repo.txt)\" commit -m x"),
+            (false, "cd scratch && git --git-dir=../.git commit -m x"),
+            (false, "cd scratch && GIT_DIR=../.git git commit -m x"),
+            (false, "cd scratch && env -C .. git commit -m x"),
+            (false, "cd scratch && find . -execdir git add {} +"),
+        ],
+    );
+}
+
+#[test]
+fn another_repository_stays_elsewhere_whatever_directory_follows() {
+    // git works on the repository GIT_DIR or --git-dir names, wherever -C
+    // points.
+    let rules = [
+        CommandRule::allow("git status *"),
+        CommandRule::allow("git *").within("scratch"),
+    ];
+    expect_ruled(
+        &rules,
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (
+                true,
+                "cd \"$(cat dir.txt)\" && git -C /home/luke/proj/scratch log",
+            ),
+            (
+                false,
+                "GIT_DIR=/home/luke/proj/.git git -C /home/luke/proj/scratch push",
+            ),
+            (
+                false,
+                "git --git-dir=/home/luke/proj/.git -C /home/luke/proj/scratch commit -m x",
+            ),
+            (
+                false,
+                "git --work-tree /home/luke/proj -C /home/luke/proj/scratch checkout .",
+            ),
+            (
+                false,
+                "export GIT_DIR=/home/luke/proj/.git; git -C /home/luke/proj/scratch commit -m x",
+            ),
+            (
+                false,
+                "env GIT_WORK_TREE=/home/luke/proj git -C /home/luke/proj/scratch checkout .",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_subshell_keeps_its_directory_and_variables() {
+    // `( … )` runs in a subshell, and so does each member of a pipeline but
+    // the last: a `cd` or an assignment there ends with it.
+    let rules = [
+        CommandRule::allow("git status *"),
+        CommandRule::allow("git *").within("scratch"),
+    ];
+    expect_ruled(
+        &rules,
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (true, "(cd scratch && git commit -m x)"),
+            (true, "cd scratch && (cd .. && ls) && git commit -m x"),
+            (true, "cd scratch && ((cd ..); git commit -m x)"),
+            (true, "cd scratch; f() { ls; }; git commit -m x"),
+            (
+                false,
+                "(cd /home/luke/proj/scratch && cargo test); git commit -m x",
+            ),
+            (false, "(cd scratch) && git commit -m x"),
+            (false, "(cd scratch; (cd ..)); git commit -m x"),
+            (false, "cd scratch | cat; git commit -m x"),
+            (false, "ls | (cd scratch) | cat && git commit -m x"),
+            // The last member runs in the current shell in zsh (and in bash
+            // with `lastpipe`): the directory isn't known after it.
+            (false, "ls | cd scratch; git commit -m x"),
+        ],
+    );
+    expect(
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (Allowed, "(cd / && ls) && rm -rf *"),
+            (Allowed, "cd / | cat; rm -rf *"),
+            (Allowed, "X=build; (X=/); rm -rf \"$X\"/*"),
+            (Allowed, "X=build; X=/ | cat; rm -rf \"$X\"/*"),
+            (Allowed, "cd build && (cd /; ls) && rm -rf *"),
+            (Protected, "(cd / && rm -rf *)"),
+            (Protected, "(cd build); cd / && rm -rf *"),
+            (Protected, "cd / && (cd build) && rm -rf *"),
+            (Outside, "ls | cd /; rm -rf *"),
+            // A `case` pattern's `)` closes no subshell.
+            (Protected, "(cd /; case $1 in a) ls;; esac; rm -rf *)"),
+            (Protected, "case $1 in (a) cd /;; esac; rm -rf *"),
+            (Allowed, "case $1 in a) (cd /);; esac; rm -rf *"),
+            // Only known when it runs, and possibly empty.
+            (Protected, "X=build; ls | X=/; rm -rf \"$X\"/*"),
+        ],
+    );
+}
+
+fn scratch_rules() -> [CommandRule; 2] {
+    [
+        CommandRule::allow("git status *"),
+        CommandRule::allow("git *").within("scratch"),
+    ]
+}
+
+#[test]
+fn a_background_list_runs_in_a_subshell() {
+    // `… &` runs the and-or list before it in a subshell.
+    expect_ruled(
+        &scratch_rules(),
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (true, "cd scratch && git commit -m x &"),
+            (true, "cd scratch; git commit -m x & wait"),
+            (
+                true,
+                "(cd scratch & ls; git status) && cd scratch && git commit -m x",
+            ),
+            (false, "cd scratch & git commit -m x"),
+            (false, "cd scratch && ls & git commit -m x"),
+            (false, "cd scratch &\ngit commit -m x"),
+            (false, "cd scratch && (ls) & git commit -m x"),
+            (false, "(cd scratch & git commit -m x)"),
+            (false, "ls | cd scratch & git commit -m x"),
+        ],
+    );
+    // The working directory is $HOME/proj.
+    expect(
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (Allowed, "cd build & rm -rf *"),
+            (Allowed, "cd / & rm -rf *"),
+            (Allowed, "cd /tmp && ls & rm -rf build"),
+            (Protected, "cd ..; cd proj & rm -rf *"),
+            (Protected, "cd ..; cd proj && ls & rm -rf *"),
+            (Protected, "cd ..; X=proj & rm -rf ${X:-.}/*"),
+            (Protected, "cd / && rm -rf * &"),
+        ],
+    );
+}
+
+#[test]
+fn a_group_or_compound_command_in_a_pipeline_keeps_its_directory() {
+    // A pipeline's member runs in a subshell whatever it is: a subshell, a
+    // `{ … }` group or a loop. In the shell itself, a group's `cd` lasts.
+    expect_ruled(
+        &scratch_rules(),
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (true, "{ cd scratch; }; git commit -m x"),
+            (true, "{ cd scratch; } && git commit -m x"),
+            (true, "if cd scratch; then git commit -m x; fi"),
+            (true, "for f in a; do cd scratch; done; git commit -m x"),
+            (true, "{ cd scratch; git commit -m x; } | cat"),
+            (false, "cd scratch | (ls); git commit -m x"),
+            (false, "cd scratch | (git commit -m x)"),
+            (false, "cd scratch | ( cat ) | cat; git commit -m x"),
+            (false, "{ cd scratch; } | cat; git commit -m x"),
+            (false, "{ cd scratch; } & git commit -m x"),
+            (
+                false,
+                "for f in a; do cd scratch; done | cat; git commit -m x",
+            ),
+            (false, "while true; do cd scratch; done & git commit -m x"),
+            (false, "if true; then cd scratch; fi | cat; git commit -m x"),
+            // As a pipeline's last member, where it runs depends on the shell.
+            (false, "ls | { cd scratch; }; git commit -m x"),
+            (
+                false,
+                "ls | while read f; do cd scratch; done; git commit -m x",
+            ),
+        ],
+    );
+    expect(
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (Allowed, "{ cd build; } && rm -rf *"),
+            (Allowed, "cd / | (ls); rm -rf *"),
+            (Protected, "{ cd /; } && rm -rf *"),
+            (Protected, "cd ..; { cd proj; } | cat; rm -rf *"),
+            (Protected, "cd ..; cd proj | (ls); rm -rf *"),
+            (Protected, "cd ..; cd proj | ( ls ) | cat; rm -rf *"),
+            (
+                Protected,
+                "cd ..; for d in proj; do cd $d; done | cat; rm -rf *",
+            ),
+            (Protected, "ls | { cd /; rm -rf *; }"),
+            (
+                Outside,
+                "cd /; ls | while read f; do cd ~/proj; done; rm -rf *",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn sudo_takes_assignments_like_env() {
+    expect_ruled(
+        &read_only_git(),
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (true, "sudo X=1 git status"),
+            (false, "sudo X=1 git push"),
+            (false, "sudo DEBIAN_FRONTEND=noninteractive git push"),
+            (false, "sudo -E X=1 git push"),
+            (false, "sudo -u luke X=1 git push"),
+        ],
+    );
+    expect_ruled(
+        &scratch_rules(),
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (true, "sudo X=1 git -C /home/luke/proj/scratch commit -m x"),
+            (
+                false,
+                "sudo GIT_DIR=/home/luke/proj/.git git -C /home/luke/proj/scratch commit -m x",
+            ),
+        ],
+    );
+    expect(
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (Allowed, "sudo X=1 rm -rf build"),
+            (Protected, "sudo FOO=1 rm -rf /"),
+            (Protected, "sudo -u root HOME=/root rm -rf ~"),
+        ],
+    );
+}
+
+#[test]
+fn more_wrappers_run_the_command_after_them() {
+    expect_ruled(
+        &read_only_git(),
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (true, "setsid -f git status"),
+            (true, "flock -w 5 /tmp/lock git status"),
+            (true, "flock /tmp/lock -c 'git status'"),
+            (true, "taskset -c 0-3 git log"),
+            (true, "taskset -p 03 1234"),
+            (true, "chronic -e git status"),
+            (true, "unshare --propagation private -m git status"),
+            (true, "strace -f -o trace.txt -e trace=file git status"),
+            (true, "ltrace -o calls.txt git log"),
+            (true, "watch -n 5 git status"),
+            (true, "watch -n 5 'git status && git log -1'"),
+            (true, "watch -x git status"),
+            (true, "script -q -c 'git log' /dev/null"),
+            (true, "su luke -c 'git status'"),
+            (false, "setsid git push"),
+            (false, "setsid -w git push"),
+            (false, "flock /tmp/lock git push"),
+            (false, "flock -n -w 5 /tmp/lock git push"),
+            (false, "flock /tmp/lock -c 'git push'"),
+            (false, "flock /tmp/lock --command 'git push'"),
+            (false, "taskset 0x3 git push"),
+            (false, "taskset -c 0-3 git push"),
+            (false, "chronic git push"),
+            (false, "unshare -r git push"),
+            (false, "unshare --map-user 0 --propagation private git push"),
+            (false, "strace -f -o trace.txt git push"),
+            (false, "strace -e trace=file -s 200 git push"),
+            (false, "ltrace -l libgit2.so git push"),
+            (false, "watch git push"),
+            (false, "watch -n 5 'git push'"),
+            (false, "watch -d -n 5 git status \\&\\& git push"),
+            (false, "watch -x git push"),
+            (false, "script -c 'git push'"),
+            (false, "script -qc 'git push' log.txt"),
+            (false, "script --command='git push'"),
+            (false, "su -c 'git push'"),
+            (false, "su luke -c 'git push'"),
+            (false, "su -lc 'git push' luke"),
+            (false, "su --session-command 'git push'"),
+            // Text only known when it runs can't be checked.
+            (false, "watch \"$(cat command.txt)\""),
+            (false, "su -c \"$(cat command.txt)\""),
+            (false, "flock /tmp/lock -c \"$(cat command.txt)\""),
+        ],
+    );
+    // Without rules, the path checks follow the commands too.
+    expect(
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (Allowed, "watch \"$(cat command.txt)\""),
+            (Allowed, "setsid rm -rf build"),
+            (Protected, "setsid rm -rf ~"),
+            (Protected, "flock /tmp/lock rm -rf /"),
+            (Protected, "flock /tmp/lock -c 'rm -rf /'"),
+            (Protected, "taskset -c 1 rm -rf /"),
+            (Protected, "chronic rm -rf ~"),
+            (Protected, "unshare -r rm -rf /etc"),
+            (Protected, "strace -o /tmp/trace rm -rf ~"),
+            (Protected, "ltrace -o /tmp/calls rm -rf ~"),
+            (Protected, "watch 'rm -rf ~'"),
+            (Protected, "script -c 'rm -rf ~' /dev/null"),
+            (Protected, "su -c 'rm -rf /'"),
+        ],
+    );
+    // `unshare -w` runs the command in another directory.
+    expect_ruled(
+        &scratch_rules(),
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (true, "cd scratch && unshare -r git commit -m x"),
+            (false, "cd scratch && unshare -w .. git commit -m x"),
+            (false, "cd scratch && unshare --root=/ git commit -m x"),
+        ],
+    );
+}
+
+#[test]
+fn git_location_variables_mean_another_repository() {
+    let variables = [
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+    ];
+    for variable in variables {
+        let value = "/home/luke/proj/.git/x";
+        expect_ruled(
+            &scratch_rules(),
+            &linux(),
+            ShellDialect::Posix,
+            &[
+                (true, "git -C /home/luke/proj/scratch/toy add ."),
+                (
+                    false,
+                    &format!("{variable}={value} git -C /home/luke/proj/scratch/toy add ."),
+                ),
+                (
+                    false,
+                    &format!("export {variable}={value}; git -C /home/luke/proj/scratch/toy add ."),
+                ),
+                (
+                    false,
+                    &format!("env {variable}={value} git -C /home/luke/proj/scratch/toy add ."),
+                ),
+                (
+                    false,
+                    &format!(
+                        "strace -E {variable}={value} git -C /home/luke/proj/scratch/toy add ."
+                    ),
+                ),
+            ],
+        );
+        // Set in the job's environment.
+        let host = host(
+            PathStyle {
+                windows: false,
+                ignore_case: false,
+            },
+            "/home/luke/proj",
+            "/home/luke",
+            &["/tmp"],
+            &[("HOME", "/home/luke"), (variable, value)],
+        );
+        expect_ruled(
+            &scratch_rules(),
+            &host,
+            ShellDialect::Posix,
+            &[(false, "git -C /home/luke/proj/scratch/toy add .")],
+        );
+    }
+}
+
+#[test]
+fn a_wrapper_without_its_command_runs_nothing() {
+    expect(
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (Allowed, "timeout"),
+            (Allowed, "timeout 5"),
+            (Allowed, "sudo -u"),
+            (Allowed, "flock -w"),
+            (Allowed, "taskset 03"),
+        ],
+    );
+}
+
+#[test]
+fn a_listing_reaches_the_next_member_from_a_subshell_or_group() {
+    expect(
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (Allowed, "(find . -name '*.o') | xargs rm -f"),
+            (Allowed, "{ ls build; } | xargs rm -rf"),
+            (Protected, "find ~ -type f | xargs rm -f"),
+            (Protected, "(find ~ -type f) | xargs rm -f"),
+            (Protected, "{ find ~ -type f; } | xargs rm -f"),
+            (Protected, "{ ls build; find ~; } | xargs rm -f"),
+            (
+                Protected,
+                "for d in a; do find ~ -type f; done | xargs rm -f",
+            ),
+            (Protected, "(ls /) | (xargs rm -rf)"),
+            (Protected, "(find ~) | grep x | xargs rm -f"),
+            (Protected, "{ (find ~) | xargs rm -f; } | cat"),
+            // The listing is checked along with the working directory.
+            (Protected, "cd ~; (ls proj/build) | xargs rm -rf"),
+        ],
+    );
+}
+
+#[test]
+fn sudos_long_options_take_their_values() {
+    expect_ruled(
+        &read_only_git(),
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (true, "sudo --user root git status"),
+            (false, "sudo --user root git push"),
+            (false, "sudo --user=root git push"),
+            (false, "sudo --group wheel --prompt x git push"),
+            (
+                false,
+                "sudo --host h --other-user u --role r --type t git push",
+            ),
+            (false, "sudo --close-from 3 --command-timeout 10 git push"),
+            (false, "sudo --chdir /tmp --chroot / git push"),
+        ],
+    );
+    expect(
+        &linux(),
+        ShellDialect::Posix,
+        &[(Protected, "sudo --user root rm -rf /")],
+    );
+}
+
+#[test]
+fn a_wrappers_directory_is_where_its_command_runs() {
+    // The working directory is $HOME/proj.
+    expect(
+        &linux(),
+        ShellDialect::Posix,
+        &[
+            (Allowed, "env -C build rm -rf *"),
+            (Allowed, "env -C /tmp rm -rf x"),
+            (Allowed, "cd / && env -C /tmp rm -rf x"),
+            (Allowed, "env -C / ls"),
+            (Allowed, "env -C / true; rm -rf *"),
+            (Protected, "env -C / rm -rf *"),
+            (Protected, "env -C/ rm -rf *"),
+            (Protected, "env --chdir=/ rm -rf *"),
+            (Protected, "env --chdir / rm -rf *"),
+            (Protected, "env -C .. rm -rf *"),
+            (Protected, "env -C ~ rm -rf *"),
+            (Protected, "sudo -D / rm -rf *"),
+            (Protected, "sudo --chdir=/ rm -rf *"),
+            (Protected, "sudo --chdir / rm -rf *"),
+            (Protected, "sudo -u root -D / rm -rf *"),
+            (Protected, "unshare -w / rm -rf *"),
+            (Protected, "unshare --wd=/ rm -rf *"),
+            (Protected, "unshare --wd / rm -rf *"),
+            (Protected, "env -C /tmp sudo -D .. rm -rf *"),
+            (Protected, "env -C / ls | xargs rm -rf"),
+            // Only known when it runs: outside the working directory.
+            (Outside, "env -C \"$(cat dir.txt)\" rm -rf *"),
+            (Outside, "sudo -D \"$(cat dir.txt)\" rm -rf build"),
+        ],
+    );
+}
+
+#[test]
+fn a_program_known_only_when_the_command_runs_is_refused_only_under_rules() {
+    let unknown = [
+        "$(which git) push",
+        "source env.sh; $TOOL push",
+        "bash -c \"$(cat script.sh)\"",
+        "eval \"$(cat command.txt)\"",
+        "ls | xargs \"$(which git)\" add",
+    ];
+    let rules = [CommandRule::deny("cargo * publish *")];
+    for command in unknown {
+        expect(&linux(), ShellDialect::Posix, &[(Allowed, command)]);
+        expect_ruled(&rules, &linux(), ShellDialect::Posix, &[(false, command)]);
+    }
+    let refusal = CommandGuard {
+        rules: rules.to_vec(),
+        ..CommandGuard::default()
+    }
+    .check_on(&linux(), ShellDialect::Posix, "$(which git) push")
+    .unwrap_err();
+    assert!(
+        refusal
+            .message
+            .contains("its program is only known when the command runs"),
+        "{}",
+        refusal.message
+    );
+}
+
+#[test]
+fn rules_leave_the_path_checks_in_place() {
+    let guard = CommandGuard {
+        rules: vec![CommandRule::allow("rm *")],
+        ..CommandGuard::default()
+    };
+    let host = linux();
+    assert_eq!(
+        verdict(&guard, &host, ShellDialect::Posix, "rm -rf ~"),
+        Protected
+    );
+    assert_eq!(
+        verdict(&guard, &host, ShellDialect::Posix, "rm -rf ../other"),
+        Outside
+    );
+    assert_eq!(
+        verdict(&guard, &host, ShellDialect::Posix, "rm -rf build"),
+        Allowed
+    );
+    // Turned off, the guard applies no rules either.
+    let off = CommandGuard {
+        dangerously_allow_all_commands: true,
+        rules: vec![CommandRule::deny("ls *")],
+        ..CommandGuard::default()
+    };
+    assert_eq!(verdict(&off, &host, ShellDialect::Posix, "ls -la"), Allowed);
+}
+
+#[test]
+fn rules_apply_in_cmd_and_powershell() {
+    let rules = read_only_git();
+    expect_ruled(
+        &rules,
+        &windows(),
+        ShellDialect::Cmd,
+        &[
+            (true, "git status"),
+            (true, "git.exe log -1"),
+            (true, "dir & git diff"),
+            (false, "git push"),
+            (false, "cd sub && GIT.EXE commit -m x"),
+            (false, "cmd /c git push"),
+        ],
+    );
+    expect_ruled(
+        &rules,
+        &windows(),
+        ShellDialect::PowerShell,
+        &[
+            (true, "git status"),
+            (true, "& git log -1"),
+            (true, "$files = Get-ChildItem; $files | Measure-Object"),
+            (
+                true,
+                "foreach ($f in $files) { Write-Output \"$($f.Name)\" }",
+            ),
+            (true, "Write-Output \"$(git log -1 --format=%H)\""),
+            (false, "git push"),
+            (false, "& 'C:\\Program Files\\Git\\bin\\git.exe' push"),
+            (false, "$tool = (Get-Command git).Source; & $tool push"),
+            (false, "Write-Output \"$(git push)\""),
+            (false, "if (Test-Path x) { git commit -m x }"),
+            (false, "pwsh -Command \"git push\""),
+        ],
+    );
+}
+
+#[test]
+fn rule_refusals_explain_the_rule() {
+    let guard = CommandGuard {
+        rules: vec![
+            CommandRule::allow("git status *"),
+            CommandRule::allow("git *").within("scratch"),
+            CommandRule::deny("cargo * publish *").because("Publishing is the user's."),
+        ],
+        ..CommandGuard::default()
+    };
+    let refusal = guard
+        .check_on(
+            &linux(),
+            ShellDialect::Posix,
+            "cd sub && git push origin main",
+        )
+        .unwrap_err();
+    assert!(!refusal.protected);
+    assert_eq!(refusal.target, "git push origin main");
+    assert_eq!(
+        refusal.message,
+        "Refused: `git push origin main` isn't one of the `git` commands allowed here: `git status *`, `git *` (in `scratch`). Use one of those, or do the work another way; other commands need the user's permission in the terminal settings."
+    );
+    let refusal = guard
+        .check_on(&linux(), ShellDialect::Posix, "cargo publish --dry-run")
+        .unwrap_err();
+    assert_eq!(
+        refusal.message,
+        "Refused: `cargo publish --dry-run` matches the command rule `cargo * publish *`. Publishing is the user's."
+    );
+}
+
 fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut text = String::new();

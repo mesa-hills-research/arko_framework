@@ -1,8 +1,9 @@
 //! Splits a command line into simple commands and words for the command
 //! guard. The lexers keep what matters for finding a command's targets:
-//! words, variable references, output redirections, and where commands and
-//! pipelines begin. Everything else (arithmetic, most expansions, parameter
-//! parsing) is left to the analysis or treated as unknown text.
+//! words, variable references, output redirections, where commands and
+//! pipelines begin, and where POSIX subshells open and close. Everything
+//! else (arithmetic, most expansions, parameter parsing) is left to the
+//! analysis or treated as unknown text.
 
 use super::ShellDialect;
 
@@ -10,8 +11,12 @@ use super::ShellDialect;
 pub(super) enum Piece {
     Text(String),
     Var(String, VarForm),
-    /// A value only known when the command runs, such as `$(...)`.
+    /// A value only known when the command runs, such as `$((...))`.
     Unknown,
+    /// The output of a command substitution (`$(...)` or backticks, and in
+    /// PowerShell `$(...)` and `@(...)`): only known when the command runs.
+    /// The text is the command it runs.
+    Substitution(String),
     /// `$(pwd)`: the working directory.
     WorkingDirectory,
     /// `$(mktemp)` and `$(mktemp -d)`: a new path in the temporary directory.
@@ -81,6 +86,56 @@ pub(super) struct Command {
     /// Commands of one pipeline, including PowerShell script blocks inside
     /// it, share this number.
     pub pipeline: usize,
+    /// PowerShell's call operator `&` came first: the first word names the
+    /// command to run, even when it is quoted or a variable.
+    pub call: bool,
+    /// POSIX subshells that open before this command, outermost first.
+    pub opens: Vec<Subshell>,
+    /// How many POSIX subshells close after this command.
+    pub closes: usize,
+    /// Later POSIX pipelines its output reaches beyond its own: in a
+    /// subshell, group or compound command that is a pipeline's member, the
+    /// next member's.
+    pub feeds: Vec<usize>,
+}
+
+/// Commands of a POSIX line that run in a subshell: a `cd` or assignment
+/// there ends with it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum Subshell {
+    /// `( … )`, a background list (`… &`), or a pipeline's member other
+    /// than the last.
+    Always,
+    /// A pipeline's last member: a subshell in bash, the shell itself in
+    /// zsh, ksh, and bash with `lastpipe`.
+    Maybe,
+}
+
+/// A POSIX list being read: the line, or a `( … )`, `{ … }` or compound
+/// command (`while … done`, `if … fi`, …) in it. Indexes are of the
+/// commands read.
+struct List {
+    /// The word that closes it.
+    close: &'static str,
+    /// Where its current and-or list began: `&` runs that in the background.
+    start: usize,
+    /// Where its current pipeline's member began.
+    member: usize,
+    /// Its current pipeline has a `|` already.
+    piped: bool,
+}
+
+/// What ends a POSIX command.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Separator {
+    /// `;` or a newline.
+    List,
+    /// `&&` or `||`.
+    AndOr,
+    /// `&`: the and-or list runs in the background.
+    Background,
+    /// `|` or `|&`.
+    Pipe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -98,10 +153,20 @@ struct Builder {
     pending: Pending,
     pipeline: usize,
     heredocs: Vec<(String, bool)>,
+    /// POSIX only: reserved words, groups and subshells are read.
+    posix: bool,
+    /// `( … )` subshells opened since the last command.
+    opens: usize,
+    /// `( … )` subshells open.
+    subshells: usize,
+    /// For each `case` statement open, the subshells open where it began.
+    cases: Vec<usize>,
+    /// The POSIX lists open, the line first.
+    lists: Vec<List>,
 }
 
 impl Builder {
-    fn new() -> Self {
+    fn new(posix: bool) -> Self {
         Self {
             commands: Vec::new(),
             current: Command::default(),
@@ -109,6 +174,16 @@ impl Builder {
             pending: Pending::None,
             pipeline: 0,
             heredocs: Vec::new(),
+            posix,
+            opens: 0,
+            subshells: 0,
+            cases: Vec::new(),
+            lists: vec![List {
+                close: "",
+                start: 0,
+                member: 0,
+                piped: false,
+            }],
         }
     }
 
@@ -125,7 +200,44 @@ impl Builder {
             return;
         };
         match std::mem::replace(&mut self.pending, Pending::None) {
-            Pending::None => self.current.words.push(word),
+            Pending::None => {
+                // A reserved word counts at the start of a command, also
+                // after `do`, `then`, `else`, `elif` and `!`.
+                let reserved = self.posix
+                    && !word.quoted
+                    && self.current.words.iter().all(|before| {
+                        !before.quoted
+                            && matches!(
+                                before.literal().as_deref(),
+                                Some("do" | "then" | "else" | "elif" | "!")
+                            )
+                    });
+                if reserved {
+                    match word.literal().as_deref() {
+                        // The braces of a group aren't words of its commands.
+                        Some("{") => return self.open_list("}"),
+                        Some("}") if self.close_list("}") => return,
+                        Some("while" | "until" | "for" | "select") => self.open_list("done"),
+                        Some("if") => self.open_list("fi"),
+                        Some("case") => {
+                            self.cases.push(self.subshells);
+                            self.open_list("esac");
+                        }
+                        Some("done") => {
+                            self.close_list("done");
+                        }
+                        Some("fi") => {
+                            self.close_list("fi");
+                        }
+                        Some("esac") => {
+                            self.cases.pop();
+                            self.close_list("esac");
+                        }
+                        _ => {}
+                    }
+                }
+                self.current.words.push(word);
+            }
             Pending::Output { append } => self.current.redirects.push(Redirect {
                 append,
                 target: word,
@@ -152,6 +264,7 @@ impl Builder {
         self.pending = Pending::None;
         let pipeline = self.pipeline;
         if !self.current.words.is_empty() || !self.current.redirects.is_empty() {
+            self.current.opens = vec![Subshell::Always; std::mem::take(&mut self.opens)];
             self.commands.push(std::mem::take(&mut self.current));
         }
         if new_pipeline {
@@ -168,6 +281,118 @@ impl Builder {
         };
     }
 
+    /// Ends a POSIX command at `separator`, marking what runs in a subshell:
+    /// a pipeline's members, and a background list.
+    fn separate(&mut self, separator: Separator) {
+        if separator == Separator::Pipe {
+            self.end_command(true, false);
+            let member = self.list().member;
+            self.subshell(member, Subshell::Always);
+            // The next member reads the output of every command in this one.
+            let pipeline = self.current.pipeline;
+            for command in &mut self.commands[member..] {
+                if command.pipeline != pipeline {
+                    command.feeds.push(pipeline);
+                }
+            }
+            let next = self.commands.len();
+            let list = self.list();
+            list.member = next;
+            list.piped = true;
+            return;
+        }
+        self.end_command(false, true);
+        self.end_pipeline();
+        if separator == Separator::Background {
+            let start = self.list().start;
+            self.subshell(start, Subshell::Always);
+        }
+        if separator != Separator::AndOr {
+            let next = self.commands.len();
+            self.list().start = next;
+        }
+    }
+
+    /// The current pipeline ends: its last member, after a `|`, may run in
+    /// a subshell.
+    fn end_pipeline(&mut self) {
+        let list = self.list();
+        let (piped, member) = (std::mem::take(&mut list.piped), list.member);
+        if piped {
+            self.subshell(member, Subshell::Maybe);
+        }
+        let next = self.commands.len();
+        self.list().member = next;
+    }
+
+    /// The commands read since `start` run in a subshell of `kind`, which
+    /// holds any subshell marked in them already.
+    fn subshell(&mut self, start: usize, kind: Subshell) {
+        if start < self.commands.len() {
+            self.commands[start].opens.insert(0, kind);
+            if let Some(last) = self.commands.last_mut() {
+                last.closes += 1;
+            }
+        }
+    }
+
+    fn list(&mut self) -> &mut List {
+        self.lists.last_mut().expect("the line's list stays open")
+    }
+
+    /// A list closed by the word `close` opens.
+    fn open_list(&mut self, close: &'static str) {
+        let start = self.commands.len();
+        self.lists.push(List {
+            close,
+            start,
+            member: start,
+            piped: false,
+        });
+    }
+
+    /// Closes the innermost list if `close` closes it.
+    fn close_list(&mut self, close: &str) -> bool {
+        if self.lists.len() < 2 || self.list().close != close {
+            return false;
+        }
+        self.end_pipeline();
+        self.lists.pop();
+        true
+    }
+
+    /// A POSIX subshell opens (`(`). One that begins a pipeline's member
+    /// keeps its place in the pipeline.
+    fn open_subshell(&mut self) {
+        if !self.at_command_start() {
+            self.end_command(false, true);
+        }
+        self.opens += 1;
+        self.subshells += 1;
+        self.open_list(")");
+    }
+
+    /// A POSIX subshell closes (`)`). One that holds no command closes with
+    /// nothing to mark; a `)` that closes no subshell (a `case` pattern's)
+    /// only ends the command.
+    fn close_subshell(&mut self) {
+        self.end_command(false, true);
+        if self.subshells == 0 || self.cases.last() == Some(&self.subshells) {
+            let next = self.commands.len();
+            let list = self.list();
+            list.start = next;
+            list.member = next;
+            return;
+        }
+        self.close_list(")");
+        self.subshells -= 1;
+        if self.opens > 0 {
+            self.opens -= 1;
+        } else if let Some(command) = self.commands.last_mut() {
+            command.closes += 1;
+        }
+    }
+
     fn redirect(&mut self, pending: Pending) {
         self.end_word();
         self.pending = pending;
@@ -175,6 +400,9 @@ impl Builder {
 
     fn finish(mut self) -> Vec<Command> {
         self.end_command(false, true);
+        if self.posix {
+            self.end_pipeline();
+        }
         self.commands
     }
 }
@@ -243,7 +471,7 @@ fn is_name_char(c: char) -> bool {
 // ---------------------------------------------------------------- POSIX sh
 
 fn posix(chars: &[char]) -> Vec<Command> {
-    let mut b = Builder::new();
+    let mut b = Builder::new(true);
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
@@ -254,15 +482,15 @@ fn posix(chars: &[char]) -> Vec<Command> {
                 i += 1;
             }
             '\n' => {
-                b.end_command(false, true);
+                b.separate(Separator::List);
                 i = skip_heredocs(chars, i + 1, &mut b.heredocs);
             }
             ';' => {
-                b.end_command(false, true);
+                b.separate(Separator::List);
                 i += 1;
             }
             '&' if next == Some('&') => {
-                b.end_command(false, true);
+                b.separate(Separator::AndOr);
                 i += 2;
             }
             '&' if next == Some('>') => {
@@ -271,19 +499,23 @@ fn posix(chars: &[char]) -> Vec<Command> {
                 i += if append { 3 } else { 2 };
             }
             '&' => {
-                b.end_command(false, true);
+                b.separate(Separator::Background);
                 i += 1;
             }
             '|' if next == Some('|') => {
-                b.end_command(false, true);
+                b.separate(Separator::AndOr);
                 i += 2;
             }
             '|' => {
-                b.end_command(true, false);
+                b.separate(Separator::Pipe);
                 i += if next == Some('&') { 2 } else { 1 };
             }
-            '(' | ')' => {
-                b.end_command(false, true);
+            '(' => {
+                b.open_subshell();
+                i += 1;
+            }
+            ')' => {
+                b.close_subshell();
                 i += 1;
             }
             '#' if b.word.is_none() => i = skip_line(chars, i),
@@ -415,7 +647,7 @@ fn posix(chars: &[char]) -> Vec<Command> {
 
 /// The value of a command substitution: the working directory for `pwd`, a
 /// new temporary path for a `mktemp` that names no directory of its own, and
-/// unknown otherwise.
+/// the command's output otherwise.
 fn substitution(inner: &[char]) -> Piece {
     let text: String = inner.iter().collect();
     let words: Vec<&str> = text.split_whitespace().collect();
@@ -430,7 +662,7 @@ fn substitution(inner: &[char]) -> Piece {
                 Piece::Unknown
             }
         }
-        _ => Piece::Unknown,
+        _ => Piece::Substitution(text),
     }
 }
 
@@ -469,9 +701,13 @@ fn posix_dollar(chars: &[char], i: usize, word: &mut Word) -> usize {
     match chars.get(i + 1) {
         Some('(') => {
             let end = balanced(chars, i + 1, '(', ')');
-            word.push(substitution(
-                &chars[i + 2..end.saturating_sub(1).max(i + 2)],
-            ));
+            let inner = &chars[i + 2..end.saturating_sub(1).max(i + 2)];
+            // `$((...))` is arithmetic, not a command.
+            word.push(if inner.first() == Some(&'(') {
+                Piece::Unknown
+            } else {
+                substitution(inner)
+            });
             end
         }
         Some('{') => {
@@ -554,7 +790,7 @@ fn brace_parameter(inner: &str) -> Piece {
 // --------------------------------------------------------------------- cmd
 
 fn cmd(chars: &[char]) -> Vec<Command> {
-    let mut b = Builder::new();
+    let mut b = Builder::new(false);
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
@@ -696,7 +932,7 @@ fn cmd_percent(chars: &[char], i: usize, word: &mut Word) -> usize {
 // -------------------------------------------------------------- PowerShell
 
 fn powershell(chars: &[char]) -> Vec<Command> {
-    let mut b = Builder::new();
+    let mut b = Builder::new(false);
     let mut depth = 0usize;
     let mut i = 0;
     while i < chars.len() {
@@ -725,7 +961,10 @@ fn powershell(chars: &[char]) -> Vec<Command> {
                 b.end_command(false, depth == 0);
                 i += 2;
             }
-            '&' if b.at_command_start() => i += 1,
+            '&' if b.at_command_start() => {
+                b.current.call = true;
+                i += 1;
+            }
             '&' => {
                 b.end_command(false, depth == 0);
                 i += 1;
@@ -797,7 +1036,11 @@ fn powershell(chars: &[char]) -> Vec<Command> {
             }
             '@' if next == Some('(') => {
                 let end = balanced(chars, i + 1, '(', ')');
-                b.word().push(Piece::Unknown);
+                b.word().push(Piece::Substitution(
+                    chars[i + 2..end.saturating_sub(1).max(i + 2)]
+                        .iter()
+                        .collect(),
+                ));
                 i = end;
             }
             '\'' => {
@@ -874,8 +1117,13 @@ fn powershell(chars: &[char]) -> Vec<Command> {
 fn powershell_dollar(chars: &[char], i: usize, word: &mut Word) -> usize {
     match chars.get(i + 1) {
         Some('(') => {
-            word.push(Piece::Unknown);
-            balanced(chars, i + 1, '(', ')')
+            let end = balanced(chars, i + 1, '(', ')');
+            word.push(Piece::Substitution(
+                chars[i + 2..end.saturating_sub(1).max(i + 2)]
+                    .iter()
+                    .collect(),
+            ));
+            end
         }
         Some('{') => {
             let end = chars[i + 2..]

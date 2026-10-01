@@ -48,7 +48,7 @@ pub use tool::{ToolCall, ToolChoice, ToolConfig, ToolDefinition, ToolResult, Too
 pub use trace::RequestTrace;
 pub use usage::{
     BillingKind, ContextEvent, ContextEventType, ModelCallUsage, PlanUsage, PlanUsageWindow,
-    UsageInfo,
+    SubscriptionPlan, UsageInfo,
 };
 
 pub use embedding_client::EmbeddingClient;

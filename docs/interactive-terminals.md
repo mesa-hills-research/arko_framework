@@ -109,10 +109,21 @@ what the shell will do rather than matching command names:
   earlier in the command, `cd` and `Set-Location` (an unset `cd $DIR` goes home),
   `..`, and wildcards. An unset variable expands to nothing, as in the shell, so
   `rm -rf "$OUT"/*` with `OUT` unset is refused as a delete of `/*`. `${OUT:?}`
-  makes the shell stop instead, and the guard allows it.
-- It follows `sudo`, `env`, `xargs` and pipelines (`find … | xargs rm`,
-  `Get-ChildItem … | Remove-Item`), and checks `sh -c`, `bash -c`, `eval`,
-  `cmd /c`, and `powershell -Command` and `-EncodedCommand` text as commands.
+  makes the shell stop instead, and the guard allows it. A `cd` or assignment in
+  a POSIX subshell lasts only there: in `( … )`, in a background list (`… &`),
+  and in a pipeline's member other than the last, be it a command, a subshell, a
+  `{ … }` group or a loop. One in a pipeline's last member leaves the directory
+  or variable only known when the command runs: bash runs that member in a
+  subshell, zsh in the shell itself. A `{ … }` group, loop or `if` run in the
+  shell itself keeps its `cd`.
+- It follows wrappers to the command they run (`sudo` and `env` with their
+  `NAME=value` assignments, `nice`, `timeout`, `setsid`, `flock`, `taskset`,
+  `unshare`, `strace`, `ltrace`, `chronic`, `watch -x`), judging it from the
+  directory `env -C`, `sudo -D` or `unshare -w` gives it. It follows `xargs` and
+  pipelines (`find … | xargs rm`, `Get-ChildItem … | Remove-Item`, also with
+  the listing in a subshell or `{ … }` group), and checks `sh -c`, `bash -c`,
+  `eval`, `watch`, `su -c`, `script -c`, `flock … -c`, `cmd /c`, and
+  `powershell -Command` and `-EncodedCommand` text as commands.
 - `$(pwd)` is the working directory and `$(mktemp)` a new temporary path. A path
   it can't know in advance (other `$(…)` output, or a variable a sourced script
   may set) counts as outside the working directory. If that value could be empty
@@ -133,6 +144,94 @@ config.command_guard.allowed_paths.push(home.join(".cache/my-app"));
 `CommandGuard::check(command, dialect, working_directory)` runs the same check
 for other tools that run shell commands; the `deepcoder` example's `run_shell`
 uses it, with a `--dangerously-allow-all-commands` flag.
+
+### Command rules
+
+`CommandGuard::rules` allows or refuses programs and their arguments. There are
+none by default. Each `CommandRule` has an action (`RuleAction::Allow` or
+`Deny`), a pattern, and optionally a directory it applies `within` and a
+`reason` for the model:
+
+```rust,ignore
+use arko_agents::terminal::CommandRule;
+
+config.command_guard.rules = vec![
+    // git only reads...
+    CommandRule::allow("git status *"),
+    CommandRule::allow("git log *"),
+    CommandRule::allow("git diff *"),
+    CommandRule::deny("git * --output* *"),
+    // ...except in the scratch folder.
+    CommandRule::allow("git *").within("scratch"),
+    CommandRule::deny("cargo * publish *").because("Publishing is the user's."),
+];
+```
+
+- **Patterns.** A pattern is words separated by spaces. The first is the
+  program, compared with the base name of the command's program, ignoring case
+  and `.exe` (`/usr/bin/git` and `GIT.EXE` are `git`). Each other word matches
+  one argument, in order: `*` alone matches any number of arguments, none
+  included; `*` inside a word matches any text in that argument (`--output*`
+  matches `--output=log.txt`); any other word matches itself exactly, after the
+  shell's quoting is removed. A pattern matches the whole command, so `git log`
+  matches only `git log` with no arguments, and `git * --output*` only a command
+  whose last argument starts with `--output`. Variables the guard can resolve
+  are resolved, and an unquoted one splits into words as the shell splits it;
+  an argument only known when the command runs (`$(…)` output) matches only `*`.
+- **git.** Before matching, git's global options `-C <dir>`, `--no-pager`, `-P`
+  and `--no-optional-locks` are skipped, so `git log *` matches
+  `git -C repo --no-pager log`. Its other global options (`-c`, `--git-dir`,
+  `--work-tree`, …) stay, so `git log *` doesn't match `git -c core.pager=… log`.
+- **Decision.** A command that a `Deny` rule matches is refused. Otherwise, if
+  its program has `Allow` rules, it runs only if one of them matches; if not,
+  the rules allow it. The path checks apply either way.
+- **`within`.** A rule with `within` applies only to a command run in that
+  directory or below it, following `cd` and git's `-C` in the same command line
+  (the guard checks one line at a time, from the job's working directory; a
+  Claude Code agent's `Bash` calls each start there too, since arko starts the
+  CLI with `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1`). A `cd` in a subshell
+  lasts only there, so after `(cd scratch && cargo test); git commit -m x` the
+  commit runs in the working directory. A relative `within` is relative to the
+  job's working directory. A command whose directory isn't known
+  is never within one: after `cd` to a value only known when it runs, with
+  `env -C` or `unshare -w`, or for git with `--git-dir`, `--work-tree`, or one
+  of `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`,
+  `GIT_OBJECT_DIRECTORY` and `GIT_ALTERNATE_OBJECT_DIRECTORIES` set in the
+  environment or the command line (also through `env`, `sudo` or `strace -E`),
+  whatever `-C` follows (git then works on that repository, work tree, index or
+  object store). An `Allow` rule
+  with `within` still puts its program on an allow-list everywhere: with the
+  rules above, git runs fully in `scratch` and only reads elsewhere.
+- **Which commands.** The rules apply to every command the guard finds in the
+  line: each pipeline and list item; the command behind wrappers such as
+  `sudo`, `env`, `nice`, `timeout`, `nohup` and the others above; commands in
+  `sh -c`, `bash -c`, `eval`, `watch`, `su -c`, `script -c`, `cmd /c` and
+  `powershell -Command`; commands in `$(…)` and backticks
+  (in PowerShell, `$(…)`, `@(…)` and `(…)`); and the commands `xargs` and
+  `find -exec` run. Words that only mention a program are not commands, so under
+  a git allow-list `ls /usr/share/doc/git`, `grep -rn git .`, `echo git push`
+  and a heredoc that contains `git push` run. In PowerShell, a statement that
+  starts with a quoted or computed word runs a command only after `&`; without
+  it (`$files | Measure-Object`) it is an expression.
+- **Commands known only when they run.** While there are rules, a command whose
+  program is only known when it runs (`$(which git) push`, `& $tool push`), or
+  shell text that is (`bash -c "$(cat script.sh)"`, `eval "$(…)"`), is refused,
+  since the rules can't check it. Without rules these run as before.
+- **Deny rules guard against accidents.** They match the words the guard reads,
+  so an argument only known when the command runs doesn't match a deny rule's
+  literal words: `cargo publish *` doesn't refuse `cargo $(printf publish)`, or
+  `sh -c 'cargo "$1"' _ publish`. An allow-list is the stronger form: such an
+  argument matches only `*`, so with `cargo build *` and `cargo test *` allowed,
+  both are refused.
+- **Refusals.** A refusal names the command and the rule, or for an allow-list
+  the patterns allowed for that program, followed by the rule's `reason`
+  (without one, a note to do the work another way). Its `target` is the
+  command, and `protected` is false. `dangerously_allow_all_commands` turns the
+  rules off too.
+
+Like the rest of the guard, rules guard against accidents: a script, Makefile or
+program a command runs can still run anything. A Claude Code agent's `Bash` and
+`PowerShell` get the same rules from `ClaudeCodeSettings::command_rules`.
 
 ## Input requests
 
