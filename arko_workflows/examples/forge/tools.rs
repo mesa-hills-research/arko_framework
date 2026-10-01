@@ -1,14 +1,15 @@
 //! The forge's own tools: lessons, trial runs, and a shell for the API
-//! backend (agents in Claude Code use its `Bash`).
+//! backend (agents in Claude Code use its `Bash`), with the command rules
+//! every agent's shell follows.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use arko_agents::terminal::{CommandGuard, ShellDialect};
+use arko_agents::terminal::{CommandGuard, CommandRule, ShellDialect};
 use arko_agents::{
     TaskContext, Tool, ToolDefinition, ToolError, ToolParameterDefinition, ToolParameterType,
     ToolTypeDetails,
@@ -370,6 +371,37 @@ fn shell(command: &str) -> tokio::process::Command {
 pub struct RunShell {
     pub guard: CommandGuard,
     pub target_dir: PathBuf,
+    /// Further environment variables for its commands.
+    pub env: Vec<(String, String)>,
+}
+
+impl RunShell {
+    /// The shell of an agent, or of a spike when `spike_root` is its
+    /// scratch crates' folder.
+    pub fn new(spike_root: Option<&Path>, target_dir: PathBuf) -> Self {
+        Self {
+            guard: CommandGuard {
+                rules: command_rules(spike_root),
+                ..CommandGuard::default()
+            },
+            target_dir,
+            env: spike_root.map(spike_environment).unwrap_or_default(),
+        }
+    }
+}
+
+/// The environment of a spike's shell: git looks for a repository no higher
+/// than the spikes' folder, so a git command outside a scratch crate's toy
+/// repository fails rather than acting on a repository around the state
+/// directory (`--state-dir` can put it inside the user's). git never looks
+/// in a ceiling directory or above it, except when it starts in the ceiling
+/// itself, so the ceiling is the folder above the spikes'.
+pub fn spike_environment(spike_root: &Path) -> Vec<(String, String)> {
+    let ceiling = spike_root.parent().unwrap_or(spike_root);
+    vec![(
+        "GIT_CEILING_DIRECTORIES".to_string(),
+        ceiling.display().to_string(),
+    )]
 }
 
 #[async_trait]
@@ -377,7 +409,7 @@ impl Tool for RunShell {
     fn definition(&self) -> ToolDefinition {
         definition(
             "run_shell",
-            "Run one shell command in the workspace and return its output: searching (grep, find), building and testing (cargo). Commands that would delete or overwrite paths outside the workspace are refused. Stops after 20 minutes.",
+            "Run one shell command in the workspace and return its output: searching (grep, find), building and testing (cargo). Commands that would delete or overwrite paths outside the workspace are refused, and so are git and gh commands that change anything (reading runs) and publishing. Stops after 20 minutes.",
             vec![parameter("command", "The command.", true)],
         )
     }
@@ -400,6 +432,7 @@ impl Tool for RunShell {
         process
             .current_dir(context.current_working_directory)
             .env("CARGO_TARGET_DIR", &self.target_dir)
+            .envs(self.env.iter().map(|(name, value)| (name, value)))
             .stdin(Stdio::null())
             .kill_on_drop(true);
         let output = tokio::time::timeout(Duration::from_secs(20 * 60), process.output())
@@ -423,42 +456,100 @@ impl Tool for RunShell {
     }
 }
 
-/// Why the forge refuses a shell `command`, if it does: version control and
-/// publishing are the user's, never the agents'.
-pub fn refused_command(command: &str) -> Option<&'static str> {
-    let words: Vec<&str> = command
-        .split(|c: char| c.is_whitespace() || ";|&()`$<>'\"{}".contains(c))
-        .filter(|word| !word.is_empty())
-        .collect();
-    let program = |word: &str| {
-        let name = word.rsplit(['/', '\\']).next().unwrap_or(word);
-        name.strip_suffix(".exe").unwrap_or(name).to_string()
-    };
-    for (index, word) in words.iter().enumerate() {
-        match program(word).as_str() {
-            "git" | "gh" => {
-                return Some(
-                    "The forge doesn't run git or gh: version control and publishing are the user's. Leave the crate's files as they are; the user reviews and commits them. Don't try to get around this refusal; if it blocks work you need, say so in your summary.",
-                );
-            }
-            "cargo"
-                if words.get(index + 1).is_some_and(|next| {
-                    ["publish", "login", "logout", "owner", "yank"].contains(next)
-                }) =>
-            {
-                return Some(
-                    "The forge doesn't publish crates or change registry logins. Don't try to get around this refusal; if it blocks work you need, say so in your summary.",
-                );
-            }
-            _ => {}
+/// The command rules of every agent's shell (Claude Code's `Bash` and
+/// `run_shell`): version control and publishing are the user's, so git and
+/// gh may only read, and cargo doesn't publish. A spike (`spike_root`, its
+/// scratch crates' folder) may also use git fully there, to test claims
+/// about git in toy repositories.
+pub fn command_rules(spike_root: Option<&Path>) -> Vec<CommandRule> {
+    const VERSION_CONTROL: &str = "Version control and publishing are the user's: the forge allows git and gh only to read (status, log, diff, show and the like) and leaves commits, branches and the index to the user. Don't try to get around this refusal; if it blocks work you need, say so in your summary or submission.";
+    const PUBLISHING: &str = "The forge doesn't publish crates or change registry logins: publishing is the user's. Don't try to get around this refusal; if it blocks work you need, say so in your summary or submission.";
+    let mut rules: Vec<CommandRule> = [
+        "git --version",
+        "git status *",
+        "git log *",
+        "git diff *",
+        "git show *",
+        "git rev-parse *",
+        "git rev-list *",
+        "git merge-base *",
+        "git cat-file *",
+        "git ls-files *",
+        "git ls-tree *",
+        "git blame *",
+        "git describe *",
+        "git shortlog *",
+        "git grep *",
+        // Only these forms: `git branch <name>` creates a branch.
+        "git branch",
+        "git branch -a",
+        "git branch -r",
+        "git branch -v",
+        "git branch -vv",
+        "git branch -a -v",
+        "git branch -a -vv",
+        "git branch --list *",
+        "git branch --show-current",
+        "git tag",
+        "git tag --list *",
+        "git stash list *",
+        "git reflog",
+        "git reflog show *",
+        "git show-ref *",
+        "git for-each-ref *",
+        "git worktree list *",
+        "git submodule status *",
+        "git check-ignore *",
+        "git help *",
+        "git remote -v",
+        "git config --get *",
+        "git config --list *",
+        "gh --version",
+        "gh pr view *",
+        "gh pr list *",
+        "gh pr diff *",
+        "gh pr checks *",
+        "gh pr status *",
+        "gh issue view *",
+        "gh issue list *",
+        "gh repo view *",
+        "gh auth status *",
+        "gh run list *",
+        "gh run view *",
+    ]
+    .into_iter()
+    .map(|pattern| CommandRule::allow(pattern).because(VERSION_CONTROL))
+    .collect();
+    // `log`, `diff` and `show` write files with `--output`.
+    rules.push(CommandRule::deny("git * --output* *").because(
+        "`--output` writes a file, which the forge's read-only git doesn't do: read the output from the command instead.",
+    ));
+    // `git grep -O` opens the matching files in a program, also bundled
+    // with other short options (`-nO`).
+    for option in ["-*O*", "--open-files-in-pager*"] {
+        rules.push(CommandRule::deny(format!("git grep * {option} *")).because(
+            "`git grep -O` runs a program on the matching files, which the forge's read-only git doesn't do: read the matches from the command's output instead.",
+        ));
+    }
+    // `cargo run -- publish` and `cargo test login` run.
+    for command in ["publish", "login", "logout", "owner", "yank"] {
+        for pattern in [
+            format!("cargo {command} *"),
+            format!("cargo +* {command} *"),
+            format!("cargo -* {command} *"),
+        ] {
+            rules.push(CommandRule::deny(pattern).because(PUBLISHING));
         }
     }
-    None
+    if let Some(root) = spike_root {
+        rules.push(CommandRule::allow("git *").within(root));
+    }
+    rules
 }
 
 #[cfg(test)]
 mod tests {
-    use super::refused_command;
+    use super::*;
 
     #[test]
     fn a_trial_must_pass_its_reserved_budget() {
@@ -470,26 +561,105 @@ mod tests {
     }
 
     #[test]
-    fn version_control_and_publishing_are_refused() {
+    fn git_and_gh_only_read_and_cargo_doesnt_publish() {
+        let spikes = std::env::temp_dir().join("forge-state/deliberations");
+        let guard = |spike_root: Option<&Path>| CommandGuard {
+            rules: command_rules(spike_root),
+            ..CommandGuard::default()
+        };
+        let runs = |guard: &CommandGuard, command: &str, directory: &Path| {
+            guard.check(command, ShellDialect::Posix, directory).is_ok()
+        };
+        let workspace = std::env::temp_dir().join("forge-crate");
+        let agent = guard(None);
         for command in [
-            "git status",
-            "cd /repo && git commit -am wip",
-            "/usr/bin/git push origin main",
-            "echo $(git rev-parse HEAD)",
-            "gh pr create",
+            "git status --short",
+            "git --no-pager log --oneline -10",
+            "git diff HEAD~1 -- src",
+            "git -C ../arko show HEAD:README.md",
+            "git branch",
+            "git branch --show-current",
+            "git remote -v",
+            "git config --get user.name",
+            "gh pr view 12 --comments",
+            "ls /usr/share/doc/git",
+            "grep -rn 'git push' src",
+            "cat .gitignore",
+            "cargo build --all-targets",
+            "cargo test publish_tests",
+            "git branch -a",
+            "git branch -vv",
+            "git branch -a -vv",
+            "git tag",
+            "git stash list --stat",
+            "git reflog",
+            "git reflog show HEAD -5",
+            "git show-ref --heads",
+            "git for-each-ref refs/heads",
+            "git worktree list --porcelain",
+            "git submodule status --recursive",
+            "git check-ignore -v target",
+            "git help log",
+            "git grep -n TODO -- src",
+            "gh --version",
+            "gh pr checks 12",
+            "gh pr status",
+            "cargo run -- publish",
+            "cargo test login",
+            "cargo --locked test owner",
+        ] {
+            assert!(runs(&agent, command, &workspace), "{command}");
+        }
+        for command in [
+            "git commit -am wip",
+            "cd /repo && git push origin main",
+            "git log --output=log.txt",
+            "git branch -D old",
+            "git -c alias.x='!sh' x",
+            "git stash",
+            "gh pr create --fill",
+            "gh api repos/o/r",
             "cargo publish --dry-run",
             "(cargo login token)",
+            "cargo +nightly yank --version 1.0.0",
+            "cargo --locked publish",
+            "cargo -Zunstable-options logout",
+            "cargo owner --add someone",
+            "git branch new-feature",
+            "git branch -a -d old",
+            "git tag v1.0",
+            "git stash drop",
+            "git reflog expire --all",
+            "git worktree add ../other",
+            "git submodule update --init",
+            "git grep -O TODO",
+            "git grep -n -Ovim TODO",
+            "git grep -nOvim TODO",
+            "git grep -inO'touch x' TODO",
+            "git grep TODO --open-files-in-pager=vim",
+            "gh pr checkout 12",
         ] {
-            assert!(refused_command(command).is_some(), "{command}");
+            assert!(!runs(&agent, command, &workspace), "{command}");
         }
-        for command in [
-            "cargo build --all-targets",
-            "grep -rn digit src",
-            "cat .gitignore",
-            "rg legit_name",
-            "cargo test publish_tests",
-        ] {
-            assert!(refused_command(command).is_none(), "{command}");
-        }
+        let refusal = |command: &str| {
+            agent
+                .check(command, ShellDialect::Posix, &workspace)
+                .unwrap_err()
+                .message
+        };
+        assert!(
+            refusal("git log --output=log.txt").contains("read the output from the command"),
+            "{}",
+            refusal("git log --output=log.txt")
+        );
+        assert!(refusal("git grep -O TODO").contains("runs a program"));
+        // A spike may use git fully in its scratch crate, and only there.
+        let spike = guard(Some(&spikes));
+        let scratch = spikes.join("D1/spike-1");
+        assert!(runs(&spike, "git init && git commit -m x", &scratch));
+        assert!(runs(&spike, "git rebase -i HEAD~2", &scratch));
+        assert!(!runs(&spike, "git commit -m x", &workspace));
+        assert!(!runs(&agent, "git init", &scratch));
+        assert!(!runs(&spike, "git log --output=x", &scratch));
     }
 }

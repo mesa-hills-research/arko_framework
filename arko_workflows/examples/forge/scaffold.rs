@@ -50,6 +50,48 @@ pub fn scaffold(dir: &Path, name: &str, arko: &Path, use_case: &str) -> io::Resu
     Ok(())
 }
 
+/// The package name in `dir`'s `Cargo.toml`.
+pub fn package_name(dir: &Path) -> Option<String> {
+    let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).ok()?;
+    let mut in_package = false;
+    for line in manifest.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+        } else if in_package
+            && let Some((key, value)) = line.split_once('=')
+            && key.trim() == "name"
+        {
+            return Some(value.trim().trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
+/// Whether `dir`'s `Cargo.toml` depends on the arko crates in `arko` by
+/// path.
+pub fn depends_on(dir: &Path, arko: &Path) -> bool {
+    let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap_or_default();
+    let workflows = arko
+        .join("arko_workflows")
+        .to_string_lossy()
+        .replace('\\', "/");
+    manifest.replace('\\', "/").contains(&workflows)
+}
+
+/// Adds a requested change to the end of an existing crate's `USE_CASE.md`,
+/// which keeps the original use case above it.
+pub fn add_change(dir: &Path, change: &str) -> io::Result<()> {
+    let path = dir.join("USE_CASE.md");
+    let mut text = std::fs::read_to_string(&path).unwrap_or_else(|_| "# Use case\n".into());
+    text = format!(
+        "{}\n\n## Change requested {}\n\n{}\n",
+        text.trim_end(),
+        chrono::Utc::now().format("%Y-%m-%d"),
+        change.trim()
+    );
+    std::fs::write(path, text)
+}
+
 fn manifest(name: &str, arko: &Path) -> String {
     let path = |krate: &str| {
         // TOML strings take forward slashes on every platform.
@@ -204,6 +246,22 @@ mod tests {
         );
         // Not over existing work.
         assert!(scaffold(&dir, "demo", arko, "again").is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_existing_crate_takes_a_change() {
+        let dir = std::env::temp_dir().join(format!("forge-update-{}", uuid::Uuid::new_v4()));
+        let arko = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        scaffold(&dir, "longcoder", arko, "Run coding work for hours.").unwrap();
+        assert_eq!(package_name(&dir).as_deref(), Some("longcoder"));
+        assert!(depends_on(&dir, arko));
+        assert!(!depends_on(&dir, Path::new("/elsewhere/arko")));
+        add_change(&dir, "Add a deliberation mode.").unwrap();
+        let use_case = std::fs::read_to_string(dir.join("USE_CASE.md")).unwrap();
+        let (original, change) = use_case.split_once("## Change requested").unwrap();
+        assert!(original.contains("Run coding work for hours."));
+        assert!(change.contains("Add a deliberation mode."));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
