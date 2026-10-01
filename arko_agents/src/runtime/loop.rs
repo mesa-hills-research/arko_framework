@@ -1449,6 +1449,7 @@ impl AgentLoop {
         } else {
             TaskState::Failed {
                 reason: reason_text,
+                cause: None,
             }
         };
         self.stop_at_tool_call(tool_call_id, tool_name, reason, state)
@@ -2717,7 +2718,8 @@ impl AgentLoop {
                                 }
                             },
                             TaskState::AwaitingErrorRecoveryApproval {
-                                ref error_message, ..
+                                ref error_message,
+                                ref cause,
                             } => {
                                 match cmd {
                                     UserCommand::ContinueAfterError { ref note } => {
@@ -2908,7 +2910,12 @@ impl AgentLoop {
                                                 error_message
                                             ),
                                         };
-                                        self.task.set_state(TaskState::Failed { reason });
+                                        // The pause's cause stays with the
+                                        // failure.
+                                        self.task.set_state(TaskState::Failed {
+                                            reason,
+                                            cause: Some(cause.clone()),
+                                        });
                                     }
                                     UserCommand::CancelTask => {}
                                     UserCommand::SuspendTask => {}
@@ -4314,7 +4321,7 @@ impl AgentLoop {
             TaskState::Cancelled { reason } if reason == CANCELLED_BY_USER => {
                 TASK_CANCELLED_CALL.to_string()
             }
-            TaskState::Failed { reason } | TaskState::Cancelled { reason } => {
+            TaskState::Failed { reason, .. } | TaskState::Cancelled { reason } => {
                 format!("This call was not run: {}.", reason.trim_end_matches('.'))
             }
             _ => UNREACHED_CALL.to_string(),
@@ -5758,6 +5765,7 @@ impl AgentLoop {
                     self.failed_on_tool_error = true;
                     self.task.set_state(TaskState::Failed {
                         reason: error_message_for_event.clone(),
+                        cause: None,
                     });
                     self.emit_event(AgentEvent::TaskStateChanged(
                         self.task.current_state.clone(),

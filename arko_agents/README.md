@@ -571,7 +571,20 @@ couldn't use, up to the attempt limit), `UsageLimit { resets_at_unix_ms }`, `Ref
 `PauseAndAwaitApproval`), `Monitor` (an opt-in monitor paused it), `Middleware` (the
 execution middleware paused it with `PauseTask`), or `BudgetExceeded` (the host held its
 next model request; see `TurnContextSource::hold_request` below). A task saved before
-causes were recorded loads with `Unknown`.
+causes were recorded loads with `Unknown`. Both runtimes report every pause as the
+`TaskStateChanged` that gives its cause, then `ErrorEncountered` with
+`requires_approval_to_retry`. While the task waits at the pause, a command the runtime
+can't apply (a `ResolveRefusal` whose changes are invalid, or any for a Claude Code agent)
+is answered with another `ErrorEncountered` needing a decision, without a state change:
+the pause stands.
+
+`Failed { reason, cause }`: `cause` is the pause's cause when the task failed at an
+error-recovery pause the host rejected (`RejectErrorRecovery`, as a workflow's error
+recovery policy does for `NonRetryable`, `Refusal` and `UnusableResponses`), so a host can
+tell, for example, an expired login or a bad key (`NonRetryable`: starting the agent again
+only helps once the credential or configuration is fixed) from other failures without
+reading the reason. It is `None` for other failures and in a task saved by an older
+version, and left out of the saved form when `None`.
 
 | Events | Meaning |
 | --- | --- |
@@ -1026,6 +1039,26 @@ reports the plan limit reached pauses with `ErrorRecoveryCause::UsageLimit` and 
 agents, when the wait fits `max_wait_ms`) and resumes the session. The cache monitor judges the main conversation's
 requests.
 
+**Errors.** A session that can't start (the CLI is missing or exits at once) pauses with
+`ErrorRecoveryCause::NonRetryable`, and so does a turn that ends because Claude Code
+can't authenticate (not signed in, or its login expired or was revoked): Claude Code
+starts without a login and reports it on the first turn, as an API error message whose
+`error` is `authentication_failed` (or a result whose `api_error_status` is 401), and
+the runtime reads those fields. A session that fails otherwise (the CLI exits, or a turn
+ends in an error Claude Code's own retries didn't recover from) pauses with
+`RetriesExhausted` (`UsageLimit` at a plan limit), under the pausing error policies.
+Every pause, also one taken after a turn (a tool error under `PauseAndAwaitApproval`, a
+completion a verifier couldn't review, the execution middleware's `PauseTask`), is
+reported as in arko's own runtime: the pause's state change, then the
+`ErrorEncountered` a host answers. A workflow's error recovery policy decides it by its
+cause: under `ErrorRecoveryPolicy::Automatic` a session that can't start or sign in (or
+a standing refusal) fails the run, with the cause in `TaskState::Failed`, and a failed
+session is resumed after the policy's wait. Earlier versions reported the error first,
+so a workflow returned every such pause to its caller as `Paused`; reported a pause
+after a turn by its state alone, so a workflow never decided it and the run call waited
+for ever; and treated a login failure as a failed session, retried for ever under
+`Automatic`.
+
 **Refusals.** By default Claude Code retries a refused request on a fallback model it
 chooses; the runtime reports it as `RefusalReceived` then `RefusalFallback`, and a model
 switch for availability as `ModelRerouted`. Claude Code keeps the rest of that session on
@@ -1039,7 +1072,8 @@ it out. A refusal that stands (no retry ran) is
 that model (`set_model`) for one turn, asks it to continue, and switches back, and a
 refusal on that turn stands. Without it, the task pauses with `ErrorRecoveryCause::Refusal`
 under the pausing policies. The refused request stays in Claude Code's conversation, so
-`ResolveRefusal` doesn't apply.
+`ResolveRefusal` doesn't apply: it is answered with an `ErrorEncountered` needing a
+decision, and the task keeps waiting.
 
 **Handovers.** With `handover` set, the threshold is checked against each request of the
 main conversation as Claude Code reports it. Once reached, the model's next tool call is

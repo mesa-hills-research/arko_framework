@@ -1431,6 +1431,283 @@ impl Drop for FakeClaude {
     }
 }
 
+/// A Claude Code agent whose CLI can't start fails under `Automatic`, as an
+/// agent of arko's own runtime does for an error retrying can't fix: the
+/// runtime reports the pause's cause before the error, so the policy sees
+/// it (it saw an unknown cause before, and returned the agent paused).
+#[tokio::test]
+async fn a_claude_code_agent_that_cant_start_fails_with_its_cause() {
+    let workspace = Workspace::new();
+    let fake = FakeClaude::new(json!([]));
+    let mut config = fake.agent();
+    let claude_code = config.claude_code.as_mut().unwrap();
+    claude_code.cli_args = vec!["-c".into(), "import sys; sys.exit(1)".into()];
+    let workflow = Workflow::builder()
+        .name("cant-start")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(arko_ai::LLMClient::new()))
+        .agent("coder", config)
+        .build()
+        .unwrap();
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        workflow.run_agent("coder", "Write it."),
+    )
+    .await
+    .expect("the run returned")
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("can't succeed without a change to the request, a credential"),
+        "{error}"
+    );
+    let result = &workflow.result().agent_results[0];
+    assert_eq!(result.status, AgentRunStatus::Failed);
+    assert_eq!(
+        result.failure_cause(),
+        Some(&arko_agents::ErrorRecoveryCause::NonRetryable)
+    );
+    assert!(
+        result
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Claude Code could not start")
+    );
+}
+
+/// A Claude Code agent that isn't signed in (or whose login expired) fails
+/// under `Automatic` with that cause: Claude Code starts, and reports it
+/// on the first turn, as `authentication_failed` (it was retried for ever,
+/// as a session failure).
+#[tokio::test]
+async fn a_claude_code_agent_that_cant_sign_in_fails_with_its_cause() {
+    let workspace = Workspace::new();
+    let fake = FakeClaude::new(json!([[
+        {"api_error": "authentication_failed", "text": "Not logged in · Please run /login", "status": null},
+    ]]));
+    let workflow = Workflow::builder()
+        .name("cant-sign-in")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(arko_ai::LLMClient::new()))
+        .agent("coder", fake.agent())
+        .build()
+        .unwrap();
+    let error = within(workflow.run_agent("coder", "Write it."))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("a credential"), "{error}");
+    let result = &workflow.result().agent_results[0];
+    assert_eq!(
+        result.failure_cause(),
+        Some(&arko_agents::ErrorRecoveryCause::NonRetryable)
+    );
+    assert!(
+        result.error.as_deref().unwrap().contains("Not logged in"),
+        "{:?}",
+        result.error
+    );
+    assert_eq!(fake.logged("argv").len(), 1, "not retried");
+}
+
+/// A Claude Code agent's refused input can't be changed (Claude Code keeps
+/// its own conversation): `ResolveRefusal` is refused at once, and the
+/// agent stays paused for another decision.
+#[tokio::test]
+async fn a_claude_code_refusal_cant_be_resolved_by_changing_its_input() {
+    let workspace = Workspace::new();
+    let fake = FakeClaude::new(json!([[
+        {"system": {"subtype": "model_refusal", "api_refusal_category": "cyber",
+                    "api_refusal_explanation": "The request was refused."}},
+        {"text": "No."},
+    ]]));
+    let workflow = Workflow::builder()
+        .name("cc-refusal")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(arko_ai::LLMClient::new()))
+        .agent("coder", fake.agent())
+        .error_recovery_policy(crate::policy::ErrorRecoveryPolicy::ReturnToCaller)
+        .build()
+        .unwrap();
+    let error = within(workflow.run_agent("coder", "Write it."))
+        .await
+        .unwrap_err();
+    let WorkflowError::AgentPaused {
+        task_id,
+        pause: crate::policy::AgentPause::ErrorRecovery { cause, .. },
+        ..
+    } = error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(cause, arko_agents::ErrorRecoveryCause::Refusal);
+    let paused = workflow.agent_result(task_id).unwrap();
+    let change = arko_agents::RefusalResolution::RemoveUserMessage { message_index: 0 };
+    let refused = within(workflow.resume_agent(
+        &paused,
+        crate::policy::AgentResume::ResolveRefusal(vec![change]),
+    ))
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&refused, WorkflowError::BuilderInvalid(reason) if reason.contains("Claude Code")),
+        "{refused:?}"
+    );
+    let failed = within(workflow.resume_agent(
+        &paused,
+        crate::policy::AgentResume::FailAfterError { reason: None },
+    ))
+    .await
+    .unwrap_err();
+    assert!(failed.to_string().contains("rejected"), "{failed}");
+}
+
+/// A tool whose every call fails.
+#[derive(Debug)]
+struct FailingTool;
+
+#[async_trait::async_trait]
+impl arko_agents::Tool for FailingTool {
+    fn definition(&self) -> arko_agents::ToolDefinition {
+        arko_agents::ToolDefinition {
+            name: "boom".to_string(),
+            description: "Fails.".to_string(),
+            output_based_example: None,
+            parameters: vec![],
+            parallel_safe: false,
+            tool_type_details: arko_agents::ToolTypeDetails::DeveloperDefined,
+            raw_json_schema_override: None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _context: &arko_agents::TaskContext<'_>,
+        _params: std::collections::HashMap<String, Value>,
+    ) -> Result<String, arko_agents::ToolError> {
+        Err(arko_agents::ToolError::ExecutionFailed("boom".into()))
+    }
+}
+
+/// A Claude Code agent's pause after its turn (here a tool error under
+/// `ToolErrorPolicy::PauseAndAwaitApproval`) is decided by the workflow:
+/// `Automatic` continues it. (Claude Code reported such a pause by its
+/// state alone, and the run call waited for ever.) The error is reported
+/// once, by the pause, naming its call, as arko's own runtime reports it
+/// (it was reported first on its own too).
+#[tokio::test]
+async fn a_claude_code_agents_tool_error_pause_is_continued() {
+    use arko_agents::ToolErrorPolicy;
+    let boom = json!({"tool": "mcp__arko__boom", "input": {}, "id": "toolu_boom"});
+    let complete = json!({"tool": "mcp__arko__complete_task", "input": {"summary": "done"}});
+    for (policy, script, turns, reports) in [
+        // One turn: the error is the call's result, and the model goes on.
+        (
+            ToolErrorPolicy::InformAgentAndContinue,
+            json!([[boom, complete]]),
+            1,
+            (false, true),
+        ),
+        (
+            ToolErrorPolicy::PauseAndAwaitApproval,
+            json!([[boom], [complete]]),
+            2,
+            (true, true),
+        ),
+    ] {
+        let workspace = Workspace::new();
+        let fake = FakeClaude::new(script);
+        let mut config = fake.agent();
+        config.error_recovery_config.on_tool_execution_error = policy.clone();
+        let workflow = Workflow::builder()
+            .name("tool-error")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(arko_ai::LLMClient::new()))
+            .agent("coder", config)
+            .global_tool(Arc::new(FailingTool))
+            .build()
+            .unwrap();
+        let mut events = workflow.subscribe_events();
+        let result = within(workflow.run_agent("coder", "Boom it."))
+            .await
+            .unwrap();
+        assert_eq!(result.summary, "done");
+        assert_eq!(fake.logged("user").len(), turns, "{policy:?}");
+        // (Needs a decision, names its call.)
+        let mut errors = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let arko_agents::runtime::event::AgentEvent::ErrorEncountered {
+                requires_approval_to_retry,
+                tool_call_id,
+                ..
+            } = event.event
+            {
+                errors.push((requires_approval_to_retry, tool_call_id.is_some()));
+            }
+        }
+        assert_eq!(errors, [reports], "{policy:?}");
+    }
+}
+
+/// A Claude Code agent whose completion its verifier can't review is
+/// returned as `VerifierFailed` (the pause was reported by its state alone,
+/// and the run call waited for ever), and continued with `continue_agent`
+/// it is reviewed again.
+#[tokio::test]
+async fn a_claude_code_agent_its_verifier_cant_review_is_returned_and_continued() {
+    let workspace = Workspace::new();
+    let complete = json!([{"tool": "mcp__arko__complete_task", "input": {"summary": "done"}}]);
+    let fake = FakeClaude::new(json!([complete, complete]));
+    let reviews = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let server = ResponsesServer::start({
+        let reviews = reviews.clone();
+        move |index, _| {
+            // Unusable at first, then accepted.
+            let verdict = if reviews.fetch_add(1, Ordering::SeqCst) == 0 {
+                "Looks good to me."
+            } else {
+                "ACCEPTED"
+            };
+            Some(complete_turn(&format!("v{index}"), verdict))
+        }
+    })
+    .await;
+    let workflow = Workflow::builder()
+        .name("cc-verifier")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("coder", fake.agent())
+        .agent("reviewer", agent_config("Friendly Reviewer"))
+        .completion_verifier(
+            crate::verification::CompletionVerifierConfig::correctness("check", "reviewer")
+                .target("coder")
+                .format_retries(0)
+                .review_retries(0),
+        )
+        .build()
+        .unwrap();
+    let error = within(workflow.run_agent("coder", "Write it."))
+        .await
+        .unwrap_err();
+    let WorkflowError::VerifierFailed { task_id, .. } = error else {
+        panic!("{error:?}");
+    };
+    let paused = workflow.agent_result(task_id).unwrap();
+    assert!(matches!(
+        paused.task.current_state,
+        arko_agents::TaskState::AwaitingErrorRecoveryApproval {
+            cause: arko_agents::ErrorRecoveryCause::Middleware,
+            ..
+        }
+    ));
+    let result = within(workflow.continue_agent(&paused, "Have it reviewed again."))
+        .await
+        .unwrap();
+    assert_eq!(result.status, AgentRunStatus::Completed);
+    assert_eq!(reviews.load(Ordering::SeqCst), 2);
+}
+
 /// A Claude Code agent running a tool call when the workflow crashed is
 /// recovered like any other: its session resumes (`--resume`), and its
 /// first message says the call's outcome is unknown.
@@ -1872,6 +2149,7 @@ async fn resume_run_resumes_only_a_run_its_caller_may_resume() {
     cancelled.id = uuid::Uuid::new_v4();
     cancelled.set_state(arko_agents::TaskState::Failed {
         reason: "stopped".to_string(),
+        cause: None,
     });
     let cancelled_id = cancelled.id;
     crate::workflow::result::upsert_result(

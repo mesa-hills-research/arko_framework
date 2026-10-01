@@ -1155,7 +1155,8 @@ async fn stops_are_reported_once_and_worded_for_how_the_task_ended() {
         stopped_call_reason(
             ToolsStopped::Cancelled,
             &TaskState::Failed {
-                reason: "tool error".into()
+                reason: "tool error".into(),
+                cause: None,
             }
         ),
         STOPPED_TASK_ENDED

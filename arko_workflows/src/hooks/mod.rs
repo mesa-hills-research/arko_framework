@@ -15,6 +15,9 @@ pub enum HookPoint {
     PreAgentSpawn,
     PostAgentCompletion,
     PostAgentInterruption,
+    /// An agent run ended failed. A failure at an error-recovery pause the
+    /// error recovery policy (or the caller) rejected has the pause's cause
+    /// in the metadata's `cause` (`non_retryable`, `refusal`, …).
     PostAgentFailure,
     /// An agent run ended cancelled: stopped with the workflow run, or by the
     /// workflow over its budget.

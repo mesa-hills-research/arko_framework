@@ -171,6 +171,14 @@ pub enum TaskState {
     },
     Failed {
         reason: String,
+        /// Why, when the task failed at an error-recovery pause the host
+        /// rejected (a workflow's error recovery policy fails a pause whose
+        /// cause retrying can't fix): the pause's cause, such as
+        /// [`ErrorRecoveryCause::NonRetryable`] for a request that needs a
+        /// new credential or a configuration change. `None` for other
+        /// failures, and in a task saved by an older version.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<ErrorRecoveryCause>,
     },
     /// Stopped on request (a [`CancelTask`](crate::runtime::command::UserCommand::CancelTask)
     /// command or a middleware's
@@ -214,6 +222,8 @@ enum TaskStateRepr {
     },
     Failed {
         reason: String,
+        #[serde(default)]
+        cause: Option<ErrorRecoveryCause>,
     },
     Cancelled {
         reason: String,
@@ -258,10 +268,10 @@ impl From<TaskStateRepr> for TaskState {
             TaskStateRepr::Interrupted { reason } => TaskState::Interrupted { reason },
             TaskStateRepr::Completed { summary } => TaskState::Completed { summary },
             // Saved before cancellation had its own state.
-            TaskStateRepr::Failed { reason } if reason == CANCELLED_BY_USER => {
+            TaskStateRepr::Failed { reason, .. } if reason == CANCELLED_BY_USER => {
                 TaskState::Cancelled { reason }
             }
-            TaskStateRepr::Failed { reason } => TaskState::Failed { reason },
+            TaskStateRepr::Failed { reason, cause } => TaskState::Failed { reason, cause },
             TaskStateRepr::Cancelled { reason } => TaskState::Cancelled { reason },
         }
     }
@@ -833,6 +843,20 @@ mod tests {
                 reason: CANCELLED_BY_USER.to_string()
             }
         );
+        // A failure without a cause is saved as before, so older versions
+        // read it; one with a cause keeps it.
+        let failed = |cause| TaskState::Failed {
+            reason: "x".into(),
+            cause,
+        };
+        assert_eq!(
+            serde_json::to_value(failed(None)).unwrap(),
+            serde_json::json!({"Failed": {"reason": "x"}})
+        );
+        assert_eq!(
+            state(serde_json::json!({"Failed": {"reason": "x", "cause": "non_retryable"}})),
+            failed(Some(ErrorRecoveryCause::NonRetryable))
+        );
         // Only the exact reason the runtime recorded is a cancellation.
         for reason in [
             "Task cancelled by user",
@@ -841,7 +865,8 @@ mod tests {
             assert_eq!(
                 state(serde_json::json!({"Failed": {"reason": reason}})),
                 TaskState::Failed {
-                    reason: reason.to_string()
+                    reason: reason.to_string(),
+                    cause: None,
                 }
             );
         }
@@ -892,6 +917,11 @@ mod tests {
             },
             TaskState::Failed {
                 reason: "verifier rejected".into(),
+                cause: None,
+            },
+            TaskState::Failed {
+                reason: "a new credential is needed".into(),
+                cause: Some(ErrorRecoveryCause::NonRetryable),
             },
             TaskState::Cancelled {
                 reason: "Workflow cancelled.".into(),

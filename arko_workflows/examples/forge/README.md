@@ -235,7 +235,15 @@ told that a tool call it was running when the forge stopped may or may not have 
 can't be recovered, a new architect run continues from the work already in the crate, which
 keeps `DESIGN.md` current for exactly this. An explorer run that the architect didn't resume
 itself is recovered after it. Usage limits and provider errors don't stop the forge: they're
-waited out and retried.
+waited out and retried (a Claude Code session that fails, too: it is resumed after a wait).
+
+An agent whose model request needs a new credential or a configuration change (an expired or
+invalidated login, Claude Code not signed in or its login expired, a Claude Code CLI that can't
+start, a bad key) gets one fresh start per process:
+the architect is started again, continuing from the crate; the architect may ask an explorer
+again; a deliberation agent's part starts again. If it fails the same way again, the forge saves
+and exits with status 3, naming the agent and its model. Sign in again (`claude` for Claude Code,
+`codex login` for ChatGPT) and resume with `forge --resume <state dir>`; the agent starts afresh.
 
 With `--budget`, reaching the budget doesn't cancel anything: each agent pauses before its next
 model request (a tool call it is running finishes first), and once every agent is paused the

@@ -567,6 +567,54 @@ async fn automatic_recovery_fails_clearly_on_an_error_retrying_cant_fix() {
     );
 }
 
+/// A run the policy failed at a pause records the pause's cause, for hosts
+/// (`AgentResult::failure_cause`, the saved task) and for the
+/// `PostAgentFailure` hook (its `cause` metadata).
+#[tokio::test]
+async fn a_failure_at_a_pause_records_its_cause() {
+    let workspace = Workspace::new();
+    let server = scripted(|_| status(401)).await;
+    let causes = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let workflow = builder(&server, &workspace, agent_config("Friendly Coder"))
+        .hook(HookPoint::PostAgentFailure, {
+            let causes = causes.clone();
+            Arc::new(move |context| {
+                causes.lock().push(context.metadata.get("cause").cloned());
+                HookResult::Continue
+            })
+        })
+        .build()
+        .unwrap();
+    assert!(
+        within(workflow.run_agent("coder", "Write it."))
+            .await
+            .is_err()
+    );
+    let result = &workflow.result().agent_results[0];
+    assert_eq!(
+        result.failure_cause(),
+        Some(&ErrorRecoveryCause::NonRetryable)
+    );
+    assert!(matches!(
+        &result.task.current_state,
+        arko_agents::TaskState::Failed {
+            cause: Some(ErrorRecoveryCause::NonRetryable),
+            ..
+        }
+    ));
+    assert_eq!(*causes.lock(), [Some(json!("non_retryable"))]);
+    // A run that didn't fail has none.
+    let workspace = Workspace::new();
+    let server = scripted(|_| done()).await;
+    let workflow = builder(&server, &workspace, agent_config("Friendly Coder"))
+        .build()
+        .unwrap();
+    let result = within(workflow.run_agent("coder", "Write it."))
+        .await
+        .unwrap();
+    assert_eq!(result.failure_cause(), None);
+}
+
 /// `Limited { max }` recovers `max` times in a drive, then fails the run.
 #[tokio::test]
 async fn limited_recovery_stops_after_its_count() {
@@ -1408,4 +1456,186 @@ async fn automatic_recovery_continues_after_tool_errors() {
     let second = &server.bodies()[1];
     assert!(second.contains("missing.txt"), "{second}");
     assert!(!user_text(second).contains("approved"), "{second}");
+}
+
+/// A streamed model turn refusing the request.
+fn refusal() -> Reply {
+    let text = "I can't help with that.";
+    let item = json!({
+        "type": "message", "id": "msg_refused", "role": "assistant", "status": "completed",
+        "content": [{"type": "refusal", "refusal": text}],
+    });
+    let completed = json!({"type": "response.completed", "response": {
+        "id": "resp_refused", "object": "response", "created_at": 0, "status": "completed",
+        "model": "gpt-5.6-luna", "output": [], "usage": {"input_tokens": 10, "output_tokens": 5},
+        "metadata": {},
+    }});
+    Reply::Stream(
+        [
+            json!({"type": "response.refusal.delta", "item_id": "msg_refused", "content_index": 0, "delta": text}),
+            json!({"type": "response.refusal.done", "item_id": "msg_refused", "content_index": 0, "refusal": text}),
+            json!({"type": "response.output_item.done", "output_index": 0, "item": item}),
+            completed,
+        ]
+        .iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect(),
+    )
+}
+
+/// `ResolveRefusal` changes a refusal pause's input. A resolution for
+/// another pause, or without a change, is refused at once; changes the
+/// runtime can't apply leave the agent paused, and the call returns with
+/// the runtime's error (it waited for ever once: the resumed run's driver
+/// didn't know the pause it started in, and held the error for a pause
+/// that never came); changes it can apply continue the agent.
+#[tokio::test]
+async fn a_refusal_resolution_is_checked_and_one_that_cant_apply_returns_paused() {
+    use arko_agents::RefusalResolution;
+    let invalid = |error: &WorkflowError, text: &str| matches!(error, WorkflowError::BuilderInvalid(reason) if reason.contains(text));
+    let workspace = Workspace::new();
+    let server = scripted(|index| if index == 0 { refusal() } else { done() }).await;
+    let workflow = builder(&server, &workspace, failing_once_agent())
+        .error_recovery_policy(ErrorRecoveryPolicy::ReturnToCaller)
+        .build()
+        .unwrap();
+    let error = within(workflow.run_agent("coder", "Write it."))
+        .await
+        .unwrap_err();
+    let WorkflowError::AgentPaused {
+        task_id,
+        pause: AgentPause::ErrorRecovery { cause, .. },
+        ..
+    } = error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(cause, ErrorRecoveryCause::Refusal);
+    let paused = workflow.agent_result(task_id).unwrap();
+    let prompt = paused.task.refused_input.as_ref().unwrap().messages[0].message_index;
+    let resume = AgentResume::ResolveRefusal(vec![]);
+    let refused = within(workflow.resume_agent(&paused, resume))
+        .await
+        .unwrap_err();
+    assert!(invalid(&refused, "at least one change"), "{refused:?}");
+    // A change the runtime can't apply: paused again, with its error.
+    let unknown = RefusalResolution::RemoveUserMessage { message_index: 99 };
+    let resume = AgentResume::ResolveRefusal(vec![unknown]);
+    let error = within(workflow.resume_agent(&paused, resume))
+        .await
+        .unwrap_err();
+    let WorkflowError::AgentPaused {
+        task_id,
+        pause: AgentPause::ErrorRecovery { error, cause },
+        ..
+    } = error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(cause, ErrorRecoveryCause::Refusal);
+    assert!(error.contains("Could not resolve the refusal"), "{error}");
+    assert!(error.contains("Message 99"), "{error}");
+    let paused = workflow.agent_result(task_id).unwrap();
+    assert_eq!(paused.status, AgentRunStatus::Paused);
+    // One it can: the changed input is sent, and the agent completes.
+    let rephrase = RefusalResolution::RephraseUserMessage {
+        message_index: prompt,
+        text: "Write it politely.".into(),
+    };
+    let resume = AgentResume::ResolveRefusal(vec![rephrase]);
+    let result = within(workflow.resume_agent(&paused, resume))
+        .await
+        .unwrap();
+    assert_eq!(result.summary, "done");
+    assert!(user_text(&server.bodies()[1]).contains("Write it politely."));
+    assert_eq!(server.requests(), 2);
+
+    // Another pause can't be answered with a resolution, with or without
+    // changes.
+    let workspace = Workspace::new();
+    let server = scripted(failing_then_done(503)).await;
+    let workflow = builder(&server, &workspace, failing_once_agent())
+        .error_recovery_policy(ErrorRecoveryPolicy::ReturnToCaller)
+        .build()
+        .unwrap();
+    let error = within(workflow.run_agent("coder", "Write it."))
+        .await
+        .unwrap_err();
+    let WorkflowError::AgentPaused { task_id, .. } = error else {
+        panic!("{error:?}");
+    };
+    let paused = workflow.agent_result(task_id).unwrap();
+    let change = RefusalResolution::RemoveUserMessage { message_index: 0 };
+    for changes in [vec![], vec![change]] {
+        let resume = AgentResume::ResolveRefusal(changes);
+        let refused = within(workflow.resume_agent(&paused, resume))
+            .await
+            .unwrap_err();
+        assert!(invalid(&refused, "retries_exhausted"), "{refused:?}");
+    }
+}
+
+/// A refusal pause saved before pauses recorded their cause loads as
+/// `Unknown`: `ResolveRefusal` is accepted, and the runtime checks the
+/// changes. One it can't apply returns the agent paused again (decided as
+/// an unknown cause, under any policy); one it can continues the agent.
+#[tokio::test]
+async fn a_refusal_pause_saved_without_its_cause_can_be_resolved() {
+    use arko_agents::{RefusalResolution, TaskState};
+    let workspace = Workspace::new();
+    let server = scripted(|index| if index == 0 { refusal() } else { done() }).await;
+    let workflow = builder(&server, &workspace, failing_once_agent())
+        .error_recovery_policy(ErrorRecoveryPolicy::ReturnToCaller)
+        .build()
+        .unwrap();
+    let error = within(workflow.run_agent("coder", "Write it."))
+        .await
+        .unwrap_err();
+    let WorkflowError::AgentPaused { task_id, .. } = error else {
+        panic!("{error:?}");
+    };
+    // As an older version saved it.
+    let mut paused = workflow.agent_result(task_id).unwrap();
+    let TaskState::AwaitingErrorRecoveryApproval { error_message, .. } = &paused.task.current_state
+    else {
+        panic!("{:?}", paused.task.current_state);
+    };
+    paused.task.current_state = serde_json::from_value(json!({
+        "AwaitingErrorRecoveryApproval": {"error_message": error_message},
+    }))
+    .unwrap();
+    assert!(matches!(
+        paused.task.current_state,
+        TaskState::AwaitingErrorRecoveryApproval {
+            cause: ErrorRecoveryCause::Unknown,
+            ..
+        }
+    ));
+    let prompt = paused.task.refused_input.as_ref().unwrap().messages[0].message_index;
+    let unknown = RefusalResolution::RemoveUserMessage { message_index: 99 };
+    let resume = AgentResume::ResolveRefusal(vec![unknown]);
+    let error = within(workflow.resume_agent(&paused, resume))
+        .await
+        .unwrap_err();
+    let WorkflowError::AgentPaused {
+        task_id,
+        pause: AgentPause::ErrorRecovery { error, cause },
+        ..
+    } = error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(cause, ErrorRecoveryCause::Unknown);
+    assert!(error.contains("Message 99"), "{error}");
+    let paused = workflow.agent_result(task_id).unwrap();
+    let rephrase = RefusalResolution::RephraseUserMessage {
+        message_index: prompt,
+        text: "Write it politely.".into(),
+    };
+    let resume = AgentResume::ResolveRefusal(vec![rephrase]);
+    let result = within(workflow.resume_agent(&paused, resume))
+        .await
+        .unwrap();
+    assert_eq!(result.summary, "done");
+    assert!(user_text(&server.bodies()[1]).contains("Write it politely."));
 }

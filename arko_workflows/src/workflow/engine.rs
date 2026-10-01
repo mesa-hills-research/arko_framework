@@ -415,8 +415,14 @@ async fn answer_budget_hold(
 /// The error-recovery state of one drive of an agent.
 #[derive(Default)]
 struct RecoveryState {
-    /// The last error-recovery pause the agent reported, and its cause.
-    pause: Option<(String, arko_agents::ErrorRecoveryCause)>,
+    /// The cause of the error-recovery pause the agent is in (its latest
+    /// state, or the state it was resumed in), if it is in one: an error it
+    /// reports needing a decision is about that pause.
+    paused: Option<arko_agents::ErrorRecoveryCause>,
+    /// An error needing a decision that arrived before the state change
+    /// giving its cause: answered once that pause arrives, so the decision
+    /// doesn't depend on the order a runtime reports them in.
+    unanswered: Option<String>,
     /// Automatic recoveries in this drive (for `ErrorRecoveryPolicy::Limited`).
     recovered: u32,
     /// Pauses in a row without a model response in between.
@@ -658,23 +664,23 @@ async fn send_tool_decisions(
     let _ = cmd_tx.send(command).await;
 }
 
-/// Answers an error-recovery pause under the workflow's error recovery
-/// policy: continues (after a wait), fails the task, or pauses the agent
-/// for its caller; a `nested` run (inside another agent's tool call) can't
-/// pause, so it fails instead.
+/// Answers `error`, reported at an error-recovery pause, under the
+/// workflow's error recovery policy and the pause's cause: continues (after
+/// a wait), fails the task, or pauses the agent for its caller; a `nested`
+/// run (inside another agent's tool call) can't pause, so it fails instead.
 async fn answer_recovery_pause(
     agent_name: &str,
     agent_run_id: uuid::Uuid,
-    fallback_error: String,
+    error: String,
     recovery: &mut RecoveryState,
     nested: bool,
     cmd_tx: &tokio::sync::mpsc::Sender<UserCommand>,
     ctx: &Arc<SharedContext>,
 ) -> Result<(), WorkflowError> {
-    let (error, cause) = recovery
-        .pause
+    let cause = recovery
+        .paused
         .clone()
-        .unwrap_or((fallback_error, arko_agents::ErrorRecoveryCause::Unknown));
+        .unwrap_or(arko_agents::ErrorRecoveryCause::Unknown);
     if cause == arko_agents::ErrorRecoveryCause::BudgetExceeded {
         return answer_budget_hold(agent_name, agent_run_id, error, nested, cmd_tx, ctx).await;
     }
@@ -772,6 +778,10 @@ async fn answer_recovery_pause(
 ///
 /// A `batch_stop` (fail-fast in `run_agents_parallel`) that is set stops the
 /// agent too: the loop returns `AgentCancelled` with its reason.
+///
+/// `paused` is the cause of the error-recovery pause the agent starts in (a
+/// resumed or recovered run): a runtime reports an error about it (such as
+/// a refusal change it can't apply) without reporting the pause again.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn drive_event_loop(
     agent_name: &str,
@@ -782,6 +792,7 @@ pub(crate) async fn drive_event_loop(
     persistence: Option<&Arc<PersistenceManager>>,
     batch_stop: Option<tokio::sync::watch::Receiver<Option<String>>>,
     nested: bool,
+    paused: Option<arko_agents::ErrorRecoveryCause>,
 ) -> Result<(), WorkflowError> {
     let drive = Drive {
         agent_name,
@@ -790,15 +801,19 @@ pub(crate) async fn drive_event_loop(
         ctx,
         persistence,
     };
+    let mut recovery = RecoveryState {
+        paused,
+        ..RecoveryState::default()
+    };
     let Some(mut batch_stop) = batch_stop else {
-        return drive_events(&drive, event_rx, cmd_tx).await;
+        return drive_events(&drive, event_rx, cmd_tx, &mut recovery).await;
     };
     let stopped = tokio::select! {
         biased;
         stopped = batch_stop.wait_for(Option::is_some) => {
             stopped.map(|reason| reason.clone().unwrap_or_default())
         }
-        result = drive_events(&drive, event_rx, cmd_tx) => {
+        result = drive_events(&drive, event_rx, cmd_tx, &mut recovery) => {
             return result;
         }
     };
@@ -807,8 +822,8 @@ pub(crate) async fn drive_event_loop(
             agent: agent_name.to_string(),
             reason,
         }),
-        // The call that could stop it is gone: drive on.
-        Err(_) => drive_events(&drive, event_rx, cmd_tx).await,
+        // The call that could stop it is gone: drive on, where it was.
+        Err(_) => drive_events(&drive, event_rx, cmd_tx, &mut recovery).await,
     }
 }
 
@@ -828,6 +843,7 @@ async fn drive_events(
     drive: &Drive<'_>,
     event_rx: &mut tokio::sync::mpsc::Receiver<AgentEvent>,
     cmd_tx: &tokio::sync::mpsc::Sender<UserCommand>,
+    recovery: &mut RecoveryState,
 ) -> Result<(), WorkflowError> {
     let Drive {
         agent_name,
@@ -836,7 +852,6 @@ async fn drive_events(
         ctx,
         persistence,
     } = *drive;
-    let mut recovery = RecoveryState::default();
     loop {
         let event = tokio::select! {
             biased;
@@ -864,6 +879,14 @@ async fn drive_events(
         {
             let _ = cmd_tx.try_send(UserCommand::CancelTask);
             return Err(error);
+        }
+        // Any other state: the agent is past its pause, and an error it
+        // reported without one needs no decision.
+        if let AgentEvent::TaskStateChanged(state) = &event
+            && !matches!(state, TaskState::AwaitingErrorRecoveryApproval { .. })
+        {
+            recovery.paused = None;
+            recovery.unanswered = None;
         }
         match event {
             AgentEvent::ToolCallAwaitingApproval {
@@ -976,30 +999,51 @@ async fn drive_events(
                 }
             }
 
+            // An error-recovery pause is reported as the state change that
+            // gives its cause and an error needing a decision; it is answered
+            // once both have arrived, whichever comes first (arko's runtimes
+            // report the state first; a pause they are still in, also one a
+            // run was resumed in, can be reported again with an error alone,
+            // such as a refusal change they can't apply). The error's text
+            // is what the host is told.
             AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
-                ref error_message,
                 ref cause,
+                ..
             }) => {
-                recovery.pause = Some((error_message.clone(), cause.clone()));
+                recovery.paused = Some(cause.clone());
+                if let Some(error) = recovery.unanswered.take() {
+                    answer_recovery_pause(
+                        agent_name,
+                        agent_run_id,
+                        error,
+                        recovery,
+                        nested,
+                        cmd_tx,
+                        ctx,
+                    )
+                    .await?;
+                }
             }
 
-            // The runtime reports every error-recovery pause this way, after
-            // the state change that gives its cause.
             AgentEvent::ErrorEncountered {
                 requires_approval_to_retry: true,
                 error_message,
                 ..
             } => {
-                answer_recovery_pause(
-                    agent_name,
-                    agent_run_id,
-                    error_message,
-                    &mut recovery,
-                    nested,
-                    cmd_tx,
-                    ctx,
-                )
-                .await?;
+                if recovery.paused.is_some() {
+                    answer_recovery_pause(
+                        agent_name,
+                        agent_run_id,
+                        error_message,
+                        recovery,
+                        nested,
+                        cmd_tx,
+                        ctx,
+                    )
+                    .await?;
+                } else {
+                    recovery.unanswered = Some(error_message);
+                }
             }
 
             AgentEvent::UserQuestionsAsked { questions } => {
@@ -1149,7 +1193,7 @@ async fn answer_saved_wait(
             cause,
         } => {
             let mut recovery = RecoveryState {
-                pause: Some((error_message.clone(), cause.clone())),
+                paused: Some(cause.clone()),
                 ..RecoveryState::default()
             };
             answer_recovery_pause(
@@ -1537,6 +1581,11 @@ async fn drive_run_to_result(
     } else {
         Ok(())
     };
+    // A run resumed (or recovered) at an error-recovery pause starts in it.
+    let paused = match &started_task.current_state {
+        TaskState::AwaitingErrorRecoveryApproval { cause, .. } => Some(cause.clone()),
+        _ => None,
+    };
     let drive_result = match saved_wait {
         Ok(()) => {
             drive_event_loop(
@@ -1548,6 +1597,7 @@ async fn drive_run_to_result(
                 persistence,
                 batch_stop,
                 depth > 0,
+                paused,
             )
             .await
         }
@@ -1978,6 +2028,7 @@ pub(crate) async fn finalize_agent_task(
     };
     let summary = result.summary.clone();
     let error = result.error.clone();
+    let failure_cause = result.failure_cause().cloned();
     // With persistence, its task is saved first (a failure is logged and
     // retried at the next checkpoint; it never fails the run). Spawned, so
     // the result is recorded even if this call is dropped while it waits
@@ -2030,6 +2081,13 @@ pub(crate) async fn finalize_agent_task(
                 );
             }
             None => {}
+        }
+        // A failure at a rejected error-recovery pause: its cause.
+        if let Some(cause) = &failure_cause {
+            hook.metadata.insert(
+                "cause".to_string(),
+                serde_json::json!(crate::policy::cause_name(cause)),
+            );
         }
     });
 
@@ -3002,7 +3060,29 @@ impl WorkflowEngine {
             (AgentPause::ErrorRecovery { .. }, AgentResume::FailAfterError { reason }) => {
                 Decision::Command(UserCommand::RejectErrorRecovery { message: reason })
             }
-            (AgentPause::ErrorRecovery { .. }, AgentResume::ResolveRefusal(changes)) => {
+            (AgentPause::ErrorRecovery { cause, .. }, AgentResume::ResolveRefusal(changes)) => {
+                // A pause saved before causes were recorded (`Unknown`) may
+                // be a refusal: the runtime checks there is refused input.
+                if !matches!(
+                    cause,
+                    arko_agents::ErrorRecoveryCause::Refusal
+                        | arko_agents::ErrorRecoveryCause::Unknown
+                ) {
+                    return Err(WorkflowError::BuilderInvalid(format!(
+                        "ResolveRefusal answers a refusal; the agent is paused for another error ({}): continue or fail it",
+                        crate::policy::cause_name(cause)
+                    )));
+                }
+                if changes.is_empty() {
+                    return Err(WorkflowError::BuilderInvalid(
+                        "ResolveRefusal needs at least one change to the refused input".to_string(),
+                    ));
+                }
+                if previous.task.agent_config.runs_in_claude_code() {
+                    return Err(WorkflowError::BuilderInvalid(
+                        "a Claude Code agent's refused input can't be changed (Claude Code keeps its own conversation): continue or fail it".to_string(),
+                    ));
+                }
                 Decision::Command(UserCommand::ResolveRefusal { changes })
             }
             (pause, resume) => {
@@ -4043,6 +4123,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
             ),
         )
         .await
@@ -4054,6 +4135,128 @@ mod tests {
             command_rx.try_recv().unwrap(),
             UserCommand::CancelTask
         ));
+    }
+
+    /// An error-recovery pause is decided by its cause whichever a runtime
+    /// reports first: the state change that gives the cause, or the error
+    /// needing a decision. A non-retryable cause fails the run under
+    /// `Automatic` in both orders (it was answered with an unknown cause,
+    /// returned to the caller, when the error came first).
+    #[tokio::test]
+    async fn a_recovery_pause_is_decided_by_its_cause_in_either_order() {
+        let config = AgentConfig::builder(
+            "designer".into(),
+            "Designer".into(),
+            AgentLLMConfig {
+                model: Model::openai_gpt_5_6_sol(),
+                generation_config: GenerationConfig::default(),
+            },
+        )
+        .role_description("Designer".into())
+        .instructions("Design".into())
+        .build()
+        .unwrap();
+        let workflow = Workflow::builder()
+            .name("order-test")
+            .workspace(std::env::current_dir().unwrap())
+            .llm_client(Arc::new(LLMClient::new()))
+            .agent("designer", config)
+            .build()
+            .unwrap();
+        let pause = || {
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
+                error_message: "401 refresh_token_invalidated".into(),
+                cause: arko_agents::ErrorRecoveryCause::NonRetryable,
+            })
+        };
+        let error = || AgentEvent::ErrorEncountered {
+            error_message: "401 refresh_token_invalidated".into(),
+            requires_approval_to_retry: true,
+            tool_call_id: None,
+        };
+        let decide_from = |paused: Option<arko_agents::ErrorRecoveryCause>,
+                           events: Vec<AgentEvent>| {
+            let context = workflow.context().clone();
+            async move {
+                let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
+                let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(8);
+                for event in events {
+                    event_tx.send(event).await.unwrap();
+                }
+                drop(event_tx);
+                let driven = drive_event_loop(
+                    "designer",
+                    uuid::Uuid::new_v4(),
+                    &mut event_rx,
+                    &command_tx,
+                    &context,
+                    None,
+                    None,
+                    false,
+                    paused,
+                )
+                .await;
+                assert!(driven.is_ok(), "{driven:?}");
+                let mut commands = Vec::new();
+                while let Ok(command) = command_rx.try_recv() {
+                    commands.push(command);
+                }
+                commands
+            }
+        };
+        let decide = |events: Vec<AgentEvent>| decide_from(None, events);
+        let rejected = |commands: &[UserCommand]| match commands {
+            [
+                UserCommand::RejectErrorRecovery {
+                    message: Some(message),
+                },
+            ] => message.contains("can't succeed without a change to the request, a credential"),
+            _ => false,
+        };
+        let state_first = decide(vec![pause(), error()]).await;
+        let error_first = decide(vec![error(), pause()]).await;
+        assert!(rejected(&state_first), "{state_first:?}");
+        assert!(rejected(&error_first), "{error_first:?}");
+        // A pause the agent is still in, reported again with an error alone,
+        // is decided by that pause; an error the agent moved past without a
+        // pause needs no decision.
+        let again = decide(vec![pause(), error(), error()]).await;
+        assert_eq!(again.len(), 2, "{again:?}");
+        assert!(rejected(&again[1..]));
+        let moved_on = decide(vec![
+            error(),
+            AgentEvent::TaskStateChanged(TaskState::InProgress),
+        ])
+        .await;
+        assert!(moved_on.is_empty(), "{moved_on:?}");
+        // Once the agent is past a pause, a new error waits for its own
+        // pause rather than taking the old one's cause.
+        let past = decide(vec![
+            pause(),
+            error(),
+            AgentEvent::TaskStateChanged(TaskState::InProgress),
+            error(),
+        ])
+        .await;
+        assert_eq!(past.len(), 1, "{past:?}");
+        // A run resumed at a pause starts in it: an error about it alone
+        // (a refusal change the runtime can't apply) is decided by its
+        // cause, and its own text is what the host is told.
+        let resumed = decide_from(
+            Some(arko_agents::ErrorRecoveryCause::NonRetryable),
+            vec![AgentEvent::ErrorEncountered {
+                error_message: "Could not resolve the refusal: no refused input".into(),
+                requires_approval_to_retry: true,
+                tool_call_id: None,
+            }],
+        )
+        .await;
+        assert!(rejected(&resumed), "{resumed:?}");
+        assert!(
+            matches!(&resumed[..], [UserCommand::RejectErrorRecovery { message: Some(message) }]
+                if message.contains("Could not resolve the refusal")),
+            "{resumed:?}"
+        );
     }
 
     /// The run status follows the task state, never the wording of a
@@ -4083,6 +4286,7 @@ mod tests {
             (
                 TaskState::Failed {
                     reason: "The upload was cancelled by the server.".into(),
+                    cause: None,
                 },
                 crate::workflow::result::AgentRunStatus::Failed,
             ),

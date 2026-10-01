@@ -72,7 +72,7 @@ impl AgentResult {
         let (summary, error) = match &task.current_state {
             TaskState::Completed { summary } => (summary.clone(), None),
             TaskState::Cancelled { reason }
-            | TaskState::Failed { reason }
+            | TaskState::Failed { reason, .. }
             | TaskState::Interrupted { reason } => (String::new(), Some(reason.clone())),
             TaskState::AwaitingUserResponse { questions } => {
                 (String::new(), Some(questions.clone()))
@@ -125,6 +125,25 @@ impl AgentResult {
     /// Returns the total output tokens generated.
     pub fn total_output_tokens(&self) -> usize {
         self.task.total_output_tokens()
+    }
+
+    /// Why the run failed, when it failed at an error-recovery pause the
+    /// error recovery policy (or a caller) rejected: the pause's cause, as
+    /// its task recorded it (`TaskState::Failed::cause`). For example
+    /// [`ErrorRecoveryCause::NonRetryable`](arko_agents::ErrorRecoveryCause::NonRetryable):
+    /// the model request needs a new credential (an expired login) or a
+    /// configuration change, so starting the agent again only helps once
+    /// that is fixed. `None` for a run that didn't fail, failed otherwise,
+    /// or was saved by an older version.
+    pub fn failure_cause(&self) -> Option<&arko_agents::ErrorRecoveryCause> {
+        match &self.task.current_state {
+            arko_agents::TaskState::Failed { cause, .. }
+                if self.status == AgentRunStatus::Failed =>
+            {
+                cause.as_ref()
+            }
+            _ => None,
+        }
     }
 }
 

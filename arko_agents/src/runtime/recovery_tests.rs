@@ -550,7 +550,8 @@ async fn run_answering_the_pause(
     )
 }
 
-/// A rejected recovery fails the task with the host's reason, when given.
+/// A rejected recovery fails the task with the host's reason, when given,
+/// and records the pause's cause with the failure.
 #[tokio::test(start_paused = true)]
 async fn a_rejected_recovery_fails_with_the_hosts_reason() {
     for (message, expected) in [
@@ -573,10 +574,15 @@ async fn a_rejected_recovery_fails_with_the_hosts_reason() {
         };
         let (task, cause) = run_answering_the_pause(agent, events, commands, command).await;
         assert_eq!(cause, ErrorRecoveryCause::NonRetryable);
-        let TaskState::Failed { reason } = &task.current_state else {
+        let TaskState::Failed {
+            reason,
+            cause: recorded,
+        } = &task.current_state
+        else {
             panic!("{:?}", task.current_state);
         };
         assert!(reason.starts_with(expected), "{reason}");
+        assert_eq!(recorded, &Some(ErrorRecoveryCause::NonRetryable));
     }
 }
 

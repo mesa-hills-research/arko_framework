@@ -746,6 +746,12 @@ pub struct PyAgentResult {
     /// The failure or cancellation reason, the questions, or the pause.
     #[pyo3(get)]
     pub error: Option<String>,
+    /// Why a `"Failed"` run failed, when it failed at a rejected
+    /// error-recovery pause: the pause's cause, such as `"non_retryable"`
+    /// (the request needs a new credential or a configuration change) or
+    /// `"refusal"`; `None` otherwise.
+    #[pyo3(get)]
+    pub failure_cause: Option<String>,
     /// The full result, to continue or resume the run.
     inner: crate::AgentResult,
 }
@@ -760,6 +766,9 @@ impl From<crate::AgentResult> for PyAgentResult {
             status: format!("{:?}", result.status),
             agent_run_id: result.agent_run_id.to_string(),
             error: result.error.clone(),
+            failure_cause: result
+                .failure_cause()
+                .map(|cause| crate::policy::cause_name(cause).to_string()),
             inner: result,
         }
     }

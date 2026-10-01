@@ -1250,6 +1250,7 @@ async fn a_native_batch_a_middleware_stops_answers_the_calls_it_did_not_run() {
         } else {
             TaskState::Failed {
                 reason: reason.into(),
+                cause: None,
             }
         };
         assert_eq!(task.current_state, expected);

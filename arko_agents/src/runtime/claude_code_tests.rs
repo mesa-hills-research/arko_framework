@@ -547,13 +547,26 @@ async fn a_crash_pauses_and_continuing_resumes_the_session() {
         None,
     );
     let mut run = start(task);
-    run.events_until(|event| {
-        matches!(
+    let seen = run
+        .events_until(|event| {
+            matches!(
+                event,
+                AgentEvent::ErrorEncountered {
+                    requires_approval_to_retry: true,
+                    ..
+                }
+            )
+        })
+        .await;
+    // As arko's own runtime reports a pause: the state change that gives
+    // its cause, then the error a host answers.
+    assert!(
+        seen.iter().any(|event| matches!(
             event,
             AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
-        )
-    })
-    .await;
+        )),
+        "{seen:#?}"
+    );
     run.commands
         .send(UserCommand::ContinueAfterError { note: None })
         .await
@@ -1110,8 +1123,100 @@ async fn without_a_fallback_a_standing_refusal_pauses() {
             }
         ))
     ));
+    // Reported with its error, as every pause is.
+    let reported = run
+        .events_until(|event| matches!(event, AgentEvent::ErrorEncountered { .. }))
+        .await;
+    assert!(
+        matches!(
+            reported.as_slice(),
+            [AgentEvent::ErrorEncountered {
+                requires_approval_to_retry: true,
+                ..
+            }]
+        ),
+        "{reported:#?}"
+    );
+    // Claude Code keeps its conversation: a change to the refused input is
+    // answered with an error to decide, the pause standing (the command
+    // was once ignored, and a host waited for ever).
+    run.commands
+        .send(UserCommand::ResolveRefusal {
+            changes: vec![crate::task::RefusalResolution::RemoveUserMessage { message_index: 0 }],
+        })
+        .await
+        .unwrap();
+    let answered = run
+        .events_until(|event| matches!(event, AgentEvent::ErrorEncountered { .. }))
+        .await;
+    assert!(
+        matches!(
+            answered.last(),
+            Some(AgentEvent::ErrorEncountered {
+                error_message,
+                requires_approval_to_retry: true,
+                ..
+            }) if error_message.starts_with("Could not resolve the refusal")
+        ),
+        "{answered:#?}"
+    );
     run.commands.send(UserCommand::CancelTask).await.unwrap();
-    run.finish().await;
+    let (task, _) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Cancelled { .. }));
+}
+
+/// A request Claude Code can't authenticate (it isn't signed in, or its
+/// login expired or was revoked) pauses as one retrying can't fix, by the
+/// error's kind or status Claude Code reports; another failed request
+/// pauses as retries exhausted, as before. Claude Code reports both on the
+/// first turn, not at its start (checked with Claude Code 2.1.286).
+#[tokio::test]
+async fn a_failed_login_pauses_as_non_retryable() {
+    use crate::task::ErrorRecoveryCause;
+    for (kind, status, expected) in [
+        (
+            json!("authentication_failed"),
+            json!(null),
+            ErrorRecoveryCause::NonRetryable,
+        ),
+        (json!(null), json!(401), ErrorRecoveryCause::NonRetryable),
+        (
+            json!("server_error"),
+            json!(500),
+            ErrorRecoveryCause::RetriesExhausted {
+                retry_after_ms: None,
+            },
+        ),
+    ] {
+        let fake = Fake::new(json!([[
+            {"system": {"subtype": "api_retry", "attempt": 1, "error": kind, "error_status": status}},
+            {"api_error": kind, "text": "Not logged in · Please run /login", "status": status},
+        ]]));
+        let task = Task::new(config(&fake, &[]), "Do it.".into(), fake.workspace(), None);
+        let mut run = start(task);
+        let events = run
+            .events_until(|event| matches!(event, AgentEvent::ErrorEncountered { .. }))
+            .await;
+        let pause = events.iter().find_map(|event| match event {
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
+                error_message,
+                cause,
+            }) => Some((error_message.clone(), cause.clone())),
+            _ => None,
+        });
+        let (message, cause) = pause.unwrap_or_else(|| panic!("{events:#?}"));
+        assert_eq!(cause, expected, "{kind} {status}");
+        assert!(message.contains("Not logged in"), "{message}");
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::ErrorEncountered {
+                requires_approval_to_retry: true,
+                ..
+            })
+        ));
+        run.commands.send(UserCommand::CancelTask).await.unwrap();
+        run.finish().await;
+    }
 }
 
 fn slow_down_config(fake: &Fake, delay_ms: u64) -> AgentConfig {

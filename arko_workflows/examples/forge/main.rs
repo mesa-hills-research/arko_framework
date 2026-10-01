@@ -23,11 +23,12 @@ mod prompts;
 mod scaffold;
 mod tools;
 
+use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arko_agents::agent_config::{AgentLLMConfig, AgentToolConfig, PathSafetyPolicy};
@@ -670,12 +671,18 @@ async fn main() -> ForgeResult<()> {
         builder = builder.agent_tool(&name, tool);
     }
     if !settings.no_explorers {
-        builder = builder.workflow_services(
-            WorkflowServicesConfig::default()
-                .allow_caller(ARCHITECT)
-                .allow_target(EXPLORER)
-                .max_active_calls(settings.max_active_calls),
-        );
+        builder = builder
+            .workflow_services(
+                WorkflowServicesConfig::default()
+                    .allow_caller(ARCHITECT)
+                    .allow_target(EXPLORER)
+                    .max_active_calls(settings.max_active_calls),
+            )
+            .hook(HookPoint::PostAgentFailure, {
+                let failed_once = Arc::new(AtomicBool::new(false));
+                let model = ModelSpec::new(&settings.explorer_model, settings.explorer_effort)?;
+                Arc::new(move |context| explorer_failed(&failed_once, &model, context))
+            });
     }
     if let Some(path) = &lessons_path {
         builder = builder.agent_tool(
@@ -724,6 +731,16 @@ async fn main() -> ForgeResult<()> {
     }
     let workflow = builder.build()?;
     let _ = trial_ledger.set(workflow.context().clone());
+    // The architect's run calls: after a login failure, one fresh architect
+    // run per process continues from the crate, then the forge stops.
+    let restarted = Arc::new(AtomicBool::new(false));
+    let architect = |restarted: &Arc<AtomicBool>| Architect {
+        workflow: &workflow,
+        state_dir: &state_dir,
+        model: architect_model.clone(),
+        restart: fill(prompts::ARCHITECT_RESUME, &manifest),
+        restarted: restarted.clone(),
+    };
     let deliberator = match (&manifest.deliberation, &ledger) {
         (Some(config), Some(ledger)) => Some(deliberation::Deliberator {
             workflow: &workflow,
@@ -733,9 +750,11 @@ async fn main() -> ForgeResult<()> {
             arko: &manifest.arko,
             target_dir: &manifest.target_dir,
             resumed: Mutex::default(),
+            architect: architect(&restarted),
         }),
         _ => None,
     };
+    let architect = architect(&restarted);
 
     eprintln!(
         "forge: building `{}` in {}",
@@ -774,7 +793,7 @@ async fn main() -> ForgeResult<()> {
     {
         Some(interrupted) => {
             eprintln!("forge: recovering the architect where it stopped");
-            match within_budget(&workflow, &state_dir, workflow.recover_agent(&interrupted)).await {
+            match architect.call(workflow.recover_agent(&interrupted)).await {
                 Ok(result) => Some(result),
                 Err(error) => {
                     eprintln!("forge: couldn't recover the architect ({error})");
@@ -792,45 +811,48 @@ async fn main() -> ForgeResult<()> {
         Some(earlier) if earlier.status == AgentRunStatus::Paused => {
             eprintln!("forge: continuing the paused architect");
             let resume = AgentResume::ContinueAfterError { note: None };
-            within_budget(
-                &workflow,
-                &state_dir,
-                workflow.resume_agent(&earlier, resume),
-            )
-            .await?
+            architect
+                .call(workflow.resume_agent(&earlier, resume))
+                .await?
+        }
+        // A run that failed can't be continued: a fresh architect continues
+        // from the crate (after a login failure, that is its one fresh
+        // start in this process).
+        Some(earlier) if earlier.status == AgentRunStatus::Failed => {
+            if let Some(error) = deliberation::login_failure(&state_dir, &earlier) {
+                eprintln!(
+                    "forge: the architect couldn't reach its model ({}); starting it again from the crate",
+                    cut(&error, 200)
+                );
+                restarted.store(true, Ordering::SeqCst);
+            }
+            architect
+                .call(workflow.run_agent(ARCHITECT, &architect.restart))
+                .await?
         }
         Some(earlier) => {
             let resume = fill(prompts::ARCHITECT_RESUME, &manifest);
-            match within_budget(
-                &workflow,
-                &state_dir,
-                workflow.continue_agent(&earlier, &resume),
-            )
-            .await
+            match architect
+                .call(workflow.continue_agent(&earlier, &resume))
+                .await
             {
                 Ok(result) => result,
                 Err(error) => {
                     eprintln!(
                         "forge: couldn't continue the earlier task ({error}); starting again"
                     );
-                    within_budget(
-                        &workflow,
-                        &state_dir,
-                        workflow.run_agent(ARCHITECT, &resume),
-                    )
-                    .await?
+                    architect
+                        .call(workflow.run_agent(ARCHITECT, &resume))
+                        .await?
                 }
             }
         }
         None if args.resume.is_some() => {
-            within_budget(
-                &workflow,
-                &state_dir,
-                workflow.run_agent(ARCHITECT, &fill(prompts::ARCHITECT_RESUME, &manifest)),
-            )
-            .await?
+            architect
+                .call(workflow.run_agent(ARCHITECT, &architect.restart))
+                .await?
         }
-        None => within_budget(&workflow, &state_dir, workflow.run_agent(ARCHITECT, &task)).await?,
+        None => architect.call(workflow.run_agent(ARCHITECT, &task)).await?,
     };
     // Deliberations the architect requested run now, and it continues with
     // their records (also after a restart: finished stages aren't run again).
@@ -881,12 +903,9 @@ async fn main() -> ForgeResult<()> {
                     "The forge's check `{}` failed after you finished. Fix the cause, run the checks again, and call complete_task when they all pass.\n\n```text\n{}\n```",
                     failure.check, failure.output
                 );
-                result = within_budget(
-                    &workflow,
-                    &state_dir,
-                    workflow.continue_agent(&result, &prompt),
-                )
-                .await?;
+                result = architect
+                    .call(workflow.continue_agent(&result, &prompt))
+                    .await?;
                 result = settle(&deliberator, result).await?;
             }
             Err(failure) => {
@@ -969,8 +988,133 @@ async fn within_budget<T>(
                 },
             ..
         }) => budget_stop(workflow, state_dir).await,
+        // An explorer couldn't reach its model a second time
+        // ([`explorer_failed`] stopped the run).
+        Err(WorkflowError::AbortedByHook { hook_point, reason })
+            if hook_point == "PostAgentFailure" =>
+        {
+            deliberation::login_stop(workflow, state_dir, &reason).await
+        }
         result => result,
     }
+}
+
+/// The architect's run calls. When the architect's run fails because its
+/// model request needs a new credential or a configuration change (an
+/// expired login), a fresh architect run continues from the crate, once per
+/// process; when that fails the same way, the forge stops, saved, with
+/// status 3.
+pub(crate) struct Architect<'a> {
+    pub workflow: &'a Workflow,
+    pub state_dir: &'a Path,
+    pub model: ModelSpec,
+    /// The fresh run's prompt.
+    pub restart: String,
+    /// The fresh start of this process is used (shared by every copy).
+    pub restarted: Arc<AtomicBool>,
+}
+
+impl Architect<'_> {
+    /// Runs `call` (one of the architect's run calls) within the budget,
+    /// starting the architect afresh after a login failure, and stopping the
+    /// forge on a second one.
+    pub(crate) async fn call(
+        &self,
+        call: impl std::future::Future<Output = Result<AgentResult, WorkflowError>>,
+    ) -> Result<AgentResult, WorkflowError> {
+        match self.attempt(call).await {
+            Ok(result) => result,
+            Err(reason) => deliberation::login_stop(self.workflow, self.state_dir, &reason).await,
+        }
+    }
+
+    /// The call's outcome, or why the forge stops: the architect can't reach
+    /// its model, also when started afresh.
+    pub(crate) async fn attempt(
+        &self,
+        call: impl std::future::Future<Output = Result<AgentResult, WorkflowError>>,
+    ) -> Result<Result<AgentResult, WorkflowError>, String> {
+        let mut failed_before = self.failed_runs();
+        let mut outcome = within_budget(self.workflow, self.state_dir, call).await;
+        loop {
+            // The architect run that failed in this call, if one did.
+            let error = self
+                .workflow
+                .context()
+                .agent_results
+                .read()
+                .iter()
+                .filter(|run| Self::is_architects(run) && run.status == AgentRunStatus::Failed)
+                .find(|run| !failed_before.contains(&run.agent_run_id))
+                .and_then(|run| deliberation::login_failure(self.state_dir, run));
+            let Some(error) = error else {
+                return Ok(outcome);
+            };
+            if self.restarted.swap(true, Ordering::SeqCst) {
+                return Err(deliberation::login_reason(
+                    ARCHITECT,
+                    Some(&self.model),
+                    &error,
+                ));
+            }
+            eprintln!(
+                "forge: the architect couldn't reach its model ({}); starting it again from the crate",
+                cut(&error, 200)
+            );
+            failed_before = self.failed_runs();
+            outcome = within_budget(
+                self.workflow,
+                self.state_dir,
+                self.workflow.run_agent(ARCHITECT, &self.restart),
+            )
+            .await;
+        }
+    }
+
+    fn is_architects(run: &AgentResult) -> bool {
+        run.agent_name == ARCHITECT && run.task.parent.is_none()
+    }
+
+    /// The architect's runs that failed.
+    fn failed_runs(&self) -> HashSet<uuid::Uuid> {
+        self.workflow
+            .context()
+            .agent_results
+            .read()
+            .iter()
+            .filter(|run| Self::is_architects(run) && run.status == AgentRunStatus::Failed)
+            .map(|run| run.agent_run_id)
+            .collect()
+    }
+}
+
+/// An explorer whose model request needs a new credential or a configuration
+/// change (an expired login): the architect may ask again once (a fresh
+/// explorer run); a second such failure in this process stops the run, which
+/// [`within_budget`] turns into the forge's saved stop (status 3).
+fn explorer_failed(
+    failed_once: &AtomicBool,
+    model: &ModelSpec,
+    context: &arko_workflows::hooks::context::HookContext,
+) -> HookResult {
+    let login = context.agent_name.as_deref() == Some(EXPLORER)
+        && context
+            .metadata
+            .get("cause")
+            .and_then(|cause| cause.as_str())
+            == Some("non_retryable");
+    if !login {
+        return HookResult::Continue;
+    }
+    let error = context.error_message.clone().unwrap_or_default();
+    if !failed_once.swap(true, Ordering::SeqCst) {
+        eprintln!(
+            "forge: an explorer couldn't reach its model ({}); the architect may ask again",
+            cut(&error, 200)
+        );
+        return HookResult::Continue;
+    }
+    HookResult::Abort(deliberation::login_reason(EXPLORER, Some(model), &error))
 }
 
 /// The budget is used up: saves the paused agents and exits with status 2.
@@ -1840,6 +1984,61 @@ mod tests {
             .filter(|dependency| dependency.os.is_none())
             .map(|dependency| (dependency.executable.unwrap(), dependency.optional))
             .collect()
+    }
+
+    /// A hook context for a run of `agent` that failed with `cause`.
+    fn failure(agent: &str, cause: &str) -> arko_workflows::hooks::context::HookContext {
+        arko_workflows::hooks::context::HookContext {
+            timestamp: chrono::Utc::now(),
+            hook_point: HookPoint::PostAgentFailure,
+            workflow_run_id: uuid::Uuid::new_v4(),
+            workflow_name: "forge".into(),
+            agent_run_id: Some(uuid::Uuid::new_v4()),
+            agent_name: Some(agent.into()),
+            tool_name: None,
+            tool_call_id: None,
+            tool_params: None,
+            tool_result: None,
+            original_tool_result: None,
+            effective_tool_result: None,
+            agent_summary: None,
+            approval_reason: None,
+            error_message: Some("401 refresh_token_invalidated".into()),
+            budget_spent: 0.0,
+            budget_limit: None,
+            metadata: HashMap::from([("cause".to_string(), serde_json::json!(cause))]),
+        }
+    }
+
+    #[test]
+    fn an_explorers_expired_login_lets_the_architect_ask_once_then_stops_the_forge() {
+        let failed_once = AtomicBool::new(false);
+        let model = ModelSpec::new("claude-sonnet-5-5", Effort::High).unwrap();
+        let hook = |agent: &str, cause: &str| {
+            explorer_failed(&failed_once, &model, &failure(agent, cause))
+        };
+        // Other agents, and other failures, are the forge's usual business.
+        assert!(matches!(
+            hook(ARCHITECT, "non_retryable"),
+            HookResult::Continue
+        ));
+        assert!(matches!(hook(EXPLORER, "refusal"), HookResult::Continue));
+        // The first: the architect may ask again (a fresh explorer run).
+        assert!(matches!(
+            hook(EXPLORER, "non_retryable"),
+            HookResult::Continue
+        ));
+        // The second stops the run; `within_budget` makes it the saved stop.
+        match hook(EXPLORER, "non_retryable") {
+            HookResult::Abort(reason) => {
+                assert!(
+                    reason.starts_with("explorer (claude-sonnet-5-5:high, Anthropic)"),
+                    "{reason}"
+                );
+                assert!(reason.contains("`claude`"), "{reason}");
+            }
+            _ => panic!("the forge should stop"),
+        }
     }
 
     #[test]

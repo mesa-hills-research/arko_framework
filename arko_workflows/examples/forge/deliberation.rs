@@ -15,14 +15,17 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::future::Future;
-use std::io;
+use std::hash::{Hash, Hasher};
+use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
+use arko_agents::runtime::event::AgentEvent;
 use arko_agents::{
-    ErrorRecoveryCause, TaskContext, Tool, ToolDefinition, ToolError, ToolRecovery, ToolTypeDetails,
+    ErrorRecoveryCause, TaskContext, TaskState, Tool, ToolDefinition, ToolError, ToolRecovery,
+    ToolTypeDetails,
 };
 use arko_workflows::prelude::*;
 use async_trait::async_trait;
@@ -389,6 +392,10 @@ pub struct Decision {
 /// The decision as the architect framed it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Frame {
+    /// A short name for it (records, file names, log lines); see
+    /// [`name`](Self::name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub question: String,
     #[serde(default)]
     pub context: String,
@@ -398,6 +405,28 @@ pub struct Frame {
     pub evidence: Vec<String>,
     #[serde(default)]
     pub criteria: Vec<String>,
+}
+
+impl Frame {
+    /// The decision's short name: its title, or else (a frame without one,
+    /// such as an older ledger's) its question's first sentence, cut to 100
+    /// characters. The whole question stays in the record's "The decision".
+    pub fn name(&self) -> String {
+        let title = self.title.as_deref().map(str::trim).unwrap_or_default();
+        if !title.is_empty() {
+            return crate::cut(title, 100);
+        }
+        let question = self.question.trim();
+        let line = question.lines().next().unwrap_or_default();
+        let end = line
+            .char_indices()
+            .find(|&(at, c)| {
+                matches!(c, '.' | '?' | '!')
+                    && line[at + c.len_utf8()..].starts_with(char::is_whitespace)
+            })
+            .map_or(line.len(), |(at, c)| at + c.len_utf8());
+        crate::cut(&line[..end], 100)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -893,7 +922,7 @@ impl Store {
             .map(|finding| finding.id.clone())
             .collect();
         let (ruling, votes) = merge(&rulings, &contested);
-        let name = format!("{id}-{}.md", slug(&decision.frame.question));
+        let name = format!("{id}-{}.md", slug(&decision.frame.name()));
         let record = format!("decisions/{name}");
         let mut decided = decision.clone();
         decided.outcome = Some(Outcome::Decided {
@@ -1162,7 +1191,7 @@ fn indent(text: &str) -> String {
 
 /// The decision record: what was decided, why, and what lost.
 pub fn render_record(decision: &Decision, config: &Config) -> String {
-    let mut text = format!("# {}: {}\n\n", decision.id, decision.frame.question.trim());
+    let mut text = format!("# {}: {}\n\n", decision.id, decision.frame.name());
     if let Some(later) = &decision.reopened_by {
         let _ = write!(
             text,
@@ -1380,6 +1409,8 @@ pub struct RequestDeliberation {
 
 #[derive(Deserialize)]
 struct Request {
+    #[serde(default)]
+    title: Option<String>,
     question: String,
     #[serde(default)]
     context: String,
@@ -1402,6 +1433,7 @@ impl Tool for RequestDeliberation {
             json!({
                 "type": "object",
                 "properties": {
+                    "title": text("A short name for the decision, under 80 characters."),
                     "question": text("The decision, as a question with real alternatives."),
                     "context": text("Why it matters and what depends on it."),
                     "constraints": strings("What every answer must respect: from the use case, the user's answers, the framework."),
@@ -1435,6 +1467,10 @@ impl Tool for RequestDeliberation {
             .map(|id| id.trim().to_ascii_uppercase())
             .filter(|id| !id.is_empty());
         let frame = Frame {
+            title: request
+                .title
+                .map(|title| title.trim().to_string())
+                .filter(|title| !title.is_empty()),
             question: request.question.trim().to_string(),
             context: request.context,
             constraints: request.constraints,
@@ -1982,8 +2018,12 @@ pub struct Deliberator<'a> {
     pub config: &'a Config,
     pub arko: &'a Path,
     pub target_dir: &'a Path,
-    /// Error pauses resumed in this process, to try each once.
+    /// What this process tried once: error pauses resumed, by run, and jobs
+    /// started afresh after their run failed for a credential or the
+    /// configuration, by a key from the job ([`Job::fresh_start`]).
     pub resumed: Mutex<HashSet<uuid::Uuid>>,
+    /// The architect's run calls, started afresh after a login failure.
+    pub architect: crate::Architect<'a>,
 }
 
 /// One agent's part in a stage.
@@ -1996,6 +2036,10 @@ struct Job {
     /// a run with it.
     continues: bool,
     prompt: String,
+    /// The prompt of a fresh run with the same marker, when the run failed
+    /// for a credential or the configuration: the start prompt, or for a
+    /// continuation, one that carries its context.
+    fresh: String,
     /// Whether the agent's part is in.
     done: Box<dyn Fn(&Decision) -> bool + Send + Sync>,
 }
@@ -2009,29 +2053,134 @@ impl Job {
         prompt: String,
         done: impl Fn(&Decision) -> bool + Send + Sync + 'static,
     ) -> Self {
+        let prompt = format!("{}\n{prompt}", marker(id, stage, slot));
         Self {
             agent: agent(role, slot),
             marker: marker(id, stage, slot),
             continues: false,
-            prompt: format!("{}\n{prompt}", marker(id, stage, slot)),
+            fresh: prompt.clone(),
+            prompt,
             done: Box::new(done),
         }
     }
 
-    /// Continues the run `role` started in `stage`.
+    /// Continues the run `role` started in `stage` with `prompt`; `fresh`
+    /// is the same request with its context, for a fresh run.
     fn next(
         role: &str,
         stage: &str,
         id: &str,
         slot: usize,
         prompt: String,
+        fresh: String,
         done: impl Fn(&Decision) -> bool + Send + Sync + 'static,
     ) -> Self {
         Self {
             continues: true,
             prompt,
-            ..Self::start(role, stage, id, slot, String::new(), done)
+            ..Self::start(role, stage, id, slot, fresh, done)
         }
+    }
+
+    /// The job's key among what this process tried once
+    /// ([`Deliberator::resumed`]), from its agent and its prompt's first line
+    /// (its stage: a rebuttal continues the proposal's run, under the same
+    /// marker).
+    fn fresh_start(&self) -> uuid::Uuid {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (&self.agent, self.prompt.lines().next()).hash(&mut hasher);
+        uuid::Uuid::from_u128(u128::from(hasher.finish()) << 64 | 0x6a6f_625f_6672_6573)
+    }
+}
+
+/// Why the forge stops when `agent` (on `model`, when known) can't reach its
+/// model, also when started afresh: the request needs a new credential or a
+/// configuration change.
+pub(crate) fn login_reason(agent: &str, model: Option<&ModelSpec>, error: &str) -> String {
+    let openai = model
+        .and_then(|model| arko_ai::Model::find(&model.id))
+        .is_some_and(|model| model.provider == arko_ai::Provider::OpenAI);
+    let (via, fix) = if openai {
+        (
+            "OpenAI",
+            "sign in to ChatGPT again (`codex login`), or check OPENAI_API_KEY or the OPENAI_OAUTH_* variables",
+        )
+    } else {
+        (
+            "Anthropic",
+            "check the Claude Code CLI and its login (run `claude`), or ANTHROPIC_API_KEY with `--backend api`",
+        )
+    };
+    format!(
+        "{agent} ({}, {via}) can't reach its model, also when started again: the request needs a new credential or a configuration change ({}). To continue, {fix}",
+        model.map_or_else(|| "its model".to_string(), ModelSpec::to_string),
+        crate::cut(error.trim(), 400)
+    )
+}
+
+/// Stops the forge, saved, with exit status 3: an agent's model request
+/// needs a new credential or a configuration change (`reason`).
+pub(crate) async fn login_stop(workflow: &Workflow, state_dir: &Path, reason: &str) -> ! {
+    if let Err(error) = workflow.checkpoint().await {
+        eprintln!("forge: couldn't save a checkpoint ({error}); the latest one is kept");
+    }
+    eprintln!(
+        "\nforge: stopped: {reason}.\nforge: the run is saved. To continue, sign in again (or fix the configuration), then resume:\n\n    forge --resume {}\n",
+        state_dir.display()
+    );
+    std::process::exit(3);
+}
+
+/// A proposer's fresh run for its rebuttal, after its conversation failed.
+const AFRESH_PROPOSER: &str = "You proposed the design below for the decision below, and a critic reviewed it. Your earlier conversation ended when its model request failed, so this one starts from your design as you submitted it.";
+
+/// A critic's fresh run for its reply, after its conversation failed.
+const AFRESH_CRITIC: &str = "You reviewed the proposal below for the decision below; your findings follow it. Your earlier conversation ended when its model request failed, so this one starts from them.";
+
+/// The error, when `run` failed because its model request needs a new
+/// credential or a configuration change (arko's
+/// `ErrorRecoveryCause::NonRetryable`: an expired or invalidated login, a
+/// bad key), as the run's failure records it (`AgentResult::failure_cause`).
+/// A run saved before arko recorded that is read from its state changes in
+/// the event log (`events.jsonl` in the state directory): the run went from
+/// that pause straight to its failure.
+pub(crate) fn login_failure(state_dir: &Path, run: &AgentResult) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Logged {
+        agent_run_id: uuid::Uuid,
+        event: AgentEvent,
+    }
+    if run.status != AgentRunStatus::Failed {
+        return None;
+    }
+    if let Some(cause) = run.failure_cause() {
+        return (*cause == ErrorRecoveryCause::NonRetryable)
+            .then(|| run.error.clone().unwrap_or_default());
+    }
+    let log = std::fs::File::open(state_dir.join("events.jsonl")).ok()?;
+    let id = run.agent_run_id.to_string();
+    let mut before_failure = None;
+    for line in io::BufReader::new(log).lines().map_while(Result::ok) {
+        if !line.contains(&id) || !line.contains("TaskStateChanged") {
+            continue;
+        }
+        let Ok(logged) = serde_json::from_str::<Logged>(&line) else {
+            continue;
+        };
+        match logged.event {
+            AgentEvent::TaskStateChanged(TaskState::Failed { .. }) => {}
+            AgentEvent::TaskStateChanged(state) if logged.agent_run_id == run.agent_run_id => {
+                before_failure = Some(state)
+            }
+            _ => {}
+        }
+    }
+    match before_failure? {
+        TaskState::AwaitingErrorRecoveryApproval {
+            cause: ErrorRecoveryCause::NonRetryable,
+            error_message,
+        } => Some(error_message),
+        _ => None,
     }
 }
 
@@ -2067,7 +2216,14 @@ impl Deliberator<'_> {
             let mut to_rule = None;
             for decision in &pending {
                 if decision.outcome.is_none() {
-                    self.deliberate(&decision.id).await?;
+                    match self.deliberate(&decision.id).await {
+                        // Only `drive` interrupts a deliberation: an agent's
+                        // login or configuration needs the user.
+                        Err(WorkflowError::AgentInterrupted { reason, .. }) => {
+                            login_stop(self.workflow, self.state_dir, &reason).await
+                        }
+                        result => result?,
+                    }
                 }
                 let decision = self.decision(&decision.id);
                 if decision.outcome.is_none() {
@@ -2146,12 +2302,25 @@ impl Deliberator<'_> {
                     prompt
                 }
             };
-            architect = within_budget(
-                self.workflow,
-                self.state_dir,
-                self.workflow.continue_agent(&architect, &prompt),
-            )
-            .await?;
+            architect = self
+                .architect
+                .call(self.workflow.continue_agent(&architect, &prompt))
+                .await?;
+        }
+    }
+
+    /// Why the forge stops when `agent`'s model request needs a new
+    /// credential or a configuration change, also when started afresh.
+    fn login_error(&self, agent: &str, error: &str) -> WorkflowError {
+        let model = self
+            .config
+            .agents()
+            .into_iter()
+            .find(|(name, ..)| name == agent)
+            .map(|(.., model)| model.clone());
+        WorkflowError::AgentInterrupted {
+            agent: agent.to_string(),
+            reason: login_reason(agent, model.as_ref(), error),
         }
     }
 
@@ -2176,10 +2345,7 @@ impl Deliberator<'_> {
         self.activate(id)?;
         let config = self.config;
         let decision = self.decision(id);
-        eprintln!(
-            "forge: deliberating {id}: {}",
-            crate::cut(&decision.frame.question, 200)
-        );
+        eprintln!("forge: deliberating {id}: {}", decision.frame.name());
         let frame = render_frame(&decision.frame);
 
         // Proposals, independently.
@@ -2258,16 +2424,22 @@ impl Deliberator<'_> {
                 .iter()
                 .filter(|&&slot| !decision.findings_of(slot).is_empty())
                 .map(|&slot| {
+                    let findings = render_findings(decision.findings_of(slot));
+                    let proposal = decision.proposals[slot].as_ref().expect("submitted");
                     Job::next(
                         PROPOSER,
                         "proposal",
                         id,
                         slot,
                         format!(
-                            "[forge {id} rebuttal {}]\n{}\n\n{}",
+                            "[forge {id} rebuttal {}]\n{}\n\n{findings}",
                             slot + 1,
-                            prompts::REBUT,
-                            render_findings(decision.findings_of(slot))
+                            prompts::REBUT
+                        ),
+                        format!(
+                            "{AFRESH_PROPOSER}\n\n# The decision ({id})\n\n{frame}\n\n# Your design\n\n{}\n\n{}\n\n{findings}",
+                            render_design(&Decision::proposal_id(slot), &proposal.design, proposal),
+                            prompts::REBUT
                         ),
                         move |d| d.rebuttals.get(slot).is_some_and(Option::is_some),
                     )
@@ -2293,6 +2465,7 @@ impl Deliberator<'_> {
                             .filter(|response| response.answer != Answer::Accept)
                             .map(render_response)
                             .collect();
+                        let proposal = decision.proposals.get(slot)?.as_ref()?;
                         (!contested.is_empty()).then(|| {
                             Job::next(
                                 CRITIC,
@@ -2302,6 +2475,12 @@ impl Deliberator<'_> {
                                 format!(
                                     "[forge {id} reply {}]\n{}\n\n{contested}",
                                     slot + 1,
+                                    prompts::REPLY
+                                ),
+                                format!(
+                                    "{AFRESH_CRITIC}\n\n# The decision ({id})\n\n{frame}\n\n# The proposal\n\n{}\n\n# Your findings\n\n{}\n\n{}\n\n{contested}",
+                                    render_design("The proposal", &proposal.design, proposal),
+                                    render_findings(decision.findings_of(slot)),
                                     prompts::REPLY
                                 ),
                                 move |d| d.replies.get(slot).is_some_and(Option::is_some),
@@ -2407,6 +2586,12 @@ impl Deliberator<'_> {
     }
 
     /// Drives `job`'s run until its part is in, or the run can't get there.
+    /// A run whose model request needs a new credential or a configuration
+    /// change (an expired login) isn't the end of the job: a failed one
+    /// starts again afresh once per process, and when that fails the same
+    /// way (or a paused one was resumed once already), the forge stops,
+    /// saved ([`login_stop`](Self::login_stop)), so the user can sign in
+    /// again and resume; the resumed forge starts the job afresh again.
     async fn drive(&self, id: &str, job: &Job) -> Result<(), WorkflowError> {
         let agent = job.agent.as_str();
         let mut nudges = 0;
@@ -2435,16 +2620,38 @@ impl Deliberator<'_> {
                         nudges += 1;
                         Call::Continue(run, prompt)
                     }
-                    AgentRunStatus::Failed => {
-                        eprintln!(
-                            "forge: {agent} failed: {}",
-                            crate::cut(run.error.as_deref().unwrap_or("no reason given"), 300)
-                        );
-                        return Ok(());
-                    }
+                    AgentRunStatus::Failed => match login_failure(self.state_dir, &run) {
+                        Some(error) => {
+                            if !self.resumed.lock().unwrap().insert(job.fresh_start()) {
+                                return Err(self.login_error(agent, &error));
+                            }
+                            eprintln!(
+                                "forge: {agent} couldn't reach its model ({}); starting its part again",
+                                crate::cut(error.trim(), 200)
+                            );
+                            nudges = 0;
+                            Call::Run(job.fresh.clone())
+                        }
+                        None => {
+                            eprintln!(
+                                "forge: {agent} failed: {}",
+                                crate::cut(run.error.as_deref().unwrap_or("no reason given"), 300)
+                            );
+                            return Ok(());
+                        }
+                    },
                     _ => match self.next_call(&run) {
                         Some(call) => call,
-                        None => return Ok(()),
+                        // A credential or the configuration, resumed once
+                        // already in this process (agents in Claude Code
+                        // pause for it rather than fail).
+                        None => match AgentPause::of(&run.task.current_state) {
+                            Some(AgentPause::ErrorRecovery {
+                                cause: ErrorRecoveryCause::NonRetryable,
+                                error,
+                            }) => return Err(self.login_error(agent, &error)),
+                            _ => return Ok(()),
+                        },
                     },
                 },
             };
@@ -2658,7 +2865,7 @@ async fn join_all<F: Future>(futures: impl IntoIterator<Item = F>) -> Vec<F::Out
 
 /// A line for the forge's report.
 pub fn summary_line(decision: &Decision) -> String {
-    let question = crate::cut(&decision.frame.question, 160);
+    let question = decision.frame.name();
     match &decision.outcome {
         Some(Outcome::Decided { record, ruling, .. }) => {
             let chosen = Decision::slot_of(&ruling.chosen)
@@ -2717,6 +2924,7 @@ mod tests {
 
     fn decision() -> Decision {
         let frame = Frame {
+            title: None,
             question: "How should the workflow recover after a crash?".into(),
             context: String::new(),
             constraints: vec![],
@@ -3059,6 +3267,493 @@ mod tests {
         }
         .resolve(&"claude-opus-5-5:xhigh".parse().unwrap(), true);
         assert!(mixed.unwrap_err().contains("alone"));
+    }
+
+    /// A local stand-in for OpenAI that answers every request with 401, as
+    /// an invalidated ChatGPT login does, and counts the requests. No real
+    /// provider is reached.
+    async fn invalid_login_server() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counted = requests.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                counted.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buffer = [0_u8; 8192];
+                    loop {
+                        let Ok(read) = socket.read(&mut buffer).await else {
+                            return;
+                        };
+                        if read == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buffer[..read]);
+                        let text = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                        if let Some(end) = text.find("\r\n\r\n") {
+                            let length: usize = text[..end]
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length:"))
+                                .map_or(0, |value| value.trim().parse().unwrap_or(0));
+                            if request.len() >= end + 4 + length {
+                                break;
+                            }
+                        }
+                    }
+                    let body = r#"{"error":{"message":"Your refresh token has been invalidated. Please sign in again.","type":"invalid_request_error","code":"refresh_token_invalidated"}}"#;
+                    let response = format!(
+                        "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (url, requests)
+    }
+
+    /// A one-proposer deliberation on GPT-6.1 Sol whose OpenAI client is
+    /// `url`, persisted in `state_dir`.
+    struct Fixture {
+        root: PathBuf,
+        state_dir: PathBuf,
+        config: Config,
+        agent: arko_agents::AgentConfig,
+        client: arko_ai::LLMClient,
+        store: Arc<Store>,
+    }
+
+    impl Fixture {
+        fn new(name: &str, url: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("forge-{name}-{}", uuid::Uuid::new_v4()));
+            let state_dir = root.join("state");
+            std::fs::create_dir_all(root.join("crate")).unwrap();
+            std::fs::create_dir_all(&state_dir).unwrap();
+            let config = Flags {
+                deliberate: Some(Level::Light),
+                proposers: Some(1),
+                proposer_models: vec!["gpt-6.1-sol:low".into()],
+                ..Flags::default()
+            }
+            .resolve(&"claude-opus-5-5:xhigh".parse().unwrap(), true)
+            .unwrap()
+            .unwrap();
+            let agent = crate::Agents {
+                backend: crate::Backend::ClaudeCode,
+                target_dir: root.join("target"),
+                metered: false,
+                spike_root: state_dir.join("deliberations"),
+            }
+            .config(
+                "proposer-1",
+                "Design proposer",
+                &config.proposers[0],
+                "Role.",
+                "Propose a design.",
+                crate::Access::Read,
+                &[],
+            )
+            .unwrap();
+            let client = arko_ai::LLMClient::new().with_openai_client(
+                arko_ai::providers::openai::OpenAIClient::new("test").with_base_url(url),
+            );
+            let store = Arc::new(Store::open(&state_dir, &root.join("crate")).unwrap());
+            store
+                .update(|ledger| {
+                    ledger
+                        .decisions
+                        .push(Decision::new("D1".into(), decision().frame, None, 1))
+                })
+                .unwrap();
+            Self {
+                root,
+                state_dir,
+                config,
+                agent,
+                client,
+                store,
+            }
+        }
+
+        fn workflow(&self, checkpoint: Option<PathBuf>) -> Workflow {
+            let mut builder = Workflow::builder()
+                .name("login")
+                .workspace(self.root.join("crate"))
+                .llm_client(Arc::new(self.client.clone()))
+                .agent("proposer-1", self.agent.clone())
+                .disable_messaging()
+                .persistence(PersistenceConfig::new(&self.state_dir));
+            if let Some(checkpoint) = checkpoint {
+                builder = builder.resume_from(checkpoint);
+            }
+            builder.build().unwrap()
+        }
+
+        /// The deliberator of a new process: nothing tried yet.
+        fn deliberator<'a>(&'a self, workflow: &'a Workflow) -> Deliberator<'a> {
+            Deliberator {
+                workflow,
+                state_dir: &self.state_dir,
+                store: self.store.clone(),
+                config: &self.config,
+                arko: &self.root,
+                target_dir: &self.root,
+                resumed: Mutex::default(),
+                architect: crate::Architect {
+                    workflow,
+                    state_dir: &self.state_dir,
+                    model: "claude-opus-5-5:xhigh".parse().unwrap(),
+                    restart: "Continue from the crate.".into(),
+                    restarted: Arc::default(),
+                },
+            }
+        }
+    }
+
+    fn proposal_job() -> Job {
+        Job::start(PROPOSER, "proposal", "D1", 0, "Design it.".into(), |d| {
+            d.proposals.first().is_some_and(Option::is_some)
+        })
+    }
+
+    fn runs(workflow: &Workflow, job: &Job) -> Vec<AgentResult> {
+        workflow
+            .context()
+            .agent_results
+            .read()
+            .iter()
+            .filter(|run| run.task.initial_task_prompt.starts_with(&job.marker))
+            .cloned()
+            .collect()
+    }
+
+    fn failed_run(fixture: &Fixture, job: &Job, state: TaskState) -> AgentResult {
+        let mut task = arko_agents::Task::new(
+            fixture.agent.clone(),
+            job.prompt.clone(),
+            fixture.root.clone(),
+            None,
+        );
+        let paused = matches!(state, TaskState::AwaitingErrorRecoveryApproval { .. });
+        task.current_state = state;
+        AgentResult {
+            agent_run_id: uuid::Uuid::new_v4(),
+            agent_name: "proposer-1".into(),
+            status: if paused {
+                AgentRunStatus::Paused
+            } else {
+                AgentRunStatus::Failed
+            },
+            summary: String::new(),
+            error: Some("failed".into()),
+            task,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_invalid_login_restarts_the_job_once_then_stops_the_forge_and_a_resume_reruns_it() {
+        use std::sync::atomic::Ordering;
+        let (url, requests) = invalid_login_server().await;
+        let fixture = Fixture::new("login", &url);
+        let job = proposal_job();
+
+        let workflow = fixture.workflow(None);
+        let deliberator = fixture.deliberator(&workflow);
+        let stopped = deliberator.drive("D1", &job).await.unwrap_err();
+        // The run failed for its login, started afresh once, failed again,
+        // and the forge stops (`settle` saves it and exits with status 3).
+        let first = runs(&workflow, &job);
+        assert_eq!(first.len(), 2);
+        assert!(first.iter().all(|run| run.status == AgentRunStatus::Failed));
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        match stopped {
+            WorkflowError::AgentInterrupted { agent, reason } => {
+                assert_eq!(agent, "proposer-1");
+                assert!(reason.contains("gpt-6.1-sol:low, OpenAI"), "{reason}");
+                assert!(reason.contains("`codex login`"), "{reason}");
+                assert!(
+                    reason.contains("refresh token has been invalidated"),
+                    "{reason}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        workflow.checkpoint().await.unwrap();
+        drop(deliberator);
+        drop(workflow);
+
+        // Resumed: the job starts afresh rather than taking the failed run as
+        // final.
+        let pointer = std::fs::read_to_string(fixture.state_dir.join("latest-checkpoint")).unwrap();
+        let resumed = fixture.workflow(Some(fixture.state_dir.join(pointer.trim())));
+        let deliberator = fixture.deliberator(&resumed);
+        assert!(deliberator.drive("D1", &job).await.is_err());
+        assert_eq!(runs(&resumed, &job).len(), 3);
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        std::fs::remove_dir_all(&fixture.root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn another_failure_still_just_fails_the_job_and_a_repeated_login_pause_stops() {
+        use std::sync::atomic::Ordering;
+        let (url, requests) = invalid_login_server().await;
+        let fixture = Fixture::new("other-failure", &url);
+        let job = proposal_job();
+        let workflow = fixture.workflow(None);
+        // A run that failed for another reason (no credential pause before).
+        workflow.context().agent_results.write().push(failed_run(
+            &fixture,
+            &job,
+            TaskState::Failed {
+                reason: "the model refused".into(),
+                cause: Some(ErrorRecoveryCause::Refusal),
+            },
+        ));
+        let deliberator = fixture.deliberator(&workflow);
+        deliberator.drive("D1", &job).await.unwrap();
+        assert_eq!(runs(&workflow, &job).len(), 1);
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        // An agent in Claude Code pauses for its login instead; one this
+        // process resumed already stops the forge, as a failed one does.
+        let paused = failed_run(
+            &fixture,
+            &job,
+            TaskState::AwaitingErrorRecoveryApproval {
+                error_message: "Claude Code could not start".into(),
+                cause: ErrorRecoveryCause::NonRetryable,
+            },
+        );
+        deliberator
+            .resumed
+            .lock()
+            .unwrap()
+            .insert(paused.agent_run_id);
+        workflow.context().agent_results.write().push(paused);
+        assert!(matches!(
+            deliberator.drive("D1", &job).await,
+            Err(WorkflowError::AgentInterrupted { .. })
+        ));
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        std::fs::remove_dir_all(&fixture.root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_architect_that_cant_reach_its_model_starts_afresh_once_then_stops() {
+        use std::sync::atomic::Ordering;
+        let (url, requests) = invalid_login_server().await;
+        let fixture = Fixture::new("architect-login", &url);
+        let workflow = Workflow::builder()
+            .name("login")
+            .workspace(fixture.root.join("crate"))
+            .llm_client(Arc::new(fixture.client.clone()))
+            .agent(crate::ARCHITECT, fixture.agent.clone())
+            .disable_messaging()
+            .persistence(PersistenceConfig::new(&fixture.state_dir))
+            .build()
+            .unwrap();
+        let architect = |restarted: bool| crate::Architect {
+            workflow: &workflow,
+            state_dir: &fixture.state_dir,
+            model: "gpt-6.1-sol:low".parse().unwrap(),
+            restart: "Continue from the crate.".into(),
+            restarted: Arc::new(std::sync::atomic::AtomicBool::new(restarted)),
+        };
+        let architect_runs = || {
+            workflow
+                .context()
+                .agent_results
+                .read()
+                .iter()
+                .filter(|run| run.agent_name == crate::ARCHITECT)
+                .count()
+        };
+        // Failed for its login (the recorded cause), started afresh once,
+        // failed again: the forge stops (`call` saves and exits with 3).
+        let first = architect(false);
+        match first
+            .attempt(workflow.run_agent(crate::ARCHITECT, "Build it."))
+            .await
+        {
+            Err(reason) => {
+                assert!(
+                    reason.starts_with("architect (gpt-6.1-sol:low, OpenAI)"),
+                    "{reason}"
+                );
+                assert!(reason.contains("`codex login`"), "{reason}");
+            }
+            Ok(outcome) => panic!("{outcome:?}"),
+        }
+        assert_eq!(architect_runs(), 2);
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        // A resumed forge whose fresh start is its resume run stops at once.
+        let resumed = architect(true);
+        let stopped = resumed
+            .attempt(workflow.run_agent(crate::ARCHITECT, "Continue."))
+            .await;
+        assert!(stopped.is_err());
+        assert_eq!(architect_runs(), 3);
+        // A failure for another reason is the call's own outcome.
+        let other = architect(false);
+        let injected = {
+            let mut task = arko_agents::Task::new(
+                fixture.agent.clone(),
+                "Build it.".into(),
+                fixture.root.clone(),
+                None,
+            );
+            task.current_state = TaskState::Failed {
+                reason: "the model refused".into(),
+                cause: Some(ErrorRecoveryCause::Refusal),
+            };
+            AgentResult {
+                agent_run_id: task.id,
+                agent_name: crate::ARCHITECT.into(),
+                status: AgentRunStatus::Failed,
+                summary: String::new(),
+                error: Some("the model refused".into()),
+                task,
+            }
+        };
+        let outcome = other
+            .attempt(async {
+                workflow.context().agent_results.write().push(injected);
+                Err(WorkflowError::Cancelled)
+            })
+            .await;
+        assert!(matches!(outcome, Ok(Err(WorkflowError::Cancelled))));
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        std::fs::remove_dir_all(&fixture.root).unwrap();
+    }
+
+    #[test]
+    fn a_login_failure_is_read_from_the_runs_recorded_states() {
+        let fixture = Fixture::new("events", "http://127.0.0.1:9");
+        let job = proposal_job();
+        let mut run = failed_run(
+            &fixture,
+            &job,
+            TaskState::Failed {
+                reason: "failed".into(),
+                cause: None,
+            },
+        );
+        let (run_id, other) = (run.agent_run_id, uuid::Uuid::new_v4());
+        let line = |id: uuid::Uuid, state: Value| {
+            json!({"timestamp": "2026-10-01T00:00:00Z", "workflow_run_id": uuid::Uuid::nil(), "agent_name": "proposer-1", "agent_run_id": id, "event": {"TaskStateChanged": state}})
+                .to_string()
+        };
+        let pause = |cause: &str| json!({"AwaitingErrorRecoveryApproval": {"error_message": "401 refresh_token_invalidated", "cause": cause}});
+        let failed = json!({"Failed": {"reason": "The model request can't succeed"}});
+        let log = |lines: Vec<String>| {
+            std::fs::write(
+                fixture.state_dir.join("events.jsonl"),
+                lines.join("\n") + "\n",
+            )
+            .unwrap()
+        };
+        let classify = |run: &AgentResult| login_failure(&fixture.state_dir, run);
+        assert_eq!(classify(&run), None);
+        log(vec![
+            line(run_id, json!("InProgress")),
+            line(run_id, pause("non_retryable")),
+            line(run_id, failed.clone()),
+            line(other, json!("InProgress")),
+        ]);
+        assert_eq!(
+            classify(&run).as_deref(),
+            Some("401 refresh_token_invalidated")
+        );
+        log(vec![
+            line(other, pause("non_retryable")),
+            line(run_id, failed.clone()),
+        ]);
+        assert_eq!(classify(&run), None);
+        log(vec![
+            line(run_id, pause("refusal")),
+            line(run_id, failed.clone()),
+        ]);
+        assert_eq!(classify(&run), None);
+        log(vec![
+            line(run_id, pause("non_retryable")),
+            line(run_id, json!("InProgress")),
+            line(run_id, failed),
+        ]);
+        assert_eq!(classify(&run), None);
+        log(vec![line(run_id, pause("non_retryable"))]);
+        run.status = AgentRunStatus::Completed;
+        assert_eq!(classify(&run), None);
+        // The cause recorded with the failure comes first; the log is only
+        // for runs saved before arko recorded it.
+        run.status = AgentRunStatus::Failed;
+        run.error = Some("can't succeed: 401".into());
+        run.task.current_state = TaskState::Failed {
+            reason: "can't succeed: 401".into(),
+            cause: Some(ErrorRecoveryCause::NonRetryable),
+        };
+        std::fs::remove_file(fixture.state_dir.join("events.jsonl")).unwrap();
+        assert_eq!(classify(&run).as_deref(), Some("can't succeed: 401"));
+        run.task.current_state = TaskState::Failed {
+            reason: "refused".into(),
+            cause: Some(ErrorRecoveryCause::Refusal),
+        };
+        log(vec![
+            line(run_id, pause("non_retryable")),
+            line(run_id, json!({"Failed": {"reason": "x"}})),
+        ]);
+        assert_eq!(classify(&run), None);
+        // A continuation starts afresh with its context, under its marker.
+        let rebuttal = Job::next(
+            PROPOSER,
+            "proposal",
+            "D1",
+            0,
+            "[forge D1 rebuttal 1]\nAnswer.".into(),
+            "The context.".into(),
+            |_| false,
+        );
+        assert_eq!(rebuttal.fresh, "[forge D1 proposal 1]\nThe context.");
+        assert_ne!(rebuttal.fresh_start(), proposal_job().fresh_start());
+        assert_eq!(job.fresh_start(), proposal_job().fresh_start());
+        std::fs::remove_dir_all(&fixture.root).unwrap();
+    }
+
+    #[test]
+    fn a_decision_is_named_by_its_title_or_its_questions_first_sentence() {
+        let long = "What is the top-level architecture of the workflow, taken as one design? (1) the topology; (2) recovery; (3) state; (4) models.";
+        let mut decision = decision();
+        decision.frame.question = long.into();
+        // An older ledger's frame has no title: the first sentence.
+        assert_eq!(
+            decision.frame.name(),
+            "What is the top-level architecture of the workflow, taken as one design?"
+        );
+        decision.frame.title = Some("  Workflow architecture ".into());
+        assert_eq!(decision.frame.name(), "Workflow architecture");
+        // The record is headed and named by it, and keeps the whole question.
+        let dir = std::env::temp_dir().join(format!("forge-title-{}", uuid::Uuid::new_v4()));
+        let crate_dir = dir.join("crate");
+        std::fs::create_dir_all(&crate_dir).unwrap();
+        let store = Store::open(&dir, &crate_dir).unwrap();
+        decision.rulings = vec![Some(ruling("P1", &[("P1-F2", false), ("P2-F1", true)]))];
+        store
+            .update(|ledger| ledger.decisions = vec![decision])
+            .unwrap();
+        let record = store.decide("D1", &config(Level::Light, true)).unwrap();
+        assert_eq!(record, "decisions/D1-workflow-architecture.md");
+        let text = std::fs::read_to_string(crate_dir.join(&record)).unwrap();
+        assert!(text.starts_with("# D1: Workflow architecture\n"));
+        assert!(text.contains(&format!("**Question:** {long}")));
+        assert!(
+            summary_line(&store.decision("D1").unwrap())
+                .starts_with("- **D1** Workflow architecture: P1")
+        );
+        let old: Frame = serde_json::from_value(json!({"question": "Q?"})).unwrap();
+        assert_eq!((old.name(), old.title), ("Q?".to_string(), None));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

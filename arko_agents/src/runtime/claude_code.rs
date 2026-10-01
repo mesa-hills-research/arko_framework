@@ -70,6 +70,10 @@ const ASKED: &str = "Your questions were sent to the user. End your turn now wit
 
 const CONTINUE: &str = "Continue the task from where you left off.";
 
+/// The error a refusal resolution gets: Claude Code sends its own
+/// conversation.
+const CANT_RESOLVE_REFUSAL: &str = "Could not resolve the refusal: a Claude Code agent's conversation is kept by Claude Code, so the refused input can't be changed. Continue or fail the task instead.";
+
 /// Heads the note on the calls that were open when the task stopped; see
 /// [`ClaudeCodeRun::recover_open_calls`].
 const RESTARTED_NOTE: &str = "The task stopped while tool calls were open (arko's host or Claude Code stopped). As arko recorded them, and whatever Claude Code reports of them (it may call them interrupted):";
@@ -547,6 +551,14 @@ pub(super) struct ClaudeCodeRun {
     delivered_context: Vec<String>,
     /// A pause the turn's calls asked for, applied when the turn ends.
     pause_after_turn: Option<(String, ErrorRecoveryCause)>,
+    /// The turn's tool errors under `ToolErrorPolicy::PauseAndAwaitApproval`
+    /// (each with its call), reported with the tool-error pause at the
+    /// turn's end, as arko's own runtime reports them: once.
+    tool_errors: Vec<(String, Uuid)>,
+    /// The kind of API error Claude Code reported in the turn's latest
+    /// message (its `error` field: `authentication_failed`, `rate_limit`,
+    /// …), if it reported one.
+    api_error: Option<String>,
     stopping: Option<Stopping>,
     handover_skip_warned: bool,
     host: Option<Arc<ToolHost>>,
@@ -609,6 +621,8 @@ impl ClaudeCodeRun {
             after_result: HashMap::new(),
             delivered_context: Vec::new(),
             pause_after_turn: None,
+            tool_errors: Vec::new(),
+            api_error: None,
             stopping: None,
             handover_skip_warned: false,
             host: None,
@@ -795,6 +809,8 @@ impl ClaudeCodeRun {
             open.len()
         );
         let mut lines = Vec::new();
+        // The pauses the calls run again ask for: the task pauses once.
+        let mut pauses = Vec::new();
         for call in open {
             let served = if call.built_in {
                 call.tool_name.clone()
@@ -869,13 +885,14 @@ impl ClaudeCodeRun {
                     self.set_state(if cancel {
                         TaskState::Cancelled { reason }
                     } else {
-                        TaskState::Failed { reason }
+                        TaskState::Failed {
+                            reason,
+                            cause: None,
+                        }
                     })
                     .await?;
                 }
-                CallOutcome::Pause { reason, .. } => {
-                    self.pause(reason, ErrorRecoveryCause::Middleware).await?;
-                }
+                CallOutcome::Pause { reason, .. } => pauses.push(reason),
             }
             lines.push(format!(
                 "- {named} was running, so it was run again. Its result: {}",
@@ -883,6 +900,10 @@ impl ClaudeCodeRun {
             ));
         }
         self.task.running_tool_calls.clear();
+        if !pauses.is_empty() && !self.task.current_state.is_terminal() {
+            self.pause(pauses.join("\n"), ErrorRecoveryCause::Middleware)
+                .await?;
+        }
         if self.task.current_state.is_terminal() {
             self.report(false).await;
             return Ok(());
@@ -1038,16 +1059,36 @@ impl ClaudeCodeRun {
                     return Ok(true);
                 }
                 (
-                    TaskState::AwaitingErrorRecoveryApproval { error_message, .. },
+                    TaskState::AwaitingErrorRecoveryApproval {
+                        error_message,
+                        cause,
+                    },
                     UserCommand::RejectErrorRecovery { message },
                 ) => {
+                    // The pause's cause stays with the failure.
                     self.set_state(TaskState::Failed {
                         reason: message.unwrap_or_else(|| {
                             format!("Error recovery rejected by user for error: {error_message}")
                         }),
+                        cause: Some(cause),
                     })
                     .await?;
                     return Ok(false);
+                }
+                // Claude Code keeps the conversation it sends, so the input
+                // it was refused can't be changed: reported as arko's own
+                // runtime reports a change it can't apply, an error the
+                // host answers, the pause standing.
+                (
+                    TaskState::AwaitingErrorRecoveryApproval { .. },
+                    UserCommand::ResolveRefusal { .. },
+                ) => {
+                    self.emit(AgentEvent::ErrorEncountered {
+                        error_message: CANT_RESOLVE_REFUSAL.to_string(),
+                        requires_approval_to_retry: true,
+                        tool_call_id: None,
+                    })
+                    .await?;
                 }
                 (_, other) => log::warn!(
                     "Task {}: command {:?} doesn't apply while the task is {:?}; ignored.",
@@ -1358,6 +1399,9 @@ impl ClaudeCodeRun {
         (mut session, mut requests): (cc::ClaudeSession, mpsc::UnboundedReceiver<HostRequest>),
     ) -> Result<SessionEnd, ArkoAgentsError> {
         let input = self.unsent_input()?;
+        self.api_error = None;
+        // A session that ended before its turn did: reported now.
+        self.report_tool_errors().await?;
         // The session (and what it was sent) is saved before it runs.
         self.report(true).await;
         if let Err(error) = session.send(input).await {
@@ -1792,6 +1836,7 @@ impl ClaudeCodeRun {
             Ok(ToolExecutionDecision::FailTask { reason }) => {
                 self.set_state(TaskState::Failed {
                     reason: reason.clone(),
+                    cause: None,
                 })
                 .await?;
                 let _ = session.interrupt().await;
@@ -2110,6 +2155,13 @@ impl ClaudeCodeRun {
                 if assistant.parent_tool_use_id.is_some() {
                     return Ok(());
                 }
+                // A request that failed: Claude Code reports it as a message
+                // of its own, its error's kind in `error`.
+                self.api_error = assistant
+                    .raw
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
                 let mut text = String::new();
                 let mut calls = Vec::new();
                 for block in &assistant.content {
@@ -2360,25 +2412,38 @@ impl ClaudeCodeRun {
                 .await?;
             }
             Some(CallOutcome::Failed(error)) => {
-                self.emit(AgentEvent::ErrorEncountered {
-                    error_message: error.clone(),
-                    requires_approval_to_retry: false,
-                    tool_call_id: Some(id),
-                })
-                .await?;
-                match self
+                let policy = self
                     .task
                     .agent_config
                     .error_recovery_config
                     .on_tool_execution_error
-                {
+                    .clone();
+                if policy != ToolErrorPolicy::PauseAndAwaitApproval {
+                    self.emit(AgentEvent::ErrorEncountered {
+                        error_message: error.clone(),
+                        requires_approval_to_retry: false,
+                        tool_call_id: Some(id),
+                    })
+                    .await?;
+                }
+                match policy {
                     ToolErrorPolicy::InformAgentAndContinue => {}
+                    // Reported by the pause at the turn's end. A pause the
+                    // turn already asked for (a middleware's, a monitor's)
+                    // stands, and the error is reported on its own then.
                     ToolErrorPolicy::PauseAndAwaitApproval => {
-                        self.pause_after_turn = Some((error, ErrorRecoveryCause::ToolError));
+                        self.tool_errors.push((error.clone(), id));
+                        if self.pause_after_turn.is_none() {
+                            self.pause_after_turn = Some((error, ErrorRecoveryCause::ToolError));
+                        }
                         let _ = session.interrupt().await;
                     }
                     ToolErrorPolicy::FailTask => {
-                        self.set_state(TaskState::Failed { reason: error }).await?;
+                        self.set_state(TaskState::Failed {
+                            reason: error,
+                            cause: None,
+                        })
+                        .await?;
                         let _ = session.interrupt().await;
                     }
                 }
@@ -2394,7 +2459,10 @@ impl ClaudeCodeRun {
                     self.set_state(if cancel {
                         TaskState::Cancelled { reason }
                     } else {
-                        TaskState::Failed { reason }
+                        TaskState::Failed {
+                            reason,
+                            cause: None,
+                        }
                     })
                     .await?;
                 }
@@ -2767,6 +2835,18 @@ impl ClaudeCodeRun {
         session: &cc::ClaudeSession,
     ) -> Result<Option<SessionEnd>, ArkoAgentsError> {
         self.flush_usage().await?;
+        let api_error = self.api_error.take();
+        let ending = self.stopping.is_some() || self.task.current_state.is_terminal();
+        if ending
+            || !matches!(
+                self.pause_after_turn,
+                Some((_, ErrorRecoveryCause::ToolError))
+            )
+        {
+            // No tool-error pause reports them: each is reported on its own.
+            self.report_tool_errors().await?;
+        }
+        let tool_error_pause = std::mem::take(&mut self.tool_errors);
         if let Some(stopping) = self.stopping {
             let _ = stopping;
             return Ok(Some(SessionEnd::Stop));
@@ -2795,7 +2875,21 @@ impl ClaudeCodeRun {
                     },
                 ));
             }
-            self.pause(reason, cause).await?;
+            if cause == ErrorRecoveryCause::ToolError && !tool_error_pause.is_empty() {
+                // Every failure, the call named when it is the only one.
+                let tool_call_id = match tool_error_pause.as_slice() {
+                    [(_, id)] => Some(*id),
+                    _ => None,
+                };
+                let message = tool_error_pause
+                    .into_iter()
+                    .map(|(message, _)| message)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.pause_for_call(message, cause, tool_call_id).await?;
+            } else {
+                self.pause(reason, cause).await?;
+            }
             return Ok(Some(SessionEnd::Wait));
         }
         let fallback_answered = std::mem::take(&mut self.fallback_turn);
@@ -2854,6 +2948,24 @@ impl ClaudeCodeRun {
                 .result
                 .clone()
                 .unwrap_or_else(|| format!("Claude Code ended the turn with {}", result.subtype));
+            // Claude Code isn't signed in, or its login expired or was
+            // revoked: a new login is needed, which retrying doesn't give.
+            if api_error.as_deref() == Some("authentication_failed")
+                || result.raw.get("api_error_status").and_then(Value::as_u64) == Some(401)
+            {
+                self.pause_on_error(
+                    format!("Claude Code could not authenticate: {message}"),
+                    ErrorRecoveryCause::NonRetryable,
+                )
+                .await?;
+                return Ok(Some(
+                    if matches!(self.task.current_state, TaskState::Interrupted { .. }) {
+                        SessionEnd::Stop
+                    } else {
+                        SessionEnd::Wait
+                    },
+                ));
+            }
             return self.session_failed(message).await.map(Some);
         }
         if self.handover_due() {
@@ -3024,15 +3136,17 @@ impl ClaudeCodeRun {
             LLMErrorPolicy::PauseAndAwaitApproval
                 | LLMErrorPolicy::RetryThenPauseAndAwaitApproval { .. }
         );
-        self.emit(AgentEvent::ErrorEncountered {
-            error_message: message.clone(),
-            requires_approval_to_retry: pausing,
-            tool_call_id: None,
-        })
-        .await?;
         if pausing {
             self.pause(message, cause).await
         } else {
+            // Reported before the task ends interrupted: a workflow stops
+            // reading its events at that state.
+            self.emit(AgentEvent::ErrorEncountered {
+                error_message: message.clone(),
+                requires_approval_to_retry: false,
+                tool_call_id: None,
+            })
+            .await?;
             self.set_state(TaskState::Interrupted { reason: message })
                 .await
         }
@@ -3055,26 +3169,53 @@ impl ClaudeCodeRun {
             self.task.id
         );
         self.task.monitor_pause = true;
-        self.pause(reason.clone(), ErrorRecoveryCause::BudgetExceeded)
-            .await?;
-        self.emit(AgentEvent::ErrorEncountered {
-            error_message: reason,
-            requires_approval_to_retry: true,
-            tool_call_id: None,
-        })
-        .await
+        self.pause(reason, ErrorRecoveryCause::BudgetExceeded).await
     }
 
+    /// Pauses for an error-recovery decision, reported as arko's own
+    /// runtime reports one: the state change that gives the pause's cause,
+    /// then the error a host answers (a workflow decides the pause once it
+    /// has both).
     async fn pause(
         &mut self,
         message: String,
         cause: ErrorRecoveryCause,
     ) -> Result<(), ArkoAgentsError> {
+        self.pause_for_call(message, cause, None).await
+    }
+
+    /// [`pause`](Self::pause), naming the tool call the error is about.
+    async fn pause_for_call(
+        &mut self,
+        message: String,
+        cause: ErrorRecoveryCause,
+        tool_call_id: Option<Uuid>,
+    ) -> Result<(), ArkoAgentsError> {
         self.set_state(TaskState::AwaitingErrorRecoveryApproval {
-            error_message: message,
+            error_message: message.clone(),
             cause,
         })
+        .await?;
+        self.emit(AgentEvent::ErrorEncountered {
+            error_message: message,
+            requires_approval_to_retry: true,
+            tool_call_id,
+        })
         .await
+    }
+
+    /// Reports the tool errors no tool-error pause reports, each as the
+    /// error of its call.
+    async fn report_tool_errors(&mut self) -> Result<(), ArkoAgentsError> {
+        for (message, id) in std::mem::take(&mut self.tool_errors) {
+            self.emit(AgentEvent::ErrorEncountered {
+                error_message: message,
+                requires_approval_to_retry: false,
+                tool_call_id: Some(id),
+            })
+            .await?;
+        }
+        Ok(())
     }
 
     /// The report arrived: a fresh session starts from the seed and the

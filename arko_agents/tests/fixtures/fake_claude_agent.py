@@ -19,6 +19,12 @@ the next turn's index). Steps:
                                          its result is reported
   {"rate_limit": {...}}                  a rate_limit_event with this info
   {"fail": "..."}                        the turn ends in this error
+  {"api_error": "authentication_failed", "text": "...", "status": 401}
+                                         a request fails as Claude Code
+                                         2.1 reports it (not signed in:
+                                         status null): its own message
+                                         with the error's kind, then an
+                                         error result
   {"system": {"subtype": ...}}           a system message
   {"refused": {"category": ...}}         a response the API refused: its
                                          message_delta stops with
@@ -221,6 +227,20 @@ def turn(text):
                 "usage": usage(step, 1)}})
             delta(step)
             continue
+        if "api_error" in step:
+            text = step.get("text", "API Error")
+            send({"type": "assistant", "parent_tool_use_id": None, "session_id": SESSION,
+                  "error": step["api_error"], "is_api_error_message": True,
+                  "message": {"id": "synthetic_%d" % index, "role": "assistant",
+                              "model": "<synthetic>", "stop_reason": "stop_sequence",
+                              "content": [{"type": "text", "text": text}],
+                              "usage": {"input_tokens": 0, "output_tokens": 0,
+                                        "cache_read_input_tokens": 0,
+                                        "cache_creation_input_tokens": 0}}})
+            send({"type": "result", "subtype": "success", "is_error": True, "num_turns": 1,
+                  "session_id": SESSION, "duration_ms": 5, "result": text,
+                  "api_error_status": step.get("status"), "terminal_reason": "api_error"})
+            return
         if "fail" in step:
             send({"type": "result", "subtype": "error_during_execution", "is_error": True,
                   "num_turns": 1, "session_id": SESSION, "duration_ms": 5,

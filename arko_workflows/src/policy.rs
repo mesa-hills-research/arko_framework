@@ -283,8 +283,16 @@ pub enum AgentResume {
     ContinueAfterError { note: Option<String> },
     /// Fail the task, with `reason` when given.
     FailAfterError { reason: Option<String> },
-    /// Change the refused input of a refusal pause and continue; see
-    /// `arko_agents::Task::resolve_refusal`.
+    /// Change the refused input of a refusal pause (cause
+    /// [`ErrorRecoveryCause::Refusal`], or `Unknown` for a pause saved before
+    /// causes were recorded) and continue; see
+    /// `arko_agents::Task::resolve_refusal`. Refused at once for another
+    /// pause, without a change, or for a Claude Code agent (Claude Code
+    /// keeps its own conversation). When the runtime can't apply the
+    /// changes, the host gets its error under the error recovery policy, as
+    /// another error at that pause: under `ReturnToCaller` (or for an
+    /// `Unknown` pause) the run call returns the agent paused again; under
+    /// `Automatic` or `Limited` a refusal's run fails with that error.
     ResolveRefusal(Vec<RefusalResolution>),
 }
 
