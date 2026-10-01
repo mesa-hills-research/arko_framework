@@ -479,6 +479,9 @@ pub struct Finding {
 #[serde(rename_all = "snake_case")]
 pub enum Answer {
     Accept,
+    /// Right in part: the design is revised for that part, and the rest is
+    /// contested (the argument says which).
+    AcceptInPart,
     Incorrect,
     NotApplicable,
     OutOfScope,
@@ -489,6 +492,7 @@ impl Answer {
     fn label(self) -> &'static str {
         match self {
             Self::Accept => "accepted",
+            Self::AcceptInPart => "accepted in part, the rest contested",
             Self::Incorrect => "contested as incorrect",
             Self::NotApplicable => "contested as not applicable",
             Self::OutOfScope => "contested as out of scope",
@@ -1648,14 +1652,14 @@ impl Submit {
                                 "type": "object",
                                 "properties": {
                                     "finding": text("The finding's id, e.g. P1-F2."),
-                                    "answer": {"type": "string", "enum": ["accept", "incorrect", "not_applicable", "out_of_scope", "implausible"]},
+                                    "answer": {"type": "string", "enum": ["accept", "accept_in_part", "incorrect", "not_applicable", "out_of_scope", "implausible"]},
                                     "argument": text("Why, with evidence."),
                                     "settle_by": text("Optional: a small experiment that would settle it.")
                                 },
                                 "required": ["finding", "answer", "argument"]
                             }
                         },
-                        "revised_design": text("The whole design, revised for the findings you accept. Required when you accept any.")
+                        "revised_design": text("The whole design, revised for the findings you accept, in whole or in part. Required when you accept any.")
                     },
                     "required": ["responses"]
                 }),
@@ -1757,7 +1761,13 @@ impl Submit {
                     .get(slot)
                     .map(ModelSpec::to_string)
                     .unwrap_or_default();
+                // Each part is taken in its own stage only: a design replaced
+                // after its review would leave the findings, and the critic's
+                // reply, about a design the ledger no longer has.
                 self.store.record_into(target, |decision| {
+                    if decision.findings.get(slot).is_some_and(Option::is_some) {
+                        return Err("your design has been reviewed, so it can't be replaced now: answer the findings with submit_rebuttal, with the revised design in its `revised_design`".into());
+                    }
                     set(&mut decision.proposals, slot, proposal);
                     Ok(())
                 })
@@ -1765,6 +1775,9 @@ impl Submit {
             Part::Findings => {
                 let findings: Findings = parse(params)?;
                 self.store.record_into(target, |decision| {
+                    if decision.rebuttals.get(slot).is_some_and(Option::is_some) {
+                        return Err("the proposer has answered your findings, so they can't be replaced now: reply to the ones it contested with submit_reply".into());
+                    }
                     let prefix = Decision::proposal_id(slot);
                     let findings = findings
                         .findings
@@ -1785,6 +1798,12 @@ impl Submit {
             Part::Rebuttal => {
                 let rebuttal: Rebuttal = parse(params)?;
                 self.store.record_into(target, |decision| {
+                    if decision.findings.get(slot).is_none_or(Option::is_none) {
+                        return Err("your design hasn't been reviewed yet: there are no findings to answer".into());
+                    }
+                    if decision.replies.get(slot).is_some_and(Option::is_some) {
+                        return Err("the critic has replied to your answers, so they can't be changed now".into());
+                    }
                     let expected: Vec<String> = decision
                         .findings_of(slot)
                         .iter()
@@ -1794,13 +1813,16 @@ impl Submit {
                         &expected,
                         rebuttal.responses.iter().map(|r| r.finding.as_str()),
                     )?;
-                    if rebuttal.responses.iter().any(|r| r.answer == Answer::Accept)
+                    if rebuttal
+                        .responses
+                        .iter()
+                        .any(|r| matches!(r.answer, Answer::Accept | Answer::AcceptInPart))
                         && rebuttal
                             .revised_design
                             .as_deref()
                             .is_none_or(|design| design.trim().is_empty())
                     {
-                        return Err("you accepted a finding: include the whole revised design in `revised_design`".into());
+                        return Err("you accepted a finding, in whole or in part: include the whole revised design in `revised_design`".into());
                     }
                     set(&mut decision.rebuttals, slot, rebuttal);
                     Ok(())
@@ -1809,6 +1831,9 @@ impl Submit {
             Part::Reply => {
                 let replies: Replies = parse(params)?;
                 self.store.record_into(target, |decision| {
+                    if decision.rebuttals.get(slot).is_none_or(Option::is_none) {
+                        return Err("the proposer hasn't answered your findings yet".into());
+                    }
                     let expected: Vec<String> = decision
                         .findings_of(slot)
                         .iter()
@@ -3205,6 +3230,152 @@ mod tests {
         assert!(covers(&expected, ["P1-F1", "P1-F2"].into_iter()).is_ok());
         assert!(covers(&expected, ["P1-F1"].into_iter()).is_err());
         assert!(covers(&expected, ["P1-F1", "P1-F2", "P9-F1"].into_iter()).is_err());
+    }
+
+    #[test]
+    fn each_part_is_taken_in_its_own_stage_only() {
+        let dir = std::env::temp_dir().join(format!("forge-stages-{}", uuid::Uuid::new_v4()));
+        let crate_dir = dir.join("crate");
+        std::fs::create_dir_all(&crate_dir).unwrap();
+        let store = Arc::new(Store::open(&dir, &crate_dir).unwrap());
+        let mut proposed = decision();
+        proposed.id = "D2".into();
+        proposed.findings = vec![None, None];
+        proposed.rebuttals = vec![None, None];
+        proposed.replies = vec![None, None];
+        store
+            .update(|ledger| ledger.decisions = vec![decision(), proposed])
+            .unwrap();
+        let submit = |part| Submit {
+            part,
+            slot: 0,
+            store: store.clone(),
+            config: config(Level::Full, true),
+            lead: false,
+        };
+        let proposal = || {
+            HashMap::from([
+                ("title".to_string(), json!("host loop, revised")),
+                ("design".to_string(), json!("a new design")),
+            ])
+        };
+        let findings = || {
+            HashMap::from([(
+                "findings".to_string(),
+                json!([{"severity": "major", "claim": "c", "evidence": "e", "trigger": "t"}]),
+            )])
+        };
+        let rebuttal = || {
+            HashMap::from([(
+                "responses".to_string(),
+                json!([
+                    {"finding": "P1-F1", "answer": "incorrect", "argument": "a"},
+                    {"finding": "P1-F2", "answer": "implausible", "argument": "a"}
+                ]),
+            )])
+        };
+        let reply = || {
+            HashMap::from([(
+                "responses".to_string(),
+                json!([{"finding": "P1-F2", "stance": "withdraw", "argument": "a"}]),
+            )])
+        };
+        let refusal = |part, params, prompt: &str| {
+            submit(part).record(prompt, params).unwrap_err().to_string()
+        };
+
+        // D1 has been through every stage: none of its parts can be replaced.
+        let d1 = "[forge D1 proposal 1]\n";
+        assert!(refusal(Part::Proposal, proposal(), d1).contains("can't be replaced now"));
+        assert!(refusal(Part::Findings, findings(), d1).contains("can't be replaced now"));
+        assert!(refusal(Part::Rebuttal, rebuttal(), d1).contains("can't be changed now"));
+        let d1 = store.decision("D1").unwrap();
+        assert_eq!(d1.proposals[0].as_ref().unwrap().title, "host loop");
+        assert_eq!(d1.findings_of(0).len(), 2);
+
+        // D2 has only its proposals: nothing to answer or reply to yet, and
+        // the design may still be replaced.
+        let d2 = "[forge D2 proposal 1]\n";
+        assert!(refusal(Part::Rebuttal, rebuttal(), d2).contains("hasn't been reviewed yet"));
+        assert!(refusal(Part::Reply, reply(), d2).contains("hasn't answered"));
+        submit(Part::Proposal).record(d2, proposal()).unwrap();
+        let d2 = store.decision("D2").unwrap();
+        assert_eq!(
+            d2.proposals[0].as_ref().unwrap().title,
+            "host loop, revised"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_finding_accepted_in_part_revises_the_design_and_stays_contested() {
+        let dir = std::env::temp_dir().join(format!("forge-in-part-{}", uuid::Uuid::new_v4()));
+        let crate_dir = dir.join("crate");
+        std::fs::create_dir_all(&crate_dir).unwrap();
+        let store = Arc::new(Store::open(&dir, &crate_dir).unwrap());
+        let mut reviewed = decision();
+        reviewed.rebuttals[0] = None;
+        reviewed.replies = vec![None, None];
+        store
+            .update(|ledger| ledger.decisions = vec![reviewed])
+            .unwrap();
+        let submit = |part| Submit {
+            part,
+            slot: 0,
+            store: store.clone(),
+            config: config(Level::Full, true),
+            lead: false,
+        };
+        let rebuttal = |revised: Option<&str>| {
+            let mut params = HashMap::from([(
+                "responses".to_string(),
+                json!([
+                    {"finding": "P1-F1", "answer": "accept_in_part", "argument": "half of it"},
+                    {"finding": "P1-F2", "answer": "implausible", "argument": "rare"}
+                ]),
+            )]);
+            if let Some(revised) = revised {
+                params.insert("revised_design".into(), json!(revised));
+            }
+            params
+        };
+        let prompt = "[forge D1 rebuttal 1]\n";
+        assert!(
+            submit(Part::Rebuttal)
+                .record(prompt, rebuttal(None))
+                .unwrap_err()
+                .to_string()
+                .contains("in whole or in part")
+        );
+        submit(Part::Rebuttal)
+            .record(prompt, rebuttal(Some("host loop, half revised")))
+            .unwrap();
+
+        // The critic replies to it, as to any contested finding.
+        let reply = |findings: &[&str]| {
+            let responses: Vec<Value> = findings
+                .iter()
+                .map(|finding| json!({"finding": finding, "stance": "maintain", "argument": "a"}))
+                .collect();
+            HashMap::from([("responses".to_string(), json!(responses))])
+        };
+        assert!(
+            submit(Part::Reply)
+                .record(prompt, reply(&["P1-F2"]))
+                .is_err()
+        );
+        submit(Part::Reply)
+            .record(prompt, reply(&["P1-F1", "P1-F2"]))
+            .unwrap();
+        let decision = store.decision("D1").unwrap();
+        let finding = decision.finding("P1-F1").unwrap();
+        assert_eq!(decision.standing(finding), Standing::Contested);
+        let proposal = decision.proposals[0].as_ref().unwrap();
+        assert_eq!(
+            decision.final_design(0, proposal),
+            "host loop, half revised"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

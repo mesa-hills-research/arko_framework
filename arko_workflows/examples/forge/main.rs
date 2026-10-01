@@ -1946,10 +1946,15 @@ fn report(
             "| {agent} | {runs} | {requests} | {input} | {output} | ${cost:.2} |\n"
         ));
     }
-    text.push_str(&format!("\nBilled: ${:.2}", result.total_cost));
+    // A trial is a separate program: the forge sees only what it reserved
+    // for it, not what it spent.
+    text.push_str(&format!(
+        "\nBilled for the forge's agents: ${:.2}",
+        (result.total_cost - trials).max(0.0)
+    ));
     if trials > 0.0 {
         text.push_str(&format!(
-            ", of which ${trials:.2} was reserved for trial runs (their caps, in full)"
+            "; reserved for trial runs: ${trials:.2} (their caps, in full; what they spent isn't measured here, but each trial's own output reports it)"
         ));
     }
     if !plan_usage.is_empty() {

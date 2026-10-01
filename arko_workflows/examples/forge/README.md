@@ -118,9 +118,11 @@ meets) with `request_deliberation` and ends its turn, and the forge runs it:
    Critics are told what a useful finding is, and that style preferences and failures without a
    plausible cause aren't findings.
 3. **Rebut.** Each proposer answers the findings on its design, in its own conversation: it
-   accepts a finding and revises the design, or contests it as incorrect, not applicable, out of
-   scope, or implausible. With two rounds, each critic then maintains or withdraws what was
-   contested.
+   accepts a finding and revises the design, accepts it in part (revising for that part and
+   contesting the rest), or contests it as incorrect, not applicable, out of scope, or
+   implausible. Each part is taken only in its own stage: once its design has been reviewed, a
+   proposer revises it through its answer, not by submitting it again. With two rounds, each
+   critic then maintains or withdraws what was contested.
 4. **Test.** The contested findings that matter (critical or major, the most severe first) become
    spikes: a small experiment in a scratch crate that depends on the arko checkout (a snippet that
    compiles, the framework's offline tests). Spikes make no model calls.

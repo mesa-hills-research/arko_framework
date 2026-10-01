@@ -306,9 +306,10 @@ You rule on one design decision about an arko_workflows workflow the forge is bu
 the decision's framing, the proposals (by id; their authors aren't named), each critic's findings,
 the proposers' answers, the critics' replies, and the results of any spikes.
 
-- Rule on each contested finding: upheld or dismissed, with the reason, citing the answer, the
-  reply and any spike. Dismiss a finding the answer shows is incorrect, not applicable, out of
-  scope, or implausible, and say which. A spike's result outweighs argument.
+- Rule on each contested finding (for one accepted in part, on the part still contested): upheld
+  or dismissed, with the reason, citing the answer, the reply and any spike. Dismiss a finding the
+  answer shows is incorrect, not applicable, out of scope, or implausible, and say which. A
+  spike's result outweighs argument.
 - Choose one proposal, then graft on specific improvements from the others, each named precisely.
   Don't blend designs wholesale: a blend inherits every proposal's weaknesses.
 - Say why each other proposal lost.
@@ -326,23 +327,27 @@ pub const REOPENING: &str = "\n\nThis decision reopens {earlier}, whose record i
 pub const CRITIQUE: &str = "Review the proposal below against the decision's criteria and the use case. Submit your findings with `submit_findings` (an empty list if there are none), then call complete_task with a one-line summary.";
 
 pub const REBUT: &str = r#"A critic reviewed your design. Answer each finding below with `submit_rebuttal`:
-- accept it, and revise the design to address it; or
+- accept it, and revise the design to address it;
+- accept it in part: revise the design for the part that's right, and say in the argument which
+  part you accept and which you contest, and why (the contested part goes on like any contested
+  finding); or
 - contest it as incorrect (it misreads the design or the code), not applicable (it doesn't hold
   under this project's constraints), out of scope (it's real, but belongs to another decision or to
   later work), or implausible (its trigger is speculative or vanishingly rare: say why it won't
   happen, or how rarely).
 Contest a finding when you have grounds, rather than conceding it; accept it when it's right.
 Back each answer with evidence. When a contested point could be settled by a small experiment,
-describe it in `settle_by`. If you accept any finding, include the whole revised design. Then call
-complete_task with a one-line summary.
+describe it in `settle_by`. If you accept any finding, in whole or in part, include the whole
+revised design. Then call complete_task with a one-line summary.
 
 The findings:"#;
 
 pub const REPLY: &str = r#"The proposer answered your findings; its answers to the ones it contested are below. Reply to each
 with `submit_reply`: maintain it, with the evidence or argument that answers the rebuttal, or
 withdraw it when the rebuttal shows it is incorrect, not applicable, out of scope, or implausible.
-When a point you maintain could be settled by a small experiment, describe it in `settle_by`. Then
-call complete_task with a one-line summary.
+For a finding accepted in part, reply to the part it still contests. When a point you maintain
+could be settled by a small experiment, describe it in `settle_by`. Then call complete_task with a
+one-line summary.
 
 The contested findings:"#;
 
@@ -353,9 +358,10 @@ pub const RULE: &str = "Rule on the decision below. Submit your ruling with `sub
 /// The architect's prompt when it rules itself.
 pub const LEAD_RULING: &str = r#"The deliberation you requested is ready for your ruling: the proposals (by id), the critics'
 findings with the proposers' answers and the critics' replies, and any spikes are below.
-- Rule on each contested finding: upheld or dismissed, with the reason, citing the answer, the
-  reply and any spike. Dismiss a finding the answer shows is incorrect, not applicable, out of
-  scope, or implausible, and say which. A spike's result outweighs argument.
+- Rule on each contested finding (for one accepted in part, on the part still contested): upheld
+  or dismissed, with the reason, citing the answer, the reply and any spike. Dismiss a finding the
+  answer shows is incorrect, not applicable, out of scope, or implausible, and say which. A
+  spike's result outweighs argument.
 - Choose one proposal, then graft on specific improvements from the others. Don't blend designs
   wholesale.
 - Say why each other proposal lost.
