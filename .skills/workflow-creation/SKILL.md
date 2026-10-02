@@ -26,7 +26,7 @@ The design guides offer ideas, not rules.
 4. Use memory for durable shared state, messages for handoffs and questions, and files for artifacts. Assign every shared resource an owner and an access policy.
 5. Enable freshness tracking when agents can concurrently read and write the same files, memory tiers, or other resources. Define whether a conflict causes a reread, merge, retry, or review.
 6. Add completion verification when a successful `complete_task` call is not enough evidence that the artifact is correct. Keep reviewers independent when that matters.
-7. Configure cancellation, budgets, and human input for the deployment. For set-and-forget workflows, keep the default `ApprovalPolicy::ApproveAll` and `ErrorRecoveryPolicy::Automatic`: they are the only settings that let a run finish without a person.
+7. Configure cancellation, budgets, and human input for the deployment. For set-and-forget workflows, keep the default `ApprovalPolicy::ApproveAll` and `ErrorRecoveryPolicy::Automatic`: they are the only settings that let a run finish without a person. Decide by the error's kind, never its text: a run that failed with `AgentResult::failure_kind()` `Some(ErrorKind::Authentication)` (a lost login) will be followed by every agent on that credential, so stop the run, save it, and ask for a new sign-in; a `ContextOverflow` or `InvalidRequest` failure is that run's alone.
 8. Use persistence for runs that must survive interruption. Wrap external side effects in durable steps and define how in-doubt outcomes are resolved. Preserve compatibility with earlier checkpoints and task files.
 
 Start with the simplest approach that could work, and build up only when it falls short. Anything you mention in an agent's prompt or offer as a tool or parameter steers the agent toward using it, even when the task doesn't need it, so decide carefully what each agent sees and phrase optional things as optional. Keep the workflow control flow explicit, and add agents, shared write access, retries, and expensive model calls only when each has a concrete role in the outcome. Prefer the model and reasoning recommendations in the model-choice section of the agent guide; leave `model.max_output_tokens` at the model maximum unless a clear limit is required.
@@ -76,6 +76,8 @@ Choose tools according to that level. `ask_user`, approval requests, error-recov
 ## Implement and verify
 
 - Inspect existing workflow code and saved-data formats before changing them.
+- Rely on the overflow guard (`ToolResultLimits`, on by default) for tool results too large for the model: don't write your own read cap in a hook. Give agents that meet large files a terminal and tell them to read in parts (`wc -l`, `grep -n`, `sed -n 'a,bp'`); set `max_result_tokens` only where a role or a tool needs a tighter budget. `read_file` line ranges are opt-in, for agents without a terminal.
+- Resume with the build and agent configurations the run was saved with. A refused resume names the changed configuration fields; restore them, or register the changed configuration under another agent name.
 - Use the framework’s actual builder and execution APIs; do not invent a separate scheduler or graph layer.
 - Declare the external programs the workflow runs in its `WorkflowMetadata`, required and optional, with install hints, and check them at startup with `missing_dependencies()`: stop before any model call when a required one is missing, and warn about optional ones.
 - Run `cargo fmt --all -- --check` and the repository’s required locked checks after implementation.

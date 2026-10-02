@@ -299,6 +299,7 @@ async fn an_interrupted_run_needs_its_configuration() {
     let path = crash_mid_tool(&server, &workspace, ProbeTool::new("probe", true)).await;
     let mut changed = agent_config("Friendly Coder");
     changed.instructions = "other instructions".to_string();
+    changed.tool_config.tool_timeout_seconds = Some(30);
     let error = Workflow::builder()
         .name("recovery-test")
         .workspace(&workspace.0)
@@ -311,9 +312,44 @@ async fn an_interrupted_run_needs_its_configuration() {
         .build()
         .err()
         .unwrap();
+    // The error names the fields that changed.
     assert!(
-        matches!(&error, WorkflowError::BuilderInvalid(message) if message.contains("agent 'coder' configuration changed")),
+        matches!(&error, WorkflowError::BuilderInvalid(message) if message.contains("agent 'coder' configuration changed since its checkpoint (instructions, tool_config.tool_timeout_seconds changed); use the original configuration")),
         "{error}"
+    );
+}
+
+/// The changed fields are named by their paths, objects field by field and
+/// arrays as a whole, a long list cut short.
+#[test]
+fn changed_configuration_fields_are_named_by_their_paths() {
+    let saved = json!({
+        "instructions": "a",
+        "tool_config": {"available_tool_names": ["read_file"], "tool_timeout_seconds": 1200},
+        "handover": {"at_input_tokens": 100},
+        "claude_code": null,
+    });
+    let current = json!({
+        "instructions": "b",
+        "tool_config": {"available_tool_names": ["read_file", "terminal_start"], "tool_timeout_seconds": 1200},
+        "handover": {"at_input_tokens": 100, "report_request": "Report."},
+        "claude_code": {"env": {"KEY": "1"}},
+    });
+    let mut changed = Vec::new();
+    super::changed_fields(&saved, &current, "", &mut changed);
+    assert_eq!(
+        changed,
+        [
+            "claude_code",
+            "handover.report_request",
+            "instructions",
+            "tool_config.available_tool_names",
+        ]
+    );
+    let many: Vec<String> = (0..12).map(|n| format!("f{n}")).collect();
+    assert_eq!(
+        super::describe_changed_fields(&many),
+        "f0, f1, f2, f3, f4, f5, f6, f7, f8, f9 and 2 more"
     );
 }
 
@@ -2150,6 +2186,7 @@ async fn resume_run_resumes_only_a_run_its_caller_may_resume() {
     cancelled.set_state(arko_agents::TaskState::Failed {
         reason: "stopped".to_string(),
         cause: None,
+        error_kind: None,
     });
     let cancelled_id = cancelled.id;
     crate::workflow::result::upsert_result(

@@ -182,6 +182,14 @@ pub struct PerToolConfigOverride {
     /// left out) uses the agent's setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_timeout_seconds: Option<Option<u64>>,
+    /// Opt-in: at most this many (estimated) tokens of this tool's result
+    /// go into the conversation, instead of
+    /// [`ToolResultLimits::max_result_tokens`]: `Some(Some(tokens))`, or
+    /// `Some(None)` (JSON `null`) for no cap on this tool. `None` (the field
+    /// left out) uses the agent's setting. A longer result keeps its start
+    /// and end, up to the cap, with a notice; see [`ToolResultLimits`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_result_tokens: Option<Option<usize>>,
 }
 
 /// The serialized form of [`PerToolConfigOverride`], which also reads a
@@ -198,6 +206,8 @@ struct PerToolConfigOverrideRepr {
     out_of_workspace_path_policy: Option<PathSafetyPolicy>,
     #[serde(default, deserialize_with = "deserialize_explicit_option")]
     tool_timeout_seconds: Option<Option<u64>>,
+    #[serde(default, deserialize_with = "deserialize_explicit_option")]
+    max_result_tokens: Option<Option<usize>>,
 }
 
 impl From<PerToolConfigOverrideRepr> for PerToolConfigOverride {
@@ -209,7 +219,113 @@ impl From<PerToolConfigOverrideRepr> for PerToolConfigOverride {
                 .or(repr.allow_batched_calls.filter(|allowed| !allowed)),
             out_of_workspace_path_policy: repr.out_of_workspace_path_policy,
             tool_timeout_seconds: repr.tool_timeout_seconds,
+            max_result_tokens: repr.max_result_tokens,
         }
+    }
+}
+
+/// Host-side limits on what tool results add to an agent's conversation
+/// ([`AgentToolConfig::result_limits`]). None of them is shown to the
+/// model: it sees only a shortened result's notice.
+///
+/// **The overflow guard** (on by default) acts only when the next request
+/// would certainly be over the model's input limit
+/// ([`LLMClient::max_input_tokens`](arko_ai::LLMClient::max_input_tokens):
+/// the model's limit, or 272,000 tokens on ChatGPT OAuth). It runs once per
+/// turn, over all of the turn's tool results (parallel calls included),
+/// after result interceptors and distillers, as the results go into the
+/// conversation. No tokenizer is used. It decides by a lower bound on the
+/// next request: the latest request's reported input tokens, plus every
+/// byte added since (the reply and the results) at 10 bytes per token,
+/// more than any content measured packs into a token (code 3.6 to 4.8
+/// bytes per o200k token, English 3.8 to 4.3, padded tables 8.6; Claude's
+/// tokenizer counts more tokens for the same text). Only when even that is
+/// over the limit does it act: the largest results are shortened first,
+/// each to a head-and-tail preview (about 2% of the input limit, between
+/// 4,000 and 16,000 tokens), until the overflow is no longer certain. If
+/// the previews leave it certain (a nearly full context), the room left is
+/// shared between the results above 500 tokens, by a bytes-per-token ratio
+/// calibrated from the task's own reported usage, keeping
+/// [`margin_tokens`](Self::margin_tokens) free. A shortened result is
+/// followed by a notice: with a terminal tool offered, the notice names
+/// commands to look at the rest (`wc -l`, `head`, `grep -n`,
+/// `sed -n 'a,bp'`, a short script); without one, with
+/// [`AgentToolConfig::read_file_line_ranges`] on, a `read_file` result's
+/// notice names its line ranges; otherwise it says the output was too
+/// large and to ask for less. When the results may fit, none is changed
+/// (unless their text packs more than 10 bytes into a token, as long runs
+/// of spaces can), a result no larger than about 500 tokens is never
+/// shortened, and none is replaced by a larger notice, so the guard
+/// changes nothing in normal use. With the model's limit unknown (an
+/// OpenRouter model without catalog data), the guard does nothing.
+///
+/// If the provider still answers that the request is over the model's
+/// input limit ([`ErrorKind::ContextOverflow`](arko_ai::ErrorKind::ContextOverflow)),
+/// the largest tool result added since the last successful request is
+/// shortened further and the request sent again, at most twice; then the
+/// task stops on the error, its kind recorded. A handover can't help here:
+/// its report request would be over the limit too.
+///
+/// The guard covers native tool calling in arko's own runtime. Output-based
+/// (legacy) tool calling and Claude Code agents are not guarded: Claude
+/// Code manages its own context.
+///
+/// **Caps** are opt-in: [`max_result_tokens`](Self::max_result_tokens) for
+/// every tool, and [`PerToolConfigOverride::max_result_tokens`] for one. A
+/// result over its cap keeps its head and tail up to the cap, with the same
+/// notice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolResultLimits {
+    /// The overflow guard; `true` by default. `false` adds every result
+    /// whole, as before the guard existed, and turns off its overflow
+    /// recovery too.
+    pub overflow_guard: bool,
+    /// Tokens of the input limit the guard keeps free when it shares the
+    /// room left between shortened results (a nearly full context), for
+    /// what the runtime adds to the next request and for estimate error.
+    /// It doesn't decide whether the guard acts. `None` (the default): 2% of
+    /// the limit, at least 4,000 tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub margin_tokens: Option<usize>,
+    /// Opt-in: at most this many (estimated) tokens of any one tool result
+    /// go into the conversation. `None` (the default): no cap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_result_tokens: Option<usize>,
+}
+
+impl Default for ToolResultLimits {
+    fn default() -> Self {
+        Self {
+            overflow_guard: true,
+            margin_tokens: None,
+            max_result_tokens: None,
+        }
+    }
+}
+
+impl ToolResultLimits {
+    /// The defaults: the overflow guard on, no caps.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Turns the overflow guard (and its overflow recovery) off.
+    pub fn without_overflow_guard(mut self) -> Self {
+        self.overflow_guard = false;
+        self
+    }
+
+    /// Keeps `tokens` of the input limit free instead of the default margin.
+    pub fn margin_tokens(mut self, tokens: usize) -> Self {
+        self.margin_tokens = Some(tokens);
+        self
+    }
+
+    /// Caps every tool result at `tokens` (estimated).
+    pub fn max_result_tokens(mut self, tokens: usize) -> Self {
+        self.max_result_tokens = Some(tokens);
+        self
     }
 }
 
@@ -379,7 +495,27 @@ pub struct AgentToolConfig {
     /// nothing, so no limit applies.
     #[serde(default = "default_tool_timeout_seconds")]
     pub tool_timeout_seconds: Option<u64>,
+    /// Host-side limits on what tool results add to the conversation: the
+    /// overflow guard (on by default) and opt-in caps; see
+    /// [`ToolResultLimits`].
+    #[serde(default, skip_serializing_if = "ToolResultLimits::is_default")]
+    pub result_limits: ToolResultLimits,
+    /// Opt-in (off by default): the built-in `read_file` takes optional
+    /// `start_line` and `end_line` parameters (1-based, inclusive) and reads
+    /// only those lines; its schema and description show them, and the
+    /// overflow guard's notice for a shortened `read_file` result names
+    /// them. Off, they are neither shown nor mentioned, and a call that
+    /// passes them anyway reads the whole file. Offering ranges steers
+    /// models to read in short ranges; an agent with a terminal tool is
+    /// better served by it (`sed -n '100,200p'`), which the guard's notice
+    /// already points to.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_file_line_ranges: bool,
 }
+
+/// The terminal tool that starts a command; an agent offered it has a
+/// terminal (`TerminalTool::NAMES`).
+const TERMINAL_START_TOOL_NAME: &str = "terminal_start";
 
 /// The default [`AgentToolConfig::tool_timeout_seconds`]: 20 minutes.
 pub const DEFAULT_TOOL_TIMEOUT_SECONDS: u64 = 20 * 60;
@@ -405,6 +541,10 @@ struct AgentToolConfigRepr {
     tool_calling_mode: ToolCallingMode,
     #[serde(default = "default_tool_timeout_seconds")]
     tool_timeout_seconds: Option<u64>,
+    #[serde(default)]
+    result_limits: ToolResultLimits,
+    #[serde(default)]
+    read_file_line_ranges: bool,
     /// Removed: every call of a response runs now. Read only to warn when a
     /// configuration had turned batching off.
     #[serde(default)]
@@ -429,6 +569,8 @@ impl From<AgentToolConfigRepr> for AgentToolConfig {
             tool_specific_configs: repr.tool_specific_configs,
             tool_calling_mode: repr.tool_calling_mode,
             tool_timeout_seconds: repr.tool_timeout_seconds,
+            result_limits: repr.result_limits,
+            read_file_line_ranges: repr.read_file_line_ranges,
         }
     }
 }
@@ -469,7 +611,41 @@ impl AgentToolConfig {
         seconds.map(std::time::Duration::from_secs)
     }
 
+    /// Whether the agent is offered arko's terminal tools
+    /// ([`TerminalTool`](crate::terminal::TerminalTool), named by
+    /// `terminal_start`).
+    pub(crate) fn offers_terminal(&self) -> bool {
+        self.available_tool_names
+            .iter()
+            .any(|name| name == TERMINAL_START_TOOL_NAME)
+    }
+
+    /// The opt-in cap on `tool_name`'s results, in estimated tokens: its
+    /// [`PerToolConfigOverride::max_result_tokens`], or else
+    /// [`ToolResultLimits::max_result_tokens`].
+    pub fn max_result_tokens(&self, tool_name: &str) -> Option<usize> {
+        match self
+            .tool_specific_configs
+            .get(tool_name)
+            .and_then(|config| config.max_result_tokens)
+        {
+            Some(explicit) => explicit,
+            None => self.result_limits.max_result_tokens,
+        }
+    }
+
     fn validate(&self) -> Result<(), ArkoAgentsError> {
+        if self.result_limits.max_result_tokens == Some(0)
+            || self
+                .tool_specific_configs
+                .values()
+                .any(|config| config.max_result_tokens == Some(Some(0)))
+        {
+            return Err(ArkoAgentsError::BuilderError {
+                struct_name: "AgentToolConfig".into(),
+                message: "max_result_tokens must be positive; use None (null) for no cap.".into(),
+            });
+        }
         let invalid = |seconds: Option<u64>| {
             seconds.is_some_and(|seconds| {
                 seconds == 0
@@ -503,6 +679,8 @@ impl Default for AgentToolConfig {
             tool_specific_configs: HashMap::new(),
             tool_calling_mode: ToolCallingMode::default(),
             tool_timeout_seconds: default_tool_timeout_seconds(),
+            result_limits: ToolResultLimits::default(),
+            read_file_line_ranges: false,
         }
     }
 }
@@ -1211,7 +1389,15 @@ impl AgentConfig {
 
     /// A tool's definition as the agent is shown it, in either tool calling
     /// mode: with [`complete_task_summary_prompt_override`](Self::complete_task_summary_prompt_override)
-    /// as `complete_task`'s `summary` description.
+    /// as `complete_task`'s `summary` description, and the built-in
+    /// `read_file` as the agent's tools shape it (see
+    /// [`read_file::offered_definition`](crate::tool::builtins::read_file::offered_definition)).
+    ///
+    /// The definition follows from the configuration alone, so the same
+    /// configuration always shows the same definitions (the prompt cache
+    /// holds). Tool definitions are not part of the configuration a
+    /// workflow compares when it resumes, so a change here never stops a
+    /// saved run from resuming.
     pub(crate) fn offered_tool_definition(
         &self,
         mut definition: crate::tool::ToolDefinition,
@@ -1227,7 +1413,7 @@ impl AgentConfig {
                 }
             }
         }
-        definition
+        crate::tool::builtins::read_file::offered_definition(definition, &self.tool_config)
     }
 
     /// Gets the tool parsing configuration, using the override if present.
@@ -1676,6 +1862,71 @@ mod validation_tests {
             LLMModel::openai_gpt_5_6_luna(),
             LLMGenerationConfig::default(),
         )
+    }
+
+    /// The tool-result limits: a configuration saved without them loads
+    /// with the guard on and no caps, and they are written only when set;
+    /// a tool's own cap wins (`null`: none), and a zero cap is rejected.
+    #[test]
+    fn tool_result_limits_load_by_default_and_tools_override_the_cap() {
+        let saved = serde_json::to_value(luna()).unwrap();
+        assert!(
+            saved["tool_config"].get("result_limits").is_none(),
+            "{saved}"
+        );
+        assert!(saved["tool_config"].get("read_file_line_ranges").is_none());
+        let loaded: AgentConfig = serde_json::from_value(saved).unwrap();
+        assert!(loaded.tool_config.result_limits.overflow_guard);
+        assert!(loaded.tool_config.result_limits.is_default());
+        assert!(!loaded.tool_config.read_file_line_ranges);
+
+        let mut config = luna();
+        config.tool_config.result_limits = ToolResultLimits::default().max_result_tokens(20_000);
+        config.tool_config.read_file_line_ranges = true;
+        let overrides = &mut config.tool_config.tool_specific_configs;
+        overrides
+            .entry("read_file".into())
+            .or_default()
+            .max_result_tokens = Some(None);
+        overrides
+            .entry("dump".into())
+            .or_default()
+            .max_result_tokens = Some(Some(1_000));
+        let saved = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            saved["tool_config"]["result_limits"],
+            serde_json::json!({"overflow_guard": true, "max_result_tokens": 20_000})
+        );
+        assert_eq!(
+            saved["tool_config"]["tool_specific_configs"]["read_file"]["max_result_tokens"],
+            serde_json::Value::Null
+        );
+        let loaded: AgentConfig = serde_json::from_value(saved).unwrap();
+        let tools = &loaded.tool_config;
+        assert_eq!(tools.max_result_tokens("search"), Some(20_000));
+        assert_eq!(tools.max_result_tokens("read_file"), None);
+        assert_eq!(tools.max_result_tokens("dump"), Some(1_000));
+        assert!(tools.read_file_line_ranges);
+        // Off, the guard is saved as off.
+        let off: ToolResultLimits =
+            serde_json::from_value(serde_json::json!({"overflow_guard": false})).unwrap();
+        assert_eq!(off, ToolResultLimits::default().without_overflow_guard());
+
+        config.tool_config.result_limits = ToolResultLimits::default().max_result_tokens(0);
+        assert!(config.validate().is_err());
+        config.tool_config.result_limits = ToolResultLimits::default();
+        assert!(config.validate().is_ok());
+        config
+            .tool_config
+            .tool_specific_configs
+            .entry("dump".into())
+            .or_default()
+            .max_result_tokens = Some(Some(0));
+        let error = config.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("max_result_tokens must be positive"),
+            "{error}"
+        );
     }
 
     /// A zero command timeout (which ended every wait at once) is rejected,

@@ -577,12 +577,16 @@ async fn a_rejected_recovery_fails_with_the_hosts_reason() {
         let TaskState::Failed {
             reason,
             cause: recorded,
+            error_kind,
         } = &task.current_state
         else {
             panic!("{:?}", task.current_state);
         };
         assert!(reason.starts_with(expected), "{reason}");
         assert_eq!(recorded, &Some(ErrorRecoveryCause::NonRetryable));
+        // The pause's error kind stays with the failure: a 401 is a lost
+        // credential.
+        assert_eq!(error_kind, &Some(ai::ErrorKind::Authentication));
     }
 }
 

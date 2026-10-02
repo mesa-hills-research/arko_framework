@@ -299,6 +299,16 @@ spaces they stand for. The byte offsets (`start`, `end`, `available_end`,
 The prompt matcher handles line prompts and ANSI decoration, not full-screen
 terminal interfaces.
 
+Because a response holds a bounded window and the full output stays in `output.log`,
+the terminal is the way to read large files and outputs: `wc -l` for the size,
+`grep -n` to find what is needed, `head` or `sed -n 'a,bp'` for a range, or a short
+script that prints only what matters. Printing a whole large file costs one window,
+never the context. An agent offered both `read_file` and these tools sees a sentence in
+`read_file`'s description pointing it here for large or generated files, and when a
+result of another tool is too large for the model's context, arko_agents' overflow
+guard names these commands in the notice of the shortened result (see
+[Large tool results](context-efficiency.md#large-tool-results)).
+
 ## Program input requests
 
 A program, or an adapter wrapping it, can declare an input request without
@@ -403,7 +413,9 @@ with portable programs or explicit platform branches.
 Agent instructions for terminal work should ask the agent to read the actual
 question before answering, stay within its task's authorization, cite the current
 revision, fetch missing output before deciding, and treat inferred prompts as
-possible rather than certain input requests.
+possible rather than certain input requests. Where an agent may meet large files
+(data, logs, generated code), ask it to inspect them with the terminal in parts
+(`wc -l`, `grep -n`, `sed -n '100,200p'`) rather than reading them whole.
 
 ## Testing
 

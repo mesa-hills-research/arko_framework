@@ -51,6 +51,7 @@ fn waiting_for_recovery(
         cause: ErrorRecoveryCause::RetriesExhausted {
             retry_after_ms: None,
         },
+        error_kind: None,
     });
     agent
         .scripted_responses

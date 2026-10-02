@@ -309,6 +309,12 @@ impl ToolHost {
         custom_output: Option<String>,
         recovering: bool,
     ) -> (CallOutcome, cc::ToolOutput) {
+        let mut params = params_of(arguments);
+        crate::tool::builtins::read_file::ignore_line_ranges(
+            tool.as_ref(),
+            &self.config.tool_config,
+            &mut params,
+        );
         let run = ToolRun {
             tool_call_id: id,
             tool_name: name.to_string(),
@@ -319,7 +325,7 @@ impl ToolHost {
             parallel_safe: false,
             interception: self.interception_for(name, tool.as_ref()),
             interruptible: tool.interruptible(),
-            params: params_of(arguments),
+            params,
             custom_output,
             tool,
             call_id: None,
@@ -559,6 +565,9 @@ pub(super) struct ClaudeCodeRun {
     /// message (its `error` field: `authentication_failed`, `rate_limit`,
     /// …), if it reported one.
     api_error: Option<String>,
+    /// The kind of the failed turn's error, recorded with the pause (or the
+    /// error event) that reports it.
+    error_kind: Option<arko_ai::ErrorKind>,
     stopping: Option<Stopping>,
     handover_skip_warned: bool,
     host: Option<Arc<ToolHost>>,
@@ -623,6 +632,7 @@ impl ClaudeCodeRun {
             pause_after_turn: None,
             tool_errors: Vec::new(),
             api_error: None,
+            error_kind: None,
             stopping: None,
             handover_skip_warned: false,
             host: None,
@@ -888,6 +898,7 @@ impl ClaudeCodeRun {
                         TaskState::Failed {
                             reason,
                             cause: None,
+                            error_kind: None,
                         }
                     })
                     .await?;
@@ -1031,6 +1042,7 @@ impl ClaudeCodeRun {
                     TaskState::AwaitingErrorRecoveryApproval {
                         error_message,
                         cause,
+                        ..
                     },
                     UserCommand::ApproveErrorRecovery { message },
                 ) => {
@@ -1062,15 +1074,17 @@ impl ClaudeCodeRun {
                     TaskState::AwaitingErrorRecoveryApproval {
                         error_message,
                         cause,
+                        error_kind,
                     },
                     UserCommand::RejectErrorRecovery { message },
                 ) => {
-                    // The pause's cause stays with the failure.
+                    // The pause's cause and error kind stay with the failure.
                     self.set_state(TaskState::Failed {
                         reason: message.unwrap_or_else(|| {
                             format!("Error recovery rejected by user for error: {error_message}")
                         }),
                         cause: Some(cause),
+                        error_kind,
                     })
                     .await?;
                     return Ok(false);
@@ -1087,6 +1101,7 @@ impl ClaudeCodeRun {
                         error_message: CANT_RESOLVE_REFUSAL.to_string(),
                         requires_approval_to_retry: true,
                         tool_call_id: None,
+                        error_kind: None,
                     })
                     .await?;
                 }
@@ -1400,6 +1415,7 @@ impl ClaudeCodeRun {
     ) -> Result<SessionEnd, ArkoAgentsError> {
         let input = self.unsent_input()?;
         self.api_error = None;
+        self.error_kind = None;
         // A session that ended before its turn did: reported now.
         self.report_tool_errors().await?;
         // The session (and what it was sent) is saved before it runs.
@@ -1837,6 +1853,7 @@ impl ClaudeCodeRun {
                 self.set_state(TaskState::Failed {
                     reason: reason.clone(),
                     cause: None,
+                    error_kind: None,
                 })
                 .await?;
                 let _ = session.interrupt().await;
@@ -2423,6 +2440,7 @@ impl ClaudeCodeRun {
                         error_message: error.clone(),
                         requires_approval_to_retry: false,
                         tool_call_id: Some(id),
+                        error_kind: None,
                     })
                     .await?;
                 }
@@ -2442,6 +2460,7 @@ impl ClaudeCodeRun {
                         self.set_state(TaskState::Failed {
                             reason: error,
                             cause: None,
+                            error_kind: None,
                         })
                         .await?;
                         let _ = session.interrupt().await;
@@ -2462,6 +2481,7 @@ impl ClaudeCodeRun {
                         TaskState::Failed {
                             reason,
                             cause: None,
+                            error_kind: None,
                         }
                     })
                     .await?;
@@ -2948,13 +2968,31 @@ impl ClaudeCodeRun {
                 .result
                 .clone()
                 .unwrap_or_else(|| format!("Claude Code ended the turn with {}", result.subtype));
-            // Claude Code isn't signed in, or its login expired or was
-            // revoked: a new login is needed, which retrying doesn't give.
-            if api_error.as_deref() == Some("authentication_failed")
-                || result.raw.get("api_error_status").and_then(Value::as_u64) == Some(401)
-            {
+            let api_error_status = result
+                .raw
+                .get("api_error_status")
+                .and_then(Value::as_u64)
+                .and_then(|status| u16::try_from(status).ok());
+            let kind = arko_ai::ErrorKind::from_claude_code(
+                api_error.as_deref(),
+                api_error_status,
+                result.raw.get("terminal_reason").and_then(Value::as_str),
+                &message,
+            );
+            self.error_kind = Some(kind).filter(|kind| *kind != arko_ai::ErrorKind::Unknown);
+            // Failures retrying doesn't fix: Claude Code isn't signed in, or
+            // its login expired or was revoked (a new login is needed); its
+            // account can't be billed (a credit or spend wall); or its
+            // organization or plan may not use what was asked.
+            let lasting = match kind {
+                arko_ai::ErrorKind::Authentication => Some("could not authenticate"),
+                arko_ai::ErrorKind::Billing => Some("can't bill its account"),
+                arko_ai::ErrorKind::Permission => Some("isn't allowed to make the request"),
+                _ => None,
+            };
+            if let Some(what) = lasting {
                 self.pause_on_error(
-                    format!("Claude Code could not authenticate: {message}"),
+                    format!("Claude Code {what}: {message}"),
                     ErrorRecoveryCause::NonRetryable,
                 )
                 .await?;
@@ -3019,6 +3057,7 @@ impl ClaudeCodeRun {
         if let Some(Some(resets_at)) = self.limit_reached
             && let Some(wait) = self.usage_limit_wait(resets_at)
         {
+            self.error_kind = None;
             return self.wait_for_reset(message, resets_at, wait).await;
         }
         let cause = match self.limit_reached {
@@ -3141,10 +3180,12 @@ impl ClaudeCodeRun {
         } else {
             // Reported before the task ends interrupted: a workflow stops
             // reading its events at that state.
+            let error_kind = self.error_kind.take();
             self.emit(AgentEvent::ErrorEncountered {
                 error_message: message.clone(),
                 requires_approval_to_retry: false,
                 tool_call_id: None,
+                error_kind,
             })
             .await?;
             self.set_state(TaskState::Interrupted { reason: message })
@@ -3184,22 +3225,26 @@ impl ClaudeCodeRun {
         self.pause_for_call(message, cause, None).await
     }
 
-    /// [`pause`](Self::pause), naming the tool call the error is about.
+    /// [`pause`](Self::pause), naming the tool call the error is about. The
+    /// failed turn's error kind, if one was recorded, goes with the pause.
     async fn pause_for_call(
         &mut self,
         message: String,
         cause: ErrorRecoveryCause,
         tool_call_id: Option<Uuid>,
     ) -> Result<(), ArkoAgentsError> {
+        let error_kind = self.error_kind.take();
         self.set_state(TaskState::AwaitingErrorRecoveryApproval {
             error_message: message.clone(),
             cause,
+            error_kind,
         })
         .await?;
         self.emit(AgentEvent::ErrorEncountered {
             error_message: message,
             requires_approval_to_retry: true,
             tool_call_id,
+            error_kind,
         })
         .await
     }
@@ -3212,6 +3257,7 @@ impl ClaudeCodeRun {
                 error_message: message,
                 requires_approval_to_retry: false,
                 tool_call_id: Some(id),
+                error_kind: None,
             })
             .await?;
         }

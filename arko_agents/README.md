@@ -295,6 +295,85 @@ Output supplied with an approval runs nothing and has no limit.
 Response text is streamed as it arrives in native mode. In output-based mode, a turn's
 text and tool events are emitted once the response has been parsed.
 
+### Tool result size
+
+A tool returns all of its output: `read_file` the whole file, `list_files` the whole
+tree, command and MCP tools everything they print. One 8 MB file is about two million
+tokens, more than any model's input limit, so a request carrying it would fail. The
+**overflow guard** (`tool_config.result_limits.overflow_guard`, on by default) prevents
+that, and changes nothing while the request may fit:
+
+- Once per turn, as the turn's results (parallel calls included) go into the
+  conversation, after result interceptors and distillers, it checks whether the next
+  request would certainly be over the model's input limit (`LLMClient::max_input_tokens`:
+  272,000 tokens on ChatGPT OAuth). No tokenizer is used: it counts the latest request's
+  reported input, plus every byte added since (the reply and the results) at 10 bytes per
+  token, more than any content packs into a token (code takes about 3.6 to 4.8 bytes per
+  token, padded tables 8.6). When the request may fit, nothing changes: it is sent, and an
+  overflow the provider reports is recovered from (below).
+- When the overflow is certain, the largest results are shortened first, each to a
+  head-and-tail preview of about 2% of the limit (4,000 to 16,000 tokens), until it no
+  longer is; the others stay as they were. In a nearly full context, where even the
+  previews leave it certain, the room left (by a bytes-per-token ratio calibrated from the
+  task's own requests, less `margin_tokens`: by default 2% of the limit, at least 4,000
+  tokens) is shared between the results above about 500 tokens. A smaller result is never
+  shortened, and none is replaced by a notice larger than it.
+- A shortened result keeps its first and last lines, a marker for what was left out, and
+  a notice. The notice is the only part the model sees:
+
+  ```text
+  [Shortened: this result is about 2,100,000 tokens (8.2 MB, 81,431 lines), too large for
+  your context. Shown: the first 410 and the last 80 lines. Look at the parts you need with
+  the terminal, for example: wc -l data/big.csv; grep -n 'pattern' data/big.csv; head -n
+  100 data/big.csv; sed -n '5000,5400p' data/big.csv; or a short script.]
+  ```
+
+  With the terminal tools offered it names commands (on the file, for `read_file`);
+  without them, with `read_file_line_ranges` on, it names `read_file`'s ranges;
+  otherwise it says the output was too large and to ask for less.
+- If the provider still answers that the request is over the model's input limit (an
+  `ErrorKind::ContextOverflow` error), the largest result added since the last answered
+  request is shortened (to a preview, then to its notice alone) and the request is sent
+  again, at most twice. After that the error ends recovery like any error that retrying
+  can't fix, recorded as `ContextOverflow`. A handover can't help: its report request
+  would be over the limit too.
+- `ToolResultShortened` reports each shortened result, with its estimated size and the
+  reason; the `ToolResult` event before it has the whole output.
+
+Opt-in tighter limits: `result_limits.max_result_tokens` caps every result, and a tool's
+`tool_specific_configs` entry sets its own (`max_result_tokens: Some(Some(tokens))`, or
+`Some(None)` for none). A result over its cap keeps its head and tail up to the cap, with
+the same notice. Turn the guard off with
+`ToolResultLimits::default().without_overflow_guard()`; results then go in whole, as
+before the guard existed.
+
+```rust
+use arko_agents::{PerToolConfigOverride, ToolResultLimits};
+
+// A researcher that should never pull more than about 20,000 tokens per call.
+tool_config.result_limits = ToolResultLimits::default().max_result_tokens(20_000);
+// One MCP tool that returns huge JSON gets a tighter cap.
+tool_config.tool_specific_configs.insert(
+    "mcp__db__query".into(),
+    PerToolConfigOverride { max_result_tokens: Some(Some(8_000)), ..Default::default() },
+);
+```
+
+When an agent is offered both `read_file` and the terminal tools, `read_file`'s
+description gains one sentence (`read_file::TERMINAL_HINT`) pointing to the terminal for
+large or generated files. It is part of the tool's description, not of the agent's
+instructions: the same configuration always shows the same definitions, and a
+workflow's resume check, which compares configurations, not tool definitions, is not
+affected. (In output-based mode the definitions are in the system prompt written when a
+task starts, so a saved task keeps its own.) `tool_config.read_file_line_ranges` (off by default) adds the optional
+`start_line` and `end_line` (1-based, inclusive) to `read_file`; off, they are neither in
+its schema nor mentioned, and a call that passes them anyway reads the whole file. Agents
+given ranges tend to read in short pieces, so prefer the terminal where an agent has one.
+
+The guard covers native tool calling in arko's own runtime. Output-based (legacy) tool
+calling is not guarded, and neither are Claude Code agents: Claude Code manages its own
+context, and its `Read` and `Bash` have their own output limits.
+
 ### Approvals and workspace paths
 
 Tool calls wait for approval unless `default_auto_approve_tool_use` or a per-tool
@@ -586,14 +665,23 @@ only helps once the credential or configuration is fixed) from other failures wi
 reading the reason. It is `None` for other failures and in a task saved by an older
 version, and left out of the saved form when `None`.
 
+`AwaitingErrorRecoveryApproval` and `Failed` also record `error_kind`, the
+`arko_ai::ErrorKind` of the model-request error that ended recovery, when it was
+classified: `Authentication` for a lost login, `Billing` for a credit wall,
+`ContextOverflow` for a request over the model's input limit, and so on (see
+[Error kinds](../arko_ai/README.md#error-kinds)). `ErrorEncountered` carries it too. A
+rejected recovery keeps it with the failure. It is `None` for other pauses and errors,
+unclassified ones, and in a task saved by an older version, and left out when `None`.
+
 | Events | Meaning |
 | --- | --- |
 | `TaskStateChanged` | The task's state changed. |
 | `AssistantResponseChunk`, `ReasoningChunk` | Response text and reasoning; `event_throttle_ms` coalesces chunks. |
 | `ToolCallInitiated`, `ToolCallFormatted` | A tool call was announced, then parsed. Output-based mode with `simplified_tool_events` off also emits `ToolParamName`, `ToolParamValueChunk`, and `ToolParamEnd`. |
 | `ToolCallAwaitingApproval`, `BatchToolCallAwaitingApproval`, `UserQuestionsAsked` | The task waits for a command. |
+| `ToolResultShortened` | A result was shortened before it went into the conversation (`reason`: the overflow guard, a cap, or overflow recovery); see [Tool result size](#tool-result-size). |
 | `ToolResult`, `ToolResultIntercepted`, `ToolRejected`, `UnavailableToolAttempted` | Tool outcomes. `ToolRejected` also reports calls that did not run: stopped, held, not reached, or a `complete_task` refused after an earlier call of its turn was rejected or failed. |
-| `ErrorEncountered`, `RetryScheduled`, `UsageLimitReached` | Errors and recovery. `requires_approval_to_retry` marks a pause; `RetryScheduled` carries the attempt, delay, and elapsed milliseconds, and `rate_limit` when the retry waits out a provider rate limit. |
+| `ErrorEncountered`, `RetryScheduled`, `UsageLimitReached` | Errors and recovery. `requires_approval_to_retry` marks a pause; `error_kind` is a failed model request's `arko_ai::ErrorKind`, when classified; `RetryScheduled` carries the attempt, delay, and elapsed milliseconds, and `rate_limit` when the retry waits out a provider rate limit. |
 | `OutputTokenLimitReached` | A response ended at its output-token limit, so its text may be cut short and a call still being written was dropped. The response is handled as usual; a host can tell the user, who can ask the agent to continue. |
 | `RefusalReceived`, `RefusedInput`, `RefusalFallback` | Refusals. |
 | `UsageReported`, `ModelCallUsageReported`, `PlanUsageReported`, `ModelRerouted` | Usage after each model call. |
@@ -785,6 +873,12 @@ responses, connection failures and timeouts, truncated streams, errors reported 
 stream started without a permanent code, and responses without a tool call are retried.
 Invalid requests, missing provider configuration, authentication failures, and permanent
 provider codes (such as quota exhaustion and invalid refresh grants) end recovery at once.
+The pause (or the `ErrorEncountered` of an interrupted task) records the error's
+`Error::kind()` as `error_kind` when it is classified, so a host can tell a lost login
+(`Authentication`) or a credit wall (`Billing`), which every request on the credential
+meets, from a request one task got wrong (`InvalidRequest`, `ContextOverflow`). A request
+over the model's input limit is first made smaller and sent again, at most twice; see
+[Tool result size](#tool-result-size).
 
 | `LLMRetryConfig` field | Default | Meaning |
 | --- | --- | --- |
@@ -1040,24 +1134,30 @@ agents, when the wait fits `max_wait_ms`) and resumes the session. The cache mon
 requests.
 
 **Errors.** A session that can't start (the CLI is missing or exits at once) pauses with
-`ErrorRecoveryCause::NonRetryable`, and so does a turn that ends because Claude Code
-can't authenticate (not signed in, or its login expired or was revoked): Claude Code
-starts without a login and reports it on the first turn, as an API error message whose
-`error` is `authentication_failed` (or a result whose `api_error_status` is 401), and
-the runtime reads those fields. A session that fails otherwise (the CLI exits, or a turn
+`ErrorRecoveryCause::NonRetryable`, and so does a turn that ends in a failure retrying
+doesn't fix, by the error's kind (`arko_ai::ErrorKind::from_claude_code`):
+- Claude Code can't authenticate (`Authentication`: not signed in, or its login expired
+  or was revoked). Claude Code starts without a login and reports it on the first turn,
+  as an API error message whose `error` is `authentication_failed` (or a result whose
+  `api_error_status` is 401).
+- Its account can't be billed (`Billing`: `billing_error`, `account_on_hold`, HTTP 402).
+- Its organization or plan may not make the request (`Permission`:
+  `oauth_org_not_allowed`, HTTP 403).
+
+The runtime reads those fields, and the pause records the kind. A session that fails otherwise (the CLI exits, or a turn
 ends in an error Claude Code's own retries didn't recover from) pauses with
 `RetriesExhausted` (`UsageLimit` at a plan limit), under the pausing error policies.
 Every pause, also one taken after a turn (a tool error under `PauseAndAwaitApproval`, a
 completion a verifier couldn't review, the execution middleware's `PauseTask`), is
 reported as in arko's own runtime: the pause's state change, then the
 `ErrorEncountered` a host answers. A workflow's error recovery policy decides it by its
-cause: under `ErrorRecoveryPolicy::Automatic` a session that can't start or sign in (or
-a standing refusal) fails the run, with the cause in `TaskState::Failed`, and a failed
-session is resumed after the policy's wait. Earlier versions reported the error first,
+cause: under `ErrorRecoveryPolicy::Automatic` a session that can't start, sign in, bill
+its account or make the request (or a standing refusal) fails the run, with the cause and
+kind in `TaskState::Failed`, and a failed session is resumed after the policy's wait. Earlier versions reported the error first,
 so a workflow returned every such pause to its caller as `Paused`; reported a pause
 after a turn by its state alone, so a workflow never decided it and the run call waited
-for ever; and treated a login failure as a failed session, retried for ever under
-`Automatic`.
+for ever; and treated a login failure (until this version, a billing or organization
+failure too) as a failed session, retried for ever under `Automatic`.
 
 **Refusals.** By default Claude Code retries a refused request on a fallback model it
 chooses; the runtime reports it as `RefusalReceived` then `RefusalFallback`, and a model
@@ -1109,16 +1209,22 @@ let config = AgentConfig::builder(id, name, llm_config)
     .build()?;
 ```
 
-1. **The request.** Before a model request, once the latest request of the current
-   conversation had at least the threshold's input tokens (the lower of
-   `at_input_tokens` and `at_context_fraction` of the model's input limit; the fraction is
-   ignored for a model whose limit is unknown), or after a host sent
+1. **The request.** Before a model request, once that request is estimated to have at
+   least the threshold's input tokens (the lower of `at_input_tokens` and
+   `at_context_fraction` of the model's input limit; the fraction is ignored for a model
+   whose limit is unknown), or after a host sent
    `UserCommand::RequestHandover`, the runtime adds a user message asking for the report
    (`DEFAULT_REPORT_REQUEST`, or `report_request`) and emits `HandoverRequested`. It waits
    for a boundary where a user message can go: not while calls wait for results, and not
    for a refusal fallback's request. A conversation whose first request was already over
    the threshold doesn't hand over (the fresh one would start over it too); a warning is
-   logged once.
+   logged once. The estimate is the latest request's reported input plus what the
+   conversation gained since (the reply and the turn's tool results), as the
+   [overflow guard](#tool-result-size) estimates it, so a turn whose results take the
+   conversation over the threshold hands over before the request that would carry them,
+   not one request later. `HandoverRequested` and the record keep the latest request's
+   reported input. The Claude Code runtime checks the latest request's input, as Claude
+   Code reports it.
 2. **The report turn.** The agent replies with the report as plain text. The request
    asks for the task, what was done and the evidence, decisions, where it stopped, the
    next steps, what it is still waiting for and from whom (such as a reply to a

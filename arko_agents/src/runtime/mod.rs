@@ -20,6 +20,7 @@ pub mod command;
 pub mod event;
 mod r#loop;
 mod monitor;
+mod result_budget;
 mod retry;
 mod tool_run;
 pub mod turn_context;

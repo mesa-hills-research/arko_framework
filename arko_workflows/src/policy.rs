@@ -184,6 +184,13 @@ pub enum AgentPause {
     ErrorRecovery {
         error: String,
         cause: ErrorRecoveryCause,
+        /// The kind of the model-request error, when it was classified
+        /// (`TaskState::AwaitingErrorRecoveryApproval::error_kind`): for
+        /// example [`ErrorKind::Authentication`](arko_ai::ErrorKind::Authentication)
+        /// for a lost login. `None` otherwise, and in a pause saved by an
+        /// older version.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_kind: Option<arko_ai::ErrorKind>,
     },
 }
 
@@ -215,9 +222,11 @@ impl AgentPause {
             TaskState::AwaitingErrorRecoveryApproval {
                 error_message,
                 cause,
+                error_kind,
             } => Some(Self::ErrorRecovery {
                 error: error_message.clone(),
                 cause: cause.clone(),
+                error_kind: *error_kind,
             }),
             _ => None,
         }
@@ -243,13 +252,23 @@ impl fmt::Display for AgentPause {
                     .join(", ");
                 write!(formatter, "awaiting approval of {tools}")
             }
-            Self::ErrorRecovery { error, cause } => {
-                write!(
+            Self::ErrorRecovery {
+                error,
+                cause,
+                error_kind,
+            } => match error_kind {
+                Some(kind) => write!(
+                    formatter,
+                    "awaiting error-recovery approval ({}, {}): {error}",
+                    cause_name(cause),
+                    kind.as_str()
+                ),
+                None => write!(
                     formatter,
                     "awaiting error-recovery approval ({}): {error}",
                     cause_name(cause)
-                )
-            }
+                ),
+            },
         }
     }
 }

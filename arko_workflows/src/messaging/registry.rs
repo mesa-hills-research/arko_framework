@@ -708,6 +708,7 @@ mod tests {
                 error_message: "429".into(),
                 requires_approval_to_retry: false,
                 tool_call_id: None,
+                error_kind: None,
             },
         );
         let AgentStatus::Waiting(WaitReason::RateLimited { until: Some(until) }) =

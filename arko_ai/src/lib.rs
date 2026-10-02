@@ -29,7 +29,7 @@ pub use config::{
     AnthropicCacheTtl, AnthropicInferenceGeo, GenerationConfig, OpenAIServiceTier, Verbosity,
 };
 pub use conversation::{Conversation, OpenAITurnState};
-pub use error::{Error, RetryClass};
+pub use error::{Error, ErrorKind, RetryClass};
 pub use input_limit::{CHATGPT_OAUTH_MAX_INPUT_TOKENS, effective_max_input_tokens};
 pub use message::{ConfigurationUpdate, Content, Image, Message, Role};
 pub use model::{Model, ModelPricing, Provider};

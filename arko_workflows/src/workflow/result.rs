@@ -145,6 +145,27 @@ impl AgentResult {
             _ => None,
         }
     }
+
+    /// The kind of the model-request error the run failed on, when it
+    /// failed at an error-recovery pause that recorded one
+    /// (`TaskState::Failed::error_kind`): for example
+    /// [`ErrorKind::Authentication`](arko_ai::ErrorKind::Authentication) for
+    /// a lost login, which fails every run on that credential until it is
+    /// renewed, or [`ErrorKind::ContextOverflow`](arko_ai::ErrorKind::ContextOverflow)
+    /// for a request over the model's input limit, which fails only this
+    /// run. A host decides by it instead of matching error text. `None` for
+    /// a run that didn't fail, failed otherwise or on an unclassified
+    /// error, or was saved by an older version.
+    pub fn failure_kind(&self) -> Option<arko_ai::ErrorKind> {
+        match &self.task.current_state {
+            arko_agents::TaskState::Failed { error_kind, .. }
+                if self.status == AgentRunStatus::Failed =>
+            {
+                *error_kind
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Aggregated result of the entire workflow.

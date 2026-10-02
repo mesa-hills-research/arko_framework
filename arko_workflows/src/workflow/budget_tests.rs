@@ -211,6 +211,7 @@ fn assert_held(error: &WorkflowError) -> uuid::Uuid {
                 AgentPause::ErrorRecovery {
                     cause: arko_agents::ErrorRecoveryCause::BudgetExceeded,
                     error,
+                    ..
                 },
             ..
         } => {

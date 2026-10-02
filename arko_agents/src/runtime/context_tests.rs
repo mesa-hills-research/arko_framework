@@ -143,7 +143,10 @@ async fn exact_results_bypass_distillation_and_are_observed_only_after_delivery_
         agent.observe_committed_tool_context();
         assert_eq!(tool.observed_results.load(Ordering::SeqCst), 0);
         if mode == ToolCallingMode::Native {
-            agent.flush_native_results_to_conversation(None).unwrap();
+            agent
+                .flush_native_results_to_conversation(None)
+                .await
+                .unwrap();
         } else {
             assert!(text_result.contains("exact fixture result"));
             agent.add_text_tool_results_to_conversation(&text_result);

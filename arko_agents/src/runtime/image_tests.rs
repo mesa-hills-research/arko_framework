@@ -173,6 +173,7 @@ async fn a_native_tools_images_go_inside_its_own_result() {
     );
     resumed
         .flush_native_results_to_conversation(Some("Review both images."))
+        .await
         .unwrap();
     let message = &resumed.task.conversation.messages[0];
     let contents = &message.content;
@@ -224,6 +225,7 @@ async fn an_older_task_with_images_beside_its_results_still_sends_them() {
     assert_eq!(resumed.task.pending_tool_images.len(), 1);
     resumed
         .flush_native_results_to_conversation(Some("Review it."))
+        .await
         .unwrap();
     let contents = &resumed.task.conversation.messages[0].content;
     assert_eq!(contents.len(), 4, "{contents:?}");
@@ -285,7 +287,10 @@ async fn text_mode_approval_errors_and_legacy_tools_preserve_their_semantics() {
     assert_result_image(&result);
     assert!(agent.task.pending_tool_images.is_empty());
     agent.task.pending_native_tool_results.push(result);
-    agent.flush_native_results_to_conversation(None).unwrap();
+    agent
+        .flush_native_results_to_conversation(None)
+        .await
+        .unwrap();
     // Output the host supplies has no images.
     let custom = agent
         .execute_native_tool_for_approval(

@@ -2,7 +2,8 @@
 
 Arko keeps an agent's context accurate and compact with four mechanisms:
 versioned memory reads, file-tree change notices, opt-in tool-result distillation,
-and background shell jobs with completion notices. State that changes during a run
+and background shell jobs with completion notices. Large tool results have a safety
+net too: the overflow guard, below. State that changes during a run
 is delivered as exact, deterministic changes. Model-written summaries are reserved
 for bulk tool output, and only where a workflow opts in by naming the agents and
 tools to distill. The original output is reported in the interception events (and
@@ -74,6 +75,51 @@ and an addition. Changing ignore rules or depth also changes the visible
 inventory. A failed scan keeps the last successful baseline; the runtime reports
 the failure and scans again before the next call.
 
+## Large tool results
+
+A tool result goes into the conversation whole: `read_file` returns the whole file and
+`list_files` the whole tree, and command and MCP tools return everything they print.
+An 8 MB data file is about two million tokens, more than any model takes, and a request
+that carries it fails.
+
+**Read big files through the terminal.** An agent with the
+[terminal tools](interactive-terminals.md) should look at a large or generated file
+(data, logs, minified code, generated sources) in parts: `wc -l` for its size,
+`grep -n` to find what it needs, `head`, `sed -n '100,200p'` for a range, or a short
+script that prints only what matters. Terminal output is already bounded (a window of
+recent output, with the full log on disk), so this never floods the context. When an
+agent is offered both `read_file` and the terminal tools, `read_file`'s description says
+so in one sentence; say it in the role's instructions too where large files are
+expected.
+
+**The overflow guard is the safety net** (`AgentToolConfig::result_limits`, on by
+default in arko's own runtime with native tool calling). It changes nothing until a
+turn's results would certainly put the next request over the model's input limit
+(272,000 tokens on ChatGPT OAuth; it counts what the turn added at 10 bytes per token,
+more than any text packs into one, so a request that may fit is sent and the provider
+decides); then it shortens the largest results to a head-and-tail preview with
+a notice that names terminal commands for the rest (without a terminal, `read_file`'s
+line ranges when they are on, or else it asks for less), and if the provider still
+finds the request too long, it shortens the largest
+new result further and resends, at most twice. It is not a strategy: a result just
+under the limit is kept whole and fills the context for one turn, then the next
+handover discards it. The handover check estimates the request about to be sent, so a
+turn whose results take the conversation over the handover threshold hands over before
+that request.
+
+**Tighter caps are opt-in**, for roles that should never pull large outputs or for one
+tool that returns too much: `ToolResultLimits::max_result_tokens` for every tool, or
+`PerToolConfigOverride::max_result_tokens` for one. A capped result keeps its head and
+tail up to the cap, with the same notice. Prefer a cap to a hook that refuses large
+reads: the notice already tells the agent how to get the rest. See
+[Tool result size](../arko_agents/README.md#tool-result-size) for the settings and the
+notice text.
+
+**Ranges for agents without a terminal.** `AgentToolConfig::read_file_line_ranges`
+(off by default) adds `start_line` and `end_line` to `read_file`. Agents offered
+ranges tend to read in short pieces, so turn it on only for agents that need to read
+large files and have no terminal.
+
 ## Tool-result distillation
 
 Distillers are opt-in and registered with `WorkflowBuilder::distiller`. Each one
@@ -138,6 +184,13 @@ Only a finished summary replaces the tool result, and every call is billed:
 
 Once the workflow run is stopped, cancelled or aborted by a hook, distillers make
 no further requests and leave tool output unchanged.
+
+The order is: the tool's output, then interceptors, then distillers, then the
+agent's overflow guard, then the request. A distiller never sends a request over its
+own model's input limit: an output that large is kept unchanged and unbilled, a record
+notes the skip, and the overflow guard shortens it if the agent's own model can't take
+it either. To distill very large outputs, give the distiller a model with a large input
+limit, or bound the output in the tool.
 
 If a raw fallback would be unsuitable for very large outputs, bound the output in
 the tool that produces it. `complete_task` and `ask_user` results are never

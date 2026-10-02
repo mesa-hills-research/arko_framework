@@ -576,6 +576,7 @@ async fn context_taken_in_an_awaiting_state_is_saved_with_the_suspended_task() {
             TaskState::AwaitingErrorRecoveryApproval {
                 error_message: "failed".into(),
                 cause: Default::default(),
+                error_kind: None,
             },
         ] {
             let mut config = config(mode.clone(), &["read_file", "list_files"]);

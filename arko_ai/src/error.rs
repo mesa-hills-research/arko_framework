@@ -1,7 +1,293 @@
 use crate::stop::{Refusal, StopReason};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+
+/// What kind of failure an error is, beside how it may be retried
+/// ([`RetryClass`], which this doesn't change). A host decides by it what a
+/// failure means for the work around the request: a lost login stops
+/// everything that uses the credential, a request over the model's input
+/// limit can be made smaller, and an invalid request fails one task. Read
+/// it with [`Error::kind`].
+///
+/// A provider's error is classified from its codes first (its error code
+/// or type, then its HTTP status), then from the documented phrases of its
+/// message; anything else is [`Unknown`](Self::Unknown), which callers
+/// treat as before kinds existed. Temporary failures (rate limits,
+/// capacity, server and network errors) are `Unknown`: their
+/// [`RetryClass`] says what they are.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorKind {
+    /// The credential is missing, invalid, expired or revoked: an HTTP 401,
+    /// an API key the provider rejects, a ChatGPT sign-in whose refresh
+    /// failed, a Claude Code CLI that isn't signed in. A new credential (or
+    /// sign-in) is needed; every request that uses it fails until then.
+    Authentication,
+    /// The credential works but may not use this model, feature or region
+    /// (an HTTP 403).
+    Permission,
+    /// A credit, spend or quota wall (an HTTP 402, OpenAI
+    /// `insufficient_quota`, Anthropic `billing_error`, a Gemini daily
+    /// quota). Every request on the account fails until it is lifted.
+    Billing,
+    /// The request's input is over the model's input limit.
+    ContextOverflow,
+    /// The request body, or one value in it, is over a size limit (an HTTP
+    /// 413, OpenAI `string_above_max_length`).
+    RequestTooLarge,
+    /// Any other request the provider rejects: a bad parameter, schema,
+    /// image or history.
+    InvalidRequest,
+    /// The model or resource doesn't exist or isn't available (an HTTP 404,
+    /// `model_not_found`).
+    NotFound,
+    /// The model or a filter around it declined the request (a policy
+    /// block).
+    Refusal,
+    /// A feature the provider or arko doesn't support.
+    Unsupported,
+    /// Not classified. Also what a kind added by a later version loads as.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Codes that name an error's kind on their own, whatever the HTTP status.
+/// Generic codes (`invalid_request_error`, `INVALID_ARGUMENT`, ...) are not
+/// here: their message or status decides. Sources: OpenAI error codes
+/// (https://developers.openai.com/api/docs/guides/error-codes) and the
+/// Codex client (codex-rs/codex-api/src/sse/responses_error.rs,
+/// codex-rs/codex-api/src/api_bridge.rs, codex-rs/login/src/auth/manager.rs);
+/// Anthropic error types (https://platform.claude.com/docs/en/api/errors);
+/// the Gemini Interactions API codes
+/// (https://ai.google.dev/gemini-api/docs/api-errors) and Google RPC
+/// statuses; OpenRouter `error.metadata.error_type` values
+/// (https://openrouter.ai/docs/api/reference/errors-and-debugging).
+const KIND_CODES: &[(&str, ErrorKind)] = &[
+    // Credentials.
+    ("invalid_api_key", ErrorKind::Authentication),
+    ("invalid_grant", ErrorKind::Authentication),
+    ("invalid_client", ErrorKind::Authentication),
+    ("unauthorized_client", ErrorKind::Authentication),
+    ("token_expired", ErrorKind::Authentication),
+    ("refresh_token_expired", ErrorKind::Authentication),
+    ("refresh_token_reused", ErrorKind::Authentication),
+    ("refresh_token_invalidated", ErrorKind::Authentication),
+    ("authentication_error", ErrorKind::Authentication),
+    ("authentication", ErrorKind::Authentication),
+    ("unauthorized", ErrorKind::Authentication),
+    ("UNAUTHENTICATED", ErrorKind::Authentication),
+    // Permissions.
+    ("permission_error", ErrorKind::Permission),
+    ("permission_denied", ErrorKind::Permission),
+    ("PERMISSION_DENIED", ErrorKind::Permission),
+    ("forbidden", ErrorKind::Permission),
+    (
+        "unsupported_country_region_territory",
+        ErrorKind::Permission,
+    ),
+    ("data_residency_mismatch", ErrorKind::Permission),
+    // Credit, spend and quota walls.
+    ("insufficient_quota", ErrorKind::Billing),
+    ("billing_hard_limit_reached", ErrorKind::Billing),
+    ("billing_error", ErrorKind::Billing),
+    ("payment_required", ErrorKind::Billing),
+    ("quota_exceeded", ErrorKind::Billing),
+    ("credit_balance_exhausted", ErrorKind::Billing),
+    ("organization_spend_limit_exceeded", ErrorKind::Billing),
+    ("organization_usage_limit_exceeded", ErrorKind::Billing),
+    ("project_spend_limit_exceeded", ErrorKind::Billing),
+    ("usage_not_included", ErrorKind::Billing),
+    // Gemini Interactions API: "Billing or account prerequisite".
+    ("failed_precondition", ErrorKind::Billing),
+    ("FAILED_PRECONDITION", ErrorKind::Billing),
+    // The input is over the model's limit.
+    ("context_length_exceeded", ErrorKind::ContextOverflow),
+    ("token_limit_exceeded", ErrorKind::ContextOverflow),
+    // Size limits on the body or one value in it.
+    ("request_too_large", ErrorKind::RequestTooLarge),
+    ("payload_too_large", ErrorKind::RequestTooLarge),
+    ("content_too_large", ErrorKind::RequestTooLarge),
+    ("string_above_max_length", ErrorKind::RequestTooLarge),
+    ("string_too_long", ErrorKind::RequestTooLarge),
+    // Missing models and resources.
+    ("model_not_found", ErrorKind::NotFound),
+    ("not_found", ErrorKind::NotFound),
+    ("not_found_error", ErrorKind::NotFound),
+    ("NOT_FOUND", ErrorKind::NotFound),
+    ("no_eligible_provider", ErrorKind::NotFound),
+    // Policy blocks.
+    ("content_policy_violation", ErrorKind::Refusal),
+    ("refusal", ErrorKind::Refusal),
+    ("bio_policy", ErrorKind::Refusal),
+    ("cyber_policy", ErrorKind::Refusal),
+    ("misalignment_policy_violation", ErrorKind::Refusal),
+    ("image_content_policy_violation", ErrorKind::Refusal),
+    // Unsupported operations.
+    ("unimplemented", ErrorKind::Unsupported),
+    ("not_implemented", ErrorKind::Unsupported),
+    ("UNIMPLEMENTED", ErrorKind::Unsupported),
+];
+
+/// Codes of a rejected request that say no more than that: the message or
+/// the HTTP status may tell more (Anthropic reports an overlong prompt as
+/// `invalid_request_error`, Gemini an invalid API key as
+/// `INVALID_ARGUMENT`).
+const GENERIC_INVALID_REQUEST_CODES: &[&str] = &[
+    "invalid_request_error",
+    "invalid_request",
+    "INVALID_ARGUMENT",
+    "bad_request",
+];
+
+/// Documented message phrases, matched in lowercase when the code didn't
+/// decide. Sources:
+/// - OpenAI Responses (and the ChatGPT backend, codex-rs
+///   `sse/responses.rs`): "Your input exceeds the context window of this
+///   model."; Chat Completions and OpenRouter: "This model's maximum
+///   context length is N tokens", "This endpoint's maximum context length
+///   is N tokens"; OpenAI per-value limits: "string too long. Expected a
+///   string with maximum length N".
+/// - Anthropic (https://platform.claude.com/docs/en/api/errors): "prompt is
+///   too long: N tokens > M maximum"; "input length and max_tokens exceed
+///   context limit".
+/// - Gemini: "The input token count (N) exceeds the maximum number of
+///   tokens allowed (M)."; an invalid key: "API key not valid", reason
+///   `API_KEY_INVALID`.
+const KIND_PHRASES: &[(&str, ErrorKind)] = &[
+    ("context_length_exceeded", ErrorKind::ContextOverflow),
+    ("exceeds the context window", ErrorKind::ContextOverflow),
+    ("maximum context length", ErrorKind::ContextOverflow),
+    ("prompt is too long", ErrorKind::ContextOverflow),
+    ("exceed context limit", ErrorKind::ContextOverflow),
+    (
+        "exceeds the maximum number of tokens allowed",
+        ErrorKind::ContextOverflow,
+    ),
+    ("string_above_max_length", ErrorKind::RequestTooLarge),
+    ("string too long", ErrorKind::RequestTooLarge),
+    ("api key not valid", ErrorKind::Authentication),
+    ("api_key_invalid", ErrorKind::Authentication),
+];
+
+/// The kind an HTTP status names on its own.
+fn status_kind(status: u16) -> Option<ErrorKind> {
+    match status {
+        401 => Some(ErrorKind::Authentication),
+        402 => Some(ErrorKind::Billing),
+        403 => Some(ErrorKind::Permission),
+        404 => Some(ErrorKind::NotFound),
+        413 => Some(ErrorKind::RequestTooLarge),
+        501 => Some(ErrorKind::Unsupported),
+        _ => None,
+    }
+}
+
+/// The kind of a provider error with `status`, `code` and `message` (the
+/// label and the error body); see [`ErrorKind`].
+fn provider_error_kind(status: Option<u16>, code: Option<&str>, message: &str) -> ErrorKind {
+    if let Some(kind) = code.and_then(|code| {
+        KIND_CODES
+            .iter()
+            .find_map(|(known, kind)| (*known == code).then_some(*kind))
+    }) {
+        return kind;
+    }
+    let status = status.or_else(|| code.and_then(code_status));
+    if let Some(kind) = status.and_then(status_kind) {
+        return kind;
+    }
+    // Phrases only for a request the provider rejected, never for an
+    // outage whose text happens to mention a limit.
+    let rejected = status.is_none_or(|status| (400..500).contains(&status));
+    if rejected && let Some(kind) = message_kind(message) {
+        return kind;
+    }
+    let generic = code.is_some_and(|code| GENERIC_INVALID_REQUEST_CODES.contains(&code));
+    match status {
+        _ if generic => ErrorKind::InvalidRequest,
+        // Other rejected requests, except timeouts, conflicts a retry may
+        // clear, rate limits and cancelled requests.
+        Some(status)
+            if (400..500).contains(&status) && !matches!(status, 408 | 409 | 429 | 499) =>
+        {
+            ErrorKind::InvalidRequest
+        }
+        // Any other permanent code (images, parameters, history).
+        _ if code.is_some_and(|code| PERMANENT_CODES.contains(&code)) => ErrorKind::InvalidRequest,
+        _ => ErrorKind::Unknown,
+    }
+}
+
+/// The kind a documented phrase in `message` names, if any.
+fn message_kind(message: &str) -> Option<ErrorKind> {
+    let message = message.to_ascii_lowercase();
+    KIND_PHRASES
+        .iter()
+        .find_map(|(phrase, kind)| message.contains(phrase).then_some(*kind))
+}
+
+impl ErrorKind {
+    /// The kind's name as it is saved: `"authentication"`,
+    /// `"context_overflow"`, ...
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Authentication => "authentication",
+            Self::Permission => "permission",
+            Self::Billing => "billing",
+            Self::ContextOverflow => "context_overflow",
+            Self::RequestTooLarge => "request_too_large",
+            Self::InvalidRequest => "invalid_request",
+            Self::NotFound => "not_found",
+            Self::Refusal => "refusal",
+            Self::Unsupported => "unsupported",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// The kind of a failed Claude Code CLI turn, from what the CLI reports:
+    /// the assistant message's `error` field (`authentication_failed`,
+    /// `billing_error`, `invalid_request`, ...; the Claude Agent SDK's
+    /// `SDKAssistantMessageError`), the result's `api_error_status` (the
+    /// HTTP status of the failed API request) and `terminal_reason`
+    /// (`prompt_too_long`, ...), and the result text, whose Anthropic error
+    /// phrases are read as for an API error. Temporary failures
+    /// (`rate_limit`, `overloaded`, `server_error`) and unrecognised values
+    /// are [`Unknown`](Self::Unknown).
+    pub fn from_claude_code(
+        error: Option<&str>,
+        api_error_status: Option<u16>,
+        terminal_reason: Option<&str>,
+        text: &str,
+    ) -> Self {
+        let named = match error {
+            Some("authentication_failed" | "verification_required" | "cloud_credential_error") => {
+                Some(Self::Authentication)
+            }
+            Some("oauth_org_not_allowed") => Some(Self::Permission),
+            Some("billing_error" | "account_on_hold") => Some(Self::Billing),
+            Some("model_not_found") => Some(Self::NotFound),
+            _ => None,
+        };
+        if let Some(kind) = named.or_else(|| api_error_status.and_then(status_kind)) {
+            return kind;
+        }
+        if terminal_reason == Some("prompt_too_long") {
+            return Self::ContextOverflow;
+        }
+        let rejected = error == Some("invalid_request")
+            || api_error_status.is_some_and(|status| (400..500).contains(&status));
+        match message_kind(text) {
+            Some(kind) if rejected || kind == Self::ContextOverflow => kind,
+            _ if rejected && !matches!(api_error_status, Some(408 | 409 | 429)) => {
+                Self::InvalidRequest
+            }
+            _ => Self::Unknown,
+        }
+    }
+}
 
 /// How a failed request may be recovered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -451,6 +737,44 @@ impl Error {
         }
     }
 
+    /// What kind of failure this is; see [`ErrorKind`]. A provider error is
+    /// classified from its code, then its HTTP status, then documented
+    /// phrases of its message. arko's own errors: a rejected or missing
+    /// credential is [`ErrorKind::Authentication`], a local request check
+    /// [`ErrorKind::InvalidRequest`], an unsupported provider, model or
+    /// feature [`ErrorKind::Unsupported`], a refusal
+    /// [`ErrorKind::Refusal`], and a response cut off at the model's
+    /// context window [`ErrorKind::ContextOverflow`].
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::ProviderError {
+                message,
+                status,
+                code,
+                ..
+            } => provider_error_kind(*status, code.as_deref(), message),
+            Self::HttpError(error) => error
+                .status()
+                .and_then(|status| status_kind(status.as_u16()))
+                .unwrap_or(ErrorKind::Unknown),
+            Self::AuthenticationFailed(_)
+            | Self::MissingApiKey(_)
+            | Self::MissingHuggingFaceToken(_) => ErrorKind::Authentication,
+            Self::InvalidRequest(_) | Self::InvalidDimension(_) => ErrorKind::InvalidRequest,
+            Self::ProviderNotSupported(_)
+            | Self::ModelNotSupported(_)
+            | Self::UnsupportedFeature(_) => ErrorKind::Unsupported,
+            Self::TokenLimitExceeded(_) => ErrorKind::ContextOverflow,
+            Self::BatchSizeLimitExceeded(_) => ErrorKind::RequestTooLarge,
+            Self::Refusal(_) => ErrorKind::Refusal,
+            Self::UnexpectedToolCalls {
+                stop_reason: StopReason::ContextWindowExceeded,
+                ..
+            } => ErrorKind::ContextOverflow,
+            _ => ErrorKind::Unknown,
+        }
+    }
+
     /// Builds a provider error from an error body. Understands string codes
     /// (`error.code`, `error.type`, `error.status`), OpenRouter's typed
     /// `error.metadata.error_type`, and numeric HTTP-style codes
@@ -762,6 +1086,10 @@ pub(crate) fn retry_after_from_body(body: &str) -> Option<Duration> {
     let value: Value = serde_json::from_str(body).ok()?;
     retry_after_from_value(&value)
 }
+
+#[cfg(test)]
+#[path = "error_kind_tests.rs"]
+mod kind_tests;
 
 #[cfg(test)]
 mod tests {

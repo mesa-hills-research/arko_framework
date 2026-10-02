@@ -603,6 +603,7 @@ async fn a_failed_fallback_request_is_recovered_from_by_its_own_error() {
                 AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
                     error_message,
                     cause,
+                    ..
                 }) => {
                     assert!(
                         error_message.contains("The refusal fallback model's request failed"),

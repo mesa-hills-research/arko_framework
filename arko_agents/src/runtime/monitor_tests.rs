@@ -164,6 +164,7 @@ async fn the_cache_monitor_reports_warns_and_pauses_once_after_warm_up() {
         if let AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
             error_message,
             cause,
+            ..
         }) = &event
         {
             assert!(

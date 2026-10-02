@@ -483,6 +483,7 @@ async fn suspend_returns_the_task_from_every_awaiting_state() {
             TaskState::AwaitingErrorRecoveryApproval {
                 error_message: "failed".into(),
                 cause: Default::default(),
+                error_kind: None,
             },
         ] {
             let mut config = config(mode.clone(), &["read_file", "list_files"]);
@@ -1017,6 +1018,7 @@ async fn under_pause_a_native_batch_finishes_before_pausing_once() {
                 AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
                     error_message,
                     cause,
+                    ..
                 }) => Some((error_message.clone(), cause.clone())),
                 _ => None,
             })
@@ -1251,6 +1253,7 @@ async fn a_native_batch_a_middleware_stops_answers_the_calls_it_did_not_run() {
             TaskState::Failed {
                 reason: reason.into(),
                 cause: None,
+                error_kind: None,
             }
         };
         assert_eq!(task.current_state, expected);
@@ -1350,6 +1353,7 @@ async fn a_middleware_pause_answers_the_call_and_pauses_after_the_batch() {
             AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
                 error_message,
                 cause,
+                ..
             }) => Some((error_message.clone(), cause.clone())),
             _ => None,
         })
@@ -1467,6 +1471,7 @@ async fn middleware_hook_errors_pause_and_preserve_tool_work() {
                 AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
                     error_message,
                     cause,
+                    ..
                 }) => Some((error_message.clone(), cause.clone())),
                 _ => None,
             })
@@ -1596,6 +1601,7 @@ async fn rejecting_recovery_records_the_turn_and_a_pause_names_every_failure() {
                 requires_approval_to_retry: true,
                 error_message,
                 tool_call_id,
+                error_kind: None,
             } => Some((error_message.clone(), *tool_call_id)),
             _ => None,
         })
@@ -1687,6 +1693,7 @@ async fn recovery_approval_answers_calls_an_older_version_stranded() {
     task.set_state(TaskState::AwaitingErrorRecoveryApproval {
         error_message: "Tool 'read_file' execution failed: not found".into(),
         cause: crate::task::ErrorRecoveryCause::ToolError,
+        error_kind: None,
     });
     let saved = serde_json::to_value(&agent.task).unwrap();
     agent.task = serde_json::from_value(saved).unwrap();

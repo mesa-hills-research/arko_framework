@@ -567,9 +567,10 @@ async fn automatic_recovery_fails_clearly_on_an_error_retrying_cant_fix() {
     );
 }
 
-/// A run the policy failed at a pause records the pause's cause, for hosts
-/// (`AgentResult::failure_cause`, the saved task) and for the
-/// `PostAgentFailure` hook (its `cause` metadata).
+/// A run the policy failed at a pause records the pause's cause and error
+/// kind, for hosts (`AgentResult::failure_cause` and `failure_kind`, the
+/// saved task) and for the `PostAgentFailure` hook (its `cause` and
+/// `error_kind` metadata).
 #[tokio::test]
 async fn a_failure_at_a_pause_records_its_cause() {
     let workspace = Workspace::new();
@@ -579,7 +580,10 @@ async fn a_failure_at_a_pause_records_its_cause() {
         .hook(HookPoint::PostAgentFailure, {
             let causes = causes.clone();
             Arc::new(move |context| {
-                causes.lock().push(context.metadata.get("cause").cloned());
+                causes.lock().push((
+                    context.metadata.get("cause").cloned(),
+                    context.metadata.get("error_kind").cloned(),
+                ));
                 HookResult::Continue
             })
         })
@@ -595,14 +599,23 @@ async fn a_failure_at_a_pause_records_its_cause() {
         result.failure_cause(),
         Some(&ErrorRecoveryCause::NonRetryable)
     );
+    // A 401: the credential is lost.
+    assert_eq!(
+        result.failure_kind(),
+        Some(arko_ai::ErrorKind::Authentication)
+    );
     assert!(matches!(
         &result.task.current_state,
         arko_agents::TaskState::Failed {
             cause: Some(ErrorRecoveryCause::NonRetryable),
+            error_kind: Some(arko_ai::ErrorKind::Authentication),
             ..
         }
     ));
-    assert_eq!(*causes.lock(), [Some(json!("non_retryable"))]);
+    assert_eq!(
+        *causes.lock(),
+        [(Some(json!("non_retryable")), Some(json!("authentication")))]
+    );
     // A run that didn't fail has none.
     let workspace = Workspace::new();
     let server = scripted(|_| done()).await;
@@ -613,6 +626,7 @@ async fn a_failure_at_a_pause_records_its_cause() {
         .await
         .unwrap();
     assert_eq!(result.failure_cause(), None);
+    assert_eq!(result.failure_kind(), None);
 }
 
 /// `Limited { max }` recovers `max` times in a drive, then fails the run.
@@ -705,6 +719,56 @@ async fn return_to_caller_pauses_at_recovery_and_resume_continues_or_fails() {
             Err(WorkflowError::BuilderInvalid(_))
         ));
     }
+}
+
+/// A pause `ReturnToCaller` returns carries the error's kind, for the
+/// caller and the `OnAgentPaused` hook, and a failure the caller decides
+/// keeps it.
+#[tokio::test]
+async fn a_pause_returned_to_the_caller_carries_its_error_kind() {
+    let workspace = Workspace::new();
+    let server = scripted(|_| status(401)).await;
+    let kinds = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let workflow = builder(&server, &workspace, agent_config("Friendly Coder"))
+        .error_recovery_policy(ErrorRecoveryPolicy::ReturnToCaller)
+        .hook(HookPoint::OnAgentPaused, {
+            let kinds = kinds.clone();
+            Arc::new(move |context| {
+                kinds
+                    .lock()
+                    .push(context.metadata.get("error_kind").cloned());
+                HookResult::Continue
+            })
+        })
+        .build()
+        .unwrap();
+    let error = within(workflow.run_agent("coder", "Write it."))
+        .await
+        .unwrap_err();
+    let WorkflowError::AgentPaused {
+        task_id,
+        pause:
+            AgentPause::ErrorRecovery {
+                cause: ErrorRecoveryCause::NonRetryable,
+                error_kind: Some(arko_ai::ErrorKind::Authentication),
+                ..
+            },
+        ..
+    } = error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*kinds.lock(), [Some(json!("authentication"))]);
+    let paused = workflow.agent_result(task_id).unwrap();
+    assert!(
+        within(workflow.resume_agent(&paused, AgentResume::FailAfterError { reason: None }))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        workflow.agent_result(task_id).unwrap().failure_kind(),
+        Some(arko_ai::ErrorKind::Authentication)
+    );
 }
 
 /// An agent that pauses in a parallel run is not a failure: the others run
@@ -1526,7 +1590,7 @@ async fn a_refusal_resolution_is_checked_and_one_that_cant_apply_returns_paused(
         .unwrap_err();
     let WorkflowError::AgentPaused {
         task_id,
-        pause: AgentPause::ErrorRecovery { error, cause },
+        pause: AgentPause::ErrorRecovery { error, cause, .. },
         ..
     } = error
     else {
@@ -1619,7 +1683,7 @@ async fn a_refusal_pause_saved_without_its_cause_can_be_resolved() {
         .unwrap_err();
     let WorkflowError::AgentPaused {
         task_id,
-        pause: AgentPause::ErrorRecovery { error, cause },
+        pause: AgentPause::ErrorRecovery { error, cause, .. },
         ..
     } = error
     else {

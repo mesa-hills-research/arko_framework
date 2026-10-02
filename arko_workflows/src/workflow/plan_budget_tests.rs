@@ -188,6 +188,7 @@ async fn a_plan_window_over_its_limit_holds_the_agent_until_it_is_raised() {
             AgentPause::ErrorRecovery {
                 cause: arko_agents::ErrorRecoveryCause::BudgetExceeded,
                 error,
+                ..
             },
         ..
     } = &error

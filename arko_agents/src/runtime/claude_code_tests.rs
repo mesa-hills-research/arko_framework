@@ -1165,27 +1165,55 @@ async fn without_a_fallback_a_standing_refusal_pauses() {
     assert!(matches!(task.current_state, TaskState::Cancelled { .. }));
 }
 
-/// A request Claude Code can't authenticate (it isn't signed in, or its
-/// login expired or was revoked) pauses as one retrying can't fix, by the
-/// error's kind or status Claude Code reports; another failed request
-/// pauses as retries exhausted, as before. Claude Code reports both on the
-/// first turn, not at its start (checked with Claude Code 2.1.286).
+/// A request that fails because Claude Code can't authenticate (it isn't
+/// signed in, or its login expired or was revoked), can't bill its account
+/// or isn't allowed to make it pauses as one retrying can't fix, by the
+/// error's kind or status Claude Code reports; another failed request pauses as retries exhausted, as
+/// before. Claude Code reports these on the first turn, not at its start
+/// (checked with Claude Code 2.1.286). The pause records the error's kind
+/// when Claude Code's report names one.
 #[tokio::test]
 async fn a_failed_login_pauses_as_non_retryable() {
     use crate::task::ErrorRecoveryCause;
-    for (kind, status, expected) in [
+    use arko_ai::ErrorKind;
+    for (kind, status, expected, error_kind) in [
         (
             json!("authentication_failed"),
             json!(null),
             ErrorRecoveryCause::NonRetryable,
+            Some(ErrorKind::Authentication),
         ),
-        (json!(null), json!(401), ErrorRecoveryCause::NonRetryable),
+        (
+            json!(null),
+            json!(401),
+            ErrorRecoveryCause::NonRetryable,
+            Some(ErrorKind::Authentication),
+        ),
         (
             json!("server_error"),
             json!(500),
             ErrorRecoveryCause::RetriesExhausted {
                 retry_after_ms: None,
             },
+            None,
+        ),
+        (
+            json!("billing_error"),
+            json!(400),
+            ErrorRecoveryCause::NonRetryable,
+            Some(ErrorKind::Billing),
+        ),
+        (
+            json!("oauth_org_not_allowed"),
+            json!(null),
+            ErrorRecoveryCause::NonRetryable,
+            Some(ErrorKind::Permission),
+        ),
+        (
+            json!(null),
+            json!(403),
+            ErrorRecoveryCause::NonRetryable,
+            Some(ErrorKind::Permission),
         ),
     ] {
         let fake = Fake::new(json!([[
@@ -1201,18 +1229,21 @@ async fn a_failed_login_pauses_as_non_retryable() {
             AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
                 error_message,
                 cause,
-            }) => Some((error_message.clone(), cause.clone())),
+                error_kind,
+            }) => Some((error_message.clone(), cause.clone(), *error_kind)),
             _ => None,
         });
-        let (message, cause) = pause.unwrap_or_else(|| panic!("{events:#?}"));
+        let (message, cause, recorded) = pause.unwrap_or_else(|| panic!("{events:#?}"));
         assert_eq!(cause, expected, "{kind} {status}");
+        assert_eq!(recorded, error_kind, "{kind} {status}");
         assert!(message.contains("Not logged in"), "{message}");
         assert!(matches!(
             events.last(),
             Some(AgentEvent::ErrorEncountered {
                 requires_approval_to_retry: true,
+                error_kind: reported,
                 ..
-            })
+            }) if *reported == error_kind
         ));
         run.commands.send(UserCommand::CancelTask).await.unwrap();
         run.finish().await;
@@ -1617,6 +1648,45 @@ async fn a_call_that_finished_before_claude_code_exited_is_reported_completed() 
     // The note follows the host's continue note, and isn't a second one.
     assert_eq!(resumed.matches("Continue the task").count(), 1, "{resumed}");
     assert!(task.running_tool_calls.is_empty());
+}
+
+/// Line ranges Claude Code passes to arko's `read_file` while they are
+/// off are ignored: the call reads the whole file. On, they read only those
+/// lines.
+#[tokio::test]
+async fn read_file_line_ranges_passed_while_off_are_ignored() {
+    for ranges in [false, true] {
+        let fake = Fake::new(json!([[
+            {"tool": "mcp__arko__read_file", "input": {"path": "a.txt", "start_line": 2, "end_line": 2}},
+            complete("done"),
+        ]]));
+        std::fs::write(fake.workspace().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let mut config = config(&fake, &["read_file"]);
+        config.tool_config.read_file_line_ranges = ranges;
+        let task = Task::new(config, "Read it.".into(), fake.workspace(), None);
+        let (task, events) = start(task).finish().await;
+        assert!(matches!(task.current_state, TaskState::Completed { .. }));
+        let output = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolResult {
+                    tool_name, output, ..
+                } if tool_name == "mcp__arko__read_file" || tool_name == "read_file" => {
+                    Some(output.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{events:#?}"));
+        if ranges {
+            assert!(output.starts_with("2 | two\n"), "{output}");
+            assert!(!output.contains("1 | one"), "{output}");
+        } else {
+            assert!(
+                output.starts_with("1 | one\n2 | two\n3 | three"),
+                "{output}"
+            );
+        }
+    }
 }
 
 #[tokio::test]

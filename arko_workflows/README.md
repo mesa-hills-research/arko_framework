@@ -594,6 +594,23 @@ happens when an agent would otherwise stop for a person:
   anything. `Limited { max }` caps the automatic recoveries per run call;
   `ReturnToCaller` pauses at every other error-recovery pause.
 
+A failed run says what kind of error failed it: `AgentResult::failure_kind()` is the
+model request's `arko_ai::ErrorKind`, when it was classified (`Authentication`,
+`Billing`, `ContextOverflow`, `InvalidRequest`, ...), and `AgentPause::ErrorRecovery`
+and the `PostAgentFailure` hook's `error_kind` metadata carry it too. Decide by it
+instead of matching error text: a lost login fails every agent on that credential,
+while a request too large for the model fails only one run.
+
+```rust
+use arko_ai::ErrorKind;
+
+let result = workflow.agent_result(task_id).unwrap();
+if result.failure_kind() == Some(ErrorKind::Authentication) {
+    // Every run on this login would fail: stop, save, and ask to sign in again.
+    workflow.cancel();
+}
+```
+
 A paused agent is recorded with `AgentRunStatus::Paused`, the call returns
 `WorkflowError::AgentPaused { agent, task_id, pause }`, and `OnAgentPaused` fires.
 Decide and continue with `resume_agent`:
@@ -688,7 +705,10 @@ under) and the tools it distills, at least one of each, `read_file` included whe
 wanted; a distiller without targets fails to build. It sets the size threshold,
 model, and reasoning. Their calls count against the budget and are recorded. A summary
 replaces the output only when the model finished it; a refusal or a summary cut
-off by its output limit keeps the raw output.
+off by its output limit keeps the raw output. An output too large for the distiller's
+own model is not sent: it is kept, and the agent's overflow guard (arko_agents'
+[tool result size](../arko_agents/README.md#tool-result-size)) shortens it if the
+agent's model can't take it either.
 `complete_task` and `ask_user` results are never distilled, and `load_skill` results
 only when the agent's `SkillsConfig::load_skill_interception` opts in. See
 [context management](../docs/context-efficiency.md#tool-result-distillation) for a
@@ -775,7 +795,9 @@ and the next checkpoint tries again. A checkpoint written meanwhile refers to th
 task's last saved version and lists the run in `missing_task_states`; resuming from it
 restores the task as last saved, with a warning that its latest state is missing.
 When a checkpoint contains a task that can be resumed (including an interrupted one),
-`build` rejects a changed agent configuration. Workflow-injected tools and prepared prompt state are excluded from this
+`build` rejects a changed agent configuration, and the error names the changed fields
+(`agent 'coder' configuration changed since its checkpoint (instructions,
+tool_config.available_tool_names changed); ...`). Workflow-injected tools and prepared prompt state are excluded from this
 comparison, as are saved model registry details; provider, model ID, generation settings,
 and other user configuration must remain compatible.
 The event log records every event, including each streamed text and reasoning

@@ -402,7 +402,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             AgentEvent::ErrorEncountered {
                 error_message,
                 requires_approval_to_retry,
-                tool_call_id: _,
+                ..
             } => {
                 close_active_blocks(&mut in_reasoning_block, &mut in_assistant_response_block)?;
                 eprintln!("\n[ERROR] {}", error_message);

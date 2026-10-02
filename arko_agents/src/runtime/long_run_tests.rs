@@ -357,6 +357,7 @@ async fn a_plan_usage_threshold_pauses_once_per_window() {
             AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
                 error_message,
                 cause,
+                ..
             }) => {
                 assert_eq!(cause, crate::task::ErrorRecoveryCause::Monitor);
                 assert!(

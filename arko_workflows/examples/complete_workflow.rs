@@ -41,7 +41,7 @@ use arko_agents::agent_config::PathSafetyPolicy;
 use arko_agents::{
     AgentConfig, AgentLLMConfig, AgentToolConfig, DEFAULT_TOOL_TIMEOUT_SECONDS,
     EnvironmentDetailsConfig, ErrorRecoveryCause, ErrorRecoveryConfig, InterceptionFailurePolicy,
-    LLMErrorPolicy, LLMRetryConfig, ToolCallingMode, ToolErrorPolicy,
+    LLMErrorPolicy, LLMRetryConfig, ToolCallingMode, ToolErrorPolicy, ToolResultLimits,
 };
 use arko_ai::{CodexAuthFile, GenerationConfig, LLMClient, Model, OpenAIEffort, ReasoningConfig};
 use arko_workflows::persistence::{DEFAULT_EVENT_FLUSH_INTERVAL, PersistenceManager};
@@ -434,6 +434,14 @@ fn agent_config(
         tool_timeout_seconds: Some(DEFAULT_TOOL_TIMEOUT_SECONDS),
         // Default empty: per-tool overrides of the settings above.
         tool_specific_configs: HashMap::new(),
+        // Default: the overflow guard on (a turn's results that would put the
+        // next request over the model's input limit are shortened, with a
+        // notice), and no caps.
+        result_limits: ToolResultLimits::default(),
+        // Default false: read_file reads whole files, and a file too large
+        // for the model's context is shortened with a notice (pointing to the
+        // terminal when one is offered). True adds start_line and end_line.
+        read_file_line_ranges: false,
     };
     let mut builder = AgentConfig::builder(id.to_string(), name.to_string(), llm_config)
         .role_description(role.to_string())

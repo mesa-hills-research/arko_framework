@@ -21,7 +21,7 @@ pub use agent_config::{
     ErrorRecoveryConfig, FileTreeMode, LLMCapacityRetryConfig, LLMErrorPolicy,
     LLMRateLimitRetryConfig, LLMRetryConfig, MonitoringConfig, PerToolConfigOverride,
     PlanUsageAction, PlanUsageThreshold, ReminderInjectionFrequency, ToolCallingMode,
-    ToolErrorPolicy, UsageLimitPolicy, UserReminder,
+    ToolErrorPolicy, ToolResultLimits, UsageLimitPolicy, UserReminder,
 };
 pub use claude_code::{ClaudeCodeSettings, ClaudeCodeTools};
 pub use error::ArkoAgentsError;
@@ -34,7 +34,7 @@ pub use parsing::{
 pub use runtime::{
     AgentRuntime, HostDecisions, TurnContextSource,
     command::{ToolApprovalDecision, UserCommand},
-    event::AgentEvent,
+    event::{AgentEvent, ShortenReason},
 };
 pub use skill::{
     AutoLoadedSkillContent, InvalidSkillPolicy, LOAD_SKILL_TOOL_NAME, LoadSkillTool, SkillManager,

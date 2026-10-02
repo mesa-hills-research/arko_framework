@@ -2078,9 +2078,12 @@ fn validate_resumed_agent_configs(
         let current = normalized_resume_agent_config(current, &workflow_tools)?;
         let saved = normalized_resume_agent_config(&result.task.agent_config, &workflow_tools)?;
         if current != saved {
+            let mut changed = Vec::new();
+            changed_fields(&saved, &current, "", &mut changed);
             return Err(WorkflowError::BuilderInvalid(format!(
-                "agent '{}' configuration changed since its checkpoint; use the original configuration to resume it or register the changed configuration under another agent name",
-                result.agent_name
+                "agent '{}' configuration changed since its checkpoint ({} changed); use the original configuration to resume it or register the changed configuration under another agent name",
+                result.agent_name,
+                describe_changed_fields(&changed)
             )));
         }
     }
@@ -2123,6 +2126,63 @@ fn superseded_on_recovery(
     });
     let settled = call.is_some() || verifier_agents.contains(result.agent_name.as_str());
     settled && !resumed
+}
+
+/// The paths of the fields that differ between two configurations as JSON
+/// (`instructions`, `tool_config.available_tool_names`,
+/// `llm_config.generation_config.max_tokens`), appended to `changed` in
+/// key order: an object is compared field by field, anything else (an
+/// array, a value) as a whole.
+fn changed_fields(
+    saved: &serde_json::Value,
+    current: &serde_json::Value,
+    path: &str,
+    changed: &mut Vec<String>,
+) {
+    use serde_json::Value;
+    match (saved, current) {
+        (Value::Object(saved), Value::Object(current)) => {
+            let keys: std::collections::BTreeSet<&String> =
+                saved.keys().chain(current.keys()).collect();
+            for key in keys {
+                let field = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                match (saved.get(key), current.get(key)) {
+                    (Some(saved), Some(current)) => {
+                        changed_fields(saved, current, &field, changed);
+                    }
+                    (saved, current) if saved != current => changed.push(field),
+                    _ => {}
+                }
+            }
+        }
+        (saved, current) if saved != current => {
+            changed.push(if path.is_empty() {
+                "the configuration".to_string()
+            } else {
+                path.to_string()
+            });
+        }
+        _ => {}
+    }
+}
+
+/// The changed fields as one line: the first ten, then how many more.
+fn describe_changed_fields(changed: &[String]) -> String {
+    const SHOWN: usize = 10;
+    let mut description = changed
+        .iter()
+        .take(SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if changed.len() > SHOWN {
+        description.push_str(&format!(" and {} more", changed.len() - SHOWN));
+    }
+    description
 }
 
 fn normalized_resume_agent_config(

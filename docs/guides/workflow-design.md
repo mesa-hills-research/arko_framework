@@ -66,6 +66,8 @@ Use tool-result interceptors when every call of a tool needs a deterministic tra
 
 Give each stage the smallest useful context, preserve important state in memory or files, and ask agents to record concise findings for the next stage.
 
+Plan for large tool results. Every tool returns its whole output, and one large file or query result can be more than a model takes in a request. The overflow guard (on by default) shortens a turn's results only when they would certainly overflow the model's input limit, with a notice telling the agent how to get the rest, so a workflow doesn't need its own read cap. Give roles that meet large files a terminal and tell them to read in parts. Where a role should never pull large outputs, or one tool returns too much, set `ToolResultLimits::max_result_tokens` or that tool's `max_result_tokens`. A distiller skips an output larger than its own model takes, so a distiller meant for very large outputs needs a model with a large input limit.
+
 ## Define completion and review
 
 An agent completes when it has produced the artifact or decision required by its role and recorded a useful summary. A successful `complete_task` call is a handoff signal, not proof that the artifact is correct.
@@ -83,6 +85,8 @@ The workflow's defaults are autonomous: every tool call is approved (`ApprovalPo
 Use hooks for lifecycle policy and observation: budget warnings, audit events, pre-tool checks, post-tool recording, freshness conflicts, and cancellation. A hook can stop a run but can't undo work already done, so run checks before the side effect and record the reason for any abort.
 
 Route questions through a `UserInputHandler` when the host can answer them asynchronously. Without a handler, the run returns `UserInputRequired`; continue the paused agent with the answer rather than starting a second run that loses its conversation.
+
+Decide what each kind of failure means for the run. A failed run records the kind of error that failed it (`AgentResult::failure_kind`, `arko_ai::ErrorKind`): a lost login (`Authentication`) or a credit wall (`Billing`) will fail every agent on that credential, so a set-and-forget host should stop the run and ask for a new sign-in; a request too large for the model (`ContextOverflow`) or an invalid request fails only that run. Decide by the kind, never by matching error text.
 
 Give cancellation a deliberate path. A cancel handle can stop the workflow from another task, and hooks can abort it when a policy is violated. Configure a grace period that lets agents record results without allowing a stuck tool call to hold the run indefinitely. Report cancellation distinctly from failure so a caller can decide whether resuming is appropriate.
 
@@ -102,6 +106,8 @@ Wrap external side effects in durable steps. A durable step records its input, a
 
 Keep saved state compatible with earlier versions. Add serde defaults for new fields, continue reading old checkpoint and task formats, and avoid changing the meaning of an existing workflow name or memory tier without an explicit migration path.
 
+Resume with the configuration the run was saved with. `resume_from` refuses a run whose agent configuration changed, and its error names the changed fields (`instructions`, `tool_config.available_tool_names`, ...), so you can restore them or register the changed configuration under another agent name. Changes outside the agent configurations (the workflow's Rust code, tool implementations and descriptions, hooks, policies, budgets) don't stop a resume.
+
 ## Observe and test the run
 
 Subscribe to workflow events or register hooks when the host needs progress, audit records, or live status. Report agent results, waiting states, pauses, costs, and cancellation causes separately. A final summary should identify incomplete work and the evidence used to accept completed work.
@@ -116,9 +122,9 @@ Build and validate the workflow before making provider calls. The complete workf
 - Each memory tier has an owner, access policy, write mode, and size limit where needed.
 - Messages carry handoff information, while durable facts live in memory or files.
 - Shared resources have freshness tracking or an explicit conflict policy.
-- Each agent has only the tools and context required for its role.
+- Each agent has only the tools and context required for its role. Roles that meet large files read them through the terminal; caps on tool results are set only where a role needs a tighter budget than the overflow guard gives.
 - Completion verification checks the artifact, not only the agent's summary.
-- Set-and-forget workflows keep `ApproveAll` and `Automatic`; cancellation, budgets, and human input are configured for the deployment.
+- Set-and-forget workflows keep `ApproveAll` and `Automatic`; cancellation, budgets, and human input are configured for the deployment, and a lost login (`failure_kind()` is `Authentication`) stops the run rather than failing every agent in turn.
 - External side effects use durable steps and define in-doubt resolution.
 - Checkpoints and old saved data remain loadable, and resume behavior is explicit.
 - A dry run passes. Live test runs and benchmark iterations fit the budget the user has authorized.

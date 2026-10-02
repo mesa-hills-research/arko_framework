@@ -67,7 +67,10 @@ Decide which tools the agent needs before you build the workflow. This is especi
 
 Offering a tool or parameter is itself a nudge to use it. For example, give agents an optional timeout parameter on a tool, and they will almost always set one. Offer only the tools and parameters a role needs, and describe optional ones as optional, with when they're worth using.
 
+Large files are the one place where reading through the terminal is more than a preference. A data file, a log or a minified bundle can be millions of tokens, more than any model takes in one request. An agent with a terminal should look at it in parts: `wc -l` for its size, `grep -n` to find what it needs, `head` or `sed -n '100,200p'` for a range, or a short script that prints only what matters. If the role is likely to meet such files, say so in its instructions. `arko_agents` points the agent there too: `read_file`'s description gains one sentence about it when the agent also has the terminal tools, and its overflow guard (on by default) shortens a turn's results only when they would certainly overflow the model's input limit, with a notice that names those commands. The guard is a safety net, not a strategy, so don't hand-roll a read cap in a hook; set `ToolResultLimits::max_result_tokens` (or a tool's own `max_result_tokens`) only for a role that should never pull large outputs. `read_file` line ranges are opt-in (`read_file_line_ranges`) for agents without a terminal; agents offered ranges tend to read in short pieces, so offer them only where they're needed.
+
 Summary:
 - Before creating an agent or workflow, consider which tools the agents need or would benefit from.
 - Make sure those tools are available beforehand, especially in controlled environments that prevent agents from installing them.
 - Every tool and parameter you offer steers the agent toward using it. Offer only what the role needs, and phrase optional ones as optional.
+- Steer agents with a terminal to read large files in parts through it. Rely on the overflow guard as the safety net, and add caps only where a role needs a tighter budget.

@@ -27,6 +27,7 @@ use arko_agents::{
     ErrorRecoveryCause, TaskContext, TaskState, Tool, ToolDefinition, ToolError, ToolRecovery,
     ToolTypeDetails,
 };
+use arko_ai::ErrorKind;
 use arko_workflows::prelude::*;
 use async_trait::async_trait;
 use clap::ValueEnum;
@@ -2178,6 +2179,14 @@ pub(crate) fn login_failure(state_dir: &Path, run: &AgentResult) -> Option<Strin
     if run.status != AgentRunStatus::Failed {
         return None;
     }
+    // A request too large for the model fails that run alone: no credential
+    // or configuration change is needed.
+    if matches!(
+        run.failure_kind(),
+        Some(ErrorKind::ContextOverflow | ErrorKind::RequestTooLarge)
+    ) {
+        return None;
+    }
     if let Some(cause) = run.failure_cause() {
         return (*cause == ErrorRecoveryCause::NonRetryable)
             .then(|| run.error.clone().unwrap_or_default());
@@ -2204,6 +2213,7 @@ pub(crate) fn login_failure(state_dir: &Path, run: &AgentResult) -> Option<Strin
         TaskState::AwaitingErrorRecoveryApproval {
             cause: ErrorRecoveryCause::NonRetryable,
             error_message,
+            ..
         } => Some(error_message),
         _ => None,
     }
@@ -2674,6 +2684,7 @@ impl Deliberator<'_> {
                             Some(AgentPause::ErrorRecovery {
                                 cause: ErrorRecoveryCause::NonRetryable,
                                 error,
+                                ..
                             }) => return Err(self.login_error(agent, &error)),
                             _ => return Ok(()),
                         },
@@ -3682,6 +3693,7 @@ mod tests {
             TaskState::Failed {
                 reason: "the model refused".into(),
                 cause: Some(ErrorRecoveryCause::Refusal),
+                error_kind: None,
             },
         ));
         let deliberator = fixture.deliberator(&workflow);
@@ -3696,6 +3708,7 @@ mod tests {
             TaskState::AwaitingErrorRecoveryApproval {
                 error_message: "Claude Code could not start".into(),
                 cause: ErrorRecoveryCause::NonRetryable,
+                error_kind: None,
             },
         );
         deliberator
@@ -3779,6 +3792,7 @@ mod tests {
             task.current_state = TaskState::Failed {
                 reason: "the model refused".into(),
                 cause: Some(ErrorRecoveryCause::Refusal),
+                error_kind: None,
             };
             AgentResult {
                 agent_run_id: task.id,
@@ -3810,6 +3824,7 @@ mod tests {
             TaskState::Failed {
                 reason: "failed".into(),
                 cause: None,
+                error_kind: None,
             },
         );
         let (run_id, other) = (run.agent_run_id, uuid::Uuid::new_v4());
@@ -3864,12 +3879,28 @@ mod tests {
         run.task.current_state = TaskState::Failed {
             reason: "can't succeed: 401".into(),
             cause: Some(ErrorRecoveryCause::NonRetryable),
+            error_kind: None,
         };
         std::fs::remove_file(fixture.state_dir.join("events.jsonl")).unwrap();
         assert_eq!(classify(&run).as_deref(), Some("can't succeed: 401"));
+        // A recorded kind tells a lost login from a request too large for
+        // the model, which needs neither a sign-in nor a new configuration.
+        for (kind, login) in [
+            (ErrorKind::Authentication, true),
+            (ErrorKind::ContextOverflow, false),
+            (ErrorKind::RequestTooLarge, false),
+        ] {
+            run.task.current_state = TaskState::Failed {
+                reason: "can't succeed: 401".into(),
+                cause: Some(ErrorRecoveryCause::NonRetryable),
+                error_kind: Some(kind),
+            };
+            assert_eq!(classify(&run).is_some(), login, "{kind:?}");
+        }
         run.task.current_state = TaskState::Failed {
             reason: "refused".into(),
             cause: Some(ErrorRecoveryCause::Refusal),
+            error_kind: None,
         };
         log(vec![
             line(run_id, pause("non_retryable")),

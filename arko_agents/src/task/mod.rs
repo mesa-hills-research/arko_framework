@@ -162,6 +162,15 @@ pub enum TaskState {
         /// version).
         #[serde(default)]
         cause: ErrorRecoveryCause,
+        /// The kind of the model-request error that ended recovery, when it
+        /// was classified ([`arko_ai::Error::kind`]): a lost login
+        /// ([`ErrorKind::Authentication`](arko_ai::ErrorKind::Authentication)),
+        /// a request over the model's input limit
+        /// ([`ErrorKind::ContextOverflow`](arko_ai::ErrorKind::ContextOverflow)),
+        /// and so on. `None` for an unclassified error, a pause of another
+        /// cause, and in a task saved by an older version.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_kind: Option<arko_ai::ErrorKind>,
     },
     Interrupted {
         reason: String,
@@ -179,6 +188,12 @@ pub enum TaskState {
         /// failures, and in a task saved by an older version.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cause: Option<ErrorRecoveryCause>,
+        /// The error's kind, when the task failed at an error-recovery
+        /// pause that recorded one (see
+        /// [`TaskState::AwaitingErrorRecoveryApproval`]). `None` otherwise,
+        /// and in a task saved by an older version.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_kind: Option<arko_ai::ErrorKind>,
     },
     /// Stopped on request (a [`CancelTask`](crate::runtime::command::UserCommand::CancelTask)
     /// command or a middleware's
@@ -213,6 +228,8 @@ enum TaskStateRepr {
         error_message: String,
         #[serde(default)]
         cause: ErrorRecoveryCause,
+        #[serde(default)]
+        error_kind: Option<arko_ai::ErrorKind>,
     },
     Interrupted {
         reason: String,
@@ -224,6 +241,8 @@ enum TaskStateRepr {
         reason: String,
         #[serde(default)]
         cause: Option<ErrorRecoveryCause>,
+        #[serde(default)]
+        error_kind: Option<arko_ai::ErrorKind>,
     },
     Cancelled {
         reason: String,
@@ -261,9 +280,11 @@ impl From<TaskStateRepr> for TaskState {
             TaskStateRepr::AwaitingErrorRecoveryApproval {
                 error_message,
                 cause,
+                error_kind,
             } => TaskState::AwaitingErrorRecoveryApproval {
                 error_message,
                 cause,
+                error_kind,
             },
             TaskStateRepr::Interrupted { reason } => TaskState::Interrupted { reason },
             TaskStateRepr::Completed { summary } => TaskState::Completed { summary },
@@ -271,7 +292,15 @@ impl From<TaskStateRepr> for TaskState {
             TaskStateRepr::Failed { reason, .. } if reason == CANCELLED_BY_USER => {
                 TaskState::Cancelled { reason }
             }
-            TaskStateRepr::Failed { reason, cause } => TaskState::Failed { reason, cause },
+            TaskStateRepr::Failed {
+                reason,
+                cause,
+                error_kind,
+            } => TaskState::Failed {
+                reason,
+                cause,
+                error_kind,
+            },
             TaskStateRepr::Cancelled { reason } => TaskState::Cancelled { reason },
         }
     }
@@ -836,6 +865,61 @@ mod tests {
     }
 
     #[test]
+    fn pauses_and_failures_saved_without_an_error_kind_still_load() {
+        use arko_ai::ErrorKind;
+        // Saved before error kinds existed.
+        assert_eq!(
+            state(
+                serde_json::json!({"AwaitingErrorRecoveryApproval": {"error_message": "401", "cause": "non_retryable"}})
+            ),
+            TaskState::AwaitingErrorRecoveryApproval {
+                error_message: "401".into(),
+                cause: ErrorRecoveryCause::NonRetryable,
+                error_kind: None,
+            }
+        );
+        assert_eq!(
+            state(serde_json::json!({"Failed": {"reason": "401", "cause": "non_retryable"}})),
+            TaskState::Failed {
+                reason: "401".into(),
+                cause: Some(ErrorRecoveryCause::NonRetryable),
+                error_kind: None,
+            }
+        );
+        // Without a kind, nothing is written for it, so older versions read
+        // the state as before; with one, it is kept.
+        let paused = TaskState::AwaitingErrorRecoveryApproval {
+            error_message: "too long".into(),
+            cause: ErrorRecoveryCause::NonRetryable,
+            error_kind: Some(ErrorKind::ContextOverflow),
+        };
+        let saved = serde_json::to_value(&paused).unwrap();
+        assert_eq!(
+            saved["AwaitingErrorRecoveryApproval"]["error_kind"],
+            "context_overflow"
+        );
+        assert_eq!(state(saved), paused);
+        let failed = serde_json::to_value(TaskState::Failed {
+            reason: "x".into(),
+            cause: Some(ErrorRecoveryCause::NonRetryable),
+            error_kind: None,
+        })
+        .unwrap();
+        assert!(failed["Failed"].get("error_kind").is_none(), "{failed}");
+        // A kind a later version adds loads as Unknown.
+        assert_eq!(
+            state(
+                serde_json::json!({"Failed": {"reason": "x", "cause": "non_retryable", "error_kind": "from_the_future"}})
+            ),
+            TaskState::Failed {
+                reason: "x".into(),
+                cause: Some(ErrorRecoveryCause::NonRetryable),
+                error_kind: Some(ErrorKind::Unknown),
+            }
+        );
+    }
+
+    #[test]
     fn a_cancellation_saved_as_a_failure_loads_as_cancelled() {
         assert_eq!(
             state(serde_json::json!({"Failed": {"reason": "Task cancelled by user."}})),
@@ -848,6 +932,7 @@ mod tests {
         let failed = |cause| TaskState::Failed {
             reason: "x".into(),
             cause,
+            error_kind: None,
         };
         assert_eq!(
             serde_json::to_value(failed(None)).unwrap(),
@@ -867,6 +952,7 @@ mod tests {
                 TaskState::Failed {
                     reason: reason.to_string(),
                     cause: None,
+                    error_kind: None,
                 }
             );
         }
@@ -908,6 +994,7 @@ mod tests {
                 cause: ErrorRecoveryCause::UsageLimit {
                     resets_at_unix_ms: Some(1_790_000_000_000),
                 },
+                error_kind: None,
             },
             TaskState::Interrupted {
                 reason: "network".into(),
@@ -918,10 +1005,17 @@ mod tests {
             TaskState::Failed {
                 reason: "verifier rejected".into(),
                 cause: None,
+                error_kind: None,
             },
             TaskState::Failed {
                 reason: "a new credential is needed".into(),
                 cause: Some(ErrorRecoveryCause::NonRetryable),
+                error_kind: Some(arko_ai::ErrorKind::Authentication),
+            },
+            TaskState::AwaitingErrorRecoveryApproval {
+                error_message: "prompt is too long".into(),
+                cause: ErrorRecoveryCause::NonRetryable,
+                error_kind: Some(arko_ai::ErrorKind::ContextOverflow),
             },
             TaskState::Cancelled {
                 reason: "Workflow cancelled.".into(),
@@ -993,6 +1087,7 @@ mod tests {
             TaskState::AwaitingErrorRecoveryApproval {
                 error_message: "boom".into(),
                 cause: ErrorRecoveryCause::Unknown,
+                error_kind: None,
             }
         );
         // An unrecorded reason is left out when saved.

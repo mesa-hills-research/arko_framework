@@ -638,6 +638,38 @@ arko_ai does not retry model calls itself. `arko_ai::retry::BackoffPolicy` is th
 backoff used by arko_agents, arko_index and the OAuth refresh retries: exponential with a
 cap and equal jitter, treating a server hint as a minimum with jitter above it.
 
+### Error kinds
+
+The retry class says whether retrying can help; `Error::kind()` says what went wrong, as
+an `ErrorKind`, so a host can decide what a failure means for the rest of its work
+without matching error text. It doesn't change the retry class.
+
+| `ErrorKind` | Means | Examples |
+|---|---|---|
+| `Authentication` | The credential is missing, invalid, expired or revoked; every request that uses it fails until it is renewed. | HTTP 401; `invalid_api_key`, `authentication_error`, `token_expired`, `invalid_grant`; Gemini's 400 "API key not valid"; arko's `AuthenticationFailed` and `MissingApiKey`. |
+| `Permission` | The credential works but may not use this model, feature or region. | HTTP 403; `permission_error`, `PERMISSION_DENIED`, `unsupported_country_region_territory`. |
+| `Billing` | A credit, spend or quota wall on the account. | HTTP 402; `insufficient_quota`, `billing_error`, `payment_required`, Gemini's `quota_exceeded`, the ChatGPT backend's spend walls. |
+| `ContextOverflow` | The request's input is over the model's input limit. | `context_length_exceeded`; "prompt is too long: N tokens > M maximum" (Anthropic); "Your input exceeds the context window of this model" (OpenAI, ChatGPT backend); "maximum context length is N tokens" (OpenAI Chat, OpenRouter); "The input token count (N) exceeds the maximum number of tokens allowed (M)" (Gemini). |
+| `RequestTooLarge` | The body, or one value in it, is over a size limit. | HTTP 413; `request_too_large`, `string_above_max_length`. |
+| `InvalidRequest` | Any other request the provider rejects. | HTTP 400 or 422 without a more specific code or phrase; image and parameter codes. |
+| `NotFound` | The model or resource doesn't exist or isn't available. | HTTP 404; `model_not_found`, `not_found_error`. |
+| `Refusal` | The model or a filter around it declined. | `Error::Refusal`; `content_policy_violation`, `cyber_policy`. |
+| `Unsupported` | A feature the provider or arko doesn't support. | HTTP 501; `UnsupportedFeature`, `ModelNotSupported`. |
+| `Unknown` | Not classified. | Rate limits, capacity, server and network errors, unrecognised errors. |
+
+A provider error is classified from a code that names a kind first, then from its HTTP
+status (401, 402, 403, 404, 413, 501), then from documented phrases of a rejected
+request's message, so a generic `invalid_request_error` or `INVALID_ARGUMENT` with an
+overlong prompt is `ContextOverflow`. A provider that rewords a message leaves its error
+`InvalidRequest` or `Unknown`, never another kind. `ErrorKind::from_claude_code`
+classifies a failed Claude Code CLI turn from its `error` field
+(`authentication_failed`, `billing_error`, `invalid_request`, ...), its
+`api_error_status`, its `terminal_reason` (`prompt_too_long`) and its text. Kinds are
+saved in snake_case (`as_str`), and a kind a later version adds loads as `Unknown`.
+
+arko_agents records the kind on the pauses, failures and error events of a run, and
+arko_workflows on its results (`AgentResult::failure_kind`).
+
 ## Long requests
 
 The shared model HTTP client has no total request deadline, since a response can stream

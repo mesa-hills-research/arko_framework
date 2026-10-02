@@ -35,8 +35,17 @@ pub const REPORT_HEADING: &str = "# Handover report";
 pub const REPORT_INTRODUCTION: &str = "Your earlier conversation on this task was replaced with this one to keep your context small. Before it was replaced, you wrote the report below. Continue the task from it.";
 
 /// When an agent hands over; see the [module docs](self). At least one
-/// threshold must be set. Checked before each model request against the
-/// input of the latest request of the current conversation.
+/// threshold must be set. In arko's own runtime it is checked before each
+/// model request against the estimated input of that request: the latest
+/// request's reported input, plus what the conversation gained since (the
+/// reply and the turn's tool results), estimated as the overflow guard
+/// estimates it (see
+/// [`ToolResultLimits`](crate::agent_config::ToolResultLimits)). So a turn
+/// whose results take the conversation over the threshold hands over
+/// before the request that would carry them. The Claude Code runtime
+/// checks the latest request's input, as Claude Code reports it.
+/// [`HandoverRequest::input_tokens`] and [`HandoverRecord::input_tokens`]
+/// record the latest request's reported input.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct HandoverConfig {

@@ -353,6 +353,7 @@ mod tests {
         running.set_state(arko_agents::TaskState::AwaitingErrorRecoveryApproval {
             error_message: "overloaded".into(),
             cause: arko_agents::ErrorRecoveryCause::Unknown,
+            error_kind: None,
         });
         std::fs::create_dir_all(workspace.0.join(format!("agents/{}", running.id))).unwrap();
         let live_file = format!("agents/{}/live.json", running.id);

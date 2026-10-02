@@ -383,6 +383,7 @@ async fn answer_budget_hold(
                 AgentPause::ErrorRecovery {
                     error,
                     cause: arko_agents::ErrorRecoveryCause::BudgetExceeded,
+                    error_kind: None,
                 },
             )
             .await;
@@ -419,6 +420,8 @@ struct RecoveryState {
     /// state, or the state it was resumed in), if it is in one: an error it
     /// reports needing a decision is about that pause.
     paused: Option<arko_agents::ErrorRecoveryCause>,
+    /// That pause's error kind, when it recorded one.
+    paused_kind: Option<arko_ai::ErrorKind>,
     /// An error needing a decision that arrived before the state change
     /// giving its cause: answered once that pause arrives, so the decision
     /// doesn't depend on the order a runtime reports them in.
@@ -756,7 +759,11 @@ async fn answer_recovery_pause(
                 agent_name,
                 agent_run_id,
                 cmd_tx,
-                AgentPause::ErrorRecovery { error, cause },
+                AgentPause::ErrorRecovery {
+                    error,
+                    cause,
+                    error_kind: recovery.paused_kind,
+                },
             )
             .await
         }
@@ -779,9 +786,10 @@ async fn answer_recovery_pause(
 /// A `batch_stop` (fail-fast in `run_agents_parallel`) that is set stops the
 /// agent too: the loop returns `AgentCancelled` with its reason.
 ///
-/// `paused` is the cause of the error-recovery pause the agent starts in (a
-/// resumed or recovered run): a runtime reports an error about it (such as
-/// a refusal change it can't apply) without reporting the pause again.
+/// `paused` is the cause (and error kind) of the error-recovery pause the
+/// agent starts in (a resumed or recovered run): a runtime reports an error
+/// about it (such as a refusal change it can't apply) without reporting the
+/// pause again.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn drive_event_loop(
     agent_name: &str,
@@ -792,7 +800,7 @@ pub(crate) async fn drive_event_loop(
     persistence: Option<&Arc<PersistenceManager>>,
     batch_stop: Option<tokio::sync::watch::Receiver<Option<String>>>,
     nested: bool,
-    paused: Option<arko_agents::ErrorRecoveryCause>,
+    paused: Option<(arko_agents::ErrorRecoveryCause, Option<arko_ai::ErrorKind>)>,
 ) -> Result<(), WorkflowError> {
     let drive = Drive {
         agent_name,
@@ -802,7 +810,8 @@ pub(crate) async fn drive_event_loop(
         persistence,
     };
     let mut recovery = RecoveryState {
-        paused,
+        paused_kind: paused.as_ref().and_then(|(_, kind)| *kind),
+        paused: paused.map(|(cause, _)| cause),
         ..RecoveryState::default()
     };
     let Some(mut batch_stop) = batch_stop else {
@@ -886,6 +895,7 @@ async fn drive_events(
             && !matches!(state, TaskState::AwaitingErrorRecoveryApproval { .. })
         {
             recovery.paused = None;
+            recovery.paused_kind = None;
             recovery.unanswered = None;
         }
         match event {
@@ -1008,9 +1018,11 @@ async fn drive_events(
             // is what the host is told.
             AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
                 ref cause,
+                error_kind,
                 ..
             }) => {
                 recovery.paused = Some(cause.clone());
+                recovery.paused_kind = error_kind;
                 if let Some(error) = recovery.unanswered.take() {
                     answer_recovery_pause(
                         agent_name,
@@ -1191,9 +1203,11 @@ async fn answer_saved_wait(
         TaskState::AwaitingErrorRecoveryApproval {
             error_message,
             cause,
+            error_kind,
         } => {
             let mut recovery = RecoveryState {
                 paused: Some(cause.clone()),
+                paused_kind: *error_kind,
                 ..RecoveryState::default()
             };
             answer_recovery_pause(
@@ -1583,7 +1597,9 @@ async fn drive_run_to_result(
     };
     // A run resumed (or recovered) at an error-recovery pause starts in it.
     let paused = match &started_task.current_state {
-        TaskState::AwaitingErrorRecoveryApproval { cause, .. } => Some(cause.clone()),
+        TaskState::AwaitingErrorRecoveryApproval {
+            cause, error_kind, ..
+        } => Some((cause.clone(), *error_kind)),
         _ => None,
     };
     let drive_result = match saved_wait {
@@ -2029,6 +2045,7 @@ pub(crate) async fn finalize_agent_task(
     let summary = result.summary.clone();
     let error = result.error.clone();
     let failure_cause = result.failure_cause().cloned();
+    let failure_kind = result.failure_kind();
     // With persistence, its task is saved first (a failure is logged and
     // retried at the next checkpoint; it never fails the run). Spawned, so
     // the result is recorded even if this call is dropped while it waits
@@ -2072,13 +2089,19 @@ pub(crate) async fn finalize_agent_task(
                     ),
                 );
             }
-            Some(AgentPause::ErrorRecovery { cause, .. }) => {
+            Some(AgentPause::ErrorRecovery {
+                cause, error_kind, ..
+            }) => {
                 hook.metadata
                     .insert("pause".to_string(), serde_json::json!("error_recovery"));
                 hook.metadata.insert(
                     "cause".to_string(),
                     serde_json::json!(crate::policy::cause_name(cause)),
                 );
+                if let Some(kind) = error_kind {
+                    hook.metadata
+                        .insert("error_kind".to_string(), serde_json::json!(kind.as_str()));
+                }
             }
             None => {}
         }
@@ -2088,6 +2111,10 @@ pub(crate) async fn finalize_agent_task(
                 "cause".to_string(),
                 serde_json::json!(crate::policy::cause_name(cause)),
             );
+        }
+        if let Some(kind) = failure_kind {
+            hook.metadata
+                .insert("error_kind".to_string(), serde_json::json!(kind.as_str()));
         }
     });
 
@@ -4167,12 +4194,14 @@ mod tests {
             AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {
                 error_message: "401 refresh_token_invalidated".into(),
                 cause: arko_agents::ErrorRecoveryCause::NonRetryable,
+                error_kind: Some(arko_ai::ErrorKind::Authentication),
             })
         };
         let error = || AgentEvent::ErrorEncountered {
             error_message: "401 refresh_token_invalidated".into(),
             requires_approval_to_retry: true,
             tool_call_id: None,
+            error_kind: None,
         };
         let decide_from = |paused: Option<arko_agents::ErrorRecoveryCause>,
                            events: Vec<AgentEvent>| {
@@ -4193,7 +4222,7 @@ mod tests {
                     None,
                     None,
                     false,
-                    paused,
+                    paused.map(|cause| (cause, None)),
                 )
                 .await;
                 assert!(driven.is_ok(), "{driven:?}");
@@ -4248,6 +4277,7 @@ mod tests {
                 error_message: "Could not resolve the refusal: no refused input".into(),
                 requires_approval_to_retry: true,
                 tool_call_id: None,
+                error_kind: None,
             }],
         )
         .await;
@@ -4287,6 +4317,7 @@ mod tests {
                 TaskState::Failed {
                     reason: "The upload was cancelled by the server.".into(),
                     cause: None,
+                    error_kind: None,
                 },
                 crate::workflow::result::AgentRunStatus::Failed,
             ),

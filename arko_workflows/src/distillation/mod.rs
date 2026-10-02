@@ -443,6 +443,18 @@ pub(crate) mod tests {
             .unwrap()
     }
 
+    /// The context of a call by the researcher in `workflow`.
+    fn task_context(workflow: &crate::Workflow) -> TaskContext<'_> {
+        TaskContext {
+            task_id: uuid::Uuid::new_v4(),
+            agent_name: "researcher",
+            initial_task_prompt: "find the failing test",
+            current_working_directory: &workflow.context().workspace,
+            tool_call_id: None,
+            recovering: false,
+        }
+    }
+
     /// Runs one interception of a large tool result against `model`, served
     /// by `client`, returning the outcome and the context it charged.
     async fn distill(
@@ -476,6 +488,55 @@ pub(crate) mod tests {
             )
             .await;
         (outcome, workflow.context().clone())
+    }
+
+    /// A tool output over the distiller model's own input limit is kept as
+    /// it is, without a request, and the skip is recorded.
+    #[tokio::test]
+    async fn an_output_over_the_distillers_input_limit_is_skipped_without_a_request() {
+        let server = MockServer::start(anthropic_reply("summary", "end_turn")).await;
+        let client = server.anthropic_client();
+        let workflow = workflow(client.clone());
+        let small = Model {
+            max_input_tokens: 20_000,
+            max_output_tokens: 4_000,
+            ..Model::anthropic_claude_opus_5_5()
+        };
+        let interceptor = DistillationInterceptor {
+            agent_name: "researcher".to_string(),
+            config: DistillationConfig::new("bulk", small)
+                .min_chars(10)
+                .target_agent("researcher")
+                .target_tool("read_file"),
+            client: Arc::new(client),
+            context: workflow.context().clone(),
+        };
+        let task = task_context(&workflow);
+        // About 16,700 tokens of input and 4,000 of output: over 20,000.
+        let large = "x".repeat(50_000);
+        let outcome = interceptor
+            .intercept("read_file", &large, &HashMap::new(), &task)
+            .await;
+        assert!(matches!(outcome, Ok(InterceptedResult::Unchanged)));
+        assert_eq!(server.requests(), 0);
+        assert_eq!(workflow.context().budget.total_spent(), 0.0);
+        let records = workflow.context().distillation_records.read().clone();
+        assert_eq!(records.len(), 1);
+        let rejection = records[0].rejection.as_deref().unwrap();
+        assert!(
+            rejection.starts_with("skipped: the input (about 16"),
+            "{rejection}"
+        );
+        assert!(
+            rejection.contains("input limit (20000 tokens)"),
+            "{rejection}"
+        );
+        // One that fits is distilled.
+        let outcome = interceptor
+            .intercept("read_file", &"y".repeat(20_000), &HashMap::new(), &task)
+            .await;
+        assert!(matches!(outcome, Ok(InterceptedResult::Replaced(_))));
+        assert_eq!(server.requests(), 1);
     }
 
     #[tokio::test]
@@ -813,6 +874,25 @@ fn response_text(response: &arko_ai::GenerationResponse) -> String {
         .join("\n")
 }
 
+/// Bytes per token for estimating a distillation request: the starting
+/// ratio of arko_agents' overflow guard, about right for code and English
+/// and on the side of more tokens.
+const DISTILLATION_BYTES_PER_TOKEN: f64 = 3.0;
+
+/// The estimated input tokens of a distillation request: its system
+/// message and messages, by bytes.
+fn distillation_input_tokens(conversation: &arko_ai::Conversation) -> usize {
+    let bytes = conversation.system_message.as_ref().map_or(0, String::len)
+        + conversation
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(arko_ai::Content::as_text)
+            .map(str::len)
+            .sum::<usize>();
+    (bytes as f64 / DISTILLATION_BYTES_PER_TOKEN).ceil() as usize
+}
+
 /// The distilled text when `response` is a complete summary, else why it
 /// can't stand in for the tool output: a refusal (whatever text accompanies
 /// it), a turn cut short by a token limit, a turn that ended any other way
@@ -880,6 +960,43 @@ impl ToolResultInterceptor for DistillationInterceptor {
             raw_result,
             chatgpt_oauth,
         );
+        // An output over the distiller model's own input limit can't be
+        // distilled: the request would fail. It is kept, unchanged and
+        // unbilled (the agent's overflow guard shortens it if the agent's
+        // own model can't take it either), and the skip is recorded.
+        if let Some(limit) = self.client.max_input_tokens(&self.config.model).await {
+            let input = distillation_input_tokens(&conversation);
+            let output = self
+                .config
+                .max_output_tokens
+                .unwrap_or_else(|| self.config.default_max_output_tokens());
+            if input.saturating_add(output) > limit {
+                let reason = format!(
+                    "skipped: the input (about {input} tokens) and output limit ({output} tokens) are over the distiller model's input limit ({limit} tokens)"
+                );
+                log::warn!(
+                    "Task {}: distiller '{}' {reason} for tool '{}'; keeping the tool output",
+                    task_context.task_id,
+                    self.config.name,
+                    tool_name
+                );
+                self.context
+                    .distillation_records
+                    .write()
+                    .push(DistillationRecord {
+                        timestamp: chrono::Utc::now(),
+                        task_id: task_context.task_id,
+                        agent_name: self.agent_name.clone(),
+                        tool_name: tool_name.to_string(),
+                        config_name: self.config.name.clone(),
+                        input_chars: raw_result.chars().count(),
+                        output_chars: 0,
+                        cost: 0.0,
+                        rejection: Some(reason),
+                    });
+                return Ok(InterceptedResult::Unchanged);
+            }
+        }
         let response = match self
             .client
             .generate_text(&conversation, generation_config)

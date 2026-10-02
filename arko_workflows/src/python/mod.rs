@@ -752,6 +752,12 @@ pub struct PyAgentResult {
     /// `"refusal"`; `None` otherwise.
     #[pyo3(get)]
     pub failure_cause: Option<String>,
+    /// The kind of the model-request error a `"Failed"` run failed on, when
+    /// it was classified: `"authentication"` (a lost login),
+    /// `"context_overflow"` (a request over the model's input limit),
+    /// `"billing"`, and so on; `None` otherwise.
+    #[pyo3(get)]
+    pub failure_kind: Option<String>,
     /// The full result, to continue or resume the run.
     inner: crate::AgentResult,
 }
@@ -769,6 +775,7 @@ impl From<crate::AgentResult> for PyAgentResult {
             failure_cause: result
                 .failure_cause()
                 .map(|cause| crate::policy::cause_name(cause).to_string()),
+            failure_kind: result.failure_kind().map(|kind| kind.as_str().to_string()),
             inner: result,
         }
     }

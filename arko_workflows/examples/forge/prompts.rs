@@ -58,6 +58,15 @@ when the use case needs them; say why in DESIGN.md. Settle these before writing 
   (`WorkflowDependency`, required or `optional()`, with an install hint), and check them at startup
   with `missing_dependencies()`: stop before any model call when a required one is missing, and
   warn about optional ones. List them in the README's requirements.
+- Large tool results: arko's overflow guard (on by default) shortens a turn's results only when
+  they would certainly overflow the model's input limit, with a notice that tells the agent how to get the
+  rest. Don't write your own read cap in a hook. Give agents that meet large files a terminal and
+  tell them to read in parts (`wc -l`, `grep -n`, `sed -n '100,200p'`); set
+  `ToolResultLimits::max_result_tokens` only for a role that needs a tighter budget.
+- Decide what a failed run means by its error kind (`AgentResult::failure_kind()`), never by
+  matching error text: `ErrorKind::Authentication` (a lost login) will fail every agent on that
+  credential, so an autonomous workflow stops, saves and asks for a new sign-in, while
+  `ContextOverflow` or `InvalidRequest` fails that run alone.
 - When the workflow has a policy that can refuse agents' calls (a command guard, a hook, path
   rules), tell each agent in its prompt how to treat a refusal: it is the policy working, not an
   obstacle. Never rephrase, split or encode a command to get past the check; do the work another

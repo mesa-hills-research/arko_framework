@@ -240,12 +240,17 @@ itself is recovered after it. Usage limits and provider errors don't stop the fo
 waited out and retried (a Claude Code session that fails, too: it is resumed after a wait).
 
 An agent whose model request needs a new credential or a configuration change (an expired or
-invalidated login, Claude Code not signed in or its login expired, a Claude Code CLI that can't
-start, a bad key) gets one fresh start per process:
+invalidated login, Claude Code not signed in or its login expired, a Claude Code account that
+can't be billed or isn't allowed to make the request, a Claude Code CLI that can't start, a bad
+key) gets one fresh start per process:
 the architect is started again, continuing from the crate; the architect may ask an explorer
 again; a deliberation agent's part starts again. If it fails the same way again, the forge saves
 and exits with status 3, naming the agent and its model. Sign in again (`claude` for Claude Code,
 `codex login` for ChatGPT) and resume with `forge --resume <state dir>`; the agent starts afresh.
+The forge tells these apart by the error's kind (`AgentResult::failure_kind`): a request too large
+for the model fails that agent's run only, as any other failure does. That is `ContextOverflow`
+once arko's overflow guard has shortened the largest new tool result and resent twice and the
+request is still too long, or `RequestTooLarge`, which isn't resent.
 
 With `--budget`, reaching the budget doesn't cancel anything: each agent pauses before its next
 model request (a tool call it is running finishes first), and once every agent is paused the

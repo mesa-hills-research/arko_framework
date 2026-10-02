@@ -1,5 +1,6 @@
 use super::command::{ToolApprovalDecision, UserCommand};
-use super::event::AgentEvent;
+use super::event::{AgentEvent, ShortenReason};
+use super::result_budget;
 use super::tool_run::{self, Interception, RunEnvironment, RunOutcome, ToolRun};
 use crate::agent_config::{
     LLMErrorPolicy, PathSafetyPolicy, PlanUsageAction, ToolCallingMode, ToolErrorPolicy,
@@ -264,6 +265,23 @@ impl NativeResults {
     }
 }
 
+/// A request as it was sent: what its reported usage is compared with to
+/// estimate the next request (see [`result_budget`]).
+#[derive(Debug, Clone, Copy)]
+struct RequestMark {
+    /// The conversation's message count.
+    messages: usize,
+    /// Its size in bytes ([`result_budget::request_bytes`]).
+    bytes: usize,
+    /// The conversation it belongs to ([`Task::conversation_usage_start`]).
+    conversation: usize,
+}
+
+/// How many times a request the provider found over the model's input
+/// limit is sent again after shortening a tool result; see
+/// [`AgentLoop::recover_from_overflow`].
+const MAX_OVERFLOW_RECOVERIES: u32 = 2;
+
 /// The current wait for a command, timed by the opt-in
 /// `AgentConfig::user_command_timeout_seconds`. Its deadline is set once,
 /// when the wait starts: context injected during the wait and commands the
@@ -472,6 +490,17 @@ pub struct AgentLoop {
     tool_context_cursor: usize,
     file_tree_baseline: Option<crate::file_tree::FileTreeSnapshot>,
     file_tree_error: Option<String>,
+    /// Bytes per token of this task's requests, calibrated from their
+    /// reported usage; see [`result_budget`].
+    bytes_per_token: f64,
+    /// The request in flight, or last sent.
+    sent_request: Option<RequestMark>,
+    /// The latest request that was answered: the task's latest reported
+    /// usage is its.
+    answered_request: Option<RequestMark>,
+    /// Requests sent again in this episode after shortening a tool result
+    /// the provider found over the model's input limit.
+    overflow_recoveries: u32,
 }
 
 impl AgentLoop {
@@ -561,6 +590,10 @@ impl AgentLoop {
             tool_context_cursor: 0,
             file_tree_baseline: None,
             file_tree_error: None,
+            bytes_per_token: result_budget::DEFAULT_BYTES_PER_TOKEN,
+            sent_request: None,
+            answered_request: None,
+            overflow_recoveries: 0,
         }
     }
 
@@ -627,7 +660,10 @@ impl AgentLoop {
             let Some((threshold, size)) = threshold.zip(context_size) else {
                 return Ok(());
             };
-            if size < threshold {
+            // The request about to be sent, not the one before it: what
+            // the turn added since (its tool results, above all) counts.
+            let coming = self.estimated_request_tokens().max(size);
+            if coming < threshold {
                 return Ok(());
             }
             // A conversation whose first request was already over the
@@ -982,10 +1018,15 @@ impl AgentLoop {
         tool_call_id: Uuid,
         tool_name: &str,
         tool: Arc<dyn Tool>,
-        params: HashMap<String, Value>,
+        mut params: HashMap<String, Value>,
         custom_output: Option<String>,
     ) -> ToolRun {
         let config = &self.task.agent_config;
+        crate::tool::builtins::read_file::ignore_line_ranges(
+            tool.as_ref(),
+            &config.tool_config,
+            &mut params,
+        );
         ToolRun {
             tool_call_id,
             tool_name: tool_name.to_string(),
@@ -1450,6 +1491,7 @@ impl AgentLoop {
             TaskState::Failed {
                 reason: reason_text,
                 cause: None,
+                error_kind: None,
             }
         };
         self.stop_at_tool_call(tool_call_id, tool_name, reason, state)
@@ -1505,6 +1547,7 @@ impl AgentLoop {
             .set_state(TaskState::AwaitingErrorRecoveryApproval {
                 error_message: reason.clone(),
                 cause: ErrorRecoveryCause::Middleware,
+                error_kind: None,
             });
         self.emit_event(AgentEvent::TaskStateChanged(
             self.task.current_state.clone(),
@@ -1514,6 +1557,7 @@ impl AgentLoop {
             error_message: reason,
             requires_approval_to_retry: true,
             tool_call_id: Some(tool_call_id),
+            error_kind: None,
         })
         .await
     }
@@ -1795,6 +1839,7 @@ impl AgentLoop {
                         error_message: reason,
                         requires_approval_to_retry: false,
                         tool_call_id: None,
+                        error_kind: None,
                     })
                     .await?;
                     self.stop_requested = true;
@@ -1895,7 +1940,7 @@ impl AgentLoop {
     /// message: the results, then `extra_text` (an answer or a note) and
     /// the environment details and reminder due with this user message, as
     /// text after the results in the same turn.
-    fn flush_native_results_to_conversation(
+    async fn flush_native_results_to_conversation(
         &mut self,
         extra_text: Option<&str>,
     ) -> Result<(), ArkoAgentsError> {
@@ -1905,11 +1950,390 @@ impl AgentLoop {
         {
             return Ok(());
         }
+        self.limit_tool_results().await?;
         let text = PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None)
             .text_beside_tool_results(&self.task, extra_text, self.task.user_message_count + 1)?;
         self.task.add_pending_tool_results(text.as_deref());
         self.mark_details_sent();
         Ok(())
+    }
+
+    /// The estimated input of the current conversation's next request, in
+    /// tokens: the latest answered request's reported input, plus the bytes
+    /// added since at the task's bytes-per-token ratio (see
+    /// [`result_budget`]). Without such a request in this run (a task run
+    /// again, or a fresh conversation), the whole request is estimated from
+    /// its bytes, and the latest reported request with its response is the
+    /// least it can be. What the handover check compares, and what the
+    /// overflow guard sizes shortened results by.
+    fn estimated_request_tokens(&self) -> usize {
+        self.request_estimate(false)
+    }
+
+    /// The fewest tokens the current conversation's next request can take:
+    /// as [`estimated_request_tokens`](Self::estimated_request_tokens), but
+    /// with every byte added since the latest answered request at
+    /// [`result_budget::LEAST_BYTES_PER_TOKEN`] and the reply at its bytes
+    /// alone. What the overflow guard decides by: it acts only when even
+    /// this is over the model's input limit.
+    fn least_request_tokens(&self) -> usize {
+        self.request_estimate(true)
+    }
+
+    fn request_estimate(&self, least: bool) -> usize {
+        let ratio = self.bytes_per_token;
+        let messages = &self.task.conversation.messages;
+        if let (Some(mark), Some(input)) = (
+            self.answered_request,
+            self.task.current_conversation_context_size(),
+        ) && mark.conversation == self.task.conversation_usage_start
+            && mark.messages <= messages.len()
+        {
+            let added = &messages[mark.messages..];
+            let bytes = |assistant: bool| {
+                added
+                    .iter()
+                    .filter(|message| (message.role == ai::Role::Assistant) == assistant)
+                    .map(result_budget::message_bytes)
+                    .sum::<usize>()
+            };
+            if least {
+                return input + result_budget::least_tokens(bytes(true) + bytes(false));
+            }
+            // The model's reply counts at least its reported output, which
+            // includes reasoning the next request may replay.
+            let output = self
+                .task
+                .usage_history
+                .last()
+                .map_or(0, |usage| usage.output_tokens);
+            let reply = output.max(result_budget::tokens(bytes(true), ratio));
+            return input + reply + result_budget::tokens(bytes(false), ratio);
+        }
+        let whole =
+            result_budget::request_bytes(&self.task.conversation, &self.build_generation_config());
+        let latest = self
+            .task
+            .usage_history
+            .get(self.task.conversation_usage_start..)
+            .and_then(<[ai::UsageInfo]>::last);
+        if least {
+            return result_budget::least_tokens(whole)
+                .max(latest.map_or(0, |usage| usage.input_tokens));
+        }
+        result_budget::tokens(whole, ratio)
+            .max(latest.map_or(0, |usage| usage.input_tokens + usage.output_tokens))
+    }
+
+    /// For a task that runs again with requests in its current
+    /// conversation: its latest request, as the conversation shows it (the
+    /// messages before the model's latest reply), with the task's ratio
+    /// calibrated from its reported input, so the next request is estimated
+    /// as in the run that made it. `None` without such a request.
+    fn saved_request_mark(&mut self) -> Option<RequestMark> {
+        let input = self.task.current_conversation_context_size()?;
+        let conversation = &self.task.conversation;
+        let reply = conversation
+            .messages
+            .iter()
+            .rposition(|message| message.role == ai::Role::Assistant)?;
+        let bytes = result_budget::request_bytes_of(
+            conversation,
+            &conversation.messages[..reply],
+            &self.build_generation_config(),
+        );
+        if let Some(ratio) = result_budget::calibrated_ratio(bytes, input) {
+            self.bytes_per_token = ratio;
+        }
+        Some(RequestMark {
+            messages: reply,
+            bytes,
+            conversation: self.task.conversation_usage_start,
+        })
+    }
+
+    /// The paths the calls of the conversation's latest model turn passed
+    /// to `read_file`, by call id: what a shortened result's notice names.
+    fn read_file_paths(&self) -> HashMap<String, String> {
+        self.task
+            .conversation
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == ai::Role::Assistant && !message.tool_calls.is_empty())
+            .into_iter()
+            .flat_map(|message| &message.tool_calls)
+            .filter(|call| call.name == crate::tool::builtins::READ_FILE_TOOL_NAME)
+            .filter_map(|call| {
+                let path = call.arguments.get("path")?.as_str()?;
+                Some((call.id.clone()?, path.to_string()))
+            })
+            .collect()
+    }
+
+    /// The overflow guard and the opt-in caps
+    /// ([`ToolResultLimits`](crate::agent_config::ToolResultLimits)) over
+    /// the turn's native results, as they go into the conversation: after
+    /// result interceptors and distillers, before the next request. A
+    /// result over its cap, or among the largest when the turn's results
+    /// would certainly put the next request over the model's input limit
+    /// (see [`result_budget::plan`]), is shortened to its head and tail
+    /// with a notice, and `ToolResultShortened` reports it; any other result
+    /// is left alone.
+    async fn limit_tool_results(&mut self) -> Result<(), ArkoAgentsError> {
+        if self.task.pending_native_tool_results.is_empty() {
+            return Ok(());
+        }
+        let tool_config = self.task.agent_config.tool_config.clone();
+        let caps: Vec<Option<usize>> = self
+            .task
+            .pending_native_tool_results
+            .iter()
+            .map(|result| tool_config.max_result_tokens(&result.name))
+            .collect();
+        let guard = tool_config.result_limits.overflow_guard;
+        if !guard && caps.iter().all(Option::is_none) {
+            return Ok(());
+        }
+        let ratio = self.bytes_per_token;
+        let limit = match guard {
+            true => {
+                self.llm_client
+                    .max_input_tokens(&self.task.conversation.model)
+                    .await
+            }
+            false => None,
+        };
+        let room = limit.map(|limit| {
+            let margin = tool_config
+                .result_limits
+                .margin_tokens
+                .unwrap_or_else(|| result_budget::default_margin(limit));
+            result_budget::Room {
+                available: limit
+                    .saturating_sub(margin)
+                    .saturating_sub(self.estimated_request_tokens()),
+                certain: limit.saturating_sub(self.least_request_tokens()),
+                least_share: ratio / result_budget::LEAST_BYTES_PER_TOKEN,
+                preview: result_budget::preview_tokens(limit),
+            }
+        });
+        let sizes: Vec<usize> = self
+            .task
+            .pending_native_tool_results
+            .iter()
+            .map(|result| result_budget::tokens(result.output.len(), ratio))
+            .collect();
+        let paths = self.read_file_paths();
+        let facts = |index: usize, reason: ShortenReason| {
+            let result = &self.task.pending_native_tool_results[index];
+            result_budget::NoticeFacts {
+                tool_name: &result.name,
+                path: result
+                    .call_id
+                    .as_ref()
+                    .and_then(|id| paths.get(id))
+                    .map(String::as_str),
+                reason,
+                tokens: sizes[index],
+                bytes: result.output.len(),
+                lines: result.output.lines().count(),
+                head_lines: 0,
+                tail_lines: 0,
+                cap: caps[index],
+                terminal: tool_config.offers_terminal(),
+                line_ranges: tool_config.read_file_line_ranges,
+            }
+        };
+        let notices: Vec<usize> = (0..sizes.len())
+            .map(|index| {
+                result_budget::notice_tokens(&facts(index, ShortenReason::Overflow), ratio)
+            })
+            .collect();
+        let cuts = result_budget::plan(&sizes, &notices, &caps, room);
+        if cuts.iter().all(Option::is_none) {
+            return Ok(());
+        }
+        let mut shortened = Vec::new();
+        for (index, cut) in cuts.into_iter().enumerate() {
+            let Some(cut) = cut else {
+                continue;
+            };
+            let result = &self.task.pending_native_tool_results[index];
+            let (text, kept) =
+                result_budget::shorten(&result.output, cut.keep, ratio, facts(index, cut.reason));
+            log::warn!(
+                "Task {}: the result of {} (about {} tokens) was shortened to about {kept} tokens ({:?}).",
+                self.task.id,
+                result.name,
+                sizes[index],
+                cut.reason
+            );
+            shortened.push((
+                index,
+                text,
+                AgentEvent::ToolResultShortened {
+                    call_id: result.call_id.clone(),
+                    tool_name: result.name.clone(),
+                    original_tokens: sizes[index],
+                    kept_tokens: kept,
+                    reason: cut.reason,
+                },
+            ));
+        }
+        for (index, text, event) in shortened {
+            self.task.pending_native_tool_results[index].output = text;
+            self.emit_event(event).await?;
+        }
+        Ok(())
+    }
+
+    /// A request the provider found over the model's input limit
+    /// ([`ai::ErrorKind::ContextOverflow`]): with the overflow guard on, in
+    /// native tool calling, the largest tool result added since the latest
+    /// answered request is shortened (to a preview, or one already that
+    /// small to its notice alone) and the request is sent again, at most
+    /// [`MAX_OVERFLOW_RECOVERIES`] times in a row. Returns whether it is
+    /// sent again; otherwise recovery goes on as for any error that
+    /// retrying can't fix, and the task stops with the error's kind. A
+    /// handover is no recovery: its report request would be over the limit
+    /// too.
+    async fn recover_from_overflow(&mut self, error: &ai::Error) -> Result<bool, ArkoAgentsError> {
+        if error.kind() != ai::ErrorKind::ContextOverflow
+            || !self
+                .task
+                .agent_config
+                .tool_config
+                .result_limits
+                .overflow_guard
+            || !self.is_native_mode()
+            || self.overflow_recoveries >= MAX_OVERFLOW_RECOVERIES
+        {
+            return Ok(false);
+        }
+        let messages = &self.task.conversation.messages;
+        // The results added since the latest answered request: one of them
+        // made this request too large.
+        let start = self
+            .answered_request
+            .filter(|mark| {
+                mark.conversation == self.task.conversation_usage_start
+                    && mark.messages <= messages.len()
+            })
+            .map(|mark| mark.messages)
+            .or_else(|| {
+                messages.iter().rposition(|message| {
+                    message
+                        .content
+                        .iter()
+                        .any(|content| content.as_tool_result().is_some())
+                })
+            })
+            .unwrap_or(messages.len());
+        let largest = messages
+            .iter()
+            .enumerate()
+            .skip(start)
+            .flat_map(|(message, content)| {
+                content
+                    .content
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(index, content)| {
+                        content
+                            .as_tool_result()
+                            .map(|result| (message, index, result.output.len()))
+                    })
+            })
+            .max_by_key(|(_, _, bytes)| *bytes);
+        let Some((message, index, _)) = largest else {
+            return Ok(false);
+        };
+        let ratio = self.bytes_per_token;
+        let preview = self
+            .llm_client
+            .max_input_tokens(&self.task.conversation.model)
+            .await
+            .map_or(
+                result_budget::preview_tokens(0),
+                result_budget::preview_tokens,
+            );
+        let paths = self.read_file_paths();
+        let tool_config = self.task.agent_config.tool_config.clone();
+        let ai::Content::ToolResult(result) =
+            &self.task.conversation.messages[message].content[index]
+        else {
+            return Ok(false);
+        };
+        // A notice the result already ends with is replaced, not kept.
+        let (output, shortened_before) = match result.output.rfind("\n\n[Shortened: ") {
+            Some(notice) => (result.output[..notice].to_string(), true),
+            None if result.output.starts_with("[Shortened: ") => (String::new(), true),
+            None => (result.output.clone(), false),
+        };
+        let tokens = result_budget::tokens(output.len(), ratio);
+        // Too small to be what made the request too large.
+        if tokens < result_budget::MIN_KEPT_TOKENS {
+            return Ok(false);
+        }
+        // A preview first; one shortened before (by the guard, a cap or the
+        // previous attempt) keeps its notice alone.
+        let keep = if tokens > preview && !shortened_before {
+            preview
+        } else {
+            0
+        };
+        let facts = result_budget::NoticeFacts {
+            tool_name: &result.name,
+            path: result
+                .call_id
+                .as_ref()
+                .and_then(|id| paths.get(id))
+                .map(String::as_str),
+            reason: ShortenReason::OverflowRecovery,
+            tokens,
+            bytes: output.len(),
+            lines: output.lines().count(),
+            head_lines: 0,
+            tail_lines: 0,
+            cap: None,
+            terminal: tool_config.offers_terminal(),
+            line_ranges: tool_config.read_file_line_ranges,
+        };
+        let (text, kept) = result_budget::shorten(&output, keep, ratio, facts);
+        let shortened = AgentEvent::ToolResultShortened {
+            call_id: result.call_id.clone(),
+            tool_name: result.name.clone(),
+            original_tokens: tokens,
+            kept_tokens: kept,
+            reason: ShortenReason::OverflowRecovery,
+        };
+        let tool_name = result.name.clone();
+        if let ai::Content::ToolResult(result) =
+            &mut self.task.conversation.messages[message].content[index]
+        {
+            result.output = text;
+        }
+        self.overflow_recoveries += 1;
+        // Sent again at once; not an ordinary recovery attempt.
+        self.indefinite_interactions = self.indefinite_interactions.saturating_add(1);
+        log::warn!(
+            "Task {}: the request was over the model's input limit; the result of {tool_name} was shortened and the request is sent again ({}/{MAX_OVERFLOW_RECOVERIES}).",
+            self.task.id,
+            self.overflow_recoveries
+        );
+        self.emit_event(AgentEvent::ErrorEncountered {
+            error_message: format!(
+                "The request was over the model's input limit; the result of {tool_name} was shortened and the request is sent again ({}/{MAX_OVERFLOW_RECOVERIES}): {error}",
+                self.overflow_recoveries
+            ),
+            requires_approval_to_retry: false,
+            tool_call_id: None,
+            error_kind: Some(ai::ErrorKind::ContextOverflow),
+        })
+        .await?;
+        self.emit_event(shortened).await?;
+        Ok(true)
     }
 
     /// Records that the conversation's last message carries this turn's
@@ -2095,6 +2519,7 @@ impl AgentLoop {
     /// Runs the agent loop to completion.
     pub async fn run(mut self) -> Result<Task, ArkoAgentsError> {
         self.task.agent_config.validate()?;
+        self.answered_request = self.saved_request_mark();
         if self.is_native_mode()
             && self
                 .task
@@ -2351,7 +2776,7 @@ impl AgentLoop {
                                         }
                                         self.end_tool_batch().await?;
                                         if self.native_results_are_due() {
-                                            self.flush_native_results_to_conversation(None)?;
+                                            self.flush_native_results_to_conversation(None).await?;
                                         }
                                         native_handled = true;
                                     } else {
@@ -2434,7 +2859,7 @@ impl AgentLoop {
                                         }
                                         self.end_tool_batch().await?;
                                         if self.native_results_are_due() {
-                                            self.flush_native_results_to_conversation(None)?;
+                                            self.flush_native_results_to_conversation(None).await?;
                                         }
                                         native_handled = true;
                                     } else {
@@ -2574,7 +2999,7 @@ impl AgentLoop {
                                         }
                                         self.end_tool_batch().await?;
                                         if self.native_results_are_due() {
-                                            self.flush_native_results_to_conversation(None)?;
+                                            self.flush_native_results_to_conversation(None).await?;
                                         }
                                         native_handled = true;
                                     } else {
@@ -2695,9 +3120,8 @@ impl AgentLoop {
                                     self.task.set_state(TaskState::InProgress);
 
                                     if self.is_native_mode() {
-                                        self.flush_native_results_to_conversation(Some(
-                                            &formatted,
-                                        ))?;
+                                        self.flush_native_results_to_conversation(Some(&formatted))
+                                            .await?;
                                         native_handled = true;
                                     } else {
                                         next_user_message_from_command = formatted;
@@ -2720,6 +3144,7 @@ impl AgentLoop {
                             TaskState::AwaitingErrorRecoveryApproval {
                                 ref error_message,
                                 ref cause,
+                                error_kind,
                             } => {
                                 match cmd {
                                     UserCommand::ContinueAfterError { ref note } => {
@@ -2749,7 +3174,7 @@ impl AgentLoop {
                                         } else if self.is_native_mode()
                                             && !self.task.pending_native_tool_results.is_empty()
                                         {
-                                            self.flush_native_results_to_conversation(note)?;
+                                            self.flush_native_results_to_conversation(note).await?;
                                             if note.is_some() {
                                                 // The note beside the results is the runtime's.
                                                 self.task.mark_last_message_runtime_text();
@@ -2841,7 +3266,8 @@ impl AgentLoop {
                                             {
                                                 self.flush_native_results_to_conversation(Some(
                                                     &recovery_prompt,
-                                                ))?;
+                                                ))
+                                                .await?;
                                                 // The note beside the results is the runtime's.
                                                 self.task.mark_last_message_runtime_text();
                                                 native_handled = true;
@@ -2881,6 +3307,7 @@ impl AgentLoop {
                                                     ),
                                                     requires_approval_to_retry: true,
                                                     tool_call_id: None,
+                                                    error_kind: None,
                                                 })
                                                 .await?;
                                                 continue 'main_loop;
@@ -2915,6 +3342,7 @@ impl AgentLoop {
                                         self.task.set_state(TaskState::Failed {
                                             reason,
                                             cause: Some(cause.clone()),
+                                            error_kind,
                                         });
                                     }
                                     UserCommand::CancelTask => {}
@@ -3057,6 +3485,7 @@ impl AgentLoop {
                             error_message: reason,
                             requires_approval_to_retry: false,
                             tool_call_id: None,
+                            error_kind: None,
                         })
                         .await?;
                         break 'main_loop;
@@ -3091,6 +3520,7 @@ impl AgentLoop {
                             error_message: reason,
                             requires_approval_to_retry: false,
                             tool_call_id: None,
+                            error_kind: None,
                         })
                         .await?;
                         break 'main_loop;
@@ -3147,6 +3577,13 @@ impl AgentLoop {
 
             let llm_client = Arc::clone(&self.llm_client);
             let (conversation, gen_config) = self.next_request();
+            // What this request's usage is compared with, to estimate the
+            // next one (not for the refusal fallback's model).
+            self.sent_request = (!self.current_request_is_fallback).then(|| RequestMark {
+                messages: conversation.messages.len(),
+                bytes: result_budget::request_bytes(&conversation, &gen_config),
+                conversation: self.task.conversation_usage_start,
+            });
             #[cfg(test)]
             let scripted_response = self.scripted_responses.get_mut().unwrap().pop_front();
             let request = async move {
@@ -3232,7 +3669,7 @@ impl AgentLoop {
                                 let reason = "Command channel disconnected during LLM streaming.".to_string();
                                 self.task.set_state(TaskState::Interrupted { reason: reason.clone() });
                                 self.emit_event(AgentEvent::TaskStateChanged(self.task.current_state.clone())).await?;
-                                self.emit_event(AgentEvent::ErrorEncountered { error_message: reason, requires_approval_to_retry: false, tool_call_id: None }).await?;
+                                self.emit_event(AgentEvent::ErrorEncountered { error_message: reason, requires_approval_to_retry: false, tool_call_id: None, error_kind: None }).await?;
                                 had_stream_error = true;
                                 break;
                             }
@@ -3277,6 +3714,15 @@ impl AgentLoop {
                                     self.prepare_fallback_response(&mut generation_response);
                                 }
                                 self.task.usage_history.push(generation_response.usage.clone());
+                                // The request was answered: its usage calibrates
+                                // the estimate of the next one.
+                                self.answered_request = self.sent_request.take();
+                                if let Some(ratio) = self.answered_request.and_then(|mark| {
+                                    result_budget::calibrated_ratio(mark.bytes, generation_response.usage.input_tokens)
+                                }) {
+                                    self.bytes_per_token = ratio;
+                                }
+                                self.overflow_recoveries = 0;
                                 self.emit_event(AgentEvent::UsageReported(generation_response.usage.clone())).await?;
                                 self.record_and_emit_model_call_usage(generation_response.model_call_usage.clone()).await?;
                                 if generation_response.stop_reason == ai::StopReason::MaxTokens {
@@ -3738,7 +4184,7 @@ impl AgentLoop {
                 // still awaiting approval are decided.
                 self.end_tool_batch().await?;
                 if self.native_results_are_due() {
-                    self.flush_native_results_to_conversation(None)?;
+                    self.flush_native_results_to_conversation(None).await?;
                 }
             } else {
                 let mut assistant_text_from_raw_events_for_pass1 = String::new();
@@ -4368,6 +4814,7 @@ impl AgentLoop {
             .set_state(TaskState::AwaitingErrorRecoveryApproval {
                 error_message: error_message.clone(),
                 cause,
+                error_kind: None,
             });
         self.emit_event(AgentEvent::TaskStateChanged(
             self.task.current_state.clone(),
@@ -4383,6 +4830,7 @@ impl AgentLoop {
             error_message,
             requires_approval_to_retry: true,
             tool_call_id,
+            error_kind: None,
         })
         .await
     }
@@ -4477,7 +4925,7 @@ impl AgentLoop {
         self.task.deferred_tool_errors.clear();
         if self.is_native_mode() {
             self.answer_open_native_calls(reason, held_reason).await?;
-            self.flush_native_results_to_conversation(None)?;
+            self.flush_native_results_to_conversation(None).await?;
             return Ok(());
         }
         let undecided = match &self.task.current_state {
@@ -4728,7 +5176,7 @@ impl AgentLoop {
                 .await?;
             self.end_tool_batch().await?;
             if self.native_results_are_due() {
-                self.flush_native_results_to_conversation(None)?;
+                self.flush_native_results_to_conversation(None).await?;
             }
             return Ok(());
         }
@@ -4992,6 +5440,7 @@ impl AgentLoop {
         message: String,
         tool_call_id: Option<Uuid>,
         cause: ErrorRecoveryCause,
+        error_kind: Option<ai::ErrorKind>,
     ) -> Result<(), ArkoAgentsError> {
         // A pending fallback stays pending: continuing sends its request
         // again, and resolving the refusal drops it.
@@ -5006,6 +5455,7 @@ impl AgentLoop {
                 .set_state(TaskState::AwaitingErrorRecoveryApproval {
                     error_message: message.clone(),
                     cause,
+                    error_kind,
                 });
         } else {
             // Exhaustion must return control to the host rather than starting
@@ -5023,6 +5473,7 @@ impl AgentLoop {
             error_message: message,
             requires_approval_to_retry: pause,
             tool_call_id,
+            error_kind,
         })
         .await
     }
@@ -5271,6 +5722,13 @@ impl AgentLoop {
         tool_call_id: Option<Uuid>,
         note: Option<String>,
     ) -> Result<(), ArkoAgentsError> {
+        // A request over the model's input limit is made smaller, not sent
+        // again unchanged.
+        if note.is_none() && self.recover_from_overflow(&error).await? {
+            return Ok(());
+        }
+        // Recorded with the pause or error that ends recovery.
+        let error_kind = Some(error.kind()).filter(|kind| *kind != ai::ErrorKind::Unknown);
         // A failed fallback request (the refusal fallback answering a refused
         // turn) is recovered from like any request, by its own error: a
         // transient failure is retried, to the fallback model, and a pause
@@ -5391,7 +5849,12 @@ impl AgentLoop {
         };
         if let Some((reason, cause)) = stop {
             return self
-                .finish_llm_recovery(format!("{reason}. {message}"), tool_call_id, cause)
+                .finish_llm_recovery(
+                    format!("{reason}. {message}"),
+                    tool_call_id,
+                    cause,
+                    error_kind,
+                )
                 .await;
         }
         // A rate limit's own delay is followed as given (plus jitter) rather
@@ -5421,6 +5884,7 @@ impl AgentLoop {
                     ErrorRecoveryCause::RetriesExhausted {
                         retry_after_ms: Some(duration_millis(delay)),
                     },
+                    error_kind,
                 )
                 .await;
         }
@@ -5432,6 +5896,7 @@ impl AgentLoop {
                     ErrorRecoveryCause::RetriesExhausted {
                         retry_after_ms: Some(duration_millis(delay)),
                     },
+                    error_kind,
                 )
                 .await;
         };
@@ -5441,6 +5906,7 @@ impl AgentLoop {
             error_message: message,
             requires_approval_to_retry: false,
             tool_call_id,
+            error_kind,
         })
         .await?;
         self.emit_event(AgentEvent::RetryScheduled {
@@ -5499,6 +5965,7 @@ impl AgentLoop {
                     format!("Usage limit reached ({when}). {error}"),
                     tool_call_id,
                     ErrorRecoveryCause::UsageLimit { resets_at_unix_ms },
+                    None,
                 )
                 .await;
         };
@@ -5519,6 +5986,7 @@ impl AgentLoop {
             ),
             requires_approval_to_retry: false,
             tool_call_id,
+            error_kind: None,
         })
         .await?;
         self.wait_before_retry(retry_at, tool_call_id).await
@@ -5541,7 +6009,7 @@ impl AgentLoop {
                 biased;
                 _ = wait_for_recovery_deadline(deadline) => {
                     let retry_after_ms = Some(duration_millis(retry_at.saturating_duration_since(tokio::time::Instant::now())));
-                    return self.finish_llm_recovery("Elapsed model recovery budget exhausted during backoff.".into(), tool_call_id, ErrorRecoveryCause::RetriesExhausted { retry_after_ms }).await;
+                    return self.finish_llm_recovery("Elapsed model recovery budget exhausted during backoff.".into(), tool_call_id, ErrorRecoveryCause::RetriesExhausted { retry_after_ms }, None).await;
                 }
                 command = self.command_receiver.recv() => {
                     if self.handle_recovery_command(command).await? { return Ok(()); }
@@ -5558,7 +6026,7 @@ impl AgentLoop {
     /// that approving it adds no error note to the conversation. A fallback
     /// still to be made survives the pause.
     async fn finish_monitor_pause(&mut self, message: String) -> Result<(), ArkoAgentsError> {
-        self.finish_llm_recovery(message, None, ErrorRecoveryCause::Monitor)
+        self.finish_llm_recovery(message, None, ErrorRecoveryCause::Monitor, None)
             .await?;
         self.task.monitor_pause = matches!(
             self.task.current_state,
@@ -5581,6 +6049,7 @@ impl AgentLoop {
             .set_state(TaskState::AwaitingErrorRecoveryApproval {
                 error_message: reason.clone(),
                 cause: ErrorRecoveryCause::BudgetExceeded,
+                error_kind: None,
             });
         self.task.monitor_pause = true;
         self.emit_event(AgentEvent::TaskStateChanged(
@@ -5591,6 +6060,7 @@ impl AgentLoop {
             error_message: reason,
             requires_approval_to_retry: true,
             tool_call_id: None,
+            error_kind: None,
         })
         .await
     }
@@ -5725,6 +6195,7 @@ impl AgentLoop {
                     error_message: error_message_for_event.clone(),
                     requires_approval_to_retry: false,
                     tool_call_id,
+                    error_kind: None,
                 })
                 .await?;
                 Ok(error_message_for_llm)
@@ -5745,6 +6216,7 @@ impl AgentLoop {
                     .set_state(TaskState::AwaitingErrorRecoveryApproval {
                         error_message: error_message_for_event.clone(),
                         cause: ErrorRecoveryCause::ToolError,
+                        error_kind: None,
                     });
                 self.emit_event(AgentEvent::TaskStateChanged(
                     self.task.current_state.clone(),
@@ -5754,6 +6226,7 @@ impl AgentLoop {
                     error_message: error_message_for_event.clone(),
                     requires_approval_to_retry: true,
                     tool_call_id,
+                    error_kind: None,
                 })
                 .await?;
                 Ok(error_message_for_llm)
@@ -5766,6 +6239,7 @@ impl AgentLoop {
                     self.task.set_state(TaskState::Failed {
                         reason: error_message_for_event.clone(),
                         cause: None,
+                        error_kind: None,
                     });
                     self.emit_event(AgentEvent::TaskStateChanged(
                         self.task.current_state.clone(),
@@ -5776,6 +6250,7 @@ impl AgentLoop {
                     error_message: error_message_for_event,
                     requires_approval_to_retry: false,
                     tool_call_id,
+                    error_kind: None,
                 })
                 .await?;
                 Ok(String::new())
@@ -6405,3 +6880,7 @@ mod handover_tests;
 #[cfg(test)]
 #[path = "snapshot_tests.rs"]
 mod snapshot_tests;
+
+#[cfg(test)]
+#[path = "result_limit_tests.rs"]
+mod result_limit_tests;

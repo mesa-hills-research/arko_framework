@@ -97,6 +97,27 @@ pub enum AgentEvent {
         error_message: String,
         requires_approval_to_retry: bool,
         tool_call_id: Option<Uuid>,
+        /// The kind of a failed model request, when it was classified
+        /// ([`arko_ai::Error::kind`]); `None` for other errors, unclassified
+        /// ones, and in events saved by an older version.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_kind: Option<arko_ai::ErrorKind>,
+    },
+    /// A tool result was shortened before it went into the conversation:
+    /// by the overflow guard, by an opt-in cap, or to recover from a
+    /// request the provider found over the model's input limit (see
+    /// [`ToolResultLimits`](crate::agent_config::ToolResultLimits)). The
+    /// `ToolResult` event before it has the whole output; the conversation
+    /// holds the head and tail kept and a notice.
+    ToolResultShortened {
+        /// The provider's id of the call the result answers.
+        call_id: Option<String>,
+        tool_name: String,
+        /// The result's estimated size, in tokens.
+        original_tokens: usize,
+        /// The estimated size of what was kept, in tokens.
+        kept_tokens: usize,
+        reason: ShortenReason,
     },
     /// The model or a filter around it refused the turn. Emitted before the
     /// refusal is handled as a non-retryable error (an `ErrorEncountered`
@@ -233,4 +254,20 @@ pub enum AgentEvent {
         /// How many handovers the task has made, this one included.
         handovers: usize,
     },
+}
+
+/// Why a tool result was shortened ([`AgentEvent::ToolResultShortened`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShortenReason {
+    /// The overflow guard: the turn's results would have put the next
+    /// request over the model's input limit.
+    Overflow,
+    /// The result was over its opt-in cap
+    /// ([`ToolResultLimits::max_result_tokens`](crate::agent_config::ToolResultLimits::max_result_tokens)
+    /// or the tool's own).
+    ResultCap,
+    /// The provider found the request over the model's input limit, and
+    /// the result was shortened so the request could be sent again.
+    OverflowRecovery,
 }

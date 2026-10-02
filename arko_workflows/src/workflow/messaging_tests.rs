@@ -863,16 +863,16 @@ async fn a_handover_restates_the_task_and_keeps_its_messages_read() {
             tool_call_turn(&format!("p{turns}"), "probe", json!({})).replace(
                 "\"input_tokens\":10",
                 if turns == 0 {
-                    "\"input_tokens\":5"
+                    "\"input_tokens\":5000"
                 } else {
-                    "\"input_tokens\":20"
+                    "\"input_tokens\":20000"
                 },
             )
         })
     })
     .await;
     let mut writer = agent("writer");
-    writer.handover = Some(arko_agents::HandoverConfig::at_input_tokens(10));
+    writer.handover = Some(arko_agents::HandoverConfig::at_input_tokens(10_000));
     let workflow = Arc::new(
         builder_with(server.client(), &workspace, &["lead"])
             .agent("writer", writer)
