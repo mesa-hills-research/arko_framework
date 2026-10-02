@@ -54,6 +54,16 @@ Start with the narrowest `MessagingPolicy` that supports the topology. One-way c
 
 Give long-running agents, such as a lead that coordinates workers for hours, a conversation handover (`AgentConfig::handover`) rather than a restart: the agent continues in the same run from its own report, so its identity, messages and budget carry over.
 
+### Operator notes
+
+Use a note (`Workflow::post_note`) when the person running the workflow, the host program, or an observer needs to steer agents that are already running: a correction ("the helper's bug is fixed; counts after 14:00 are real"), a workaround found meanwhile, a new priority. Running agents get it at their next turn boundary and later runs in their initial prompt, so it is the right tool when guidance must outlive the current run. A message is the agents' own channel, delivered to one run and done; memory is shared state agents read when they choose to; notes are pushed to every run of their audience, and standing notes stay in later prompts: a newer note takes precedence where they differ, but the older one stays visible, so state what changed. A note that is really a document belongs in a file or a memory tier, with a short note pointing to it.
+
+Notes are also the supported way to change instructions while a workflow runs or across a resume. Changing an agent's configuration (its instructions or tools, for example) makes a resume refuse the tasks it saved; a note changes what the agents do without touching the configuration. Keep notes few and specific: each one stays in every later prompt (the newest first, capped), and a newer note takes precedence where they differ, so state the change rather than repeating the whole plan. One-time notes (`Note::once`) suit something that matters now, such as "re-read section 3, it changed"; standing notes (the default) suit anything later runs must know.
+
+A note is delivered in the user role, labelled with its source, as a refinement of the task: agents are told it doesn't change their role's rules. It carries the authority of whoever can post it, so treat posting as part of the workflow's trust boundary. Agents have no tool to post notes, but with the opt-in control folder (`WorkflowBuilder::control_folder`), whoever can write `<run dir>/control/` can post as any source: keep the run directory, and any `note` command the binary offers, out of the agents' workspace and sandboxes. Label an observer agent's notes as its own (`NoteSource::Agent`), so the recipients weigh them as another agent's view rather than the operator's.
+
+Keep independent roles independent. A completion verifier gets a note only when the note names it, and judges the completion without the target's notes: when a note changes what counts as done ("skip the appendix"), address it to the verifier too, or it may keep rejecting completions that follow the note. Mark other roles that must not be steered, such as a checker or an independent replicator, with `notes_by_name_only`. Since an agent that receives a note can pass it on in a message, restrict whom such a role can hear from with the `MessagingPolicy`; the workflow logs a warning when a note can reach such an agent that way.
+
 ### Freshness
 
 When agents can read and write the same files, memory tiers, or other resources concurrently, enable context-freshness tracking. A freshness conflict means an agent is about to act on data that another actor changed after it read it. Decide whether the agent should reread, merge, retry, or stop for review.
@@ -98,7 +108,7 @@ Choose models and reasoning effort per role. The [model-choice guidance](agent-d
 
 ## Make side effects durable
 
-Use persistence when a workflow must survive process loss, operator interruption, or a long pause. Checkpoints retain the workflow identity, finalized agent results, memory, pending messages, cost ledger, verification and distillation records, freshness state, and task versions. Configure a run directory outside source control and decide how many checkpoints to retain.
+Use persistence when a workflow must survive process loss, operator interruption, or a long pause. Checkpoints retain the workflow identity, finalized agent results, memory, pending messages, operator notes, cost ledger, verification and distillation records, freshness state, and task versions. Configure a run directory outside source control and decide how many checkpoints to retain.
 
 Design resume behavior before enabling checkpoints. `resume_from` restores state and configuration from the new builder; it does not replay the original Rust or Python control flow and it does not automatically continue agents. The host must inspect restored results and explicitly run the next stage or continue a paused agent. A checkpoint can also record cancellation, so decide whether the host should keep a stopped run stopped before resuming it.
 
@@ -121,6 +131,7 @@ Build and validate the workflow before making provider calls. The complete workf
 - Parallel work has independent inputs or a defined merge rule.
 - Each memory tier has an owner, access policy, write mode, and size limit where needed.
 - Messages carry handoff information, while durable facts live in memory or files.
+- A run someone steers while it runs takes operator notes instead of configuration changes, and independent roles get only the notes that name them.
 - Shared resources have freshness tracking or an explicit conflict policy.
 - Each agent has only the tools and context required for its role. Roles that meet large files read them through the terminal; caps on tool results are set only where a role needs a tighter budget than the overflow guard gives.
 - Completion verification checks the artifact, not only the agent's summary.

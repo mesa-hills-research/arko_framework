@@ -599,6 +599,38 @@ impl Workflow {
         self.context.event_tx.subscribe()
     }
 
+    /// Posts a note to the agents: guidance that refines their task while
+    /// the workflow runs, without changing their configuration (so a resume
+    /// still accepts their saved tasks). A running agent of the audience gets
+    /// it at its next safe turn boundary, in its `# Workflow context
+    /// update`; a standing note (the default) is also in the initial prompt
+    /// of every later run of the audience, and in the fresh conversation
+    /// after a handover. See [`notes`](crate::notes).
+    ///
+    /// The text is trimmed; an empty one, one over
+    /// [`MAX_NOTE_BYTES`](crate::notes::MAX_NOTE_BYTES), or one no agent
+    /// receives returns `BuilderInvalid`, and an audience naming an
+    /// unregistered agent returns `AgentNotFound`. The note is logged once
+    /// (and recorded in the event log with persistence), and saved with
+    /// the next checkpoint: at once while agents run with the task journal.
+    pub fn post_note(
+        &self,
+        note: crate::notes::Note,
+    ) -> Result<crate::notes::PostedNote, WorkflowError> {
+        self.notes_handle().post(note)
+    }
+
+    /// Every note posted to this run, oldest first, including those restored
+    /// from the checkpoint and those read from the control folder.
+    pub fn notes(&self) -> Vec<crate::notes::PostedNote> {
+        self.context.notes.notes(&self.context)
+    }
+
+    /// A handle that posts notes from any task while the workflow runs.
+    pub fn notes_handle(&self) -> crate::notes::NotesHandle {
+        crate::notes::NotesHandle::new(&self.context)
+    }
+
     /// Record that workflow code or a custom tool observed a resource.
     pub fn register_resource_read(
         &self,
@@ -995,6 +1027,10 @@ pub struct WorkflowBuilder {
     voters: Option<HashSet<String>>,
     interception_failure_policy: Option<InterceptionFailurePolicy>,
     cancel_grace_period: std::time::Duration,
+    /// Agents that get a note only when it names them.
+    notes_by_name_only: std::collections::BTreeSet<String>,
+    /// Read notes from the run directory's control folder.
+    control_folder: bool,
 }
 
 impl WorkflowBuilder {
@@ -1035,6 +1071,8 @@ impl WorkflowBuilder {
             voters: None,
             interception_failure_policy: None,
             cancel_grace_period: DEFAULT_CANCEL_GRACE_PERIOD,
+            notes_by_name_only: std::collections::BTreeSet::new(),
+            control_folder: false,
         }
     }
 
@@ -1161,10 +1199,13 @@ impl WorkflowBuilder {
         self
     }
 
-    /// Explicitly disable run persistence and durable steps.
+    /// Explicitly disable run persistence and durable steps, and with them
+    /// the [control folder](Self::control_folder), which is in the run
+    /// directory.
     pub fn ephemeral(mut self) -> Self {
         self.persistence_config = None;
         self.resume_from = None;
+        self.control_folder = false;
         self
     }
 
@@ -1327,6 +1368,35 @@ impl WorkflowBuilder {
     /// for a host tool.
     pub fn disable_messaging(mut self) -> Self {
         self.messaging = None;
+        self
+    }
+
+    /// These agents (registration names) get a note ([`Workflow::post_note`])
+    /// only when its audience names them, as completion verifiers do: roles
+    /// that must stay independent of the operator's steering, such as a
+    /// checker. Adds to earlier calls. Default: none besides the verifiers.
+    pub fn notes_by_name_only<I, S>(mut self, agents: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.notes_by_name_only
+            .extend(agents.into_iter().map(Into::into));
+        self
+    }
+
+    /// Opt-in (default off): read notes from the run directory's control
+    /// folder, `<run dir>/control/`, which another process writes with
+    /// [`notes::control::post_note`](crate::notes::control::post_note) (a
+    /// binary's `note` subcommand, or the `runctl` example) while the
+    /// workflow runs or is stopped. `build` creates the folder. The
+    /// workflow reads it at its agents' turn boundaries and when it starts
+    /// an agent, and posts each note as [`Workflow::post_note`] does.
+    /// Requires [`persistence`](Self::persistence). Whoever can write the
+    /// folder can post notes: keep the run directory out of the agents'
+    /// reach.
+    pub fn control_folder(mut self) -> Self {
+        self.control_folder = true;
         self
     }
 
@@ -1606,6 +1676,21 @@ impl WorkflowBuilder {
                 )));
             }
         }
+        if let Some(unknown) = self
+            .notes_by_name_only
+            .iter()
+            .find(|agent| !agent_names.contains(*agent))
+        {
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "notes_by_name_only names unknown agent '{unknown}'"
+            )));
+        }
+        if self.control_folder && self.persistence_config.is_none() {
+            return Err(WorkflowError::BuilderInvalid(
+                "control_folder requires persistence: the control folder is in the run directory"
+                    .to_string(),
+            ));
+        }
         warn_unknown_tool_names(
             &name,
             &self.agents,
@@ -1790,6 +1875,14 @@ impl WorkflowBuilder {
             }
         }
         let durable_store = persistence.as_ref().map(PersistenceManager::durable_store);
+        let control_folder = match &persistence {
+            Some(persistence) if self.control_folder => {
+                let folder = crate::notes::control::folder(&persistence.config().checkpoint_dir);
+                std::fs::create_dir_all(&folder)?;
+                Some(folder)
+            }
+            _ => None,
+        };
 
         // The limits: the builder's, or the checkpoint's where it recorded
         // a higher one (see `resume_from`).
@@ -1938,6 +2031,12 @@ impl WorkflowBuilder {
                 }
                 None => AgentRegistry::default(),
             },
+            notes: crate::notes::NoteBoard::new(
+                resume_state.as_ref().and_then(|state| state.notes.clone()),
+                self.notes_by_name_only,
+                control_folder,
+                persistence.clone(),
+            ),
             user_input_handler: self.user_input_handler,
             approval_policy: self.approval_policy,
             error_recovery_policy: self.error_recovery_policy,

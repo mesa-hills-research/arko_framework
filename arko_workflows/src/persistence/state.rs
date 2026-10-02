@@ -61,6 +61,12 @@ pub struct WorkflowState {
     /// agents it may message. Absent in checkpoints from before it existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_registry: Option<crate::messaging::registry::RegistrySnapshot>,
+    /// The notes posted to the run's agents, what each agent run has been
+    /// given, and how much of the control folder has been read. Absent
+    /// while there is nothing to record, and in checkpoints from before
+    /// notes existed: a resume then starts with none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<crate::notes::NotesSnapshot>,
     /// The budget limits in force at the checkpoint, which may have been
     /// changed while the run was live
     /// ([`Workflow::set_budget`](crate::Workflow::set_budget)). Absent in
@@ -277,6 +283,7 @@ mod tests {
             completed_agents: Vec::new(),
             cancellation: None,
             agent_registry: None,
+            notes: None,
             budget_limits: None,
             plan_budget: None,
         };

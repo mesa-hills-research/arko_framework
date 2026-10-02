@@ -57,6 +57,8 @@ pub struct SharedContext {
     pub resume_notify: tokio::sync::Notify,
     /// Agent statuses: rosters, start notices, and `list_recipients`.
     pub(crate) registry: crate::messaging::registry::AgentRegistry,
+    /// The notes posted to the agents (`Workflow::post_note`).
+    pub(crate) notes: crate::notes::NoteBoard,
     /// Whether and why the run was stopped (cancelled or aborted by a hook).
     pub(crate) run_control: Arc<crate::workflow::cancel::RunControl>,
     pub user_input_handler: Option<Arc<dyn crate::user_input::UserInputHandler>>,

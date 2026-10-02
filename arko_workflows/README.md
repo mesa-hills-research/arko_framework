@@ -552,6 +552,54 @@ or shared automatically:
 ]
 ```
 
+## Operator notes
+
+A note steers the agents while the workflow runs: a correction, a workaround found
+meanwhile, a change of priority. Running agents get it at their next turn boundary,
+in a context update labelled with its source, and every later run of its audience
+gets it in its initial prompt (newest first, capped). Agents are told that a note
+refines their task and doesn't change their role's rules. A note never touches an
+agent's `AgentConfig`, so a resume still accepts the agents' saved tasks: notes are
+the supported way to change instructions in a running or resumed workflow.
+
+```rust
+use arko_workflows::notes::{Note, NoteSource};
+
+// To every agent, standing: also shown to every later run.
+workflow.post_note(Note::new("The helper's RNG bug is fixed; counts after 14:00 are real."))?;
+// To two agents, once: only the runs that have started get it.
+workflow.post_note(Note::new("Re-read the spec; section 3 changed.").to(["searcher", "lead"]).once())?;
+// From an observer agent instead of the operator.
+workflow.post_note(Note::new("The last three runs repeated the same search.")
+    .source(NoteSource::Agent("observer".into())))?;
+
+// From another task while agents run.
+let notes = workflow.notes_handle();
+tokio::spawn(async move { notes.post(Note::new("Wrap up by 18:00.")) });
+```
+
+Completion verifiers get a note only when it names them, and so do the agents set with
+`WorkflowBuilder::notes_by_name_only([...])`: keep independent roles, such as a checker,
+independent of your steering (and restrict whom they can hear from, since an agent can
+pass a note on in a message). A verifier judges without the target's notes, so address a
+note to it too when the note changes what counts as done. Notes are saved in checkpoints, logged once, and carried
+into the fresh conversation after a handover.
+
+To post from another process (a `note` subcommand of your binary, a bot, an
+observer), turn on the control folder with `WorkflowBuilder::control_folder()`; it needs
+persistence. Another process appends notes to `<run dir>/control/notes.jsonl` with
+`arko_workflows::notes::control::post_note`, under the folder's own lock, whether the run
+is live or stopped, and the workflow picks them up at its agents' next turn boundaries.
+The `runctl` example does it for any workflow:
+
+```bash
+cargo run -p arko_workflows --example runctl -- note /path/to/run "Skip d = 4; it is settled." --to searcher
+cargo run -p arko_workflows --example runctl -- status /path/to/run
+```
+
+Whoever can write the control folder can post notes, so keep the run directory out of
+the agents' reach. See [Operator notes](INDEX.md#operator-notes).
+
 ## Human input
 
 Register a `UserInputHandler` to route an agent's `ask_user` questions to an
@@ -749,8 +797,8 @@ A run directory holds the checkpoints, the agent runs' task versions
 log (`events.jsonl`), and the durable-step journal. A checkpoint contains the workflow
 and run identity, metadata, memory, pending messages, the cost ledger, freshness
 versions, each agent result with a reference to the version of its task the
-checkpoint saw, verification and distillation records, and, once the run is stopped,
-its cancellation. A task version is written only when the task changed, so
+checkpoint saw, verification and distillation records, the operator notes, and, once
+the run is stopped, its cancellation. A task version is written only when the task changed, so
 checkpoints that saw the same task share its file, and an older checkpoint still
 resumes a task that has since run on as it was then. Checkpoints and task versions
 are pretty-printed JSON. Every file except the append-only logs and the run identity is written to a

@@ -713,6 +713,7 @@ impl PersistenceManager {
             agent_limits: ctx.budget.agent_limits().into_iter().collect(),
         };
         let plan_budget = ctx.budget.plan_state();
+        let notes = ctx.notes.snapshot();
         let shared = fingerprint(&(
             &memory_snapshot,
             &message_queues,
@@ -723,6 +724,7 @@ impl PersistenceManager {
             &agent_registry,
             &budget_limits,
             &plan_budget,
+            &notes,
         ));
 
         let mut agent_runs = Vec::new();
@@ -870,6 +872,7 @@ impl PersistenceManager {
             completed_agents,
             cancellation,
             agent_registry: Some(agent_registry),
+            notes,
             budget_limits: Some(budget_limits),
             // Recorded once the run has a plan budget or has seen plan usage.
             plan_budget: (plan_budget != Default::default()).then_some(plan_budget),
@@ -1063,6 +1066,28 @@ impl PersistenceManager {
     /// Writes the buffered events now.
     pub async fn flush_events(&self) {
         self.events.flush().await;
+    }
+
+    /// Records a posted note in the event log, whatever
+    /// [`PersistenceConfig::event_log`] selects: a line with the current UTC
+    /// time, the workflow run UUID, and `note`, the [`PostedNote`](crate::notes::PostedNote).
+    /// Written at once when a Tokio runtime is running, otherwise with the
+    /// next write.
+    pub(crate) fn append_note(&self, note: &crate::notes::PostedNote) {
+        #[derive(serde::Serialize)]
+        struct PostedNoteRecord<'a> {
+            timestamp: chrono::DateTime<chrono::Utc>,
+            workflow_run_id: uuid::Uuid,
+            note: &'a crate::notes::PostedNote,
+        }
+        self.events.append_record(
+            &PostedNoteRecord {
+                timestamp: chrono::Utc::now(),
+                workflow_run_id: self.events.workflow_run_id,
+                note,
+            },
+            "a posted note",
+        );
     }
 
     /// Saves `task` as a version in the run directory, unless that version
@@ -1919,6 +1944,31 @@ impl EventWriter {
             self.flush().await;
         } else {
             self.schedule();
+        }
+    }
+
+    /// Appends `record`, a line that isn't an agent event (`what` names it
+    /// in a warning), to be written at once when a Tokio runtime is running
+    /// and otherwise with the next write.
+    fn append_record(self: &Arc<Self>, record: &impl serde::Serialize, what: &str) {
+        let mut line = match serde_json::to_vec(record) {
+            Ok(line) => line,
+            Err(error) => {
+                log::warn!("Could not serialize {what} for the event log: {error}");
+                return;
+            }
+        };
+        line.push(b'\n');
+        {
+            let mut pending = self.pending.lock();
+            pending.bytes.extend_from_slice(&line);
+            if pending.bytes.len() > MAX_BUFFERED_EVENT_BYTES {
+                drop_oldest_lines(&mut pending);
+            }
+        }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let writer = self.clone();
+            runtime.spawn(async move { writer.flush().await });
         }
     }
 

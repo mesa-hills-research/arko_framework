@@ -1336,9 +1336,9 @@ pub(crate) fn without_roster(prompt: &str) -> &str {
 const MESSAGES_HEADING: &str = "\n\n# Messages from other agents:\n";
 
 /// The task part of an initial prompt: `prompt` without the messages it
-/// delivered and the list of agents it may message.
+/// delivered, its notes, and the list of agents it may message.
 pub(crate) fn task_part(prompt: &str) -> &str {
-    let prompt = without_roster(prompt);
+    let prompt = crate::notes::without_notes(without_roster(prompt));
     match prompt.rfind(MESSAGES_HEADING) {
         Some(start) if prompt[start..].contains("\n--- Message ") => &prompt[..start],
         _ => prompt,
@@ -1351,8 +1351,9 @@ pub(crate) fn task_part(prompt: &str) -> &str {
 /// its conversation still held them), the freshness tracker forgets the
 /// run's reads (the fresh conversation holds none of their content), and
 /// the fresh conversation restates the task without the delivered messages
-/// (the report covers them) and with the current list of agents it may
-/// message, when its prompt had one.
+/// (the report covers them), with the current standing notes for the agent
+/// (and the one-time notes it wasn't given yet), and with the current list
+/// of agents it may message, when its prompt had one.
 pub(crate) struct WorkflowHandover {
     pub context: Arc<SharedContext>,
     pub agent_name: String,
@@ -1373,18 +1374,20 @@ impl HandoverHook for WorkflowHandover {
             tracker.clear_actor(&ActorId::new(task.id, &self.agent_name));
         }
         let prompt = &task.initial_task_prompt;
+        let mut context = ctx.notes.handover_section(ctx, &self.agent_name, task.id);
         let recipients = ctx.message_recipients(&self.agent_name);
-        let context = (prompt.contains(ROSTER_HEADING) && !recipients.is_empty()).then(|| {
+        if prompt.contains(ROSTER_HEADING) && !recipients.is_empty() {
             let roster = ctx.registry.roster(
                 task.id,
                 &recipients,
                 ctx.paused.load(std::sync::atomic::Ordering::Acquire),
             );
-            format!("{}{}", ROSTER_HEADING, render_recipients(ctx, &roster))
-        });
+            context.push_str(ROSTER_HEADING);
+            context.push_str(&render_recipients(ctx, &roster));
+        }
         HandoverSeed {
             task_prompt: task_part(prompt).to_string(),
-            context,
+            context: (!context.is_empty()).then_some(context),
         }
     }
 }
@@ -2479,7 +2482,8 @@ impl WorkflowEngine {
             None => ctx.registry.start(&[(task.id, agent_name)]),
         }
         let (messages, pending_message_ids) = self.pending_messages(agent_name, task.id, ctx);
-        let mut initial_prompt = format!("{prompt}{messages}");
+        let notes = ctx.notes.initial_section(ctx, agent_name, task.id);
+        let mut initial_prompt = format!("{prompt}{messages}{notes}");
         let recipients = ctx.message_recipients(agent_name);
         if !recipients.is_empty() {
             // The roster's statuses and the version the run has seen come
@@ -2534,7 +2538,11 @@ impl WorkflowEngine {
         let started_task = task.clone();
         let host_decisions = HostDecisions::new(driven);
         let mut runtime = AgentRuntime::new(self.llm_client.clone())
-            .with_turn_context(Arc::new(ActivityNotices {
+            .with_turn_context(Arc::new(crate::notes::WithNotes {
+                inner: ActivityNotices {
+                    context: ctx.clone(),
+                    agent_name: agent_name.to_string(),
+                },
                 context: ctx.clone(),
                 agent_name: agent_name.to_string(),
             }))
@@ -3385,6 +3393,8 @@ impl WorkflowEngine {
             &task.pending_context_injections,
             false,
         );
+        // The notes it was given after its task was saved, given again.
+        ctx.notes.recovered(ctx, agent_name, &task);
         // Its caller's message goes with the task, as context taken and not
         // yet added: it is added at the first turn boundary, after the
         // results of the calls it was running (and is saved with the task
@@ -3740,7 +3750,7 @@ impl WorkflowExecutionMiddleware {
                 let prompt = format!(
                     "You are a completion verifier for agent '{}'.\n\nOriginal task:\n{}\n\nCandidate completion summary:\n{}\n\nVerification instructions:\n{}\n\n{pass} Batch independent read-only tool calls when useful, but call non-batch-safe tools alone. Finish by calling complete_task using this exact contract:\n\n{}",
                     self.agent_name,
-                    without_roster(execution.initial_task_prompt),
+                    crate::notes::without_notes(without_roster(execution.initial_task_prompt)),
                     summary,
                     verifier.instructions,
                     crate::verification::VERIFIER_OUTPUT_CONTRACT,

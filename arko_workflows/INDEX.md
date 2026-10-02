@@ -13,6 +13,7 @@ Signatures are declarations with their receivers, not complete implementations. 
 - [Shared context](#shared-context)
 - [Memory](#memory)
 - [Messaging](#messaging)
+- [Operator notes](#operator-notes)
 - [Context freshness](#context-freshness)
 - [Completion verification](#completion-verification)
 - [Tool-result distillation](#tool-result-distillation)
@@ -44,6 +45,7 @@ Root re-exports: `Workflow`, `WorkflowBuilder`, `AgentHandle`, `WorkflowError`, 
 | `hooks` | `HookCallback`, `HookPoint`, `HookResult` |
 | `memory` | `AccessScope`, `MemoryConfig`, `MemoryEntry`, `MemoryTier`, `MemoryWrite`, `WriteMode` |
 | `messaging`, `messaging::registry`, `messaging::wait` | `AgentMessage`, `MessageAttachment`, `MessagingPolicy`, `AgentStatus`, `WaitReason`, `WaitForMessageTimeout` |
+| `notes` | `Note`, `NoteAudience`, `NoteKind`, `NoteSource`, `NotesHandle`, `PostedNote` |
 | `persistence` | `EventLog`, `PersistenceConfig` |
 | `policy` | `AgentPause`, `AgentResume`, `ApprovalPolicy`, `ErrorRecoveryPolicy`, `ToolApprovalHandler`, `ToolApprovalOutcome`, `ToolApprovalRequest` |
 | `services` | `WorkflowServices`, `WorkflowServicesConfig` |
@@ -51,7 +53,7 @@ Root re-exports: `Workflow`, `WorkflowBuilder`, `AgentHandle`, `WorkflowError`, 
 | `verification` | `CompletionVerifierConfig`, `RepairContextConfig`, `VERIFIER_OUTPUT_CONTRACT`, `VerificationDecision`, `VerificationKind`, `VerificationRecord` |
 | `voting` | `BallotConfig`, `BallotResult`, `CastVote`, `TieBreak`, `VoteOption` |
 
-Other public modules: `context`, `hooks::context`, `memory::tools`, `messaging::tools`, `messaging::wait`, `persistence::state`, and `python` (with the `python` feature). `workflow::engine` is public but exports no items; execution goes through `Workflow` and `AgentHandle`.
+Other public modules: `context`, `hooks::context`, `memory::tools`, `messaging::tools`, `messaging::wait`, `notes::control`, `persistence::state`, and `python` (with the `python` feature). `workflow::engine` is public but exports no items; execution goes through `Workflow` and `AgentHandle`.
 
 | Need | Entry point |
 | --- | --- |
@@ -61,6 +63,7 @@ Other public modules: `context`, `hooks::context`, `memory::tools`, `messaging::
 | Stop a run from any task, or from a hook | `cancel_handle` / `WorkflowCancelHandle`, `HookResult::Abort` |
 | Share structured text and deliver messages | `MemoryConfig`, `MemoryStore`, `MessagingPolicy`, `MessageBus` |
 | See which agents are running, waiting, or finished | `agent_status`, `AgentStatus` |
+| Steer running agents without changing their configuration | `post_note`, `notes_handle`, `control_folder` ([Operator notes](#operator-notes)) |
 | Track stale files, directories, memory, or custom resources | `ContextFreshnessConfig`, `ResourceTracker` |
 | Gate completion and retain repair context | `CompletionVerifierConfig` |
 | Condense selected tool outputs | `DistillationConfig`, custom tool result interceptors |
@@ -112,6 +115,8 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 | `workflow_services(self, config: WorkflowServicesConfig) -> Self` | Enable bounded agent-to-agent delegation through the `run_workflow_agent` tool. |
 | `messaging(self, policy: MessagingPolicy) -> Self` | Set whom each agent may message with `send_message`. Default `MessagingPolicy::all()`: every agent may message every other agent. See [Messaging policy](#messaging-policy). |
 | `disable_messaging(self) -> Self` | Offer no agent `send_message`, `list_recipients`, or `wait_for_message`. |
+| `notes_by_name_only<I, S>(self, agents: I) -> Self` (`I: IntoIterator<Item = S>`, `S: Into<String>`) | Agents (registration names) that get a note only when its audience names them, as completion verifiers do: roles that must stay independent. Adds to earlier calls. Default: none besides the verifiers. See [Operator notes](#operator-notes). |
+| `control_folder(self) -> Self` | Opt-in, default off: read notes that another process writes to `<run dir>/control/` (see [The control folder](#the-control-folder)). `build` creates the folder. Requires `persistence`; `ephemeral` clears it. |
 | `wait_for_message_timeout(self, timeout: impl Into<WaitForMessageTimeout>) -> Self` | How long `wait_for_message` waits at most, for agents without their own setting. Default `WaitForMessageTimeout::Auto`, just inside each agent's prompt-cache lifetime (4 min 30 s, or 54 min with Anthropic's 1-hour TTL); a `std::time::Duration` converts to a fixed limit, more than zero and at most 24 hours. See [Waiting for a message](#waiting-for-a-message). |
 | `agent_wait_for_message_timeout(self, agent: impl Into<String>, timeout: impl Into<WaitForMessageTimeout>) -> Self` | The same for one agent, in place of the workflow's setting. |
 | `user_input_handler(self, handler: Arc<dyn UserInputHandler>) -> Self` | Answer agents' `ask_user` questions asynchronously. Without a handler, the run suspends and returns `UserInputRequired`. |
@@ -133,6 +138,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 - a negative or non-finite workflow budget, warning threshold, or agent budget;
 - an unknown agent name in `agent_tool`, `agent_tool_result_interceptor`, `agent_budget`, a completion verifier's verifier or targets, a distiller's targets (`distiller '<name>' targets unknown agent '<target>'`), the messaging policy (`messaging policy references unknown agent '<name>'`), `agent_wait_for_message_timeout` (`wait_for_message timeout references unknown agent '<name>'`), a memory tier's `AccessScope::Only` readers or writers (`memory tier '<tier>' readers name unknown agent '<name>'`), workflow services callers or targets (`workflow services caller '<name>' is not a registered agent`), or the voters (`voting names unknown agent '<name>'`);
 - a completion verifier without a target (`completion verifier '<name>' has no target`), or a distiller without a target agent or a target tool;
+- an unknown agent in `notes_by_name_only` (`notes_by_name_only names unknown agent '<name>'`), or `control_folder` without `persistence` (`control_folder requires persistence: ...`);
 - two memory tiers with the same name;
 - a fixed `wait_for_message` limit of zero or more than 24 hours, for the workflow or an agent;
 - `max_parallel_agents(0)`;
@@ -327,6 +333,7 @@ Dropping a handle without calling `wait` or `into_parts` aborts the agent's runt
 | `async budget_blocked(&self)` | Waits until `is_budget_blocked` holds (never, while agents make progress). A host that can't raise the budget live stops there (see [Budget holds](#budget-holds)). |
 | `add_manual_cost(&self, amount: f64, description: &str, metadata: Option<String>) -> Result<AddCostResult, WorkflowError>` | Record a finite, nonnegative dollar cost with a description and optional free-form metadata. Fires `OnBudgetWarning` and `OnBudgetExceeded` as applicable; a hook `Abort` stops the run and returns the stop's error. Returns `BudgetExceeded` when spending exceeds the limit; the cost stays recorded. An invalid amount returns `InvalidCost` and records nothing. |
 | `subscribe_events(&self) -> tokio::sync::broadcast::Receiver<WorkflowEvent>` | Receive events that managed drivers emit after subscription; there is no replay. The buffer holds 1,024 events; slow receivers can lag. |
+| `post_note(&self, note: Note) -> Result<PostedNote, WorkflowError>`, `notes(&self) -> Vec<PostedNote>`, `notes_handle(&self) -> NotesHandle` | Post a note to the agents while the workflow runs, list the notes posted, or get a handle that posts from any task. See [Operator notes](#operator-notes). |
 | `async checkpoint(&self) -> Result<(), WorkflowError>` | Save a checkpoint. Succeeds without writing when persistence is not configured. |
 | `async finish(&self) -> Result<WorkflowResult, WorkflowError>` | Fire `PostWorkflow`, save a checkpoint, and return the result snapshot. Does not wait for outstanding agents or prevent later runs; each call repeats the hook and checkpoint. On a stopped run, saves a checkpoint without firing `PostWorkflow` and returns the stop's error. |
 | `pause(&self) -> Result<(), WorkflowError>` | Set the pause flag, firing `OnWorkflowPause` only when the flag changes. Managed drivers stop before processing their next event; model and tool work already in progress continues. A pause does not delay stopping the run. |
@@ -907,6 +914,84 @@ By default (`Auto`) a wait lasts up to about 4.5 minutes. Each wake-up is a chea
 
 A longer wait can be set with `Fixed(duration)`, for the workflow or one agent (more than zero, at most 24 hours; it counts from the start of the wait). Provider caches often last longer than 5 minutes (OpenAI documents about 30, and a test over ChatGPT OAuth still hit after 40), but that isn't guaranteed, and a miss re-reads the whole context at full price. The model's `timeout_seconds` shortens a wait, never lengthens it.
 
+## Operator notes
+
+Module: `arko_workflows::notes`. Sources: [notes](src/notes/mod.rs), [control folder](src/notes/control.rs), [delivery](src/workflow/engine.rs).
+
+A note is guidance the host gives the agents while the workflow runs: a correction, a workaround found meanwhile, a change of priority. It reaches running agents at their next turn boundary and later runs in their initial prompt, and it never touches an agent's `AgentConfig`, so a resume still accepts the agents' saved tasks: notes are the supported way to change instructions in a running or resumed workflow (a changed `AgentConfig`, such as new instructions, makes `resume_from` refuse the tasks saved with the old one). Notes are posted only through this API and the opt-in [control folder](#the-control-folder): agents have no tool to post them.
+
+```rust
+// Workflow
+fn post_note(&self, note: Note) -> Result<PostedNote, WorkflowError>;
+fn notes(&self) -> Vec<PostedNote>; // every note, oldest first
+fn notes_handle(&self) -> NotesHandle;
+
+// NotesHandle: Clone, Debug, Send, Sync
+fn post(&self, note: Note) -> Result<PostedNote, WorkflowError>;
+fn notes(&self) -> Vec<PostedNote>;
+
+// Note: a standing note from the operator to every agent, then setters.
+fn new(text: impl Into<String>) -> Self;
+fn to<I, S>(self, agents: I) -> Self;     // NoteAudience::Only
+fn except<I, S>(self, agents: I) -> Self; // NoteAudience::Except
+fn once(self) -> Self;                     // NoteKind::Once
+fn source(self, source: NoteSource) -> Self;
+
+// notes
+pub const MAX_NOTE_BYTES: usize;   // 16 KiB
+pub const PROMPT_MAX_NOTES: usize; // 20, per prompt or context update
+pub const PROMPT_MAX_BYTES: usize; // 16 KiB, likewise
+```
+
+| Public type | Fields or variants |
+| --- | --- |
+| `Note` | `text: String`, `audience: NoteAudience`, `kind: NoteKind`, `source: NoteSource`. In JSON only `text` is required; the others default. |
+| `NoteAudience` | `All` (default): every agent. `Only(BTreeSet<String>)`: the agents named. `Except(BTreeSet<String>)`: every agent but those. Snake case in JSON: `"all"`, `{"only": ["a"]}`, `{"except": ["b"]}`. |
+| `NoteKind` | `Standing` (default): delivered to the running runs of its audience and shown in the initial prompt of every later run. `Once`: delivered once to each run of its audience that has started when it is posted. `"standing"`, `"once"`. |
+| `NoteSource` | Who wrote it, as the agents are told: `Operator` (default; "the operator (the person running this workflow)"), `Host` ("the workflow (the program running the agents)"), or `Agent(String)` ("agent `name`"), for example an observer reviewing the run; the name need not be a registered agent's. `"operator"`, `"host"`, `{"agent": "observer"}`. |
+| `PostedNote` | `id: Uuid` (new, or the control folder entry's), `seq: u64` (the note's number in the run, from 1, in posting order), `posted_at: chrono::DateTime<chrono::Utc>` (when posted, or written to the control folder), `note: Note`. |
+| `NotesHandle` | From `notes_handle`; clones post to the same run from any task or thread. It holds a weak reference: once the workflow is dropped, `post` returns `BuilderInvalid` and `notes` returns none. |
+
+All implement `Debug` and `Clone`; all but `NotesHandle` implement `PartialEq`, `Eq`, and Serde, and `Note`, `NoteAudience`, `NoteKind`, and `NoteSource` implement `Default`.
+
+**Posting.** `post_note` trims the text, makes every line break in it (CR LF, a lone CR, NEL, U+2028, U+2029) a LF, and checks the note. It returns `BuilderInvalid` for an empty text, one over `MAX_NOTE_BYTES` (a document belongs in a file or a memory tier), an `Only` naming no agent, an `Agent` source whose name is blank or holds a line break or a control character, or a note no agent receives, and `AgentNotFound` for an audience naming an unregistered agent. A posted note is logged once: a `log::info!` line naming its number, source, recipients and first line, and, with persistence, a line in the event log, `{"timestamp", "workflow_run_id", "note": <PostedNote>}` (written at once inside a Tokio runtime, otherwise with the next write to the event log; unlike agent events it has no `agent_name` or `event`; a note restored on resume is not logged again). It is saved with the next checkpoint; while agents run under the task journal, the live checkpoint is written at once, as for a budget change. A stopped run takes notes too, for a resume.
+
+**Audience.** Names are registration names, as in [`MessagingPolicy`](#messaging-policy). Completion verifiers, and the agents set with `WorkflowBuilder::notes_by_name_only`, get a note only when its `Only` names them: under `All` and `Except` they get nothing, so independent roles stay independent of the operator's steering. An agent never gets a note whose source is that agent. Because an agent that gets a note can pass its content on in a message, posting a note that leaves out such an independent agent while one of its recipients may message it (under the messaging policy) logs a warning, once per agent; restrict whom an independent agent hears from when that matters. For a completion verifier that isn't set with `notes_by_name_only`, it is a debug line unless messages are kept for finished agents (`keep_messages_for_finished`): a verifier runs only while it reviews, and a message to it is refused at other times. Since a verifier judges the completion without the target's notes, address a note to the verifier too (`Note::to([.., verifier])`) when it changes what counts as done, or the verifier may keep rejecting completions the note asked for.
+
+**Delivery.** What a run has been given is tracked per run, so it gets each note once:
+
+- A running run gets every note it receives that it hasn't been given, standing or one-time, at its next safe turn boundary (the same one as messages and start and finish notices, after those notices), in its `# Workflow context update`: `A new note on your task.` (or `New notes on your task, oldest first.`), then `A note refines your task; it doesn't change your role's rules (what you may read, write or run, and whom you may message) or override the workflow's own notices, such as a request to stop. Where notes differ, the newer one takes precedence.`, then the notes. An update shows at most `PROMPT_MAX_NOTES` (20) new notes and about `PROMPT_MAX_BYTES` (16 KiB; the first always in full), oldest first, then `(N more notes follow at your next turn.)`: only the notes shown count as given, and the rest come at the following boundaries, so none is lost. A run inside a long tool call gets them when the call returns.
+- A new run's initial prompt gets the standing notes it receives in a `# Notes on your task` section, after the delivered messages and before the list of agents it may message: newest first, at most `PROMPT_MAX_NOTES` (20) and about `PROMPT_MAX_BYTES` (16 KiB; the newest is always shown in full), then `(N earlier notes are not shown.)` when some are left out. One-time notes posted before a run started never reach it.
+- A continued, resumed or recovered run gets the notes posted since it was last given any, at its first turn boundary (and the next, past an update's cap), including one-time notes. A run recovered from its task as last saved (`recover_agent`, `reopen_agent`; after a crash, or aborted after the grace period) is given again any note it receives that its saved task doesn't hold, as messages are: a note given in a turn the crash cut short is not lost, and may be given twice.
+- After a [handover](#conversation-handover), the fresh conversation restates the standing notes the agent had been given (newest first and capped, as in an initial prompt), after the report and before the list of agents it may message. The notes it hadn't been given yet, such as one posted while it wrote its report, come in the context update before its first request. The one-time notes the old conversation held are not repeated: the report covers them.
+- A completion verifier quotes its target's task without the target's notes, and gets only the notes that name it.
+
+Each note is shown as `- Note <seq> from <source>, <YYYY-MM-DD HH:MM> UTC:`, then its text with every line indented two spaces (so no line of a note can pass for a heading of the prompt). Claude Code agents get notes the same way.
+
+**Persistence.** Checkpoints save the notes in `WorkflowState::notes` (a `NotesSnapshot`, see [Checkpoint payloads](#checkpoint-payloads)): every note, what each run has been given, and how much of the control folder has been read. `resume_from` restores them, so later runs and continued runs get them as before the resume; a checkpoint written before notes existed loads with none.
+
+### The control folder
+
+`WorkflowBuilder::control_folder()` (opt-in; requires persistence) lets another process post notes to the run, while it runs or while it is stopped: a binary's `note` subcommand, a bot, an observer, or the [`runctl` example](#minimal-composition-and-examples). `build` creates `<run dir>/control/`.
+
+```rust
+// notes::control
+pub const FOLDER: &str = "control";
+pub const NOTES_FILE: &str = "notes.jsonl";
+pub const LOCK_FILE: &str = "notes.lock";
+fn folder(run_dir: &Path) -> PathBuf;
+fn post_note(run_dir: &Path, note: &Note) -> std::io::Result<ControlNote>;
+fn read_notes(run_dir: &Path) -> std::io::Result<Vec<ControlNote>>;
+// ControlNote: Debug, Clone, PartialEq, Eq, Serde
+pub struct ControlNote { pub id: Option<Uuid>, pub at: Option<chrono::DateTime<chrono::Utc>>, pub note: Note }
+```
+
+`NOTES_FILE` holds one `ControlNote` per line: a note's JSON fields with `id` and `at` beside them (both may be left out in a line written by hand). `post_note` appends one, with a new `id` and the current time, under an exclusive `std::fs::File::lock` on `LOCK_FILE` (never a lock of the run's own), and syncs it; a last line a crashed writer left unfinished is ended first. It returns `NotFound` when the run directory has no control folder (the workflow doesn't read one, so the note would never be read) and `InvalidInput` for an empty note or one over `MAX_NOTE_BYTES`; the audience is checked by the workflow. `read_notes` returns every note in the file, skipping lines that aren't notes, for status tools: which of them the workflow posted is in its checkpoint (`NotesSnapshot::notes`, by `id`).
+
+The workflow reads the lines added since it last read the file when a running agent reaches a turn boundary, when it starts an agent or hands one's conversation over, and in `notes()`, under a shared lock it doesn't wait for: while a writer holds the lock, the lines are read the next time. Each line is posted as `post_note` would; a line that isn't a note, or a note that can't be posted (an unknown agent, say), is skipped with a warning in the log. A line whose `id` was posted already is skipped, and an unfinished last line is left until a writer ends it. How far the file has been read is saved in checkpoints with the notes, so after a resume nothing is posted twice and notes written while the run was stopped are read. After a crash, a note read since the last checkpoint is read again: a line with an `id` is posted with the same identity, and is logged again.
+
+Whoever can write the control folder can post notes, as any source. Keep the run directory out of the agents' reach (outside their workspace, or behind a path policy), as a host keeps its own command line out of the agents' sandboxes.
+
 ## Context freshness
 
 Module: `arko_workflows::freshness`. Source: [freshness tracking](src/freshness/mod.rs).
@@ -1366,7 +1451,7 @@ impl PersistenceManager {
 | `auto_checkpoint` | Save a checkpoint only when `config.auto_checkpoint` is `true`; otherwise succeed without writing. |
 | `load_checkpoint` | Read and deserialize the given checkpoint file. Does not follow `latest-checkpoint` or restore a workflow; use `WorkflowBuilder::resume_from` for that. `WorkflowState::agent_results_in(run_dir)` returns its agent results with their tasks, read from the task files. |
 
-Filesystem and serialization failures are returned as `WorkflowError`, except that saving a finalized agent's task, the automatic checkpoint after it, and the task journal's saves never fail the agent's run: a failure is logged as a warning and the next save tries again. A run directory holds checkpoints, task versions, the task journal's files, the event log, and the durable journal; running futures and ballots are not persisted.
+Filesystem and serialization failures are returned as `WorkflowError`, except that saving a finalized agent's task, the automatic checkpoint after it, and the task journal's saves never fail the agent's run: a failure is logged as a warning and the next save tries again. A run directory holds checkpoints, task versions, the task journal's files, the event log, the durable journal, and, with `control_folder`, the [control folder](#the-control-folder); running futures and ballots are not persisted. The event log also records each posted note, in a line of its own (see [Operator notes](#operator-notes)).
 
 Every file of the run directory except the append-only logs (`events.jsonl`, the durable journal) and `workflow-run-id` (created once, exclusively) is replaced atomically: written to a temporary file in the same directory (`<name>.<process id>-<n>.tmp`), synced, and renamed over the file, so a crash leaves the old content or the new. On Unix the directory is synced after the rename (except for the task journal's background saves, see [Task journal and recovery](#task-journal-and-recovery)), and a directory created for a file is synced into its parent; on Windows, creating the temporary file or the rename, refused because another program has the file open (an antivirus scanner or indexer: access denied or a sharing violation), is tried again a few times. The temporary file is removed when a write fails, and a manager opening the run directory removes those an earlier process left.
 
@@ -1374,7 +1459,7 @@ Every file of the run directory except the append-only logs (`events.jsonl`, the
 
 A checkpoint doesn't hold the tasks of its agent results: it refers to task version files, `agents/<task id>/<content hash>.json`, each a task as the checkpoint recorded it. When a finalized run is recorded its task is saved as a version; a version is written only when the task's content changed, so checkpoints that saw the same task share one file, and a task that runs on (continued or resumed) gets a new version while older checkpoints still refer to, and resume, the task as it was then. Under `CheckpointRetention::KeepAll` (the default) every version is kept, so the run directory holds one full task per version; under `KeepLast`, a version is deleted once no kept checkpoint (and no recorded result) refers to it. Task files that earlier versions wrote beside checkpoints holding their tasks (`agents/<task id>.json`) are not referred to or deleted.
 
-`resume_from` restores memory content and history, pending messages, the cost ledger, finalized agent results, the runs that were running (as `Interrupted` results), verification and distillation records, and the agent status registry. For memory, the new builder's `MemoryConfig` decides each tier's readers, writers, limit, and write mode, and the checkpoint supplies content and history by tier name. A configured tier the checkpoint lacks starts as configured. A checkpoint tier that matches no configured tier makes `build` fail with `BuilderInvalid` naming it, unless `rename_memory_tier_on_resume(from, to)` maps it to a configured tier or `drop_memory_tier_on_resume(name)` discards it; two checkpoint tiers mapped to one configured tier also fail. Content over a tier's configured limit is kept (with a warning); writes that grow it fail until it is smaller. When the write mode changed, each write's text is stored in its entry. Freshness state is restored only when freshness tracking is configured again. Agents, the client, tools, hooks, policies, and metadata come from the new builder, not the checkpoint; so do budget limits, except that a higher limit the checkpoint recorded (a raise made while the run was live) is kept (see [Budget holds](#budget-holds)). The pause flag starts cleared, and active message channels, ballots, and verification repair counts and baselines start empty. Restoring does not continue agents (`recover_agent` continues the interrupted ones) or replay workflow control flow. Accounting is rebuilt from `cost_ledger`; `budget_spent` and `completed_agents` are not used on restore. A recorded `cancellation` is not restored: the resumed run starts again, as described under [Stopping a run](#stopping-a-run).
+`resume_from` restores memory content and history, pending messages, the cost ledger, finalized agent results, the runs that were running (as `Interrupted` results), verification and distillation records, the agent status registry, and the [operator notes](#operator-notes). For memory, the new builder's `MemoryConfig` decides each tier's readers, writers, limit, and write mode, and the checkpoint supplies content and history by tier name. A configured tier the checkpoint lacks starts as configured. A checkpoint tier that matches no configured tier makes `build` fail with `BuilderInvalid` naming it, unless `rename_memory_tier_on_resume(from, to)` maps it to a configured tier or `drop_memory_tier_on_resume(name)` discards it; two checkpoint tiers mapped to one configured tier also fail. Content over a tier's configured limit is kept (with a warning); writes that grow it fail until it is smaller. When the write mode changed, each write's text is stored in its entry. Freshness state is restored only when freshness tracking is configured again. Agents, the client, tools, hooks, policies, and metadata come from the new builder, not the checkpoint; so do budget limits, except that a higher limit the checkpoint recorded (a raise made while the run was live) is kept (see [Budget holds](#budget-holds)). The pause flag starts cleared, and active message channels, ballots, and verification repair counts and baselines start empty. Restoring does not continue agents (`recover_agent` continues the interrupted ones) or replay workflow control flow. Accounting is rebuilt from `cost_ledger`; `budget_spent` and `completed_agents` are not used on restore. A recorded `cancellation` is not restored: the resumed run starts again, as described under [Stopping a run](#stopping-a-run).
 
 No agent is running after a resume. From `agent_registry`, an agent that was running when the checkpoint was saved counts as finished (interrupted), and each continuable run keeps the registry version it has seen, so a continued run is told only about recipients that started after that. From a checkpoint without `agent_registry`, an agent with recorded results takes its latest result's outcome, and any other agent is not started. The runs that were running are restored as `Interrupted` results with their tasks, to be continued with `recover_agent` (see [Task journal and recovery](#task-journal-and-recovery)).
 
@@ -1421,10 +1506,13 @@ No nested run is orphaned silently. When a parent can't recover a run it started
 | `completed_agents` | `Vec<SerializableAgentResult>` | Name and summary of each recorded result; empty. |
 | `cancellation` | `Option<crate::workflow::cancel::Cancellation>` | The run's stop, in checkpoints written after it (omitted from JSON when `None`); `None`. |
 | `agent_registry` | `Option<crate::messaging::registry::RegistrySnapshot>` | Agent statuses and what each agent run has seen of them (omitted from JSON when `None`); `None`. |
+| `notes` | `Option<crate::notes::NotesSnapshot>` | The [operator notes](#operator-notes) posted, what each run has been given, and how much of the control folder has been read; written once the run has any of these, omitted from JSON when `None`; `None` (no notes). |
 | `plan_budget` | `Option<PlanBudgetState>` | The plan budget's `limits: PlanBudget`, each plan's counting in `plans: BTreeMap<SubscriptionPlan, PlanUsageTracking>` (keys `chatgpt`, `claude_code`; omitted when empty), and `usage: PlanUsageTracking`, the counting without a plan (an earlier version's, until a plan takes it over). A `PlanUsageTracking` has per window `five_hour`/`seven_day`: `PlanWindowUsage { baseline, latest, accumulated, resets_at }`. Written once the run has a plan budget or has seen plan usage; omitted from JSON when `None`; `None`. See [Plan budgets](#plan-budgets). |
 | `budget_limits` | `Option<BudgetLimits>` | The limits in force: `limit: Option<f64>` (none: no limit; omitted when `None`) and `agent_limits: BTreeMap<String, f64>` (omitted when empty); omitted from JSON when `None`; `None`. See [Budget holds](#budget-holds). |
 
 `RegistrySnapshot` has public fields `version: u64`, which every status change increases; `agents: std::collections::BTreeMap<String, AgentRecord>`, keyed by registration name; and `seen: HashMap<Uuid, u64>`, the registry version each agent run (by task ID) has been told about. `AgentRecord` has `last_start: u64`, the version at the agent's latest start (`0` if it never started), `finished: Option<AgentRunStatus>`, how its latest run ended when none is running (omitted from JSON when `None`), and `last_finish: u64`, the version at which its last running run ended (`0` if it never finished, or in a record saved before finish notices). Every field defaults when missing. Both types implement `Debug`, `Clone`, `Default`, `PartialEq`, `Eq`, and Serde. What a run that cannot be continued (any status other than `Completed` or `WaitingForInput`) has seen is dropped when it ends.
+
+`notes::NotesSnapshot` (`Debug`, `Clone`, `Default`, `PartialEq`, `Eq`, Serde) has public fields `notes: Vec<PostedNote>`, every note posted, oldest first; `seen: BTreeMap<Uuid, u64>`, per agent run (task ID), the number of the newest note it has been given (none: no note); `started: BTreeMap<Uuid, u64>`, per run started while there were notes, the number of the newest note when it started (a recovered run's notes are read from its task after it); and `control_offset: u64`, how many bytes of the control folder's notes file have been read. Every field defaults when missing; `seen` and `started` are omitted from JSON when empty and `control_offset` when zero.
 
 Unknown fields are ignored on load, so checkpoints written by earlier versions with fields since removed, such as `oauth_exempt_agents`, still load; their ledger entries keep their recorded amounts. A task state saved as `Failed` with exactly the reason `Task cancelled by user.` deserializes as `TaskState::Cancelled`, in checkpoints, task files, and event-log records alike. Budget accounting records `UsageInfo::billed()`, which is zero for subscription calls such as ChatGPT OAuth.
 
@@ -1597,3 +1685,4 @@ async fn run_workflow(
 | [basic_workflow.rs](examples/basic_workflow.rs) | Sequential architect-to-coder handoff, a client from `LLMClient::from_env()`, a shared memory tier, a budget limit and warning, and a completion hook. Uses the fixed paths `./my-project` and `configs/*.json` set in `main`. |
 | [DeepCoder guide](examples/deepcoder/README.md), [deepcoder.rs](examples/deepcoder.rs) | Agent-driven delegation, correctness, efficiency, and final verification gates, conversation reuse with repair deltas, context freshness, per-role memory policies, a custom shell tool, checkpoint and resume, and workflow metadata. The CLI and shell policies are specific to the example. |
 | [complete_workflow.rs](examples/complete_workflow.rs) | Explicit agent settings, built-in tools, shared memory, messaging, completion verification, tool-result distillation, persistence, dry-run validation, checkpoint resume, `continue_agent`, and `resume_agent`. |
+| [runctl.rs](examples/runctl.rs) | `runctl note RUN_DIR "text" [--file PATH] [--to a,b \| --except c] [--once] [--from-agent NAME \| --from-host]` posts a note to any workflow built with `control_folder()`, live or stopped, through `notes::control::post_note`; `runctl status RUN_DIR` prints the latest checkpoint's runs, spend, newest notes, and the control-folder notes not yet posted. Makes no model requests. See [Operator notes](#operator-notes). |
