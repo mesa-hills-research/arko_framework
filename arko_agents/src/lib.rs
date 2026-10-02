@@ -8,6 +8,7 @@ pub mod parsing;
 pub mod runtime;
 pub mod skill;
 pub mod snapshot;
+pub mod stop;
 pub mod task;
 #[cfg(any(unix, windows))]
 pub mod terminal;
@@ -41,6 +42,10 @@ pub use skill::{
     SkillPromptContext, SkillSource, SkillSummary, SkillsConfig,
 };
 pub use snapshot::TaskSnapshotSink;
+pub use stop::{
+    ChildStop, STOP_FILE_ENV, StopAwareCommand, StopAwareOutput, StopSignal, StopSource,
+    kill_stop_aware_commands,
+};
 pub use task::{
     ApprovalReason, DeferredToolError, ErrorRecoveryCause, PendingToolCallInfo,
     PlanUsageWindowMark, RefusalResolution, RefusedInput, RefusedMessage, RefusedToolResult,

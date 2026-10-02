@@ -13,14 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manager = TerminalManager::new(TerminalConfig::new(&directory))?;
     let owner = Uuid::new_v4();
     let cwd = std::env::current_dir()?;
-    let context = TaskContext {
-        task_id: owner,
-        agent_name: "demo",
-        initial_task_prompt: "Exercise interactive input",
-        current_working_directory: &cwd,
-        tool_call_id: None,
-        recovering: false,
-    };
+    let context = TaskContext::new(owner, "demo", "Exercise interactive input", &cwd);
     let (sender, mut notices) = mpsc::channel(8);
     manager.bind_runtime(owner, sender.downgrade());
     let fixture = directory.join("question.py");

@@ -62,7 +62,7 @@ Notes are also the supported way to change instructions while a workflow runs or
 
 A note is delivered in the user role, labelled with its source, as a refinement of the task: agents are told it doesn't change their role's rules. It carries the authority of whoever can post it, so treat posting as part of the workflow's trust boundary. Agents have no tool to post notes, but with the opt-in control folder (`WorkflowBuilder::control_folder`), whoever can write `<run dir>/control/` can post as any source: keep the run directory, and any `note` command the binary offers, out of the agents' workspace and sandboxes. Label an observer agent's notes as its own (`NoteSource::Agent`), so the recipients weigh them as another agent's view rather than the operator's.
 
-Keep independent roles independent. A completion verifier gets a note only when the note names it, and judges the completion without the target's notes: when a note changes what counts as done ("skip the appendix"), address it to the verifier too, or it may keep rejecting completions that follow the note. Mark other roles that must not be steered, such as a checker or an independent replicator, with `notes_by_name_only`. Since an agent that receives a note can pass it on in a message, restrict whom such a role can hear from with the `MessagingPolicy`; the workflow logs a warning when a note can reach such an agent that way.
+Keep independent roles independent. A completion verifier's review gets a note only when the note names it, and judges the completion without the target's notes: when a note changes what counts as done ("skip the appendix"), address it to the verifier too, or it may keep rejecting completions that follow the note. Mark other roles that must not be steered, such as a checker or an independent replicator, with `notes_by_name_only`. Since an agent that receives a note can pass it on in a message, restrict whom such a role can hear from with the `MessagingPolicy`; the workflow logs a warning when a note can reach such an agent that way.
 
 ### Freshness
 
@@ -96,9 +96,11 @@ Use hooks for lifecycle policy and observation: budget warnings, audit events, p
 
 Route questions through a `UserInputHandler` when the host can answer them asynchronously. Without a handler, the run returns `UserInputRequired`; continue the paused agent with the answer rather than starting a second run that loses its conversation.
 
-Decide what each kind of failure means for the run. A failed run records the kind of error that failed it (`AgentResult::failure_kind`, `arko_ai::ErrorKind`): a lost login (`Authentication`) or a credit wall (`Billing`) will fail every agent on that credential, so a set-and-forget host should stop the run and ask for a new sign-in; a request too large for the model (`ContextOverflow`) or an invalid request fails only that run. Decide by the kind, never by matching error text.
+Decide what each kind of failure means for the run. A failed run records the kind of error that failed it (`AgentResult::failure_kind`, `arko_ai::ErrorKind`): a lost login (`Authentication`) or a credit wall (`Billing`) will fail every agent on that credential, so a set-and-forget host should stop the run (`StopRequest::failure`) and ask for a new sign-in; a request too large for the model (`ContextOverflow`) or an invalid request fails only that run. Decide by the kind, never by matching error text.
 
-Give cancellation a deliberate path. A cancel handle can stop the workflow from another task, and hooks can abort it when a policy is violated. Configure a grace period that lets agents record results without allowing a stuck tool call to hold the run indefinitely. Report cancellation distinctly from failure so a caller can decide whether resuming is appropriate.
+Give stopping a deliberate path. `Workflow::stop` takes a `StopRequest` that says why: an operator's request, a drain before a redeploy, a limit of the host's own, or a failure outside the work. With a wrap-up, agents are told to save their progress and call `complete_task`, and tools that watch their stop signal (or run commands through `StopAwareCommand`) wind down, before the rest are cancelled; without one, the run is cancelled at once, as `cancel` does. `stop_on_signals` maps Ctrl-C and `SIGTERM` to a stop. Hooks can abort the run when a policy is violated. Configure a grace period that lets agents record results without allowing a stuck tool call to hold the run indefinitely.
+
+A stopped run is blameless. `AgentResult::stopped_by` marks the runs a stop ended, whether cancelled or completed early in the wrap-up: their outcome says nothing about the agent's work. Don't count them as failures, retry attempts or penalties, and don't count an early completion as finished work; report them apart from failures, so a caller can decide whether to resume.
 
 ## Budget the workflow
 
@@ -111,6 +113,18 @@ Choose models and reasoning effort per role. The [model-choice guidance](agent-d
 Use persistence when a workflow must survive process loss, operator interruption, or a long pause. Checkpoints retain the workflow identity, finalized agent results, memory, pending messages, operator notes, cost ledger, verification and distillation records, freshness state, and task versions. Configure a run directory outside source control and decide how many checkpoints to retain.
 
 Design resume behavior before enabling checkpoints. `resume_from` restores state and configuration from the new builder; it does not replay the original Rust or Python control flow and it does not automatically continue agents. The host must inspect restored results and explicitly run the next stage or continue a paused agent. A checkpoint can also record cancellation, so decide whether the host should keep a stopped run stopped before resuming it.
+
+A long-running workflow can be redeployed without losing work, with a drain-and-redeploy loop:
+
+1. The old process gets `SIGTERM` (a service manager stopping it, or the deploy script). `stop_on_signals` turns it into `StopRequest::drain(...)` with a wrap-up: agents save their progress and finish, the rest are cancelled within the grace period, and the checkpoint records the stop. The host's run calls return `Cancelled`, and the process exits.
+2. The new build starts with `resume_from` on the latest checkpoint, lists `stopped_runs()`, and relaunches each with `restart`, then carries on with its own control flow from the state it restored. A run an agent delegated is not listed when its caller is: the restarted caller resumes it (its failed call named the run). Completions made after the wrap-up notice report progress and aren't reviewed by completion verifiers; the restarted run's next completion is. A delegated run's progress report reaches its caller with a note naming the run, so that the restarted caller resumes it with `resume_run` and its completion is reviewed then.
+3. A service manager's stop timeout must outlast the wrap-up, the grace period, and the longest tool stop grace, or the process is killed mid-stop; a run it kills comes back as interrupted, and `stopped_runs` lists it too.
+
+What may change between the two builds without breaking the resume:
+
+- **Per-task prompts and notes** may change freely: the prompts runs are started or continued with, the note `restart` adds, and [operator notes](#operator-notes) are not part of an agent's configuration. Put guidance that changes between builds here.
+- **Tools the workflow registers** (`global_tool`, `agent_tool`) may change their code, descriptions and schemas, keeping their names: the resume check leaves them out. A changed description reaches a continued run with its next request. So may the workflow's own code, hooks, interceptors, distillers, policies and budgets.
+- **An agent's configuration** (`AgentConfig`: its instructions, role, generation and tool settings, handover) may not change while any of its runs can still be continued or restarted (including runs the stop cancelled or finished early): `build` refuses the resume. Keep it fixed across a redeploy, or register the changed configuration under a new agent name for new runs. A continued run keeps the system prompt saved in its task in any case.
 
 Wrap external side effects in durable steps. A durable step records its input, attempt, and outcome so a retry does not repeat work. If an operation can finish after the process loses contact with it, provide a resolver for an in-doubt result or require an operator to mark it completed, failed, or safe to retry.
 
@@ -135,7 +149,7 @@ Build and validate the workflow before making provider calls. The complete workf
 - Shared resources have freshness tracking or an explicit conflict policy.
 - Each agent has only the tools and context required for its role. Roles that meet large files read them through the terminal; caps on tool results are set only where a role needs a tighter budget than the overflow guard gives.
 - Completion verification checks the artifact, not only the agent's summary.
-- Set-and-forget workflows keep `ApproveAll` and `Automatic`; cancellation, budgets, and human input are configured for the deployment, and a lost login (`failure_kind()` is `Authentication`) stops the run rather than failing every agent in turn.
+- Set-and-forget workflows keep `ApproveAll` and `Automatic`; stopping, budgets, and human input are configured for the deployment, a lost login (`failure_kind()` is `Authentication`) stops the run rather than failing every agent in turn, and stopped runs are not counted as failures.
 - External side effects use durable steps and define in-doubt resolution.
 - Checkpoints and old saved data remain loadable, and resume behavior is explicit.
 - A dry run passes. Live test runs and benchmark iterations fit the budget the user has authorized.

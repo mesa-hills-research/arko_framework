@@ -481,6 +481,13 @@ pub struct AgentLoop {
     pub(super) handover_hook: Option<Arc<dyn HandoverHook>>,
     /// Receives the task at its safe points; see [`report_task`](Self::report_task).
     pub(super) snapshots: crate::snapshot::TaskSnapshots,
+    /// The host's stop signal for the task's calls; see
+    /// [`AgentRuntime::with_stop_signal`](super::AgentRuntime::with_stop_signal).
+    pub(super) host_stop: crate::stop::StopSignal,
+    /// Fired when `CancelTask` or `SuspendTask` arrives while calls run, so
+    /// that a call the runtime waits for winds down; see
+    /// [`TaskContext::stop`](crate::tool::TaskContext::stop).
+    calls_stop: crate::stop::StopSource,
     /// The plan-usage SlowDown's delay was checked against the prompt-cache
     /// lifetime (once per run).
     slow_down_cache_checked: bool,
@@ -585,6 +592,8 @@ impl AgentLoop {
             turn_context: None,
             handover_hook: None,
             snapshots: Default::default(),
+            host_stop: crate::stop::StopSignal::never(),
+            calls_stop: crate::stop::StopSource::new(),
             slow_down_cache_checked: false,
             handover_skip_warned: false,
             tool_context_cursor: 0,
@@ -971,6 +980,7 @@ impl AgentLoop {
             initial_task_prompt: self.task.initial_task_prompt.clone(),
             working_directory: self.task.current_working_directory.clone(),
             middleware: self.execution_middleware.clone(),
+            stop: self.host_stop.or(&self.calls_stop.signal()),
         })
     }
 
@@ -1052,8 +1062,10 @@ impl AgentLoop {
     /// returned in order otherwise; an error is a middleware's own failure.
     /// A group with a call that isn't [interruptible](crate::tool::Tool::interruptible)
     /// runs to its end, and a stop that arrived meanwhile is returned with
-    /// the outcomes. A closed channel doesn't stop the calls: the boundary
-    /// after them handles it.
+    /// the outcomes; either way the calls' stop signal fires
+    /// ([`TaskContext::stop`](crate::tool::TaskContext::stop)), so such a
+    /// call can wind down. A closed channel doesn't stop the calls: the
+    /// boundary after them handles it.
     ///
     /// Before any call starts, the calls are recorded as running
     /// ([`Task::running_tool_calls`]) and the task is reported to the
@@ -1110,8 +1122,14 @@ impl AgentLoop {
                             self.note_handover_request();
                             None
                         }
-                        Some(UserCommand::CancelTask) => Some(ToolsStopped::Cancelled),
-                        Some(UserCommand::SuspendTask) => Some(ToolsStopped::Suspended),
+                        Some(UserCommand::CancelTask) => {
+                            self.calls_stop.stop("Task cancelled.");
+                            Some(ToolsStopped::Cancelled)
+                        }
+                        Some(UserCommand::SuspendTask) => {
+                            self.calls_stop.stop("Task suspended.");
+                            Some(ToolsStopped::Suspended)
+                        }
                         Some(other) => {
                             log::warn!(
                                 "Task {}: Unexpected command {:?} received while tool calls ran. Ignoring.",

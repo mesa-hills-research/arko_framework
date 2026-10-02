@@ -386,14 +386,12 @@ mod tests {
             .write("writer", "notes", &"long initial content\n".repeat(30))
             .unwrap();
         let tool = ReadMemoryTool::new(workflow.context().clone(), "reader".into());
-        let task = TaskContext {
-            task_id: uuid::Uuid::new_v4(),
-            agent_name: "reader",
-            initial_task_prompt: "read",
-            current_working_directory: &workflow.context().workspace,
-            tool_call_id: None,
-            recovering: false,
-        };
+        let task = TaskContext::new(
+            uuid::Uuid::new_v4(),
+            "reader",
+            "read",
+            &workflow.context().workspace,
+        );
         let full = tool
             .execute(&task, params(serde_json::json!({"tier":"notes"})))
             .await
@@ -447,14 +445,7 @@ mod tests {
         let workflow = workflow();
         let context = workflow.context();
         let tool = ReadMemoryTool::new(context.clone(), "reader".into());
-        let task = TaskContext {
-            task_id: uuid::Uuid::new_v4(),
-            agent_name: "reader",
-            initial_task_prompt: "read",
-            current_working_directory: &context.workspace,
-            tool_call_id: None,
-            recovering: false,
-        };
+        let task = TaskContext::new(uuid::Uuid::new_v4(), "reader", "read", &context.workspace);
         let resource = ResourceId::MemoryTier("notes".into());
         let reader = ActorId::new(task.task_id, "reader");
         let writer = ActorId::new(uuid::Uuid::new_v4(), "writer");

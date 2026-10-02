@@ -44,14 +44,7 @@ async fn a_server_is_started_its_tools_called_and_its_exit_survived() {
         .unwrap()
         .clone();
     let workspace = std::env::temp_dir();
-    let context = TaskContext {
-        task_id: uuid::Uuid::new_v4(),
-        agent_name: "tester",
-        initial_task_prompt: "test",
-        current_working_directory: &workspace,
-        tool_call_id: None,
-        recovering: false,
-    };
+    let context = TaskContext::new(uuid::Uuid::new_v4(), "tester", "test", &workspace);
     let call = |text: &str| HashMap::from([("text".to_string(), json!(text))]);
     assert_eq!(
         echo.execute(&context, call("hello")).await.unwrap(),

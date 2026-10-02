@@ -466,10 +466,12 @@ impl WorkflowServices {
     }
 
     /// What a `run_workflow_agent` call that failed tells `caller` about
-    /// agent run `run`, which it ran and which did not finish: the run's id
-    /// and agent, and how to resume it (or that the host recovers it, when
-    /// the caller may not run its agent). `None` for a run that can't be
-    /// resumed with a message, or is running.
+    /// agent run `run`, which it ran and which did not finish (or what a
+    /// call that succeeded adds to the summary of a run that completed
+    /// after a stop's wrap-up notice): the run's id and agent, and how to
+    /// resume it (or that the host recovers it, when the caller may not run
+    /// its agent). `None` for a run that can't be resumed with a message,
+    /// or is running.
     fn unfinished_note(&self, caller: &str, run: &AgentResult) -> Option<String> {
         let context = self.context.upgrade()?;
         if context.registry.is_running(run.agent_run_id) {
@@ -486,6 +488,18 @@ impl WorkflowServices {
                 "is paused after an error"
             }
             AgentRunStatus::WaitingForInput => "is waiting for an answer to its questions",
+            // Reopened when the caller is restarted after the stop.
+            AgentRunStatus::Cancelled
+                if run.stopped_by.is_some() && !crate::workflow::engine::is_superseded(run) =>
+            {
+                "was stopped with the workflow and did not finish"
+            }
+            // Completed after the wrap-up notice told it to stop: its
+            // summary is a progress report its completion verifiers didn't
+            // review, and `stopped_runs` leaves a nested run to its caller.
+            AgentRunStatus::Completed if run.stopped_by.is_some() => {
+                "stopped with the workflow before it finished: its summary is a progress report that no completion verifier reviewed"
+            }
             _ => return None,
         };
         let (id, agent) = (run.agent_run_id, &run.agent_name);
@@ -672,7 +686,16 @@ impl Tool for RunWorkflowAgentTool {
                     .await
             }
         };
-        result.map(|result| result.summary).map_err(|error| {
+        // A run a stop's wrap-up ended early: named after its progress
+        // report, so that the caller can resume it.
+        let result = result.map(|result| {
+            let note = self.services.unfinished_note(&self.caller, &result);
+            match note {
+                Some(note) => format!("{}\n\n{note}", result.summary),
+                None => result.summary,
+            }
+        });
+        result.map_err(|error| {
             // The run the call ran, if it did not finish: named, so that
             // the caller can resume it rather than start over.
             let ran =

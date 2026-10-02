@@ -21,14 +21,7 @@ impl Fixture {
         }
     }
     fn context(&self) -> TaskContext<'_> {
-        TaskContext {
-            task_id: self.owner,
-            agent_name: "tester",
-            initial_task_prompt: "test interactive jobs",
-            current_working_directory: &self.root,
-            tool_call_id: None,
-            recovering: false,
-        }
+        TaskContext::new(self.owner, "tester", "test interactive jobs", &self.root)
     }
     fn command(&self, code: &str) -> String {
         let path = self.root.join(format!("fixture-{}.py", Uuid::new_v4()));

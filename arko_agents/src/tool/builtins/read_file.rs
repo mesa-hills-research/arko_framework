@@ -325,14 +325,7 @@ mod tests {
     }
 
     fn context(directory: &std::path::Path) -> TaskContext<'_> {
-        TaskContext {
-            task_id: uuid::Uuid::new_v4(),
-            agent_name: "a",
-            initial_task_prompt: "",
-            current_working_directory: directory,
-            tool_call_id: None,
-            recovering: false,
-        }
+        TaskContext::new(uuid::Uuid::new_v4(), "a", "", directory)
     }
 
     fn params(value: Value) -> HashMap<String, Value> {

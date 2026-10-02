@@ -11,6 +11,7 @@ use crate::error::ArkoAgentsError;
 use crate::handover::HandoverHook;
 use crate::skill::SkillPromptContext;
 use crate::snapshot::{TaskSnapshotSink, TaskSnapshots};
+use crate::stop::StopSignal;
 use crate::task::Task;
 use crate::tool::{InterceptorConfig, ToolExecutionMiddleware, ToolRegistry};
 use arko_ai::LLMClient;
@@ -68,6 +69,7 @@ pub struct AgentRuntime {
     host_decisions: HostDecisions,
     handover_hook: Option<Arc<dyn HandoverHook>>,
     task_snapshots: Option<Arc<dyn TaskSnapshotSink>>,
+    stop_signal: StopSignal,
 }
 
 impl AgentRuntime {
@@ -79,6 +81,7 @@ impl AgentRuntime {
             host_decisions: HostDecisions::default(),
             handover_hook: None,
             task_snapshots: None,
+            stop_signal: StopSignal::never(),
         }
     }
 
@@ -111,6 +114,18 @@ impl AgentRuntime {
     /// running ([`Task::running_tool_calls`]).
     pub fn with_task_snapshots(mut self, sink: Arc<dyn TaskSnapshotSink>) -> Self {
         self.task_snapshots = Some(sink);
+        self
+    }
+
+    /// Tells the tool calls of the tasks this runtime runs when the host is
+    /// stopping them: `signal` reaches each call as part of
+    /// [`TaskContext::stop`](crate::tool::TaskContext::stop), which also
+    /// fires when the runtime receives `CancelTask` or `SuspendTask` while
+    /// the call runs. Firing it changes nothing else: the task goes on until
+    /// the host cancels or suspends it (a workflow's graceful stop fires it
+    /// at the start of its wrap-up, and cancels its agents afterwards).
+    pub fn with_stop_signal(mut self, signal: StopSignal) -> Self {
+        self.stop_signal = signal;
         self
     }
 
@@ -162,6 +177,7 @@ impl AgentRuntime {
             run.host_decisions = self.host_decisions.clone();
             run.handover_hook = self.handover_hook.clone();
             run.snapshots = TaskSnapshots::new(self.task_snapshots.clone());
+            run.host_stop = self.stop_signal.clone();
             run.bind_tools(&command_sender);
             let join_handle = tokio::spawn(async move { run.run().await });
             return (event_receiver, command_sender, join_handle);
@@ -182,6 +198,7 @@ impl AgentRuntime {
         agent_loop.host_decisions = self.host_decisions.clone();
         agent_loop.handover_hook = self.handover_hook.clone();
         agent_loop.snapshots = TaskSnapshots::new(self.task_snapshots.clone());
+        agent_loop.host_stop = self.stop_signal.clone();
         agent_loop.bind_tools(&command_sender);
 
         let task_join_handle = tokio::spawn(async move { agent_loop.run().await });

@@ -17,3 +17,14 @@ Defaults that change what an agent sees of its tool results, in arko's own runti
   (`AgentToolConfig::read_file_line_ranges`, `false`).
 - Error kinds (`arko_ai::ErrorKind`) are recorded with pauses and failures, and stop
   nothing by themselves.
+
+Defaults of operator notes and graceful stops:
+
+- Operator notes do nothing until a note is posted, and the control folder through which
+  another process posts them is off (`WorkflowBuilder::control_folder`). Completion
+  verifiers' reviews get only the notes that name them. See
+  [Builder defaults](reference-map.md#builder-defaults-arko_workflows).
+- A stop (`Workflow::stop`) has no wrap-up unless its `StopRequest` asks for one, and
+  nothing is timed until a stop is under way: a `StopAwareCommand`'s graces (10 s, then
+  5 s after `SIGTERM`) start only then. See
+  [Stopping tool calls](reference-map.md#stopping-tool-calls-arko_agents).

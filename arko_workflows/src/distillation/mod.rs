@@ -445,14 +445,12 @@ pub(crate) mod tests {
 
     /// The context of a call by the researcher in `workflow`.
     fn task_context(workflow: &crate::Workflow) -> TaskContext<'_> {
-        TaskContext {
-            task_id: uuid::Uuid::new_v4(),
-            agent_name: "researcher",
-            initial_task_prompt: "find the failing test",
-            current_working_directory: &workflow.context().workspace,
-            tool_call_id: None,
-            recovering: false,
-        }
+        TaskContext::new(
+            uuid::Uuid::new_v4(),
+            "researcher",
+            "find the failing test",
+            &workflow.context().workspace,
+        )
     }
 
     /// Runs one interception of a large tool result against `model`, served
@@ -471,14 +469,12 @@ pub(crate) mod tests {
             client: Arc::new(client),
             context: workflow.context().clone(),
         };
-        let task = TaskContext {
-            task_id: uuid::Uuid::new_v4(),
-            agent_name: "researcher",
-            initial_task_prompt: "find the failing test",
-            current_working_directory: &workflow.context().workspace,
-            tool_call_id: None,
-            recovering: false,
-        };
+        let task = TaskContext::new(
+            uuid::Uuid::new_v4(),
+            "researcher",
+            "find the failing test",
+            &workflow.context().workspace,
+        );
         let outcome = interceptor
             .intercept(
                 "search",

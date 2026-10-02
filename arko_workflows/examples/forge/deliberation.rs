@@ -3134,6 +3134,7 @@ mod tests {
             summary: String::new(),
             error: None,
             task,
+            stopped_by: None,
         };
         architect.task.usage_history = vec![Default::default(); 7];
         let mut decision = decision();
@@ -3633,6 +3634,7 @@ mod tests {
             summary: String::new(),
             error: Some("failed".into()),
             task,
+            stopped_by: None,
         }
     }
 
@@ -3801,6 +3803,7 @@ mod tests {
                 summary: String::new(),
                 error: Some("the model refused".into()),
                 task,
+                stopped_by: None,
             }
         };
         let outcome = other

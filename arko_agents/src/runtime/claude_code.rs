@@ -573,6 +573,12 @@ pub(super) struct ClaudeCodeRun {
     host: Option<Arc<ToolHost>>,
     /// Receives the task at its safe points.
     pub(super) snapshots: TaskSnapshots,
+    /// The host's stop signal for the task's arko tool calls; see
+    /// [`AgentRuntime::with_stop_signal`](super::AgentRuntime::with_stop_signal).
+    pub(super) host_stop: crate::stop::StopSignal,
+    /// Fired when the host stops the session, so that a running arko tool
+    /// call winds down; see [`TaskContext::stop`](crate::tool::TaskContext::stop).
+    calls_stop: crate::stop::StopSource,
 }
 
 impl ClaudeCodeRun {
@@ -637,6 +643,8 @@ impl ClaudeCodeRun {
             handover_skip_warned: false,
             host: None,
             snapshots: TaskSnapshots::default(),
+            host_stop: crate::stop::StopSignal::never(),
+            calls_stop: crate::stop::StopSource::new(),
         }
     }
 
@@ -1314,6 +1322,7 @@ impl ClaudeCodeRun {
                 initial_task_prompt: self.task.initial_task_prompt.clone(),
                 working_directory: self.task.current_working_directory.clone(),
                 middleware: self.middleware.clone(),
+                stop: self.host_stop.or(&self.calls_stop.signal()),
             }),
             config: self.task.agent_config.clone(),
             registry: self.registry.clone(),
@@ -1505,6 +1514,11 @@ impl ClaudeCodeRun {
             if this.stopping.is_none() {
                 this.stopping = Some(stopping);
             }
+            match stopping {
+                Stopping::Cancel => this.calls_stop.stop("Task cancelled."),
+                Stopping::Suspend => this.calls_stop.stop("Task suspended."),
+                Stopping::Closed => false,
+            };
         };
         match command {
             Some(UserCommand::InjectContext { content }) => self.queue_context(content),

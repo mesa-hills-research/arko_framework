@@ -122,6 +122,12 @@ async fn cancelling_a_sequential_run_stops_its_agent_and_every_later_call() {
         }
     );
     assert_eq!(result.cancellation.unwrap().cause, CancelCause::Requested);
+    // Ended by the host's stop: blameless.
+    let stopped_by = agent.stopped_by().unwrap();
+    assert_eq!(
+        (stopped_by.kind, stopped_by.reason.as_str()),
+        (crate::StopKind::Operator, "Workflow cancelled.")
+    );
     assert_eq!(hooks.get(HookPoint::OnWorkflowCancelled), 1);
     assert_eq!(hooks.get(HookPoint::PostAgentCancellation), 1);
     assert_eq!(hooks.get(HookPoint::OnWorkflowFailed), 0);
@@ -448,6 +454,7 @@ async fn a_pre_tool_hook_abort_aborts_the_run_before_the_call() {
         result.error.as_deref(),
         Some("Workflow aborted by PreToolExecution hook: probing is not allowed")
     );
+    assert_eq!(result.stopped_by(), None, "a hook's abort is not a stop");
     assert_eq!(hooks.get(HookPoint::OnWorkflowFailed), 1);
     assert_eq!(hooks.get(HookPoint::OnWorkflowCancelled), 0);
     assert!(matches!(

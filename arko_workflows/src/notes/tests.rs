@@ -227,9 +227,10 @@ async fn standing_notes_are_in_later_prompts_and_one_time_notes_reach_earlier_ru
 }
 
 /// The audience decides who gets a note: every agent, the agents named, or
-/// all but those excluded. Completion verifiers and agents set with
-/// `notes_by_name_only` get only the notes that name them, and a verifier
-/// quotes its target's task without the target's notes.
+/// all but those excluded. Completion verifiers' reviews and agents set
+/// with `notes_by_name_only` get only the notes that name them, and a
+/// verifier quotes its target's task without the target's notes. The
+/// verifier's agent run outside a review is an ordinary run.
 #[tokio::test]
 async fn the_audience_decides_who_gets_a_note_and_verifiers_only_when_named() {
     let workspace = Workspace::new();
@@ -303,6 +304,17 @@ async fn the_audience_decides_who_gets_a_note_and_verifiers_only_when_named() {
     workflow.run_agent("checker", "Check it.").await.unwrap();
     let checker = &requests_of(&server, "Check it.")[0];
     assert!(!checker.contains("# Notes on your task"), "{checker}");
+    // Run by the host (or as a delegation target), not to review: the notes
+    // for all agents too.
+    workflow
+        .run_agent("reviewer", "Review the plan.")
+        .await
+        .unwrap();
+    let reviewer = &requests_of(&server, "Review the plan.")[0];
+    assert!(
+        has(reviewer, &["ALL-NOTE", "EXCEPT-NOTE", "REVIEWER-NOTE"]),
+        "{reviewer}"
+    );
 
     // Notes that can't be posted.
     let error = |note: Note| workflow.post_note(note).unwrap_err().to_string();
@@ -335,6 +347,63 @@ async fn the_audience_decides_who_gets_a_note_and_verifiers_only_when_named() {
             .to_string()
             .contains("notes_by_name_only names unknown agent 'ghost'")
     );
+}
+
+/// A completion verifier's review running when notes are posted gets, at
+/// its next turn boundary, only the note that names it.
+#[tokio::test]
+async fn a_running_review_gets_only_the_notes_that_name_its_verifier() {
+    let workspace = Workspace::new();
+    let go = Arc::new(tokio::sync::Notify::new());
+    let server = ResponsesServer::start_async({
+        let go = go.clone();
+        move |index, body| {
+            let go = go.clone();
+            Box::pin(async move {
+                Some(Reply::Stream(if !body.contains(VERIFIER) {
+                    complete_turn(&format!("c{index}"), "done")
+                } else if tool_outputs(&body) == 0 {
+                    go.notified().await;
+                    tool_call_turn("p0", "probe", json!({}))
+                } else {
+                    complete_turn(&format!("v{index}"), "ACCEPTED")
+                }))
+            })
+        }
+    })
+    .await;
+    let workflow = Arc::new(
+        builder(&server, &workspace, &["coder", "reviewer"])
+            .completion_verifier(
+                CompletionVerifierConfig::correctness("check", "reviewer").target("coder"),
+            )
+            .agent_tool("reviewer", ProbeTool::new("probe", false))
+            .build()
+            .unwrap(),
+    );
+    let run = tokio::spawn({
+        let workflow = workflow.clone();
+        async move { workflow.run_agent("coder", "Write the code.").await }
+    });
+    // The coder's request, then the review's first.
+    server.wait_for_requests(2).await;
+    workflow.post_note(Note::new("ALL-LIVE-NOTE")).unwrap();
+    workflow
+        .post_note(Note::new("REVIEWER-LIVE-NOTE").to(["reviewer"]))
+        .unwrap();
+    go.notify_one();
+    let result = run.await.unwrap().unwrap();
+    assert_eq!(result.status, AgentRunStatus::Completed);
+    let reviews = server
+        .bodies()
+        .into_iter()
+        .map(|body| user_text(&body))
+        .filter(|text| text.contains(VERIFIER))
+        .collect::<Vec<_>>();
+    assert_eq!(reviews.len(), 2);
+    let update = &reviews[1];
+    assert!(update.contains("REVIEWER-LIVE-NOTE"), "{update}");
+    assert!(!update.contains("ALL-LIVE-NOTE"), "{update}");
 }
 
 /// The messaging policy decides whether an agent a note excludes for its

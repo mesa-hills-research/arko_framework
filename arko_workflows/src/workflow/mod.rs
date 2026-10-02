@@ -2,6 +2,7 @@ pub mod cancel;
 pub mod config;
 pub mod engine;
 pub mod result;
+pub mod stop;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -36,6 +37,7 @@ use crate::workflow::cancel::{
 use crate::workflow::config::{WorkflowConfig, WorkflowMetadata};
 use crate::workflow::engine::{StartedRun, WorkflowEngine, fire_hooks_on_context};
 use crate::workflow::result::{AgentResult, AgentRunStatus, WorkflowEvent, WorkflowResult};
+use crate::workflow::stop::{Restart, StopRequest, StoppedRun};
 
 /// A configured multi-agent workflow.
 ///
@@ -43,9 +45,10 @@ use crate::workflow::result::{AgentResult, AgentRunStatus, WorkflowEvent, Workfl
 /// in parallel, or via non-blocking spawn with manual driving.
 ///
 /// A `Workflow` is one run. Once the run is stopped, by
-/// [`cancel`](Self::cancel) (or a [`WorkflowCancelHandle`]) or a hook's
-/// `Abort`, every run call in progress returns the stop's error after its
-/// agents have stopped, and every later one returns it at once.
+/// [`cancel`](Self::cancel) or [`stop`](Self::stop) (or a
+/// [`WorkflowCancelHandle`]) or a hook's `Abort`, every run call in progress
+/// returns the stop's error after its agents have stopped, and every later
+/// one returns it at once.
 pub struct Workflow {
     #[allow(dead_code)]
     config: WorkflowConfig,
@@ -71,7 +74,7 @@ impl Workflow {
         // Boxed: an `AgentResult` is large, and each layer holding one
         // grows the future a host awaits on its own stack.
         Box::pin(async move {
-            self.ensure_running().await?;
+            self.ensure_admitting().await?;
             let result = self
                 .engine
                 .run_agent(agent_name, prompt, &self.context)
@@ -114,6 +117,14 @@ impl Workflow {
         self.apply_stop(Ok(())).await
     }
 
+    /// `Err` with the stop's error once the run is stopped, and with
+    /// `Cancelled` during a graceful stop's wrap-up: no agent run starts
+    /// then.
+    async fn ensure_admitting(&self) -> Result<(), WorkflowError> {
+        self.ensure_running().await?;
+        self.context.run_control.check_admission(false)
+    }
+
     /// Once the run is stopped, replaces the call's outcome with the stop's
     /// error and saves the checkpoint recording the stop.
     async fn apply_stop<T>(&self, result: Result<T, WorkflowError>) -> Result<T, WorkflowError> {
@@ -140,7 +151,7 @@ impl Workflow {
         // Boxed: an `AgentResult` is large, and each layer holding one
         // grows the future a host awaits on its own stack.
         Box::pin(async move {
-            self.ensure_running().await?;
+            self.ensure_admitting().await?;
             let result = self
                 .engine
                 .continue_agent(previous, prompt, &self.context)
@@ -166,7 +177,7 @@ impl Workflow {
         // Boxed: an `AgentResult` is large, and each layer holding one
         // grows the future a host awaits on its own stack.
         Box::pin(async move {
-            self.ensure_running().await?;
+            self.ensure_admitting().await?;
             let result = self
                 .engine
                 .resume_agent(previous, resume, &self.context)
@@ -249,7 +260,7 @@ impl Workflow {
         // Boxed: an `AgentResult` is large, and each layer holding one
         // grows the future a host awaits on its own stack.
         Box::pin(async move {
-            self.ensure_running().await?;
+            self.ensure_admitting().await?;
             let result = self.engine.recover_agent(previous, &self.context).await;
             self.finish_call(result, |hook| {
                 hook.agent_name = Some(previous.agent_name.clone());
@@ -287,7 +298,7 @@ impl Workflow {
         &self,
         agents: Vec<(&str, String)>,
     ) -> Result<Vec<AgentResult>, WorkflowError> {
-        self.ensure_running().await?;
+        self.ensure_admitting().await?;
         let result = self.engine.run_agents_parallel(agents, &self.context).await;
         self.finish_call(result, |_| {}).await
     }
@@ -305,13 +316,13 @@ impl Workflow {
         agent_name: &str,
         prompt: &str,
     ) -> Result<AgentHandle, WorkflowError> {
-        self.ensure_running().await?;
+        self.ensure_admitting().await?;
         self.engine
             .spawn_agent(agent_name, prompt, &self.context)
             .await
     }
 
-    /// A handle that cancels this run from any task or thread.
+    /// A handle that cancels or stops this run from any task or thread.
     pub fn cancel_handle(&self) -> WorkflowCancelHandle {
         WorkflowCancelHandle::new(&self.context)
     }
@@ -322,7 +333,155 @@ impl Workflow {
         self.cancel_handle().cancel()
     }
 
-    /// Whether the run is stopped, by cancellation or a hook's abort.
+    /// Stops the run for `request`'s [kind](crate::workflow::stop::StopKind)
+    /// and reason; see the [`stop`](crate::workflow::stop) module.
+    ///
+    /// Without a wrap-up (the default), the run is cancelled at once, as
+    /// [`cancel`](Self::cancel) does, with
+    /// [`CancelCause::Stopped`](crate::CancelCause::Stopped).
+    ///
+    /// With a [wrap-up](StopRequest::wrap_up), first:
+    /// - no new agent run starts: run calls return `Cancelled` (only a
+    ///   completion verifier's review may start, of a completion an agent
+    ///   made before it was told);
+    /// - the tools of running agents see their stop signal at once
+    ///   ([`TaskContext::stop`](arko_agents::TaskContext::stop)): a
+    ///   [`StopAwareCommand`](arko_agents::StopAwareCommand) creates its
+    ///   stop file, and `wait_for_message` returns;
+    /// - each running agent (other than a completion verifier's review) is
+    ///   told at its next turn boundary to save its progress and call
+    ///   `complete_task`
+    ///   ([`wrap_up_notice`](crate::workflow::stop::wrap_up_notice), or the
+    ///   request's message). Completion verifiers don't review a completion
+    ///   made after the notice: it reports progress (the run is marked, and
+    ///   is continued after a restart).
+    ///
+    /// The wrap-up ends when no agent of the run is running any more, or
+    /// after its time; then the run is cancelled with the stop's cause, its
+    /// agents get the [grace period](WorkflowBuilder::cancel_grace_period),
+    /// and the checkpoint records the stop. Run calls of agents that
+    /// completed during the wrap-up return their results; once the run is
+    /// stopped, calls return `Cancelled`. Results the stop ended are marked
+    /// ([`AgentResult::stopped_by`]).
+    ///
+    /// Returns `false`, changing nothing, when the run is stopped already,
+    /// or when it is wrapping up and `request` has a wrap-up too. A request
+    /// without a wrap-up during a wrap-up ends the wrap-up at once; the
+    /// first stop's cause stands. `OnWorkflowCancelled` fires when the run
+    /// is stopped, with `stop_kind` and `reason` metadata. Timing a wrap-up
+    /// needs a Tokio runtime (the current one, or the one the handle was
+    /// made in); without one, the run is stopped at once.
+    pub fn stop(&self, request: StopRequest) -> bool {
+        self.cancel_handle().stop(request)
+    }
+
+    /// Whether a graceful stop's wrap-up is under way: the run is stopping
+    /// but not stopped yet ([`is_cancelled`](Self::is_cancelled) is still
+    /// `false`).
+    pub fn is_stopping(&self) -> bool {
+        self.context.run_control.is_wrapping_up()
+    }
+
+    /// The runs to relaunch after resuming a stopped run (with
+    /// [`WorkflowBuilder::resume_from`]), in the order they were recorded,
+    /// each with how [`restart`](Self::restart) relaunches it:
+    /// - runs a stop cancelled ([`AgentResult::stopped_by`] set, status
+    ///   `Cancelled`): [`Restart::Reopen`];
+    /// - runs that completed in a stop's wrap-up (`stopped_by` set, status
+    ///   `Completed`), started by the host: [`Restart::Continue`];
+    /// - the [`interrupted_runs`](Self::interrupted_runs) (the process
+    ///   ended while they ran, before or during a stop):
+    ///   [`Restart::Recover`].
+    ///
+    /// A run started inside another run's tool call is listed only when
+    /// that run can no longer resume it, as for `interrupted_runs`, and
+    /// isn't listed itself: restarted, that run resumes it (a call it was
+    /// running), or its call failed naming the run, so that it can resume it
+    /// with `run_workflow_agent`'s `resume_run`. Runs running now, runs
+    /// superseded after a restart, and runs paused for the caller (which a
+    /// stop doesn't end) are not listed. A
+    /// restarted run's new result replaces its old one, so it is no longer
+    /// listed unless a stop ends it again. Runs recorded by versions from
+    /// before graceful stops have no `stopped_by`: only their interrupted
+    /// runs are listed (continue cancelled ones with
+    /// [`reopen_agent`](Self::reopen_agent)).
+    pub fn stopped_runs(&self) -> Vec<StoppedRun> {
+        let interrupted = self
+            .interrupted_runs()
+            .into_iter()
+            .map(|result| result.agent_run_id)
+            .collect::<HashSet<_>>();
+        let results = self.context.agent_results.read().clone();
+        let candidates = results
+            .into_iter()
+            .filter_map(|result| {
+                let restart = if interrupted.contains(&result.agent_run_id) {
+                    Restart::Recover
+                } else if result.stopped_by.is_none()
+                    || self.context.registry.is_running(result.agent_run_id)
+                    || engine::is_superseded(&result)
+                {
+                    return None;
+                } else {
+                    match result.status {
+                        AgentRunStatus::Cancelled
+                            if result.task.parent.is_none()
+                                || engine::is_orphaned(&self.context, &result) =>
+                        {
+                            Restart::Reopen
+                        }
+                        AgentRunStatus::Completed if result.task.parent.is_none() => {
+                            Restart::Continue
+                        }
+                        _ => return None,
+                    }
+                };
+                Some(StoppedRun { result, restart })
+            })
+            .collect::<Vec<_>>();
+        // A run started inside the tool call of a run listed too is left to
+        // that run: restarted, it resumes it (a call it was running), or was
+        // told its ID (a call that failed with it) to resume it with
+        // `run_workflow_agent`'s `resume_run`.
+        let listed = candidates
+            .iter()
+            .map(|run| run.result.agent_run_id)
+            .collect::<HashSet<_>>();
+        candidates
+            .into_iter()
+            .filter(|run| {
+                run.result
+                    .task
+                    .parent
+                    .is_none_or(|parent| !listed.contains(&parent.task_id))
+            })
+            .collect()
+    }
+
+    /// Relaunches a run [`stopped_runs`](Self::stopped_runs) listed, as its
+    /// [`Restart`] says: [`recover_agent`](Self::recover_agent) (without a
+    /// message; `note` is not used),
+    /// [`reopen_agent`](Self::reopen_agent) with `note` after its reopened
+    /// notice, or [`continue_agent`](Self::continue_agent) with a message
+    /// saying the workflow was stopped and has restarted, then `note`.
+    /// `note` may be empty. Returns as those do.
+    pub async fn restart(
+        &self,
+        run: &StoppedRun,
+        note: &str,
+    ) -> Result<AgentResult, WorkflowError> {
+        match run.restart {
+            Restart::Recover => self.recover_agent(&run.result).await,
+            Restart::Reopen => self.reopen_agent(&run.result, note).await,
+            Restart::Continue => {
+                let message = crate::workflow::stop::continued_message(&run.result, note);
+                self.continue_agent(&run.result, &message).await
+            }
+        }
+    }
+
+    /// Whether the run is stopped, by cancellation, a stop or a hook's
+    /// abort.
     pub fn is_cancelled(&self) -> bool {
         self.context.run_control.is_stopped()
     }
@@ -547,7 +706,7 @@ impl Workflow {
         // Boxed: an `AgentResult` is large, and each layer holding one
         // grows the future a host awaits on its own stack.
         Box::pin(async move {
-            self.ensure_running().await?;
+            self.ensure_admitting().await?;
             let result = self
                 .engine
                 .reopen_agent(previous, prompt, &self.context)
@@ -683,8 +842,12 @@ impl Workflow {
     ///
     /// A stopped run is not complete: the snapshot, which records the stop,
     /// is persisted, `PostWorkflow` doesn't fire, and the stop's error is
-    /// returned ([`result`](Self::result) still returns the results).
+    /// returned ([`result`](Self::result) still returns the results). During
+    /// a graceful stop's wrap-up, it first waits for the run to stop.
     pub async fn finish(&self) -> Result<WorkflowResult, WorkflowError> {
+        if self.context.run_control.is_wrapping_up() {
+            self.context.run_control.stopped().await;
+        }
         if let Some(stop) = self.context.run_control.error() {
             self.checkpoint().await?;
             return Err(stop);
@@ -1374,7 +1537,8 @@ impl WorkflowBuilder {
     /// These agents (registration names) get a note ([`Workflow::post_note`])
     /// only when its audience names them, as completion verifiers do: roles
     /// that must stay independent of the operator's steering, such as a
-    /// checker. Adds to earlier calls. Default: none besides the verifiers.
+    /// checker. Adds to earlier calls. Default: none besides the verifiers'
+    /// reviews.
     pub fn notes_by_name_only<I, S>(mut self, agents: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -2116,8 +2280,8 @@ fn normalize_workspace(workspace: &std::path::Path) -> Result<PathBuf, WorkflowE
     Ok(normalized)
 }
 
-/// A task that can be resumed must keep the settings that define the agent's
-/// behavior. The task stores the prepared configuration, so compare it with
+/// A task that can be resumed (or restarted after a stop cancelled it) must
+/// keep the settings that define the agent's behavior. The task stores the prepared configuration, so compare it with
 /// the builder's user configuration after removing workflow-owned additions.
 /// Model registry snapshots are deliberately ignored: the provider and model
 /// id remain authoritative, while the registry may gain metadata between
@@ -2157,13 +2321,21 @@ fn validate_resumed_agent_configs(
     workflow_tools.extend(agent_tools.values().flatten().map(|tool| tool.name()));
 
     for result in resumed_results {
-        if !matches!(
+        // Runs that can be continued, and runs a stop cancelled (restarted
+        // after the resume; see `Workflow::stopped_runs`). Runs cancelled
+        // otherwise, reopened only on request, keep the configuration saved
+        // in their task.
+        let continued = matches!(
             result.status,
             AgentRunStatus::Completed
                 | AgentRunStatus::WaitingForInput
                 | AgentRunStatus::Paused
                 | AgentRunStatus::Interrupted
-        ) {
+        );
+        let stopped = result.status == AgentRunStatus::Cancelled
+            && result.stopped_by.is_some()
+            && !engine::is_superseded(result);
+        if !continued && !stopped {
             continue;
         }
         let Some(current) = configured.get(&result.agent_name) else {
@@ -2430,3 +2602,7 @@ mod budget_tests;
 #[cfg(test)]
 #[path = "plan_budget_tests.rs"]
 mod plan_budget_tests;
+
+#[cfg(test)]
+#[path = "stop_tests.rs"]
+mod stop_tests;

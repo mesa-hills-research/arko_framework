@@ -333,10 +333,12 @@ that, and changes nothing while the request may fit:
   otherwise it says the output was too large and to ask for less.
 - If the provider still answers that the request is over the model's input limit (an
   `ErrorKind::ContextOverflow` error), the largest result added since the last answered
-  request is shortened (to a preview, then to its notice alone) and the request is sent
-  again, at most twice. After that the error ends recovery like any error that retrying
-  can't fix, recorded as `ContextOverflow`. A handover can't help: its report request
-  would be over the limit too.
+  request is shortened and the request is sent again, at most twice: to a preview when
+  it is larger than one, otherwise (or when it was shortened before) to its notice alone.
+  After that, or at once when that result is under about 500 tokens (it is then left
+  alone), the error ends recovery like any error that retrying can't fix, recorded as
+  `ContextOverflow`. A handover can't help: its report request would be over the limit
+  too.
 - `ToolResultShortened` reports each shortened result, with its estimated size and the
   reason; the `ToolResult` event before it has the whole output.
 
@@ -506,7 +508,8 @@ The runtime does not check arguments against the definition before calling `exec
 `parallel_safe` only for tools whose calls don't affect each other, such as reads (see
 [Several calls in one response](#several-calls-in-one-response)). A tool can opt out of
 the agent's time limit with `uses_host_timeout`, and out of being stopped mid-call by
-`CancelTask` or `SuspendTask` with `interruptible`, when it winds its own work down. It
+`CancelTask` or `SuspendTask` with `interruptible`, when it winds its own work down (see
+[Stopping tool calls](#stopping-tool-calls)). It
 can opt out of result interception with `allow_result_interception`, and track what
 reached the conversation with `reset_context` and `observe_context`. `bind_runtime` gives
 a background tool a weak command sender for the task, through which it can send
@@ -537,6 +540,95 @@ status is a tool error. The process
 is killed when its call is dropped, for example when the task's runtime is aborted
 mid-call. A boolean parameter takes a JSON boolean or the text `true` or `false`, so it
 works in both tool calling modes.
+
+A host that calls a tool itself (outside a runtime, or in a test) builds its context with
+`TaskContext::new(task_id, agent_name, initial_task_prompt, working_directory)`, which
+leaves the call fields unset and its stop signal one that never fires; set the public
+fields afterwards, or the stop signal with `with_stop`. `TaskContext` is `#[non_exhaustive]`,
+so fields can be added without breaking callers: outside this crate it can't be built with
+a struct literal (adding `stop` broke literals written before it; `new` replaces them).
+
+### Stopping tool calls
+
+A long tool call can learn that its task is being stopped and wind its work down instead
+of being dropped mid-work. `TaskContext::stop` is a `StopSignal` (`arko_agents::stop`):
+`is_stopping()`, `reason()`, and `stopping().await`, which resolves when it fires. It
+fires when:
+
+- the runtime receives `CancelTask` or `SuspendTask` while the call runs (reason `Task
+  cancelled.` or `Task suspended.`); an interruptible call (the default) is dropped at that
+  moment anyway, so this matters to a tool that isn't interruptible, which the runtime
+  waits for;
+- the host fires the signal it gave the runtime with `AgentRuntime::with_stop_signal`
+  (`StopSource::new()`, `.signal()`, `.stop(reason)`): an arko_workflows graceful stop
+  fires it at the start of its wrap-up, while its agents still run. Firing it changes
+  nothing else: the task goes on until the host cancels or suspends it.
+
+A stop has no time limit of its own: what bounds it is the host (a workflow aborts an agent
+that hasn't stopped within its grace period) and the tool's own grace. Make a tool's stop
+safe to repeat: a call that stops part way is settled on recovery like any other (see
+[Task snapshots and recovery](#task-snapshots-and-recovery)).
+
+`StopAwareCommand` runs a child process that stops cooperatively. The child gets
+`ARKO_STOP_FILE`, the path of a file that exists once the task is stopping; a script checks
+it between units of work, saves its state and exits. When the signal fires, the file is
+created and the child has `grace` (10 seconds by default) to exit; then, on Unix, its
+process group gets `SIGTERM` and `terminate_grace` (5 seconds) more; then it is killed.
+Without a stop the child runs as long as it takes: nothing is timed until a stop is under
+way.
+
+```rust
+use arko_agents::{StopAwareCommand, TaskContext, ToolError};
+use std::time::Duration;
+
+async fn search(context: &TaskContext<'_>) -> Result<String, ToolError> {
+    let mut command = tokio::process::Command::new("python3");
+    command.arg("search.py").current_dir(context.current_working_directory);
+    let output = StopAwareCommand::new(command)
+        .grace(Duration::from_secs(20))
+        .output(&context.stop)
+        .await
+        .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
+    let stopped = match output.stopped {
+        Some(how) => format!(" (stopped: {how:?})"),
+        None => String::new(),
+    };
+    Ok(format!("{}{stopped}", String::from_utf8_lossy(&output.stdout)))
+}
+```
+
+```python
+import os
+while work_left():
+    do_one_unit()
+    if os.path.exists(os.environ["ARKO_STOP_FILE"]):
+        save_state()
+        break
+```
+
+`output` captures stdout and stderr with a null stdin; `status` keeps the command's own
+standard streams. `StopAwareOutput::stopped` says how a stop ended the child
+(`ChildStop::Exited` within the grace, `Terminated` by `SIGTERM`, or `Killed`), and is
+`None` when it ended without one. `stop_file(path)` names the file (for a child in a
+sandbox that sees only some directories); otherwise it is a fresh path in the system's
+temporary directory, removed afterwards. On Unix the child leads a new process group, the
+signals reach the processes it starts (unless one leaves the group with `setsid`), and
+after a stop the group is killed once the child has ended. Elsewhere there is no `SIGTERM`
+step, and only the child itself is terminated: processes it started may outlive it.
+Dropping the call (an interruptible call cancelled, or over its time limit) kills the child
+at once, with its group on Unix. A tool that wants its child to have the grace when its
+task is cancelled outright, not only in a host's graceful stop, returns `false` from
+`interruptible`.
+
+On Unix, being in its own process group, the child is out of the terminal's reach: the
+terminal's Ctrl-C doesn't reach it (the host's stop does), and it can't read the terminal.
+A read stops it (`SIGTTIN`), and the call waits until a stop kills it. Give a child that may
+read its standard input a null one (`command_mut().stdin(Stdio::null())`) or a file when it
+runs with `status`; `output` always does. A host that exits without unwinding
+(`std::process::exit` runs no destructors, so no call kills its child) calls
+`kill_stop_aware_commands()` first, which kills the process group of every
+`StopAwareCommand` child running in the process; arko_workflows' `stop_on_signals` does at
+its third signal.
 
 ### Result interception and execution middleware
 
@@ -727,7 +819,8 @@ Besides answers to the waiting states, a running task accepts:
 
 A stopped tool call is dropped, which kills an end-user command it started. A call to a
 tool that isn't interruptible (`Tool::interruptible` returns `false`) finishes first, and
-the cancellation or suspension then takes effect.
+the cancellation or suspension then takes effect; its stop signal (`TaskContext::stop`)
+fires so that it can wind down (see [Stopping tool calls](#stopping-tool-calls)).
 
 `CancelTask` and `SuspendTask` stop the task without another model request, also when
 queued behind context. Context the runtime has taken from the channel is never lost when a
@@ -1219,8 +1312,10 @@ let config = AgentConfig::builder(id, name, llm_config)
    for a refusal fallback's request. A conversation whose first request was already over
    the threshold doesn't hand over (the fresh one would start over it too); a warning is
    logged once. The estimate is the latest request's reported input plus what the
-   conversation gained since (the reply and the turn's tool results), as the
-   [overflow guard](#tool-result-size) estimates it, so a turn whose results take the
+   conversation gained since: the reply (at least its reported output tokens) and the
+   turn's tool results, at the bytes-per-token ratio calibrated from the task's own
+   requests (the [overflow guard](#tool-result-size)'s calibrated estimate, not the
+   10-bytes-per-token lower bound it decides by). So a turn whose results take the
    conversation over the threshold hands over before the request that would carry them,
    not one request later. `HandoverRequested` and the record keep the latest request's
    reported input. The Claude Code runtime checks the latest request's input, as Claude

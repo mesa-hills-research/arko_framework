@@ -96,6 +96,7 @@ impl AgentResult {
             summary,
             error,
             task,
+            stopped_by: None,
         }
     }
 }
@@ -109,6 +110,11 @@ pub struct AgentResult {
     pub summary: String,
     pub error: Option<String>,
     pub task: arko_agents::Task,
+    /// The stop that ended the run, if one did; see
+    /// [`stopped_by`](Self::stopped_by). `None` in results recorded by an
+    /// older version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_by: Option<crate::workflow::stop::StopRecord>,
 }
 
 impl AgentResult {
@@ -125,6 +131,21 @@ impl AgentResult {
     /// Returns the total output tokens generated.
     pub fn total_output_tokens(&self) -> usize {
         self.task.total_output_tokens()
+    }
+
+    /// The stop that ended this run, when a stop the host asked for ended
+    /// it: the run was cancelled by
+    /// [`Workflow::stop`](crate::Workflow::stop) or
+    /// [`Workflow::cancel`](crate::Workflow::cancel) (status `Cancelled`,
+    /// including a run aborted after the grace period), or it completed
+    /// after its stop's wrap-up notice told it to finish (status
+    /// `Completed`). A stopped run is blameless: its outcome says nothing
+    /// about the agent's work, so don't count it as a failure (or a
+    /// success); [`Workflow::stopped_runs`](crate::Workflow::stopped_runs)
+    /// lists it for a restart after resuming. `None` for every other run, a
+    /// run a hook's abort ended, and runs recorded by an older version.
+    pub fn stopped_by(&self) -> Option<&crate::workflow::stop::StopRecord> {
+        self.stopped_by.as_ref()
     }
 
     /// Why the run failed, when it failed at an error-recovery pause the

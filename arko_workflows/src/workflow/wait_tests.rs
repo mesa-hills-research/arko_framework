@@ -103,14 +103,7 @@ async fn call(
     params: &[(&str, Value)],
 ) -> Result<String, ToolError> {
     let context = workflow.context();
-    let task_context = TaskContext {
-        task_id: run,
-        agent_name: agent,
-        initial_task_prompt: "",
-        current_working_directory: &context.workspace,
-        tool_call_id: None,
-        recovering: false,
-    };
+    let task_context = TaskContext::new(run, agent, "", &context.workspace);
     let params = params
         .iter()
         .map(|(name, value)| (name.to_string(), value.clone()))
@@ -416,14 +409,7 @@ async fn an_automatic_limit_counts_from_the_last_model_request() {
         // takes 100 s to answer with the call.
         tool.observe_context(lead.id, &arko_ai::Message::new_user("Go."));
         tokio::time::advance(Duration::from_secs(100)).await;
-        let task_context = TaskContext {
-            task_id: lead.id,
-            agent_name: "lead",
-            initial_task_prompt: "",
-            current_working_directory: &context.workspace,
-            tool_call_id: None,
-            recovering: false,
-        };
+        let task_context = TaskContext::new(lead.id, "lead", "", &context.workspace);
         let started = tokio::time::Instant::now();
         let result = tool.execute(&task_context, HashMap::new()).await.unwrap();
         assert_eq!(result, expected);
@@ -455,14 +441,7 @@ async fn an_automatic_limit_leaves_a_wait_at_least_a_second() {
     // The limit is 270 s; the model took longer than that to call the tool.
     tool.observe_context(lead.id, &arko_ai::Message::new_user("Go."));
     tokio::time::advance(Duration::from_secs(300)).await;
-    let task_context = TaskContext {
-        task_id: lead.id,
-        agent_name: "lead",
-        initial_task_prompt: "",
-        current_working_directory: &context.workspace,
-        tool_call_id: None,
-        recovering: false,
-    };
+    let task_context = TaskContext::new(lead.id, "lead", "", &context.workspace);
     let started = tokio::time::Instant::now();
     let result = tool.execute(&task_context, HashMap::new()).await.unwrap();
     assert_eq!(result, "No messages after 1 s.");
@@ -498,14 +477,7 @@ async fn a_wait_whose_message_is_seen_before_its_forward_does_not_spin() {
     let waiting = {
         let (tool, polls, cwd) = (tool.clone(), polls.clone(), context.workspace.clone());
         let mut wait = Box::pin(async move {
-            let task_context = TaskContext {
-                task_id: lead,
-                agent_name: "lead",
-                initial_task_prompt: "",
-                current_working_directory: &cwd,
-                tool_call_id: None,
-                recovering: false,
-            };
+            let task_context = TaskContext::new(lead, "lead", "", &cwd);
             tool.execute(&task_context, HashMap::new()).await
         });
         tokio::spawn(std::future::poll_fn(move |cx| {
@@ -663,6 +635,7 @@ async fn a_start_or_finish_ends_the_wait_and_start_notices_still_come() {
     let notices = ActivityNotices {
         context: context.clone(),
         agent_name: "lead".to_string(),
+        review: false,
     };
     let notice = notices.turn_context(lead.id).unwrap();
     assert!(
@@ -723,6 +696,44 @@ async fn stops_end_a_long_wait_at_once() {
     });
     assert_eq!(result, "Workflow stopping.");
     assert!(cancelled.elapsed() < Duration::from_secs(1));
+}
+
+/// A graceful stop's wrap-up ends a long wait at once, through the call's
+/// stop signal: the agent is told to finish at its next turn boundary.
+#[tokio::test]
+async fn a_wrap_up_ends_a_long_wait_through_the_stop_signal() {
+    let workspace = Workspace::new();
+    let workflow = builder(&workspace, &["lead", "worker"])
+        .wait_for_message_timeout(Duration::from_secs(3_600))
+        .build()
+        .unwrap();
+    let context = workflow.context();
+    let lead = run(&workflow, "lead");
+    let task_context = TaskContext::new(lead.id, "lead", "", &context.workspace)
+        .with_stop(context.run_control.tools_signal());
+    let tool = tool(&workflow, "lead", WAIT_FOR_MESSAGE_TOOL_NAME).unwrap();
+    // Bounded: a wait that ignored the signal would last the hour.
+    let wait = tokio::time::timeout(
+        Duration::from_secs(10),
+        tool.execute(&task_context, HashMap::new()),
+    );
+    let (result, stopped) = tokio::join!(wait, async {
+        until_status(&workflow, "lead", WAITING).await;
+        assert!(workflow.stop(
+            crate::StopRequest::drain("deploying a fix").wrap_up(Duration::from_secs(3_600))
+        ));
+        Instant::now()
+    });
+    let result = result.expect("the wait returns on the stop signal");
+    assert_eq!(result.unwrap(), "Workflow stopping.");
+    assert!(stopped.elapsed() < Duration::from_secs(1));
+    assert!(workflow.is_stopping(), "the run is still wrapping up");
+    assert!(
+        context
+            .run_control
+            .wrap_up_notice(lead.id)
+            .is_some_and(|notice| notice.starts_with("The workflow is stopping: deploying a fix."))
+    );
 }
 
 /// Only agent messages the conversation lacks end a wait: not one it holds

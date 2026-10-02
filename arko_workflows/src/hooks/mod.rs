@@ -39,7 +39,10 @@ pub enum HookPoint {
     /// (an agent waiting for input or paused), a cancellation, or a stop.
     OnWorkflowFailed,
     /// A [`WorkflowCancelHandle`](crate::workflow::cancel::WorkflowCancelHandle)
-    /// cancelled the run; fires once, from the task that cancelled it.
+    /// cancelled or [stopped](crate::Workflow::stop) the run; fires once,
+    /// when the run is stopped (after a graceful stop's wrap-up), from the
+    /// task that stopped it. For a graceful stop its metadata has
+    /// `stop_kind` and `reason`.
     OnWorkflowCancelled,
     OnBudgetExceeded,
     OnBudgetWarning,

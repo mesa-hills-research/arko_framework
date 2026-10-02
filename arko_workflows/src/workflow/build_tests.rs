@@ -155,14 +155,12 @@ async fn memory_tools_follow_each_agents_access() {
             .build_tool_registry(agent, workflow.context(), 0);
         registry.get(LIST_MEMORIES_TOOL_NAME).unwrap()
     };
-    let task = TaskContext {
-        task_id: uuid::Uuid::new_v4(),
-        agent_name: "Friendly reader",
-        initial_task_prompt: "read",
-        current_working_directory: &workspace.0,
-        tool_call_id: None,
-        recovering: false,
-    };
+    let task = TaskContext::new(
+        uuid::Uuid::new_v4(),
+        "Friendly reader",
+        "read",
+        &workspace.0,
+    );
     let listed = list("reader").execute(&task, HashMap::new()).await.unwrap();
     assert_eq!(
         listed,

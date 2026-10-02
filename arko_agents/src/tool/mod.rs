@@ -66,7 +66,15 @@ impl ToolOutput {
 ///
 /// This allows tools to access relevant information from the current task's environment,
 /// such as the current working directory.
+///
+/// A host that builds one itself (to call a tool outside a runtime, or in a
+/// test) uses [`TaskContext::new`], which leaves the call fields unset and
+/// the [stop signal](Self::stop) one that never fires; the fields stay
+/// public to set afterwards. The struct is `#[non_exhaustive]`, so fields
+/// can be added without breaking callers: outside this crate it can't be
+/// built with a struct literal.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct TaskContext<'a> {
     pub task_id: uuid::Uuid,
     pub agent_name: &'a str,
@@ -83,6 +91,44 @@ pub struct TaskContext<'a> {
     /// [`Resume`](ToolRecovery::Resume) tool finds the work the first run
     /// started, by [`tool_call_id`](Self::tool_call_id), and continues it.
     pub recovering: bool,
+    /// Fires when the task is being stopped while the call runs: the
+    /// runtime received `CancelTask` or `SuspendTask`, or the host fired the
+    /// signal it gave the runtime (a workflow's graceful stop). A long call
+    /// can watch it to save its work and return early; see
+    /// [`StopSignal`](crate::stop::StopSignal) and
+    /// [`StopAwareCommand`](crate::stop::StopAwareCommand) for a child
+    /// process. An [interruptible](Tool::interruptible) call is dropped as
+    /// soon as `CancelTask` or `SuspendTask` arrives whatever it does, so
+    /// it sees the signal only for a host's graceful stop.
+    pub stop: crate::stop::StopSignal,
+}
+
+impl<'a> TaskContext<'a> {
+    /// The context of a task outside a call: no call ID, not recovering, and
+    /// a stop signal that never fires. Set the public fields to change
+    /// them, or [`with_stop`](Self::with_stop).
+    pub fn new(
+        task_id: uuid::Uuid,
+        agent_name: &'a str,
+        initial_task_prompt: &'a str,
+        current_working_directory: &'a Path,
+    ) -> Self {
+        Self {
+            task_id,
+            agent_name,
+            initial_task_prompt,
+            current_working_directory,
+            tool_call_id: None,
+            recovering: false,
+            stop: crate::stop::StopSignal::never(),
+        }
+    }
+
+    /// This context with `stop` as its [stop signal](Self::stop).
+    pub fn with_stop(mut self, stop: crate::stop::StopSignal) -> Self {
+        self.stop = stop;
+        self
+    }
 }
 
 /// How a tool call that was running when its task stopped (its host

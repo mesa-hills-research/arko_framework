@@ -58,6 +58,9 @@ pub use error::WorkflowError;
 pub use workflow::cancel::{CancelCause, Cancellation, WorkflowCancelHandle};
 pub use workflow::config::{SupportedPlatform, WorkflowDependency, WorkflowMetadata};
 pub use workflow::result::{AgentResult, AgentRunStatus, WorkflowEvent, WorkflowResult};
+pub use workflow::stop::{
+    Restart, StopKind, StopRecord, StopRequest, StoppedRun, WrapUp, stop_on_signals,
+};
 pub use workflow::{AgentHandle, Workflow, WorkflowBuilder};
 
 /// Convenience re-exports for common usage.
@@ -99,5 +102,8 @@ pub mod prelude {
     pub use crate::workflow::cancel::{CancelCause, Cancellation, WorkflowCancelHandle};
     pub use crate::workflow::config::{SupportedPlatform, WorkflowDependency, WorkflowMetadata};
     pub use crate::workflow::result::{AgentResult, AgentRunStatus, WorkflowEvent, WorkflowResult};
+    pub use crate::workflow::stop::{
+        Restart, StopKind, StopRecord, StopRequest, StoppedRun, WrapUp, stop_on_signals,
+    };
     pub use crate::workflow::{Workflow, WorkflowBuilder};
 }

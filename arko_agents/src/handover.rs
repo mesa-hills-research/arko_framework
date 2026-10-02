@@ -38,8 +38,10 @@ pub const REPORT_INTRODUCTION: &str = "Your earlier conversation on this task wa
 /// threshold must be set. In arko's own runtime it is checked before each
 /// model request against the estimated input of that request: the latest
 /// request's reported input, plus what the conversation gained since (the
-/// reply and the turn's tool results), estimated as the overflow guard
-/// estimates it (see
+/// reply, at least its reported output tokens, and the turn's tool
+/// results) at the bytes-per-token ratio calibrated from the task's own
+/// requests: the overflow guard's calibrated estimate, not the
+/// 10-bytes-per-token lower bound it decides by (see
 /// [`ToolResultLimits`](crate::agent_config::ToolResultLimits)). So a turn
 /// whose results take the conversation over the threshold hands over
 /// before the request that would carry them. The Claude Code runtime

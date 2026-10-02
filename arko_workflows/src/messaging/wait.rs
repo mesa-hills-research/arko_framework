@@ -338,7 +338,9 @@ impl Tool for WaitForMessageTool {
         let mut forward_deadline = None;
         let (mut arrivals_open, mut versions_open, mut stopping_open) = (true, true, true);
         loop {
-            if context.run_control.is_stopped() {
+            // Stopped, or a graceful stop's wrap-up began: the agent is
+            // told what to do at its next turn boundary.
+            if context.run_control.is_stopped() || task_context.stop.is_stopping() {
                 return Ok("Workflow stopping.".to_string());
             }
             if *stopping.borrow_and_update() {
@@ -365,6 +367,7 @@ impl Tool for WaitForMessageTool {
             tokio::select! {
                 biased;
                 _ = context.run_control.stopped() => {}
+                _ = task_context.stop.stopping() => {}
                 changed = stopping.changed(), if stopping_open => stopping_open = changed.is_ok(),
                 changed = arrivals.changed(), if arrivals_open => arrivals_open = changed.is_ok(),
                 changed = versions.changed(), if versions_open => versions_open = changed.is_ok(),

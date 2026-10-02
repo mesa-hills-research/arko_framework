@@ -190,7 +190,7 @@ let _task = join.await.expect("agent task panicked")?;
 To let an agent decide which other agents run, enable
 [workflow services](#workflow-services-and-voting).
 
-## Cancelling a run
+## Stopping a run
 
 A `Workflow` is one run. `cancel_handle()` returns a `WorkflowCancelHandle` that
 can be cloned and used from any task or thread; `cancel()` on it (or on the
@@ -238,6 +238,51 @@ check the checkpoint's `cancellation` before calling `resume_from`. From Python,
 `workflow.cancel()` stops the run, and pending `run_agent` and
 `run_agents_parallel` calls raise `arko_workflows.WorkflowCancelled`. See
 [stopping a run](INDEX.md#stopping-a-run) for the details, including durable steps.
+
+### Graceful stop
+
+`stop(StopRequest)` stops the run for a stated reason (`StopKind::Operator`,
+`Drain` before a redeploy, `Limit`, `Failure`), optionally after a wrap-up in
+which running agents finish their work. No wrap-up is the default: the run is
+cancelled at once, as with `cancel()`. With one, no new agent run starts, the
+tools of running agents see their stop signal (a `StopAwareCommand` child finds
+its `ARKO_STOP_FILE`; `wait_for_message` returns), and each agent is told at its
+next turn boundary to save its progress and call `complete_task` (completion
+verifiers don't review that completion: it reports progress). The wrap-up
+ends when no agent runs any more or its time is up; then the run is cancelled as
+above, with `CancelCause::Stopped`, and checkpointed. `stop_on_signals` maps
+Ctrl-C and `SIGTERM` to a stop:
+
+```rust
+use arko_workflows::{StopRequest, stop_on_signals};
+
+let _signals = stop_on_signals(
+    workflow.cancel_handle(),
+    StopRequest::drain("stopped by a signal").wrap_up(Duration::from_secs(90)),
+)?;
+```
+
+A second signal ends the wrap-up at once, and a third kills the children of
+running `StopAwareCommand`s (on Unix) and exits the process. Under
+systemd, give the unit `KillMode=mixed` and a `TimeoutStopSec` longer than the
+wrap-up, the grace period and the longest tool stop grace together.
+
+A stopped run is blameless: `AgentResult::stopped_by()` marks the runs a stop
+ended (cancelled, or completed in the wrap-up), so a host doesn't count them as
+failures. After resuming from the checkpoint, `stopped_runs()` lists them, with
+the runs that were interrupted, and `restart(&run, note)` relaunches each (a run
+an agent delegated is left to that agent, which is told its ID to resume it):
+
+```rust
+let resumed = builder.resume_from(&checkpoint).build()?;
+for run in resumed.stopped_runs() {
+    resumed.restart(&run, "").await?;
+}
+```
+
+See [graceful stop](INDEX.md#graceful-stop) for the wrap-up notice and the
+rules, and the [workflow design guide](../docs/guides/workflow-design.md#make-side-effects-durable)
+for what a resume after a redeploy allows to change.
 
 ## Shared memory
 
@@ -320,7 +365,7 @@ Hook points:
 A hook returns `Continue`, `Skip`, or `Abort(reason)`. `Skip` rejects the current
 tool call only at `PreToolExecution`. `Abort` at any point stops the whole run:
 running agents are cancelled, and the run calls return
-`WorkflowError::AbortedByHook` (see [cancelling a run](#cancelling-a-run)). At
+`WorkflowError::AbortedByHook` (see [stopping a run](#stopping-a-run)). At
 `PreToolExecution` the call does not run; at `PostToolExecution` its result
 stands. Hooks cannot change tool output: use a `ToolResultInterceptor`, which runs
 before the result enters the agent's conversation. See
@@ -578,7 +623,7 @@ let notes = workflow.notes_handle();
 tokio::spawn(async move { notes.post(Note::new("Wrap up by 18:00.")) });
 ```
 
-Completion verifiers get a note only when it names them, and so do the agents set with
+Completion verifiers' reviews get a note only when it names them, and so do the agents set with
 `WorkflowBuilder::notes_by_name_only([...])`: keep independent roles, such as a checker,
 independent of your steering (and restrict whom they can hear from, since an agent can
 pass a note on in a message). A verifier judges without the target's notes, so address a
@@ -651,11 +696,12 @@ while a request too large for the model fails only one run.
 
 ```rust
 use arko_ai::ErrorKind;
+use arko_workflows::StopRequest;
 
 let result = workflow.agent_result(task_id).unwrap();
 if result.failure_kind() == Some(ErrorKind::Authentication) {
     // Every run on this login would fail: stop, save, and ask to sign in again.
-    workflow.cancel();
+    workflow.stop(StopRequest::failure("the login expired"));
 }
 ```
 
@@ -899,6 +945,11 @@ let workflow = Workflow::builder()
 
 For interactive shell work, register the arko_agents terminal tools with
 `WorkflowBuilder::agent_tool`; see [interactive terminals](../docs/interactive-terminals.md).
+
+A tool that works for a long time can watch `TaskContext::stop`, which fires when
+the workflow starts a graceful stop (or its agent is cancelled), save its state
+and return early; `arko_agents::StopAwareCommand` does this for a child process.
+See [stopping tool calls](../arko_agents/README.md#stopping-tool-calls).
 
 ## Architecture
 

@@ -115,6 +115,11 @@ pub struct AgentRunRecord {
     /// checkpoints from before it existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_charged: Option<usize>,
+    /// The stop that ended the run
+    /// ([`AgentResult::stopped_by`](crate::AgentResult::stopped_by)).
+    /// Absent for other runs, and in checkpoints from before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_by: Option<crate::workflow::stop::StopRecord>,
 }
 
 impl AgentRunRecord {
@@ -129,6 +134,7 @@ impl AgentRunRecord {
             // A recorded interrupted run's usage is all in the ledger.
             usage_charged: (result.status == AgentRunStatus::Interrupted)
                 .then_some(result.task.usage_history.len()),
+            stopped_by: result.stopped_by.clone(),
         }
     }
 }
@@ -191,7 +197,8 @@ impl WorkflowState {
                 .iter()
                 .find(|missing| missing.agent_run_id == record.agent_run_id)
             {
-                let result = AgentResult::of_task(record.agent_name.clone(), task);
+                let mut result = AgentResult::of_task(record.agent_name.clone(), task);
+                result.stopped_by = record.stopped_by.clone();
                 warnings.push(format!(
                     "The checkpoint lacks the latest state of agent '{}' ({}), which could not be saved ({}): it was {:?}, but resumes as last saved, {:?}, from {}.",
                     record.agent_name,
@@ -227,6 +234,7 @@ impl WorkflowState {
                 summary: record.summary.clone(),
                 error: record.error.clone(),
                 task,
+                stopped_by: record.stopped_by.clone(),
             });
         }
         for missing in &self.missing_task_states {

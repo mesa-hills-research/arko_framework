@@ -22,6 +22,8 @@ pub(super) struct RunEnvironment {
     pub initial_task_prompt: String,
     pub working_directory: PathBuf,
     pub middleware: Option<Arc<dyn ToolExecutionMiddleware>>,
+    /// What the task's calls see of a stop: see [`TaskContext::stop`].
+    pub stop: crate::stop::StopSignal,
 }
 
 impl RunEnvironment {
@@ -34,6 +36,7 @@ impl RunEnvironment {
             current_working_directory: &self.working_directory,
             tool_call_id: Some(run.tool_call_id),
             recovering: run.recovering,
+            stop: self.stop.clone(),
         }
     }
 

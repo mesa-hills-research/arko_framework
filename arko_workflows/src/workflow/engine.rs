@@ -41,7 +41,7 @@ use crate::verification::{
     CompletionVerifierConfig, VerificationDecision, VerificationKind, VerificationRecord,
 };
 use crate::voting::{CAST_VOTE_TOOL_NAME, CastVoteTool};
-use crate::workflow::cancel::CancelCause;
+use crate::workflow::cancel::{CancelCause, Cancellation};
 use crate::workflow::result::{AgentResult, AgentRunStatus};
 
 use super::AgentHandle;
@@ -192,15 +192,6 @@ pub(crate) fn fire_hooks_on_context(
     }
 }
 
-/// Fires hooks at a point where their result has no effect.
-pub(crate) fn fire_hooks_ignoring_result(
-    ctx: &Arc<SharedContext>,
-    point: HookPoint,
-    configure: impl FnOnce(&mut HookContext),
-) {
-    let _ = fire_hooks(ctx, &point, configure);
-}
-
 /// Runs the hooks registered at `point` until one returns something other
 /// than `Continue`, and returns that result.
 fn fire_hooks(
@@ -240,8 +231,48 @@ pub(crate) fn abort_run(ctx: &SharedContext, point: &HookPoint, reason: String) 
         reason,
     };
     let error = cause.to_error();
-    ctx.run_control.stop(cause);
+    // During a graceful stop's wrap-up the abort ends the wrap-up, and the
+    // stop, which came first, is made.
+    if ctx.run_control.stop(cause)
+        && matches!(
+            ctx.run_control.cancellation(),
+            Some(Cancellation {
+                cause: CancelCause::Stopped { .. },
+                ..
+            })
+        )
+    {
+        fire_stop_hook(ctx);
+    }
     ctx.run_control.error().unwrap_or(error)
+}
+
+/// Fires `OnWorkflowCancelled` for the run's stop, ignoring its result. For
+/// a [`CancelCause::Stopped`] stop the hook's metadata has `stop_kind`
+/// (`operator`, `drain`, `limit` or `failure`) and `reason`.
+pub(crate) fn fire_stop_hook(ctx: &SharedContext) {
+    let cancellation = ctx.run_control.cancellation();
+    let _ = fire_hooks(ctx, &HookPoint::OnWorkflowCancelled, |hook| {
+        if let Some(Cancellation {
+            cause: CancelCause::Stopped { kind, reason },
+            ..
+        }) = &cancellation
+        {
+            hook.metadata
+                .insert("stop_kind".to_string(), serde_json::json!(kind.as_str()));
+            hook.metadata
+                .insert("reason".to_string(), serde_json::json!(reason));
+        }
+    });
+}
+
+/// Unregisters agent run `agent_run_id` from the run's stop and, when it was
+/// the last running agent of a graceful stop's wrap-up, stops the run.
+fn unregister_run(ctx: &SharedContext, agent_run_id: uuid::Uuid) {
+    ctx.run_control.unregister(agent_run_id);
+    if ctx.run_control.end_wrap_up_if_idle() {
+        fire_stop_hook(ctx);
+    }
 }
 
 /// The error of a stopped run.
@@ -1258,6 +1289,9 @@ pub(crate) struct StartOptions {
     /// The tool call the run runs inside (a delegated agent's or a
     /// verifier's), recorded in its task ([`Task::parent`]).
     pub parent: Option<arko_agents::TaskParent>,
+    /// A completion verifier's review: it may start during a graceful
+    /// stop's wrap-up, and isn't told to wrap up.
+    pub review: bool,
 }
 
 impl Default for StartOptions {
@@ -1269,6 +1303,7 @@ impl Default for StartOptions {
             admitted: false,
             driven: true,
             parent: None,
+            review: false,
         }
     }
 }
@@ -1351,14 +1386,17 @@ pub(crate) fn task_part(prompt: &str) -> &str {
 /// its conversation still held them), the freshness tracker forgets the
 /// run's reads (the fresh conversation holds none of their content), and
 /// the fresh conversation restates the task without the delivered messages
-/// (the report covers them), with the current standing notes for the agent
-/// (and the one-time notes it wasn't given yet), and with the current list
-/// of agents it may message, when its prompt had one.
+/// (the report covers them), with the standing notes for the agent it had
+/// been given (newer ones come in its next context update), and with the
+/// current list of agents it may message, when its prompt had one.
 pub(crate) struct WorkflowHandover {
     pub context: Arc<SharedContext>,
     pub agent_name: String,
     /// The messages delivered in the run's initial prompt.
     pub prompt_message_ids: Vec<uuid::Uuid>,
+    /// The run is a completion verifier's review (see
+    /// [`StartOptions::review`]).
+    pub review: bool,
 }
 
 impl HandoverHook for WorkflowHandover {
@@ -1374,7 +1412,9 @@ impl HandoverHook for WorkflowHandover {
             tracker.clear_actor(&ActorId::new(task.id, &self.agent_name));
         }
         let prompt = &task.initial_task_prompt;
-        let mut context = ctx.notes.handover_section(ctx, &self.agent_name, task.id);
+        let mut context = ctx
+            .notes
+            .handover_section(&self.agent_name, task.id, self.review);
         let recipients = ctx.message_recipients(&self.agent_name);
         if prompt.contains(ROSTER_HEADING) && !recipients.is_empty() {
             let roster = ctx.registry.roster(
@@ -1706,7 +1746,7 @@ async fn drive_run_to_result(
         }
         Err(error) => Err(error),
     };
-    ctx.run_control.unregister(agent_run_id);
+    unregister_run(ctx, agent_run_id);
     // Set when a verifier that failed paused the task.
     let verifier_failure = ctx.verifier_failures.lock().remove(&agent_run_id);
 
@@ -1805,7 +1845,7 @@ fn settles_child(
             || is_verifier_agent(ctx, &child.agent_name))
 }
 
-fn is_verifier_agent(ctx: &SharedContext, agent_name: &str) -> bool {
+pub(crate) fn is_verifier_agent(ctx: &SharedContext, agent_name: &str) -> bool {
     ctx.completion_verifiers
         .iter()
         .any(|config| config.verifier_agent == agent_name)
@@ -1932,7 +1972,7 @@ fn abandon(
         tracker.finish_actor(&ActorId::new(agent_run_id, agent_name), false);
     }
     ctx.messages.unregister_active(agent_name, agent_run_id);
-    ctx.run_control.unregister(agent_run_id);
+    unregister_run(ctx, agent_run_id);
 }
 
 /// Records a run whose driver was dropped before it recorded the run's end.
@@ -2036,7 +2076,9 @@ pub(crate) async fn finalize_agent_task(
         matches!(task.current_state, TaskState::Completed { .. }),
     );
     let pause = AgentPause::of(&task.current_state);
-    let result = AgentResult::of_task(agent_name.clone(), task);
+    let mut result = AgentResult::of_task(agent_name.clone(), task);
+    // Ended by a stop the host asked for: not the agent's failure.
+    result.stopped_by = ctx.run_control.stopped_by(agent_run_id, &result.status);
     let hook_point = match result.status {
         AgentRunStatus::Completed => HookPoint::PostAgentCompletion,
         AgentRunStatus::Cancelled => HookPoint::PostAgentCancellation,
@@ -2408,13 +2450,16 @@ impl WorkflowEngine {
     }
 
     /// Checks that the run may start an agent and fires `PreAgentSpawn`.
+    /// During a graceful stop's wrap-up only a completion verifier's
+    /// `review` may start (of a completion made in the wrap-up).
     fn admit(
         &self,
         agent_name: &str,
         agent_run_id: Option<uuid::Uuid>,
+        review: bool,
         ctx: &Arc<SharedContext>,
     ) -> Result<(), WorkflowError> {
-        ctx.run_control.check()?;
+        ctx.run_control.check_admission(review)?;
         // Under `Pause` a run over the budget starts, and is held at its
         // first request.
         if budget_cancels(ctx) && ctx.budget.is_exceeded() {
@@ -2452,7 +2497,7 @@ impl WorkflowEngine {
         let admission = if options.admitted {
             Ok(())
         } else {
-            self.admit(agent_name, None, ctx)
+            self.admit(agent_name, None, options.review, ctx)
         };
         let prepared = admission.and_then(|()| {
             let base_config = ctx
@@ -2482,7 +2527,9 @@ impl WorkflowEngine {
             None => ctx.registry.start(&[(task.id, agent_name)]),
         }
         let (messages, pending_message_ids) = self.pending_messages(agent_name, task.id, ctx);
-        let notes = ctx.notes.initial_section(ctx, agent_name, task.id);
+        let notes = ctx
+            .notes
+            .initial_section(ctx, agent_name, task.id, options.review);
         let mut initial_prompt = format!("{prompt}{messages}{notes}");
         let recipients = ctx.message_recipients(agent_name);
         if !recipients.is_empty() {
@@ -2508,11 +2555,13 @@ impl WorkflowEngine {
             ctx,
             options.depth,
             options.driven,
+            options.review,
         ))
     }
 
     /// Starts the agent runtime on `task` and registers the running agent
-    /// with the message bus and the run's cancellation.
+    /// with the message bus and the run's cancellation; `review` for a
+    /// completion verifier's review (see [`StartOptions::review`]).
     #[allow(clippy::too_many_arguments)]
     fn launch(
         &self,
@@ -2524,6 +2573,7 @@ impl WorkflowEngine {
         ctx: &Arc<SharedContext>,
         depth: u32,
         driven: bool,
+        review: bool,
     ) -> StartedRun {
         let load_skill_policy = task
             .agent_config
@@ -2542,15 +2592,19 @@ impl WorkflowEngine {
                 inner: ActivityNotices {
                     context: ctx.clone(),
                     agent_name: agent_name.to_string(),
+                    review,
                 },
                 context: ctx.clone(),
                 agent_name: agent_name.to_string(),
+                review,
             }))
             .with_host_decisions(host_decisions.clone())
+            .with_stop_signal(ctx.run_control.tools_signal())
             .with_handover_hook(Arc::new(WorkflowHandover {
                 context: ctx.clone(),
                 agent_name: agent_name.to_string(),
                 prompt_message_ids: pending_message_ids.clone(),
+                review,
             }));
         // Saved as it runs, with the usage it has been charged for so far.
         let journal = self
@@ -2640,7 +2694,22 @@ impl WorkflowEngine {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<AgentResult, WorkflowError>> + Send + 'a>,
     > {
-        Box::pin(self.continue_at(previous, prompt, ctx, depth, parent))
+        Box::pin(self.continue_at(previous, prompt, ctx, depth, parent, false))
+    }
+
+    /// [`continue_nested`](Self::continue_nested) for a completion
+    /// verifier's review, continued (a re-review, or its verdict restated).
+    fn continue_review_nested<'a>(
+        &'a self,
+        previous: &'a AgentResult,
+        prompt: &'a str,
+        ctx: &'a Arc<SharedContext>,
+        depth: u32,
+        parent: arko_agents::TaskParent,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<AgentResult, WorkflowError>> + Send + 'a>,
+    > {
+        Box::pin(self.continue_at(previous, prompt, ctx, depth, Some(parent), true))
     }
 
     /// [`run_verifier`](Self::run_verifier), boxed as
@@ -2670,6 +2739,7 @@ impl WorkflowEngine {
             roster: false,
             depth,
             parent: Some(parent),
+            review: true,
             ..StartOptions::default()
         };
         let run = self.start_agent(agent_name, prompt, ctx, options)?;
@@ -2689,13 +2759,13 @@ impl WorkflowEngine {
         agents: Vec<(&str, String)>,
         ctx: &Arc<SharedContext>,
     ) -> Result<Vec<AgentResult>, WorkflowError> {
-        ctx.run_control.check()?;
+        ctx.run_control.check_admission(false)?;
         let limit = ctx.parallel.max_agents;
         // Each agent is admitted (PreAgentSpawn, budget, the run's stop)
         // before any is marked running; one refused is that agent's error.
         let admitted = agents
             .iter()
-            .map(|(name, _)| self.admit(name, None, ctx))
+            .map(|(name, _)| self.admit(name, None, false, ctx))
             .collect::<Vec<_>>();
         // Without a cap every admitted agent starts now, marked running
         // together.
@@ -2761,7 +2831,7 @@ impl WorkflowEngine {
                         _place = place.ok();
                         // Admitted when the call began; the run may have
                         // stopped, or the budget run out, since.
-                        ctx_clone.run_control.check()?;
+                        ctx_clone.run_control.check_admission(false)?;
                         if budget_cancels(&ctx_clone) && ctx_clone.budget.is_exceeded() {
                             return Err(WorkflowError::BudgetExceeded {
                                 spent: ctx_clone.budget.total_spent(),
@@ -2902,12 +2972,13 @@ impl WorkflowEngine {
                 )
                 .await;
         }
-        self.continue_at(previous, continuation_prompt, ctx, 0, None)
+        self.continue_at(previous, continuation_prompt, ctx, 0, None, false)
             .await
     }
 
     /// Continue an agent run at `depth` (see [`StartedRun::depth`]), inside
-    /// tool call `parent` (`None` for a run the host continues).
+    /// tool call `parent` (`None` for a run the host continues); `review`
+    /// for a completion verifier's review (see [`StartOptions::review`]).
     async fn continue_at(
         &self,
         previous: &AgentResult,
@@ -2915,6 +2986,7 @@ impl WorkflowEngine {
         ctx: &Arc<SharedContext>,
         depth: u32,
         parent: Option<arko_agents::TaskParent>,
+        review: bool,
     ) -> Result<AgentResult, WorkflowError> {
         let resumable = match previous.status {
             AgentRunStatus::Completed => {
@@ -2932,7 +3004,7 @@ impl WorkflowEngine {
             ));
         }
         let agent_name = &previous.agent_name;
-        self.admit(agent_name, Some(previous.agent_run_id), ctx)?;
+        self.admit(agent_name, Some(previous.agent_run_id), review, ctx)?;
         let mut task = previous.task.clone();
         task.parent = parent;
         let mut registry = self.build_tool_registry(agent_name, ctx, depth);
@@ -2998,6 +3070,7 @@ impl WorkflowEngine {
             ctx,
             depth,
             true,
+            review,
         );
         // Now registered, it is notified of writes; one made while it
         // started is told now.
@@ -3127,7 +3200,7 @@ impl WorkflowEngine {
             }
         };
         let agent_name = &previous.agent_name;
-        self.admit(agent_name, Some(previous.agent_run_id), ctx)?;
+        self.admit(agent_name, Some(previous.agent_run_id), false, ctx)?;
         let mut task = previous.task.clone();
         if parent.is_some() {
             task.parent = parent;
@@ -3163,6 +3236,7 @@ impl WorkflowEngine {
             ctx,
             depth,
             true,
+            false,
         );
         // Messages queued while it was paused, and what changed since it
         // read it, go ahead of the decision, so they are added at the turn
@@ -3323,7 +3397,7 @@ impl WorkflowEngine {
                 return Err(running());
             }
             let agent_name = &current.agent_name;
-            self.admit(agent_name, Some(agent_run_id), ctx)?;
+            self.admit(agent_name, Some(agent_run_id), false, ctx)?;
             let mut task = current.task.clone();
             let mut registry = self.build_tool_registry(agent_name, ctx, recovery.depth);
             let skill_prompt_context =
@@ -3393,8 +3467,9 @@ impl WorkflowEngine {
             &task.pending_context_injections,
             false,
         );
-        // The notes it was given after its task was saved, given again.
-        ctx.notes.recovered(ctx, agent_name, &task);
+        // The notes it was given after its task was saved, given again (it
+        // is launched as an ordinary run, below).
+        ctx.notes.recovered(agent_name, &task, false);
         // Its caller's message goes with the task, as context taken and not
         // yet added: it is added at the first turn boundary, after the
         // results of the calls it was running (and is saved with the task
@@ -3416,6 +3491,7 @@ impl WorkflowEngine {
             ctx,
             recovery.depth,
             true,
+            false,
         );
         run.recovered = true;
         // Messages queued meanwhile, and what changed since it read it, are
@@ -3715,12 +3791,12 @@ impl WorkflowExecutionMiddleware {
                     crate::verification::VERIFIER_OUTPUT_CONTRACT,
                 );
                 match engine
-                    .continue_nested(
+                    .continue_review_nested(
                         previous,
                         &prompt,
                         &self.context,
                         self.depth + 1,
-                        Some(parent),
+                        parent,
                     )
                     .await
                 {
@@ -3787,12 +3863,12 @@ impl WorkflowExecutionMiddleware {
                             crate::verification::VERIFIER_OUTPUT_CONTRACT,
                         );
                         result = match engine
-                            .continue_nested(
+                            .continue_review_nested(
                                 &result,
                                 &prompt,
                                 &self.context,
                                 self.depth + 1,
-                                Some(parent),
+                                parent,
                             )
                             .await
                         {
@@ -3974,7 +4050,11 @@ impl WorkflowExecutionMiddleware {
             }
         }
 
-        if call.tool_name == COMPLETE_TASK_TOOL_NAME {
+        // A run told to wrap up reports its progress: its completion is not
+        // reviewed (the run it is continued in after a restart is).
+        if call.tool_name == COMPLETE_TASK_TOOL_NAME
+            && !self.context.run_control.was_told(execution.task_id)
+        {
             let summary = call
                 .parameters
                 .get("summary")
@@ -4541,14 +4621,12 @@ mod tests {
             .build_interceptor_config("coder", None, workflow.context())
             .unwrap()
             .interceptor;
-        let task = TaskContext {
-            task_id: uuid::Uuid::new_v4(),
-            agent_name: "Friendly Coder Display Name",
-            initial_task_prompt: "find the failing test",
-            current_working_directory: &workflow.context().workspace,
-            tool_call_id: None,
-            recovering: false,
-        };
+        let task = TaskContext::new(
+            uuid::Uuid::new_v4(),
+            "Friendly Coder Display Name",
+            "find the failing test",
+            &workflow.context().workspace,
+        );
         let raw = "raw tool output ".repeat(10);
         let outcome = interceptor
             .intercept("search", &raw, &HashMap::new(), &task)
@@ -4611,14 +4689,12 @@ mod tests {
                 .build_interceptor_config("coder", None, workflow.context())
                 .unwrap()
                 .interceptor;
-            let task = TaskContext {
-                task_id: uuid::Uuid::new_v4(),
-                agent_name: "coder",
-                initial_task_prompt: "find the failing test",
-                current_working_directory: &workflow.context().workspace,
-                tool_call_id: None,
-                recovering: false,
-            };
+            let task = TaskContext::new(
+                uuid::Uuid::new_v4(),
+                "coder",
+                "find the failing test",
+                &workflow.context().workspace,
+            );
             let outcome = interceptor
                 .intercept(
                     "search",
@@ -4819,14 +4895,7 @@ mod tests {
             Some(InterceptionFailurePolicy::RetryThenInformAgent { max_attempts: 2 }),
         );
         let workspace = std::env::temp_dir();
-        let task = TaskContext {
-            task_id: uuid::Uuid::new_v4(),
-            agent_name: "coder",
-            initial_task_prompt: "task",
-            current_working_directory: &workspace,
-            tool_call_id: None,
-            recovering: false,
-        };
+        let task = TaskContext::new(uuid::Uuid::new_v4(), "coder", "task", &workspace);
         let search = chain
             .intercept("search", "output", &HashMap::new(), &task)
             .await

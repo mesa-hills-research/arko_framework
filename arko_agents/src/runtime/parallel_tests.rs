@@ -1316,6 +1316,138 @@ async fn cancelling_stops_a_running_output_based_call() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
+/// A tool that works until its task's stop signal fires, then saves and
+/// returns what it was told.
+#[derive(Debug)]
+struct SavesOnStop {
+    interruptible: bool,
+    started: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl Tool for SavesOnStop {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "saves_on_stop".into(),
+            description: "Works until stopped".into(),
+            output_based_example: None,
+            parameters: vec![],
+            parallel_safe: false,
+            tool_type_details: ToolTypeDetails::DeveloperDefined,
+            raw_json_schema_override: None,
+        }
+    }
+
+    fn interruptible(&self) -> bool {
+        self.interruptible
+    }
+
+    async fn execute(
+        &self,
+        context: &TaskContext<'_>,
+        _: HashMap<String, Value>,
+    ) -> Result<String, ToolError> {
+        assert!(!context.stop.is_stopping());
+        self.started.notify_one();
+        context.stop.stopping().await;
+        Ok(format!(
+            "saved ({})",
+            context.stop.reason().unwrap_or_default()
+        ))
+    }
+}
+
+/// A call the runtime waits for when its task is cancelled sees its stop
+/// signal fire, saves and returns; its result is kept.
+#[tokio::test]
+async fn a_cancelled_call_that_is_waited_for_sees_its_stop_signal() {
+    let workspace = workspace();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(SavesOnStop {
+        interruptible: false,
+        started: started.clone(),
+    }));
+    let (mut agent, _events, commands) = agent(
+        config(ToolCallingMode::Native, &["saves_on_stop"]),
+        registry,
+        &workspace,
+    );
+    agent
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .push_back(turn(vec![native_call(
+            "work",
+            "saves_on_stop",
+            serde_json::json!({}),
+        )]));
+    let run = tokio::spawn(agent.run());
+    timeout(Duration::from_secs(10), started.notified())
+        .await
+        .unwrap();
+    commands.send(UserCommand::CancelTask).await.unwrap();
+    let task = timeout(Duration::from_secs(10), run)
+        .await
+        .expect("the call winds down")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        task.current_state,
+        TaskState::Cancelled {
+            reason: CANCELLED_BY_USER.into()
+        }
+    );
+    assert_eq!(
+        result_for(&task.conversation, "work")[0].output,
+        "saved (Task cancelled.)"
+    );
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+/// The host's stop signal reaches a running call, which returns; the task
+/// goes on (only the host's cancellation would end it).
+#[tokio::test]
+async fn the_hosts_stop_signal_reaches_a_running_call() {
+    let workspace = workspace();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(SavesOnStop {
+        interruptible: true,
+        started: started.clone(),
+    }));
+    let (mut agent, _events, _commands) = agent(
+        config(ToolCallingMode::Native, &["saves_on_stop"]),
+        registry,
+        &workspace,
+    );
+    let host = crate::stop::StopSource::new();
+    agent.host_stop = host.signal();
+    let scripted = agent.scripted_responses.get_mut().unwrap();
+    scripted.push_back(turn(vec![native_call(
+        "work",
+        "saves_on_stop",
+        serde_json::json!({}),
+    )]));
+    scripted.push_back(complete());
+    let run = tokio::spawn(agent.run());
+    timeout(Duration::from_secs(10), started.notified())
+        .await
+        .unwrap();
+    host.stop("Workflow stopping (drain): deploying a fix.");
+    let task = timeout(Duration::from_secs(10), run)
+        .await
+        .expect("the call returns")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(
+        result_for(&task.conversation, "work")[0].output,
+        "saved (Workflow stopping (drain): deploying a fix.)"
+    );
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
 /// Configurations saved with the removed batching settings still load, and
 /// none of them makes calls run at the same time: `allow_batched_tool_calls`
 /// is ignored, a tool's `allow_batched_calls: false` keeps it one at a time

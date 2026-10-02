@@ -15,7 +15,7 @@
 //! Each note is labelled with its source ([`NoteSource`]) and delivered in
 //! the user role as a refinement of the task: it doesn't change a role's
 //! rules. The audience ([`NoteAudience`]) names agents by registration name;
-//! completion verifiers, and the agents set with
+//! completion verifiers' reviews, and the agents set with
 //! [`WorkflowBuilder::notes_by_name_only`](crate::WorkflowBuilder::notes_by_name_only),
 //! get a note only when it names them.
 //!
@@ -55,7 +55,7 @@ pub const PROMPT_MAX_BYTES: usize = 16 * 1024;
 
 /// Who receives a note. Names are registration names, as in
 /// [`MessagingPolicy`](crate::messaging::MessagingPolicy). Completion
-/// verifiers, and the agents set with
+/// verifiers' reviews, and the agents set with
 /// [`WorkflowBuilder::notes_by_name_only`](crate::WorkflowBuilder::notes_by_name_only),
 /// receive a note only when [`Only`](Self::Only) names them. An agent never
 /// receives a note it is the source of ([`NoteSource::Agent`]).
@@ -279,14 +279,16 @@ impl NoteBoard {
         Ok(posted)
     }
 
-    /// The notes section of the initial prompt of run `task_id` of `agent`:
-    /// the standing notes it receives, newest first and capped; empty when
-    /// there are none. The run has then been given every note so far.
+    /// The notes section of the initial prompt of run `task_id` of `agent`
+    /// (`review` for a completion verifier's review): the standing notes it
+    /// receives, newest first and capped; empty when there are none. The
+    /// run has then been given every note so far.
     pub(crate) fn initial_section(
         &self,
         ctx: &SharedContext,
         agent: &str,
         task_id: Uuid,
+        review: bool,
     ) -> String {
         self.poll(ctx);
         let mut state = self.state.lock();
@@ -300,7 +302,7 @@ impl NoteBoard {
             .iter()
             .rev()
             .filter(|posted| {
-                posted.note.kind == NoteKind::Standing && self.receives(ctx, &posted.note, agent)
+                posted.note.kind == NoteKind::Standing && self.receives(&posted.note, agent, review)
             })
             .collect::<Vec<_>>();
         section(&notes)
@@ -313,12 +315,7 @@ impl NoteBoard {
     /// come in the context update before its first request, so none is lost
     /// to the cap or given twice; the one-time notes it had been given
     /// aren't repeated (its report covers them).
-    pub(crate) fn handover_section(
-        &self,
-        ctx: &SharedContext,
-        agent: &str,
-        task_id: Uuid,
-    ) -> String {
+    pub(crate) fn handover_section(&self, agent: &str, task_id: Uuid, review: bool) -> String {
         let state = self.state.lock();
         let seen = state.seen.get(&task_id).copied().unwrap_or(0);
         let notes = state
@@ -328,18 +325,24 @@ impl NoteBoard {
             .filter(|posted| {
                 posted.note.kind == NoteKind::Standing
                     && posted.seq <= seen
-                    && self.receives(ctx, &posted.note, agent)
+                    && self.receives(&posted.note, agent, review)
             })
             .collect::<Vec<_>>();
         section(&notes)
     }
 
-    /// The notes run `task_id` of `agent` receives that it hasn't been
-    /// given, for its next turn boundary, oldest first, as many as fit
-    /// ([`PROMPT_MAX_NOTES`], [`PROMPT_MAX_BYTES`]); `None` when there are
-    /// none. Only the notes shown count as given: the rest come at the next
-    /// boundary.
-    pub(crate) fn update(&self, ctx: &SharedContext, agent: &str, task_id: Uuid) -> Option<String> {
+    /// The notes run `task_id` of `agent` (`review` for a completion
+    /// verifier's review) receives that it hasn't been given, for its next
+    /// turn boundary, oldest first, as many as fit ([`PROMPT_MAX_NOTES`],
+    /// [`PROMPT_MAX_BYTES`]); `None` when there are none. Only the notes
+    /// shown count as given: the rest come at the next boundary.
+    pub(crate) fn update(
+        &self,
+        ctx: &SharedContext,
+        agent: &str,
+        task_id: Uuid,
+        review: bool,
+    ) -> Option<String> {
         self.poll(ctx);
         let mut state = self.state.lock();
         let newest = state.notes.last()?.seq;
@@ -350,7 +353,7 @@ impl NoteBoard {
         let notes = state
             .notes
             .iter()
-            .filter(|posted| posted.seq > seen && self.receives(ctx, &posted.note, agent))
+            .filter(|posted| posted.seq > seen && self.receives(&posted.note, agent, review))
             .collect::<Vec<_>>();
         let shown = fitting(&notes);
         let given = match notes.get(shown) {
@@ -367,7 +370,8 @@ impl NoteBoard {
     /// a crash, or aborted after the grace period), which may lack notes it
     /// was given after that save. Like a message, every note it receives
     /// that the task doesn't hold is given again, at its next turn boundary.
-    pub(crate) fn recovered(&self, ctx: &SharedContext, agent: &str, task: &arko_agents::Task) {
+    /// `review` as the run is launched with (see [`WithNotes::review`]).
+    pub(crate) fn recovered(&self, agent: &str, task: &arko_agents::Task, review: bool) {
         let (started, given) = {
             let state = self.state.lock();
             let started = state.started.get(&task.id).copied().unwrap_or(0);
@@ -375,7 +379,7 @@ impl NoteBoard {
                 .notes
                 .iter()
                 .rev()
-                .filter(|posted| posted.seq > started && self.receives(ctx, &posted.note, agent))
+                .filter(|posted| posted.seq > started && self.receives(&posted.note, agent, review))
                 .cloned()
                 .collect::<Vec<_>>();
             (started, given)
@@ -394,26 +398,38 @@ impl NoteBoard {
         }
     }
 
-    /// Whether `agent` receives `note`.
-    fn receives(&self, ctx: &SharedContext, note: &Note, agent: &str) -> bool {
+    /// Whether a run of `agent` receives `note`; `review` for a completion
+    /// verifier's review.
+    fn receives(&self, note: &Note, agent: &str, review: bool) -> bool {
         if matches!(&note.source, NoteSource::Agent(source) if source == agent) {
             return false;
         }
         match &note.audience {
             NoteAudience::Only(agents) => agents.contains(agent),
-            NoteAudience::All => !self.named_only(ctx, agent),
-            NoteAudience::Except(agents) => !agents.contains(agent) && !self.named_only(ctx, agent),
+            NoteAudience::All => !self.named_only(agent, review),
+            NoteAudience::Except(agents) => {
+                !agents.contains(agent) && !self.named_only(agent, review)
+            }
         }
     }
 
-    /// Whether `agent` receives a note only when it names it: a completion
-    /// verifier, or an agent set with `notes_by_name_only`.
-    fn named_only(&self, ctx: &SharedContext, agent: &str) -> bool {
-        self.by_name_only.contains(agent)
-            || ctx
-                .completion_verifiers
-                .iter()
-                .any(|verifier| verifier.verifier_agent == agent)
+    /// Whether a run of `agent` receives a note only when it names it: a
+    /// completion verifier's `review` (the same agent run as an ordinary
+    /// delegation target is not one), or a run of an agent set with
+    /// `notes_by_name_only`.
+    fn named_only(&self, agent: &str, review: bool) -> bool {
+        review || self.by_name_only.contains(agent)
+    }
+
+    /// Whether `agent` receives `note` in the runs it is posted for, as
+    /// posting checks and logs it: a completion verifier counts as
+    /// reviewing (it runs as one).
+    fn receives_as_posted(&self, ctx: &SharedContext, note: &Note, agent: &str) -> bool {
+        self.receives(
+            note,
+            agent,
+            crate::workflow::engine::is_verifier_agent(ctx, agent),
+        )
     }
 
     /// `note` with its text trimmed, and the agents that receive it, sorted;
@@ -456,7 +472,7 @@ impl NoteBoard {
             .messages
             .roster()
             .into_iter()
-            .filter(|agent| self.receives(ctx, &note, agent))
+            .filter(|agent| self.receives_as_posted(ctx, &note, agent))
             .collect::<Vec<_>>();
         if recipients.is_empty() {
             return Err(WorkflowError::BuilderInvalid(
@@ -521,7 +537,12 @@ impl NoteBoard {
         ctx.messages
             .roster()
             .into_iter()
-            .filter(|agent| self.named_only(ctx, agent) && !recipients.contains(agent))
+            .filter(|agent| {
+                self.named_only(
+                    agent,
+                    crate::workflow::engine::is_verifier_agent(ctx, agent),
+                ) && !recipients.contains(agent)
+            })
             .filter_map(|agent| {
                 let senders = recipients
                     .iter()
@@ -816,15 +837,18 @@ pub(crate) struct WithNotes<S> {
     pub inner: S,
     pub context: Arc<SharedContext>,
     pub agent_name: String,
+    /// The run is a completion verifier's review: it gets only the notes
+    /// that name it.
+    pub review: bool,
 }
 
 impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithNotes<S> {
     fn turn_context(&self, task_id: Uuid) -> Option<String> {
         let notices = self.inner.turn_context(task_id);
-        let notes = self
-            .context
-            .notes
-            .update(&self.context, &self.agent_name, task_id);
+        let notes =
+            self.context
+                .notes
+                .update(&self.context, &self.agent_name, task_id, self.review);
         match (notices, notes) {
             (Some(notices), Some(notes)) => Some(format!("{notices}\n\n{notes}")),
             (notices, notes) => notices.or(notes),

@@ -262,37 +262,42 @@ fn role<'a>(context: &'a SharedContext, agent: &str) -> &'a str {
         .map_or("", |config| config.role_description.as_str())
 }
 
-/// The notices a running agent receives at each safe turn boundary: one
-/// line for every agent it may message that started or finished after the
-/// registry version it has seen. It also holds the agent's requests while
-/// it is over its budget.
+/// The notices a running agent receives at each safe turn boundary: once,
+/// a graceful stop's wrap-up notice, and one line for every agent it may
+/// message that started or finished after the registry version it has seen.
+/// It also holds the agent's requests while it is over its budget.
 pub(crate) struct ActivityNotices {
     pub context: Arc<SharedContext>,
     pub agent_name: String,
+    /// The run is a completion verifier's review: it isn't told to wrap up.
+    pub review: bool,
 }
 
 impl arko_agents::TurnContextSource for ActivityNotices {
     fn turn_context(&self, task_id: uuid::Uuid) -> Option<String> {
+        // A completion verifier finishes its review: its verdict decides a
+        // completion made in the wrap-up before its agent was told.
+        let wrap_up = (!self.review)
+            .then(|| self.context.run_control.wrap_up_notice(task_id))
+            .flatten();
         let recipients = self.context.message_recipients(&self.agent_name);
-        if recipients.is_empty() {
-            return None;
-        }
-        let changes = self
-            .context
-            .registry
-            .changes_since_seen(task_id, &recipients);
-        (!changes.is_empty()).then(|| {
-            changes
-                .iter()
-                .map(|change| match change {
-                    ActivityChange::Started(agent) => start_notice(&self.context, agent),
-                    ActivityChange::Finished(agent, outcome) => {
-                        finish_notice(&self.context, agent, outcome)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
+        let changes = if recipients.is_empty() {
+            Vec::new()
+        } else {
+            self.context
+                .registry
+                .changes_since_seen(task_id, &recipients)
+        };
+        let notices = wrap_up
+            .into_iter()
+            .chain(changes.iter().map(|change| match change {
+                ActivityChange::Started(agent) => start_notice(&self.context, agent),
+                ActivityChange::Finished(agent, outcome) => {
+                    finish_notice(&self.context, agent, outcome)
+                }
+            }))
+            .collect::<Vec<_>>();
+        (!notices.is_empty()).then(|| notices.join("\n"))
     }
 
     /// Under `BudgetExceededPolicy::Pause`, an agent over the workflow's

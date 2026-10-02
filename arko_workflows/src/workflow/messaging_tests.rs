@@ -66,14 +66,12 @@ fn messaging_tools(workflow: &Workflow, agent: &str) -> Option<(Arc<dyn Tool>, A
 }
 
 fn task_context(workspace: &Workspace) -> TaskContext<'_> {
-    TaskContext {
-        task_id: uuid::Uuid::new_v4(),
-        agent_name: "Friendly sender",
-        initial_task_prompt: "coordinate",
-        current_working_directory: &workspace.0,
-        tool_call_id: None,
-        recovering: false,
-    }
+    TaskContext::new(
+        uuid::Uuid::new_v4(),
+        "Friendly sender",
+        "coordinate",
+        &workspace.0,
+    )
 }
 
 async fn send(
