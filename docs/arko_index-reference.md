@@ -258,7 +258,8 @@ starts at 1 s and doubles up to 60 s; each wait is drawn between half and all of
 step, and is never shorter than a retry delay the provider asks for. After
 `max_transient_attempts` transient failures, the request fails with its last error, a
 `retries_exhausted` attempt event is recorded, and the job becomes `blocked`. Explicit
-capacity signals (overloaded or unavailable) are retried on the same schedule without
+capacity signals (overloaded or unavailable, including Voyage's 502, 503 and 504) are
+retried on the same schedule without
 consuming attempts, until one request has waited `max_capacity_wait_ms` (15 minutes by
 default) for them in all; then it fails the same way. Other errors, such as
 authentication failures, invalid requests and refusals, are not retried.
@@ -320,7 +321,8 @@ dimension the model supports, with their published limits: for `voyage-4`, 32,00
 per input, and 320,000 tokens and 1,000 inputs per request. Voyage publishes no
 per-request token limit for `voyage-code-4`, the code retrieval model; requests to it are
 limited to 120,000 tokens (`backend::UNPUBLISHED_BATCH_TOKENS`), the smallest per-request
-limit Voyage publishes for any current model. `ArkoIndex::open` requires the backend's
+limit Voyage publishes for any current model (Voyage answered an over-limit request with
+320,000 tokens in October 2026, unpublished). `ArkoIndex::open` requires the backend's
 profile to embed as `Config::embedding` does (`EmbeddingProfile::same_embeddings`).
 
 **Indexes built with the former default revision.** Earlier versions pinned the

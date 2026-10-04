@@ -572,8 +572,13 @@ the results. See [Tool images](../arko_ai/README.md#tool-images).
 Requests are checked locally in this order: the dimension, 32,000 tokens per input, the
 model's total tokens per request (unpublished for `voyage-code-4`, so not checked), and
 1,000 inputs. Vectors come back in input order; missing, duplicate, wrong-dimension,
-non-finite or all-zero vectors are rejected. See
-[Voyage embeddings](../arko_ai/README.md#voyage-embeddings).
+non-finite or all-zero vectors, like a 200 that doesn't parse, are a permanent
+`Error::JsonError` of kind `Unknown` (Voyage answered, and may have billed, the request).
+arko_ai never retries an embedding request. Voyage error responses keep their status and
+body: 400, 401 and 403 are permanent, 429 and 500 transient, and 502, 503 and 504
+("Service Unavailable", "high traffic") `Capacity`. See
+[Voyage embeddings](../arko_ai/README.md#voyage-embeddings) and the
+[Voyage API notes](voyage-api-notes.md).
 
 ### OpenRouter (arko_ai)
 

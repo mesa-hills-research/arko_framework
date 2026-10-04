@@ -106,6 +106,8 @@ const KIND_CODES: &[(&str, ErrorKind)] = &[
     // The input is over the model's limit.
     ("context_length_exceeded", ErrorKind::ContextOverflow),
     ("token_limit_exceeded", ErrorKind::ContextOverflow),
+    // Voyage AI: a request over the model's total tokens per request.
+    ("TOO_MANY_TOKENS_IN_BATCH", ErrorKind::ContextOverflow),
     // Size limits on the body or one value in it.
     ("request_too_large", ErrorKind::RequestTooLarge),
     ("payload_too_large", ErrorKind::RequestTooLarge),

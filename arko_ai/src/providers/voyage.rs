@@ -112,10 +112,16 @@ impl EmbeddingProviderTrait for VoyageClient {
             .await?;
 
         if !response.status().is_success() {
-            return Err(Error::from_response("Voyage AI", response).await);
+            return Err(voyage_error(
+                Error::from_response("Voyage AI", response).await,
+            ));
         }
 
-        let response_data: api::VoyageEmbeddingResponse = response.json().await?;
+        // A body cut off in transfer stays a transport error; one that isn't
+        // the documented object is a malformed response.
+        let body = response.bytes().await?;
+        let response_data: api::VoyageEmbeddingResponse =
+            serde_json::from_slice(&body).map_err(malformed)?;
 
         let embeddings = ordered_embeddings(
             response_data.data,
@@ -133,16 +139,74 @@ impl EmbeddingProviderTrait for VoyageClient {
         Ok(ArkoEmbeddingResponse { embeddings, usage })
     }
 }
+
+/// Voyage's errors classify by HTTP status as Voyage documents them
+/// (https://docs.voyageai.com/docs/error-codes): 400, 401 and 403 are
+/// permanent, 429 is a rate limit and 500 a transient server error. 502, 503
+/// and 504 are "Service Unavailable": "Our servers are currently
+/// experiencing high traffic", an explicit capacity signal, so they take the
+/// `service_unavailable` code, which classifies as
+/// [`RetryClass::Capacity`](crate::RetryClass::Capacity). The body (for 4XX,
+/// `{"detail": "<message>"}`) stays in the message.
+///
+/// The 400s that name a limit take the kinds arko's own limit checks give the
+/// same requests, as Voyage answered them (2026-10-04). A request over the
+/// model's total tokens per request carries an `error_code`
+/// (`TOO_MANY_TOKENS_IN_BATCH`, undocumented), which becomes the error's
+/// code: [`ErrorKind::ContextOverflow`](crate::ErrorKind::ContextOverflow).
+/// The others carry only a `detail`: an input over the model's context
+/// window ("...does not fit into the model's context window of 32000
+/// tokens...") is `ContextOverflow`, and a batch over the item limit ("The
+/// batch size limit is 1000...") is
+/// [`ErrorKind::RequestTooLarge`](crate::ErrorKind::RequestTooLarge).
+fn voyage_error(mut error: Error) -> Error {
+    if let Error::ProviderError {
+        status: Some(status),
+        code,
+        message,
+        ..
+    } = &mut error
+        && code.is_none()
+    {
+        *code = error_code(message).or(match *status {
+            502..=504 => Some("service_unavailable".into()),
+            400 if message.contains("does not fit into the model's context window") => {
+                Some("context_length_exceeded".into())
+            }
+            400 if message.contains("The batch size limit is") => Some("request_too_large".into()),
+            _ => None,
+        });
+    }
+    error
+}
+
+/// The `error_code` of a Voyage error body (`Voyage AI: {...}` in the
+/// message), when it has one.
+fn error_code(message: &str) -> Option<String> {
+    let body = message.strip_prefix("Voyage AI: ")?;
+    serde_json::from_str::<Value>(body)
+        .ok()?
+        .get("error_code")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// A successful response that isn't the documented embeddings object. Voyage
+/// answered, and may have billed, the request, so this is not the caller's
+/// invalid request, and it is permanent rather than resent automatically: an
+/// [`Error::JsonError`] of kind [`ErrorKind::Unknown`](crate::ErrorKind::Unknown).
+fn malformed(detail: impl std::fmt::Display) -> Error {
+    Error::JsonError(<serde_json::Error as serde::de::Error>::custom(format!(
+        "Malformed Voyage AI embeddings response: {detail}"
+    )))
+}
+
 fn ordered_embeddings(
     data: Vec<api::VoyageEmbeddingObject>,
     count: usize,
     dimensions: usize,
 ) -> Result<Vec<Vec<f32>>, Error> {
-    let invalid = || {
-        Error::InvalidRequest(
-            "Malformed Voyage response: missing/duplicate index or invalid vector".into(),
-        )
-    };
+    let invalid = || malformed("missing/duplicate index or invalid vector");
     if data.len() != count {
         return Err(invalid());
     }
@@ -160,6 +224,8 @@ fn ordered_embeddings(
     }
     ordered.into_iter().map(|v| v.ok_or_else(invalid)).collect()
 }
+#[cfg(test)]
+mod mock_server_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

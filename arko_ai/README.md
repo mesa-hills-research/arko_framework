@@ -719,11 +719,13 @@ request, and 256, 512, 1024 (default), or 2048 output dimensions:
 | `voyage-4-large` | 120,000 | $0.12 |
 | `voyage-4` | 320,000 | $0.06 |
 | `voyage-4-lite` | 1,000,000 | $0.02 |
-| `voyage-code-4` | Not published | $0.12 |
+| `voyage-code-4` | Not published (320,000 observed) | $0.12 |
 
 `voyage-3.5`, `voyage-3.5-lite`, `voyage-3-large`, and `voyage-code-3` are also accepted.
 For `voyage-code-4`, `max_batch_total_tokens` is `None`: the provider validates the
-aggregate limit, and the per-input and item-count limits still apply locally.
+aggregate limit, and the per-input and item-count limits still apply locally. Voyage
+answered a request over it (2026-10-04) with a limit of 320,000 tokens and the
+`error_code` `TOO_MANY_TOKENS_IN_BATCH` (`ErrorKind::ContextOverflow`).
 Use `VoyageInputType::Query` when embedding a search query. arko never truncates
 silently: `truncation: false` is sent unless `with_voyage_truncation(true)` asks for Voyage's
 truncation, and either way an input over the per-input limit fails locally with
@@ -745,14 +747,31 @@ cache from a machine that has the tokenizer. A failed download is an
 the Hub doesn't have (404) is one naming them, without that advice (other load failures,
 such as a damaged cached file, are reported as they are), and nothing is sent to Voyage; with
 no home directory and no `HF_HOME` it is an error too. Responses are reordered by the
-provider's item indexes, and missing, duplicate, wrong-dimension, non-finite, or zero
-vectors are rejected. Provider failures keep the HTTP status and `Retry-After` for
-retries by the caller.
+provider's item indexes.
+
+arko_ai never retries an embedding request itself (Voyage doesn't document which failed
+requests are unbilled); callers retry by `Error::retry_class()`. A Voyage error response
+is an `Error::ProviderError` that keeps the HTTP status, the body (Voyage's
+`{"detail": ...}` for 4xx) in its message, and a `Retry-After` delay when one is sent.
+Its class follows Voyage's [error codes](https://docs.voyageai.com/docs/error-codes): 400,
+401 and 403 are permanent (`InvalidRequest`, `Authentication`, `Permission`; a 400 for an
+input over the context window or a request over the total tokens is `ContextOverflow`, and
+one for too many inputs `RequestTooLarge`), 429 is a
+transient rate limit, 500 a transient server error, and 502, 503 and 504 ("Service
+Unavailable", "high traffic") are `Capacity`, with the code `service_unavailable`. A
+connection lost before any response is an `Error::HttpError` without a status
+(transient; whether Voyage processed the request is unknown). A 200 cut off in transfer
+is an `Error::HttpError`, and a 200 that isn't the documented response (it doesn't parse,
+or has missing, duplicate, wrong-dimension, non-finite or zero vectors) an
+`Error::JsonError`; both are permanent, of kind `Unknown`, since Voyage answered and may
+have billed the request.
 
 Sources: Voyage's [model guide](https://docs.voyageai.com/docs/embeddings),
 [API reference](https://docs.voyageai.com/reference/embeddings-api),
+[error codes](https://docs.voyageai.com/docs/error-codes),
 [pricing](https://docs.voyageai.com/docs/pricing), and
-[tokenizer documentation](https://docs.voyageai.com/docs/tokenization).
+[tokenizer documentation](https://docs.voyageai.com/docs/tokenization). Quotes and what
+the documentation leaves open: [Voyage API notes](../docs/voyage-api-notes.md).
 
 ## OpenRouter
 
