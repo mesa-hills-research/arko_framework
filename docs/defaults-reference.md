@@ -18,6 +18,12 @@ Defaults that change what an agent sees of its tool results, in arko's own runti
 - Error kinds (`arko_ai::ErrorKind`) are recorded with pauses and failures, and stop
   nothing by themselves.
 
+ChatGPT sign-ins: one account unless `LLMClient::with_chatgpt_accounts` installs an ordered
+list. The list fails over only when the backend refuses an account (a usage limit, or
+credits or quota run out; credits keep an account serving), checks the accounts above the
+serving one at most every 5 minutes, and never runs in the background. See
+[Client and credentials](reference-map.md#client-and-credentials-arko_ai).
+
 Defaults of operator notes and graceful stops:
 
 - Operator notes do nothing until a note is posted, and the control folder through which

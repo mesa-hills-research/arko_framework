@@ -48,6 +48,12 @@ pub use request_hook::OpenAIRequestHook;
 mod credential_store;
 pub use credential_store::ChatGptOAuthStore;
 
+mod accounts;
+pub use accounts::{
+    CHATGPT_USAGE_URL, ChatGptAccount, ChatGptAccountEvent, ChatGptAccountStatus, ChatGptAccounts,
+    ChatGptUsageStatus, DEFAULT_STATUS_CHECK_INTERVAL, SwitchReason, UsableReason,
+};
+
 pub(crate) mod spent_tokens;
 
 type StreamingRefusals = BTreeMap<(String, u64), String>;

@@ -47,8 +47,8 @@ pub use stop::{Refusal, RefusalSource, StopReason};
 pub use tool::{ToolCall, ToolChoice, ToolConfig, ToolDefinition, ToolResult, ToolResultImage};
 pub use trace::RequestTrace;
 pub use usage::{
-    BillingKind, ContextEvent, ContextEventType, ModelCallUsage, PlanUsage, PlanUsageWindow,
-    SubscriptionPlan, UsageInfo,
+    BillingKind, ContextEvent, ContextEventType, ModelCallUsage, PlanCredits, PlanUsage,
+    PlanUsageWindow, SubscriptionPlan, UsageInfo,
 };
 
 pub use embedding_client::EmbeddingClient;
@@ -65,6 +65,7 @@ pub use providers::openrouter::{
 };
 
 pub use providers::openai::{
-    ChatGptOAuthCredentials, ChatGptOAuthStore, OAuthRefreshResult, OpenAIAuth, OpenAIRequestHook,
-    is_token_expired, parse_jwt_expiry, refresh_chatgpt_oauth_token,
+    ChatGptAccount, ChatGptAccountEvent, ChatGptAccountStatus, ChatGptAccounts,
+    ChatGptOAuthCredentials, ChatGptOAuthStore, ChatGptUsageStatus, OAuthRefreshResult, OpenAIAuth,
+    OpenAIRequestHook, is_token_expired, parse_jwt_expiry, refresh_chatgpt_oauth_token,
 };
