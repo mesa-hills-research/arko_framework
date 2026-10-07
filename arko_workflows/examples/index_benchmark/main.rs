@@ -596,12 +596,16 @@ async fn generate_command(args: GenerateArgs) -> BenchResult<()> {
         other => return Err(format!("--writer-tools {other}: terminal or index").into()),
     };
     let _lock = ledger::DirLock::acquire(&layout.tasks_dir(), "a `generate`")?;
-    let index_cli = if writer_arm == Arm::A {
-        repos::find_index_cli(args.index_cli.as_deref()).ok()
+    if let Some(pid) = ledger::DirLock::holder(&layout.out.join("prepare")) {
+        return Err(format!("`prepare` is running (pid {pid}); wait for it").into());
+    }
+    if writer_arm == Arm::B {
+        let index_cli = repos::find_index_cli(args.index_cli.as_deref())?;
+        repos::setup_arm_bins(&layout, &[Arm::B], &index_cli)?;
     } else {
-        Some(repos::find_index_cli(args.index_cli.as_deref())?)
-    };
-    repos::setup_arm_bins(&layout, index_cli.as_deref())?;
+        // Arm A's stubs need no CLI; the path is not used.
+        repos::setup_arm_bins(&layout, &[Arm::A], Path::new(""))?;
+    }
     let path = args.tasks.clone().unwrap_or_else(|| layout.default_tasks());
     let tasks = generate::generate(generate::GenerateOptions {
         layout: layout.clone(),
@@ -693,7 +697,12 @@ async fn run_command(args: RunArgs) -> BenchResult<()> {
             break;
         }
     }
-    repos::setup_arm_bins(&layout, Some(&index_cli))?;
+    let mut bin_arms = arms.clone();
+    if !bin_arms.contains(&Arm::A) {
+        // The graders' shells are arm A's.
+        bin_arms.push(Arm::A);
+    }
+    repos::setup_arm_bins(&layout, &bin_arms, &index_cli)?;
     let mock = start_mock(&args.model).await?;
     let client =
         agents::build_client(&args.model.codex_home, mock.as_ref().map(|mock| mock.url()))?;

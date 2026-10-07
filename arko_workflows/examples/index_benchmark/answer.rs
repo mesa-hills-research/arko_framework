@@ -241,14 +241,77 @@ pub fn check_key(key: &AnswerKey, is_list: bool, answer: &ParsedAnswer) -> Deter
     }
 }
 
-/// Removes descriptions of search commands from an answer before the
-/// grader sees it, so the grader can't tell the arms apart. A line is
-/// dropped when it names the arms' search tools in a way only a command can
+/// Search programs: a line that runs one of these is a command, not an
+/// answer.
+const SEARCH_PROGRAMS: [&str; 9] = [
+    "arko_index",
+    "arko_index_cli",
+    "arko_index_dense",
+    "rg",
+    "grep",
+    "egrep",
+    "fgrep",
+    "ag",
+    "ack",
+];
+
+/// Whether `line` is a search command: after a prompt or list marker
+/// (`$`, `>`, `-`, `*`, `1.`), the whole line (or the whole code span it
+/// is) runs a search program (or `git grep`) with arguments. A code span
+/// followed by prose (`` `rg` is fast ``) is not a command.
+fn is_search_command(line: &str) -> bool {
+    let mut rest = line.trim();
+    loop {
+        let before = rest;
+        rest = rest
+            .trim_start_matches(['$', '>', '-', '*', '•', '#'])
+            .trim_start();
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        if digits > 0 && rest[digits..].starts_with(['.', ')']) {
+            rest = rest[digits + 1..].trim_start();
+        }
+        if rest == before {
+            break;
+        }
+    }
+    if let Some(span) = rest.strip_prefix('`') {
+        let span = span.trim_start_matches('`');
+        let Some(close) = span.find('`') else {
+            return false;
+        };
+        let after = span[close..].trim_start_matches('`');
+        if !after
+            .trim()
+            .trim_end_matches(['.', ',', ':', ';'])
+            .is_empty()
+        {
+            return false;
+        }
+        rest = span[..close].trim();
+    }
+    if rest.split_whitespace().count() < 2 {
+        return false;
+    }
+    if rest.starts_with("git grep ") {
+        return true;
+    }
+    crate::shell::programs_in(rest)
+        .first()
+        .is_some_and(|program| {
+            let name = program.rsplit('/').next().unwrap_or(program);
+            SEARCH_PROGRAMS.contains(&name)
+        })
+}
+
+/// Removes descriptions of searches from an answer before the grader sees
+/// it, so the grader can't tell the arms apart. A line is dropped when it
+/// is a search command itself (`$ rg -n retry src`, `arko_index outline
+/// src/net`), names the arms' search tools in a way only a command can
 /// (`$ARKO_INDEX_STATE`, `arko_index_dense`), or names a search command
-/// (`arko_index search2`, `rg -n`, `grep -r`, `git grep`, ...) together with
-/// words describing the search ("I ran", "searched", "using `"). Other
-/// mentions stay, so answers about the code of these tools keep their
-/// content. The same rule applies to every arm.
+/// (`arko_index search2`, `rg -n`, `grep -r`, `git grep`, ...) with words
+/// describing a search ("I ran", "searched", "using `rg"). Other mentions
+/// stay, so answers about the code of these tools keep their content. The
+/// same rule applies to every arm.
 pub fn scrub_for_grader(text: &str) -> (String, bool) {
     const TOOL_ONLY: [&str; 2] = ["ARKO_INDEX_STATE", "arko_index_dense"];
     const COMMANDS: [&str; 7] = [
@@ -260,26 +323,35 @@ pub fn scrub_for_grader(text: &str) -> (String, bool) {
         "grep -n",
         "git grep",
     ];
-    const PROCESS: [&str; 12] = [
+    const PROCESS: [&str; 20] = [
         "i ran",
         "i used",
         "i searched",
+        "i grepped",
         "searched",
         "searching",
+        "grepped",
         "ran `",
         "running `",
-        "using `",
-        "with `",
-        "via `",
+        "by running",
         "found with",
         "found by",
+        "found via",
+        "located with",
+        "with `rg",
+        "with `grep",
+        "with `git grep",
+        "with `arko_index",
+        "using `rg",
+        "using `arko_index",
     ];
     let mut scrubbed = false;
     let lines: Vec<&str> = text
         .lines()
         .filter(|line| {
             let lower = line.to_lowercase();
-            let drop = TOOL_ONLY.iter().any(|marker| line.contains(marker))
+            let drop = is_search_command(line)
+                || TOOL_ONLY.iter().any(|marker| line.contains(marker))
                 || (COMMANDS.iter().any(|command| line.contains(command))
                     && PROCESS.iter().any(|word| lower.contains(word)));
             scrubbed |= drop;
@@ -553,6 +625,24 @@ mod tests {
         // Describing the CLI's own code keeps the line.
         let about = "ANSWER:\n`arko_index search2` reads only the postings of the query's terms.";
         assert_eq!(scrub_for_grader(about), (about.to_string(), false));
+        let about =
+            "`arko_index search2` loads the index with `Index::open`, then ranks with BM25.";
+        assert_eq!(scrub_for_grader(about), (about.to_string(), false));
+        // Bare commands go, whatever their prompt or list marker.
+        for command in [
+            "$ arko_index outline src/net",
+            "$ rg -n retry_delay src",
+            "- `grep -rn \"retry\" src`",
+            "1. git grep -n retry",
+            "> arko_index search2 /state 'retry delay'",
+        ] {
+            let (text, scrubbed) = scrub_for_grader(&format!("ANSWER:\n{command}\nIt is retry()."));
+            assert!(scrubbed, "{command}");
+            assert_eq!(text, "ANSWER:\nIt is retry().", "{command}");
+        }
+        // Prose that starts with an ordinary word stays.
+        let prose = "Grep-like matching happens in `matcher::find`.";
+        assert_eq!(scrub_for_grader(prose), (prose.to_string(), false));
         let (text, scrubbed) = scrub_for_grader("ANSWER:\nIt is in arko_index/src/lib.rs:3.");
         assert!(!scrubbed);
         assert!(text.contains("arko_index/src/lib.rs"));

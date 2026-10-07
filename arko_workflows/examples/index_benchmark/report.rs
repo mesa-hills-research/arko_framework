@@ -302,7 +302,8 @@ fn clusters_of<'a>(rows: &[&Row<'a>], value: impl Fn(&Row<'a>) -> Option<f64>) -
 }
 
 /// A rate over cells with a 95% interval: Wilson's when every task has one
-/// cell, else a bootstrap that resamples tasks with all their samples.
+/// cell (or there is only one task), else a bootstrap that resamples tasks
+/// with all their samples.
 fn rate<'a>(
     rows: &[&Row<'a>],
     value: impl Fn(&Row<'a>) -> Option<bool>,
@@ -310,7 +311,7 @@ fn rate<'a>(
     rng: &mut Rng,
 ) -> Estimate {
     let clusters = clusters_of(rows, |row| value(row).map(|pass| f64::from(u8::from(pass))));
-    if clusters.iter().all(|cluster| cluster.len() <= 1) {
+    if clusters.len() < 2 || clusters.iter().all(|cluster| cluster.len() <= 1) {
         let values: Vec<f64> = clusters.into_iter().flatten().collect();
         let successes = values.iter().filter(|value| **value > 0.5).count();
         return wilson(successes, values.len());

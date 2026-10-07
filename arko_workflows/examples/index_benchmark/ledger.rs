@@ -87,26 +87,44 @@ pub struct DirLock {
 
 impl DirLock {
     pub fn acquire(dir: &Path, what: &str) -> BenchResult<Self> {
+        use std::io::Write as _;
         std::fs::create_dir_all(dir)?;
         let path = dir.join("LOCK");
-        if let Some(pid) = Self::holder(dir) {
-            return Err(format!(
-                "{what} is in progress in another process (pid {pid}): wait for it or stop it, or remove {} if that process isn't this benchmark",
-                path.display()
-            )
-            .into());
+        // Created exclusively, so two processes starting at once can't both
+        // hold it; a lock whose process is gone is removed and tried again.
+        for _ in 0..2 {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    file.write_all(std::process::id().to_string().as_bytes())?;
+                    return Ok(Self { path });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if let Some(pid) = Self::holder(dir) {
+                        return Err(format!(
+                            "{what} is in progress in another process (pid {pid}): wait for it or stop it, or remove {} if that process isn't this benchmark",
+                            path.display()
+                        )
+                        .into());
+                    }
+                    let _ = std::fs::remove_file(&path);
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
-        std::fs::write(&path, std::process::id().to_string())?;
-        Ok(Self { path })
+        Err(format!("could not take the lock {}", path.display()).into())
     }
 
-    /// The live process holding `dir`'s lock, if any.
+    /// The live process holding `dir`'s lock, if any. A lock just created,
+    /// whose holder hasn't written its id yet, counts as held.
     pub fn holder(dir: &Path) -> Option<u32> {
-        let pid: u32 = std::fs::read_to_string(dir.join("LOCK"))
-            .ok()?
-            .trim()
-            .parse()
-            .ok()?;
+        let text = std::fs::read_to_string(dir.join("LOCK")).ok()?;
+        let Ok(pid) = text.trim().parse::<u32>() else {
+            return text.trim().is_empty().then_some(0);
+        };
         (pid != std::process::id() && process_alive(pid)).then_some(pid)
     }
 }

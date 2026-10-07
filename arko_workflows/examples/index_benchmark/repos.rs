@@ -479,14 +479,13 @@ const INDEX_PROGRAMS: [&str; 3] = ["arko_index", "arko_index_cli", "arko_index_d
 /// gets stubs for every arko_index program; arm B the arko_index CLI as
 /// `arko_index` and a stub for `arko_index_dense`; arm C also
 /// `arko_index_dense`, which asks this process's dense search service.
-/// Without a CLI, arms B and C get no `arko_index`.
-///
-/// Files are only replaced (atomically) when they differ, so a process
-/// starting beside a running one doesn't take its agents' tools away.
-pub fn setup_arm_bins(layout: &Layout, index_cli: Option<&Path>) -> BenchResult<()> {
+/// Only the directories of `arms` are touched (a command sets up the arms
+/// it runs, and leaves those of another process alone), and files are
+/// only replaced (atomically) when they differ.
+pub fn setup_arm_bins(layout: &Layout, arms: &[crate::Arm], index_cli: &Path) -> BenchResult<()> {
     let stub =
         |name: &str| format!("#!/bin/sh\necho \"bash: {name}: command not found\" >&2\nexit 127\n");
-    for arm in crate::Arm::ALL {
+    for &arm in arms {
         let dir = layout.bin_dir(arm);
         std::fs::create_dir_all(&dir)?;
         let stubs: &[&str] = match arm {
@@ -500,9 +499,7 @@ pub fn setup_arm_bins(layout: &Layout, index_cli: Option<&Path>) -> BenchResult<
         if arm == crate::Arm::A {
             continue;
         }
-        if let Some(cli) = index_cli {
-            ensure_link(cli, &dir.join("arko_index"))?;
-        }
+        ensure_link(index_cli, &dir.join("arko_index"))?;
         if arm == crate::Arm::C {
             let exe = std::env::current_exe()?;
             ensure_script(

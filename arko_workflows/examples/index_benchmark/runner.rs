@@ -674,9 +674,11 @@ const BENCHMARK_FILES: [&str; 8] = [
     "transcripts/",
 ];
 
-/// Whether a run's commands name the benchmark's files outside its
-/// checkout: one of [`BENCHMARK_FILES`], or a path under `out` other than
-/// the run's checkout, index and tools.
+/// Whether a run reached the benchmark's files outside its checkout: a
+/// command names one of [`BENCHMARK_FILES`], or a command or its output
+/// names a path under `out` other than the run's checkout, index and tools,
+/// or an output line names one of those files through `..` (a search of
+/// `../..`, say).
 pub fn looked_outside(task: &arko_agents::Task, out: &Path, repo: &str) -> bool {
     let out = out.display().to_string();
     let allowed = [
@@ -685,7 +687,15 @@ pub fn looked_outside(task: &arko_agents::Task, out: &Path, repo: &str) -> bool 
         format!("{out}/bin/"),
         format!("{out}/scratch/"),
     ];
-    task.conversation
+    let names_out = |text: &str| {
+        text.match_indices(out.as_str()).any(|(at, _)| {
+            !allowed
+                .iter()
+                .any(|prefix| text[at..].starts_with(prefix.as_str()))
+        })
+    };
+    let commands = task
+        .conversation
         .messages
         .iter()
         .flat_map(|message| &message.tool_calls)
@@ -693,14 +703,23 @@ pub fn looked_outside(task: &arko_agents::Task, out: &Path, repo: &str) -> bool 
             call.arguments
                 .get("command")
                 .and_then(|value| value.as_str())
-        })
-        .any(|command| {
-            BENCHMARK_FILES.iter().any(|name| command.contains(name))
-                || command.match_indices(out.as_str()).any(|(at, _)| {
-                    !allowed
-                        .iter()
-                        .any(|prefix| command[at..].starts_with(prefix.as_str()))
-                })
+        });
+    let outputs = task
+        .conversation
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|content| content.as_tool_result())
+        .map(|result| result.output.as_str());
+    commands
+        .clone()
+        .any(|command| BENCHMARK_FILES.iter().any(|name| command.contains(name)))
+        || commands.chain(outputs.clone()).any(names_out)
+        || outputs.flat_map(str::lines).any(|line| {
+            line.trim_start().starts_with("../")
+                && (BENCHMARK_FILES.iter().any(|name| line.contains(name))
+                    || line.contains("runs/")
+                    || line.contains("tasks/"))
         })
 }
 
@@ -789,7 +808,12 @@ pub fn plan(
                             plan.grade.push(settled.attempt_id.clone());
                         }
                     }
-                } else if records.len() >= max_attempts as usize {
+                } else if records
+                    .iter()
+                    .filter(|record| !is_login_failure(record.failure_kind.as_deref()))
+                    .count()
+                    >= max_attempts as usize
+                {
                     plan.abandoned.push(key);
                 } else {
                     plan.solve.push(key);
@@ -1412,10 +1436,11 @@ async fn solve(context: &RunContext, key: JobKey) -> AttemptRecord {
         result.as_ref().map(|result| &result.task),
     );
     let _ = std::fs::remove_dir_all(&scratch);
-    // A run cancelled by the operator's stop runs again on resume without
-    // using up one of its attempts.
-    let cancelled = outcome == Outcome::Infra && context.stop.level() >= 2;
-    if !cancelled && let Err(error) = context.attempts.append(&record) {
+    // A run cancelled by the operator's stop, or failed by a lost login, runs
+    // again on resume without using up one of its attempts.
+    let not_the_agents = outcome == Outcome::Infra
+        && (context.stop.level() >= 2 || is_login_failure(record.failure_kind.as_deref()));
+    if !not_the_agents && let Err(error) = context.attempts.append(&record) {
         eprintln!("could not record attempt {attempt_id}: {error}");
     }
     record
@@ -1778,7 +1803,7 @@ mod tests {
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
-        crate::repos::setup_arm_bins(&layout, Some(&cli)).unwrap();
+        crate::repos::setup_arm_bins(&layout, &Arm::ALL, &cli).unwrap();
         let repo = PreparedRepo {
             spec: crate::repos::RepoSpec {
                 id: "demo".into(),
@@ -1901,6 +1926,83 @@ mod tests {
             out,
             "redis"
         ));
+        // A search of `../..` that printed the task set.
+        let mut searched_up = task_with_commands(&["rg -n 'retry delay' ../.."]);
+        let mut result = arko_ai::Message::new_user("");
+        result.content = vec![arko_ai::Content::ToolResult(
+            serde_json::from_value(serde_json::json!({
+                "call_id": "call_0",
+                "name": "shell",
+                "output": "exit code: 0\n../../tasks.json:120: \"question\": \"retry delay ...\"",
+                "is_error": false,
+            }))
+            .unwrap(),
+        )];
+        searched_up.conversation.messages.push(result);
+        assert!(looked_outside(&searched_up, out, "redis"));
+    }
+
+    #[tokio::test]
+    async fn a_lost_login_while_solving_stops_the_run_and_uses_no_attempt() {
+        let dir = crate::test_dir("solve-login");
+        let layout = Layout::new(&dir.join("out")).unwrap();
+        let repo = crate::mock::demo_repo(&layout.out);
+        let mut demo = task("t1");
+        demo.repo = "demo".into();
+        let url = crate::mock::unauthorized_server().await;
+        let client = crate::agents::build_client(&[], Some(&url)).unwrap();
+        let settings = || RunSettings {
+            name: "main".into(),
+            arms: vec![Arm::A],
+            samples: 1,
+            concurrency: 1,
+            model: ModelSettings::parse("gpt-6-astra:xhigh", true).unwrap(),
+            shell: ShellSettings {
+                timeout: Duration::from_secs(5),
+                max_output_bytes: 4096,
+                max_calls: 5,
+            },
+            max_input_tokens: 1_000_000,
+            attempt_timeout: None,
+            max_attempts: 3,
+            grade: true,
+            grade_only: false,
+            grader_shell: true,
+            seed: 1,
+            limit: None,
+            mock: true,
+            tasks_file: "tasks.json".into(),
+            index_cli: "cli".into(),
+            index_cli_sha256: String::new(),
+        };
+        // More resumes than attempts, all with the login still broken.
+        for _ in 0..4 {
+            let summary = run(RunInputs {
+                layout: layout.clone(),
+                settings: settings(),
+                tasks: vec![demo.clone()],
+                prepared: BTreeMap::from([("demo".to_string(), repo.clone())]),
+                client: client.clone(),
+            })
+            .await
+            .unwrap();
+            assert!(summary.contains("stopped (login failure)"), "{summary}");
+        }
+        let attempts: Vec<AttemptRecord> =
+            read_jsonl(&layout.run_dir("main").join("attempts.jsonl")).unwrap();
+        assert!(attempts.is_empty(), "{attempts:?}");
+        // Records of lost logins written by an earlier version don't count
+        // against the attempts either.
+        let old: Vec<AttemptRecord> = (0..3)
+            .map(|index| AttemptRecord {
+                failure_kind: Some("Authentication".into()),
+                ..attempt("t1", Arm::A, Outcome::Infra, &format!("old{index}"))
+            })
+            .collect();
+        let resumed = plan(&[task("t1")], &[Arm::A], 1, &old, &[], 3, 1);
+        assert_eq!(resumed.solve.len(), 1);
+        assert!(resumed.abandoned.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

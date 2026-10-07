@@ -132,7 +132,8 @@ only the rest is done. A lost login (or a billing or permission error) stops the
 other runs that end outside the agent's control are run again up to `--max-attempts` (3). A
 resumed run must keep its model, shell settings and limits; it may add arms, samples and tasks.
 One process at a time works on a run, on `generate`, or on `prepare` (a `LOCK` file with its
-process id; `prepare` also waits for runs and `generate` to end, since it replaces checkouts).
+process id). `prepare` refuses to start while a run or `generate` is working, since it replaces
+checkouts and indexes, and they refuse to start while it works.
 
 ## Metrics
 

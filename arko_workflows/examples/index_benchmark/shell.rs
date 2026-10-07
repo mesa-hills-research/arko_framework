@@ -251,34 +251,99 @@ async fn kill_group(pid: Option<u32>) {
     let _ = pid;
 }
 
+/// The simple commands of a command line, as words: split at `;`, `|`,
+/// `&`, parentheses, braces, backticks and newlines, and into words at
+/// whitespace, all outside quotes; quotes and backslashes removed.
+pub fn simple_commands(command: &str) -> Vec<Vec<String>> {
+    let mut commands = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        if let Some(open) = quote {
+            match c {
+                c if c == open => quote = None,
+                '\\' if open == '"' => word.extend(chars.next()),
+                c => word.push(c),
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' => {
+                quote = Some(c);
+                in_word = true;
+            }
+            '\\' => {
+                word.extend(chars.next());
+                in_word = true;
+            }
+            ';' | '|' | '&' | '(' | ')' | '{' | '}' | '`' | '\n' => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+                if !words.is_empty() {
+                    commands.push(std::mem::take(&mut words));
+                }
+            }
+            c if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            c => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        words.push(word);
+    }
+    if !words.is_empty() {
+        commands.push(words);
+    }
+    commands
+}
+
 /// The programs a command line runs: the first word of each simple command
-/// (split at `;`, `|`, `&`, parentheses, braces, backticks and newlines),
-/// after variable assignments, shell keywords and wrappers such as `xargs`
-/// or `timeout` with their options. Approximate (quotes aren't parsed, and
-/// `bash -c '...'` counts as `bash`), but a path or a word in an argument
-/// is never taken for a program.
+/// (see [`simple_commands`]), after variable assignments, shell keywords
+/// and wrappers such as `xargs` or `timeout` with their options, and the
+/// program of a `find ... -exec`. Approximate (`bash -c '...'` counts as
+/// `bash`), but a path or a word in an argument, quoted or not, is never
+/// taken for a program.
 pub fn programs_in(command: &str) -> Vec<String> {
-    const KEYWORDS: [&str; 9] = [
-        "if", "then", "else", "elif", "fi", "do", "done", "while", "until",
+    const KEYWORDS: [&str; 10] = [
+        "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!",
     ];
-    // Segments that name variables and words, not a program.
+    // Commands that name variables and words, not a program.
     const HEADERS: [&str; 3] = ["for", "case", "select"];
     const WRAPPERS: [&str; 9] = [
         "xargs", "time", "command", "exec", "env", "nice", "timeout", "nohup", "stdbuf",
     ];
+    // Wrapper options followed by a value (`xargs -I %`, `timeout -k 5`).
+    const OPTIONS_WITH_VALUE: [&str; 10] =
+        ["-I", "-n", "-P", "-L", "-d", "-s", "-E", "-a", "-k", "-u"];
     let mut programs = Vec::new();
-    for segment in command.split([';', '|', '&', '(', ')', '{', '}', '`', '\n']) {
-        if segment
-            .split_whitespace()
-            .next()
-            .is_some_and(|first| HEADERS.contains(&first))
+    for words in simple_commands(command) {
+        if words
+            .first()
+            .is_some_and(|first| HEADERS.contains(&first.as_str()))
         {
             continue;
         }
         let mut after_wrapper = false;
-        for word in segment.split_whitespace() {
-            let word = word.trim_matches(|c| c == '"' || c == '\'');
-            if word.is_empty() || word == "!" || KEYWORDS.contains(&word) {
+        let mut skip_value = false;
+        let mut program = None;
+        for (index, word) in words.iter().enumerate() {
+            if skip_value {
+                skip_value = false;
+                continue;
+            }
+            if word.is_empty() || KEYWORDS.contains(&word.as_str()) {
                 continue;
             }
             // `NAME=value` before the program.
@@ -289,20 +354,32 @@ pub fn programs_in(command: &str) -> Vec<String> {
                 continue;
             }
             // A wrapper's options and arguments (`timeout 30`, `xargs -0`).
+            if after_wrapper && word.starts_with('-') {
+                skip_value = OPTIONS_WITH_VALUE.contains(&word.as_str());
+                continue;
+            }
             if after_wrapper
-                && (word.starts_with('-')
-                    || word
-                        .chars()
-                        .all(|c| c.is_ascii_digit() || c == '.' || c == 's'))
+                && word
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '.' || c == 's' || c == 'm')
             {
                 continue;
             }
-            if WRAPPERS.contains(&word) {
+            if WRAPPERS.contains(&word.as_str()) {
                 after_wrapper = true;
                 continue;
             }
-            programs.push(word.to_string());
+            program = Some(index);
             break;
+        }
+        let Some(index) = program else {
+            continue;
+        };
+        programs.push(words[index].clone());
+        for pair in words[index..].windows(2) {
+            if ["-exec", "-execdir", "-ok", "-okdir"].contains(&pair[0].as_str()) {
+                programs.push(pair[1].clone());
+            }
         }
     }
     programs
@@ -596,6 +673,32 @@ mod tests {
         assert_eq!(
             index_programs("arko_index_dense 'retry delay'"),
             (false, true)
+        );
+        // Words inside quotes are arguments, whatever they hold.
+        assert_eq!(
+            index_programs("rg -n 'Index|arko_index' Cargo.toml"),
+            (false, false)
+        );
+        assert_eq!(
+            index_programs("grep -rnE \"(arko_index|arko_ai)\" ."),
+            (false, false)
+        );
+        assert_eq!(index_programs("rg -n 'a;arko_index b' ."), (false, false));
+        // Programs behind xargs and find.
+        assert_eq!(
+            index_programs("ls src | xargs -I % arko_index outline %"),
+            (true, false)
+        );
+        assert_eq!(
+            index_programs("find . -name '*.rs' -exec arko_index outline {} \\;"),
+            (true, false)
+        );
+        assert_eq!(
+            simple_commands("a 'b c' \"d;e\" f\\ g; h"),
+            vec![
+                vec!["a".to_string(), "b c".into(), "d;e".into(), "f g".into()],
+                vec!["h".to_string()]
+            ]
         );
     }
 
