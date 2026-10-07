@@ -20,7 +20,8 @@ Use the `shell` tool to explore it: list files, search, and read code. {tools}
 Rules:
 - Base every claim on code you have read in this checkout, not on what you remember of the
   project: this is one exact version, and details differ between versions.
-- Don't modify files, build the project, run its tests, or use the network.
+- Stay inside this checkout: everything you need is in it. Don't modify files, build the
+  project, run its tests, or use the network.
 - Paths are relative to the repository root. Line numbers are 1-based, as `rg -n`, `grep -n`
   and `sed -n` print them.
 - Be complete where the question asks for a list (every caller, every place affected), and
@@ -179,7 +180,8 @@ checkout). First you answer it yourself from the code; then you get the answer k
 engineer wrote, and you decide whether the key is right.
 
 Use the `shell` tool to explore (`rg`, `grep`, `find`, `sed -n`, `git grep`{index}). Base every
-claim on code you have read in this checkout. Don't modify files, build, or use the network.
+claim on code you have read in this checkout, and stay inside it. Don't modify files, build, or
+use the network.
 
 First message: answer the question. Call `complete_task` with your answer as its summary:
 ANSWER:

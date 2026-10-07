@@ -251,6 +251,79 @@ async fn kill_group(pid: Option<u32>) {
     let _ = pid;
 }
 
+/// The programs a command line runs: the first word of each simple command
+/// (split at `;`, `|`, `&`, parentheses, braces, backticks and newlines),
+/// after variable assignments, shell keywords and wrappers such as `xargs`
+/// or `timeout` with their options. Approximate (quotes aren't parsed, and
+/// `bash -c '...'` counts as `bash`), but a path or a word in an argument
+/// is never taken for a program.
+pub fn programs_in(command: &str) -> Vec<String> {
+    const KEYWORDS: [&str; 9] = [
+        "if", "then", "else", "elif", "fi", "do", "done", "while", "until",
+    ];
+    // Segments that name variables and words, not a program.
+    const HEADERS: [&str; 3] = ["for", "case", "select"];
+    const WRAPPERS: [&str; 9] = [
+        "xargs", "time", "command", "exec", "env", "nice", "timeout", "nohup", "stdbuf",
+    ];
+    let mut programs = Vec::new();
+    for segment in command.split([';', '|', '&', '(', ')', '{', '}', '`', '\n']) {
+        if segment
+            .split_whitespace()
+            .next()
+            .is_some_and(|first| HEADERS.contains(&first))
+        {
+            continue;
+        }
+        let mut after_wrapper = false;
+        for word in segment.split_whitespace() {
+            let word = word.trim_matches(|c| c == '"' || c == '\'');
+            if word.is_empty() || word == "!" || KEYWORDS.contains(&word) {
+                continue;
+            }
+            // `NAME=value` before the program.
+            if let Some((name, _)) = word.split_once('=')
+                && !name.is_empty()
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                continue;
+            }
+            // A wrapper's options and arguments (`timeout 30`, `xargs -0`).
+            if after_wrapper
+                && (word.starts_with('-')
+                    || word
+                        .chars()
+                        .all(|c| c.is_ascii_digit() || c == '.' || c == 's'))
+            {
+                continue;
+            }
+            if WRAPPERS.contains(&word) {
+                after_wrapper = true;
+                continue;
+            }
+            programs.push(word.to_string());
+            break;
+        }
+    }
+    programs
+}
+
+/// Which arko_index programs a command runs: (`arko_index` or
+/// `arko_index_cli`, `arko_index_dense`).
+pub fn index_programs(command: &str) -> (bool, bool) {
+    let mut index = false;
+    let mut dense = false;
+    for program in programs_in(command) {
+        let name = program.rsplit('/').next().unwrap_or(&program);
+        match name {
+            "arko_index" | "arko_index_cli" => index = true,
+            "arko_index_dense" => dense = true,
+            _ => {}
+        }
+    }
+    (index, dense)
+}
+
 /// Variables that hold credentials: never passed to the agents' commands.
 pub fn is_sensitive(name: &str) -> bool {
     let name = name.to_ascii_uppercase();
@@ -491,6 +564,39 @@ mod tests {
         let fresh = tool(10, 4096, vec![]);
         assert!(fresh.execute(&context, call("rm -rf /usr")).await.is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn finds_the_programs_a_command_runs() {
+        assert_eq!(
+            programs_in("cd src && arko_index outline . | head -20; FOO=1 rg -n x"),
+            vec!["cd", "arko_index", "head", "rg"]
+        );
+        assert_eq!(
+            programs_in("for f in a b; do timeout 30 arko_index search2 \"$S\" 'q'; done"),
+            vec!["arko_index"]
+        );
+        assert_eq!(
+            programs_in("ls | xargs -0 ./bin/arko_index_dense $(echo q)"),
+            vec!["ls", "./bin/arko_index_dense", "echo"]
+        );
+        // Paths and arguments that merely mention arko_index don't count.
+        assert_eq!(
+            index_programs("sed -n '1,54p' docs/arko_index-reference.md"),
+            (false, false)
+        );
+        assert_eq!(
+            index_programs("rg -n arko_index arko_index/src"),
+            (false, false)
+        );
+        assert_eq!(
+            index_programs("arko_index search2 \"$ARKO_INDEX_STATE\" 'x'"),
+            (true, false)
+        );
+        assert_eq!(
+            index_programs("arko_index_dense 'retry delay'"),
+            (false, true)
+        );
     }
 
     #[test]

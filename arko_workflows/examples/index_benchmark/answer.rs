@@ -147,6 +147,16 @@ pub struct DeterministicCheck {
     pub pass: bool,
 }
 
+/// Whether a cited location identifies a key location: they overlap (with
+/// [`LINE_TOLERANCE`] lines of slack), and the citation is at most three
+/// times as long as the key's range plus 30 lines, so citing a whole file
+/// or a large chunk doesn't meet every item inside it.
+pub fn cited_matches(key: &Location, cited: &Location, tolerance: u32) -> bool {
+    let key_lines = key.end_line - key.start_line + 1;
+    let cited_lines = cited.end_line - cited.start_line + 1;
+    key.matches(cited, tolerance) && cited_lines <= key_lines * 3 + 30
+}
+
 /// Checks `answer` against the location and file items of `task`'s key.
 pub fn deterministic_check(task: &BenchTask, answer: &ParsedAnswer) -> DeterministicCheck {
     check_key(&task.key, task.kind.is_list(), answer)
@@ -175,7 +185,7 @@ pub fn check_key(key: &AnswerKey, is_list: bool, answer: &ParsedAnswer) -> Deter
                 items += 1;
                 if cited
                     .iter()
-                    .any(|cited| location.matches(cited, LINE_TOLERANCE))
+                    .any(|cited| cited_matches(location, cited, LINE_TOLERANCE))
                 {
                     met += 1;
                 }
@@ -202,7 +212,7 @@ pub fn check_key(key: &AnswerKey, is_list: bool, answer: &ParsedAnswer) -> Deter
             .filter(|cited| {
                 key_locations
                     .iter()
-                    .any(|location| location.matches(cited, LINE_TOLERANCE))
+                    .any(|location| cited_matches(location, cited, LINE_TOLERANCE))
             })
             .count();
         (
@@ -216,7 +226,7 @@ pub fn check_key(key: &AnswerKey, is_list: bool, answer: &ParsedAnswer) -> Deter
         key.distractors.iter().any(|item| {
             item.location
                 .as_ref()
-                .is_some_and(|location| location.matches(first, 0))
+                .is_some_and(|location| cited_matches(location, first, 0))
         })
     });
     let score = (items > 0).then(|| met as f64 / items as f64);
@@ -231,28 +241,49 @@ pub fn check_key(key: &AnswerKey, is_list: bool, answer: &ParsedAnswer) -> Deter
     }
 }
 
-/// Removes mentions of search commands from an answer before the grader
-/// sees it, so the grader can't tell the arms apart. Lines that show a
-/// search command (of any arm) are dropped; other text is kept.
+/// Removes descriptions of search commands from an answer before the
+/// grader sees it, so the grader can't tell the arms apart. A line is
+/// dropped when it names the arms' search tools in a way only a command can
+/// (`$ARKO_INDEX_STATE`, `arko_index_dense`), or names a search command
+/// (`arko_index search2`, `rg -n`, `grep -r`, `git grep`, ...) together with
+/// words describing the search ("I ran", "searched", "using `"). Other
+/// mentions stay, so answers about the code of these tools keep their
+/// content. The same rule applies to every arm.
 pub fn scrub_for_grader(text: &str) -> (String, bool) {
-    const MARKERS: [&str; 9] = [
+    const TOOL_ONLY: [&str; 2] = ["ARKO_INDEX_STATE", "arko_index_dense"];
+    const COMMANDS: [&str; 7] = [
         "arko_index search2",
         "arko_index outline",
-        "arko_index_dense",
-        "ARKO_INDEX_STATE",
-        "search2 ",
         "rg -",
         "`rg ",
         "grep -r",
+        "grep -n",
         "git grep",
+    ];
+    const PROCESS: [&str; 12] = [
+        "i ran",
+        "i used",
+        "i searched",
+        "searched",
+        "searching",
+        "ran `",
+        "running `",
+        "using `",
+        "with `",
+        "via `",
+        "found with",
+        "found by",
     ];
     let mut scrubbed = false;
     let lines: Vec<&str> = text
         .lines()
         .filter(|line| {
-            let keep = !MARKERS.iter().any(|marker| line.contains(marker));
-            scrubbed |= !keep;
-            keep
+            let lower = line.to_lowercase();
+            let drop = TOOL_ONLY.iter().any(|marker| line.contains(marker))
+                || (COMMANDS.iter().any(|command| line.contains(command))
+                    && PROCESS.iter().any(|word| lower.contains(word)));
+            scrubbed |= drop;
+            !drop
         })
         .collect();
     (lines.join("\n"), scrubbed)
@@ -480,6 +511,22 @@ mod tests {
     }
 
     #[test]
+    fn broad_citations_meet_no_item() {
+        let key = key(
+            vec![item(
+                "L1",
+                ItemKind::Location,
+                Some(Location::new("src/a.rs", 100, 110)),
+            )],
+            vec![],
+        );
+        // The function itself, or a chunk around it, meets the item.
+        assert!(check_key(&key, false, &parse_answer("LOCATIONS:\nsrc/a.rs:95-140\n")).pass);
+        // A citation of the whole file doesn't.
+        assert!(!check_key(&key, false, &parse_answer("LOCATIONS:\nsrc/a.rs:1-900\n")).pass);
+    }
+
+    #[test]
     fn list_questions_report_precision() {
         let key = key(
             vec![
@@ -503,6 +550,9 @@ mod tests {
         );
         assert!(scrubbed);
         assert_eq!(text, "ANSWER:\nIt is in a.rs.");
+        // Describing the CLI's own code keeps the line.
+        let about = "ANSWER:\n`arko_index search2` reads only the postings of the query's terms.";
+        assert_eq!(scrub_for_grader(about), (about.to_string(), false));
         let (text, scrubbed) = scrub_for_grader("ANSWER:\nIt is in arko_index/src/lib.rs:3.");
         assert!(!scrubbed);
         assert!(text.contains("arko_index/src/lib.rs"));

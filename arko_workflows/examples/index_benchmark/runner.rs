@@ -354,9 +354,10 @@ impl UsageSummary {
                     .get("command")
                     .and_then(|value| value.as_str())
                     .unwrap_or("");
-                if command.contains("arko_index_dense") {
+                let (index, dense) = crate::shell::index_programs(command);
+                if dense {
                     summary.dense_calls += 1;
-                } else if command.contains("arko_index") {
+                } else if index {
                     summary.index_calls += 1;
                 }
             }
@@ -601,6 +602,11 @@ pub struct AttemptRecord {
     pub usage: UsageSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript: Option<String>,
+    /// Commands of the run named the benchmark's own files (task sets,
+    /// records, transcripts) outside the checkout: its answer may come from
+    /// a key or another arm's answer. Reported, and to be checked by hand.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub looked_outside: bool,
 }
 
 impl AttemptRecord {
@@ -637,6 +643,65 @@ pub struct GradeRecord {
     pub usage: UsageSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript: Option<String>,
+    /// The kind of error that failed the grader's run, when one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<String>,
+}
+
+/// Whether a failure kind is a lost login or account problem: every run on
+/// the credential fails until a person fixes it.
+pub fn is_login_failure(kind: Option<&str>) -> bool {
+    matches!(kind, Some("Authentication" | "Billing" | "Permission"))
+}
+
+/// The failure kind of a run's result, as records keep it.
+pub fn failure_kind_of(result: Option<&AgentResult>) -> Option<String> {
+    result
+        .and_then(AgentResult::failure_kind)
+        .map(|kind| format!("{kind:?}"))
+}
+
+/// Names of the benchmark's own files, which a solver has no business
+/// reading.
+const BENCHMARK_FILES: [&str; 8] = [
+    "tasks.json",
+    "candidates.jsonl",
+    "verifications.jsonl",
+    "writers.jsonl",
+    "attempts.jsonl",
+    "grades.jsonl",
+    "prepare.json",
+    "transcripts/",
+];
+
+/// Whether a run's commands name the benchmark's files outside its
+/// checkout: one of [`BENCHMARK_FILES`], or a path under `out` other than
+/// the run's checkout, index and tools.
+pub fn looked_outside(task: &arko_agents::Task, out: &Path, repo: &str) -> bool {
+    let out = out.display().to_string();
+    let allowed = [
+        format!("{out}/repos/{repo}"),
+        format!("{out}/indexes/{repo}"),
+        format!("{out}/bin/"),
+        format!("{out}/scratch/"),
+    ];
+    task.conversation
+        .messages
+        .iter()
+        .flat_map(|message| &message.tool_calls)
+        .filter_map(|call| {
+            call.arguments
+                .get("command")
+                .and_then(|value| value.as_str())
+        })
+        .any(|command| {
+            BENCHMARK_FILES.iter().any(|name| command.contains(name))
+                || command.match_indices(out.as_str()).any(|(at, _)| {
+                    !allowed
+                        .iter()
+                        .any(|prefix| command[at..].starts_with(prefix.as_str()))
+                })
+        })
 }
 
 /// A task, arm and sample: one cell of the benchmark.
@@ -1039,10 +1104,7 @@ pub async fn run(inputs: RunInputs) -> BenchResult<String> {
                     }
                 }
                 if record.outcome == Outcome::Infra
-                    && matches!(
-                        record.failure_kind.as_deref(),
-                        Some("Authentication" | "Billing" | "Permission")
-                    )
+                    && is_login_failure(record.failure_kind.as_deref())
                 {
                     eprintln!(
                         "the ChatGPT login failed ({}); stopping the run. Fix the login, then run again to resume.",
@@ -1052,6 +1114,13 @@ pub async fn run(inputs: RunInputs) -> BenchResult<String> {
                 }
             }
             Some(Ok(JobDone::Graded(record))) => {
+                if !record.ok && is_login_failure(record.failure_kind.as_deref()) {
+                    eprintln!(
+                        "the ChatGPT login failed while grading ({}); stopping the run. Fix the login, then run again to resume.",
+                        record.detail.as_deref().unwrap_or("")
+                    );
+                    context.stop.raise_to(1, "login failure");
+                }
                 graded += 1;
                 eprintln!(
                     "[grade {graded}] {} {}{}",
@@ -1286,6 +1355,7 @@ async fn solve(context: &RunContext, key: JobKey) -> AttemptRecord {
         active_ms: 0,
         usage: UsageSummary::default(),
         transcript: None,
+        looked_outside: false,
     };
     let Some(repo) = context.prepared.get(&task.repo) else {
         record.detail = Some(format!("repository {} is not prepared", task.repo));
@@ -1331,6 +1401,7 @@ async fn solve(context: &RunContext, key: JobKey) -> AttemptRecord {
     record.active_ms = active.as_millis() as u64;
     if let Some(result) = &result {
         record.usage = UsageSummary::of_task(&result.task, &context.settings.model);
+        record.looked_outside = looked_outside(&result.task, &context.layout.out, &task.repo);
         if outcome == Outcome::Answered {
             record.answer = Some(result.summary.clone());
         }
@@ -1385,6 +1456,7 @@ async fn grade(context: &RunContext, attempt: AttemptRecord) -> GradeRecord {
         wall_ms: 0,
         usage: UsageSummary::default(),
         transcript: None,
+        failure_kind: None,
     };
     let Some(repo) = context.prepared.get(&task.repo) else {
         record.detail = Some(format!("repository {} is not prepared", task.repo));
@@ -1475,6 +1547,7 @@ async fn grade(context: &RunContext, attempt: AttemptRecord) -> GradeRecord {
             record.verdict = Some(verdict);
         }
         None => {
+            record.failure_kind = failure_kind_of(result.as_ref());
             record.detail = Some(
                 control
                     .limit_reason()
@@ -1484,9 +1557,11 @@ async fn grade(context: &RunContext, attempt: AttemptRecord) -> GradeRecord {
             );
         }
     }
-    // A grading cancelled by a stop is not a failed grading: it runs again.
-    let cancelled = context.stop.level() >= 2 && !record.ok;
-    if !cancelled && let Err(error) = context.grades.append(&record) {
+    // A grading cancelled by a stop, or failed by a lost login, is not a
+    // failed grading: it runs again on resume.
+    let not_the_graders = !record.ok
+        && (context.stop.level() >= 2 || is_login_failure(record.failure_kind.as_deref()));
+    if !not_the_graders && let Err(error) = context.grades.append(&record) {
         eprintln!("could not record grade {grade_id}: {error}");
     }
     record
@@ -1542,6 +1617,7 @@ mod tests {
             active_ms: 1,
             usage: UsageSummary::default(),
             transcript: None,
+            looked_outside: false,
         }
     }
 
@@ -1560,6 +1636,7 @@ mod tests {
             wall_ms: 1,
             usage: UsageSummary::default(),
             transcript: None,
+            failure_kind: None,
         }
     }
 
@@ -1701,7 +1778,7 @@ mod tests {
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
-        crate::repos::setup_arm_bins(&layout, &cli).unwrap();
+        crate::repos::setup_arm_bins(&layout, Some(&cli)).unwrap();
         let repo = PreparedRepo {
             spec: crate::repos::RepoSpec {
                 id: "demo".into(),
@@ -1764,6 +1841,126 @@ mod tests {
         assert!(b_dense.starts_with("exit code: 127"), "{b_dense}");
         let c_dense = run(&layout, &repo, &dir, Arm::C, "command -v arko_index_dense").await;
         assert!(c_dense.starts_with("exit code: 0"), "{c_dense}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn task_with_commands(commands: &[&str]) -> arko_agents::Task {
+        let model = ModelSettings::parse("gpt-6-astra:xhigh", true).unwrap();
+        let config = agent_config("t", "T", "role", "instructions", "summary", &model, 60).unwrap();
+        let mut task = arko_agents::Task::new(config, "q".into(), PathBuf::from("/x"), None);
+        let mut message = arko_ai::Message::new_assistant("");
+        message.tool_calls = commands
+            .iter()
+            .enumerate()
+            .map(|(index, command)| {
+                serde_json::from_value(serde_json::json!({
+                    "id": format!("call_{index}"),
+                    "name": "shell",
+                    "arguments": {"command": command},
+                }))
+                .unwrap()
+            })
+            .collect();
+        task.conversation.messages.push(message);
+        task
+    }
+
+    #[test]
+    fn counts_index_use_and_flags_reads_of_the_benchmarks_files() {
+        let out = Path::new("/data/bench");
+        let model = ModelSettings::parse("gpt-6-astra:xhigh", true).unwrap();
+        let ordinary = task_with_commands(&[
+            "rg -n foo src",
+            "sed -n 1,9p /data/bench/repos/redis/src/a.c",
+            "arko_index search2 \"$ARKO_INDEX_STATE\" 'retry delay'",
+            "cat docs/arko_index-reference.md",
+        ]);
+        let usage = UsageSummary::of_task(&ordinary, &model);
+        assert_eq!(
+            (usage.tool_calls, usage.shell_calls, usage.index_calls),
+            (4, 4, 1)
+        );
+        assert!(!looked_outside(&ordinary, out, "redis"));
+        assert!(!looked_outside(
+            &task_with_commands(&["ls /data/bench/indexes/redis"]),
+            out,
+            "redis"
+        ));
+        assert!(looked_outside(
+            &task_with_commands(&["cat ../../tasks.json"]),
+            out,
+            "redis"
+        ));
+        assert!(looked_outside(
+            &task_with_commands(&["ls /data/bench/runs/main"]),
+            out,
+            "redis"
+        ));
+        assert!(looked_outside(
+            &task_with_commands(&["rg -n x /data/bench/repos/caddy"]),
+            out,
+            "redis"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_lost_login_while_grading_stops_the_run_and_uses_no_attempt() {
+        let dir = crate::test_dir("grade-login");
+        let layout = Layout::new(&dir.join("out")).unwrap();
+        let repo = crate::mock::demo_repo(&layout.out);
+        let mut demo = task("t1");
+        demo.repo = "demo".into();
+        let run_dir = layout.run_dir("main");
+        let attempts = Appender::open(&run_dir.join("attempts.jsonl")).unwrap();
+        for id in ["a1", "a2"] {
+            let mut answered = attempt("t1", Arm::A, Outcome::Answered, id);
+            answered.repo = "demo".into();
+            if id == "a2" {
+                answered.arm = Arm::B;
+            }
+            attempts.append(&answered).unwrap();
+        }
+        drop(attempts);
+        let url = crate::mock::unauthorized_server().await;
+        let client = crate::agents::build_client(&[], Some(&url)).unwrap();
+        let settings = RunSettings {
+            name: "main".into(),
+            arms: vec![Arm::A, Arm::B],
+            samples: 1,
+            concurrency: 1,
+            model: ModelSettings::parse("gpt-6-astra:xhigh", true).unwrap(),
+            shell: ShellSettings {
+                timeout: Duration::from_secs(5),
+                max_output_bytes: 4096,
+                max_calls: 5,
+            },
+            max_input_tokens: 1_000_000,
+            attempt_timeout: None,
+            max_attempts: 3,
+            grade: true,
+            grade_only: true,
+            grader_shell: true,
+            seed: 1,
+            limit: None,
+            mock: true,
+            tasks_file: "tasks.json".into(),
+            index_cli: "cli".into(),
+            index_cli_sha256: String::new(),
+        };
+        let summary = run(RunInputs {
+            layout: layout.clone(),
+            settings,
+            tasks: vec![demo],
+            prepared: BTreeMap::from([("demo".to_string(), repo)]),
+            client,
+        })
+        .await
+        .unwrap();
+        assert!(summary.contains("stopped (login failure)"), "{summary}");
+        // The failed grading isn't recorded: both answers are graded on
+        // resume, with all their attempts left.
+        let grades: Vec<GradeRecord> = read_jsonl(&run_dir.join("grades.jsonl")).unwrap();
+        assert!(grades.is_empty(), "{grades:?}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

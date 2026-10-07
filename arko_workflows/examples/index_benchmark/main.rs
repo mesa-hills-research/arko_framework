@@ -250,6 +250,14 @@ struct GenerateArgs {
     /// The task set to write (default: OUT/tasks.json).
     #[arg(long)]
     tasks: Option<PathBuf>,
+    /// The writer's and verifier's tools: `terminal` (arm A's) or `index`
+    /// (arm B's, with arko_index). Terminal by default, so the questions
+    /// aren't shaped by the tool under test.
+    #[arg(long, default_value = "terminal")]
+    writer_tools: String,
+    /// The arko_index CLI (default: `arko_index_cli` next to this binary).
+    #[arg(long)]
+    index_cli: Option<PathBuf>,
     #[command(flatten)]
     shell: ShellArgs,
 }
@@ -335,8 +343,11 @@ struct RunArgs {
     shell: ShellArgs,
     /// Input tokens (all calls, cached included) after which an agent run is
     /// stopped and counted as failed.
-    #[arg(long, default_value_t = 4_000_000)]
+    #[arg(long, default_value_t = 8_000_000)]
     max_input_tokens: usize,
+    /// The arko_index CLI (default: `arko_index_cli` next to this binary).
+    #[arg(long)]
+    index_cli: Option<PathBuf>,
     /// Minutes an agent run may work (waits for usage limits excluded)
     /// before it is stopped and counted as failed; 0 for no limit.
     #[arg(long, default_value_t = 60)]
@@ -579,10 +590,18 @@ async fn generate_command(args: GenerateArgs) -> BenchResult<()> {
         return Err("no prepared repositories: run `prepare` first".into());
     }
     let kinds = parse_kinds(&args.kinds)?.unwrap_or_else(|| tasks::TaskKind::ALL.to_vec());
-    let index_cli = repos::find_index_cli(None).ok();
-    if let Some(cli) = &index_cli {
-        repos::setup_arm_bins(&layout, cli)?;
-    }
+    let writer_arm = match args.writer_tools.as_str() {
+        "terminal" => Arm::A,
+        "index" => Arm::B,
+        other => return Err(format!("--writer-tools {other}: terminal or index").into()),
+    };
+    let _lock = ledger::DirLock::acquire(&layout.tasks_dir(), "a `generate`")?;
+    let index_cli = if writer_arm == Arm::A {
+        repos::find_index_cli(args.index_cli.as_deref()).ok()
+    } else {
+        Some(repos::find_index_cli(args.index_cli.as_deref())?)
+    };
+    repos::setup_arm_bins(&layout, index_cli.as_deref())?;
     let path = args.tasks.clone().unwrap_or_else(|| layout.default_tasks());
     let tasks = generate::generate(generate::GenerateOptions {
         layout: layout.clone(),
@@ -597,6 +616,7 @@ async fn generate_command(args: GenerateArgs) -> BenchResult<()> {
         shell: args.shell.settings(),
         tasks_path: path,
         mock: args.model.mock,
+        writer_arm,
     })
     .await?;
     print_counts(&layout, &tasks)?;
@@ -653,7 +673,12 @@ async fn run_command(args: RunArgs) -> BenchResult<()> {
             .into());
         }
     }
-    let index_cli = repos::find_index_cli(None)?;
+    let _lock =
+        ledger::DirLock::acquire(&layout.run_dir(&args.name), &format!("run {}", args.name))?;
+    if let Some(pid) = ledger::DirLock::holder(&layout.out.join("prepare")) {
+        return Err(format!("`prepare` is running (pid {pid}); wait for it").into());
+    }
+    let index_cli = repos::find_index_cli(args.index_cli.as_deref())?;
     let index_cli_sha256 = repos::sha256_file(&index_cli)?;
     for task in &task_set {
         if let Some(repo) = prepared.get(&task.repo)
@@ -668,7 +693,7 @@ async fn run_command(args: RunArgs) -> BenchResult<()> {
             break;
         }
     }
-    repos::setup_arm_bins(&layout, &index_cli)?;
+    repos::setup_arm_bins(&layout, Some(&index_cli))?;
     let mock = start_mock(&args.model).await?;
     let client =
         agents::build_client(&args.model.codex_home, mock.as_ref().map(|mock| mock.url()))?;

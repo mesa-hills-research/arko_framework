@@ -195,6 +195,20 @@ pub struct PrepareOptions<'a> {
 
 pub async fn prepare(options: PrepareOptions<'_>) -> BenchResult<BTreeMap<String, PreparedRepo>> {
     let layout = options.layout;
+    let _lock = crate::ledger::DirLock::acquire(&layout.out.join("prepare"), "a prepare")?;
+    let mut busy: Vec<PathBuf> = vec![layout.tasks_dir()];
+    if let Ok(runs) = std::fs::read_dir(layout.out.join("runs")) {
+        busy.extend(runs.flatten().map(|entry| entry.path()));
+    }
+    for dir in busy {
+        if let Some(pid) = crate::ledger::DirLock::holder(&dir) {
+            return Err(format!(
+                "{} is in use by process {pid}: prepare changes the checkouts and indexes it uses; wait for it, or stop it",
+                dir.display()
+            )
+            .into());
+        }
+    }
     let mut prepared = load_prepared(layout)?;
     let cli_sha = sha256_file(&options.index_cli)?;
     for spec in &options.repos {
@@ -465,34 +479,33 @@ const INDEX_PROGRAMS: [&str; 3] = ["arko_index", "arko_index_cli", "arko_index_d
 /// gets stubs for every arko_index program; arm B the arko_index CLI as
 /// `arko_index` and a stub for `arko_index_dense`; arm C also
 /// `arko_index_dense`, which asks this process's dense search service.
-pub fn setup_arm_bins(layout: &Layout, index_cli: &Path) -> BenchResult<()> {
+/// Without a CLI, arms B and C get no `arko_index`.
+///
+/// Files are only replaced (atomically) when they differ, so a process
+/// starting beside a running one doesn't take its agents' tools away.
+pub fn setup_arm_bins(layout: &Layout, index_cli: Option<&Path>) -> BenchResult<()> {
+    let stub =
+        |name: &str| format!("#!/bin/sh\necho \"bash: {name}: command not found\" >&2\nexit 127\n");
     for arm in crate::Arm::ALL {
         let dir = layout.bin_dir(arm);
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir)?;
-        }
         std::fs::create_dir_all(&dir)?;
         let stubs: &[&str] = match arm {
             crate::Arm::A => &INDEX_PROGRAMS,
-            crate::Arm::B => &INDEX_PROGRAMS[2..],
-            crate::Arm::C => &[],
+            crate::Arm::B => &INDEX_PROGRAMS[1..],
+            crate::Arm::C => &INDEX_PROGRAMS[1..2],
         };
         for name in stubs {
-            write_script(
-                &dir.join(name),
-                &format!("#!/bin/sh\necho \"bash: {name}: command not found\" >&2\nexit 127\n"),
-            )?;
+            ensure_script(&dir.join(name), &stub(name))?;
         }
         if arm == crate::Arm::A {
             continue;
         }
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(index_cli, dir.join("arko_index"))?;
-        #[cfg(not(unix))]
-        std::fs::copy(index_cli, dir.join("arko_index.exe")).map(|_| ())?;
+        if let Some(cli) = index_cli {
+            ensure_link(cli, &dir.join("arko_index"))?;
+        }
         if arm == crate::Arm::C {
             let exe = std::env::current_exe()?;
-            write_script(
+            ensure_script(
                 &dir.join("arko_index_dense"),
                 &format!(
                     "#!/bin/sh\nexec '{}' dense-query \"$@\"\n",
@@ -504,13 +517,38 @@ pub fn setup_arm_bins(layout: &Layout, index_cli: &Path) -> BenchResult<()> {
     Ok(())
 }
 
-fn write_script(path: &Path, text: &str) -> BenchResult<()> {
-    std::fs::write(path, text)?;
+/// Writes an executable script, through a temporary file and a rename,
+/// unless it already holds `text`.
+fn ensure_script(path: &Path, text: &str) -> BenchResult<()> {
+    if std::fs::read_to_string(path).is_ok_and(|current| current == text) {
+        return Ok(());
+    }
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&temporary, text)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755))?;
     }
+    std::fs::rename(&temporary, path)?;
+    Ok(())
+}
+
+/// Points `link` at `target` (a symbolic link; a copy on Windows), through
+/// a temporary link and a rename, unless it already does.
+fn ensure_link(target: &Path, link: &Path) -> BenchResult<()> {
+    #[cfg(unix)]
+    {
+        if std::fs::read_link(link).is_ok_and(|current| current == target) {
+            return Ok(());
+        }
+        let temporary = link.with_extension(format!("tmp-{}", std::process::id()));
+        let _ = std::fs::remove_file(&temporary);
+        std::os::unix::fs::symlink(target, &temporary)?;
+        std::fs::rename(&temporary, link)?;
+    }
+    #[cfg(not(unix))]
+    std::fs::copy(target, link.with_extension("exe")).map(|_| ())?;
     Ok(())
 }
 

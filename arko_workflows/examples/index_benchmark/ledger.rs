@@ -77,6 +77,56 @@ impl Appender {
     }
 }
 
+/// A `LOCK` file holding this process's id: one process at a time works
+/// in a directory (a run, the task generation, a `prepare`). A lock whose
+/// process is gone (it crashed) is taken over. Removed on drop.
+#[derive(Debug)]
+pub struct DirLock {
+    path: PathBuf,
+}
+
+impl DirLock {
+    pub fn acquire(dir: &Path, what: &str) -> BenchResult<Self> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join("LOCK");
+        if let Some(pid) = Self::holder(dir) {
+            return Err(format!(
+                "{what} is in progress in another process (pid {pid}): wait for it or stop it, or remove {} if that process isn't this benchmark",
+                path.display()
+            )
+            .into());
+        }
+        std::fs::write(&path, std::process::id().to_string())?;
+        Ok(Self { path })
+    }
+
+    /// The live process holding `dir`'s lock, if any.
+    pub fn holder(dir: &Path) -> Option<u32> {
+        let pid: u32 = std::fs::read_to_string(dir.join("LOCK"))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
+        (pid != std::process::id() && process_alive(pid)).then_some(pid)
+    }
+}
+
+impl Drop for DirLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Whether a process with this id runs (Linux: `/proc`; elsewhere a lock is
+/// taken as held, since there is no cheap check).
+fn process_alive(pid: u32) -> bool {
+    if cfg!(target_os = "linux") {
+        Path::new(&format!("/proc/{pid}")).exists()
+    } else {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +163,31 @@ mod tests {
             read_jsonl::<Record>(&path).unwrap(),
             vec![Record { n: 1 }, Record { n: 2 }, Record { n: 4 }]
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn locks_refuse_a_live_holder_and_take_over_a_dead_one() {
+        let dir = crate::test_dir("lock");
+        // A live process (this test's parent, say) holds it.
+        let parent = std::fs::read_to_string("/proc/self/stat")
+            .unwrap()
+            .split_whitespace()
+            .nth(3)
+            .unwrap()
+            .to_string();
+        std::fs::write(dir.join("LOCK"), &parent).unwrap();
+        assert!(DirLock::acquire(&dir, "the run").is_err());
+        // A process that is gone.
+        std::fs::write(dir.join("LOCK"), "4000000000").unwrap();
+        let lock = DirLock::acquire(&dir, "the run").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("LOCK")).unwrap(),
+            std::process::id().to_string()
+        );
+        drop(lock);
+        assert!(!dir.join("LOCK").exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -283,8 +283,9 @@ pub struct GroupStats {
     pub index_calls: f64,
     /// Share of cells whose agent ran arko_index at least once.
     pub index_adoption: f64,
-    pub wall_seconds: Estimate,
-    pub median_wall_seconds: f64,
+    /// Working time: wall time less waits for usage limits and retries.
+    pub work_seconds: Estimate,
+    pub median_work_seconds: f64,
     pub api_cost: Estimate,
     /// Total cost divided by passes.
     pub cost_per_pass: Option<f64>,
@@ -300,6 +301,23 @@ fn clusters_of<'a>(rows: &[&Row<'a>], value: impl Fn(&Row<'a>) -> Option<f64>) -
     by_task.into_values().collect()
 }
 
+/// A rate over cells with a 95% interval: Wilson's when every task has one
+/// cell, else a bootstrap that resamples tasks with all their samples.
+fn rate<'a>(
+    rows: &[&Row<'a>],
+    value: impl Fn(&Row<'a>) -> Option<bool>,
+    resamples: usize,
+    rng: &mut Rng,
+) -> Estimate {
+    let clusters = clusters_of(rows, |row| value(row).map(|pass| f64::from(u8::from(pass))));
+    if clusters.iter().all(|cluster| cluster.len() <= 1) {
+        let values: Vec<f64> = clusters.into_iter().flatten().collect();
+        let successes = values.iter().filter(|value| **value > 0.5).count();
+        return wilson(successes, values.len());
+    }
+    bootstrap_mean(&clusters, resamples, rng)
+}
+
 pub fn group_stats(
     arm: Arm,
     group: &str,
@@ -308,13 +326,12 @@ pub fn group_stats(
     rng: &mut Rng,
 ) -> GroupStats {
     let passes: Vec<bool> = rows.iter().filter_map(|row| row.pass()).collect();
-    let det: Vec<bool> = rows.iter().filter_map(|row| row.det_pass()).collect();
     let usage = |f: fn(&crate::runner::UsageSummary) -> f64| {
         clusters_of(rows, move |row| Some(f(&row.attempt.usage)))
     };
-    let mut walls: Vec<f64> = rows
+    let mut works: Vec<f64> = rows
         .iter()
-        .map(|row| row.attempt.wall_ms as f64 / 1000.0)
+        .map(|row| row.attempt.active_ms as f64 / 1000.0)
         .collect();
     let total_cost: f64 = rows.iter().map(|row| row.attempt.usage.api_cost).sum();
     let pass_count = passes.iter().filter(|pass| **pass).count();
@@ -341,9 +358,9 @@ pub fn group_stats(
             .iter()
             .filter(|row| row.answered() && row.grade.is_some())
             .count(),
-        pass_rate: wilson(pass_count, passes.len()),
+        pass_rate: rate(rows, Row::pass, resamples, rng),
         item_score: bootstrap_mean(&clusters_of(rows, Row::item_score), resamples, rng),
-        det_pass_rate: wilson(det.iter().filter(|pass| **pass).count(), det.len()),
+        det_pass_rate: rate(rows, Row::det_pass, resamples, rng),
         input_tokens: bootstrap_mean(&usage(|u| u.input_tokens as f64), resamples, rng),
         uncached_input_tokens: bootstrap_mean(
             &usage(|u| (u.input_tokens - u.cached_input_tokens.min(u.input_tokens)) as f64),
@@ -368,12 +385,12 @@ pub fn group_stats(
             .filter(|row| row.attempt.usage.index_calls + row.attempt.usage.dense_calls > 0)
             .count() as f64
             / n,
-        wall_seconds: bootstrap_mean(
-            &clusters_of(rows, |row| Some(row.attempt.wall_ms as f64 / 1000.0)),
+        work_seconds: bootstrap_mean(
+            &clusters_of(rows, |row| Some(row.attempt.active_ms as f64 / 1000.0)),
             resamples,
             rng,
         ),
-        median_wall_seconds: median(&mut walls),
+        median_work_seconds: median(&mut works),
         api_cost: bootstrap_mean(&usage(|u| u.api_cost), resamples, rng),
         cost_per_pass: (pass_count > 0).then(|| total_cost / pass_count as f64),
     }
@@ -392,7 +409,7 @@ pub struct PairedStats {
     pub input_tokens: Estimate,
     pub output_tokens: Estimate,
     pub api_cost: Estimate,
-    pub wall_seconds: Estimate,
+    pub work_seconds: Estimate,
     /// Tasks where `second` scored higher, the same, lower (item score).
     pub wins: usize,
     pub ties: usize,
@@ -445,7 +462,7 @@ pub fn paired_stats(
             avg(rows.iter().map(|row| row.attempt.usage.api_cost).collect()).unwrap_or(0.0),
             avg(rows
                 .iter()
-                .map(|row| row.attempt.wall_ms as f64 / 1000.0)
+                .map(|row| row.attempt.active_ms as f64 / 1000.0)
                 .collect())
             .unwrap_or(0.0),
         )
@@ -492,7 +509,7 @@ pub fn paired_stats(
         input_tokens: estimate(3),
         output_tokens: estimate(4),
         api_cost: estimate(5),
-        wall_seconds: estimate(6),
+        work_seconds: estimate(6),
         wins,
         ties,
         losses,
@@ -572,9 +589,9 @@ fn agreement(rows: &[Row<'_>]) -> Agreement {
             } else {
                 &answer.locations
             };
-            let check = cited
-                .iter()
-                .any(|cited| location.matches(cited, crate::answer::LINE_TOLERANCE));
+            let check = cited.iter().any(|cited| {
+                crate::answer::cited_matches(location, cited, crate::answer::LINE_TOLERANCE)
+            });
             let grader = verdict
                 .items
                 .iter()
@@ -600,6 +617,9 @@ pub struct Report {
     pub frontier: Vec<FrontierPoint>,
     pub agreement: Agreement,
     pub infra_attempts: usize,
+    /// Settled cells whose agent's commands named the benchmark's own files
+    /// outside the checkout, per arm (check their transcripts).
+    pub looked_outside: BTreeMap<Arm, usize>,
     pub ungraded_answers: usize,
     pub failed_gradings: usize,
     pub grading_usage: crate::runner::UsageSummary,
@@ -691,6 +711,13 @@ pub fn compute(
             .filter(|row| row.answered() && !graded_ok.contains(row.attempt.attempt_id.as_str()))
             .count(),
         failed_gradings: grades.iter().filter(|grade| !grade.ok).count(),
+        looked_outside: rows.iter().filter(|row| row.attempt.looked_outside).fold(
+            BTreeMap::new(),
+            |mut counts, row| {
+                *counts.entry(row.attempt.arm).or_insert(0) += 1;
+                counts
+            },
+        ),
         infra_attempts: attempts
             .iter()
             .filter(|attempt| attempt.outcome == Outcome::Infra)
@@ -794,12 +821,12 @@ pub fn render(report: &Report) -> String {
     );
     let _ = writeln!(
         text,
-        "Correctness: **pass** is the blind grader's verdict `correct` (a run that didn't answer fails); **items** is the share of the key's required items the grader found met (0 for no answer); **check** is the deterministic check of the key's locations and files. Intervals are 95%: Wilson for rates, a bootstrap over tasks for means. Cost is the API list price of the tokens (ChatGPT OAuth itself bills nothing per call).\n"
+        "Correctness: **pass** is the blind grader's verdict `correct` (a run that didn't answer fails); **items** is the share of the key's required items the grader found met (0 for no answer); **check** is the deterministic check of the key's locations and files. Intervals are 95%: Wilson for rates (a bootstrap over tasks when tasks have several samples), a bootstrap over tasks for means. Time is working time: wall time less waits for usage limits and retries. Cost is the API list price of the tokens (ChatGPT OAuth itself bills nothing per call).\n"
     );
     let _ = writeln!(text, "## Per arm and kind\n");
     let _ = writeln!(
         text,
-        "| kind | arm | cells | answered | pass | items | check | input tok | uncached in | output tok | calls | shell | index use | wall s (median) | cost $ | $/pass |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+        "| kind | arm | cells | answered | pass | items | check | input tok | uncached in | output tok | calls | shell | index use | work s (median) | cost $ | $/pass |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
     );
     for stats in &report.by_kind {
         let _ = writeln!(
@@ -834,8 +861,8 @@ pub fn render(report: &Report) -> String {
                     stats.index_calls
                 )
             },
-            stats.wall_seconds.fmt(0),
-            stats.median_wall_seconds,
+            stats.work_seconds.fmt(0),
+            stats.median_work_seconds,
             stats.api_cost.fmt(3),
             stats
                 .cost_per_pass
@@ -849,7 +876,7 @@ pub fn render(report: &Report) -> String {
         );
         let _ = writeln!(
             text,
-            "| kind | arms | tasks | pass | items | check | input tok | output tok | cost $ | wall s | items better/same/worse |\n|---|---|---|---|---|---|---|---|---|---|---|"
+            "| kind | arms | tasks | pass | items | check | input tok | output tok | cost $ | work s | items better/same/worse |\n|---|---|---|---|---|---|---|---|---|---|---|"
         );
         for paired in &report.paired {
             let _ = writeln!(
@@ -879,14 +906,14 @@ pub fn render(report: &Report) -> String {
                         paired.api_cost.value, paired.api_cost.low, paired.api_cost.high
                     )
                 },
-                if paired.wall_seconds.n == 0 {
+                if paired.work_seconds.n == 0 {
                     "-".into()
                 } else {
                     format!(
                         "{:+.0} [{:+.0}, {:+.0}]",
-                        paired.wall_seconds.value,
-                        paired.wall_seconds.low,
-                        paired.wall_seconds.high
+                        paired.work_seconds.value,
+                        paired.work_seconds.low,
+                        paired.work_seconds.high
                     )
                 },
                 paired.wins,
@@ -957,6 +984,18 @@ pub fn render(report: &Report) -> String {
         "- Answers not graded yet: {}; failed gradings: {}; runs that ended outside the agent's control (run again): {}.",
         report.ungraded_answers, report.failed_gradings, report.infra_attempts
     );
+    if !report.looked_outside.is_empty() {
+        let _ = writeln!(
+            text,
+            "- **Runs whose commands named the benchmark's own files** (task sets, records, transcripts) outside their checkout: {}. Their answers may come from a key or another arm's answer: check the transcripts (`looked_outside` in attempts.jsonl).",
+            report
+                .looked_outside
+                .iter()
+                .map(|(arm, count)| format!("arm {arm}: {count}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     let _ = writeln!(
         text,
         "- Grading used {} input and {} output tokens (${:.2} at list price).",
@@ -990,45 +1029,47 @@ fn csv_field(text: &str) -> String {
 /// One line per settled cell.
 pub fn attempts_csv(rows: &[Row<'_>], prepared: &BTreeMap<String, PreparedRepo>) -> String {
     let mut text = String::from(
-        "task_id,repo,language,kind,arm,sample,outcome,pass,item_score,check_pass,check_score,wrong_claims,input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,llm_calls,shell_calls,index_calls,dense_calls,wall_s,active_s,api_cost\n",
+        "task_id,repo,language,kind,arm,sample,outcome,pass,item_score,check_pass,check_score,wrong_claims,input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,llm_calls,shell_calls,index_calls,dense_calls,wall_s,work_s,api_cost,looked_outside\n",
     );
     let option = |value: Option<f64>| value.map_or(String::new(), |v| format!("{v:.4}"));
     let flag = |value: Option<bool>| value.map_or(String::new(), |v| (v as u8).to_string());
     for row in rows {
         let usage = &row.attempt.usage;
-        let _ =
-            writeln!(
-                text,
-                "{},{},{},{},{},{},{:?},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{:.5}",
-                csv_field(&row.task.id),
-                csv_field(&row.task.repo),
-                prepared
-                    .get(&row.task.repo)
-                    .map_or("", |repo| repo.spec.language.as_str()),
-                row.task.kind,
-                row.attempt.arm,
-                row.attempt.sample,
-                row.attempt.outcome,
-                flag(row.pass()),
-                option(row.item_score()),
-                flag(row.det_pass()),
-                option(row.det_score()),
-                row.grade.and_then(|grade| grade.verdict.as_ref()).map_or(
-                    String::new(),
-                    |verdict| verdict.wrong_claims.len().to_string()
-                ),
-                usage.input_tokens,
-                usage.cached_input_tokens,
-                usage.output_tokens,
-                usage.reasoning_tokens,
-                usage.llm_calls,
-                usage.shell_calls,
-                usage.index_calls,
-                usage.dense_calls,
-                row.attempt.wall_ms as f64 / 1000.0,
-                row.attempt.active_ms as f64 / 1000.0,
-                usage.api_cost,
-            );
+        let _ = writeln!(
+            text,
+            "{},{},{},{},{},{},{:?},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{:.5},{}",
+            csv_field(&row.task.id),
+            csv_field(&row.task.repo),
+            prepared
+                .get(&row.task.repo)
+                .map_or("", |repo| repo.spec.language.as_str()),
+            row.task.kind,
+            row.attempt.arm,
+            row.attempt.sample,
+            row.attempt.outcome,
+            flag(row.pass()),
+            option(row.item_score()),
+            flag(row.det_pass()),
+            option(row.det_score()),
+            row.grade
+                .and_then(|grade| grade.verdict.as_ref())
+                .map_or(String::new(), |verdict| verdict
+                    .wrong_claims
+                    .len()
+                    .to_string()),
+            usage.input_tokens,
+            usage.cached_input_tokens,
+            usage.output_tokens,
+            usage.reasoning_tokens,
+            usage.llm_calls,
+            usage.shell_calls,
+            usage.index_calls,
+            usage.dense_calls,
+            row.attempt.wall_ms as f64 / 1000.0,
+            row.attempt.active_ms as f64 / 1000.0,
+            usage.api_cost,
+            u8::from(row.attempt.looked_outside),
+        );
     }
     text
 }
@@ -1151,6 +1192,7 @@ mod tests {
                 ..UsageSummary::default()
             },
             transcript: None,
+            looked_outside: false,
         }
     }
 
@@ -1190,6 +1232,7 @@ mod tests {
             wall_ms: 1,
             usage: UsageSummary::default(),
             transcript: None,
+            failure_kind: None,
         }
     }
 
@@ -1337,6 +1380,73 @@ mod tests {
         assert!(markdown.contains("A→B"));
         let csv = attempts_csv(&rows(&tasks, &attempts, &grades), &BTreeMap::new());
         assert_eq!(csv.lines().count(), 9);
+    }
+
+    #[test]
+    fn time_is_working_time_and_samples_widen_rates() {
+        let tasks: Vec<BenchTask> = (0..6)
+            .map(|i| task(&format!("t{i}"), TaskKind::Definition))
+            .collect();
+        let right = "LOCATIONS:\nsrc/a.rs:12\n";
+        let mut attempts = Vec::new();
+        let mut grades = Vec::new();
+        for task in &tasks {
+            for sample in 0..3 {
+                let mut a = attempt(&task.id, Arm::A, Outcome::Answered, right, 1000);
+                a.attempt_id = format!("{}-{sample}", task.id);
+                a.sample = sample;
+                // Five minutes of work; arm A also waited three hours for a
+                // usage limit on t0.
+                a.active_ms = 300_000;
+                a.wall_ms = if task.id == "t0" { 11_100_000 } else { 300_000 };
+                // Samples of a task agree: t0..t2 pass, t3..t5 fail.
+                let pass = task.id < "t3".to_string();
+                grades.push(grade(&a, pass, pass));
+                attempts.push(a);
+            }
+        }
+        let manifest = crate::runner::RunManifest {
+            name: "test".into(),
+            created_at: chrono::Utc::now(),
+            model: crate::agents::ModelSettings::parse("gpt-6-astra:xhigh", true).unwrap(),
+            mock: true,
+            shell_timeout_seconds: 120,
+            shell_max_output_bytes: 16384,
+            shell_max_calls: 80,
+            max_input_tokens: 4_000_000,
+            attempt_timeout_seconds: None,
+            grader_shell: true,
+            index_cli_sha256: String::new(),
+            index_cli: std::path::PathBuf::new(),
+            arms: vec![Arm::A],
+            samples: 3,
+            tasks_file: "tasks.json".into(),
+            sessions: vec![],
+        };
+        let report = compute(
+            &manifest,
+            &tasks,
+            &attempts,
+            &grades,
+            &BTreeMap::new(),
+            2000,
+        );
+        let all = report
+            .by_kind
+            .iter()
+            .find(|stats| stats.group == "all")
+            .unwrap();
+        assert!((all.work_seconds.value - 300.0).abs() < 1e-9);
+        assert!((all.median_work_seconds - 300.0).abs() < 1e-9);
+        // 18 cells, but six independent tasks: the interval is that of six
+        // tasks, much wider than Wilson's for 18 cells.
+        assert!((all.pass_rate.value - 0.5).abs() < 1e-9);
+        let cells = wilson(9, 18);
+        assert!(
+            all.pass_rate.high - all.pass_rate.low > (cells.high - cells.low) * 1.2,
+            "{:?} vs {cells:?}",
+            all.pass_rate
+        );
     }
 
     #[test]

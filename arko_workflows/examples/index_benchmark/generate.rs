@@ -28,7 +28,7 @@ use crate::prompts;
 use crate::repos::{Layout, PreparedRepo};
 use crate::runner::{
     ActiveRuns, AgentJob, AgentSession, JobControl, JobLimits, PlanUsageLog, UsageSummary,
-    arm_environment,
+    arm_environment, failure_kind_of, is_login_failure,
 };
 use crate::shell::{ShellSettings, ShellTool};
 use crate::tasks::{
@@ -128,6 +128,8 @@ pub struct WriterRecord {
     pub outcome: crate::runner::Outcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<String>,
     pub wall_ms: u64,
     pub usage: UsageSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -149,6 +151,8 @@ pub struct VerificationRecord {
     pub blind_check: Option<DeterministicCheck>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<String>,
     pub wall_ms: u64,
     pub usage: UsageSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -458,6 +462,9 @@ pub struct GenerateOptions {
     pub shell: ShellSettings,
     pub tasks_path: PathBuf,
     pub mock: bool,
+    /// The tools of the writer and the verifier: arm A's (a terminal) or
+    /// arm B's (with arko_index).
+    pub writer_arm: Arm,
 }
 
 struct Paths {
@@ -545,6 +552,51 @@ fn seed_counts(seeds: &[BenchTask]) -> HashMap<(String, TaskKind), usize> {
     counts
 }
 
+/// Writer runs per repository and kind at most, over every `generate`:
+/// enough to write twice the questions wanted.
+pub fn max_writer_runs(per_kind: usize, oversample: f64) -> usize {
+    ((per_kind as f64 * oversample * 2.0).ceil() as usize).div_ceil(QUESTIONS_PER_WRITER_RUN) + 2
+}
+
+/// Writer runs per repository and kind, in one `generate`, that may end for
+/// reasons outside the writer before the pair is left alone.
+const MAX_INFRA_WRITER_RUNS: usize = 3;
+
+/// Where generation stands for one repository and kind.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PairProgress {
+    /// Seed tasks of the pair.
+    pub seeded: usize,
+    /// Questions the verifier agreed with.
+    pub agreed: usize,
+    /// Questions waiting for (another) verification.
+    pub pending: usize,
+    /// Writer runs that ended for reasons of their own: they count against
+    /// [`max_writer_runs`].
+    pub writer_runs: usize,
+    /// Writer runs of this `generate` that ended outside the writer's
+    /// control (not counted against the limit).
+    pub infra_runs: usize,
+}
+
+impl PairProgress {
+    /// Questions to write now: enough that the agreed questions, and the
+    /// pending ones at the expected yield (one in `oversample`), reach
+    /// `per_kind` with the seeds. None once the pair has had its writer runs.
+    pub fn to_write(&self, per_kind: usize, oversample: f64, max_runs: usize) -> usize {
+        if self.writer_runs >= max_runs || self.infra_runs >= MAX_INFRA_WRITER_RUNS {
+            return 0;
+        }
+        let needed = per_kind.saturating_sub(self.seeded + self.agreed);
+        let target = (needed as f64 * oversample).ceil() as usize;
+        target.saturating_sub(self.pending)
+    }
+}
+
+/// Verifications of a candidate that may fail (no verdict) before it is
+/// dropped.
+const MAX_VERIFICATION_FAILURES: usize = 3;
+
 pub async fn generate(options: GenerateOptions) -> BenchResult<Vec<BenchTask>> {
     let paths = paths(&options.layout);
     std::fs::create_dir_all(&paths.transcripts)?;
@@ -554,84 +606,87 @@ pub async fn generate(options: GenerateOptions) -> BenchResult<Vec<BenchTask>> {
     let writers: Vec<WriterRecord> = read_jsonl(&paths.writers)?;
     let state = Arc::new(GenerationState::new(&paths.candidates, &existing, &seeds)?);
     let seed_counts = seed_counts(&seeds);
+    let max_runs = max_writer_runs(options.per_kind, options.oversample);
 
-    // Writer runs still needed for each repository and kind: enough
-    // candidates for `per_kind` tasks (less the seeds) after verification.
-    let mut writer_queues: Vec<VecDeque<WriterJob>> = Vec::new();
-    for repo in &options.repo_ids {
-        for kind in &options.kinds {
-            let seeded = seed_counts
-                .get(&(repo.clone(), *kind))
-                .copied()
-                .unwrap_or(0);
-            let wanted = options.per_kind.saturating_sub(seeded);
-            let target = (wanted as f64 * options.oversample).ceil() as usize;
-            let have = existing
-                .iter()
-                .filter(|candidate| &candidate.repo == repo && candidate.kind == *kind)
-                .count();
-            let runs_so_far = writers
-                .iter()
-                .filter(|record| &record.repo == repo && record.kind == *kind)
-                .count();
-            let max_runs = target.div_ceil(QUESTIONS_PER_WRITER_RUN) + 3;
-            let mut need = target.saturating_sub(have);
-            let mut queue = VecDeque::new();
-            let mut batch = runs_so_far;
-            while need > 0 && batch < max_runs {
-                let count = need.min(QUESTIONS_PER_WRITER_RUN);
-                queue.push_back(WriterJob {
-                    repo: repo.clone(),
-                    kind: *kind,
-                    count,
-                    batch,
-                });
-                need -= count;
-                batch += 1;
-            }
-            if !queue.is_empty() {
-                writer_queues.push(queue);
-            }
+    let pairs: Vec<(String, TaskKind)> = options
+        .repo_ids
+        .iter()
+        .flat_map(|repo| options.kinds.iter().map(move |kind| (repo.clone(), *kind)))
+        .collect();
+    let mut progress: HashMap<(String, TaskKind), PairProgress> = pairs
+        .iter()
+        .map(|pair| {
+            let seeded = seed_counts.get(pair).copied().unwrap_or(0);
+            (
+                pair.clone(),
+                PairProgress {
+                    seeded,
+                    ..PairProgress::default()
+                },
+            )
+        })
+        .collect();
+    let mut runs_so_far: HashMap<(String, TaskKind), usize> = HashMap::new();
+    for record in &writers {
+        let pair = (record.repo.clone(), record.kind);
+        *runs_so_far.entry(pair.clone()).or_insert(0) += 1;
+        if record.outcome.is_final()
+            && let Some(progress) = progress.get_mut(&pair)
+        {
+            progress.writer_runs += 1;
         }
     }
-    let verified: HashSet<&str> = verifications
-        .iter()
-        .filter(|record| record.ok)
-        .map(|record| record.candidate_id.as_str())
-        .collect();
-    let mut failed_verifications: HashMap<&str, usize> = HashMap::new();
-    for record in verifications.iter().filter(|record| !record.ok) {
-        *failed_verifications
-            .entry(record.candidate_id.as_str())
-            .or_insert(0) += 1;
+    let mut failures: HashMap<String, usize> = HashMap::new();
+    let mut verdicts: HashMap<&str, &str> = HashMap::new();
+    for record in &verifications {
+        match (&record.verdict, record.ok) {
+            (Some(verdict), true) => {
+                verdicts.insert(record.candidate_id.as_str(), verdict.verdict.as_str());
+            }
+            _ => *failures.entry(record.candidate_id.clone()).or_insert(0) += 1,
+        }
     }
-    let mut verify_queue: VecDeque<Candidate> = existing
+    let mut verify_queue: VecDeque<Candidate> = VecDeque::new();
+    for candidate in &existing {
+        let Some(progress) = progress.get_mut(&(candidate.repo.clone(), candidate.kind)) else {
+            continue;
+        };
+        match verdicts.get(candidate.id.as_str()) {
+            Some(&"agree") => progress.agreed += 1,
+            Some(_) => {}
+            None if failures.get(&candidate.id).copied().unwrap_or(0)
+                < MAX_VERIFICATION_FAILURES =>
+            {
+                progress.pending += 1;
+                verify_queue.push_back(candidate.clone());
+            }
+            None => {}
+        }
+    }
+    let queued_writes: usize = pairs
         .iter()
-        .filter(|candidate| options.repo_ids.contains(&candidate.repo))
-        .filter(|candidate| !verified.contains(candidate.id.as_str()))
-        .filter(|candidate| {
-            failed_verifications
-                .get(candidate.id.as_str())
-                .copied()
-                .unwrap_or(0)
-                < 3
-        })
-        .cloned()
-        .collect();
+        .map(|pair| progress[pair].to_write(options.per_kind, options.oversample, max_runs))
+        .sum();
     eprintln!(
-        "generate: {} writer runs queued over {} repository/kind pairs, {} questions to verify{}",
-        writer_queues.iter().map(VecDeque::len).sum::<usize>(),
-        writer_queues.len(),
+        "generate: {queued_writes} questions to write over {} repository/kind pairs, {} to verify; writer and verifier tools: {}{}",
+        pairs.len(),
         verify_queue.len(),
+        options.writer_arm.label(),
         if options.mock { " (mock model)" } else { "" }
     );
 
+    let index_tools = if options.writer_arm == Arm::A {
+        String::new()
+    } else {
+        ", and `arko_index search2 \"$ARKO_INDEX_STATE\" 'words'` or `arko_index outline PATH`"
+            .to_string()
+    };
     let context = Arc::new(GenerateContext {
         writer_config: agent_config(
             "writer",
             "Question writer",
             prompts::WRITER_ROLE,
-            &prompts::WRITER_INSTRUCTIONS.replace("{index}", ", and `arko_index search2 \"$ARKO_INDEX_STATE\" 'words'` or `arko_index outline PATH`"),
+            &prompts::WRITER_INSTRUCTIONS.replace("{index}", &index_tools),
             "A one-line summary: how many questions you submitted.",
             &options.model,
             options.shell.timeout.as_secs() + 60,
@@ -640,7 +695,7 @@ pub async fn generate(options: GenerateOptions) -> BenchResult<Vec<BenchTask>> {
             "verifier",
             "Question verifier",
             prompts::VERIFIER_ROLE,
-            &prompts::VERIFIER_INSTRUCTIONS.replace("{index}", ", and `arko_index search2 \"$ARKO_INDEX_STATE\" 'words'` or `arko_index outline PATH`"),
+            &prompts::VERIFIER_INSTRUCTIONS.replace("{index}", &index_tools),
             "First your answer (ANSWER:/LOCATIONS:); after the key, only the JSON verdict.",
             &options.model,
             options.shell.timeout.as_secs() + 60,
@@ -659,38 +714,69 @@ pub async fn generate(options: GenerateOptions) -> BenchResult<Vec<BenchTask>> {
     crate::runner::watch_signals(stop.clone(), context.active.clone());
 
     enum Done {
-        Writer(usize, Box<WriterRecord>),
-        Verified(Box<VerificationRecord>),
+        Writer((String, TaskKind), Box<WriterRecord>),
+        Verified(Box<Candidate>, Box<VerificationRecord>, bool),
     }
     let mut running: tokio::task::JoinSet<Done> = tokio::task::JoinSet::new();
-    let mut writer_busy = vec![false; writer_queues.len()];
+    let mut busy: HashSet<(String, TaskKind)> = HashSet::new();
     let (mut written, mut checked, mut agreed) = (0usize, 0usize, 0usize);
+    let per_kind = context.options.per_kind;
+    let oversample = context.options.oversample;
     loop {
+        // Questions submitted since: count them, and verify them.
+        for candidate in context.state.take_new() {
+            if let Some(progress) = progress.get_mut(&(candidate.repo.clone(), candidate.kind)) {
+                progress.pending += 1;
+            }
+            verify_queue.push_back(candidate);
+        }
         while running.len() < context.options.concurrency && stop.level() == 0 {
             if let Some(candidate) = verify_queue.pop_front() {
                 let context = context.clone();
                 running.spawn(async move {
-                    Done::Verified(Box::new(verify(&context, candidate).await))
+                    let (record, recorded) = verify(&context, &candidate).await;
+                    Done::Verified(Box::new(candidate), Box::new(record), recorded)
                 });
                 continue;
             }
-            let Some(index) = (0..writer_queues.len())
-                .find(|&index| !writer_busy[index] && !writer_queues[index].is_empty())
-            else {
+            // One writer run at a time per pair, so runs of a pair don't
+            // write about the same code.
+            let Some(pair) = pairs.iter().find(|pair| {
+                !busy.contains(*pair)
+                    && progress[*pair].to_write(per_kind, oversample, max_runs) > 0
+            }) else {
                 break;
             };
-            let job = writer_queues[index].pop_front().expect("not empty");
-            writer_busy[index] = true;
+            let count = progress[pair]
+                .to_write(per_kind, oversample, max_runs)
+                .min(QUESTIONS_PER_WRITER_RUN);
+            let batch = runs_so_far.entry(pair.clone()).or_insert(0);
+            let job = WriterJob {
+                repo: pair.0.clone(),
+                kind: pair.1,
+                count,
+                batch: *batch,
+            };
+            *batch += 1;
+            busy.insert(pair.clone());
             let context = context.clone();
-            running.spawn(async move { Done::Writer(index, Box::new(write(&context, job).await)) });
+            let pair = pair.clone();
+            running.spawn(async move { Done::Writer(pair, Box::new(write(&context, job).await)) });
         }
         let Some(done) = running.join_next().await else {
             break;
         };
         match done {
-            Ok(Done::Writer(index, record)) => {
-                writer_busy[index] = false;
+            Ok(Done::Writer(pair, record)) => {
+                busy.remove(&pair);
                 written += record.accepted;
+                if let Some(progress) = progress.get_mut(&pair) {
+                    if record.outcome.is_final() {
+                        progress.writer_runs += 1;
+                    } else {
+                        progress.infra_runs += 1;
+                    }
+                }
                 eprintln!(
                     "[writer] {} {}: {} of {} questions accepted ({:?}{}), {}k tokens in",
                     record.repo,
@@ -707,46 +793,87 @@ pub async fn generate(options: GenerateOptions) -> BenchResult<Vec<BenchTask>> {
                         )),
                     record.usage.input_tokens / 1000
                 );
-                // A run that wrote too few leaves the rest to the next
-                // `generate`, within the limit of writer runs.
-                for candidate in context.state.take_new() {
-                    verify_queue.push_back(candidate);
+                if is_login_failure(record.failure_kind.as_deref()) {
+                    eprintln!(
+                        "the ChatGPT login failed; stopping. Fix the login, then run `generate` again to resume."
+                    );
+                    stop.raise_to(1, "login failure");
                 }
             }
-            Ok(Done::Verified(record)) => {
-                checked += 1;
+            Ok(Done::Verified(candidate, record, recorded)) => {
+                let pair = (candidate.repo.clone(), candidate.kind);
                 let verdict = record
                     .verdict
                     .as_ref()
                     .map_or("no verdict", |verdict| verdict.verdict.as_str());
-                if verdict == "agree" {
-                    agreed += 1;
+                if record.ok {
+                    checked += 1;
+                    if let Some(progress) = progress.get_mut(&pair) {
+                        progress.pending = progress.pending.saturating_sub(1);
+                        if verdict == "agree" {
+                            progress.agreed += 1;
+                        }
+                    }
+                    if verdict == "agree" {
+                        agreed += 1;
+                    }
+                } else if recorded {
+                    let failed = failures.entry(candidate.id.clone()).or_insert(0);
+                    *failed += 1;
+                    if *failed < MAX_VERIFICATION_FAILURES {
+                        verify_queue.push_back(*candidate.clone());
+                    } else if let Some(progress) = progress.get_mut(&pair) {
+                        progress.pending = progress.pending.saturating_sub(1);
+                    }
                 }
                 eprintln!(
-                    "[verify {checked}] {}: {verdict}{}",
+                    "[verify] {}: {verdict}{}",
                     record.candidate_id,
                     record
                         .verdict
                         .as_ref()
                         .and_then(|verdict| verdict.problems.first())
+                        .or(record.detail.as_ref())
                         .map_or(String::new(), |problem| format!(
                             " ({})",
                             problem.lines().next().unwrap_or("")
                         ))
                 );
+                if is_login_failure(record.failure_kind.as_deref()) {
+                    eprintln!(
+                        "the ChatGPT login failed; stopping. Fix the login, then run `generate` again to resume."
+                    );
+                    stop.raise_to(1, "login failure");
+                }
             }
             Err(error) => eprintln!("a generation job panicked: {error}"),
         }
     }
-    // Candidates written by runs that ended after the loop stopped taking
-    // new ones are verified on the next `generate`.
+    // Questions submitted by runs that ended after the loop stopped taking
+    // new work are verified on the next `generate`.
     let _ = context.state.take_new();
+    let short: Vec<String> = pairs
+        .iter()
+        .filter(|pair| progress[*pair].seeded + progress[*pair].agreed < per_kind)
+        .map(|(repo, kind)| {
+            format!(
+                "{repo} {kind} ({})",
+                progress[&(repo.clone(), *kind)].seeded + progress[&(repo.clone(), *kind)].agreed
+            )
+        })
+        .collect();
     eprintln!(
         "generate: {written} questions written, {checked} verified ({agreed} agreed){}",
         stop.reason().map_or(String::new(), |reason| format!(
             "; stopped ({reason}): run again to resume"
         ))
     );
+    if !short.is_empty() && stop.reason().is_none() {
+        eprintln!(
+            "short of {per_kind} tasks (writer runs used up; raise --oversample to write more): {}",
+            short.join(", ")
+        );
+    }
     assemble(
         &context.options.layout,
         context.options.per_kind,
@@ -779,7 +906,13 @@ impl GenerateContext {
         settings.max_calls = max_calls;
         ShellTool::new(
             settings,
-            arm_environment(&self.options.layout, Arm::B, repo, scratch, None),
+            arm_environment(
+                &self.options.layout,
+                self.options.writer_arm,
+                repo,
+                scratch,
+                None,
+            ),
             Some(control.limit_callback()),
         )
     }
@@ -808,6 +941,7 @@ async fn write(context: &GenerateContext, job: WriterJob) -> WriterRecord {
         accepted: 0,
         outcome: crate::runner::Outcome::Infra,
         detail: None,
+        failure_kind: None,
         wall_ms: 0,
         usage: UsageSummary::default(),
         transcript: None,
@@ -884,9 +1018,11 @@ async fn write(context: &GenerateContext, job: WriterJob) -> WriterRecord {
     );
     let (result, error) = session.ask(&prompt).await;
     let (wall, _) = session.finish();
-    let (outcome, detail, _) = crate::runner::classify(result.as_ref(), error.as_deref(), &control);
+    let (outcome, detail, failure_kind) =
+        crate::runner::classify(result.as_ref(), error.as_deref(), &control);
     record.outcome = outcome;
     record.detail = detail;
+    record.failure_kind = failure_kind;
     record.wall_ms = wall.as_millis() as u64;
     record.accepted = submit.accepted();
     if let Some(result) = &result {
@@ -895,7 +1031,11 @@ async fn write(context: &GenerateContext, job: WriterJob) -> WriterRecord {
     record.transcript =
         context.save_transcript(&run_id, result.as_ref().map(|result| &result.task));
     let _ = std::fs::remove_dir_all(&scratch);
-    if let Err(error) = context.writers.append(&record) {
+    // A run cancelled by the operator, or failed by a lost login, isn't the
+    // writer's: it isn't recorded. (Questions it submitted are kept.)
+    let not_the_writers = record.outcome == crate::runner::Outcome::Infra
+        && (context.stop.level() >= 2 || is_login_failure(record.failure_kind.as_deref()));
+    if !not_the_writers && let Err(error) = context.writers.append(&record) {
         eprintln!("could not record writer run {run_id}: {error}");
     }
     record
@@ -913,7 +1053,10 @@ fn key_text(candidate: &Candidate) -> String {
     )
 }
 
-async fn verify(context: &GenerateContext, candidate: Candidate) -> VerificationRecord {
+/// Verifies `candidate`; also returns whether the verification was
+/// recorded (one cancelled by the operator, or failed by a lost login, is
+/// not: it runs again).
+async fn verify(context: &GenerateContext, candidate: &Candidate) -> (VerificationRecord, bool) {
     let mut record = VerificationRecord {
         candidate_id: candidate.id.clone(),
         ok: false,
@@ -921,13 +1064,15 @@ async fn verify(context: &GenerateContext, candidate: Candidate) -> Verification
         blind_answer: None,
         blind_check: None,
         detail: None,
+        failure_kind: None,
         wall_ms: 0,
         usage: UsageSummary::default(),
         transcript: None,
     };
     let Some(repo) = context.options.prepared.get(&candidate.repo) else {
         record.detail = Some("not prepared".into());
-        return record;
+        let _ = context.verifications.append(&record);
+        return (record, true);
     };
     let name = format!(
         "verify-{}-{}",
@@ -955,7 +1100,8 @@ async fn verify(context: &GenerateContext, candidate: Candidate) -> Verification
         Ok(session) => session,
         Err(error) => {
             record.detail = Some(error.to_string());
-            return record;
+            let _ = context.verifications.append(&record);
+            return (record, true);
         }
     };
     let question = format!(
@@ -981,7 +1127,7 @@ async fn verify(context: &GenerateContext, candidate: Candidate) -> Verification
             &answer::parse_answer(&first.summary),
         ));
         (result, error) = session
-            .ask_again(&first, &prompts::verifier_key(&key_text(&candidate)))
+            .ask_again(&first, &prompts::verifier_key(&key_text(candidate)))
             .await;
         for round in 0..2 {
             let Some(current) = result.clone() else { break };
@@ -1012,6 +1158,7 @@ async fn verify(context: &GenerateContext, candidate: Candidate) -> Verification
         record.usage = UsageSummary::of_task(&result.task, &context.options.model);
     }
     if !record.ok {
+        record.failure_kind = failure_kind_of(result.as_ref());
         record.detail = Some(
             control
                 .limit_reason()
@@ -1022,12 +1169,14 @@ async fn verify(context: &GenerateContext, candidate: Candidate) -> Verification
     }
     record.transcript = context.save_transcript(&name, result.as_ref().map(|result| &result.task));
     let _ = std::fs::remove_dir_all(&scratch);
-    // A verification cancelled by a stop runs again later.
-    let cancelled = !record.ok && context.stop.level() >= 2;
-    if !cancelled && let Err(error) = context.verifications.append(&record) {
+    // A verification cancelled by a stop, or failed by a lost login, isn't
+    // the verifier's: it isn't recorded, and runs again later.
+    let recorded = record.ok
+        || !(context.stop.level() >= 2 || is_login_failure(record.failure_kind.as_deref()));
+    if recorded && let Err(error) = context.verifications.append(&record) {
         eprintln!("could not record verification of {}: {error}", candidate.id);
     }
-    record
+    (record, recorded)
 }
 
 /// Builds the task set: the seed tasks, then for each repository and kind
@@ -1262,6 +1411,7 @@ mod tests {
             blind_answer: None,
             blind_check: None,
             detail: None,
+            failure_kind: None,
             wall_ms: 0,
             usage: UsageSummary::default(),
             transcript: None,
@@ -1298,6 +1448,91 @@ mod tests {
         let tasks = select_tasks(&[seed], &candidates, &verdicts, 2);
         let ids: Vec<&str> = tasks.iter().map(|task| task.id.as_str()).collect();
         assert_eq!(ids, vec!["seed-1", "r-definition-g001"]);
+    }
+
+    #[test]
+    fn writes_until_agreed_and_pending_questions_reach_the_quota() {
+        let max_runs = max_writer_runs(9, 1.5);
+        assert_eq!(max_runs, 9);
+        let fresh = PairProgress::default();
+        assert_eq!(fresh.to_write(9, 1.5, max_runs), 14);
+        // Seeds count; pending questions count at the expected yield.
+        let seeded = PairProgress {
+            seeded: 3,
+            pending: 4,
+            ..PairProgress::default()
+        };
+        assert_eq!(seeded.to_write(9, 1.5, max_runs), 5);
+        // The verifier disagreed with some: write more, until the runs are
+        // used up.
+        let short = PairProgress {
+            agreed: 5,
+            writer_runs: 4,
+            ..PairProgress::default()
+        };
+        assert_eq!(short.to_write(9, 1.5, max_runs), 6);
+        let used_up = PairProgress {
+            writer_runs: max_runs,
+            ..short.clone()
+        };
+        assert_eq!(used_up.to_write(9, 1.5, max_runs), 0);
+        let failing = PairProgress {
+            infra_runs: 3,
+            ..short
+        };
+        assert_eq!(failing.to_write(9, 1.5, max_runs), 0);
+        let done = PairProgress {
+            agreed: 9,
+            ..PairProgress::default()
+        };
+        assert_eq!(done.to_write(9, 1.5, max_runs), 0);
+    }
+
+    #[tokio::test]
+    async fn a_lost_login_stops_generation_and_uses_no_writer_run() {
+        let dir = crate::test_dir("generate-login");
+        let layout = Layout::new(&dir.join("out")).unwrap();
+        let repo = crate::mock::demo_repo(&layout.out);
+        let url = crate::mock::unauthorized_server().await;
+        let client = crate::agents::build_client(&[], Some(&url)).unwrap();
+        let options = || GenerateOptions {
+            layout: layout.clone(),
+            prepared: BTreeMap::from([("demo".to_string(), repo.clone())]),
+            repo_ids: vec!["demo".into()],
+            kinds: vec![TaskKind::Definition, TaskKind::Callers],
+            per_kind: 2,
+            oversample: 1.5,
+            concurrency: 4,
+            model: ModelSettings::parse("gpt-6-astra:xhigh", true).unwrap(),
+            client: client.clone(),
+            shell: ShellSettings {
+                timeout: Duration::from_secs(5),
+                max_output_bytes: 4096,
+                max_calls: 5,
+            },
+            tasks_path: layout.out.join("tasks.json"),
+            mock: true,
+            writer_arm: Arm::A,
+        };
+        for _ in 0..3 {
+            generate(options()).await.unwrap();
+        }
+        // No writer run was the writer's: none is recorded, so none counts
+        // against the pair's runs, however often the login fails.
+        let writers: Vec<WriterRecord> =
+            read_jsonl(&layout.tasks_dir().join("writers.jsonl")).unwrap();
+        assert!(writers.is_empty(), "{writers:?}");
+        // The writers did run (and failed on the login) every time.
+        let runs = std::fs::read_dir(layout.tasks_dir().join("transcripts"))
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .is_ok_and(|entry| entry.file_name().to_string_lossy().starts_with("demo-"))
+            })
+            .count();
+        assert!(runs >= 3, "{runs} writer transcripts");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

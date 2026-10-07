@@ -476,8 +476,18 @@ fn writer(view: &View) -> Action {
         return Action::Call("complete_task", json!({"summary": "mock: no files"}));
     }
     let file = &files[(hash_of(&[&view.cache_key]) as usize) % files.len()];
+    // The definitions of one file: from arko_index's outline when the
+    // writer has it, else from a grep for definition keywords.
+    let has_index = view.instructions.contains("arko_index outline");
     if shells == 1 {
-        return shell(format!("arko_index outline {}", quote(file)));
+        return shell(if has_index {
+            format!("arko_index outline {}", quote(file))
+        } else {
+            format!(
+                "grep -nE '^[[:space:]]*((pub|export|async|static|public|private|protected|final|abstract)[^ ]* +)*(fn|func|def|class|struct|enum|interface|type) +[A-Za-z_]' {} | head -40",
+                quote(file)
+            )
+        });
     }
     let submitted = view
         .calls
@@ -491,27 +501,11 @@ fn writer(view: &View) -> Action {
             output
                 .lines()
                 .filter_map(|line| {
-                    let mut fields = line.split('\t');
-                    let range = fields.next()?.rsplit(':').next()?.to_string();
-                    let kind = fields.next()?;
-                    let symbol = fields.next()?.trim();
-                    let (start, end) = range.split_once('-')?;
-                    let wanted = !symbol.is_empty()
-                        && [
-                            "function",
-                            "method",
-                            "class",
-                            "struct",
-                            "type",
-                            "enum",
-                            "interface",
-                        ]
-                        .iter()
-                        .any(|wanted| kind.contains(wanted));
-                    if !wanted {
-                        return None;
+                    if has_index {
+                        outline_entry(line)
+                    } else {
+                        grep_entry(line)
                     }
-                    Some((start.parse().ok()?, end.parse().ok()?, symbol.to_string()))
                 })
                 .collect()
         })
@@ -558,6 +552,54 @@ fn writer(view: &View) -> Action {
     )
 }
 
+/// A definition from an `arko_index outline` line: `path:start-end<TAB>kind<TAB>symbol`.
+fn outline_entry(line: &str) -> Option<(u32, u32, String)> {
+    let mut fields = line.split('\t');
+    let range = fields.next()?.rsplit(':').next()?.to_string();
+    let kind = fields.next()?;
+    let symbol = fields.next()?.trim();
+    let (start, end) = range.split_once('-')?;
+    let wanted = !symbol.is_empty()
+        && [
+            "function",
+            "method",
+            "class",
+            "struct",
+            "type",
+            "enum",
+            "interface",
+        ]
+        .iter()
+        .any(|wanted| kind.contains(wanted));
+    if !wanted {
+        return None;
+    }
+    Some((start.parse().ok()?, end.parse().ok()?, symbol.to_string()))
+}
+
+/// A definition from a `grep -n` line: `line:text`, the name after the
+/// keyword.
+fn grep_entry(line: &str) -> Option<(u32, u32, String)> {
+    let (number, code) = line.split_once(':')?;
+    let number: u32 = number.parse().ok()?;
+    let mut words = code.split(|c: char| !c.is_alphanumeric() && c != '_');
+    words.find(|word| {
+        [
+            "fn",
+            "func",
+            "def",
+            "class",
+            "struct",
+            "enum",
+            "interface",
+            "type",
+        ]
+        .contains(word)
+    })?;
+    let symbol = words.find(|word| !word.is_empty())?;
+    Some((number, number, symbol.to_string()))
+}
+
 fn verifier(view: &View, steps: usize) -> Action {
     let in_key_phase = view
         .user_texts
@@ -576,6 +618,64 @@ fn verifier(view: &View, steps: usize) -> Action {
         );
     }
     solver(view, steps)
+}
+
+/// A local server that refuses every request with HTTP 401
+/// `invalid_api_key`, as a lost login does: its URL.
+#[cfg(test)]
+pub async fn unauthorized_server() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                if read_request(&mut socket).await.is_none() {
+                    return;
+                }
+                let body = json!({"error": {
+                    "message": "Incorrect API key provided.",
+                    "type": "invalid_request_error",
+                    "code": "invalid_api_key",
+                }})
+                .to_string();
+                let reply = format!(
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(reply.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+    url
+}
+
+/// A prepared repository `demo` with one source file, for tests.
+#[cfg(test)]
+pub fn demo_repo(dir: &std::path::Path) -> crate::repos::PreparedRepo {
+    let checkout = dir.join("repos/demo");
+    std::fs::create_dir_all(checkout.join("src")).unwrap();
+    std::fs::write(checkout.join("src/a.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+    crate::repos::PreparedRepo {
+        spec: crate::repos::RepoSpec {
+            id: "demo".into(),
+            url: String::new(),
+            rev: "v1".into(),
+            commit: None,
+            language: "rust".into(),
+            description: "a demo".into(),
+        },
+        checkout,
+        index: dir.join("indexes/demo"),
+        commit: "abc".into(),
+        files: 1,
+        bytes: 20,
+        files_by_language: Default::default(),
+        index_build_ms: 0,
+        index_summary: String::new(),
+        index_cli_sha256: String::new(),
+        dense: None,
+    }
 }
 
 #[cfg(test)]
@@ -609,6 +709,24 @@ mod tests {
         assert!(terminal.contains("'fetch_page'"));
         assert!(!search_command("terminal only", question, 1).contains("'fetch_page'"));
         assert_eq!(keywords(question)[0], "fetch_page");
+    }
+
+    #[test]
+    fn reads_definitions_from_outlines_and_greps() {
+        assert_eq!(
+            outline_entry("a.rs:10-20\tfunction_item\tFoo::bar"),
+            Some((10, 20, "Foo::bar".to_string()))
+        );
+        assert_eq!(outline_entry("a.rs:1-3\tuse_declaration\t"), None);
+        assert_eq!(
+            grep_entry("42:pub(crate) fn parse_answer(text: &str) {"),
+            Some((42, 42, "parse_answer".to_string()))
+        );
+        assert_eq!(
+            grep_entry("7:class Spider(object):"),
+            Some((7, 7, "Spider".to_string()))
+        );
+        assert_eq!(grep_entry("9:// a comment"), None);
     }
 
     #[test]

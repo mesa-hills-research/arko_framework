@@ -44,8 +44,13 @@ The task set (`OUT/tasks.json`) is assembled from:
   separate verifier agent then answers each question blind, gets the key, rechecks every
   difference in the code, and returns `agree`, `disagree` or `ambiguous`. Only questions it
   agrees with are kept, up to `--per-kind` per repository and kind (the seeds count toward it).
-  With the defaults (9 per kind) that is 7 × 4 × 9 = 252 tasks less the seeds' surplus: about
-  250.
+  `generate` keeps writing while the verified questions and those still being verified (at the
+  expected yield, one in `--oversample`) fall short, up to enough writer runs for twice the
+  questions wanted per repository and kind. With the defaults (9 per kind) that is
+  7 × 4 × 9 = 252 tasks less the seeds' surplus: about 250.
+- The writer and the verifier have arm A's tools, a terminal (`--writer-tools index` gives them
+  arko_index too), so the questions aren't shaped by the tool under test: a writer that found
+  its code with arko_index would tend to describe it in the words that find it there.
 
 The repositories (`repos.json`; each checked out at its tag, depth 1, and made read-only):
 
@@ -76,7 +81,7 @@ becomes repeatable (`LLMClient::with_codex_auth_files`, one account per home, fi
 ## Running it
 
 Build the benchmark and the arko_index CLI into the same target directory (the benchmark finds
-`arko_index_cli` next to itself; or pass `--index-cli`):
+`arko_index_cli` next to itself; or pass `--index-cli` to `prepare`, `generate` and `run`):
 
 ```sh
 cargo build --release -p arko_index --example arko_index_cli
@@ -100,9 +105,10 @@ OUT=~/index-benchmark
    $B validate --out $OUT                  # counts, and every key location checked again
    ```
 
-   `generate` is resumable: run it again after a stop, or with a higher `--per-kind`, and it
-   writes and verifies only what is missing. `assemble --per-kind N` rebuilds `tasks.json` from
-   what was verified, without agents.
+   `generate` is resumable: run it again after a stop, or with a higher `--per-kind` or
+   `--oversample`, and it writes and verifies only what is missing. It says which repositories
+   and kinds fell short. `assemble --per-kind N` rebuilds `tasks.json` from what was verified,
+   without agents.
 
 3. Run the benchmark (start with a pilot), then read the report:
 
@@ -121,37 +127,45 @@ Stopping and resuming: Ctrl-C, `SIGTERM`, or `touch $OUT/runs/NAME/STOP` start n
 runs and let the running ones finish; a second signal cancels them (they run again on resume,
 without using up an attempt); a third exits. Running the same command again resumes: every
 finished solver run and grading is recorded as it ends (`attempts.jsonl`, `grades.jsonl`), and
-only the rest is done. An agent run that ends for a reason outside the agent (the login failed,
-the run was stopped) is run again, up to `--max-attempts` (3); a lost login also stops the whole
-run. A resumed run must keep its model, shell settings and limits; it may add arms, samples and
-tasks.
+only the rest is done. A lost login (or a billing or permission error) stops the whole run, or
+`generate`, and the agent runs it failed are run again on resume without using up an attempt;
+other runs that end outside the agent's control are run again up to `--max-attempts` (3). A
+resumed run must keep its model, shell settings and limits; it may add arms, samples and tasks.
+One process at a time works on a run, on `generate`, or on `prepare` (a `LOCK` file with its
+process id; `prepare` also waits for runs and `generate` to end, since it replaces checkouts).
 
 ## Metrics
 
 Per task, arm and sample (`attempts.jsonl`, `attempts.csv`): the outcome (answered, failed,
-over a limit), the answer, model calls, tool and shell calls (and how many ran arko_index),
-input tokens (and the cached part), output tokens (and reasoning), the largest context, wall
-time and working time (wall time less waits for usage limits and retries), the API list price
-of the tokens (ChatGPT OAuth bills nothing per call; this is the cost the same tokens would have
-at API prices, in Fast mode), and the transcript.
+over a limit), the answer, model calls, tool and shell calls (and how many ran arko_index:
+commands whose program is `arko_index`, not ones that merely mention it), input tokens (and the
+cached part), output tokens (and reasoning), the largest context, wall time and working time
+(wall time less waits for usage limits and retries; the report's time is working time), the API
+list price of the tokens (ChatGPT OAuth bills nothing per call; this is the cost the same tokens
+would have at API prices, in Fast mode), and the transcript.
 
 `report.md` (and `report.json`) gives, per arm and per kind, and per repository:
 
-- **pass**: the grader's verdict `correct`, with a Wilson 95% interval; a run that didn't answer
-  fails;
+- **pass**: the grader's verdict `correct`, with a Wilson 95% interval (a bootstrap over tasks
+  with `--samples` above 1); a run that didn't answer fails;
 - **items**: the share of the key's items the grader found met, with a bootstrap 95% interval
   over tasks;
-- **check**: the deterministic check of locations and files;
+- **check**: the deterministic check of locations and files (a cited range more than three times
+  as long as the key's, plus 30 lines, meets nothing, so citing whole files doesn't pay);
 - tokens, calls, wall time and cost, with intervals, and cost per pass;
 - **paired differences** between arms on the same tasks (B − A, ...), with bootstrap intervals,
   and how many tasks each arm did better on;
 - the **cost/quality frontier**: per kind, the arms no other arm beats on both cost and item
   score (`frontier.csv` for plotting);
-- how often the grader and the deterministic check agree, and what was left ungraded.
+- how often the grader and the deterministic check agree, and what was left ungraded;
+- runs whose commands named the benchmark's own files outside their checkout (`tasks.json`,
+  the records, transcripts, other directories of `--out`): the solver's shell can reach them, and
+  the prompt tells every arm to stay in its checkout; check those transcripts by hand.
 
 The grader sees the question, the key and the answer, never the arm: lines of the answer that
-show a search command (`arko_index ...`, `rg -n ...`, `grep -r`, `git grep`) are removed first,
-in every arm, and gradings run interleaved with the solvers. It has a shell in the checkout to
+describe a search (`$ARKO_INDEX_STATE`, `arko_index_dense`, or a search command such as
+`arko_index search2`, `rg -n`, `grep -r` or `git grep` beside words like "I ran" or "searched")
+are removed first, in every arm, and gradings run interleaved with the solvers. It has a shell in the checkout to
 check claims the key doesn't settle (`--grader-without-shell` to judge from the key alone).
 
 ## Limits
@@ -162,17 +176,21 @@ check claims the key doesn't settle (`--grader-without-shell` to judge from the 
 | `--max-output-bytes` | 16,384 | Output of one shell command returned to the agent (head and tail). |
 | `--command-timeout` | 120 s | Per shell command. |
 | `--max-shell-calls` | 80 | After that the agent is asked to answer; ten more and the run is stopped. |
-| `--max-input-tokens` | 4,000,000 | All calls, cached included; over it the run is stopped and fails. |
+| `--max-input-tokens` | 8,000,000 | All calls, cached included; over it the run is stopped and fails. |
 | `--attempt-timeout-minutes` | 60 | Working time (waits for usage limits excluded); 0 for none. |
 
-Runs stopped by a limit count as failures (scored 0) in every arm alike.
+Runs stopped by a limit count as failures (scored 0) in every arm alike, so a limit that binds
+often mixes cost into correctness: check the "over limit" counts of the pilot. Input grows with
+every call (each request carries the whole conversation), so 8M tokens is roughly 45 to 65 model
+calls of a long investigation (at 3,000 to 8,000 tokens of growth per call).
 
 ## Dry run
 
 `--mock` replaces the model with a local server that plays every role from a script (no model
 calls): solvers run `--mock-steps` (12) shell commands, searching and reading in turn (arm A
 with `rg`, arms B and C with `arko_index search2` and `arko_index_dense`), then answer; the
-writer submits questions from `arko_index outline`; the verifier and grader return verdicts. The
+writer submits definition questions from a `grep` (or `arko_index outline`) of one file; the
+verifier and grader return verdicts. The
 commands run for real, so a dry run exercises the checkouts, indexes, the arms' tools, grading,
 resume and the report, and measures prompt and tool-output sizes. Its token counts are
 estimates: 4 bytes per token, each call's earlier reasoning carried back in its input, and
@@ -196,4 +214,7 @@ tasks/                    candidates, verifications and writer runs (JSON lines)
 tasks.json                the task set
 runs/<name>/              manifest.json, attempts.jsonl, grades.jsonl, transcripts/,
                           report.md, report.json, attempts.csv, frontier.csv, progress.json
+scratch/                  each agent run's TMPDIR, removed when it ends
 ```
+
+`runs/<name>/`, `tasks/` and `prepare/` hold a `LOCK` file while a process works on them.

@@ -1634,12 +1634,12 @@ control-folder notes not yet posted. It makes no model requests and reads no cre
 
 **`index_benchmark`**: subcommands `prepare` (fetch the pinned repositories of `repos.json`,
 make them read-only, build their arko_index indexes with the `arko_index_cli` next to the
-binary or `--index-cli`), `generate` (writer and verifier agents; `assemble` rebuilds the task
-set without agents), `validate`, `run` and `report`; every one takes `--out DIR`. Every agent
+binary or `--index-cli`), `generate` (writer and verifier agents, with a terminal unless
+`--writer-tools index`; `assemble` rebuilds the task set without agents), `validate`, `run` and `report`; every one takes `--out DIR`. Every agent
 runs on `--model` (`gpt-6-astra:xhigh`) in Fast mode (`--no-fast` for standard) over the ChatGPT
-login of `--codex-home` (one, in this build). `run` defaults: `--arms A,B`, `--samples 1`,
+login of `--codex-home` (one, in this build); `--index-cli` on `prepare`, `generate` and `run`. `run` defaults: `--arms A,B`, `--samples 1`,
 `--concurrency 24`, `--max-output-bytes 16384`, `--command-timeout 120`, `--max-shell-calls 80`,
-`--max-input-tokens 4000000`, `--attempt-timeout-minutes 60`, `--max-attempts 3`; resumable by
+`--max-input-tokens 8000000`, `--attempt-timeout-minutes 60`, `--max-attempts 3`; resumable by
 `--name`, stopped gracefully by a signal or a `STOP` file. `--mock` runs every role against a
 local scripted model. See the
 [benchmark README](../arko_workflows/examples/index_benchmark/README.md).
