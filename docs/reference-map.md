@@ -1644,9 +1644,11 @@ Guides: [arko_index README](../arko_index/README.md) · [arko_index reference](a
 
 | Item | What it is | Code | Docs |
 |---|---|---|---|
-| `bench_v1::Options` | `max_bytes`, the source-byte bound of a chunk (default 4,096; below 4 rejected). A rendered chunk is also capped at 24,000 bytes. | `arko_index/src/bench_v1.rs` | [Boundaries and identities](../arko_index/README.md#boundaries-and-identities) |
+| `bench_v1::Options` | `max_bytes`, the source-byte bound of a chunk (default 4,096; below 4 rejected). A rendered chunk is also capped at 24,000 bytes. `front_matter_description` (default `false`) adds the front matter's description to Markdown scopes. | `arko_index/src/bench_v1.rs` | [Boundaries and identities](../arko_index/README.md#boundaries-and-identities) |
 | `bench_v1::Chunk`, `SourceSpan`, `CHUNK_FORMAT` | A chunk: `id`, `path`, `start_byte`, `end_byte`, `start_line`, `end_line`, `language`, `symbol_path`, `kind`, `token_estimate`, `scope` (format 2: enclosing definitions or Markdown headings; metadata only); `header()`. | `arko_index/src/bench_v1.rs`, `arko_index/src/headers.rs` | [Context headers](../arko_index/README.md#context-headers) |
 | `bench_v1::chunk_str`, `chunk_file` | Chunk one text (under a given path) or one file. | `arko_index/src/bench_v1.rs` | [Library](../arko_index/README.md#library) |
+| `bench_v1::chunk_str_with_metadata`, `chunk_file_with_metadata`, `FileChunks`, `FileMetadata` | The same with a Markdown file's metadata region (front matter, MDX import/export lines), which its chunks leave out (chunk format 3). | `arko_index/src/bench_v1.rs`, `arko_index/src/front_matter.rs` | [arko_index languages](arko_index-languages.md#markdown-and-mdx) |
+| Languages and rules | 50 languages by extension and file name, a rules table per grammar (`rules/tables.rs`, from `tags.scm` where a grammar has one). | `arko_index/src/languages.rs`, `arko_index/src/rules/` | [arko_index languages](arko_index-languages.md) |
 | `bench_v1::chunk_dir[_with]`, `chunk_dir_each[_with]`, `chunk_dir_map[_with]` | Chunk every selected file in path order, collected, streamed to a sink, or mapped on worker threads; output is identical at any thread count. `_with` takes `FileRules` and returns the `Report`. | `arko_index/src/bench_v1.rs`, `arko_index/src/par.rs` | [Chunking](arko_index-reference.md#chunking) |
 | `FileRules` | `respect_ignore` (`false`), `exclude`, `include` (gitignore patterns, empty); `validate()`. | `arko_index/src/files.rs` | [What gets indexed](../arko_index/README.md#what-gets-indexed) |
 | `Report`, `Skipped`, `SkipReason` | What a walk indexed and skipped, with reasons and per-source ignore counts; `summary()`, `notable(limit)`. | `arko_index/src/files.rs` | [What gets indexed](../arko_index/README.md#what-gets-indexed) |
@@ -1672,12 +1674,13 @@ Guides: [arko_index README](../arko_index/README.md) · [arko_index reference](a
 ### Persisted data (arko_index)
 
 - State directories hold the `.arko-index-state` marker and `report.json`, plus `index.json` (`search`), `CURRENT2` and `index2-*` generations (`index2`; with embeddings each generation also holds `dense.json` and `dense/`), `dense.json` and `embed-cache/` (builds with embeddings), `watch.json` (`open_watch`) or `watch2.snap`, `watch2.recs.N` and `watch2.wal` (`Watcher2`).
-- Chunk JSON format 2 adds `scope` (written only when not empty); format 1 data loads with an empty scope, and a watcher reports chunks that gain a scope as `changed` once.
+- Chunk JSON format 2 adds `scope` (written only when not empty); format 1 data loads with an empty scope, and a watcher reports chunks that gain a scope as `changed` once. Format 3 adds `FileMetadata` lines (Markdown front matter) to the `chunk` output.
+- Markdown scopes start with the front matter's title (or the first `# H1`), without the description (`Options::front_matter_description` is `false`).
 - arko_index is unpublished and its on-disk data has no compatibility guarantee between versions; the SQLite databases of the earlier, model-chunked arko_index are not readable. A watcher reuses its parse cache only when the engine digest (chunking sources and locked tree-sitter versions) matches, and otherwise re-chunks without spurious deltas.
 
 ### Example CLI (arko_index)
 
-`arko_index_cli` (`cargo run --release -p arko_index --example arko_index_cli -- COMMAND`): `chunk`, `outline`, `index`/`search`, `index2`/`search2`, `watch`, `watch2` (Linux) and `bench-scan` (Unix). Commands that walk a tree take `--respect-ignore`, `--exclude PATTERN`, `--include PATTERN` and `--report FILE`; `index2` also `--embed MODEL`, `--dimensions`, `--embed-config`, `--quantize`, `--max-embed-tokens`, `--no-embed`; `search2` `--mode`, `--limit`, `--candidates`, `--fusion`, `--path-prefix`, `--language`, `--text`. `dense_live_check` runs the retrieval evaluation with Voyage (spends tokens). See [Command line](arko_index-reference.md#command-line).
+`arko_index_cli` (`cargo run --release -p arko_index --example arko_index_cli -- COMMAND`): `chunk`, `outline`, `index`/`search`, `index2`/`search2`, `watch`, `watch2` (Linux) and `bench-scan` (Unix). Commands that walk a tree take `--respect-ignore`, `--exclude PATTERN`, `--include PATTERN`, `--report FILE` and `--front-matter-description`; `index2` also `--embed MODEL`, `--dimensions`, `--embed-config`, `--quantize`, `--max-embed-tokens`, `--no-embed`; `search2` `--mode`, `--limit`, `--candidates`, `--fusion`, `--path-prefix`, `--language`, `--text`. `dense_live_check` runs the retrieval evaluation with Voyage (spends tokens). See [Command line](arko_index-reference.md#command-line).
 
 ## Across crates
 

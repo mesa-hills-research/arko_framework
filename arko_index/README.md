@@ -2,11 +2,12 @@
 
 Deterministic, syntax-aware partitioning of source repositories into chunks, offline
 BM25 code search, optional dense (embedding) and hybrid search, and durable watchers
-that turn file changes into chunk deltas. Eight code families are parsed with
-tree-sitter (Rust, Python, JavaScript, TypeScript including TSX, Go, Java, C, C++);
-other UTF-8 text is split by a strictly bounded fallback. Every chunk carries a
-context header: its enclosing definitions (`impl Display for Point › fn fmt`) or, in
-Markdown, its heading chain. Chunking, lexical search and watching run locally: no
+that turn file changes into chunk deltas. Code, prose, markup and data in 50 languages
+are parsed with tree-sitter and chunked along their structure (see
+[Languages](#languages)); other UTF-8 text is split by a strictly bounded fallback.
+Every chunk carries a context header: its enclosing definitions
+(`impl Display for Point › fn fmt`) or, in Markdown, the document's title and heading
+chain. Chunking, lexical search and watching run locally: no
 network, no credentials, no model calls. Dense search is opt-in: it embeds through an
 [`Embedder`](#dense-and-hybrid-search) the caller supplies (the CLI uses Voyage through
 arko_ai), and the library itself never makes a network call.
@@ -89,7 +90,26 @@ name; `chunk_str` keeps the supplied UTF-8 path verbatim. Literal Unix backslash
 filename characters, not separators. A directory walk skips and reports undecodable
 names instead of letting them collide with another path; `chunk_file` and `chunk_str`
 return an error for one. Empty files produce no chunks. Every included nonempty text
-byte, including whitespace, is in exactly one chunk.
+byte, including whitespace, is in exactly one chunk, or in a Markdown file's metadata
+region (its front matter), which `chunk_str_with_metadata` and
+`chunk_file_with_metadata` return with the chunks.
+
+## Languages
+
+Bash, C, C#, C++, CMake, CSS, CUDA, Dart, DTD, Elixir, Elm, embedded templates (ERB,
+EJS), Erlang, F#, Fortran, GLSL, Go, Haskell, HCL (Terraform), HTML, Java, JavaScript,
+JSON, Julia, Kotlin, Lua, Make, Markdown and MDX, Objective-C, OCaml, Odin, Perl, PHP,
+PowerShell, Protocol Buffers, Python, R, Ruby, Rust, Scala, Solidity, SQL, Svelte,
+Swift, TOML, TypeScript and TSX, Verilog, XML, YAML and Zig.
+
+Each grammar has a table of rules: which node kinds are definitions, which containers
+expose their members, what attaches to what, and how scopes are labelled. Code splits
+into its definitions, prose into sections, markup into elements and data into keys or
+tables. A Markdown file's front matter (and MDX's leading `import`/`export` lines) is
+file metadata: the chunks cover the rest, and its title roots every chunk's scope.
+[arko_index languages](../docs/arko_index-languages.md) lists the extensions and file
+names of each language, how ambiguous ones are settled (`.h`, `.m`, `.v`, `.pl`) and
+every language's rules.
 
 ## What gets indexed
 
@@ -316,10 +336,14 @@ docs/guide.md:14-21 · # Guide › ## Install › ### Linux
   several definitions (a function family, a run of tiny definitions) shows the
   enclosing scope and the members joined with ` | `; text packed between definitions
   shows the enclosing scope.
-* **Markdown** (`.md`, `.markdown`, `.mdx`): the heading chain in effect where the
-  chunk starts (`# Guide › ## Install › ### Linux`), from ATX and setext headings;
-  fenced code blocks and a leading YAML front matter block hold no headings. A chunk
-  that starts before the first heading but contains one takes that heading's chain.
+* **Markdown** (`.md`, `.markdown`, `.mdx`): the document's title (the front matter's
+  `title`, or the first `# H1`), then the heading chain in effect where the chunk
+  starts (`Guide › ## Install › ### Linux`), from ATX and setext headings. Fenced code
+  blocks and the front matter hold no headings. A chunk that starts before the first
+  heading but contains one takes that heading's chain.
+* **Other languages**: the labels their rules give, from `defmodule Shop.Cart › def add`
+  (Elixir) to `jobs › lint` (YAML) and `<body> › <section id="summary">` (HTML), listed
+  in [arko_index languages](../docs/arko_index-languages.md).
 * Other text has no scope.
 
 Labels longer than 200 bytes end in `…`; a scope over 1,000 bytes keeps its innermost
@@ -332,7 +356,9 @@ to `token_estimate`; format 2 appends `scope`, written only when it is not empty
 chunk without one serializes exactly as before. Readers treat a missing `scope` as
 empty. Because the field is new, a watcher state written before format 2 reconciles
 on its first open with a one-time `changed` delta for every chunk that has a scope
-(same IDs, bytes and lines); nothing is added or removed.
+(same IDs, bytes and lines); nothing is added or removed. Format 3 adds a line before
+a Markdown file's chunks that records its metadata region (front matter), with a `file`
+key where chunks have `id`. The chunks themselves are unchanged.
 
 ## Search
 
@@ -534,12 +560,16 @@ identity checks and measurements behind this README were made on Linux.
 ## Parsing
 
 Parsing uses mhr_tree_sitter (until it is published, a local checkout: see
-`Cargo.toml`), a pure, safe Rust port of tree-sitter 0.25.10 and its grammars, made by
+`Cargo.toml`), a pure, safe Rust port of tree-sitter 0.25.10 and 54 grammars, made by
 an AI agent swarm and differentially tested against the C library. Its libraries keep
-tree-sitter's names (`tree_sitter`, `tree_sitter_rust`, ...), and the grammar versions
-are the ones this crate used with the C library: tree-sitter-rust 0.24.2, -python
-0.25.0, -typescript 0.23.2 (TypeScript and TSX), -javascript 0.25.0, -go 0.25.0, -java
-0.23.5, -c 0.24.2 and -cpp 0.23.4. No C compiler is needed.
+tree-sitter's names (`tree_sitter`, `tree_sitter_rust`, ...). The grammars of the
+original eight languages are the versions this crate used with the C library:
+tree-sitter-rust 0.24.2, -python 0.25.0, -typescript 0.23.2 (TypeScript and TSX),
+-javascript 0.25.0, -go 0.25.0, -java 0.23.5, -c 0.24.2 and -cpp 0.23.4. Their chunks
+stayed byte-identical when the other grammars came: 21,924 files of five local corpora
+(this repository, a research repository's sources, a GPUI workspace, the openai/codex
+repository, and CPython and Go sources) gave the same output as before. No C compiler is
+needed.
 
 Before the switch, the crate used the C library and an optional GCC profile-guided
 build of the grammars. The switch was checked on eight trees: a snapshot of this
@@ -558,6 +588,7 @@ at one thread for five of the trees.
 cargo test -p arko_index --locked
 python3 arko_index/tools/validate_cli.py target/release/examples/arko_index_cli
 python3 arko_index/tools/audit_coverage.py CORPUS chunks.jsonl
+python3 arko_index/scripts/language_check.py --cli CLI [--baseline OLD_CLI] CORPUS...
 ```
 
 `validate_cli.py` drives the CLI end to end: repeated `index`, hidden, ignored and state
@@ -565,7 +596,10 @@ paths, best-first `search`, and `watch` through SIGKILL restarts, burst edits, S
 and a broken pipe. `audit_coverage.py` checks a `chunk` output against a corpus without
 using the crate's code: every UTF-8 file covered byte for byte in order, unique IDs,
 line numbers, languages and the size bounds. It reads every file under the corpus, so
-use it on trees without `.git` or `CACHEDIR.TAG` directories.
+use it on trees without `.git` or `CACHEDIR.TAG` directories. `language_check.py`
+checks whole corpora language by language, and with `--baseline` compares the original
+languages' output with an older build (see
+[Checking whole corpora](../docs/arko_index-languages.md#checking-whole-corpora)).
 
 ## Trade-offs
 

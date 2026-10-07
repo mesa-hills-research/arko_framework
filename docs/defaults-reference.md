@@ -54,3 +54,8 @@ Defaults of arko_index (see [Defaults (arko_index)](reference-map.md#defaults-ar
   Vectors are stored as f32 (`Quantization::Int8` opt-in).
 - Chunks carry a context header (`scope`: enclosing definitions or Markdown headings),
   chunk JSON format 2; boundaries and IDs are unchanged.
+- 50 languages are parsed and chunked along their structure; anything else is split by
+  the bounded fallback. A Markdown file's front matter is file metadata (chunk format 3
+  records it), and its title, without the description, roots every chunk's scope
+  (`Options::front_matter_description` adds the description). See
+  [arko_index languages](arko_index-languages.md).

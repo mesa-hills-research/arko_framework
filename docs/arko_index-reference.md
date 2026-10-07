@@ -14,7 +14,7 @@ the defaults and the on-disk state.
 
 | Module | What it holds | Code |
 |---|---|---|
-| `arko_index::bench_v1` | Chunking and the polling watcher: `Options`, `SourceSpan`, `Chunk`, `CHUNK_FORMAT`, `Delta`, `Error`, `Watcher`, `chunk_str`, `chunk_file`, `chunk_dir`, `chunk_dir_each`, `chunk_dir_map`, `open_watch`, the `_with` variants; re-exports `FileRules`, `Report`, `SkipReason`, `Skipped`. | `arko_index/src/bench_v1.rs`, `arko_index/src/watch.rs`, `arko_index/src/syntax.rs`, `arko_index/src/headers.rs` |
+| `arko_index::bench_v1` | Chunking and the polling watcher: `Options`, `SourceSpan`, `Chunk`, `FileMetadata`, `FileChunks`, `CHUNK_FORMAT`, `Delta`, `Error`, `Watcher`, `chunk_str`, `chunk_str_with_metadata`, `chunk_file`, `chunk_file_with_metadata`, `chunk_dir`, `chunk_dir_each`, `chunk_dir_map`, `open_watch`, the `_with` variants; re-exports `FileRules`, `Report`, `SkipReason`, `Skipped`. | `arko_index/src/bench_v1.rs`, `arko_index/src/watch.rs`, `arko_index/src/syntax.rs`, `arko_index/src/languages.rs`, `arko_index/src/rules/`, `arko_index/src/headers.rs`, `arko_index/src/front_matter.rs` |
 | `arko_index::search` | The first index format (one JSON file): `index`, `index_with`, `search`, `outline`. | `arko_index/src/search.rs` |
 | `arko_index::index2` | The disk-resident index: `index`, `index_with`, `build`, `BuildOptions`, `search`, `dense_info`, `BuildStats`. | `arko_index/src/index2.rs` |
 | `arko_index::dense` | Embeddings: `Embedder`, `ModelDescriptor`, `EmbedLimits`, `Embedding`, `InputKind`, `HashEmbedder`, `embed_query`, `render`, `RENDER_VERSION`, `DenseConfig`, `DenseBuild`, `EmbedProgress`, `EmbedStats`, `DenseIndexInfo`. | `arko_index/src/dense/` |
@@ -29,17 +29,18 @@ Errors are `bench_v1::Error`, a boxed `std::error::Error + Send + Sync`.
 
 | Item | What it does |
 |---|---|
-| `Options { max_bytes }` | The source-byte bound of a chunk. Default 4,096; values below 4 are rejected. A rendered chunk (path, newline, source) is also capped at 24,000 bytes. |
-| `chunk_str(path, text, options)` | Chunks one text under the given path (kept verbatim; the extension selects the grammar). |
-| `chunk_file(path, options)` | Reads and chunks one file under its file name. A binary or non-UTF-8 file gives no chunks. |
+| `Options { max_bytes, front_matter_description }` | `max_bytes`: the source-byte bound of a chunk. Default 4,096; values below 4 are rejected. A rendered chunk (path, newline, source) is also capped at 24,000 bytes. `front_matter_description` (default `false`): Markdown scopes start with the front matter's title and description instead of the title alone. |
+| `chunk_str(path, text, options)` | Chunks one text under the given path (kept verbatim; the extension or file name selects the grammar). |
+| `chunk_str_with_metadata(path, text, options)` | The same, as `FileChunks { metadata, chunks }`: a Markdown file's metadata region (`FileMetadata`) with its chunks. |
+| `chunk_file(path, options)`, `chunk_file_with_metadata(path, options)` | Reads and chunks one file under its file name. A binary or non-UTF-8 file gives no chunks. |
 | `chunk_dir(root, options)`, `chunk_dir_with(root, options, rules)` | Every file the rules select, in path order; `_with` also returns the `Report`. |
 | `chunk_dir_each[_with](root, options, [rules,] sink)` | Streams each file's chunks to `sink` in path order, chunking on `threads()` workers. |
-| `chunk_dir_map[_with](root, options, [rules,] threads, map, sink)` | Like `chunk_dir_each`, applying `map` on the worker (the CLI renders JSON there). Memory is bounded by a reorder window of source bytes. |
+| `chunk_dir_map[_with](root, options, [rules,] threads, map, sink)` | Like `chunk_dir_each`, applying `map` to each file's `FileChunks` on the worker (the CLI renders JSON there). Memory is bounded by a reorder window of source bytes. |
 
-Languages by extension: `rs` Rust; `py` Python; `js`, `jsx` JavaScript; `ts`, `tsx`
-TypeScript (TSX grammar for `tsx`); `go` Go; `java` Java; `c`, `h` C (`.h` parsed with
-the C++ grammar); `cc`, `cpp`, `hpp` C++. Anything else is `text`, split by the bounded
-fallback.
+Languages: 50, from extensions and well-known file names (`Makefile`,
+`CMakeLists.txt`, `PKGBUILD`, ...), listed with each language's rules in
+[arko_index languages](arko_index-languages.md). Anything else is `text`, split by the
+bounded fallback.
 
 **`Chunk` fields** (one JSON object per line in CLI output, in this order): `id`
 (SHA-256 based, from path plus trimmed content and an occurrence ordinal), `path`
@@ -51,9 +52,17 @@ the source), `scope` (the context: enclosing definitions such as
 `impl Display for Point › fn fmt`, or a Markdown heading chain; written only when not
 empty). `Chunk::header()` gives `path:start_line-end_line · scope`.
 
-**Chunk format versions** (`bench_v1::CHUNK_FORMAT`, now 2): format 1 is the ten fields
+**`FileMetadata` fields** (a JSON line before the file's chunks in CLI output, format
+3): `file` (the path), `metadata_range` (a `SourceSpan` from byte 0: `start_byte`,
+`end_byte`, `start_line`, `end_line`), `front_matter` (the raw block, delimiters
+included; absent when empty), `title` and `description` (absent when the front matter
+has none). Only Markdown files with front matter or MDX import/export lines at the top
+have one. Every byte of a file is in exactly one chunk or in this region.
+
+**Chunk format versions** (`bench_v1::CHUNK_FORMAT`, now 3): format 1 is the ten fields
 up to `token_estimate`; format 2 appends `scope`. Boundaries and IDs are the same in
-both. A reader of either treats a missing `scope` as empty; a chunk without a scope
+both. Format 3 adds `FileMetadata` lines to the `chunk` output and leaves the chunk
+fields as in format 2. A reader of either treats a missing `scope` as empty; a chunk without a scope
 serializes identically in both. Watcher states and index documents written before
 format 2 load (their chunks have no scope); a watcher reports the chunks that gain one
 as `changed`, once. The README's [Context headers](../arko_index/README.md#context-headers)
@@ -142,8 +151,8 @@ for the cache, the cap and the accounting.
 
 | Command | Output |
 |---|---|
-| `chunk ROOT` (directory or file) | Chunk JSON lines. |
-| `outline ROOT` | `path:start-end<TAB>kind<TAB>symbol_path` lines. |
+| `chunk ROOT` (directory or file) | Chunk JSON lines, and a `FileMetadata` line before a Markdown file's chunks when it has front matter. |
+| `outline ROOT` | `path:start-end<TAB>kind<TAB>symbol_path` lines; a metadata region is `path:start-end<TAB>metadata<TAB>title`. |
 | `index ROOT STATE_DIR` | stderr `indexed N chunks` and the report summary. |
 | `search STATE_DIR QUERY...` | Up to ten chunk JSON lines (the words are joined with spaces). |
 | `index2 ROOT STATE_DIR` | stderr `indexed N chunks, T terms, R runs` and the report summary; with embeddings also a progress line per request and the token summary. Flags: `--embed MODEL` (`voyage-code-4`, `voyage:MODEL`, `hash`), `--dimensions N`, `--embed-config FILE`, `--quantize f32\|int8`, `--max-embed-tokens N\|none`, `--no-embed`; without them, the saved `dense.json` applies. |
@@ -155,7 +164,8 @@ for the cache, the cap and the accounting.
 
 File selection flags (commands that walk a tree): `--respect-ignore`,
 `--exclude PATTERN`, `--include PATTERN` (repeatable), `--report FILE`; `--opt=value`
-works, `--` ends the flags. Errors print `arko_index: <message>` and exit with status 1.
+works, `--` ends the flags. Those commands also take `--front-matter-description`
+(`Options::front_matter_description`). Errors print `arko_index: <message>` and exit with status 1.
 stderr lines from the report start with `arko_index: `.
 
 `dense_live_check` is a second example: it builds an index with Voyage embeddings of
@@ -177,7 +187,7 @@ file's header and the README.
 ## Features
 
 arko_index has no cargo features. It parses with mhr_tree_sitter, a pure-Rust port of
-tree-sitter 0.25.10 and its grammars, so the library needs no C compiler. The port pins
+tree-sitter 0.25.10 and 54 grammars, so the library needs no C compiler. The port pins
 the grammar versions: an upgrade changes chunk boundaries and IDs. See
 [Parsing](../arko_index/README.md#parsing). The examples and tests depend on arko_ai
 (dev-dependency, for the Voyage adapter), whose dependencies need a C compiler.
@@ -187,6 +197,7 @@ the grammar versions: an upgrade changes chunk boundaries and IDs. See
 | Setting | Default |
 |---|---|
 | `Options::max_bytes` | 4,096 source bytes; the rendered cap is 24,000 bytes |
+| `Options::front_matter_description` | `false`: a Markdown scope's root is the front matter's title alone (or the first `# H1`) |
 | `FileRules::respect_ignore` | `false`: ignore files are not read; gitignored files are indexed |
 | `FileRules::exclude`, `include` | Empty |
 | Built-in exclusions | `.git` directories and files, `CACHEDIR.TAG` directories (not the root), state directories |
@@ -230,7 +241,8 @@ refused (`watch2` refuses a version 2 snapshot and asks for a rebuild) or rebuil
 watcher's parse cache is reused only when the engine digest (the chunking sources and
 the locked tree-sitter versions) matches; otherwise the files are parsed again,
 without spurious deltas, except once for chunk format 2: chunks that gain a `scope`
-are delivered as `changed`. An index2 generation from before this version loads and
+are delivered as `changed`. The engine digest also changes with
+`Options::front_matter_description`. An index2 generation from before this version loads and
 searches lexically; filters need its `files.dat` (rebuild to filter). Saved files
 with embeddings carry versions (`dense.json` 1, the generation's `dense.json` 1,
 `slots.dat` 1, `cache.json` 1) and new fields get serde defaults. The SQLite
