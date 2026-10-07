@@ -46,8 +46,9 @@ The task set (`OUT/tasks.json`) is assembled from:
   agrees with are kept, up to `--per-kind` per repository and kind (the seeds count toward it).
   `generate` keeps writing while the verified questions and those still being verified (at the
   expected yield, one in `--oversample`) fall short, up to enough writer runs for twice the
-  questions wanted per repository and kind. With the defaults (9 per kind) that is
-  7 × 4 × 9 = 252 tasks less the seeds' surplus: about 250.
+  questions wanted per repository and kind. With the defaults (9 per kind) that is up to
+  258 tasks: 9 per repository and kind, and all 15 of arko's seed definition questions (seeds
+  are always kept).
 - The writer and the verifier have arm A's tools, a terminal (`--writer-tools index` gives them
   arko_index too), so the questions aren't shaped by the tool under test: a writer that found
   its code with arko_index would tend to describe it in the words that find it there.
