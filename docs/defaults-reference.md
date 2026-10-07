@@ -39,7 +39,3 @@ Defaults of arko_index (see [Defaults (arko_index)](reference-map.md#defaults-ar
   never stops for them.
 - Chunking, indexing and watching use every available CPU (`ARKO_INDEX_THREADS`
   overrides), with identical output at any thread count.
-- The `pgo` feature is on: optimized builds with GCC on x86-64 Linux parse with grammars
-  compiled with GCC profile-guided optimization (identical output, about a quarter less
-  chunking CPU on mixed-language code, none measurable on Rust); other builds use the
-  grammar crates' objects. `default-features = false` removes it.

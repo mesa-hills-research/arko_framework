@@ -6,10 +6,9 @@ code families are parsed with tree-sitter (Rust, Python, JavaScript, TypeScript
 including TSX, Go, Java, C, C++); other UTF-8 text is split by a strictly bounded
 fallback. Everything runs locally: no network, no credentials, no model calls.
 
-The crate builds the tree-sitter C runtime and grammars, so it needs a C compiler.
-Linux is the primary platform; see [Platforms](#platforms). With GCC on x86-64 Linux,
-release builds compile the grammars with profile-guided optimization; see
-[The `pgo` feature](#the-pgo-feature). The
+Parsing uses mhr_tree_sitter, a pure-Rust port of tree-sitter, so the crate needs no C
+compiler; see [Parsing](#parsing). Linux is the primary platform; see
+[Platforms](#platforms). The
 [arko_index reference](../docs/arko_index-reference.md) lists the API, the CLI, the
 environment variables and the on-disk state.
 
@@ -337,56 +336,26 @@ directory fsync is skipped (Windows cannot open a directory as a file); `bench-s
 `watch2` are unavailable. The CI builds and tests the crate on macOS and Windows; the
 identity checks and measurements behind this README were made on Linux.
 
-## The `pgo` feature
+## Parsing
 
-The tree-sitter grammars (generated C) do most of the chunking work. With the `pgo`
-feature, on by default, the build script compiles the eight grammars a second time with
-GCC profile-guided optimization from the profiles committed in `pgo/`, under renamed
-symbols, and parsing uses those copies. A check at first use compares each copy with
-the grammar crate Cargo linked (node types, ABI version, symbol, field and parse-state
-counts) and falls back to the crate's grammar if they differ. Output is byte-identical
-with the feature on and off.
+Parsing uses mhr_tree_sitter (until it is published, a local checkout: see
+`Cargo.toml`), a pure, safe Rust port of tree-sitter 0.25.10 and its grammars, made by
+an AI agent swarm and differentially tested against the C library. Its libraries keep
+tree-sitter's names (`tree_sitter`, `tree_sitter_rust`, ...), and the grammar versions
+are the ones this crate used with the C library: tree-sitter-rust 0.24.2, -python
+0.25.0, -typescript 0.23.2 (TypeScript and TSX), -javascript 0.25.0, -go 0.25.0, -java
+0.23.5, -c 0.24.2 and -cpp 0.23.4. No C compiler is needed.
 
-Measured on x86-64 Linux with GCC 15.2 (`chunk`, median of 5 interleaved runs, profiles
-trained only on the committed corpus): the 35 MB multi-language corpus of the research
-run 2.83 → 2.16 s on one thread (−24 %) and 0.62 → 0.47 s on six; a 7.7 MB snapshot of
-this repository (Rust) 0.58 → 0.57 s, no measurable gain. C and C++ gain most; Rust
-parsing spends its time elsewhere (the tree-sitter runtime and the Rust code).
+Before the switch, the crate used the C library and an optional GCC profile-guided
+build of the grammars. The switch was checked on eight trees: a snapshot of this
+repository, a research repository (17.6 GB of text, gitignored runs included), the
+openai/codex repository, CPython and Go sources, a mixed research corpus, and
+TypeScript, Python and Rust repositories. In total 237,312 files, 18.9 GB of text and
+6.5 million chunks. Each tree's `chunk` output was byte-identical across the C build,
+the profile-guided C build and the port, in three runs each at six threads, and also
+at one thread for five of the trees.
 
-**When it applies.** Optimized builds (opt-level 2 or 3) with GCC targeting x86-64 Linux
-on an x86-64 Linux host, with the GCC major version the profiles were made with (15),
-and the grammar crates at their pinned versions with unmodified sources (the build
-script compares them with `pgo/profile.txt`). Every other build is a normal one using
-the grammar crates' own objects: silently when the compiler is not GCC (clang, MSVC),
-the target is another platform, or the build is unoptimized; with one cargo warning
-when GCC on x86-64 Linux could not use the profiles (another GCC major version, changed
-or missing sources, a grammar upgraded without new profiles, a failed compile). Builds
-never fail because of the feature.
-
-**Costs.** A release build of the crate takes about 2 s longer (6 CPU-seconds, three
-jobs). Binaries grow by about 10 MB, because the crates' grammars stay linked as the
-fallback (the CLI: 15.1 → 25.5 MB). The repository holds 200 KB of profiles and a
-48 KB training corpus.
-
-**Turning it off.** `arko_index = { path = "...", default-features = false }`, or
-`cargo build --no-default-features`. `ARKO_INDEX_PGO_PROFILES=DIR` makes the build
-script read `profile.txt` and `gcda/` from `DIR` instead of `pgo/`.
-
-**Regenerating the profiles.** Run `arko_index/pgo/train.sh [WORK_DIR]` on x86-64 Linux
-with GCC (about 40 s) after upgrading a grammar crate (`Cargo.toml` pins them; the
-build warns until the profiles are regenerated), after moving to a new GCC major
-version, or after changing the training corpus. It builds the CLI with instrumented
-grammars (`ARKO_INDEX_PGO_TRAIN`), chunks the corpus (`pgo/corpus`, samples of all
-eight families; this crate's Rust sources; the tree-sitter runtime's C sources and the
-grammars' `grammar.js` and scanners from the pinned crates), writes `pgo/profile.txt`
-and `pgo/gcda/`, and checks that a release build uses them. Commit both.
-
-The tree-sitter runtime (`lib.c` of the `tree-sitter` crate) is not covered: its
-symbols are fixed by the Rust bindings, so a second copy cannot be linked beside the
-crate's. A whole-build `CFLAGS` experiment (profiles trained on large real corpora, one
-thread) measured what it leaves out: the sealed half of the research corpus 1.20 s
-without profiles, 0.83 s with profiled grammars, 0.76 s with the runtime profiled too;
-the Rust snapshot 0.57, 0.56 and 0.51 s.
+<!-- TODO: speed and memory against the C library, measured on dedicated cores. -->
 
 ## Validation tools
 

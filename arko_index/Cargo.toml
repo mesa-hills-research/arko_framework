@@ -11,32 +11,22 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 ignore.workspace = true
-tree-sitter = "0.25"
-tree-sitter-language = "0.1"
-# The grammars are pinned: an upgrade changes chunk boundaries and IDs, and the GCC
-# profiles in pgo/ are made for these exact sources (rerun pgo/train.sh after one).
-tree-sitter-rust = "=0.24.2"
-tree-sitter-python = "=0.25.0"
-tree-sitter-typescript = "=0.23.2"
-tree-sitter-javascript = "=0.25.0"
-tree-sitter-go = "=0.25.0"
-tree-sitter-java = "=0.23.5"
-tree-sitter-c = "=0.24.2"
-tree-sitter-cpp = "=0.23.4"
+# mhr_tree_sitter: a pure-Rust port of tree-sitter 0.25.10 and its grammars. The
+# libraries keep tree-sitter's names (tree_sitter, tree_sitter_rust, ...). The port pins
+# the grammar versions; a grammar upgrade changes chunk boundaries and IDs.
+# TODO: local path dependencies until the mhr_tree_sitter repository is published.
+mhr_tree_sitter = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/runtime" }
+mhr_tree_sitter_rust = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/rust" }
+mhr_tree_sitter_python = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/python" }
+# TypeScript, and TSX (re-exported from mhr_tree_sitter_tsx as LANGUAGE_TSX).
+mhr_tree_sitter_typescript = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/typescript" }
+mhr_tree_sitter_javascript = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/javascript" }
+mhr_tree_sitter_go = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/go" }
+mhr_tree_sitter_java = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/java" }
+mhr_tree_sitter_c = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/c" }
+mhr_tree_sitter_cpp = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/cpp" }
 fs2 = "0.4"
 libc = "0.2"
-
-[features]
-default = ["pgo"]
-# Compiles the tree-sitter grammars a second time with GCC profile-guided optimization,
-# from the profiles in pgo/, and parses with those copies. Applies to optimized builds
-# with GCC on x86-64 Linux whose GCC major version and grammar sources match the
-# profiles; any other build silently uses the grammar crates' own objects. Output is
-# identical either way. Remove with `default-features = false`.
-pgo = []
-
-[build-dependencies]
-cc = "1"
 
 [dev-dependencies]
 tempfile.workspace = true

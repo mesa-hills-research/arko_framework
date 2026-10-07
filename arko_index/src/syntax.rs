@@ -28,10 +28,6 @@ pub(crate) fn language(path: &Path) -> &'static str {
     }
 }
 fn grammar(lang: &str) -> Option<Language> {
-    #[cfg(arko_index_pgo)]
-    if let Some(language) = crate::pgo::grammar(lang) {
-        return Some(language);
-    }
     Some(match lang {
         "rust" => tree_sitter_rust::LANGUAGE.into(),
         "python" => tree_sitter_python::LANGUAGE.into(),
