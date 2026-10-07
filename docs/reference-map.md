@@ -1436,6 +1436,7 @@ Agents are named by their registration name (the one given to `WorkflowBuilder::
 | `forge --use-case`, `--output`, `--involvement`, `--backend` | A workflow that builds workflows: describe a use case, get a checked, documented crate. | `arko_workflows/examples/forge/main.rs` | [Forge](../arko_workflows/examples/forge/README.md) |
 | `forge --trial-runs`, `--no-explorers`, `--max-active-calls`, `--resume` | Live trial runs, the explorer agents, and resuming a run. | `arko_workflows/examples/forge/main.rs` | [Example binaries](#example-binaries-arko_workflows) |
 | `complete_workflow --data-dir DIR`, `--dry-run`, `--resume PATH`, `--owner TEXT` | Complete three-agent incident-report workflow; validates without credentials in dry-run mode and can resume a checkpoint. | `arko_workflows/examples/complete_workflow.rs` | [Complete workflow example](#complete-workflow-example) |
+| `index_benchmark prepare`, `generate`, `run`, `report` (`--out`, `--arms`, `--concurrency`, `--codex-home`, `--mock`) | The arko_index agent benchmark: code-understanding questions on pinned repositories, answered with a terminal alone or with arko_index, graded blind against verified keys. | `arko_workflows/examples/index_benchmark/main.rs` | [Example binaries](#example-binaries-arko_workflows) |
 | `runctl note RUN_DIR TEXT` (`--file`, `--to`, `--except`, `--once`, `--from-agent`, `--from-host`), `runctl status RUN_DIR` | Post a note to any workflow run built with `control_folder()`, live or stopped; print a run's status from its latest checkpoint. No model requests. | `arko_workflows/examples/runctl.rs` | [Example binaries](#example-binaries-arko_workflows) |
 
 ### Builder defaults (arko_workflows)
@@ -1630,6 +1631,18 @@ otherwise (exit status 1); the workflow posts the note at its agents' next turn 
 it resumes. `status RUN_DIR` prints the latest checkpoint's runs, spend, newest notes and the
 control-folder notes not yet posted. It makes no model requests and reads no credentials. See
 [Operator notes](../arko_workflows/INDEX.md#operator-notes).
+
+**`index_benchmark`**: subcommands `prepare` (fetch the pinned repositories of `repos.json`,
+make them read-only, build their arko_index indexes with the `arko_index_cli` next to the
+binary or `--index-cli`), `generate` (writer and verifier agents; `assemble` rebuilds the task
+set without agents), `validate`, `run` and `report`; every one takes `--out DIR`. Every agent
+runs on `--model` (`gpt-6-astra:xhigh`) in Fast mode (`--no-fast` for standard) over the ChatGPT
+login of `--codex-home` (one, in this build). `run` defaults: `--arms A,B`, `--samples 1`,
+`--concurrency 24`, `--max-output-bytes 16384`, `--command-timeout 120`, `--max-shell-calls 80`,
+`--max-input-tokens 4000000`, `--attempt-timeout-minutes 60`, `--max-attempts 3`; resumable by
+`--name`, stopped gracefully by a signal or a `STOP` file. `--mock` runs every role against a
+local scripted model. See the
+[benchmark README](../arko_workflows/examples/index_benchmark/README.md).
 
 
 ## arko_index

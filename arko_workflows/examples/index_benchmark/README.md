@@ -1,0 +1,199 @@
+# The arko_index agent benchmark
+
+Does giving a coding agent arko_index make it better or cheaper at understanding code than a
+terminal alone? This example answers it by measurement: agents answer code-understanding
+questions about real repositories, pinned to tags, in two (or three) arms that differ only in
+their tools, and a grader that doesn't know the arm scores every answer against a verified key.
+
+| Arm | The solver has |
+|---|---|
+| A | a terminal (a `shell` tool in a read-only checkout; `rg`, `grep`, `sed`, `git grep`, ...) |
+| B | the same terminal, plus the arko_index CLI as `arko_index`, with an index of the checkout built beforehand |
+| C (opt-in) | B, plus dense search over the same chunks (`arko_index_dense`, Voyage embeddings) |
+
+Every agent (the solvers of every arm, the grader, the question writer and the verifier) runs
+in an arko workflow on the same model and settings: `gpt-6-astra` at `xhigh` effort, Fast mode,
+over a ChatGPT login (Codex's `auth.json`). The arms' prompts are the same except for the
+paragraph that describes the extra tools, and their shells are the same except for the programs
+first on `PATH` (arm A gets stubs that answer "command not found" for every arko_index program).
+
+## The tasks
+
+Four kinds of question, each with an answer key of required items:
+
+| Kind | Asks | Key |
+|---|---|---|
+| definition | where something is defined (by name, or by what it does) | its location |
+| callers | who calls a function or method (in a stated scope) | every call site |
+| behaviour | how a feature works | 3 to 6 facts, and the functions or files that implement it |
+| impact | what a change would affect | the places affected, and why |
+
+Items are locations (`path:start-end`), files, or facts. Locations and files are also checked
+deterministically against the answer's `LOCATIONS:` (3 lines of slack); some keys list known
+wrong answers (a same-named variant of another enum, say), and citing one first fails the check.
+
+The task set (`OUT/tasks.json`) is assembled from:
+
+- **Seed tasks** (built in, `seed-tasks.json`): the earlier arko question sets
+  (`behaviour-arko.json`, and the depth and breadth sets of `breadth-depth-arko.json`)
+  converted to tasks, every key rechecked by hand at the pinned arko commit: 15 definition and
+  4 callers tasks.
+- **Generated tasks**: a writer agent writes questions per repository and kind, in runs of at most
+  four, each run pointed at other directories. Its `submit_question` tool rejects keys whose
+  locations aren't in the checkout, duplicates, and questions that name the answer's file. A
+  separate verifier agent then answers each question blind, gets the key, rechecks every
+  difference in the code, and returns `agree`, `disagree` or `ambiguous`. Only questions it
+  agrees with are kept, up to `--per-kind` per repository and kind (the seeds count toward it).
+  With the defaults (9 per kind) that is 7 × 4 × 9 = 252 tasks less the seeds' surplus: about
+  250.
+
+The repositories (`repos.json`; each checked out at its tag, depth 1, and made read-only):
+
+| Id | Repository | Tag | Language | Files | MB |
+|---|---|---|---|---|---|
+| arko | mesa-hills-research/arko_framework (private: `--source arko=PATH`) | commit 8f8569a | Rust | 294 | 7.2 |
+| redis | redis/redis | 7.2.5 | C | 1,583 | 15.5 |
+| leveldb | google/leveldb | 1.23 | C++ | 152 | 1.0 |
+| caddy | caddyserver/caddy | v2.8.4 | Go | 471 | 2.7 |
+| jsoup | jhy/jsoup | jsoup-1.18.1 | Java | 245 | 2.3 |
+| scrapy | scrapy/scrapy | 2.11.2 | Python | 532 | 4.2 |
+| vite | vitejs/vite | v5.4.10 | TypeScript | 2,125 | 13.3 |
+
+## Requirements
+
+Linux (arm C needs a Unix host), `git`, `bash`, and network access for `prepare`. `rg`
+(ripgrep) is recommended: both arms are told it is there when it is. A ChatGPT login: run
+`codex login` (with `CODEX_HOME` set if you keep several), and pass that home with
+`--codex-home` (default `$CODEX_HOME`, else `~/.codex`). Arm C needs `VOYAGE_API_KEY` in the
+benchmark's environment (never in the agents' shells: their commands get no variable that looks
+like a credential). Don't run it as root: the read-only checkouts are what keep concurrent agents
+from changing each other's code.
+
+Failover between two ChatGPT accounts needs arko's `ChatGptAccounts`, which this build doesn't
+have (branch `oauth-failover`); `--codex-home` takes one login until it is merged, and then
+becomes repeatable (`LLMClient::with_codex_auth_files`, one account per home, first preferred).
+
+## Running it
+
+Build the benchmark and the arko_index CLI into the same target directory (the benchmark finds
+`arko_index_cli` next to itself; or pass `--index-cli`):
+
+```sh
+cargo build --release -p arko_index --example arko_index_cli
+cargo build --release -p arko_workflows --example index_benchmark
+B=target/release/examples/index_benchmark
+OUT=~/index-benchmark
+```
+
+1. Fetch the repositories and build their indexes (untimed; the build times are recorded and
+   reported):
+
+   ```sh
+   $B prepare --out $OUT --source arko=/path/to/arko_framework
+   # Arm C too: VOYAGE_API_KEY=... $B prepare --out $OUT --source arko=... --dense
+   ```
+
+2. Generate and verify the questions, and assemble the task set:
+
+   ```sh
+   $B generate --out $OUT --codex-home ~/.codex --concurrency 24
+   $B validate --out $OUT                  # counts, and every key location checked again
+   ```
+
+   `generate` is resumable: run it again after a stop, or with a higher `--per-kind`, and it
+   writes and verifies only what is missing. `assemble --per-kind N` rebuilds `tasks.json` from
+   what was verified, without agents.
+
+3. Run the benchmark (start with a pilot), then read the report:
+
+   ```sh
+   $B run --out $OUT --codex-home ~/.codex --name pilot --limit 20
+   $B run --out $OUT --codex-home ~/.codex --name main --concurrency 24
+   $B report --out $OUT --name main          # also written at the end of every run
+   ```
+
+   `--arms A,B,C` adds arm C; `--samples 3` runs each task three times per arm (the intervals
+   then resample tasks with all their samples). Every agent run counts toward the plan's usage
+   limits; when one is reached, the runs wait for the reset (arko's automatic recovery) and the
+   wait doesn't count toward their time limit.
+
+Stopping and resuming: Ctrl-C, `SIGTERM`, or `touch $OUT/runs/NAME/STOP` start no new agent
+runs and let the running ones finish; a second signal cancels them (they run again on resume,
+without using up an attempt); a third exits. Running the same command again resumes: every
+finished solver run and grading is recorded as it ends (`attempts.jsonl`, `grades.jsonl`), and
+only the rest is done. An agent run that ends for a reason outside the agent (the login failed,
+the run was stopped) is run again, up to `--max-attempts` (3); a lost login also stops the whole
+run. A resumed run must keep its model, shell settings and limits; it may add arms, samples and
+tasks.
+
+## Metrics
+
+Per task, arm and sample (`attempts.jsonl`, `attempts.csv`): the outcome (answered, failed,
+over a limit), the answer, model calls, tool and shell calls (and how many ran arko_index),
+input tokens (and the cached part), output tokens (and reasoning), the largest context, wall
+time and working time (wall time less waits for usage limits and retries), the API list price
+of the tokens (ChatGPT OAuth bills nothing per call; this is the cost the same tokens would have
+at API prices, in Fast mode), and the transcript.
+
+`report.md` (and `report.json`) gives, per arm and per kind, and per repository:
+
+- **pass**: the grader's verdict `correct`, with a Wilson 95% interval; a run that didn't answer
+  fails;
+- **items**: the share of the key's items the grader found met, with a bootstrap 95% interval
+  over tasks;
+- **check**: the deterministic check of locations and files;
+- tokens, calls, wall time and cost, with intervals, and cost per pass;
+- **paired differences** between arms on the same tasks (B − A, ...), with bootstrap intervals,
+  and how many tasks each arm did better on;
+- the **cost/quality frontier**: per kind, the arms no other arm beats on both cost and item
+  score (`frontier.csv` for plotting);
+- how often the grader and the deterministic check agree, and what was left ungraded.
+
+The grader sees the question, the key and the answer, never the arm: lines of the answer that
+show a search command (`arko_index ...`, `rg -n ...`, `grep -r`, `git grep`) are removed first,
+in every arm, and gradings run interleaved with the solvers. It has a shell in the checkout to
+check claims the key doesn't settle (`--grader-without-shell` to judge from the key alone).
+
+## Limits
+
+| Flag | Default | |
+|---|---|---|
+| `--concurrency` | 24 | Agent runs at once (solvers and graders). |
+| `--max-output-bytes` | 16,384 | Output of one shell command returned to the agent (head and tail). |
+| `--command-timeout` | 120 s | Per shell command. |
+| `--max-shell-calls` | 80 | After that the agent is asked to answer; ten more and the run is stopped. |
+| `--max-input-tokens` | 4,000,000 | All calls, cached included; over it the run is stopped and fails. |
+| `--attempt-timeout-minutes` | 60 | Working time (waits for usage limits excluded); 0 for none. |
+
+Runs stopped by a limit count as failures (scored 0) in every arm alike.
+
+## Dry run
+
+`--mock` replaces the model with a local server that plays every role from a script (no model
+calls): solvers run `--mock-steps` (12) shell commands, searching and reading in turn (arm A
+with `rg`, arms B and C with `arko_index search2` and `arko_index_dense`), then answer; the
+writer submits questions from `arko_index outline`; the verifier and grader return verdicts. The
+commands run for real, so a dry run exercises the checkouts, indexes, the arms' tools, grading,
+resume and the report, and measures prompt and tool-output sizes. Its token counts are
+estimates: 4 bytes per token, each call's earlier reasoning carried back in its input, and
+`--mock-reasoning-tokens` (1,500) of reasoning per call. `prepare --dense --mock-embeddings`
+builds arm C's index with an offline hashing embedder.
+
+```sh
+$B prepare --out $OUT/dry --source arko=/path/to/arko_framework --dense --mock-embeddings
+$B generate --out $OUT/dry --mock --per-kind 4
+$B run --out $OUT/dry --mock --name dry --arms A,B,C
+```
+
+## Layout of `--out`
+
+```text
+repos/<id>/               read-only checkouts
+indexes/<id>/             arko_index index2 state (and <id>.dense/ for arm C)
+prepare.json              commits, sizes, index build times, the CLI's hash
+bin/arm-{A,B,C}/          the programs first on each arm's PATH
+tasks/                    candidates, verifications and writer runs (JSON lines), transcripts
+tasks.json                the task set
+runs/<name>/              manifest.json, attempts.jsonl, grades.jsonl, transcripts/,
+                          report.md, report.json, attempts.csv, frontier.csv, progress.json
+```
