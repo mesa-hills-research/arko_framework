@@ -17,6 +17,12 @@ pub struct SourceSpan {
     pub start_line: usize,
     pub end_line: usize,
 }
+/// The version of the chunk JSON format (the `chunk` command's lines, deltas, index
+/// documents). Format 1 had the ten fields up to `token_estimate`; format 2 adds
+/// `scope`, serialized only when it is not empty. Boundaries and IDs are the same in
+/// both formats.
+pub const CHUNK_FORMAT: u32 = 2;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Chunk {
     pub id: String,
@@ -29,6 +35,26 @@ pub struct Chunk {
     pub symbol_path: String,
     pub kind: String,
     pub token_estimate: usize,
+    /// The chunk's context: the chain of enclosing definitions from the syntax tree
+    /// (`impl Display for Point › fn fmt`, `class X › def y`), or for Markdown the
+    /// heading chain at its start (`# Guide › ## Install`), joined with ` › `. Empty
+    /// for top-level text. Metadata only: it never affects boundaries or IDs. Absent
+    /// from the JSON when empty, and in data written before chunk format 2.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scope: String,
+}
+
+impl Chunk {
+    /// The context header shown with a search result: `path:start_line-end_line`,
+    /// then ` · ` and the scope when there is one.
+    pub fn header(&self) -> String {
+        let mut header = format!("{}:{}-{}", self.path, self.start_line, self.end_line);
+        if !self.scope.is_empty() {
+            header.push_str(" · ");
+            header.push_str(&self.scope);
+        }
+        header
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Delta {

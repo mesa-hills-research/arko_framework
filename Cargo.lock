@@ -178,6 +178,7 @@ dependencies = [
 name = "arko_index"
 version = "0.3.0"
 dependencies = [
+ "arko_ai",
  "ctrlc",
  "fs2",
  "ignore",
@@ -195,6 +196,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

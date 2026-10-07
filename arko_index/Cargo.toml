@@ -32,3 +32,7 @@ libc = "0.2"
 tempfile.workspace = true
 # The arko_index_cli example stops its watchers on SIGINT and SIGTERM.
 ctrlc = { version = "3.5", features = ["termination"] }
+# The examples embed with Voyage through arko_ai's client (examples/support/voyage.rs).
+# The library itself never depends on arko_ai: it defines the `dense::Embedder` trait.
+arko_ai.workspace = true
+tokio.workspace = true

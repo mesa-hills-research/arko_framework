@@ -1,4 +1,7 @@
-use crate::bench_v1::{Chunk, Error, Options};
+use crate::{
+    bench_v1::{Chunk, Error, Options},
+    headers::{SCOPE_SEPARATOR, clip, collapse},
+};
 use sha2::{Digest, Sha256};
 use std::{cell::RefCell, collections::HashMap, path::Path};
 use tree_sitter::{Language, Node, ParseOptions, Parser};
@@ -80,6 +83,9 @@ struct Part {
     // Ephemeral AST parent identity: grouping must not cross lexical scopes even
     // when a wrapper has no display name (e.g. a module or anonymous namespace).
     sibling_scope: Option<usize>,
+    /// The chain of enclosing definition labels (`Chunk::scope`). Metadata only:
+    /// nothing below reads it to choose boundaries.
+    scope: String,
 }
 fn comment(n: Node) -> bool {
     n.kind().contains("comment") || matches!(n.kind(), "attribute_item" | "inner_attribute_item")
@@ -200,6 +206,160 @@ fn name(n: Node, text: &str) -> Option<String> {
     }
     None
 }
+/// The label of a definition that opens a scope in `Chunk::scope` (`fn f`,
+/// `impl Display for Point`, `class C`, `def m`, `namespace N`), or `None`.
+/// `lang` is the parser language: Python, C and C++ share `function_definition`,
+/// Go and TypeScript `function_declaration`, Go and Java `method_declaration`.
+fn scope_label(n: Node, text: &str, lang: &str) -> Option<String> {
+    let kind = n.kind();
+    let keyword = match kind {
+        // Wrappers take the label of the definition they wrap.
+        "decorated_definition" => {
+            return n
+                .child_by_field_name("definition")
+                .and_then(|d| scope_label(d, text, lang));
+        }
+        "export_statement" => {
+            return n
+                .child_by_field_name("declaration")
+                .and_then(|d| scope_label(d, text, lang));
+        }
+        "template_declaration" => {
+            return children(n)
+                .into_iter()
+                .rev()
+                .find(|c| semantic(*c))
+                .and_then(|d| scope_label(d, text, lang));
+        }
+        "impl_item" => return impl_label(n, text),
+        "method_declaration" if lang == "go" => {
+            let receiver = n.child_by_field_name("receiver")?;
+            let name = n.child_by_field_name("name")?;
+            return Some(format!(
+                "func {} {}",
+                clip(collapse(&text[receiver.byte_range()])),
+                clip(collapse(&text[name.byte_range()]))
+            ));
+        }
+        "type_declaration" if lang == "go" => {
+            let specs: Vec<_> = children(n)
+                .into_iter()
+                .filter(|c| matches!(c.kind(), "type_spec" | "type_alias"))
+                .collect();
+            let [spec] = specs.as_slice() else {
+                return None;
+            };
+            let name = spec.child_by_field_name("name")?;
+            return Some(format!("type {}", clip(collapse(&text[name.byte_range()]))));
+        }
+        // Rust, and the C, C++, Java and TypeScript kinds that take the same keyword
+        "mod_item" => "mod",
+        "trait_item" => "trait",
+        "struct_item" | "struct_specifier" => "struct",
+        "enum_item" | "enum_declaration" | "enum_specifier" => "enum",
+        "union_item" => "union",
+        "function_item" | "function_signature_item" => "fn",
+        "macro_definition" => "macro_rules!",
+        // Python, C and C++
+        "function_definition" if lang == "python" => {
+            if text[n.byte_range()].starts_with("async") {
+                "async def"
+            } else {
+                "def"
+            }
+        }
+        "function_definition" => "function",
+        "class_definition"
+        | "class_declaration"
+        | "abstract_class_declaration"
+        | "class"
+        | "class_specifier" => "class",
+        "namespace_definition" => {
+            return Some(match name(n, text) {
+                Some(name) => format!("namespace {}", clip(name)),
+                None => "namespace".to_owned(),
+            });
+        }
+        // JavaScript, TypeScript, Java, Go
+        "interface_declaration" => "interface",
+        "record_declaration" => "record",
+        "type_alias_declaration" => "type",
+        "internal_module" => "namespace",
+        "module" if lang == "typescript" || lang == "tsx" => "module",
+        "function_declaration" if lang == "go" => "func",
+        "function_declaration" | "generator_function_declaration" | "function_signature" => {
+            "function"
+        }
+        "method_definition"
+        | "method_declaration"
+        | "method_signature"
+        | "abstract_method_signature" => "method",
+        "constructor_declaration" => "constructor",
+        // A callable bound to a name (`const f = () => ...`, `{ f: function () {} }`).
+        "pair" | "variable_declarator" | "assignment_expression" if semantic(n) => "function",
+        _ => return None,
+    };
+    Some(format!("{keyword} {}", clip(name(n, text)?)))
+}
+/// `impl Type`, `impl Trait for Type` or `impl !Trait for Type`.
+fn impl_label(n: Node, text: &str) -> Option<String> {
+    let ty = clip(collapse(&text[n.child_by_field_name("type")?.byte_range()]));
+    Some(match n.child_by_field_name("trait") {
+        Some(t) => {
+            let negative = text[n.start_byte()..t.start_byte()].contains('!');
+            format!(
+                "impl {}{} for {ty}",
+                if negative { "!" } else { "" },
+                clip(collapse(&text[t.byte_range()]))
+            )
+        }
+        None => format!("impl {ty}"),
+    })
+}
+/// The scope of parts merged into one chunk (a function family, a group of tiny
+/// definitions): their own scope when they share it; otherwise the enclosing scope
+/// followed by the members' own labels joined with ` | ` (bounded by `cap` bytes,
+/// then `…`), as `symbol_path` joins symbols; the enclosing scope alone when a member
+/// has no label of its own.
+fn merged_scope(parent: &str, members: &[Part], cap: usize) -> String {
+    if members.iter().all(|m| m.scope == members[0].scope) {
+        return members[0].scope.clone();
+    }
+    let mut tails = Vec::with_capacity(members.len());
+    for m in members {
+        let tail = if parent.is_empty() {
+            Some(m.scope.as_str())
+        } else {
+            m.scope
+                .strip_prefix(parent)
+                .and_then(|t| t.strip_prefix(SCOPE_SEPARATOR))
+        };
+        match tail {
+            Some(t) if !t.is_empty() => tails.push(t),
+            _ => return parent.to_owned(),
+        }
+    }
+    let mut joined = String::new();
+    for t in tails {
+        if !joined.is_empty() {
+            if joined.len() + t.len() >= cap {
+                joined.push_str(" | …");
+                break;
+            }
+            joined.push_str(" | ");
+        }
+        joined.push_str(t);
+    }
+    if parent.is_empty() {
+        joined
+    } else {
+        format!("{parent}{SCOPE_SEPARATOR}{joined}")
+    }
+}
+fn finish_group(mut group: Part, members: &[Part], parent: &str) -> Part {
+    group.scope = merged_scope(parent, members, 500);
+    group
+}
 fn children(n: Node) -> Vec<Node> {
     let mut cursor = n.walk();
     n.named_children(&mut cursor)
@@ -269,7 +429,16 @@ fn line_boundary(text: &str, byte: usize, floor: usize) -> usize {
         byte
     }
 }
-fn emit(out: &mut Vec<Part>, s: usize, e: usize, symbol: &str, kind: &str, atomic: bool) {
+#[allow(clippy::too_many_arguments)]
+fn emit(
+    out: &mut Vec<Part>,
+    s: usize,
+    e: usize,
+    symbol: &str,
+    scope: &str,
+    kind: &str,
+    atomic: bool,
+) {
     if e > s {
         out.push(Part {
             s,
@@ -278,14 +447,17 @@ fn emit(out: &mut Vec<Part>, s: usize, e: usize, symbol: &str, kind: &str, atomi
             kind: kind.to_owned(),
             atomic,
             sibling_scope: None,
+            scope: scope.to_owned(),
         });
     }
 }
+#[allow(clippy::too_many_arguments)]
 fn fallback(
     text: &str,
     s: usize,
     e: usize,
     symbol: &str,
+    scope: &str,
     kind: &str,
     limit: usize,
     out: &mut Vec<Part>,
@@ -313,7 +485,7 @@ fn fallback(
                 q = i;
             }
         }
-        emit(out, p, q, symbol, kind, false);
+        emit(out, p, q, symbol, scope, kind, false);
         p = q;
     }
 }
@@ -348,7 +520,7 @@ fn function_family_key(part: &Part) -> Option<(&str, &str, bool)> {
 // useful nearby vocabulary. The entire same-family run must be exactly two:
 // never greedily phase a long accessor run into windows. Each function retains
 // at least one third of the group's nonwhitespace bytes, independent of queries.
-fn function_families(parts: Vec<Part>, text: &str, limit: usize) -> Vec<Part> {
+fn function_families(parts: Vec<Part>, text: &str, limit: usize, parent_scope: &str) -> Vec<Part> {
     let mut result = Vec::with_capacity(parts.len());
     let mut i = 0;
     while i < parts.len() {
@@ -384,6 +556,7 @@ fn function_families(parts: Vec<Part>, text: &str, limit: usize) -> Vec<Part> {
                 group.symbol.push_str(" | ");
                 group.symbol.push_str(&parts[j - 1].symbol);
                 group.sibling_scope = None;
+                group.scope = merged_scope(parent_scope, &parts[i..j], usize::MAX);
                 result.push(group);
                 i = j;
                 continue;
@@ -398,7 +571,7 @@ fn function_families(parts: Vec<Part>, text: &str, limit: usize) -> Vec<Part> {
 // Coalesce sustained runs of tiny sibling definitions (generated accessors/tables),
 // not ordinary short files. Content-defined cuts resynchronize after local insertions;
 // unrelated distant groups keep their identity instead of moving fixed-size windows.
-fn tiny_runs(parts: Vec<Part>, text: &str, limit: usize) -> Vec<Part> {
+fn tiny_runs(parts: Vec<Part>, text: &str, limit: usize, parent_scope: &str) -> Vec<Part> {
     let mut result = Vec::new();
     let mut i = 0;
     while i < parts.len() {
@@ -417,9 +590,15 @@ fn tiny_runs(parts: Vec<Part>, text: &str, limit: usize) -> Vec<Part> {
             continue;
         }
         let mut group: Option<Part> = None;
-        for p in &parts[i..j] {
+        // Members of the group being built, for its scope.
+        let mut first = i;
+        for (at, p) in parts.iter().enumerate().take(j).skip(i) {
             if group.as_ref().is_some_and(|g| p.e - g.s > limit.min(768)) {
-                result.push(group.take().unwrap());
+                result.push(finish_group(
+                    group.take().unwrap(),
+                    &parts[first..at],
+                    parent_scope,
+                ));
             }
             if let Some(g) = &mut group {
                 g.e = p.e;
@@ -430,6 +609,7 @@ fn tiny_runs(parts: Vec<Part>, text: &str, limit: usize) -> Vec<Part> {
                 }
             } else {
                 group = Some(p.clone());
+                first = at;
             }
             let mut key = text[p.s..p.e]
                 .trim()
@@ -442,11 +622,15 @@ fn tiny_runs(parts: Vec<Part>, text: &str, limit: usize) -> Vec<Part> {
             key = (key ^ (key >> 33)).wrapping_mul(0xc4ceb9fe1a85ec53);
             key ^= key >> 33;
             if key & 7 == 0 {
-                result.push(group.take().unwrap());
+                result.push(finish_group(
+                    group.take().unwrap(),
+                    &parts[first..=at],
+                    parent_scope,
+                ));
             }
         }
         if let Some(g) = group {
-            result.push(g);
+            result.push(finish_group(g, &parts[first..j], parent_scope));
         }
         i = j;
     }
@@ -459,6 +643,8 @@ fn split(
     s: usize,
     e: usize,
     inherited: &str,
+    inherited_scope: &str,
+    lang: &str,
     text: &str,
     limit: usize,
     depth: usize,
@@ -475,13 +661,20 @@ fn split(
         }
         symbol.push_str(&name);
     }
+    // The scope chain grows like the symbol path, by labels (`impl A for B`, `fn f`),
+    // and also through modules and namespaces without a symbol.
+    let scope = match scope_label(n, text, lang) {
+        Some(label) if inherited_scope.is_empty() => label,
+        Some(label) => format!("{inherited_scope}{SCOPE_SEPARATOR}{label}"),
+        None => inherited_scope.to_owned(),
+    };
     let oversized = e - s > limit;
     let container = is_container(n) || (!is_semantic && contains_definition(n));
     if (!oversized && !container) || depth >= 100 {
         if oversized {
-            fallback(text, s, e, &symbol, n.kind(), limit, out);
+            fallback(text, s, e, &symbol, &scope, n.kind(), limit, out);
         } else {
-            emit(out, s, e, &symbol, n.kind(), is_semantic);
+            emit(out, s, e, &symbol, &scope, n.kind(), is_semantic);
             if matches!(
                 n.kind(),
                 "function_item"
@@ -510,7 +703,7 @@ fn split(
         units.push((line_boundary(text, start, s), child));
     }
     if units.is_empty() {
-        fallback(text, s, e, &symbol, n.kind(), limit, out);
+        fallback(text, s, e, &symbol, &scope, n.kind(), limit, out);
         return;
     }
     // Tiny classes remain self-contained; large containers expose member boundaries.
@@ -521,11 +714,11 @@ fn split(
         )
         && e - s < 700
     {
-        emit(out, s, e, &symbol, n.kind(), true);
+        emit(out, s, e, &symbol, &scope, n.kind(), true);
         return;
     }
     if units.len() == 1 && units[0].1.id() == n.id() {
-        fallback(text, s, e, &symbol, n.kind(), limit, out);
+        fallback(text, s, e, &symbol, &scope, n.kind(), limit, out);
         return;
     }
     let mut parts = Vec::new();
@@ -541,6 +734,8 @@ fn split(
             a,
             b,
             &symbol,
+            &scope,
+            lang,
             text,
             limit,
             depth + 1,
@@ -549,7 +744,12 @@ fn split(
     }
     // Pack short declarations/statements within the same lexical container, not unrelated functions.
     let pack = if container { limit.min(1000) } else { limit };
-    for part in tiny_runs(function_families(parts, text, limit), text, limit) {
+    for part in tiny_runs(
+        function_families(parts, text, limit, &scope),
+        text,
+        limit,
+        &scope,
+    ) {
         if let Some(last) = out.last_mut()
             && !last.atomic
             && !part.atomic
@@ -563,6 +763,9 @@ fn split(
             }
             if last.symbol != part.symbol {
                 last.symbol = symbol.clone();
+            }
+            if last.scope != part.scope {
+                last.scope = scope.clone();
             }
             continue;
         }
@@ -639,13 +842,21 @@ pub(crate) fn chunk(path: &Path, text: &str, options: &Options) -> Result<Vec<Ch
             0,
             text.len(),
             "",
+            "",
+            parser_language,
             text,
             limit,
             0,
             &mut parts,
         );
     } else {
-        fallback(text, 0, text.len(), "", "text", limit, &mut parts);
+        fallback(text, 0, text.len(), "", "", "text", limit, &mut parts);
+    }
+    if crate::headers::is_markdown(path) {
+        let chains = crate::headers::markdown_chains(text, parts.iter().map(|p| (p.s, p.e)));
+        for (part, chain) in parts.iter_mut().zip(chains) {
+            part.scope = chain;
+        }
     }
     let mut starts = vec![0usize];
     starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
@@ -675,6 +886,7 @@ pub(crate) fn chunk(path: &Path, text: &str, options: &Options) -> Result<Vec<Ch
             symbol_path: p.symbol,
             kind: p.kind,
             token_estimate: source.len() + path_s.len() + 1,
+            scope: crate::headers::bounded(p.scope),
         });
     }
     Ok(chunks)
