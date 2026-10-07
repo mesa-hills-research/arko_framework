@@ -118,7 +118,7 @@ Code paths are relative to the repository root. Items are listed by their shorte
 | `GenerationConfig::long_context`, `with_long_context` | Requests Claude's 1M-token context (standard on Claude 4.6 and later; nothing is sent). | `arko_ai/src/config.rs` | [GenerationConfig (arko_ai)](#generationconfig-arko_ai) |
 | `GenerationConfig::tool_config`, `with_tool_config` | Tool definitions, tool choice and parallel-call setting for the request. | `arko_ai/src/config.rs` | [Tool calls (arko_ai)](#tool-calls-arko_ai) |
 | `GenerationConfig::interleaved_thinking`, `with_interleaved_thinking` | Claude interleaved thinking between tool calls. | `arko_ai/src/config.rs` | [GenerationConfig (arko_ai)](#generationconfig-arko_ai) |
-| `GenerationConfig::openai_service_tier`, `with_openai_service_tier`; `OpenAIServiceTier` (`Auto`, `Default`, `Flex`, `Fast`), `OpenAIServiceTier::pricing_tier` | OpenAI `service_tier` (`Fast` is sent as `priority`); API key only. `pricing_tier` maps it to the `ServiceTier` used for cost (`Auto` and `Default` price as `Standard`). | `arko_ai/src/config.rs` | [GenerationConfig (arko_ai)](#generationconfig-arko_ai) |
+| `GenerationConfig::openai_service_tier`, `with_openai_service_tier`; `OpenAIServiceTier` (`Auto`, `Default`, `Flex`, `Fast`), `OpenAIServiceTier::pricing_tier` | OpenAI `service_tier` (`Fast` is sent as `priority`); over ChatGPT OAuth only `Fast` (on the models Codex offers it for) and `Default` (sends no tier). `pricing_tier` maps it to the `ServiceTier` used for cost (`Auto` and `Default` price as `Standard`). | `arko_ai/src/config.rs` | [GenerationConfig (arko_ai)](#generationconfig-arko_ai) |
 | `GenerationConfig::anthropic_cache_ttl`, `with_anthropic_cache_ttl` | `ttl` of the `cache_control` arko sends for Claude (`AnthropicCacheTtl`). | `arko_ai/src/config.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
 | `GenerationConfig::anthropic_fast_mode`, `with_anthropic_fast_mode` | Anthropic fast mode (`speed: "fast"`), Opus 5.5, Opus 5 and Opus 4.8. | `arko_ai/src/config.rs` | [GenerationConfig (arko_ai)](#generationconfig-arko_ai) |
 | `GenerationConfig::anthropic_inference_geo`, `with_anthropic_inference_geo`; `AnthropicInferenceGeo` (`Global`, `Us`) | Anthropic `inference_geo`, Claude 4.6 and later. | `arko_ai/src/config.rs` | [GenerationConfig (arko_ai)](#generationconfig-arko_ai) |
@@ -355,10 +355,10 @@ or YAML config is valid. One config can serve models of several providers: a set
 the model's provider has no use for is dropped with a warning (logged once per process
 for each provider and setting), while a value the provider can't accept for a setting it
 does use is an error before anything is sent. Exceptions: `temperature` and
-`parallel_tool_calls: Some(false)` on Gemini, and `openai_service_tier` over ChatGPT
-OAuth, are `Error::UnsupportedFeature`; Gemini ignores `ToolDefinition::strict` without a
-warning; Claude on OpenRouter accepts `anthropic_summarized_thinking` and `long_context`
-without sending anything.
+`parallel_tool_calls: Some(false)` on Gemini, and the Flex and Auto
+`openai_service_tier` over ChatGPT OAuth, are `Error::UnsupportedFeature`; Gemini ignores
+`ToolDefinition::strict` without a warning; Claude on OpenRouter accepts
+`anthropic_summarized_thinking` and `long_context` without sending anything.
 
 | Field | `None` means | Allowed values and notes |
 |---|---|---|
@@ -373,7 +373,7 @@ without sending anything.
 | `long_context` | Nothing sent | `Some(true)` is accepted on Claude 4.6 and later, where 1M context is standard and nothing extra is sent; `Error::InvalidRequest` on other Claude models, Sonnet 4 and 4.5 included. `Some(false)` sends nothing. |
 | `tool_config` | No tools | See [Tool calls (arko_ai)](#tool-calls-arko_ai). |
 | `interleaved_thinking` | Automatic on Claude 4.6 and later while adaptive thinking is active | On the Anthropic provider, `Some(true)` needs a model that supports it and active thinking (not a manual budget on Opus 4.6); with a manual budget it sends the `interleaved-thinking-2025-05-14` beta header, with adaptive thinking nothing. `Some(false)` is `Error::InvalidRequest` while adaptive thinking is active on 4.6 and later, and sends nothing otherwise. For Claude on OpenRouter, `Some(true)` adds the beta header and `Some(false)` is `Error::UnsupportedFeature`. |
-| `openai_service_tier` | Not sent: the project's default tier | `auto`, `default`, `flex`, `priority` (the `Fast` variant). Flex and Fast only on models that offer them (`Error::InvalidRequest` otherwise); API key only (`Error::UnsupportedFeature` over ChatGPT OAuth). |
+| `openai_service_tier` | Not sent: the project's default tier | `auto`, `default`, `flex`, `priority` (the `Fast` variant). With an API key, Flex and Fast only on models that offer them (`Error::InvalidRequest` otherwise). Over ChatGPT OAuth, as in Codex: Fast (`priority`, plus `tier=priority` in the `x-codex-routing-hint` header) on GPT-6 Astra, Sol, Luna and 6.1 Sol, GPT-5.6 Sol, Terra and Luna, and GPT-5.5 (`Error::InvalidRequest` on other models); `Default` sends no tier; Flex and Auto are `Error::UnsupportedFeature`. |
 | `anthropic_cache_ttl` | No `ttl`: 5 minutes | `"5m"`, `"1h"` (1-hour cache writes cost 2x base input). `Error::InvalidRequest` while caching is off. Also used for Claude on OpenRouter. |
 | `anthropic_fast_mode` | Nothing sent | `Some(true)` sends `speed: "fast"` with the `fast-mode-2026-02-01` beta header on Opus 5.5, Opus 5 and Opus 4.8 (`Error::InvalidRequest` on other models); billed at fast-mode rates. |
 | `anthropic_inference_geo` | Not sent: the workspace's default | `global`, `us` (1.1x price); Claude 4.6 and later (`Error::InvalidRequest` on older models). |
@@ -469,7 +469,12 @@ Requests over ChatGPT OAuth go to the Codex backend and differ from API-key requ
 - Without a reasoning config, `effort: "medium"` is sent to GPT-5.x and GPT-6 models;
   `openai_reasoning_mode` is omitted and warns once, because the backend does not accept
   `reasoning.mode`.
-- `openai_service_tier` is `Error::UnsupportedFeature`.
+- `openai_service_tier`: Fast mode (`service_tier: "priority"`) on the models Codex
+  offers it for, `Error::InvalidRequest` on others; `Default` sends no tier; Flex and
+  Auto are `Error::UnsupportedFeature`. Every request carries Codex's
+  `x-codex-routing-hint` header (`model=<model>`, plus `;tier=priority` in Fast mode).
+  Fast calls are estimated at the API's Fast rates and, like every OAuth call, not
+  billed.
 - GPT-5.4 and GPT-5.5 snapshot IDs are sent without their date.
 - The input limit is capped at 272,000 tokens (`CHATGPT_OAUTH_MAX_INPUT_TOKENS`), or
   the model's limit if lower; `LLMClient::max_input_tokens(&model)` returns it. Requests
