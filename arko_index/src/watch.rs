@@ -39,9 +39,14 @@ struct State {
 // S-f5530629 qualifies persisted parser caches by engine and options. Hash the
 // actual boundary/identity policy and locked dependencies, rather than relying on
 // a manually bumped string when a grammar or normalization implementation changes.
-#[cfg(target_os = "linux")]
-pub(crate) fn engine_id_pub() -> String {
-    engine_id()
+/// [`engine_id`], qualified by the options other than `max_bytes` (which the state
+/// records itself) that change chunks: the default options keep the plain engine id.
+pub(crate) fn engine_for(options: &Options) -> String {
+    if options.front_matter_description {
+        format!("{}-front-matter-description", engine_id())
+    } else {
+        engine_id()
+    }
 }
 fn engine_id() -> String {
     crate::files::hash(
@@ -49,6 +54,11 @@ fn engine_id() -> String {
             "arko-index-cache-v1\0",
             env!("CARGO_PKG_VERSION"),
             include_str!("syntax.rs"),
+            include_str!("languages.rs"),
+            include_str!("rules/mod.rs"),
+            include_str!("rules/tables.rs"),
+            include_str!("rules/tags.rs"),
+            include_str!("headers.rs"),
             include_str!("normalize.rs"),
             include_str!("files.rs"),
             include_str!("bench_v1.rs"),
@@ -260,7 +270,7 @@ impl Watcher {
         let rules_changed = existed && state.rules.as_ref() != Some(rules);
         state.rules = Some(rules.clone());
         let delivered = state.acked;
-        let engine = engine_id();
+        let engine = engine_for(options);
         let mut cache = BTreeMap::new();
         if state.engine == engine && state.max_bytes == options.max_bytes {
             for (path, hash) in &state.file_hashes {
@@ -649,7 +659,10 @@ mod cache_tests {
         assert_eq!(expected, w.snapshot().unwrap());
         drop(w);
         reset_work();
-        let options = Options { max_bytes: 64 };
+        let options = Options {
+            max_bytes: 64,
+            ..Options::default()
+        };
         let mut w = Watcher::open(root.path(), state.path(), &options).unwrap();
         assert_eq!(work(), (3, 2));
         assert!(w.next_change(Duration::ZERO).unwrap().is_none());
@@ -767,7 +780,17 @@ mod cache_tests {
     fn invalid_options_fail_before_state_creation_even_for_empty_tree() {
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("state");
-        assert!(Watcher::open(root.path(), &state, &Options { max_bytes: 0 }).is_err());
+        assert!(
+            Watcher::open(
+                root.path(),
+                &state,
+                &Options {
+                    max_bytes: 0,
+                    ..Options::default()
+                }
+            )
+            .is_err()
+        );
         assert!(!state.exists());
     }
 }

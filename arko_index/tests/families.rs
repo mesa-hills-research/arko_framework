@@ -2,7 +2,15 @@ use arko_index::bench_v1::{Chunk, Options, chunk_str};
 use std::{collections::HashSet, path::Path};
 
 fn chunks(path: &str, text: &str, max_bytes: usize) -> Vec<Chunk> {
-    let cs = chunk_str(Path::new(path), text, &Options { max_bytes }).unwrap();
+    let cs = chunk_str(
+        Path::new(path),
+        text,
+        &Options {
+            max_bytes,
+            ..Options::default()
+        },
+    )
+    .unwrap();
     let mut end = 0;
     for c in &cs {
         assert_eq!(c.start_byte, end);

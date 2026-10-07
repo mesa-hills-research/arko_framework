@@ -34,9 +34,10 @@ fn write_json<T: serde::Serialize>(value: &T) -> Result<(), Error> {
 struct Walk {
     rules: FileRules,
     report: Option<PathBuf>,
+    /// `--front-matter-description`: Markdown scopes start with title and description.
+    front_matter_description: bool,
 }
-const RULE_FLAGS: &str =
-    "[--respect-ignore] [--exclude PATTERN]... [--include PATTERN]... [--report FILE]";
+const RULE_FLAGS: &str = "[--respect-ignore] [--exclude PATTERN]... [--include PATTERN]... [--report FILE] [--front-matter-description]";
 const EMBED_FLAGS: &str = "[--embed MODEL] [--dimensions N] [--embed-config FILE] [--quantize f32|int8] [--max-embed-tokens N|none] [--no-embed]";
 const SEARCH_FLAGS: &str = "[--mode lexical|dense|hybrid] [--limit N] [--candidates N] [--fusion rrf|linear] [--rrf-k K] [--lexical-weight W] [--dense-weight W] [--path-prefix P] [--language L] [--text]";
 
@@ -77,6 +78,7 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
         walk: Walk {
             rules: FileRules::default(),
             report: None,
+            front_matter_description: false,
         },
         embed: None,
         dimensions: None,
@@ -120,7 +122,11 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
         };
         let unknown = || -> Error { format!("unknown option {a}; options: {options}").into() };
         let accepted = match flag {
-            "--respect-ignore" | "--exclude" | "--include" | "--report" => accepts.walk,
+            "--respect-ignore"
+            | "--exclude"
+            | "--include"
+            | "--report"
+            | "--front-matter-description" => accepts.walk,
             "--embed" | "--dimensions" | "--embed-config" | "--quantize" | "--max-embed-tokens"
             | "--no-embed" => accepts.embed,
             "--mode" | "--limit" | "--candidates" | "--fusion" | "--rrf-k" | "--lexical-weight"
@@ -135,6 +141,10 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
             match flag {
                 "--respect-ignore" => {
                     f.walk.rules.respect_ignore = true;
+                    continue;
+                }
+                "--front-matter-description" => {
+                    f.walk.front_matter_description = true;
                     continue;
                 }
                 "--no-embed" => {
@@ -388,7 +398,6 @@ fn search2(state: &Path, query: &str, f: &Flags) -> Result<(), Error> {
 
 fn run() -> Result<(), Error> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let options = Options::default();
     let usage = format!(
         "usage: arko_index_cli chunk ROOT | index ROOT STATE_DIR | search STATE_DIR QUERY | watch ROOT STATE_DIR | outline ROOT\n\
          \x20      (also index2, search2, watch2, bench-scan)\n\
@@ -414,6 +423,10 @@ fn run() -> Result<(), Error> {
         (parse_flags(&[], accepts)?.0, args)
     };
     let walk = &flags.walk;
+    let options = Options {
+        front_matter_description: walk.front_matter_description,
+        ..Options::default()
+    };
     match args.first().map(String::as_str) {
         Some("chunk") | Some("outline") if args.len() == 2 => {
             let root = Path::new(&args[1]);
@@ -421,9 +434,28 @@ fn run() -> Result<(), Error> {
             // writes the rendered bytes in sequential file order through one buffer.
             let outline = args[0] == "outline";
             let mut out = io::BufWriter::with_capacity(1 << 20, io::stdout().lock());
-            let render = |chunks: Vec<Chunk>| -> Result<Vec<u8>, Error> {
+            // A file's metadata region (Markdown front matter) comes before its chunks:
+            // in the outline as `path:start-end\tmetadata\ttitle`, in JSON as a line
+            // with a `file` key.
+            let render = |file: FileChunks| -> Result<Vec<u8>, Error> {
                 let mut buf = Vec::new();
-                for c in chunks {
+                if let Some(m) = &file.metadata {
+                    if outline {
+                        let span = &m.metadata_range;
+                        writeln!(
+                            buf,
+                            "{}:{}-{}\tmetadata\t{}",
+                            m.file,
+                            span.start_line,
+                            span.end_line,
+                            m.title.as_deref().unwrap_or("")
+                        )?;
+                    } else {
+                        serde_json::to_writer(&mut buf, m)?;
+                        buf.push(b'\n');
+                    }
+                }
+                for c in file.chunks {
                     if outline {
                         writeln!(
                             buf,
@@ -459,8 +491,8 @@ fn run() -> Result<(), Error> {
                     write_report_file(walk, &r)?;
                 }
             } else {
-                let chunks = chunk_file(root, &options)?;
-                if chunks.is_empty() {
+                let file = chunk_file_with_metadata(root, &options)?;
+                if file.chunks.is_empty() && file.metadata.is_none() {
                     // Say why a single file produced nothing (empty, binary or not UTF-8).
                     let bytes = std::fs::read(root)?;
                     if bytes.contains(&0) {
@@ -469,7 +501,7 @@ fn run() -> Result<(), Error> {
                         eprintln!("arko_index: skipped (not-utf8): {}", root.display());
                     }
                 }
-                out.write_all(&render(chunks)?)?;
+                out.write_all(&render(file)?)?;
             }
             out.flush()?;
         }

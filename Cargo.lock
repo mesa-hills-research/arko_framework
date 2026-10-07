@@ -184,14 +184,55 @@ dependencies = [
  "ignore",
  "libc",
  "mhr_tree_sitter",
+ "mhr_tree_sitter_bash",
  "mhr_tree_sitter_c",
+ "mhr_tree_sitter_c_sharp",
+ "mhr_tree_sitter_cmake",
  "mhr_tree_sitter_cpp",
+ "mhr_tree_sitter_css",
+ "mhr_tree_sitter_cuda",
+ "mhr_tree_sitter_dart",
+ "mhr_tree_sitter_elixir",
+ "mhr_tree_sitter_elm",
+ "mhr_tree_sitter_embedded_template",
+ "mhr_tree_sitter_erlang",
+ "mhr_tree_sitter_fortran",
+ "mhr_tree_sitter_fsharp",
+ "mhr_tree_sitter_glsl",
  "mhr_tree_sitter_go",
+ "mhr_tree_sitter_haskell",
+ "mhr_tree_sitter_hcl",
+ "mhr_tree_sitter_html",
  "mhr_tree_sitter_java",
  "mhr_tree_sitter_javascript",
+ "mhr_tree_sitter_json",
+ "mhr_tree_sitter_julia",
+ "mhr_tree_sitter_kotlin",
+ "mhr_tree_sitter_lua",
+ "mhr_tree_sitter_make",
+ "mhr_tree_sitter_markdown",
+ "mhr_tree_sitter_objc",
+ "mhr_tree_sitter_ocaml",
+ "mhr_tree_sitter_odin",
+ "mhr_tree_sitter_perl",
+ "mhr_tree_sitter_php",
+ "mhr_tree_sitter_powershell",
+ "mhr_tree_sitter_proto",
  "mhr_tree_sitter_python",
+ "mhr_tree_sitter_r",
+ "mhr_tree_sitter_ruby",
  "mhr_tree_sitter_rust",
+ "mhr_tree_sitter_scala",
+ "mhr_tree_sitter_solidity",
+ "mhr_tree_sitter_sql",
+ "mhr_tree_sitter_svelte",
+ "mhr_tree_sitter_swift",
+ "mhr_tree_sitter_toml",
  "mhr_tree_sitter_typescript",
+ "mhr_tree_sitter_verilog",
+ "mhr_tree_sitter_xml",
+ "mhr_tree_sitter_yaml",
+ "mhr_tree_sitter_zig",
  "serde",
  "serde_json",
  "sha2",
@@ -1553,7 +1594,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "mhr_tree_sitter_bash"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
 name = "mhr_tree_sitter_c"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_c_sharp"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_cmake"
 version = "0.1.0"
 dependencies = [
  "mhr_tree_sitter_language",
@@ -1567,7 +1629,105 @@ dependencies = [
 ]
 
 [[package]]
+name = "mhr_tree_sitter_css"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_cuda"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_dart"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_dtd"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_elixir"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_elm"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_embedded_template"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_erlang"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_fortran"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_fsharp"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_glsl"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
 name = "mhr_tree_sitter_go"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_haskell"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_hcl"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_html"
 version = "0.1.0"
 dependencies = [
  "mhr_tree_sitter_language",
@@ -1588,8 +1748,123 @@ dependencies = [
 ]
 
 [[package]]
+name = "mhr_tree_sitter_json"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_julia"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_kotlin"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
 name = "mhr_tree_sitter_language"
 version = "0.1.0"
+
+[[package]]
+name = "mhr_tree_sitter_lua"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_make"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_markdown"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+ "mhr_tree_sitter_markdown_inline",
+]
+
+[[package]]
+name = "mhr_tree_sitter_markdown_inline"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_objc"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_ocaml"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+ "mhr_tree_sitter_ocaml_interface",
+]
+
+[[package]]
+name = "mhr_tree_sitter_ocaml_interface"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_odin"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_perl"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_php"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+ "mhr_tree_sitter_php_only",
+]
+
+[[package]]
+name = "mhr_tree_sitter_php_only"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_powershell"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_proto"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
 
 [[package]]
 name = "mhr_tree_sitter_python"
@@ -1599,7 +1874,63 @@ dependencies = [
 ]
 
 [[package]]
+name = "mhr_tree_sitter_r"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_ruby"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
 name = "mhr_tree_sitter_rust"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_scala"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_solidity"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_sql"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_svelte"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_swift"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_toml"
 version = "0.1.0"
 dependencies = [
  "mhr_tree_sitter_language",
@@ -1618,6 +1949,35 @@ version = "0.1.0"
 dependencies = [
  "mhr_tree_sitter_language",
  "mhr_tree_sitter_tsx",
+]
+
+[[package]]
+name = "mhr_tree_sitter_verilog"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_xml"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_dtd",
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_yaml"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
+]
+
+[[package]]
+name = "mhr_tree_sitter_zig"
+version = "0.1.0"
+dependencies = [
+ "mhr_tree_sitter_language",
 ]
 
 [[package]]

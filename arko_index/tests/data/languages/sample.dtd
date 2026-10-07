@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A catalog of books. -->
+<!ENTITY % inline "#PCDATA | em | code">
+<!ENTITY publisher "Mesa Hills Press">
+
+<!ELEMENT catalog (book+)>
+<!ATTLIST catalog
+  version CDATA #REQUIRED
+  updated CDATA #IMPLIED>
+
+<!-- One book. -->
+<!ELEMENT book (title, author+, summary?)>
+<!ATTLIST book
+  id ID #REQUIRED
+  format (hardcover | paperback | ebook) "paperback">
+
+<!ELEMENT title (%inline;)*>
+<!ELEMENT author (#PCDATA)>
+<!ELEMENT summary (%inline;)*>
+<!ELEMENT em (#PCDATA)>
+<!ELEMENT code (#PCDATA)>
+<!NOTATION png SYSTEM "image/png">

@@ -4,13 +4,21 @@ use std::path::Path;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Options {
     pub max_bytes: usize,
+    /// Markdown files: the front matter's `description` joins its `title` at the root
+    /// of every chunk's scope (`Title — Description › ## Section`). Off by default:
+    /// the root is the title alone.
+    #[serde(default)]
+    pub front_matter_description: bool,
 }
 impl Default for Options {
     fn default() -> Self {
-        Self { max_bytes: 4096 }
+        Self {
+            max_bytes: 4096,
+            front_matter_description: false,
+        }
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SourceSpan {
     pub start_byte: usize,
     pub end_byte: usize,
@@ -20,8 +28,10 @@ pub struct SourceSpan {
 /// The version of the chunk JSON format (the `chunk` command's lines, deltas, index
 /// documents). Format 1 had the ten fields up to `token_estimate`; format 2 adds
 /// `scope`, serialized only when it is not empty. Boundaries and IDs are the same in
-/// both formats.
-pub const CHUNK_FORMAT: u32 = 2;
+/// both formats. Format 3 adds file entries ([`FileMetadata`]) to the `chunk`
+/// command's output: a Markdown file's metadata region (front matter, MDX
+/// import/export lines), which its chunks leave out.
+pub const CHUNK_FORMAT: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Chunk {
@@ -56,6 +66,35 @@ impl Chunk {
         header
     }
 }
+/// A file's metadata region: bytes that belong to the file's record instead of a
+/// chunk. A Markdown file has one when it starts with front matter (a YAML `---` or
+/// TOML `+++` block) or, in MDX, with `import`/`export` lines. Every byte of a file is
+/// in exactly one chunk or in this region, which always starts at byte 0. As a line of
+/// the `chunk` command's output it comes before the file's chunks and has a `file` key
+/// where chunks have `id`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileMetadata {
+    /// The file's path, as in its chunks.
+    pub file: String,
+    pub metadata_range: SourceSpan,
+    /// The front matter block as written, delimiter lines included; empty when the
+    /// region holds only MDX import/export lines.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub front_matter: String,
+    /// The front matter's `title`, the root of the file's chunk scopes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The front matter's `description` (in scopes with
+    /// [`Options::front_matter_description`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+/// One file's chunks and, when it has one, its metadata region.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FileChunks {
+    pub metadata: Option<FileMetadata>,
+    pub chunks: Vec<Chunk>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Delta {
     pub sequence: u64,
@@ -67,15 +106,29 @@ pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub use crate::files::{FileRules, Report, SkipReason, Skipped};
 pub use crate::watch::Watcher;
 
+/// A file's chunks. A Markdown file's metadata region (see [`FileMetadata`]) is left
+/// out; [`chunk_str_with_metadata`] also returns it.
 pub fn chunk_str(path: &Path, text: &str, options: &Options) -> Result<Vec<Chunk>, Error> {
+    Ok(crate::syntax::chunk(path, text, options)?.chunks)
+}
+/// [`chunk_str`], with the file's metadata region.
+pub fn chunk_str_with_metadata(
+    path: &Path,
+    text: &str,
+    options: &Options,
+) -> Result<FileChunks, Error> {
     crate::syntax::chunk(path, text, options)
 }
 pub fn chunk_file(path: &Path, options: &Options) -> Result<Vec<Chunk>, Error> {
+    Ok(chunk_file_with_metadata(path, options)?.chunks)
+}
+/// [`chunk_file`], with the file's metadata region.
+pub fn chunk_file_with_metadata(path: &Path, options: &Options) -> Result<FileChunks, Error> {
     let bytes = std::fs::read(path)?;
     let Some(text) = crate::files::text(&bytes) else {
-        return Ok(Vec::new());
+        return Ok(FileChunks::default());
     };
-    chunk_str(
+    chunk_str_with_metadata(
         Path::new(path.file_name().ok_or("file path has no name")?),
         text,
         options,
@@ -124,11 +177,11 @@ pub fn chunk_dir_each_with<S>(
 where
     S: FnMut(Vec<Chunk>) -> Result<(), Error>,
 {
-    chunk_dir_map_with(root, options, rules, threads, Ok, sink)
+    chunk_dir_map_with(root, options, rules, threads, |file| Ok(file.chunks), sink)
 }
-/// Like [`chunk_dir_each`], but first applies `map` to each file's chunks on the worker
-/// thread (for example to render output there), and hands `map`'s results to `sink`
-/// in file order. The reorder window is a byte budget (`ARKO_INDEX_WINDOW_MB`, default
+/// Like [`chunk_dir_each`], but first applies `map` to each file's chunks (and metadata
+/// region, see [`FileMetadata`]) on the worker thread (for example to render output
+/// there), and hands `map`'s results to `sink` in file order. The reorder window is a byte budget (`ARKO_INDEX_WINDOW_MB`, default
 /// 32 MB of source per thread).
 pub fn chunk_dir_map<R, M, S>(
     root: &Path,
@@ -139,7 +192,7 @@ pub fn chunk_dir_map<R, M, S>(
 ) -> Result<(), Error>
 where
     R: Send,
-    M: Fn(Vec<Chunk>) -> Result<R, Error> + Sync,
+    M: Fn(FileChunks) -> Result<R, Error> + Sync,
     S: FnMut(R) -> Result<(), Error>,
 {
     chunk_dir_map_with(root, options, &FileRules::default(), threads, map, sink).map(|_| ())
@@ -155,7 +208,7 @@ pub fn chunk_dir_map_with<R, M, S>(
 ) -> Result<Report, Error>
 where
     R: Send,
-    M: Fn(Vec<Chunk>) -> Result<R, Error> + Sync,
+    M: Fn(FileChunks) -> Result<R, Error> + Sync,
     S: FnMut(R) -> Result<(), Error>,
 {
     use crate::files::Read;
@@ -167,9 +220,11 @@ where
         crate::par::window_bytes(threads),
         |i| weights.get(i).copied().unwrap_or(1),
         |item| match crate::files::read_listed(item, false) {
-            Read::Text(path, file) => {
-                Ok(Ok(map(chunk_str(Path::new(&path), &file.text, options)?)?))
-            }
+            Read::Text(path, file) => Ok(Ok(map(chunk_str_with_metadata(
+                Path::new(&path),
+                &file.text,
+                options,
+            )?)?)),
             Read::Skip(s) => Ok(Err(Some(s))),
             Read::Gone => Ok(Err(None)),
         },

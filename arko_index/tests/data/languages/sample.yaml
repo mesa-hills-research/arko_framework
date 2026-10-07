@@ -1,0 +1,36 @@
+# CI workflow.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        run: |
+          cargo test --workspace --locked
+          cargo fmt --all --check
+
+  # Lints with clippy.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo clippy --all-targets -- -D warnings
+---
+# A second document.
+defaults: &defaults
+  retries: 3
+service:
+  <<: *defaults
+  name: orders

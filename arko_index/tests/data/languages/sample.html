@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Dashboard</title>
+  <!-- Page styles. -->
+  <style>
+    body { margin: 0; font-family: sans-serif; }
+    .card { padding: 16px; border: 1px solid #ccc; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Dashboard</h1>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/reports">Reports</a>
+    </nav>
+  </header>
+  <main>
+    <section id="summary">
+      <h2>Summary</h2>
+      <p>Orders today: <span id="orders">0</span></p>
+      <ul>
+        <li>Open: <b>3</b></li>
+        <li>Shipped: <b>12</b></li>
+      </ul>
+    </section>
+    <section id="chart">
+      <h2>Chart</h2>
+      <canvas width="600" height="300"></canvas>
+    </section>
+  </main>
+  <script>
+    async function refresh() {
+      const response = await fetch("/api/orders");
+      const data = await response.json();
+      document.getElementById("orders").textContent = data.count;
+    }
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>

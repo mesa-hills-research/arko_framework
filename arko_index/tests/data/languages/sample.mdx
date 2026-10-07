@@ -1,0 +1,28 @@
+---
+title: Button
+---
+
+import { Button } from "../components/Button";
+import { Story } from "@storybook/blocks";
+
+# Button
+
+Buttons start actions.
+
+<Story name="Primary">
+  <Button variant="primary">Save</Button>
+</Story>
+
+## Props
+
+| Prop | Type |
+|---|---|
+| variant | `"primary" \| "secondary"` |
+
+export const meta = { title: "Button" };
+
+## Examples
+
+```tsx
+<Button onClick={() => alert("hi")}>Hi</Button>
+```

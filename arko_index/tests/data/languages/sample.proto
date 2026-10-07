@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package shop.orders.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "example.com/shop/orders/v1";
+
+// An order line.
+message OrderLine {
+  string sku = 1;
+  int32 quantity = 2;
+}
+
+// An order.
+message Order {
+  string id = 1;
+  repeated OrderLine lines = 2;
+  Status status = 3;
+  google.protobuf.Timestamp created = 4;
+
+  message Note {
+    string text = 1;
+  }
+
+  oneof payment {
+    string card = 5;
+    string invoice = 6;
+  }
+
+  map<string, string> labels = 7;
+}
+
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  STATUS_OPEN = 1;
+  STATUS_PAID = 2;
+}
+
+// Manages orders.
+service Orders {
+  rpc Get(GetRequest) returns (Order);
+  rpc List(ListRequest) returns (stream Order) {
+    option deprecated = true;
+  }
+}
+
+message GetRequest { string id = 1; }
+message ListRequest { int32 page_size = 1; }

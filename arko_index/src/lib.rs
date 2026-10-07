@@ -7,9 +7,11 @@
 pub mod bench_v1;
 pub mod dense;
 mod files;
+mod front_matter;
 mod fsio;
 mod headers;
 pub mod hybrid;
+mod languages;
 pub mod search;
 mod syntax;
 pub mod vector;
@@ -18,6 +20,7 @@ mod watch;
 pub mod index2;
 mod normalize;
 mod par;
+mod rules;
 pub use par::threads;
 #[cfg(unix)]
 mod scan;

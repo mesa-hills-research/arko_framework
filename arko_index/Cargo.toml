@@ -13,18 +13,59 @@ sha2.workspace = true
 ignore.workspace = true
 # mhr_tree_sitter: a pure-Rust port of tree-sitter 0.25.10 and its grammars. The
 # libraries keep tree-sitter's names (tree_sitter, tree_sitter_rust, ...). The port pins
-# the grammar versions; a grammar upgrade changes chunk boundaries and IDs.
+# the grammar versions; a grammar upgrade changes chunk boundaries and IDs. The
+# TypeScript, OCaml and XML crates re-export TSX, OCaml interfaces and DTD.
 # TODO: local path dependencies until the mhr_tree_sitter repository is published.
 mhr_tree_sitter = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/runtime" }
 mhr_tree_sitter_rust = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/rust" }
 mhr_tree_sitter_python = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/python" }
-# TypeScript, and TSX (re-exported from mhr_tree_sitter_tsx as LANGUAGE_TSX).
 mhr_tree_sitter_typescript = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/typescript" }
 mhr_tree_sitter_javascript = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/javascript" }
 mhr_tree_sitter_go = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/go" }
 mhr_tree_sitter_java = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/java" }
 mhr_tree_sitter_c = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/c" }
 mhr_tree_sitter_cpp = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/cpp" }
+mhr_tree_sitter_bash = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/bash" }
+mhr_tree_sitter_c_sharp = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/c_sharp" }
+mhr_tree_sitter_cmake = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/cmake" }
+mhr_tree_sitter_css = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/css" }
+mhr_tree_sitter_cuda = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/cuda" }
+mhr_tree_sitter_dart = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/dart" }
+mhr_tree_sitter_elixir = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/elixir" }
+mhr_tree_sitter_elm = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/elm" }
+mhr_tree_sitter_embedded_template = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/embedded_template" }
+mhr_tree_sitter_erlang = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/erlang" }
+mhr_tree_sitter_fortran = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/fortran" }
+mhr_tree_sitter_fsharp = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/fsharp" }
+mhr_tree_sitter_glsl = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/glsl" }
+mhr_tree_sitter_haskell = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/haskell" }
+mhr_tree_sitter_hcl = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/hcl" }
+mhr_tree_sitter_html = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/html" }
+mhr_tree_sitter_json = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/json" }
+mhr_tree_sitter_julia = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/julia" }
+mhr_tree_sitter_kotlin = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/kotlin" }
+mhr_tree_sitter_lua = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/lua" }
+mhr_tree_sitter_make = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/make" }
+mhr_tree_sitter_markdown = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/markdown" }
+mhr_tree_sitter_objc = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/objc" }
+mhr_tree_sitter_ocaml = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/ocaml" }
+mhr_tree_sitter_odin = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/odin" }
+mhr_tree_sitter_perl = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/perl" }
+mhr_tree_sitter_php = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/php" }
+mhr_tree_sitter_powershell = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/powershell" }
+mhr_tree_sitter_proto = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/proto" }
+mhr_tree_sitter_r = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/r" }
+mhr_tree_sitter_ruby = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/ruby" }
+mhr_tree_sitter_scala = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/scala" }
+mhr_tree_sitter_solidity = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/solidity" }
+mhr_tree_sitter_sql = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/sql" }
+mhr_tree_sitter_svelte = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/svelte" }
+mhr_tree_sitter_swift = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/swift" }
+mhr_tree_sitter_toml = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/toml" }
+mhr_tree_sitter_verilog = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/verilog" }
+mhr_tree_sitter_xml = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/xml" }
+mhr_tree_sitter_yaml = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/yaml" }
+mhr_tree_sitter_zig = { path = "/home/local-ubuntu/Desktop/mhr-work/mhr_tree_sitter/grammars/zig" }
 fs2 = "0.4"
 libc = "0.2"
 

@@ -698,6 +698,7 @@ fn a_watcher_delta_reembeds_only_its_new_chunks() {
 
 /// Context headers (`Chunk::scope`) for each language family, and chunk boundaries and
 /// IDs identical to chunk format 1 (recorded from the build before scopes existed).
+/// Markdown, plain text in format 1, is chunked by its grammar since.
 #[test]
 fn scopes_are_metadata_and_identities_are_unchanged() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
@@ -705,10 +706,12 @@ fn scopes_are_metadata_and_identities_are_unchanged() {
     let golden: Vec<Chunk> = fs::read_to_string(dir.join("scopes-format1.jsonl"))
         .unwrap()
         .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
+        .map(|l| serde_json::from_str::<Chunk>(l).unwrap())
+        .filter(|c| c.path != "guide.md")
         .collect();
-    assert_eq!(chunks.len(), golden.len());
-    for (new, old) in chunks.iter().zip(&golden) {
+    let code: Vec<&Chunk> = chunks.iter().filter(|c| c.path != "guide.md").collect();
+    assert_eq!(code.len(), golden.len());
+    for (new, old) in code.into_iter().zip(&golden) {
         assert!(old.scope.is_empty(), "format 1 has no scope");
         let without_scope = Chunk {
             scope: String::new(),
@@ -760,8 +763,17 @@ fn scopes_are_metadata_and_identities_are_unchanged() {
         scope_of("sample.cpp", 20),
         "namespace net › namespace http › class Router › function find"
     );
-    // Markdown: the whole small file is one chunk; its first heading names it.
-    assert_eq!(scope_of("guide.md", 10), "# Guide");
+    // Markdown: the whole small file (without its front matter) is one chunk, under the
+    // front matter's title.
+    assert_eq!(
+        scope_of("guide.md", 10),
+        "A guide with front matter › # Guide"
+    );
+    assert!(
+        chunks
+            .iter()
+            .all(|c| c.path != "guide.md" || c.start_line > 4)
+    );
 }
 
 #[test]
@@ -770,7 +782,15 @@ fn markdown_heading_chains_in_small_chunks() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/scopes/guide.md"),
     )
     .unwrap();
-    let chunks = chunk_str(Path::new("guide.md"), &text, &Options { max_bytes: 64 }).unwrap();
+    let chunks = chunk_str(
+        Path::new("guide.md"),
+        &text,
+        &Options {
+            max_bytes: 64,
+            ..Options::default()
+        },
+    )
+    .unwrap();
     let scope_at = |needle: &str| -> String {
         let at = text.find(needle).unwrap();
         chunks
@@ -780,16 +800,25 @@ fn markdown_heading_chains_in_small_chunks() {
             .scope
             .clone()
     };
-    assert_eq!(scope_at("This guide explains"), "# Guide");
+    assert_eq!(
+        scope_at("This guide explains"),
+        "A guide with front matter › # Guide"
+    );
     assert_eq!(
         scope_at("sudo apt install"),
-        "# Guide › ## Install › ### Linux"
+        "A guide with front matter › # Guide › ## Install › ### Linux"
     );
-    assert_eq!(scope_at("brew install"), "# Guide › ## Install › ### macOS");
-    assert_eq!(scope_at("Run `the-tool --help`"), "# Guide › ## Use");
+    assert_eq!(
+        scope_at("brew install"),
+        "A guide with front matter › # Guide › ## Install › ### macOS"
+    );
+    assert_eq!(
+        scope_at("Run `the-tool --help`"),
+        "A guide with front matter › # Guide › ## Use"
+    );
     assert_eq!(
         scope_at("The configuration file"),
-        "# Guide › ## Configuration"
+        "A guide with front matter › # Guide › ## Configuration"
     );
     // Front matter and fenced comments are not headings.
     assert!(chunks.iter().all(|c| !c.scope.contains("not a heading")));
@@ -801,7 +830,7 @@ fn markdown_heading_chains_in_small_chunks() {
     assert_eq!(
         c.header(),
         format!(
-            "guide.md:{}-{} · # Guide › ## Install › ### macOS",
+            "guide.md:{}-{} · A guide with front matter › # Guide › ## Install › ### macOS",
             c.start_line, c.end_line
         )
     );

@@ -1,6 +1,7 @@
 //! Context headers: the parts of `Chunk::scope` that do not come from a syntax tree
-//! (Markdown heading chains) and the bounds every scope keeps. The labels of
-//! definitions (`fn f`, `class C`) are made where the tree is walked, in `syntax.rs`.
+//! (Markdown heading chains under the document's title) and the bounds every scope
+//! keeps. The labels of definitions (`fn f`, `class C`) are made where the tree is
+//! walked, in `syntax.rs`.
 use std::path::Path;
 
 /// Joins the elements of a scope chain.
@@ -130,16 +131,19 @@ fn plain(line: &str) -> bool {
 
 /// The headings of a Markdown text: ATX (`# Title`) and setext (a one-line paragraph
 /// underlined with `===` or `---`). Headings inside fenced code blocks and a leading
-/// YAML front matter block are not headings.
+/// YAML (`---`) or TOML (`+++`) front matter block are not headings.
 fn headings(text: &str) -> Vec<Heading> {
     let lines = lines(text);
     let mut out = Vec::new();
     let mut i = 0;
-    if lines.first().is_some_and(|(_, l)| l.trim_end() == "---")
-        && let Some(close) = lines
-            .iter()
-            .skip(1)
-            .position(|(_, l)| matches!(l.trim_end(), "---" | "..."))
+    let open = lines
+        .first()
+        .map(|(_, l)| l.trim_start_matches('\u{feff}').trim_end());
+    if let Some(open @ ("---" | "+++")) = open
+        && let Some(close) = lines.iter().skip(1).position(|(_, l)| {
+            let l = l.trim_end();
+            l == open || (open == "---" && l == "...")
+        })
     {
         i = close + 2;
     }
@@ -203,17 +207,92 @@ fn headings(text: &str) -> Vec<Heading> {
     out
 }
 
+/// The scope of each range of a Markdown file: the document's root, then the heading
+/// chain at the range (see [`markdown_chains`]). The root is `title` (the front
+/// matter's), with ` — description` when one is given; without a title, the first
+/// level-1 heading's text. The heading that gives the root, and a level-1 heading
+/// that repeats the title, are left out of the chains.
+pub(crate) fn markdown_scopes(
+    text: &str,
+    ranges: impl Iterator<Item = (usize, usize)>,
+    title: Option<&str>,
+    description: Option<&str>,
+) -> Vec<String> {
+    let headings = headings(text);
+    let first_h1 = headings.iter().position(|h| h.level == 1);
+    let (base, skip) = match title {
+        Some(title) => (Some(clip(collapse(title))), None),
+        None => (first_h1.map(|i| headings[i].title.clone()), first_h1),
+    };
+    let base = base.filter(|b| !b.is_empty());
+    let root = match (base, description.map(collapse).filter(|d| !d.is_empty())) {
+        (Some(base), Some(d)) => Some(format!("{base} — {}", clip_to(d, 300))),
+        (Some(base), None) => Some(base),
+        (None, Some(d)) => Some(clip_to(d, 300)),
+        (None, None) => None,
+    };
+    let repeats = |h: &Heading| {
+        h.level == 1 && title.is_some_and(|t| collapse(t).eq_ignore_ascii_case(&h.title))
+    };
+    let keep: Vec<bool> = headings
+        .iter()
+        .enumerate()
+        .map(|(i, h)| Some(i) != skip && !repeats(h))
+        .collect();
+    chains(&headings, &keep, text, ranges)
+        .into_iter()
+        .map(|chain| {
+            let scope = match (&root, chain.is_empty()) {
+                (Some(root), true) => root.clone(),
+                (Some(root), false) => format!("{root}{SCOPE_SEPARATOR}{chain}"),
+                (None, _) => chain,
+            };
+            bounded(scope)
+        })
+        .collect()
+}
+
+/// At most `max` bytes, cut on a character boundary and ending in `…`.
+fn clip_to(mut text: String, max: usize) -> String {
+    if text.len() > max {
+        let mut at = max - '…'.len_utf8();
+        while !text.is_char_boundary(at) {
+            at -= 1;
+        }
+        text.truncate(at);
+        text.push('…');
+    }
+    text
+}
+
 /// The heading chain of each range `(start, end)` (ascending, not overlapping): the
 /// headings in effect at the range's first non-whitespace byte, each closing the
 /// headings of its own and deeper levels, as `# A › ## B`. A range that starts before
 /// any heading (front matter, a preamble) but contains one gets the chain of its
 /// first heading.
+#[cfg(test)]
 pub(crate) fn markdown_chains(
     text: &str,
     ranges: impl Iterator<Item = (usize, usize)>,
 ) -> Vec<String> {
     let headings = headings(text);
-    let mut stack: Vec<&Heading> = Vec::new();
+    let keep = vec![true; headings.len()];
+    chains(&headings, &keep, text, ranges)
+        .into_iter()
+        .map(bounded)
+        .collect()
+}
+
+/// The chains of [`markdown_chains`], leaving out the headings whose `keep` is false
+/// (they still close the headings of their level).
+fn chains(
+    headings: &[Heading],
+    keep: &[bool],
+    text: &str,
+    ranges: impl Iterator<Item = (usize, usize)>,
+) -> Vec<String> {
+    // Indices into `headings`.
+    let mut stack: Vec<usize> = Vec::new();
     let mut next = 0;
     let mut out = Vec::new();
     for (start, end) in ranges {
@@ -221,21 +300,24 @@ pub(crate) fn markdown_chains(
             .find(|c: char| !c.is_whitespace())
             .map_or(start, |i| start + i);
         while let Some(h) = headings.get(next).filter(|h| h.at <= first) {
-            while stack.last().is_some_and(|top| top.level >= h.level) {
+            while stack
+                .last()
+                .is_some_and(|&top| headings[top].level >= h.level)
+            {
                 stack.pop();
             }
-            stack.push(h);
+            stack.push(next);
             next += 1;
         }
         let mut chain = stack.clone();
-        if chain.is_empty()
-            && let Some(h) = headings.get(next).filter(|h| h.at < end)
-        {
-            chain.push(h);
+        if chain.is_empty() && headings.get(next).is_some_and(|h| h.at < end) {
+            chain.push(next);
         }
         let chain: Vec<String> = chain
-            .iter()
-            .map(|h| {
+            .into_iter()
+            .filter(|&i| keep[i])
+            .map(|i| {
+                let h = &headings[i];
                 let hashes = "#".repeat(h.level);
                 if h.title.is_empty() {
                     hashes
@@ -244,7 +326,7 @@ pub(crate) fn markdown_chains(
                 }
             })
             .collect();
-        out.push(bounded(chain.join(SCOPE_SEPARATOR)));
+        out.push(chain.join(SCOPE_SEPARATOR));
     }
     out
 }
