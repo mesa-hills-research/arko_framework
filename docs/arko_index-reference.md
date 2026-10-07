@@ -1,19 +1,25 @@
 # arko_index reference
 
 arko_index partitions source trees into syntax-aware chunks with tree-sitter, builds
-offline BM25 indexes over them, and keeps chunk snapshots current with durable
-watchers. It makes no network calls and depends on no other arko crate. The
+offline BM25 indexes over them, optionally embeds the chunks for dense and hybrid
+search, and keeps chunk snapshots current with durable watchers. The library makes no
+network calls and depends on no other arko crate: embeddings come from a caller's
+`dense::Embedder` (its examples adapt arko_ai's Voyage client, a dev-dependency). The
 [crate README](../arko_index/README.md) explains the behaviour (which files are indexed,
-how boundaries and IDs are chosen, the watchers' durability); this page lists the API,
-the CLI, the environment variables, the defaults and the on-disk state.
+how boundaries and IDs are chosen, context headers, dense and hybrid search, the
+watchers' durability); this page lists the API, the CLI, the environment variables,
+the defaults and the on-disk state.
 
 ## Modules
 
 | Module | What it holds | Code |
 |---|---|---|
-| `arko_index::bench_v1` | Chunking and the polling watcher: `Options`, `SourceSpan`, `Chunk`, `Delta`, `Error`, `Watcher`, `chunk_str`, `chunk_file`, `chunk_dir`, `chunk_dir_each`, `chunk_dir_map`, `open_watch`, the `_with` variants; re-exports `FileRules`, `Report`, `SkipReason`, `Skipped`. | `arko_index/src/bench_v1.rs`, `arko_index/src/watch.rs` |
+| `arko_index::bench_v1` | Chunking and the polling watcher: `Options`, `SourceSpan`, `Chunk`, `CHUNK_FORMAT`, `Delta`, `Error`, `Watcher`, `chunk_str`, `chunk_file`, `chunk_dir`, `chunk_dir_each`, `chunk_dir_map`, `open_watch`, the `_with` variants; re-exports `FileRules`, `Report`, `SkipReason`, `Skipped`. | `arko_index/src/bench_v1.rs`, `arko_index/src/watch.rs`, `arko_index/src/syntax.rs`, `arko_index/src/headers.rs` |
 | `arko_index::search` | The first index format (one JSON file): `index`, `index_with`, `search`, `outline`. | `arko_index/src/search.rs` |
-| `arko_index::index2` | The disk-resident index: `index`, `index_with`, `search`, `BuildStats`. | `arko_index/src/index2.rs` |
+| `arko_index::index2` | The disk-resident index: `index`, `index_with`, `build`, `BuildOptions`, `search`, `dense_info`, `BuildStats`. | `arko_index/src/index2.rs` |
+| `arko_index::dense` | Embeddings: `Embedder`, `ModelDescriptor`, `EmbedLimits`, `Embedding`, `InputKind`, `HashEmbedder`, `embed_query`, `render`, `RENDER_VERSION`, `DenseConfig`, `DenseBuild`, `EmbedProgress`, `EmbedStats`, `DenseIndexInfo`. | `arko_index/src/dense/` |
+| `arko_index::vector` | Vector storage: `VectorStore`, `BruteForceStore`, `Quantization`, `Filter`, `VectorMeta`, `VectorHit`. | `arko_index/src/vector.rs` |
+| `arko_index::hybrid` | Lexical, dense and hybrid search: `search`, `SearchRequest`, `Mode`, `Fusion`, `fuse`, `Fused`, `SearchHit`, `SearchResults`. | `arko_index/src/hybrid.rs` |
 | `arko_index::watch2` | Linux only: `Watcher2`, the inotify watcher. | `arko_index/src/watch2.rs` |
 | crate root | `FileRules`, `Report`, `SkipReason`, `Skipped`, `threads()`, and on Unix `bench_scan`, `bench_scan_with`. | `arko_index/src/lib.rs`, `arko_index/src/files.rs`, `arko_index/src/par.rs`, `arko_index/src/scan.rs` |
 
@@ -40,7 +46,18 @@ fallback.
 (relative, slash-separated), `start_byte`, `end_byte` (half-open UTF-8 byte range),
 `start_line`, `end_line` (1-based, inclusive), `language`, `symbol_path` (enclosing
 symbols), `kind` (the syntax kind, `function_family` for a merged pair, or a fallback
-kind), `token_estimate` (a conservative byte upper bound of the rendered input).
+kind), `token_estimate` (a conservative byte upper bound of the path, a newline and
+the source), `scope` (the context: enclosing definitions such as
+`impl Display for Point › fn fmt`, or a Markdown heading chain; written only when not
+empty). `Chunk::header()` gives `path:start_line-end_line · scope`.
+
+**Chunk format versions** (`bench_v1::CHUNK_FORMAT`, now 2): format 1 is the ten fields
+up to `token_estimate`; format 2 appends `scope`. Boundaries and IDs are the same in
+both. A reader of either treats a missing `scope` as empty; a chunk without a scope
+serializes identically in both. Watcher states and index documents written before
+format 2 load (their chunks have no scope); a watcher reports the chunks that gain one
+as `changed`, once. The README's [Context headers](../arko_index/README.md#context-headers)
+lists the labels per language.
 
 **`Delta` fields**: `sequence` (monotone), `added` (chunks), `removed` (IDs), `changed`
 (chunks whose ID stayed but whose bytes, range or lines changed). Applying a delta as
@@ -73,11 +90,40 @@ precedence.
 | `search::index[_with](root, state_dir, options, [rules])` | Chunks the tree and writes `index.json`; returns the chunk count (and the `Report`). |
 | `search::search(state_dir, query)` | Loads `index.json`; returns up to ten chunks, best first. |
 | `search::outline(chunks)` | Groups chunks by path for a human-readable outline. |
-| `index2::index[_with](root, state_dir, options, threads, mem_budget, [rules])` | Builds a new generation with postings memory bounded by `mem_budget` bytes; returns `BuildStats { docs, terms, runs, report }`. |
+| `index2::index[_with](root, state_dir, options, threads, mem_budget, [rules])` | Builds a new generation with postings memory bounded by `mem_budget` bytes, lexical only; returns `BuildStats { docs, terms, runs, report, dense }`. |
+| `index2::build(root, state_dir, options, &BuildOptions)` | The same with `BuildOptions { threads, mem_budget, rules, dense }` (`#[non_exhaustive]`; `Default`, `with_*`). With `dense: Some(DenseBuild)` the chunks are embedded too (below). |
 | `index2::search(state_dir, query)` | Reads only the query terms' postings of the current generation; same results as `search::search` on the same tree. |
+| `index2::dense_info(state_dir)` | The current generation's `DenseIndexInfo` (model, render version, quantization, chunks, chunks with vectors), or `None`. |
 
 Scoring: BM25 with k1 = 1.2 and b = 0.75 over lowercase words plus identifier parts
 (snake_case and camelCase components); ties by path, then start byte.
+
+## Dense and hybrid search
+
+| Item | What it does |
+|---|---|
+| `dense::Embedder` | The provider interface (`Send + Sync`): `descriptor()`, `limits()`, `count_tokens(texts)`, `embed(texts, InputKind)` returning `Embedding { vectors, tokens }` (tokens billed; 0 means "use the counted tokens"). |
+| `dense::ModelDescriptor` | `provider`, `model`, `dimensions`, `input_types`, `revision` (optional); `new`, `with_input_types`, `with_revision`, `key()` (16 hex digits naming the cache directory), `display()`. Part of the embedding cache key. |
+| `dense::EmbedLimits::new(max_items, max_request_tokens, max_input_tokens)` | Batching limits. A text over a limit is not embedded (`EmbedStats::too_long`). |
+| `dense::HashEmbedder::new(dimensions)` | Offline, deterministic feature hashing of the lexical terms (provider `hash`, model `hash-v1`); for tests and examples, not semantic. |
+| `dense::render(chunk, chunk_text)`, `RENDER_VERSION` | The embedded text, version 1: `path`, `\n`, the scope and `\n` when there is one, the source trimmed. |
+| `dense::embed_query(embedder, query)` | The query's vector and billed tokens, for `SearchRequest::query_vector`. |
+| `dense::DenseConfig` | The per-index settings in `STATE_DIR/dense.json`: `version` (1), `embedder` (a `ModelDescriptor`), `render_version`, `quantization`, `max_tokens_per_run`; `new`, `with_*`, `load(state_dir)`, `read(path)`, `save(state_dir)`, `remove(state_dir)`. Saved by every build with embeddings. |
+| `dense::DenseBuild` | One build's embedding: `embedder`, `quantization` (`F32`), `max_tokens` (`None`), `progress` (called after each request with `EmbedProgress { texts, total, tokens, requests }`); `new`, `from_config`, `with_*`. |
+| `dense::EmbedStats` | `BuildStats::dense`: `embedder`, `render_version`, `docs`, `embedded_docs`, `texts` (distinct), `cached`, `new`, `requests`, `tokens` (billed), `max_tokens`, `cap_reached`, `not_embedded`, `not_embedded_tokens` (counted), `too_long`, `cache_records`. |
+| `vector::VectorStore` | `dimensions`, `len`, `is_empty`, `insert(id, vector, VectorMeta { path, language })` (replaces), `delete(id)`, `search(query, k, &Filter) -> Vec<VectorHit { id, score }>` (cosine; best first, then id ascending), `persist`, `open(dir)`. |
+| `vector::BruteForceStore::create(dir, dimensions, Quantization)` | The exact store; `Quantization::Int8` adds an 8-bit copy scanned first, with the best `max(4k, 40)` rescored exactly. |
+| `vector::Filter` | `path_prefix` (a string prefix of the relative path), `language` (the chunk's `language`); `with_path_prefix`, `with_language`, `matches`, `is_empty`. |
+| `hybrid::search(state_dir, &SearchRequest, Option<&dyn Embedder>)` | One generation, read consistently; returns `SearchResults { hits, mode, query_tokens, dense }`. A search that loses a race with a build's switch starts over on the new generation, embedding the query once. |
+| `hybrid::SearchRequest::new(query)` | `mode` (`Lexical`), `limit` (10), `candidates` (50, hybrid), `fusion` (RRF), `filter` (none), `query_vector` (none); `with_*`. |
+| `hybrid::SearchHit` | The chunk (flattened in JSON), `header`, `score` (BM25, cosine or fused), `lexical_rank`, `dense_rank` (1-based). |
+| `hybrid::Fusion` | `Rrf { k: 60, lexical_weight: 1, dense_weight: 1 }` (default): `Σ weight / (k + rank)`; `Linear { lexical_weight }`: `w · minmax(lexical) + (1 − w) · minmax(dense)`. Ties by document id. |
+| `hybrid::fuse(lexical, dense, &Fusion, limit)` | The fusion on its own, over `(id, score)` lists. |
+
+Dense and hybrid modes need the generation to have embeddings and an embedder whose
+descriptor equals the generation's (or a `query_vector`); filters apply to both
+sides. See the README's [Dense and hybrid search](../arko_index/README.md#dense-and-hybrid-search)
+for the cache, the cap and the accounting.
 
 ## Watchers
 
@@ -100,8 +146,8 @@ Scoring: BM25 with k1 = 1.2 and b = 0.75 over lowercase words plus identifier pa
 | `outline ROOT` | `path:start-end<TAB>kind<TAB>symbol_path` lines. |
 | `index ROOT STATE_DIR` | stderr `indexed N chunks` and the report summary. |
 | `search STATE_DIR QUERY...` | Up to ten chunk JSON lines (the words are joined with spaces). |
-| `index2 ROOT STATE_DIR` | stderr `indexed N chunks, T terms, R runs` and the report summary. |
-| `search2 STATE_DIR QUERY...` | As `search`. |
+| `index2 ROOT STATE_DIR` | stderr `indexed N chunks, T terms, R runs` and the report summary; with embeddings also a progress line per request and the token summary. Flags: `--embed MODEL` (`voyage-code-4`, `voyage:MODEL`, `hash`), `--dimensions N`, `--embed-config FILE`, `--quantize f32\|int8`, `--max-embed-tokens N\|none`, `--no-embed`; without them, the saved `dense.json` applies. |
+| `search2 STATE_DIR QUERY...` | Up to `--limit` (10) JSON lines: the chunk's fields plus `header`, `score`, `lexical_rank`, `dense_rank`; `--text` prints `rank. header  [mode score; ranks]`. `--mode lexical\|dense\|hybrid` (default hybrid when the index has embeddings, else lexical), `--candidates N`, `--fusion rrf\|linear`, `--rrf-k K`, `--lexical-weight W`, `--dense-weight W`, `--path-prefix P`, `--language L`. Dense and hybrid print the query's tokens on stderr. |
 | `watch ROOT STATE_DIR` | Delta JSON lines, each acknowledged after it is flushed; stops on SIGINT or SIGTERM. |
 | `watch2 ROOT STATE_DIR` | Linux. As `watch`; stderr also gets a JSON line with file count and timings at start and per delta. |
 | `bench-scan ROOT` | Unix. One JSON line of scan timings. |
@@ -112,6 +158,11 @@ File selection flags (commands that walk a tree): `--respect-ignore`,
 works, `--` ends the flags. Errors print `arko_index: <message>` and exit with status 1.
 stderr lines from the report start with `arko_index: `.
 
+`dense_live_check` is a second example: it builds an index with Voyage embeddings of
+a small corpus and runs the retrieval evaluation in the three modes, printing ranks,
+scores and tokens (`--dry-run` only counts tokens). It spends Voyage tokens; see the
+file's header and the README.
+
 ## Environment variables
 
 | Variable | Default | Effect |
@@ -121,13 +172,15 @@ stderr lines from the report start with `arko_index: `.
 | `ARKO_INDEX_INDEX_MEM_MB` | 256 | CLI only: `index2`'s postings memory budget before spilling to runs. |
 | `ARKO_INDEX_STATS` | Unset | When set, `index2` prints per-phase timings to stderr. |
 | `MALLOC_MMAP_THRESHOLD_` | Unset: the CLI sets 1 MB | glibc's own variable; when set, the CLI leaves the threshold to glibc. |
+| `VOYAGE_API_KEY` | Unset | Examples only (through arko_ai's `EmbeddingClient::from_env`): the key for embedding with Voyage. The library reads no credentials. |
 
 ## Features
 
 arko_index has no cargo features. It parses with mhr_tree_sitter, a pure-Rust port of
-tree-sitter 0.25.10 and its grammars, so a build needs no C compiler. The port pins the
-grammar versions: an upgrade changes chunk boundaries and IDs. See
-[Parsing](../arko_index/README.md#parsing).
+tree-sitter 0.25.10 and its grammars, so the library needs no C compiler. The port pins
+the grammar versions: an upgrade changes chunk boundaries and IDs. See
+[Parsing](../arko_index/README.md#parsing). The examples and tests depend on arko_ai
+(dev-dependency, for the Voyage adapter), whose dependencies need a C compiler.
 
 ## Defaults
 
@@ -139,9 +192,20 @@ grammar versions: an upgrade changes chunk boundaries and IDs. See
 | Built-in exclusions | `.git` directories and files, `CACHEDIR.TAG` directories (not the root), state directories |
 | Non-UTF-8, binary, unreadable files | Skipped and reported; the run continues |
 | Symbolic links | Not followed; reported |
-| Search results | At most ten |
+| Search results | At most ten (`SearchRequest::limit` 10) |
 | Polling watcher debounce | 75 ms of stable inventory |
 | Threads | All available CPUs |
+| Embeddings (`BuildOptions::dense`) | `None`: indexes are lexical; dense is opt-in per index |
+| Embedding model (CLI `--embed`) | None until chosen; then the saved `dense.json`. The CLI's Voyage models default to the model's dimensions (voyage-code-4: 1,024) with input types on |
+| Token cap (`DenseBuild::max_tokens`, `DenseConfig::max_tokens_per_run`) | `None`: no cap |
+| Vector storage (`Quantization`) | `F32`; `Int8` rescores `max(4k, 40)` candidates |
+| Search mode (`SearchRequest::mode`) | `Lexical`; the CLI's `search2` uses hybrid when the index has embeddings |
+| Hybrid candidates (`SearchRequest::candidates`) | 50 per side |
+| Fusion (`Fusion::default`) | Reciprocal rank fusion, k = 60, both weights 1 (`Linear`: lexical weight 0.5 in the CLI) |
+| Filters (`Filter::default`) | None |
+| Render version (`RENDER_VERSION`) | 1: path, scope, trimmed source |
+| Embedding cache compaction | When records exceed twice the live texts plus 1,024 |
+| Voyage adapter (examples) | 1,000 texts and 320,000 tokens per request for voyage-code-4; 4 retries of transient failures |
 
 ## On-disk state
 
@@ -151,7 +215,8 @@ directory that holds it) and `report.json` (the last walk's report).
 | Writer | Files |
 |---|---|
 | `search::index` | `index.json` (version 1), `.index.lock` |
-| `index2::index` | `CURRENT2` (the name of the current generation), `index2-<stamp>-<pid>/` with `meta.json` (version 2), `lens.dat`, `docs.off`, `docs.dat`, `terms.dat`, `terms.idx`, `post.dat`. Older generations are removed after a switch. |
+| `index2::index`, `index2::build` | `CURRENT2` (the name of the current generation), `index2-<stamp>-<pid>/` with `meta.json` (version 2), `lens.dat`, `docs.off`, `docs.dat`, `terms.dat`, `terms.idx`, `post.dat`, `files.dat` (each file's first document and path, for filters); with embeddings also `dense.json` (`DenseIndexInfo`, version 1) and `dense/` (`slots.dat` with ids, paths, languages, int8 scales and a SHA-256 checksum; `vectors.f32`; `vectors.i8` with int8). Older generations are removed after a switch. |
+| `index2::build` with embeddings | `dense.json` (`DenseConfig`, version 1: the model and settings later builds follow) and `embed-cache/<model key>/` (`cache.json` with the full descriptor and the epoch, `keys.<epoch>` with 32-byte text hashes, `vectors.<epoch>` with the vectors as returned, appended and fsynced per request). |
 | `open_watch` | `watch.json` (version 1: snapshot, fingerprints, sequence, acknowledgement, pending deltas, rules, and the engine-qualified parse cache) |
 | `Watcher2` | `watch2.snap` (version 3), `watch2.recs.N`, `watch2.wal` |
 
@@ -164,8 +229,12 @@ guarantee between versions: an index or watcher state from an earlier build may 
 refused (`watch2` refuses a version 2 snapshot and asks for a rebuild) or rebuilt. A
 watcher's parse cache is reused only when the engine digest (the chunking sources and
 the locked tree-sitter versions) matches; otherwise the files are parsed again,
-without spurious deltas. The SQLite databases of the earlier, model-chunked arko_index
-are not readable by this crate.
+without spurious deltas, except once for chunk format 2: chunks that gain a `scope`
+are delivered as `changed`. An index2 generation from before this version loads and
+searches lexically; filters need its `files.dat` (rebuild to filter). Saved files
+with embeddings carry versions (`dense.json` 1, the generation's `dense.json` 1,
+`slots.dat` 1, `cache.json` 1) and new fields get serde defaults. The SQLite
+databases of the earlier, model-chunked arko_index are not readable by this crate.
 
 ## Platforms
 
