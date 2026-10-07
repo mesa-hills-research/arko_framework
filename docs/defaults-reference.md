@@ -28,3 +28,14 @@ Defaults of operator notes and graceful stops:
   nothing is timed until a stop is under way: a `StopAwareCommand`'s graces (10 s, then
   5 s after `SIGTERM`) start only then. See
   [Stopping tool calls](reference-map.md#stopping-tool-calls-arko_agents).
+
+Defaults of arko_index (see [Defaults (arko_index)](reference-map.md#defaults-arko_index)):
+
+- Every regular file under the root is indexed, hidden and gitignored files included.
+  Ignore files are read only with `FileRules::respect_ignore` (`--respect-ignore`), and
+  never above the root. Built in: `.git` and `CACHEDIR.TAG` directories and the tool's
+  state directories are skipped.
+- Binary, non-UTF-8 and unreadable files are skipped and listed in the report; a walk
+  never stops for them.
+- Chunking, indexing and watching use every available CPU (`ARKO_INDEX_THREADS`
+  overrides), with identical output at any thread count.

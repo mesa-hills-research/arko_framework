@@ -10,9 +10,9 @@ multi-agent workflows, and indexing source code for retrieval.
 | [arko_ai](arko_ai/README.md) | Model clients for OpenAI (API key or ChatGPT OAuth), Anthropic, Google Gemini, and OpenRouter, plus Voyage embeddings. Streaming, tool calls, reasoning controls, and usage and cost reporting. |
 | [arko_agents](arko_agents/README.md) | Agent configuration and runtime, built-in and custom tools, skills, MCP servers, and interactive terminal tools. |
 | [arko_workflows](arko_workflows/README.md) | Multi-agent workflows with shared memory, messaging, budgets, hooks, completion verification, and persistence. Optional Python bindings behind the `python` feature. |
-| [arko_index](arko_index/README.md) | Indexing of source code and documentation with model-selected chunk boundaries, Voyage embeddings, and local SQLite hybrid search. |
+| [arko_index](arko_index/README.md) | Deterministic tree-sitter chunking of source repositories, offline BM25 code search, and durable watchers that report chunk deltas. No network or model calls. |
 
-arko_agents builds on arko_ai; arko_workflows builds on both; arko_index builds on arko_ai.
+arko_agents builds on arko_ai; arko_workflows builds on both; arko_index depends on neither.
 
 ## Build and test
 
@@ -47,8 +47,8 @@ directory contains runnable programs.
   API reference.
 - [Complete workflow example](arko_workflows/examples/complete_workflow.rs): explicit agent
   configuration, memory, messaging, verification, distillation, persistence, and resume.
-- [Arko Index reference](docs/arko_index-reference.md): file selection, chunk
-  validation, jobs and events, search, usage accounting, and the example CLI.
+- [Arko Index reference](docs/arko_index-reference.md): the chunking, search and
+  watcher API, file selection, the example CLI, environment variables and on-disk state.
 
 ## License
 

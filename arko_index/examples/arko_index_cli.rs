@@ -1,322 +1,313 @@
-//! Run from the workspace root; see arko_index/README.md.
-use arko_ai::{EmbeddingClient, EmbeddingModelDetails, EmbeddingProviderIdentifier, LLMClient};
-use arko_index::{
-    backend::{
-        ArkoBackend, Backend, Limits, ModelReply, ModelRequest, VectorReply, embedding_limits,
+//! Command-line interface to arko_index: `chunk`, `outline`, `index`/`search`,
+//! `index2`/`search2`, `watch`, `watch2` (Linux) and `bench-scan` (Unix). Run
+//! `cargo run --release -p arko_index --example arko_index_cli -- --help`; the
+//! crate README describes the commands, the file selection flags and the protocol.
+use arko_index::{bench_v1::*, search};
+use std::{
+    io::{self, Write},
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
     },
-    *,
+    time::Duration,
 };
-use clap::{Parser, Subcommand};
-use std::{path::PathBuf, sync::Arc, time::Duration};
-#[path = "support/search_judge.rs"]
-mod search_judge;
-use search_judge::JudgeArgs;
-type AnyResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-#[derive(Parser)]
-struct Args {
-    #[arg(long)]
-    database: PathBuf,
-    /// A Codex auth.json (access_token, refresh_token and account_id at the top
-    /// level or in a tokens object). Every token refresh reads it again first,
-    /// and rotated tokens are saved to it at once.
-    #[arg(long)]
-    oauth_file: Option<PathBuf>,
-    #[arg(long, default_value_t = 6)]
-    batch_count: usize,
-    #[arg(long, default_value_t = 2)]
-    concurrency: usize,
-    /// Opt-in: cut a chunk-model or judge response off after this many
-    /// seconds without data. Off by default: models can reason silently for
-    /// a long time (GPT Pro models for over an hour), so a short value cuts
-    /// healthy responses off. Make it generous.
-    #[arg(long)]
-    stream_idle_timeout_secs: Option<u64>,
-    #[command(subcommand)]
-    command: Command,
+fn write_json<T: serde::Serialize>(value: &T) -> Result<(), Error> {
+    let mut out = io::stdout().lock();
+    serde_json::to_writer(&mut out, value)?;
+    writeln!(out)?;
+    out.flush()?;
+    Ok(())
 }
-#[derive(Subcommand)]
-enum Command {
-    Build {
-        root: PathBuf,
-        /// The index name; defaults to the root directory's name.
-        #[arg(long)]
-        name: Option<String>,
-    },
-    Update {
-        index: String,
-    },
-    Resume {
-        job: String,
-    },
-    Status {
-        job: String,
-    },
-    List,
-    Search {
-        index: String,
-        query: String,
-        #[arg(long, conflicts_with = "semantic")]
-        lexical: bool,
-        /// Use vector-only retrieval instead of hybrid retrieval.
-        #[arg(long)]
-        semantic: bool,
-        /// Hide source fragments shorter than this many UTF-8 bytes; 0 keeps all.
-        #[arg(long, default_value_t = 40)]
-        min_chunk_bytes: usize,
-        /// Return this many complete results from the final combined ranking.
-        #[arg(long, default_value_t = 10)]
-        top_k: usize,
-        /// The most affected paths a rebuild notice lists.
-        #[arg(long, default_value_t = 100)]
-        rebuild_file_limit: usize,
-        #[command(flatten)]
-        judging: JudgeArgs,
-    },
-    Read {
-        index: String,
-        generation: String,
-        ids: Vec<String>,
-    },
-    Watch {
-        index: String,
-        #[arg(long, default_value_t = 500)]
-        debounce_ms: u64,
-        /// Seconds between full scans that catch missed file-system events;
-        /// 0 scans only at start and after events.
-        #[arg(long, default_value_t = 30)]
-        reconcile_secs: u64,
-    },
+/// File selection flags, accepted by every command that walks a tree.
+struct Walk {
+    rules: FileRules,
+    report: Option<PathBuf>,
 }
-impl Command {
-    /// Whether the command sends model or embedding requests, or counts
-    /// tokens, and so needs the provider backend.
-    fn needs_backend(&self) -> bool {
-        !matches!(self, Self::Status { .. } | Self::List | Self::Read { .. })
-    }
-}
-/// The backend of commands that make no provider requests: `list`, `status`
-/// and `read` need neither credentials nor a tokenizer.
-struct NoProviders {
-    profile: EmbeddingProfile,
-    limits: Limits,
-}
-impl NoProviders {
-    fn new(profile: EmbeddingProfile) -> Self {
-        let limits =
-            EmbeddingModelDetails::get(EmbeddingProviderIdentifier::Voyage, &profile.model)
-                .ok()
-                .and_then(|details| embedding_limits(&details).ok())
-                .unwrap_or(Limits {
-                    item_tokens: 32_000,
-                    batch_tokens: 120_000,
-                    batch_items: 1_000,
-                });
-        Self { profile, limits }
-    }
-}
-fn no_providers() -> Error {
-    Error::Invalid("this command makes no provider requests".into())
-}
-#[async_trait::async_trait]
-impl Backend for NoProviders {
-    async fn chunk(&self, _: ModelRequest) -> Result<ModelReply> {
-        Err(no_providers())
-    }
-    async fn embed(&self, _: Vec<String>, _: bool) -> Result<VectorReply> {
-        Err(no_providers())
-    }
-    fn tokens(&self, _: &str) -> Result<usize> {
-        Err(no_providers())
-    }
-    fn limits(&self) -> Limits {
-        self.limits
-    }
-    fn profile(&self) -> &EmbeddingProfile {
-        &self.profile
-    }
-    fn output_tokenizer(&self) -> String {
-        format!(
-            "voyageai/{}@{}",
-            self.profile.model,
-            self.profile.tokenizer_revision.as_deref().unwrap_or("main")
-        )
-    }
-}
-/// The default index name: the root directory's name.
-fn default_name(root: &std::path::Path) -> String {
-    std::fs::canonicalize(root)
-        .ok()
-        .and_then(|root| {
-            root.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .unwrap_or_else(|| "index".into())
-}
-/// Credentials from an OAuth file when given, kept in step with the file,
-/// else from the environment.
-fn load_client(path: Option<PathBuf>) -> AnyResult<LLMClient> {
-    match path {
-        Some(path) => Ok(arko_ai::CodexAuthFile::load(path)?.client()?),
-        None => Ok(LLMClient::from_env()?),
-    }
-}
-async fn observe(index: &ArkoIndex, job: &str) -> AnyResult<()> {
-    let mut cursor = 0;
-    loop {
-        for event in index.events(job, cursor, 100).await? {
-            cursor = event.sequence;
-            println!("{}", serde_json::to_string(&event)?);
-        }
-        let status = index.status(job).await?;
-        match status.phase.as_str() {
-            "ready" => return Ok(()),
-            "paused" | "cancelled" | "failed" | "blocked" => {
-                return Err(
-                    format!("{}: {}", status.phase, status.problem.unwrap_or_default()).into(),
-                );
-            }
-            _ => {}
-        }
-        tokio::select! {_=tokio::time::sleep(Duration::from_millis(250))=>{},_=tokio::signal::ctrl_c()=>{index.pause(job).await?;}}
-    }
-}
-#[tokio::main]
-async fn main() -> AnyResult<()> {
-    // Warnings from every crate, and the index's progress (such as the
-    // updates `watch` starts); RUST_LOG overrides it.
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("warn,arko_index=info"),
-    )
-    .init();
-    let args = Args::parse();
-    let config = Config {
-        batch_count: args.batch_count,
-        concurrency: args.concurrency,
-        stream_idle_timeout_ms: args
-            .stream_idle_timeout_secs
-            .map(|seconds| seconds.saturating_mul(1000)),
-        ..Default::default()
+const RULE_FLAGS: &str =
+    "[--respect-ignore] [--exclude PATTERN]... [--include PATTERN]... [--report FILE]";
+/// Splits the file selection flags from the positional arguments. `--` ends the flags.
+fn walk_args(args: &[String]) -> Result<(Walk, Vec<String>), Error> {
+    let mut walk = Walk {
+        rules: FileRules::default(),
+        report: None,
     };
-    // Only commands that call providers or count tokens load credentials and
-    // the tokenizer.
-    let (client, backend): (Option<LLMClient>, Arc<dyn Backend>) = if args.command.needs_backend() {
-        let client = load_client(args.oauth_file.clone())?;
-        let backend = ArkoBackend::new(
-            client.clone(),
-            EmbeddingClient::from_env(),
-            config.embedding.clone(),
-        )
-        .await?;
-        (Some(client), Arc::new(backend))
-    } else {
-        (None, Arc::new(NoProviders::new(config.embedding.clone())))
-    };
-    let index = ArkoIndex::open(args.database, backend, config).await?;
-    match args.command {
-        Command::Build { root, name } => {
-            let name = name.unwrap_or_else(|| default_name(&root));
-            let job = index.start_build(BuildSpec::new(name, root)).await?;
-            println!("{}", serde_json::to_string(&job)?);
-            observe(&index, &job.job).await?;
+    let mut positional = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            positional.extend(it.cloned());
+            break;
         }
-        Command::Update { index: id } => {
-            let job = index.start_update(&id).await?;
-            println!("{}", serde_json::to_string(&job)?);
-            observe(&index, &job.job).await?;
+        if !a.starts_with("--") {
+            positional.push(a.clone());
+            continue;
         }
-        Command::Resume { job } => {
-            index.resume(&job).await?;
-            observe(&index, &job).await?;
+        let (flag, inline) = match a.split_once('=') {
+            Some((f, v)) => (f, Some(v.to_owned())),
+            None => (a.as_str(), None),
+        };
+        if flag == "--respect-ignore" && inline.is_none() {
+            walk.rules.respect_ignore = true;
+            continue;
         }
-        Command::Status { job } => println!(
-            "{}",
-            serde_json::to_string_pretty(&index.status(&job).await?)?
-        ),
-        Command::List => println!("{}", serde_json::to_string_pretty(&index.list().await?)?),
-        Command::Search {
-            index: id,
-            query,
-            lexical,
-            semantic,
-            min_chunk_bytes,
-            top_k,
-            rebuild_file_limit,
-            judging,
-        } => {
-            let options = SearchOptions {
-                mode: if lexical {
-                    SearchMode::Lexical
-                } else if semantic {
-                    SearchMode::Semantic
-                } else {
-                    SearchMode::Hybrid
-                },
-                rebuild_file_limit: Some(rebuild_file_limit),
-                min_chunk_bytes,
-                top_k: Some(top_k),
-                ..Default::default()
-            };
-            let result = if judging.judge {
-                let client = client.as_ref().ok_or("search needs a client")?;
-                let mut judge = judging.build_judge(client, args.oauth_file.as_deref())?;
-                if let Some(seconds) = args.stream_idle_timeout_secs {
-                    judge = judge.with_stream_idle_timeout(Duration::from_secs(seconds));
-                }
-                index
-                    .search_with_judge(&id, &query, options, &judge, judging.options())
-                    .await
-            } else {
-                index.search(&id, &query, options).await
-            };
-            println!("{}", serde_json::to_string_pretty(&result?)?);
-        }
-        Command::Read {
-            index: id,
-            generation,
-            ids,
-        } => println!(
-            "{}",
-            serde_json::to_string_pretty(&index.read_chunks(&id, &generation, &ids, 0).await?)?
-        ),
-        Command::Watch {
-            index: id,
-            debounce_ms,
-            reconcile_secs,
-        } => {
-            let reconcile = (reconcile_secs > 0).then(|| Duration::from_secs(reconcile_secs));
-            let watcher = index
-                .watch(
-                    &id,
-                    WatchOptions::new(Duration::from_millis(debounce_ms)).with_reconcile(reconcile),
-                )
-                .await?;
-            // Each watcher event as a JSON line: scans, and the updates it
-            // starts, resumes or leaves paused or blocked.
-            let mut events = watcher.subscribe();
-            let printer = tokio::spawn(async move {
-                loop {
-                    match events.recv().await {
-                        Ok(event) => {
-                            if let Ok(line) = serde_json::to_string(&event) {
-                                println!("{line}");
-                            }
-                        }
-                        // Events missed while printing fell behind.
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    }
-                }
-            });
-            let _ = tokio::signal::ctrl_c().await;
-            watcher.stop().await?;
-            printer.abort();
+        let value = match inline {
+            Some(v) => v,
+            None => it.next().cloned().ok_or(format!("{flag} needs a value"))?,
+        };
+        match flag {
+            "--exclude" => walk.rules.exclude.push(value),
+            "--include" => walk.rules.include.push(value),
+            "--report" => walk.report = Some(PathBuf::from(value)),
+            _ => return Err(format!("unknown option {a}; options: {RULE_FLAGS}").into()),
         }
     }
-    // An update job can still be running (watch starts them); a token
-    // refresh in flight holds the credentials until its new tokens are
-    // saved, so wait for it before the runtime shuts down.
-    if let Some(client) = client {
-        client.openai_chatgpt_oauth_credentials().await;
+    walk.rules.validate()?;
+    Ok((walk, positional))
+}
+/// Prints the report summary and the entries worth listing to stderr, and writes the
+/// full report to `--report FILE` if given.
+fn report(walk: &Walk, report: &Report) -> Result<(), Error> {
+    eprintln!("arko_index: {}", report.summary());
+    for line in report.notable(20) {
+        eprintln!("arko_index: {line}");
+    }
+    write_report_file(walk, report)
+}
+/// Writes the full report to `--report FILE`, if given.
+fn write_report_file(walk: &Walk, report: &Report) -> Result<(), Error> {
+    if let Some(path) = &walk.report {
+        let mut bytes = serde_json::to_vec_pretty(report)?;
+        bytes.push(b'\n');
+        std::fs::write(path, bytes)?;
     }
     Ok(())
+}
+fn rules_changed_note() {
+    eprintln!(
+        "arko_index: the file selection rules differ from the previous run's (or the state predates recorded rules); the first delta applies the new rules"
+    );
+}
+fn run() -> Result<(), Error> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let options = Options::default();
+    let usage = format!(
+        "usage: arko_index_cli chunk ROOT | index ROOT STATE_DIR | search STATE_DIR QUERY | watch ROOT STATE_DIR | outline ROOT\n\
+         \x20      (also index2, search2, watch2, bench-scan)\n\
+         commands that walk a tree accept: {RULE_FLAGS}"
+    );
+    let walks = matches!(
+        args.first().map(String::as_str),
+        Some("chunk" | "outline" | "index" | "index2" | "watch" | "watch2" | "bench-scan")
+    );
+    let (walk, args) = if walks {
+        let (walk, mut rest) = walk_args(&args[1..])?;
+        rest.insert(0, args[0].clone());
+        (walk, rest)
+    } else {
+        let walk = Walk {
+            rules: FileRules::default(),
+            report: None,
+        };
+        (walk, args)
+    };
+    match args.first().map(String::as_str) {
+        Some("chunk") | Some("outline") if args.len() == 2 => {
+            let root = Path::new(&args[1]);
+            // Scaling prototype: workers chunk and render each file; the main thread
+            // writes the rendered bytes in sequential file order through one buffer.
+            let outline = args[0] == "outline";
+            let mut out = io::BufWriter::with_capacity(1 << 20, io::stdout().lock());
+            let render = |chunks: Vec<Chunk>| -> Result<Vec<u8>, Error> {
+                let mut buf = Vec::new();
+                for c in chunks {
+                    if outline {
+                        writeln!(
+                            buf,
+                            "{}:{}-{}\t{}\t{}",
+                            c.path, c.start_line, c.end_line, c.kind, c.symbol_path
+                        )?;
+                    } else {
+                        serde_json::to_writer(&mut buf, &c)?;
+                        buf.push(b'\n');
+                    }
+                }
+                Ok(buf)
+            };
+            if root.is_dir() {
+                let r = chunk_dir_map_with(
+                    root,
+                    &options,
+                    &walk.rules,
+                    arko_index::threads(),
+                    render,
+                    |b| {
+                        out.write_all(&b)?;
+                        Ok(())
+                    },
+                )?;
+                out.flush()?;
+                // Quiet when only the built-in exclusions (.git, CACHEDIR.TAG, state
+                // directories) or the user's own rules removed anything; the full
+                // report still goes to --report FILE.
+                if r.worth_printing() {
+                    report(&walk, &r)?;
+                } else {
+                    write_report_file(&walk, &r)?;
+                }
+            } else {
+                let chunks = chunk_file(root, &options)?;
+                if chunks.is_empty() {
+                    // Say why a single file produced nothing (empty, binary or not UTF-8).
+                    let bytes = std::fs::read(root)?;
+                    if bytes.contains(&0) {
+                        eprintln!("arko_index: skipped (binary): {}", root.display());
+                    } else if std::str::from_utf8(&bytes).is_err() {
+                        eprintln!("arko_index: skipped (not-utf8): {}", root.display());
+                    }
+                }
+                out.write_all(&render(chunks)?)?;
+            }
+            out.flush()?;
+        }
+        Some("index") if args.len() == 3 => {
+            let (n, r) = search::index_with(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                &options,
+                &walk.rules,
+            )?;
+            eprintln!("indexed {n} chunks");
+            report(&walk, &r)?;
+        }
+        Some("index2") if args.len() == 3 => {
+            let budget_mb = std::env::var("ARKO_INDEX_INDEX_MEM_MB")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(256);
+            let s = arko_index::index2::index_with(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                &options,
+                arko_index::threads(),
+                budget_mb << 20,
+                &walk.rules,
+            )?;
+            eprintln!(
+                "indexed {} chunks, {} terms, {} runs",
+                s.docs, s.terms, s.runs
+            );
+            report(&walk, &s.report)?;
+        }
+        Some("search2") if args.len() >= 3 => {
+            let mut out = io::BufWriter::new(io::stdout().lock());
+            for c in arko_index::index2::search(Path::new(&args[1]), &args[2..].join(" "))? {
+                serde_json::to_writer(&mut out, &c)?;
+                writeln!(out)?;
+            }
+            out.flush()?;
+        }
+        #[cfg(target_os = "linux")]
+        Some("watch2") if args.len() == 3 => {
+            let running = Arc::new(AtomicBool::new(true));
+            let flag = running.clone();
+            ctrlc::set_handler(move || flag.store(false, Ordering::SeqCst))?;
+            let mut watcher = arko_index::watch2::Watcher2::open_with(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                &options,
+                &walk.rules,
+            )?;
+            if watcher.rules_changed() {
+                rules_changed_note();
+            }
+            eprintln!(
+                "{}",
+                serde_json::json!({"files": watcher.file_count(), "stats": watcher.stats})
+            );
+            report(&walk, watcher.report())?;
+            let mut shown = watcher.report().clone();
+            // Each delta is streamed from the record store as one complete, flushed
+            // line before it is acknowledged (the same bytes as `write_json`).
+            let mut out = io::BufWriter::with_capacity(1 << 20, io::stdout().lock());
+            while running.load(Ordering::SeqCst) {
+                if let Some(seq) = watcher.next_change_to(Duration::from_millis(250), &mut out)? {
+                    out.flush()?;
+                    watcher.ack(seq)?;
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({"seq": seq, "stats": watcher.stats})
+                    );
+                }
+                // Skipped entries changed: one summary line (the list is in report.json).
+                if watcher.report().counts != shown.counts {
+                    shown = watcher.report().clone();
+                    eprintln!("arko_index: {}", shown.summary());
+                }
+            }
+        }
+        #[cfg(unix)]
+        Some("bench-scan") if args.len() == 2 => {
+            arko_index::bench_scan_with(Path::new(&args[1]), arko_index::threads(), &walk.rules)?;
+        }
+        Some("search") if args.len() >= 3 => {
+            for c in search::search(Path::new(&args[1]), &args[2..].join(" "))? {
+                write_json(&c)?;
+            }
+        }
+        Some("watch") if args.len() == 3 => {
+            let running = Arc::new(AtomicBool::new(true));
+            let flag = running.clone();
+            ctrlc::set_handler(move || flag.store(false, Ordering::SeqCst))?;
+            let root = Path::new(&args[1]);
+            let state = Path::new(&args[2]);
+            let mut watcher = open_watch_with(root, state, &options, &walk.rules)?;
+            if watcher.rules_changed() {
+                rules_changed_note();
+            }
+            report(&walk, watcher.report())?;
+            let mut shown = watcher.report().clone();
+            while running.load(Ordering::SeqCst) {
+                if let Some(d) = watcher.next_change(Duration::from_millis(250))? {
+                    write_json(&d)?;
+                    // The CLI acknowledges after a complete, flushed line. Library consumers can
+                    // instead ack after processing and deduplicate by durable sequence.
+                    watcher.ack(d.sequence)?;
+                }
+                // Skipped entries changed: one summary line (the list is in report.json).
+                if watcher.report().counts != shown.counts {
+                    shown = watcher.report().clone();
+                    eprintln!("arko_index: {}", shown.summary());
+                }
+            }
+            watcher.flush()?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        Some("watch2") => return Err("watch2 needs Linux (inotify); use watch".into()),
+        #[cfg(not(unix))]
+        Some("bench-scan") => return Err("bench-scan needs a Unix system".into()),
+        Some("--help") | Some("-h") => eprintln!("{usage}"),
+        _ => return Err(usage.into()),
+    }
+    Ok(())
+}
+/// glibc raises its mmap threshold (up to 32 MB) after large blocks are freed, so the
+/// per-thread arenas then keep up to ~64 MB each of freed file text and parse trees
+/// resident. A fixed 1 MB threshold returns large blocks to the OS on free: measured
+/// on Linux, peak RSS of chunk at 12 threads 659 -> 512 MB and index2 1293 -> 869 MB
+/// for about 1 percent more wall time. Allocation results are unaffected.
+fn tune_allocator() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if std::env::var_os("MALLOC_MMAP_THRESHOLD_").is_none() {
+        unsafe {
+            libc::mallopt(libc::M_MMAP_THRESHOLD, 1 << 20);
+        }
+    }
+}
+fn main() {
+    tune_allocator();
+    if let Err(e) = run() {
+        eprintln!("arko_index: {e}");
+        std::process::exit(1);
+    }
 }

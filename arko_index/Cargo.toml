@@ -1,34 +1,29 @@
 [package]
 name = "arko_index"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "Incremental source indexing with validated model boundaries and local hybrid retrieval"
+description = "Deterministic tree-sitter source partitioning and durable incremental code search"
 license.workspace = true
 
 [dependencies]
-arko_ai.workspace = true
-async-trait.workspace = true
-chrono.workspace = true
-futures.workspace = true
-log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
-tokio.workspace = true
-rusqlite = { version = "0.30", features = ["bundled"] }
 sha2.workspace = true
-uuid.workspace = true
 ignore.workspace = true
-glob = "0.3"
-notify = "8.2"
-syn = { version = "2", features = ["full", "visit"] }
-proc-macro2 = { version = "1", features = ["span-locations"] }
-pulldown-cmark = "0.13"
-tiktoken-rs = "0.12"
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+fs2 = "0.4"
+libc = "0.2"
 
 [dev-dependencies]
-env_logger.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
-clap.workspace = true
+# The arko_index_cli example stops its watchers on SIGINT and SIGTERM.
+ctrlc = { version = "3.5", features = ["termination"] }

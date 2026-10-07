@@ -10,8 +10,8 @@ behavior and defaults for using it correctly.
 - [arko_index](#arko_index)
 - [Complete workflow example](#complete-workflow-example)
 
-The crates build on one another: `arko_agents` uses `arko_ai`, `arko_workflows` uses both,
-and `arko_index` uses `arko_ai`. Code paths in the tables are repository-relative. Defaults
+The crates build on one another: `arko_agents` uses `arko_ai` and `arko_workflows` uses both;
+`arko_index` stands alone. Code paths in the tables are repository-relative. Defaults
 and omitted serialized fields are called out separately because they can differ.
 
 ## arko_ai
@@ -1629,256 +1629,44 @@ control-folder notes not yet posted. It makes no model requests and reads no cre
 
 ## arko_index
 
-Incremental indexing of source code and documentation: a chunk model chooses validated chunk boundaries, Voyage embeds the chunks, and a local SQLite database serves lexical, semantic and hybrid search.
+Syntax-aware partitioning of source trees into chunks (tree-sitter for Rust, Python, JavaScript, TypeScript, Go, Java, C and C++; a bounded fallback for other UTF-8 text), offline BM25 search, and durable watchers that report chunk deltas. No network calls, credentials or model requests; no dependency on the other arko crates.
 
 Guides: [arko_index README](../arko_index/README.md) · [arko_index reference](arko_index-reference.md)
 
 ### Map (arko_index)
 
-The crate root re-exports the items of `config`, `index`, `search` and `judge`, `JobUsage`, the watcher types, `Error` and `Result`. The modules `backend`, `budget`, `chunker`, `config`, `error`, `packing` and `source` are public too; `budget`, `chunker`, `packing` and `source` hold the building blocks the index calls itself.
-
-**Opening and configuration**
+`bench_v1` holds the chunking and polling-watcher API; `search` and `index2` the two index formats; `watch2` (Linux) the inotify watcher. The crate root re-exports the file selection types and `threads()`.
 
 | Item | What it is | Code | Docs |
 |---|---|---|---|
-| `ArkoIndex` | Cloneable handle to one index database; the calls below go through it. | `arko_index/src/index.rs` | [README](../arko_index/README.md#build-and-search) |
-| `ArkoIndex::open(path, backend, config)` | Validates `config`, requires the backend's profile to embed as `config.embedding` does, and opens or creates the SQLite database, holding `<path>.lock` so that one `ArkoIndex` serves it at a time. | `arko_index/src/index.rs` | [Storage and updates](arko_index-reference.md#storage-and-updates) |
-| `Config`, `Config::validate` | Index settings: `batch_count`, `concurrency`, `embedding_concurrency`, `embedding`, `vector_cache_bytes`, `max_transient_attempts`, `max_capacity_wait_ms`, `query_priority`, `query_max_transient_attempts`, `embedding_batch_tokens`, `embedding_batch_items`, `keep_generations`, `synchronous`, `stream_idle_timeout_ms`. | `arko_index/src/config.rs` | [`Config` (arko_index)](#config-arko_index) |
-| `Synchronous::{Full, Normal}` | SQLite `synchronous` mode of the database (`Config::synchronous`). | `arko_index/src/config.rs` | [Storage and updates](arko_index-reference.md#storage-and-updates) |
-| `EmbeddingProfile`, `EmbeddingProfile::same_embeddings`, `EmbeddingProfile::revision_label` | What embeds an index: Voyage `model`, `dimensions` and `tokenizer_revision`; `same_embeddings` compares two profiles, and `revision_label` names the revision (`unpinned` when unset). | `arko_index/src/config.rs` | [Embeddings](arko_index-reference.md#embeddings) |
-| `DEFAULT_MAX_CAPACITY_WAIT_MS` | 900,000 (15 minutes), the default `Config::max_capacity_wait_ms`. | `arko_index/src/config.rs` | [`Config` (arko_index)](#config-arko_index) |
-| `FORMER_DEFAULT_TOKENIZER_REVISION` | The `voyageai/voyage-4` commit earlier versions pinned by default; an unset `tokenizer_revision` compares, and keys stored vectors, as this one. | `arko_index/src/config.rs` | [Embeddings](arko_index-reference.md#embeddings) |
-| `Error`, `Result<T>` | The crate's error: `Invalid`, `Blocked`, `Paused`, `UsageLimit`, `Cancelled`, `Stale`, `Provider { message, transient, retry_after, source, usage }`, `Io`, `Sql`, `Json`, `Worker`. `search` returns `Blocked` before the first generation is published and `Stale` for a cursor or generation no longer available; `Paused`, `UsageLimit` and `Cancelled` are job stop reasons, seen as the job's phase and problem. An `arko_ai::Error` converts to `Provider`. | `arko_index/src/error.rs` | [Jobs, scheduling and retries](arko_index-reference.md#jobs-scheduling-and-retries) |
-| `Error::with_usage`, `Error::usage`, `Error::retry_class` | Attach or read the usage of a provider response the backend rejected; the recovery class (`arko_ai::RetryClass`) of a provider failure, from its source error or else from `transient`. | `arko_index/src/error.rs` | [Usage and cost](arko_index-reference.md#usage-and-cost) |
+| `bench_v1::Options` | `max_bytes`, the source-byte bound of a chunk (default 4,096; below 4 rejected). A rendered chunk is also capped at 24,000 bytes. | `arko_index/src/bench_v1.rs` | [Boundaries and identities](../arko_index/README.md#boundaries-and-identities) |
+| `bench_v1::Chunk`, `SourceSpan` | A chunk: `id`, `path`, `start_byte`, `end_byte`, `start_line`, `end_line`, `language`, `symbol_path`, `kind`, `token_estimate`. | `arko_index/src/bench_v1.rs` | [Chunking](arko_index-reference.md#chunking) |
+| `bench_v1::chunk_str`, `chunk_file` | Chunk one text (under a given path) or one file. | `arko_index/src/bench_v1.rs` | [Library](../arko_index/README.md#library) |
+| `bench_v1::chunk_dir[_with]`, `chunk_dir_each[_with]`, `chunk_dir_map[_with]` | Chunk every selected file in path order, collected, streamed to a sink, or mapped on worker threads; output is identical at any thread count. `_with` takes `FileRules` and returns the `Report`. | `arko_index/src/bench_v1.rs`, `arko_index/src/par.rs` | [Chunking](arko_index-reference.md#chunking) |
+| `FileRules` | `respect_ignore` (`false`), `exclude`, `include` (gitignore patterns, empty); `validate()`. | `arko_index/src/files.rs` | [What gets indexed](../arko_index/README.md#what-gets-indexed) |
+| `Report`, `Skipped`, `SkipReason` | What a walk indexed and skipped, with reasons and per-source ignore counts; `summary()`, `notable(limit)`. | `arko_index/src/files.rs` | [What gets indexed](../arko_index/README.md#what-gets-indexed) |
+| `threads()` | Worker count: `ARKO_INDEX_THREADS`, else the CPUs the process may use. | `arko_index/src/par.rs` | [Environment variables](arko_index-reference.md#environment-variables) |
+| `search::index[_with]`, `search::search`, `search::outline` | The JSON index (`index.json`), loaded whole by a search; at most ten hits. | `arko_index/src/search.rs` | [Search](arko_index-reference.md#search) |
+| `index2::index[_with]`, `index2::search`, `BuildStats` | The disk-resident index: generations published through `CURRENT2`, bounded build memory, searches that read only the query terms' postings. Same results as `search`. | `arko_index/src/index2.rs` | [Search](arko_index-reference.md#search) |
+| `bench_v1::Delta` | `sequence`, `added`, `removed` (IDs), `changed`. | `arko_index/src/bench_v1.rs` | [Durable watching](../arko_index/README.md#durable-watching) |
+| `bench_v1::open_watch[_with]`, `Watcher` | The polling watcher (any platform): `next_change`, `ack`, `snapshot`, `flush`, `report`, `rules_changed`. | `arko_index/src/watch.rs` | [Watchers](arko_index-reference.md#watchers) |
+| `watch2::Watcher2` | Linux: inotify plus metadata reconciliation, a record store and a write-ahead journal; `open[_with]`, `next_change`, `next_change_to`, `ack`, `report`, `rules_changed`, `file_count`, `stats`. | `arko_index/src/watch2.rs` | [Watchers](arko_index-reference.md#watchers) |
+| `bench_scan[_with]` | Unix: prints timings of the scan primitives. | `arko_index/src/scan.rs` | [Command line](arko_index-reference.md#command-line) |
 
-**Builds and jobs**
+### Defaults (arko_index)
 
-| Item | What it is | Code | Docs |
-|---|---|---|---|
-| `BuildSpec`, `BuildSpec::new`, `with_chunking`, `with_max_file_bytes`, `with_skip_directories`, `validate` | What an index covers: `name`, `root`, `include`, `exclude`, `skip_directories`, `max_file_bytes`, `chunking`; saved with the index at `start_build`. | `arko_index/src/config.rs` | [`BuildSpec` and chunking (arko_index)](#buildspec-and-chunking-arko_index) |
-| `ChunkingOptions`, `ChunkingOptions::validate` | How chunk-model requests are sized: `max_request_tokens`, `max_request_bytes`, `oversize`, `max_repair_rounds`, `repair_limit`. | `arko_index/src/config.rs` | [Request budget and large files](arko_index-reference.md#request-budget-and-large-files) |
-| `OversizePolicy::{Split, Skip, Block}` | What happens to a file over the chunk request budget. | `arko_index/src/config.rs` | [Request budget and large files](arko_index-reference.md#request-budget-and-large-files) |
-| `RepairLimitPolicy::{Merge, Block}` | What happens to a window whose cuts are still invalid after `max_repair_rounds` repair requests. | `arko_index/src/config.rs` | [Repairs](arko_index-reference.md#repairs) |
-| `DEFAULT_SKIPPED_DIRECTORIES`, `DEFAULT_MAX_FILE_BYTES` | The default `BuildSpec::skip_directories` list and `BuildSpec::max_file_bytes` (16 MiB). | `arko_index/src/config.rs` | [Which files are indexed](arko_index-reference.md#which-files-are-indexed) |
-| `ArkoIndex::start_build(spec)` | Creates a new index with its own ID, even when the name is already used, and starts its first job in the background; returns a `JobHandle`. | `arko_index/src/index.rs` | [Jobs, scheduling and retries](arko_index-reference.md#jobs-scheduling-and-retries) |
-| `ArkoIndex::start_update(index)` | Starts a job that rescans the source with the saved spec; fails while another job of the index is running, paused or blocked. | `arko_index/src/index.rs` | [Storage and updates](arko_index-reference.md#storage-and-updates) |
-| `ArkoIndex::pause(job)` | Drains a job running in this `ArkoIndex` to a checkpoint: queued requests and retry waits stop, requests in flight finish. Fails for a job being cancelled. | `arko_index/src/index.rs` | [Jobs, scheduling and retries](arko_index-reference.md#jobs-scheduling-and-retries) |
-| `ArkoIndex::cancel(job)` | Cancels a job, dropping its requests in flight; a `ready` or `pruned` job can't be cancelled. | `arko_index/src/index.rs` | [Jobs, scheduling and retries](arko_index-reference.md#jobs-scheduling-and-retries) |
-| `ArkoIndex::resume(job)` | Continues a `paused`, `blocked` or `failed` job from its checkpoints with the current runtime settings. | `arko_index/src/index.rs` | [Jobs, scheduling and retries](arko_index-reference.md#jobs-scheduling-and-retries) |
-| `ArkoIndex::status(job)`, `JobStatus` | A job's `job` and `index` IDs, `phase`, `problem`, file counts (`files`, `validated`, `bypassed`, `unchecked`, `skipped`), requests in flight across all jobs (`active_chunking`, `active_embeddings`) and `usage`. | `arko_index/src/index.rs` | [Jobs, scheduling and retries](arko_index-reference.md#jobs-scheduling-and-retries) |
-| Job phases (`JobStatus::phase`) | `snapshotting`, `chunking`, `embedding`, `ready`; the stops `paused`, `blocked`, `cancelled` and `failed`; `pruned` for a generation removed by `keep_generations`. | `arko_index/src/index.rs` | [Jobs (arko_index)](#jobs-arko_index) |
-| `ArkoIndex::events(job, after, limit)`, `Event` | Up to `limit` of a job's events with a sequence number above `after`: `sequence`, `kind`, JSON `detail`. | `arko_index/src/index.rs` | [Jobs, scheduling and retries](arko_index-reference.md#jobs-scheduling-and-retries) |
-| Event kinds (`Event::kind`) | `phase`, `snapshot`, `oversize`, `request_attempt`, `request_finished`, `deterministic_repair`, `pause_requested`, `settings_changed`, `embedding_plan`, `embedded`, `embedding_rejected`, `embedding_failed`, `pruned`. A `request_attempt` event's `detail.event.phase` is `started`, `failed`, `retry_wait`, `retries_exhausted`, `usage_limit` or `completed`. | `arko_index/src/index.rs`, `arko_index/src/scheduler.rs` | [Jobs, scheduling and retries](arko_index-reference.md#jobs-scheduling-and-retries) |
-| `ArkoIndex::request_artifact(job, id)` | A saved chunk-model request with its response or error and its attempt events. | `arko_index/src/index.rs` | [Jobs, scheduling and retries](arko_index-reference.md#jobs-scheduling-and-retries) |
-| `ArkoIndex::changes(job)`, `FileChange` | A job's file changes against the generation that was active when it scanned: `Added`, `Modified`, `Deleted`, `Moved { from, to }`. | `arko_index/src/index.rs`, `arko_index/src/watcher.rs` | [Storage and updates](arko_index-reference.md#storage-and-updates) |
-| `coalesce(old, new)` | The `FileChange`s between two path-to-content-hash maps; a move needs exactly one deleted and one added file with that content. | `arko_index/src/watcher.rs` | [Storage and updates](arko_index-reference.md#storage-and-updates) |
-| `ArkoIndex::list()`, `IndexInfo` | The database's indexes, ordered by name: `id`, `name` and active `generation`. | `arko_index/src/index.rs` | [Storage and updates](arko_index-reference.md#storage-and-updates) |
-| `ArkoIndex::delete(index)` | Removes an index and the data no remaining index uses; fails while one of its jobs is snapshotting, chunking or embedding. | `arko_index/src/index.rs` | [Storage and updates](arko_index-reference.md#storage-and-updates) |
-| `JobHandle` | The `index` and `job` IDs that `start_build` and `start_update` return. | `arko_index/src/index.rs` | [Jobs, scheduling and retries](arko_index-reference.md#jobs-scheduling-and-retries) |
-| `JobUsage`, `JobUsage::total`, `JobUsage::billed` | Token usage and cost of a job's provider responses (`JobStatus::usage`): `chunk_calls`, `chunking`, `embedding_calls`, `embedding`, `unreported_calls`, `rejected_calls`. | `arko_index/src/usage.rs` | [Usage and cost](arko_index-reference.md#usage-and-cost) |
-
-**Backend (module `backend`, not re-exported at the root)**
-
-| Item | What it is | Code | Docs |
-|---|---|---|---|
-| `backend::Backend` | Extension trait the index calls for providers. Required: `chunk`, `embed`, `tokens`, `limits`, `profile`, `output_tokenizer`; with defaults: `input_tokens`, `chunk_model_info`, `chunk_input`. `ArkoBackend` implements it; tests and offline hosts can supply their own. | `arko_index/src/backend.rs` | [Backend and chunk model (arko_index)](#backend-and-chunk-model-arko_index) |
-| `backend::ArkoBackend::new(llm, embeddings, profile)` | The shipped backend: Voyage embeddings and token counts for `profile` (loading the `voyageai/<model>` tokenizer), and chunk boundaries from GPT-5.6 Luna with `default_chunk_config()`. | `arko_index/src/backend.rs` | [Chunk model](arko_index-reference.md#chunk-model) |
-| `backend::ArkoBackend::with_chunk_model(model, config)` | Chunk boundaries from another `arko_ai` model and generation settings; the backend keeps ownership of the tool configuration. | `arko_index/src/backend.rs` | [Chunk model](arko_index-reference.md#chunk-model) |
-| `backend::default_chunk_config()` | The default chunk-model settings: `high` reasoning effort with summaries, `low` verbosity. | `arko_index/src/backend.rs` | [Chunk model](arko_index-reference.md#chunk-model) |
-| `backend::ModelRequest` | One chunk-model request: `system`, `prompt`, `tool`, `schema`, `cache_key` (the job's ID) and `stream_idle_timeout_ms` (from `Config`). | `arko_index/src/backend.rs` | [Chunk model](arko_index-reference.md#chunk-model) |
-| `backend::ModelReply`, `backend::VectorReply` | A backend's answers: the tool call's arguments (`value`), the provider's call record (`usage`) and `usage_info`; embedding `vectors`, `billed_tokens` and `usage_info`. | `arko_index/src/backend.rs` | [Usage and cost](arko_index-reference.md#usage-and-cost) |
-| `backend::ChunkInput`, `backend::ChunkTokenizer::O200kBase`, `backend::chunk_tokenizer(model)` | What sizes chunk requests: the chunk model's `tokenizer` (`o200k_base` for models of the OpenAI provider, none for others) and `max_input_tokens`. | `arko_index/src/backend.rs` | [Request budget and large files](arko_index-reference.md#request-budget-and-large-files) |
-| `backend::Limits`, `backend::embedding_limits(details)`, `backend::UNPUBLISHED_BATCH_TOKENS` | Embedding request limits (`item_tokens`, `batch_tokens`, `batch_items`) of a Voyage model, with 120,000 tokens per request where Voyage publishes no limit (`voyage-code-4`). | `arko_index/src/backend.rs` | [Embeddings](arko_index-reference.md#embeddings) |
-| `backend::ChunkModelInfo`, `backend::ChunkModelInfo::new(model, config)` | The chunk `model` and `reasoning` recorded in each job's `snapshot` event. | `arko_index/src/backend.rs` | [Chunk model](arko_index-reference.md#chunk-model) |
-
-**Search**
-
-| Item | What it is | Code | Docs |
-|---|---|---|---|
-| `ArkoIndex::search(index, query, options)` | Searches the active generation, or a cursor's generation, and returns a `SearchPage`. | `arko_index/src/search.rs` | [Search](arko_index-reference.md#search) |
-| `SearchMode::{Lexical, Semantic, Hybrid}` | FTS5 BM25 over path, text and identifier parts; exact cosine similarity; or both fused by reciprocal rank. | `arko_index/src/search.rs` | [Search](arko_index-reference.md#search) |
-| `SearchOptions` | `mode`, `top_k`, `min_chunk_bytes`, `path_prefix`, `literal`, `cursor`, `rebuild_file_limit`. | `arko_index/src/search.rs` | [Search and judge (arko_index)](#search-and-judge-arko_index) |
-| `SearchPage` | `generation`, `mode`, `hits`, `next`, `omitted_hits`, `candidate_count`, `fresh_at_publication`, `rebuild`, `search_tokens`, `rebuild_tokens`, `tokenizer`, and `judge` for judged searches. | `arko_index/src/search.rs` | [Search](arko_index-reference.md#search) |
-| `SearchHit` | One result: `id`, `path`, `snapshot`, `start_byte`, `end_byte`, `first_line`, `last_line`, `structure`, `score`, `score_type`, the complete `text`, `other_locations` and `may_be_stale`. | `arko_index/src/search.rs` | [Search](arko_index-reference.md#search) |
-| `SearchCursor` | The `generation`, `query_hash` and `offset` of the next page (`SearchPage::next`). | `arko_index/src/search.rs` | [Search](arko_index-reference.md#search) |
-| `RebuildNotice` | `SearchPage::rebuild` while an update is unfinished: its `job`, `phase`, `affected_files`, `omitted_files`, `determining_changes` and `message`. | `arko_index/src/search.rs` | [Search](arko_index-reference.md#search) |
-| `ArkoIndex::read_chunks(index, generation, ids, neighbors)`, `ChunkRead` | The named chunks of a complete generation, plus up to `neighbors` adjacent chunks on each side in the same file, ordered by path and position. | `arko_index/src/search.rs` | [Search](arko_index-reference.md#search) |
-
-**Judge**
-
-| Item | What it is | Code | Docs |
-|---|---|---|---|
-| `ArkoIndex::search_with_judge(index, query, options, judge, judging)` | Opt-in: searches for `candidate_limit` candidates, lets the judge filter and order them, then applies `top_k`. | `arko_index/src/judge.rs` | [LLM judge](arko_index-reference.md#llm-judge) |
-| `SearchJudge` | Extension trait for judges: `select` is required; `name` (default `custom`) and `select_with_usage` have defaults. | `arko_index/src/judge.rs` | [LLM judge](arko_index-reference.md#llm-judge) |
-| `LlmSearchJudge::new(client, model)`, `with_generation_config`, `with_instructions`, `with_stream_idle_timeout` | The shipped judge: one `select_results` tool call to an `arko_ai` model; the judge owns the tool configuration. | `arko_index/src/judge.rs` | [LLM judge](arko_index-reference.md#llm-judge) |
-| `JudgeOptions` | `candidate_limit`, `max_attempts`, `max_transient_attempts`. | `arko_index/src/judge.rs` | [Search and judge (arko_index)](#search-and-judge-arko_index) |
-| `JudgeSelection`, `JudgeExclusion` | A judge's answer: `ordered_ids`, and the `excluded` IDs, each with a `reason`. | `arko_index/src/judge.rs` | [LLM judge](arko_index-reference.md#llm-judge) |
-| `JudgeReport` | `SearchPage::judge`: `name`, `attempts`, `usage`, `examined_candidates`, `unexamined_candidates`, `selected_count`, `selected_beyond_limit`, `excluded`. | `arko_index/src/judge.rs` | [LLM judge](arko_index-reference.md#llm-judge) |
-| `JudgeAttempt` | One judge call's `result` and the `usage` of its response, from `select_with_usage`. | `arko_index/src/judge.rs` | [LLM judge](arko_index-reference.md#llm-judge) |
-| `MAX_JUDGE_RETRY_WAIT` | 60 s: a judged search fails instead of waiting longer before a retry. | `arko_index/src/judge.rs` | [LLM judge](arko_index-reference.md#llm-judge) |
-
-**Watcher**
-
-| Item | What it is | Code | Docs |
-|---|---|---|---|
-| `ArkoIndex::watch(index, options)` | Watches the index root and starts, resumes or holds updates; returns a `WatchHandle`. | `arko_index/src/watcher.rs` | [Watching for changes](arko_index-reference.md#watching-for-changes) |
-| `WatchOptions`, `WatchOptions::new(debounce)`, `with_reconcile`, `with_resume_interrupted`, `with_retry_blocked_after` | `debounce`, `reconcile`, `resume_interrupted`, `retry_blocked_after`. | `arko_index/src/watcher.rs` | [Watcher (arko_index)](#watcher-arko_index) |
-| `WatchHandle::subscribe()`, `WatchHandle::stop()` | Receive the watcher's events from then on (a receiver more than 64 events behind misses the oldest); stop the watcher. | `arko_index/src/watcher.rs` | [Watching for changes](arko_index-reference.md#watching-for-changes) |
-| `WatchEvent` | `Scanned { files, changes }`, `UpdateStarted { job }`, `Resumed { job, reason }`, `Held { job, phase, problem }`, `Failed { error }`. | `arko_index/src/watcher.rs` | [Watching for changes](arko_index-reference.md#watching-for-changes) |
-
-**Building blocks (`source`, `chunker`, `packing`, `budget`)**
-
-The index calls these itself; a host doesn't need them to build, update or search.
-
-| Item | What it is | Code | Docs |
-|---|---|---|---|
-| `source::scan(spec)`, `source::Manifest`, `source::Exclusion` | The scan a job runs: the files a spec selects (`files`), each exclusion with its reason (`excluded`), the manifest `hash` and the `directories` entered. | `arko_index/src/source.rs` | [Which files are indexed](arko_index-reference.md#which-files-are-indexed) |
-| `source::TOO_LARGE_TO_READ`, `source::TOO_LARGE_FOR_A_REQUEST` | The exclusion reasons "too large (over max_file_bytes)" and "too large (over the chunk request budget)". | `arko_index/src/source.rs` | [Which files are indexed](arko_index-reference.md#which-files-are-indexed) |
-| `source::Snapshot`, `source::hash` | A file normalized to LF line endings (`path`, `hash`, `original_hash`, `text`, `line_starts`) with row helpers (`new`, `rows`, `line_end`, `row_at`, `line`, `numbered`, `tail_matches`); `hash` is a SHA-256 hex digest. | `arko_index/src/source.rs` | [Chunking and validation](arko_index-reference.md#chunking-and-validation) |
-| `source::Structure`, `source::structure(snapshot)` | A file's guarded byte ranges (`protected`) and `status` (`rust-guarded`, `markdown-guarded` or `unchecked`); `legal(byte)` tells whether a cut may end there. | `arko_index/src/source.rs` | [Chunking and validation](arko_index-reference.md#chunking-and-validation) |
-| `chunker::POLICY_VERSION`, `GROUPING_GUIDANCE`, `PROMPT`, `REPAIR_PROMPT`, `initial_prompt()`, `policy_hash()` | The chunking policy: its version, its prompts, and the hash each `snapshot` event records as `chunking_policy`. | `arko_index/src/chunker.rs` | [Repairs](arko_index-reference.md#repairs) |
-| `chunker::{Cut, Cuts, Window, Region, Repair}`, `windows`, `request`, `failures`, `spans`, `remove_impossible_cuts`, `merge_invalid_cuts`, `repair`, `apply_repair` | The cut format (`after_line` and an exact `tail`), the `submit_cuts` and `repair_cuts` requests, and the validation and repair steps the index runs on replies. | `arko_index/src/chunker.rs` | [Chunking and validation](arko_index-reference.md#chunking-and-validation) |
-| `packing::{Payload, payload, pack, normalize}` | Embedding payloads keyed by profile and text, first-fit-decreasing packing into requests within `Limits`, and normalization of vectors to unit length. | `arko_index/src/packing.rs` | [Embeddings](arko_index-reference.md#embeddings) |
-| `budget::FALLBACK_MAX_INPUT_TOKENS`, `DEFAULT_BUDGET_PERCENT`, `BYTES_PER_TOKEN` | 128,000 tokens, assumed when the chunk model's input limit is unknown; the default budget's 10% share of that limit; 4 bytes per token for budgets in bytes. | `arko_index/src/budget.rs` | [Request budget and large files](arko_index-reference.md#request-budget-and-large-files) |
-
-**Example binaries**
-
-| Item | What it is | Code | Docs |
-|---|---|---|---|
-| `arko_index_cli` | Example CLI: `build ROOT`, `update INDEX_ID`, `resume JOB_ID`, `status JOB_ID`, `list`, `search INDEX_ID QUERY`, `read INDEX_ID GENERATION CHUNK_ID...`, `watch INDEX_ID`. | `arko_index/examples/arko_index_cli.rs`, `arko_index/examples/support/search_judge.rs` | [Example CLI (arko_index)](#example-cli-arko_index) |
-| `retrieval_eval DATABASE INDEX_ID QUERIES_JSON OUTPUT_DIRECTORY` | Research example: runs a semantic and a hybrid search (top 10, 40-byte minimum) for each query in the JSON file and saves every page; needs `VOYAGE_API_KEY`. | `arko_index/examples/retrieval_eval.rs` | [Example CLI (arko_index)](#example-cli-arko_index) |
-| `retrieval_judge OAUTH_FILE EVALUATION_DIRECTORY` | Research example: grades each query's candidates in `judging-pool.json` with GPT-5.6 Luna at `max` effort over ChatGPT OAuth. | `arko_index/examples/retrieval_judge.rs` | [Example CLI (arko_index)](#example-cli-arko_index) |
-| `retrieval_select OAUTH_FILE EVALUATION_DIRECTORY [compact\|conservative] [max\|high]` | Research example: GPT-5.6 Luna selection over saved search results; `conservative` and `max` by default. | `arko_index/examples/retrieval_select.rs` | [Example CLI (arko_index)](#example-cli-arko_index) |
-
-### `Config` (arko_index)
-
-Given to `ArkoIndex::open`; fields omitted from JSON take their defaults. `open` rejects a zero `batch_count`, `concurrency`, `embedding_concurrency` or `max_transient_attempts`; `Some(0)` for `query_max_transient_attempts`, `keep_generations`, `stream_idle_timeout_ms`, `embedding_batch_tokens` or `embedding_batch_items`; and an empty `tokenizer_revision`. `vector_cache_bytes: 0` caches nothing, and `max_capacity_wait_ms: Some(0)` fails a request at its first capacity signal. A resumed job takes every field except `embedding` from the current configuration.
-
-| Field | Default and omitted | Notes |
-|---|---|---|
-| `batch_count` | 6 | Most windows per initial chunk request, within the request budget; a file within the budget is one window. |
-| `concurrency` | 2 | Chunk-model requests in flight, shared by all jobs of the `ArkoIndex`. |
-| `embedding_concurrency` | 2 | Embedding requests in flight, search query embeddings included. |
-| `embedding` | `voyage-4`, 1,024 dimensions, `tokenizer_revision: None` | Must embed as the backend's profile does. An unset revision loads the tokenizer repository's current version (`main`) and compares, and keys vectors, as `FORMER_DEFAULT_TOKENIZER_REVISION`, so indexes built with that former default keep working; `Some("main")` is a different profile. See [Embeddings](arko_index-reference.md#embeddings). |
-| `vector_cache_bytes` | 64 MiB | Memory for the vectors of the most recent semantic or hybrid search's generation and filters; 0 caches nothing. Results are the same either way. |
-| `max_transient_attempts` | 10 | A request fails at this many transient failures; capacity signals don't count. |
-| `max_capacity_wait_ms` | `Some(900_000)` (15 min); JSON `null` gives `None` | Total time one request may wait out capacity signals; `None` waits as long as the provider reports overload. Search query embeddings wait too. |
-| `query_priority` | `false` | Opt-in: search query embeddings are dispatched before queued build embeddings. |
-| `query_max_transient_attempts` | `None`: `max_transient_attempts` | Opt-in retry budget for search query embeddings. |
-| `embedding_batch_tokens`, `embedding_batch_items` | `None`: the model's limits | Opt-in: fewer tokens or inputs per embedding request. They can't raise the model's limits, and `embedding_batch_tokens` can't be below the per-input limit. |
-| `keep_generations` | `None`: every generation is kept until the index is deleted | Opt-in: `Some(n)` prunes the index's complete generations beyond the newest `n` each time a job publishes. |
-| `synchronous` | `Full` | `Normal` syncs at WAL checkpoints; power loss can lose the last commits, never corrupting the database. |
-| `stream_idle_timeout_ms` | `None` | Opt-in: a chunk-model response is cut off after this many milliseconds without data, a transient failure that is retried. No total deadline; make it generous. See [Jobs, scheduling and retries](arko_index-reference.md#jobs-scheduling-and-retries). |
-
-### `BuildSpec` and chunking (arko_index)
-
-`BuildSpec::new(name, root)` sets the defaults below; in JSON, `name` and `root` are required and the other fields take these defaults. `start_build` rejects `max_file_bytes: 0` and zero chunk limits or repair rounds, makes `root` canonical, and saves the spec with the index. No call changes it later: updates, the watcher and search's staleness check use the saved spec. The library has no default name.
-
-| Field | Default and omitted | Notes |
-|---|---|---|
-| `include`, `exclude` | Empty | Case-sensitive globs on the root-relative path with `/` separators; `*` also matches `/`. With `include`, exactly the matching files are considered, whatever their extension, instead of the built-in list of file names and extensions; `exclude` and the other filters still apply. |
-| `skip_directories` | `DEFAULT_SKIPPED_DIRECTORIES`: `.git`, `target`, `node_modules`, `.runtime`, `.cache`, `__pycache__`, `.venv`, `dist` | Exact names, never entered, at any depth; an empty list skips none, `.git` included. |
-| `max_file_bytes` | 16 MiB (`DEFAULT_MAX_FILE_BYTES`) | Larger files are excluded unread, with the reason "too large (over max_file_bytes)". |
-| `chunking.max_request_tokens` | `None`: 10% of the chunk model's input limit on the client's auth path | For chunk models of the OpenAI provider, counted in `o200k_base` tokens: 92,200 for GPT-5.6 and GPT-6 with an API key, 27,200 over ChatGPT OAuth. The budget counts only the rendered file content (header lines and numbered rows); the instructions and tool schema come on top. For models measured in bytes, a set value applies as 4 bytes per token unless `max_request_bytes` is set. |
-| `chunking.max_request_bytes` | `None`: no byte limit for OpenAI chunk models; for others, 4 bytes per token of the default share | Models of other providers, OpenRouter included, are measured in bytes. An unknown input limit is taken as 128,000 tokens, a 51,200-byte default, and the job logs a warning. For OpenAI models both limits apply when both are set; for others this one replaces `max_request_tokens`. |
-| `chunking.oversize` | `Split` | A file over the budget is split into windows at its strongest boundaries: Markdown headings, then top-level blocks; in Rust files that parse, items, then members, then statements; in other files, blank lines and the outermost indentation and bracket depth; then single lines. `Skip` leaves it out with the reason "too large (over the chunk request budget)"; `Block` blocks the job before any model request, naming the files. |
-| `chunking.max_repair_rounds` | `Some(5)`; JSON `null` gives `None` | Repair requests per window; `None` repairs until every cut is valid. |
-| `chunking.repair_limit` | `Merge` | When the repairs run out: `Merge` drops the invalid cuts, merging each disputed region into its neighbor (a `deterministic_repair` event); `Block` leaves the file unfinished and blocks the job. |
-
-The OpenAI-or-bytes rule is `ArkoBackend`'s; a custom `Backend` reports its model's tokenizer and input limit through `Backend::chunk_input`. A job resolves its budget when it scans the source, records it as `chunk_budget` in its `snapshot` event, and keeps it when resumed, even if the client's auth path changed. Hidden files are indexed; `.gitignore` and `.ignore` files (the root's parent directories included), `.git/info/exclude` and the global git excludes file apply, even outside a repository. Symbolic links, files that aren't valid UTF-8 and files with NUL bytes are excluded with a reason. See [Which files are indexed](arko_index-reference.md#which-files-are-indexed) and [Request budget and large files](arko_index-reference.md#request-budget-and-large-files).
-
-### Backend and chunk model (arko_index)
-
-| Setting | Default | Notes |
-|---|---|---|
-| Chunk model of `ArkoBackend::new` | GPT-5.6 Luna with `default_chunk_config()`: `high` reasoning effort with summaries, `low` verbosity | `with_chunk_model(model, config)` selects another; the client passed to `new` must hold credentials for that model's provider. Changing the model keeps the boundaries of unchanged files. |
-| Chunk tool configuration | The boundary tool (`submit_cuts`, or `repair_cuts` for repairs) replaces any `tool_config` in the settings | Forced where the model allows forcing it with those settings, with parallel calls disabled where supported. A reply must be exactly one call to the tool in a turn that ended with `EndTurn` or `ToolUse`: a refusal or a token or context limit fails the request, and a missing, extra or malformed call is retried as a transient failure. |
-| Prompt-cache key of chunk requests | The job's ID (`ModelRequest::cache_key`) | The same for initial requests and repairs, before and after a resume. `ArkoBackend` sends it as the conversation's prompt-cache key, which over ChatGPT OAuth is also the `session-id` header. |
-| Embedding requests of `ArkoBackend` | Voyage, the profile's dimensions, truncation off | Input type `document` for chunks and `query` for search queries. |
-| `Backend::chunk_input` | No tokenizer, unknown input limit | Chunk requests are then measured in bytes against 51,200 bytes (10% of an assumed 128,000 tokens, at 4 bytes per token), with a warning. |
-| `Backend::input_tokens` | `Backend::tokens` | The count used for embedding inputs and the query limit. |
-| `Backend::chunk_model_info` | `None` | The `snapshot` event then records no chunk model. |
-
-### Search and judge (arko_index)
-
-`SearchOptions` and `JudgeOptions` fields omitted from JSON take these defaults.
-
-| Setting | Default and omitted | Notes |
-|---|---|---|
-| `SearchOptions::mode` | `Hybrid` | `Lexical`, `Semantic`. Semantic and hybrid searches of a generation embedded with another profile fail with `Error::Invalid`; lexical search still works. |
-| `SearchOptions::top_k` | `Some(10)` | Results per page, with a cursor for the rest; `None` returns every eligible result; `Some(0)` is an error. |
-| `SearchOptions::min_chunk_bytes` | 40 | Chunks shorter than this many bytes are left out of search, not of `read_chunks`; 0 keeps them. |
-| `SearchOptions::path_prefix`, `SearchOptions::literal` | `None` | A plain prefix of the root-relative path; a case-sensitive substring of the chunk text. |
-| `SearchOptions::cursor` | `None` | A previous page's `next`. It needs the same query, `mode`, `top_k`, `min_chunk_bytes`, `path_prefix` and `literal`, or the search returns `Error::Stale`. |
-| `SearchOptions::rebuild_file_limit` | `Some(100)` | Affected paths a rebuild notice lists; `None` lists all. |
-| `JudgeOptions::candidate_limit` | 20 | Candidates retrieved and sent to the judge; must be positive and at least `top_k`. |
-| `JudgeOptions::max_attempts` | 2 | The search fails when this many judge replies have failed validation, refused or incomplete ones included. |
-| `JudgeOptions::max_transient_attempts` | 3 | The search fails when this many transient provider failures have occurred. A retry delay over 60 s (`MAX_JUDGE_RETRY_WAIT`) fails it at once; other provider errors, plan usage limits included, are returned at once. |
-| `LlmSearchJudge::new(client, model)` | `GenerationConfig::default()`, no extra instructions, no idle timeout | No default model. Judged searches take no cursor and return none. |
-
-Every search hit carries `may_be_stale`: true when the newest unfinished update (running, paused or blocked) lists its file as affected, or when the file under the index root no longer matches the chunk's snapshot (changed, removed, unreadable or over `max_file_bytes`). When the root isn't accessible, only the first applies. Search returns `Error::Blocked` until an index's first build has published.
-
-### Watcher (arko_index)
-
-`WatchOptions` has no serde form. `watch` rejects zero durations.
-
-| Field | Default | Notes |
-|---|---|---|
-| `debounce` | 500 ms | How long the source must be quiet after a file-system event before it is scanned. |
-| `reconcile` | `Some(30 s)` | Interval of full scans that catch unreported events; `None` scans at start and after events, and, while an update is held, looks again every twenty debounce periods. |
-| `resume_interrupted` | `true` | Resumes an update paused with the problem "process interrupted; resume persisted work". |
-| `retry_blocked_after` | `None` | Opt-in: resumes an update blocked only by transient provider failures, this long after the watcher found it blocked. |
-
-An update paused with `pause` or by a usage limit, blocked for another reason, or one the watcher failed to resume, is held: a `Held` event is sent once per job, phase and problem, and no other update starts until the host resumes or cancels it. Events under directories the last scan didn't enter are ignored. See [Watching for changes](arko_index-reference.md#watching-for-changes).
-
-### Jobs (arko_index)
-
-- `start_build` and `start_update` return at once and run the job in the background: `snapshotting`, `chunking`, `embedding`, then `ready`. A pause request or a plan usage limit stops it as `paused`; a provider error, an invalid response or files that still need repair as `blocked`; `cancel` as `cancelled`; a local I/O, database, JSON or worker failure as `failed`.
-- Transient failures are retried after a backoff that starts at 1 s and doubles up to 60 s, jittered and never shorter than the provider's delay. After `max_transient_attempts` a chunk request fails and the job is `blocked`; its `phase` event has `retryable: true` when only such failures blocked it. An embedding request that exhausts retries records `embedding_failed` before the job stops. Capacity signals wait without using attempts, up to `max_capacity_wait_ms`.
-- Initial chunk requests and build embeddings are dispatched before repairs and retries; with `query_priority`, search query embeddings come first.
-- A plan usage limit (ChatGPT `usage_limit_reached`) stops the job's queued requests and pauses it, with the reset time when the provider gave one. Nothing resumes it automatically.
-- A job left running by a stopped process is `paused` when the database is next opened, with the problem "process interrupted; resume persisted work", or "paused" if a pause had been requested. Opening writes a matching `phase` event in the same transaction. Only a watcher resumes such a job automatically.
-- `resume` requires the job's embedding profile, the current chunking policy (for a job that has scanned its source) and no newer published generation of the index. Every other `Config` field comes from the current configuration; changes are logged and recorded as a `settings_changed` event.
-- A paused or blocked job keeps new updates of its index from starting; a failed or cancelled one doesn't.
-- An update reuses validated boundaries of files with the same content and extension from the active generation and from the newest cancelled or failed job of the index, only when those ran with the same embedding profile and chunking policy. Vectors are reused per text and profile.
-
-See [Jobs, scheduling and retries](arko_index-reference.md#jobs-scheduling-and-retries).
+- Every regular file under the root is indexed, hidden and gitignored files included. Built-in exclusions: `.git` directories and files, directories with a valid `CACHEDIR.TAG` (not the root), and the tool's state directories. Ignore files are read only with `respect_ignore`, and never above the root.
+- Binary, non-UTF-8, unreadable and undecodably named entries are skipped and reported; a walk never stops for them. Symbolic links are not followed.
+- `max_bytes` 4,096; at most ten search hits; all available CPUs; a reorder window of 32 MB of source per thread; `index2` postings budget 256 MB in the CLI.
 
 ### Persisted data (arko_index)
 
-- The database schema is version 2. A version 1 database is migrated when opened; a database with tables but no version, or with a newer version, is refused.
-- Content is stored once: a snapshot per normalized file content, a chunk text and its full-text entry per location and content (shared by the generations and indexes that hold it), a vector per text and embedding profile. `delete` and pruning remove data nothing refers to, and remove vectors only while no job of the database is unfinished.
-- The database stores no credentials: the saved configuration, specs and chunk requests hold none.
-- A saved `BuildSpec` without `skip_directories` loads with the default list; one without `max_file_bytes` loads with 16 MiB, so at its next update an older index excludes files over 16 MiB with the reason "too large (over max_file_bytes)". To keep them, build again with a larger `with_max_file_bytes`.
-- A job saved without a chunk budget batches its initial requests by `batch_count` only.
-- `JobStatus::active_chunking` also reads the former name `active_luna`.
-- A profile with an unset `tokenizer_revision` is saved without it; a saved profile holding `FORMER_DEFAULT_TOKENIZER_REVISION` matches an unset one.
-- Saved usage totals whose costs aren't numbers load with those costs as zero; totals that can't be read at all are logged and restart from zero.
+- State directories hold the `.arko-index-state` marker and `report.json`, plus `index.json` (`search`), `CURRENT2` and `index2-*` generations (`index2`), `watch.json` (`open_watch`) or `watch2.snap`, `watch2.recs.N` and `watch2.wal` (`Watcher2`).
+- arko_index is unpublished and its on-disk data has no compatibility guarantee between versions; the SQLite databases of the earlier, model-chunked arko_index are not readable. A watcher reuses its parse cache only when the engine digest (chunking sources and locked tree-sitter versions) matches, and otherwise re-chunks without spurious deltas.
 
 ### Example CLI (arko_index)
 
-`arko_index_cli`: global flags come before the command. Settings without a flag keep the library defaults.
-
-| Flag | Default | Notes |
-|---|---|---|
-| `--database PATH` | Required | Created if missing, with its parent directories. |
-| `--oauth-file PATH` | Unset: `LLMClient::from_env()` | An OpenAI client with ChatGPT OAuth credentials from a Codex `auth.json`, kept in step with the file; see [ChatGPT OAuth credentials](../arko_ai/README.md#chatgpt-oauth-credentials). |
-| `--batch-count N`, `--concurrency N` | 6, 2 | `Config::batch_count` and `Config::concurrency`. |
-| `--stream-idle-timeout-secs S` | Unset | `Config::stream_idle_timeout_ms`, also applied to the judge. |
-| `build ROOT --name NAME` | The root directory's name | |
-| `search --lexical`, `--semantic` | Hybrid | Mutually exclusive. |
-| `search --top-k N`, `--min-chunk-bytes N`, `--rebuild-file-limit N` | 10, 40, 100 | |
-| `watch --debounce-ms MS`, `--reconcile-secs S` | 500, 30 | `--reconcile-secs 0` turns periodic scans off. |
-| `search --judge` | Off | Every other `--judge-*` flag requires it. |
-| `--judge-provider` | `openai` | Or `anthropic`. |
-| `--judge-model ID` | `gpt-5.6-luna` for OpenAI | Required for Anthropic. |
-| `--judge-effort LEVEL` | `high` for an OpenAI reasoning model, unless `--judge-config` sets `reasoning` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; requires an OpenAI reasoning model. |
-| `--judge-candidates N`, `--judge-attempts N` | 20, 2 | `JudgeOptions::candidate_limit` and `max_attempts`; transient failures keep the library's 3. |
-| `--judge-auth` | `inherit` | `inherit` reuses the global client (OpenAI only); `api-key` reads `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, or the variable `--judge-api-key-env NAME` names; `oauth` reads `--judge-oauth-file PATH`, else `--oauth-file`. |
-| `--judge-config PATH` | Unset: `GenerationConfig` defaults | JSON `GenerationConfig` fields; unknown fields and `tool_config` are rejected. |
-| `--judge-instructions-file PATH` | Unset | Selection preferences appended to the judge's instructions. |
-
-`list`, `status` and `read` load no backend, so they need no credentials and no tokenizer. The other commands load the Voyage tokenizer; those that embed need `VOYAGE_API_KEY`. `build`, `update`, `resume` and `watch` need OpenAI credentials for the chunk model (GPT-5.6 Luna; no flag changes it), and so does `search --judge` with the default `--judge-auth inherit`. Ctrl-C pauses a running `build`, `update` or `resume` job. In `watch`, it stops the watcher and leaves an update it started unfinished: the database lists that update as paused when next opened, and the next `watch` resumes it. Logs go to standard error at `warn,arko_index=info` unless `RUST_LOG` is set. See [Example CLI](arko_index-reference.md#example-cli) and [Judge options](arko_index-reference.md#judge-options).
+`arko_index_cli` (`cargo run --release -p arko_index --example arko_index_cli -- COMMAND`): `chunk`, `outline`, `index`/`search`, `index2`/`search2`, `watch`, `watch2` (Linux) and `bench-scan` (Unix). Commands that walk a tree take `--respect-ignore`, `--exclude PATTERN`, `--include PATTERN` and `--report FILE`. See [Command line](arko_index-reference.md#command-line).
 
 ## Across crates
 
@@ -1886,19 +1674,15 @@ These defaults interact across the crates:
 
 - **Model requests have no total deadline.** A response is awaited while its connection
   stays open. The opt-in stream-idle limits are `LLMClient::with_stream_idle_timeout`,
-  `LLMRetryConfig::stream_idle_timeout_ms`, `Config::stream_idle_timeout_ms` for
-  `arko_index`, and `LlmSearchJudge::with_stream_idle_timeout`. The other relevant
+  and `LLMRetryConfig::stream_idle_timeout_ms`. The other relevant
   limits are the 30-second connect timeout, the 60-second OAuth refresh timeout, the
   `arko_agents` host tool timeout (20 minutes by default), `wait_for_message`'s default
-  270-second limit, the terminal wait cap, the judge's 60-second retry-delay cap, and the
-  workflow's 30-second cancellation grace period. A graceful stop's wrap-up and a
+  270-second limit, the terminal wait cap, and the workflow's 30-second cancellation grace period. A graceful stop's wrap-up and a
   `StopAwareCommand`'s stop graces (10 s, then 5 s after `SIGTERM`) count only once a stop
   is under way; nothing asks for a wrap-up by default.
 - **Retries are layered.** `arko_ai` only resends an expired ChatGPT OAuth request once.
   `arko_agents` owns model-call retries and pauses at plan usage limits. `arko_workflows`
-  answers those pauses automatically by default. `arko_index` gives chunk and embedding
-  requests up to ten transient attempts and waits up to 15 minutes for capacity; judge
-  validation and transient failures have separate budgets.
+  answers those pauses automatically by default.
 - **Error kinds travel with the failure.** `arko_ai::Error::kind` classifies a failure
   (`Authentication`, `ContextOverflow`, `Billing`, ...) beside its retry class;
   `arko_agents` records it on error-recovery pauses, failures and `ErrorEncountered`;
@@ -1913,11 +1697,10 @@ These defaults interact across the crates:
   than `ask_user`; a workflow uses `ApproveAll` by default. Workspace path policy applies
   only to parameters marked as paths. Terminal, MCP and command tools are not confined by
   that file-path policy.
-- **Caching is enabled by default.** Each conversation has its own cache key, while an
-  `arko_index` job uses one key for all of its chunk requests and repairs.
+- **Caching is enabled by default.** Each conversation has its own cache key.
 - **Credentials are explicit.** Only `LLMClient::from_env` and
-  `EmbeddingClient::from_env` read environment credentials. `WorkflowBuilder` and
-  `ArkoIndex` do not; the Python workflow binding constructs its client with
+  `EmbeddingClient::from_env` read environment credentials. `WorkflowBuilder` does
+  not; arko_index needs none; the Python workflow binding constructs its client with
   `LLMClient::from_env()`.
 - **Costs use billed amounts.** Budgets and task totals use `UsageInfo::billed()`;
   ChatGPT OAuth subscription calls contribute zero billed cost while their list-price
@@ -1931,7 +1714,9 @@ These defaults interact across the crates:
 - **Persistence is durable but compatible.** Task files, checkpoints, event logs and
   request traces can contain full conversations and use default file permissions. New
   serialized fields have defaults and unknown fields are ignored; crate-specific
-  migration rules are documented in each persisted-data section.
+  migration rules are documented in each persisted-data section. arko_index's index and
+  watcher state is the exception: no compatibility guarantee while the crate is
+  unpublished.
 
 ## Complete workflow example
 

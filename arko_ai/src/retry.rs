@@ -1,7 +1,7 @@
 //! Retry delays shared by the framework's recovery loops.
 //!
-//! arko_ai itself does not retry model calls; callers (arko_agents, arko_index,
-//! and the OpenAI OAuth refresh loop) decide *whether* to retry using
+//! arko_ai itself does not retry model calls; callers (arko_agents and the
+//! OpenAI OAuth refresh loop) decide *whether* to retry using
 //! [`Error::retry_class`](crate::Error::retry_class) and use
 //! [`BackoffPolicy`] to decide *how long* to wait.
 
@@ -142,7 +142,7 @@ mod tests {
             let huge = Duration::from_secs(u64::MAX);
             assert!(policy.delay(3, Some(huge), sample) >= huge);
             // Hints parsed from responses are capped, so a caller can add the
-            // delay to the current time (as arko_index's scheduler does).
+            // delay to the current time.
             let delay = policy.delay(3, Some(MAX_SERVER_DELAY_HINT), sample);
             assert!(
                 delay <= MAX_SERVER_DELAY_HINT + Duration::from_secs(30),

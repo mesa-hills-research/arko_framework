@@ -635,7 +635,7 @@ read as Codex reads it). All are capped at `retry::MAX_SERVER_DELAY_HINT` (30 da
 hint can always be added to the current time.
 
 arko_ai does not retry model calls itself. `arko_ai::retry::BackoffPolicy` is the shared
-backoff used by arko_agents, arko_index and the OAuth refresh retries: exponential with a
+backoff used by arko_agents and the OAuth refresh retries: exponential with a
 cap and equal jitter, treating a server hint as a minimum with jitter above it.
 
 ### Error kinds

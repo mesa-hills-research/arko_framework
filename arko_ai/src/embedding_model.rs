@@ -83,7 +83,7 @@ impl EmbeddingModelDetails {
     /// aggregate token limits are left to the provider. Voyage answered
     /// (2026-10-04) that it allows 320,000 tokens per request ("The max
     /// allowed tokens per submitted batch is 320000"); it stays unset until
-    /// published, so arko_index keeps its 120,000-token default batches.
+    /// published.
     pub fn voyage_code_4() -> Self {
         Self {
             provider: EmbeddingProviderIdentifier::Voyage,
