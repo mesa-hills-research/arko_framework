@@ -61,7 +61,12 @@ fn undecodable_paths_are_skipped_or_rejected_instead_of_lossy_collisions() {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};
     let root = tempfile::tempdir().unwrap();
     let invalid = root.path().join(OsString::from_vec(b"a\xff.rs".to_vec()));
-    fs::write(&invalid, "fn invalid_name() {}\n").unwrap();
+    // APFS (macOS) refuses names that aren't UTF-8, so the case can't arise there.
+    if let Err(error) = fs::write(&invalid, "fn invalid_name() {}\n") {
+        assert_eq!(error.raw_os_error(), Some(libc::EILSEQ), "{error}");
+        eprintln!("skipped: this file system refuses non-UTF-8 names ({error})");
+        return;
+    }
     fs::write(
         root.path().join("a�.rs"),
         "fn real_replacement_character() {}\n",

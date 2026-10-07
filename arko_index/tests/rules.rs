@@ -415,11 +415,15 @@ fn non_utf8_names_are_skipped_and_reported() {
     let root = tempfile::tempdir().unwrap();
     let r = root.path();
     write(r, "good.rs", "fn good() {}\n");
-    fs::write(
+    // APFS (macOS) refuses names that aren't UTF-8, so the case can't arise there.
+    if let Err(error) = fs::write(
         r.join(OsString::from_vec(b"bad\xff.rs".to_vec())),
         "fn bad() {}\n",
-    )
-    .unwrap();
+    ) {
+        assert_eq!(error.raw_os_error(), Some(libc::EILSEQ), "{error}");
+        eprintln!("skipped: this file system refuses non-UTF-8 names ({error})");
+        return;
+    }
     let dir = r.join(OsString::from_vec(b"dir\xfe".to_vec()));
     fs::create_dir(&dir).unwrap();
     fs::write(dir.join("inner.rs"), "fn inner() {}\n").unwrap();
