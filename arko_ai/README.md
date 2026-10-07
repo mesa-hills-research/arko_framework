@@ -388,8 +388,10 @@ on other models. Every OAuth request also carries Codex's `x-codex-routing-hint`
 `model=<model>`, with `;tier=priority` in Fast mode. Codex's catalog describes Fast mode
 as "2x speed, increased usage": it uses more of the plan's limits. `Default` sends no
 tier (standard processing, as Codex does); Flex and Auto are `Error::UnsupportedFeature`
-over OAuth. The response's `service_tier`, when the backend echoes one, is reported in
-`UsageInfo::service_tier` as on the API, and the subscription estimate uses it.
+over OAuth. `UsageInfo::service_tier` reports the requested tier (Fast when `priority`
+was sent, standard otherwise), and the subscription estimate uses it: the `service_tier`
+the backend echoes is ignored, as Codex ignores it, since it says `default` or `auto` for
+Fast calls that were served fast.
 
 **Turn state.** The backend returns an `x-codex-turn-state` routing token.
 `GenerationResponse::openai_turn_state` carries it, and
@@ -597,7 +599,8 @@ actually used:
 
 - **Service tier.** The tier the response reports wins over the one requested (OpenAI
   echoes `service_tier`, for example `default` when a Fast request was downgraded;
-  Anthropic reports `speed: "fast"` and `service_tier`).
+  Anthropic reports `speed: "fast"` and `service_tier`), except over ChatGPT OAuth, where
+  the requested tier is used (the backend's echo doesn't tell Fast calls apart).
   `GenerationConfig::with_openai_service_tier` requests OpenAI Flex or Fast (sent as
   `priority`) on models that offer it. Over ChatGPT OAuth only Fast is available, as in
   Codex (see [ChatGPT OAuth requests](#openai-responses-replay-prompt-caching-and-chatgpt-oauth));

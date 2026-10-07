@@ -1737,6 +1737,7 @@ impl OpenAIClient {
         // stays visible while nothing is billed per call.
         if is_chatgpt_oauth {
             usage.billing = BillingKind::Subscription;
+            usage.service_tier = Some(Self::chatgpt_oauth_requested_tier(config));
         }
         usage.calculate_cost(model, Some(config));
 
@@ -2005,6 +2006,21 @@ impl OpenAIClient {
                     "The {tier:?} OpenAI service tier requires API-key authentication; over ChatGPT OAuth only Fast (and Default, which sends no tier) can be requested."
                 )))
             }
+        }
+    }
+
+    /// The tier a ChatGPT OAuth call is reported and priced at: the one
+    /// requested (Fast when `priority` was sent, standard otherwise), not the
+    /// `service_tier` the response echoes. The ChatGPT backend echoes
+    /// `default` or `auto` for Fast calls that are served fast, and Codex
+    /// never reads the echo (`ResponseCompleted` in openai/codex
+    /// `codex-rs/codex-api/src/sse/responses.rs` has no `service_tier`).
+    /// A request that would send another tier fails before it is sent (see
+    /// [`chatgpt_oauth_service_tier`](Self::chatgpt_oauth_service_tier)).
+    fn chatgpt_oauth_requested_tier(config: &GenerationConfig) -> ServiceTier {
+        match config.openai_service_tier {
+            Some(OpenAIServiceTier::Fast) => ServiceTier::Fast,
+            _ => ServiceTier::Standard,
         }
     }
 
@@ -2848,9 +2864,10 @@ impl OpenAIClient {
     }
 
     /// `input_tokens` already includes cached and written tokens and
-    /// `output_tokens` includes reasoning tokens. The response's
+    /// `output_tokens` includes reasoning tokens. On the API, the response's
     /// `service_tier` is the tier actually used (for example `default` when a
-    /// Fast request was downgraded).
+    /// Fast request was downgraded); over ChatGPT OAuth the requested tier
+    /// replaces it (see [`chatgpt_oauth_requested_tier`](Self::chatgpt_oauth_requested_tier)).
     /// https://developers.openai.com/api/docs/guides/prompt-caching
     fn calculate_usage(response: &OpenAIResponse) -> UsageInfo {
         let mut usage = UsageInfo::new(response.usage.input_tokens, response.usage.output_tokens);
@@ -4049,18 +4066,32 @@ mod tests {
         assert_eq!(usage.billed(), 0.0);
 
         // Fast mode over OAuth: estimated at the API's Fast rates ("increased
-        // usage" of the plan, per Codex), still not billed. The reported tier
-        // wins.
+        // usage" of the plan, per Codex), still not billed. The requested
+        // tier is reported whatever the response echoes: the ChatGPT backend
+        // echoes `default` or `auto` for Fast calls served fast, and Codex
+        // never reads the echo.
         let fast = GenerationConfig::default()
             .with_openai_service_tier(crate::config::OpenAIServiceTier::Fast);
-        for reported in [Some("priority"), None] {
+        for reported in [Some("priority"), None, Some("default"), Some("auto")] {
             let usage = priced(reported, &fast, true);
             assert_eq!(usage.service_tier, Some(crate::pricing::ServiceTier::Fast));
             assert_eq!(usage.billing, crate::usage::BillingKind::Subscription);
             assert!(close(usage.total_cost, 102.0));
             assert_eq!(usage.billed(), 0.0);
         }
-        let downgraded = priced(Some("default"), &fast, true);
+        // Without Fast, no tier is sent: standard, even if `priority` is
+        // echoed.
+        for reported in [Some("priority"), None, Some("default")] {
+            let usage = priced(reported, &GenerationConfig::default(), true);
+            assert_eq!(
+                usage.service_tier,
+                Some(crate::pricing::ServiceTier::Standard)
+            );
+            assert!(close(usage.total_cost, 51.0));
+        }
+        // On the API the echo still wins: a Fast request served at the
+        // default tier is priced as standard.
+        let downgraded = priced(Some("default"), &fast, false);
         assert_eq!(
             downgraded.service_tier,
             Some(crate::pricing::ServiceTier::Standard)

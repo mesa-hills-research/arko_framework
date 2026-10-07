@@ -474,7 +474,8 @@ Requests over ChatGPT OAuth go to the Codex backend and differ from API-key requ
   Auto are `Error::UnsupportedFeature`. Every request carries Codex's
   `x-codex-routing-hint` header (`model=<model>`, plus `;tier=priority` in Fast mode).
   Fast calls are estimated at the API's Fast rates and, like every OAuth call, not
-  billed.
+  billed. `UsageInfo::service_tier` is the requested tier: the backend's echoed
+  `service_tier` is ignored, as in Codex (it reads `default` or `auto` for Fast calls).
 - GPT-5.4 and GPT-5.5 snapshot IDs are sent without their date.
 - The input limit is capped at 272,000 tokens (`CHATGPT_OAUTH_MAX_INPUT_TOKENS`), or
   the model's limit if lower; `LLMClient::max_input_tokens(&model)` returns it. Requests
