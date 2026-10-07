@@ -1,0 +1,26 @@
+# GCC profiles of the tree-sitter grammars, written by pgo/train.sh.
+gcc 15.2.0
+target x86_64-unknown-linux-gnu
+crate tree-sitter-c 0.24.2
+crate tree-sitter-cpp 0.23.4
+crate tree-sitter-go 0.25.0
+crate tree-sitter-java 0.23.5
+crate tree-sitter-javascript 0.25.0
+crate tree-sitter-python 0.25.0
+crate tree-sitter-rust 0.24.2
+crate tree-sitter-typescript 0.23.2
+unit c_parser 34e0854817a8aace
+unit cpp_parser 02f0428673604fa5
+unit cpp_scanner 5ed22fc0669bbd1a
+unit go_parser 7bc697db1ac98c13
+unit java_parser 108615720ced0ae0
+unit javascript_parser 0fa388be6f04f013
+unit javascript_scanner e6e07c76721285f4
+unit python_parser 70366fb28f569038
+unit python_scanner 06617d39927345f8
+unit rust_parser 8e147ee05a436ad4
+unit rust_scanner 35b9bf2bd842113c
+unit typescript_parser 74e49641eacd7bd5
+unit typescript_scanner d722daa1df4e8dcb
+unit tsx_parser c1486e9be1fd9260
+unit tsx_scanner 254d00a6f7fda789

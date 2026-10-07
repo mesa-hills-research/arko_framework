@@ -178,6 +178,7 @@ dependencies = [
 name = "arko_index"
 version = "0.3.0"
 dependencies = [
+ "cc",
  "ctrlc",
  "fs2",
  "ignore",
@@ -192,6 +193,7 @@ dependencies = [
  "tree-sitter-go",
  "tree-sitter-java",
  "tree-sitter-javascript",
+ "tree-sitter-language",
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",

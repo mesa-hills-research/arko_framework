@@ -11,6 +11,8 @@ mod watch;
 pub mod index2;
 mod normalize;
 mod par;
+#[cfg(arko_index_pgo)]
+mod pgo;
 pub use par::threads;
 #[cfg(unix)]
 mod scan;
