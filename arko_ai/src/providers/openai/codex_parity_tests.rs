@@ -161,6 +161,11 @@ async fn oauth_requests_carry_the_conversation_identity_and_api_key_requests_do_
             header(oauth, "chatgpt-account-id").as_deref(),
             Some("synthetic-account")
         );
+        assert_eq!(
+            header(oauth, "x-codex-routing-hint").as_deref(),
+            Some("model=gpt-6-astra")
+        );
+        assert!(oauth_body.get("service_tier").is_none());
         for absent in [
             "openai-beta",
             "originator",
@@ -192,6 +197,7 @@ async fn oauth_requests_carry_the_conversation_identity_and_api_key_requests_do_
             "originator",
             "user-agent",
             "x-codex-turn-state",
+            "x-codex-routing-hint",
             "chatgpt-account-id",
         ] {
             assert_eq!(header(api, absent), None, "{absent}");
@@ -720,6 +726,76 @@ fn saved_conversations_with_reasoning_items_replay_through_reconstruction() {
             {"role": "assistant", "type": "message", "content": [{"type": "output_text", "text": "Looks fine."}], "id": "msg_2"},
         ])
     );
+}
+
+/// Fast mode over ChatGPT OAuth goes out as Codex sends it: `service_tier:
+/// "priority"` in the body and `tier=priority` in the routing hint. The tier
+/// the response echoes prices the call, which the subscription covers.
+#[tokio::test]
+async fn oauth_fast_mode_is_sent_as_codex_sends_it_and_priced_by_the_reported_tier() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let echoing = |tier: &str| {
+            let mut response = completed(json!([]));
+            response["service_tier"] = json!(tier);
+            response["usage"] = json!({"input_tokens": 100_000, "output_tokens": 1_000_000});
+            sse(&[json!({"type": "response.completed", "response": response})])
+        };
+        let mut api_response = completed_response();
+        api_response["service_tier"] = json!("priority");
+        let (url, server) = server(vec![
+            reply("/responses", 200, &echoing("priority")),
+            reply("/responses", 200, &echoing("default")),
+            reply("/responses", 200, &api_response.to_string()),
+        ])
+        .await;
+        let fast = GenerationConfig::default().with_openai_service_tier(OpenAIServiceTier::Fast);
+        let served = client(&url)
+            .generate_text(&conversation(), &fast)
+            .await
+            .unwrap();
+        let downgraded = client(&url)
+            .generate_text(&conversation(), &fast)
+            .await
+            .unwrap();
+        let api_key = api_key_client(&url)
+            .generate_text(&conversation(), &fast)
+            .await
+            .unwrap();
+        let requests = server.await.unwrap();
+
+        for (raw, body) in &requests[..2] {
+            assert_eq!(body["service_tier"], "priority");
+            assert_eq!(
+                header(raw, "x-codex-routing-hint").as_deref(),
+                Some("model=gpt-6-astra;tier=priority")
+            );
+        }
+        // GPT-6 Astra at Fast rates (2x): 0.1M input at $20 + 1M output at
+        // $100, estimated but not billed.
+        let usage = &served.usage;
+        assert_eq!(usage.service_tier, Some(crate::pricing::ServiceTier::Fast));
+        assert_eq!(usage.billing, crate::usage::BillingKind::Subscription);
+        assert!((usage.total_cost - 102.0).abs() < 1e-9);
+        assert_eq!(usage.billed(), 0.0);
+        // A Fast request the backend served at the standard tier.
+        assert_eq!(
+            downgraded.usage.service_tier,
+            Some(crate::pricing::ServiceTier::Standard)
+        );
+        assert!((downgraded.usage.total_cost - 51.0).abs() < 1e-9);
+
+        // API keys: the same body value, no routing hint, metered.
+        let (raw, body) = &requests[2];
+        assert_eq!(body["service_tier"], "priority");
+        assert_eq!(header(raw, "x-codex-routing-hint"), None);
+        assert_eq!(
+            api_key.usage.service_tier,
+            Some(crate::pricing::ServiceTier::Fast)
+        );
+        assert_eq!(api_key.usage.billing, crate::usage::BillingKind::Metered);
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

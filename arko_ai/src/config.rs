@@ -125,9 +125,15 @@ pub struct GenerationConfig {
     /// the selected model automatically requires interleaved thinking with its
     /// active adaptive-thinking mode.
     pub interleaved_thinking: Option<bool>,
-    /// OpenAI processing tier (`service_tier`). Flex and Fast must be offered
-    /// by the model (see [`ModelPricing::service_tiers`]); API-key auth only.
-    /// `None` sends nothing, so the project default applies.
+    /// OpenAI processing tier (`service_tier`). With an API key, Flex and Fast
+    /// must be offered by the model (see [`ModelPricing::service_tiers`]).
+    /// Over ChatGPT OAuth, as in Codex, only Fast mode is available, on the
+    /// models Codex offers it for (GPT-6 Astra, Sol, Luna and 6.1 Sol,
+    /// GPT-5.6 Sol, Terra and Luna, GPT-5.5); `Default` sends no tier there,
+    /// and Flex and Auto are [`Error::UnsupportedFeature`].
+    /// `None` sends nothing, so the project (or plan) default applies.
+    ///
+    /// [`Error::UnsupportedFeature`]: crate::error::Error::UnsupportedFeature
     ///
     /// [`ModelPricing::service_tiers`]: crate::model::ModelPricing::service_tiers
     #[serde(default, skip_serializing_if = "Option::is_none")]

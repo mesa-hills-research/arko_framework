@@ -380,6 +380,17 @@ prompt caching off has no effect there (also warned about once). It also does no
 `reasoning.mode`; `GenerationConfig::openai_reasoning_mode` is omitted on this auth path
 and warns once when configured.
 
+**Fast mode over ChatGPT OAuth.** `GenerationConfig::with_openai_service_tier(Fast)`
+works on a subscription as Codex's Fast mode does: `service_tier: "priority"` in the body
+of every request it is set for, on the models Codex's catalog offers it for (GPT-6 Astra,
+Sol, Luna and 6.1 Sol; GPT-5.6 Sol, Terra and Luna; GPT-5.5), and `Error::InvalidRequest`
+on other models. Every OAuth request also carries Codex's `x-codex-routing-hint` header,
+`model=<model>`, with `;tier=priority` in Fast mode. Codex's catalog describes Fast mode
+as "2x speed, increased usage": it uses more of the plan's limits. `Default` sends no
+tier (standard processing, as Codex does); Flex and Auto are `Error::UnsupportedFeature`
+over OAuth. The response's `service_tier`, when the backend echoes one, is reported in
+`UsageInfo::service_tier` as on the API, and the subscription estimate uses it.
+
 **Turn state.** The backend returns an `x-codex-turn-state` routing token.
 `GenerationResponse::openai_turn_state` carries it, and
 `Conversation::add_assistant_message_from_response` keeps the first token of each user
@@ -588,7 +599,9 @@ actually used:
   echoes `service_tier`, for example `default` when a Fast request was downgraded;
   Anthropic reports `speed: "fast"` and `service_tier`).
   `GenerationConfig::with_openai_service_tier` requests OpenAI Flex or Fast (sent as
-  `priority`) on models that offer it, with API-key auth only. Tier prices are per model
+  `priority`) on models that offer it. Over ChatGPT OAuth only Fast is available, as in
+  Codex (see [ChatGPT OAuth requests](#openai-responses-replay-prompt-caching-and-chatgpt-oauth));
+  its estimate uses the API's Fast rates and is not billed. Tier prices are per model
   (`ModelPricing::service_tiers`); tiers without a published price (Anthropic priority,
   OpenAI scale) are estimated at standard rates.
 - **Cache TTL, residency and dates.** Anthropic 1-hour cache writes use their own rate;

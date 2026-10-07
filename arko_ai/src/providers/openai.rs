@@ -59,6 +59,27 @@ const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 /// ChatGPT backend sticky-routing token; see [`Conversation::openai_turn_state`].
 const TURN_STATE_HEADER: &str = "x-codex-turn-state";
+/// The ChatGPT backend's routing hint, `model=<model>` plus `;tier=<tier>`
+/// when a tier is sent, which Codex sends on every Codex-backend request
+/// (openai/codex `codex-rs/core/src/client.rs`, `build_routing_hint_header`).
+const ROUTING_HINT_HEADER: &str = "x-codex-routing-hint";
+/// The models whose Codex catalog entry offers Fast mode (`service_tiers`
+/// with id `priority`, "2x speed, increased usage"): the only ones Codex
+/// sends `service_tier: "priority"` for over ChatGPT sign-in
+/// (`ModelInfo::service_tier_for_request` in
+/// `codex-rs/protocol/src/openai_models.rs`). From
+/// `codex-rs/models-manager/models.json` at openai/codex ac9b5b8, less
+/// Codex's hidden approval-review model (`codex-auto-review`).
+const CHATGPT_FAST_MODE_MODELS: &[&str] = &[
+    "gpt-6-astra",
+    "gpt-6.1-sol",
+    "gpt-6-sol",
+    "gpt-6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+];
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatGptOAuthCredentials {
@@ -1099,12 +1120,7 @@ impl OpenAIClient {
                 .http_client
                 .post(url)
                 .header("Content-Type", "application/json");
-            let builder = self.apply_request_headers(
-                &auth,
-                builder,
-                conversation,
-                request.stream == Some(true),
-            );
+            let builder = self.apply_request_headers(&auth, builder, conversation, request);
             let http_request = self.prepare_http_request(
                 Self::apply_auth_headers(&auth, builder).json(request),
                 conversation_key,
@@ -1256,13 +1272,15 @@ impl OpenAIClient {
     /// backend derives prompt-cache affinity from it), `thread-id` and
     /// `x-client-request-id`, all set to the conversation's
     /// `prompt_cache_key`, plus the turn's `x-codex-turn-state` when one is
-    /// held (see [`Conversation::openai_turn_state`]).
+    /// held (see [`Conversation::openai_turn_state`]) and Codex's
+    /// `x-codex-routing-hint` (`model=<model>`, with `;tier=priority` in Fast
+    /// mode).
     fn apply_request_headers(
         &self,
         auth: &OpenAIAuth,
         mut builder: reqwest::RequestBuilder,
         conversation: &Conversation,
-        stream: bool,
+        request: &OpenAIRequest,
     ) -> reqwest::RequestBuilder {
         fn header(
             builder: reqwest::RequestBuilder,
@@ -1294,7 +1312,16 @@ impl OpenAIClient {
             if let Some(token) = conversation.current_openai_turn_state() {
                 builder = header(builder, TURN_STATE_HEADER, token);
             }
-            if stream {
+            let routing_hint = match request.service_tier {
+                Some(tier) => format!(
+                    "model={};tier={}",
+                    request.model,
+                    Self::service_tier_wire(tier)
+                ),
+                None => format!("model={}", request.model),
+            };
+            builder = header(builder, ROUTING_HINT_HEADER, &routing_hint);
+            if request.stream == Some(true) {
                 builder = builder.header(ACCEPT, "text/event-stream");
             }
         }
@@ -1951,6 +1978,46 @@ impl OpenAIClient {
         usage.with_stop_metadata(Some(reason), details)
     }
 
+    /// The `service_tier` sent over ChatGPT OAuth, as Codex sends it there
+    /// (`service_tier_for_request` in openai/codex
+    /// `codex-rs/protocol/src/openai_models.rs`): Fast as `priority` for the
+    /// models whose Codex catalog entry offers it, and `Default`, Codex's
+    /// "standard routing" choice, as no tier at all. Fast on another model is
+    /// an error rather than Codex's silent omission, as on the API-key path.
+    /// Flex and Auto stay refused: no catalog entry offers them (Codex passes
+    /// a configured `flex` through as "an API request option", but whether
+    /// the ChatGPT backend honors it is unverified).
+    fn chatgpt_oauth_service_tier(
+        tier: OpenAIServiceTier,
+        request_model: &str,
+    ) -> Result<Option<OpenAIServiceTier>, Error> {
+        match tier {
+            OpenAIServiceTier::Fast if CHATGPT_FAST_MODE_MODELS.contains(&request_model) => {
+                Ok(Some(tier))
+            }
+            OpenAIServiceTier::Fast => Err(Error::InvalidRequest(format!(
+                "{request_model} does not offer Fast mode over ChatGPT OAuth; Codex offers it for {}.",
+                CHATGPT_FAST_MODE_MODELS.join(", ")
+            ))),
+            OpenAIServiceTier::Default => Ok(None),
+            OpenAIServiceTier::Flex | OpenAIServiceTier::Auto => {
+                Err(Error::UnsupportedFeature(format!(
+                    "The {tier:?} OpenAI service tier requires API-key authentication; over ChatGPT OAuth only Fast (and Default, which sends no tier) can be requested."
+                )))
+            }
+        }
+    }
+
+    /// The wire value of `tier`, as serialized in `service_tier`.
+    fn service_tier_wire(tier: OpenAIServiceTier) -> &'static str {
+        match tier {
+            OpenAIServiceTier::Auto => "auto",
+            OpenAIServiceTier::Default => "default",
+            OpenAIServiceTier::Flex => "flex",
+            OpenAIServiceTier::Fast => "priority",
+        }
+    }
+
     fn request_model_id(model_id: &str, is_chatgpt_oauth: bool) -> String {
         if !is_chatgpt_oauth
             || !(model_id.starts_with("gpt-5.4") || model_id.starts_with("gpt-5.5"))
@@ -2008,24 +2075,28 @@ impl OpenAIClient {
                 .or(Some(conversation.model.max_output_tokens))
         };
 
-        if let Some(tier) = config.openai_service_tier {
-            if is_chatgpt_oauth {
-                return Err(Error::UnsupportedFeature(
-                    "OpenAI service tiers require API-key authentication; ChatGPT OAuth requests use the subscription's processing."
-                        .to_string(),
-                ));
+        let request_model = Self::request_model_id(&conversation.model.id, is_chatgpt_oauth);
+        let service_tier = match config.openai_service_tier {
+            Some(tier) if is_chatgpt_oauth => {
+                Self::chatgpt_oauth_service_tier(tier, &request_model)?
             }
-            let priced = tier.pricing_tier();
-            if priced != ServiceTier::Standard && !conversation.model.pricing.offers_tier(&priced) {
-                return Err(Error::InvalidRequest(format!(
-                    "{} does not offer the {:?} service tier.",
-                    conversation.model.id, tier
-                )));
+            Some(tier) => {
+                let priced = tier.pricing_tier();
+                if priced != ServiceTier::Standard
+                    && !conversation.model.pricing.offers_tier(&priced)
+                {
+                    return Err(Error::InvalidRequest(format!(
+                        "{} does not offer the {:?} service tier.",
+                        conversation.model.id, tier
+                    )));
+                }
+                Some(tier)
             }
-        }
+            None => None,
+        };
 
         let mut request = OpenAIRequest {
-            model: Self::request_model_id(&conversation.model.id, is_chatgpt_oauth),
+            model: request_model,
             store: false,
             instructions: conversation.system_message.clone(),
             reasoning: None,
@@ -2047,7 +2118,7 @@ impl OpenAIClient {
             // same prompt cache.
             prompt_cache_key: Some(conversation.prompt_cache_key.clone()),
             prompt_cache_options: None,
-            service_tier: config.openai_service_tier,
+            service_tier,
         };
 
         if conversation.model.supports_openai_prompt_cache_options() && !is_chatgpt_oauth {
@@ -2866,7 +2937,13 @@ struct OpenAIToolChoiceObject {
 
 #[derive(Debug, Serialize)]
 struct OpenAIRequest {
+    // The tier right after the model, ahead of a large `input`, as Codex
+    // orders its routing fields: gateways may read the body incrementally
+    // (openai/codex `codex-rs/codex-api/src/common.rs`, `ResponsesApiRequest`).
+    // `stream` stays in place, so bodies without a tier are unchanged.
     model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<OpenAIServiceTier>,
     store: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
@@ -2893,8 +2970,6 @@ struct OpenAIRequest {
     prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_options: Option<OpenAIPromptCacheOptions>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    service_tier: Option<OpenAIServiceTier>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3758,19 +3833,20 @@ mod tests {
         use crate::config::OpenAIServiceTier;
         let client = OpenAIClient::new("test");
         let astra = Conversation::new(Model::openai_gpt_6_astra());
-        for (tier, wire) in [
+        let build = |oauth: bool, model: Model, tier: OpenAIServiceTier| {
+            let config = GenerationConfig::default().with_openai_service_tier(tier);
+            client
+                .build_request(&Conversation::new(model), &config, oauth)
+                .map(|request| serde_json::to_value(request).unwrap())
+        };
+        for (requested, wire) in [
             (OpenAIServiceTier::Flex, "flex"),
             (OpenAIServiceTier::Fast, "priority"),
             (OpenAIServiceTier::Auto, "auto"),
             (OpenAIServiceTier::Default, "default"),
         ] {
-            let config = GenerationConfig::default().with_openai_service_tier(tier);
-            let request = client.build_request(&astra, &config, false).unwrap();
-            assert_eq!(serde_json::to_value(request).unwrap()["service_tier"], wire);
-            assert!(matches!(
-                client.build_request(&astra, &config, true),
-                Err(Error::UnsupportedFeature(_))
-            ));
+            let api_key = build(false, Model::openai_gpt_6_astra(), requested).unwrap();
+            assert_eq!(api_key["service_tier"], wire);
         }
         let unset = client
             .build_request(&astra, &GenerationConfig::default(), false)
@@ -3780,6 +3856,70 @@ mod tests {
                 .unwrap()
                 .get("service_tier")
                 .is_none()
+        );
+
+        // ChatGPT OAuth: Fast mode as Codex sends it, on every model its
+        // catalog offers it for (GPT-5.5 by its undated ID)...
+        for model in [
+            Model::openai_gpt_6_astra(),
+            Model::openai_gpt_6_sol(),
+            Model::openai_gpt_6_1_sol(),
+            Model::openai_gpt_6_luna(),
+            Model::openai_gpt_5_6_sol(),
+            Model::openai_gpt_5_6_terra(),
+            Model::openai_gpt_5_6_luna(),
+            Model::openai_gpt_5_5(),
+        ] {
+            let id = model.id.clone();
+            let oauth = build(true, model, OpenAIServiceTier::Fast).unwrap();
+            assert_eq!(oauth["service_tier"], "priority", "{id}");
+        }
+        assert_eq!(
+            build(true, Model::openai_gpt_5_5(), OpenAIServiceTier::Fast).unwrap()["model"],
+            "gpt-5.5"
+        );
+        // ...and not on others, even where the API offers it.
+        for model in [
+            Model::openai_gpt_5_4(),
+            Model::openai_gpt_5_4_nano(),
+            Model::openai_gpt_5_6(),
+            Model::openai_gpt_5_5_pro(),
+        ] {
+            let id = model.id.clone();
+            assert!(
+                matches!(
+                    build(true, model, OpenAIServiceTier::Fast),
+                    Err(Error::InvalidRequest(_))
+                ),
+                "{id}"
+            );
+        }
+        // Default is standard routing, which Codex expresses by sending no
+        // tier; Flex and Auto stay API-key only.
+        let default = build(
+            true,
+            Model::openai_gpt_6_astra(),
+            OpenAIServiceTier::Default,
+        )
+        .unwrap();
+        assert!(default.get("service_tier").is_none());
+        for refused in [OpenAIServiceTier::Flex, OpenAIServiceTier::Auto] {
+            assert!(matches!(
+                build(true, Model::openai_gpt_6_astra(), refused),
+                Err(Error::UnsupportedFeature(_))
+            ));
+        }
+
+        // The tier follows the model, ahead of the input, as Codex orders it.
+        let mut conversation = Conversation::new(Model::openai_gpt_6_astra());
+        conversation.add_user_message("hello");
+        let config = GenerationConfig::default().with_openai_service_tier(OpenAIServiceTier::Fast);
+        let body =
+            serde_json::to_string(&client.build_request(&conversation, &config, true).unwrap())
+                .unwrap();
+        assert!(
+            body.starts_with(r#"{"model":"gpt-6-astra","service_tier":"priority","#),
+            "{body}"
         );
         // gpt-4.1 has no Flex; gpt-5.4-nano has no Fast mode.
         for (model, tier) in [
@@ -3907,6 +4047,25 @@ mod tests {
         assert!(close(usage.total_cost, 51.0));
         assert!(close(usage.input_cost, 1.0));
         assert_eq!(usage.billed(), 0.0);
+
+        // Fast mode over OAuth: estimated at the API's Fast rates ("increased
+        // usage" of the plan, per Codex), still not billed. The reported tier
+        // wins.
+        let fast = GenerationConfig::default()
+            .with_openai_service_tier(crate::config::OpenAIServiceTier::Fast);
+        for reported in [Some("priority"), None] {
+            let usage = priced(reported, &fast, true);
+            assert_eq!(usage.service_tier, Some(crate::pricing::ServiceTier::Fast));
+            assert_eq!(usage.billing, crate::usage::BillingKind::Subscription);
+            assert!(close(usage.total_cost, 102.0));
+            assert_eq!(usage.billed(), 0.0);
+        }
+        let downgraded = priced(Some("default"), &fast, true);
+        assert_eq!(
+            downgraded.service_tier,
+            Some(crate::pricing::ServiceTier::Standard)
+        );
+        assert!(close(downgraded.total_cost, 51.0));
     }
 }
 
