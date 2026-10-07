@@ -1070,7 +1070,7 @@ impl ChatGptAccounts {
             |text: &str| state.origins.get(&fingerprint(text)).copied().unwrap_or(0) != index;
         let foreign_turn_state = conversation
             .current_openai_turn_state()
-            .is_some_and(&foreign);
+            .is_some_and(foreign);
         let foreign_reasoning = conversation
             .messages
             .iter()
@@ -1089,7 +1089,7 @@ impl ChatGptAccounts {
                         && item
                             .get("encrypted_content")
                             .and_then(Value::as_str)
-                            .is_some_and(&foreign))
+                            .is_some_and(foreign))
                 }),
                 Some(ReasoningArtifact::OpenAIEncryptedReasoning { items }) => {
                     items.retain(|item| !foreign(&item.encrypted_content))
