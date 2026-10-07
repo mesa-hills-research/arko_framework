@@ -17,6 +17,9 @@ struct Answer {
     headers: Vec<(&'static str, String)>,
     /// How long the mock waits before answering.
     delay: Duration,
+    /// How long the mock waits between the head and the body: the request
+    /// is accepted at once, and its response ends this much later.
+    body_delay: Duration,
 }
 
 fn answer(account: &'static str, path: &'static str, status: u16, body: &str) -> Answer {
@@ -27,6 +30,7 @@ fn answer(account: &'static str, path: &'static str, status: u16, body: &str) ->
         body: body.into(),
         headers: Vec::new(),
         delay: Duration::ZERO,
+        body_delay: Duration::ZERO,
     }
 }
 
@@ -39,6 +43,26 @@ impl Answer {
     fn after(mut self, delay: Duration) -> Self {
         self.delay = delay;
         self
+    }
+
+    fn ending_after(mut self, delay: Duration) -> Self {
+        self.body_delay = delay;
+        self
+    }
+
+    /// The weekly window at `used` percent and, with a balance, credits
+    /// left.
+    fn weekly(self, used: &str, balance: Option<&str>) -> Self {
+        let answer = self
+            .header("x-codex-primary-used-percent", used)
+            .header("x-codex-primary-window-minutes", "10080");
+        match balance {
+            Some(balance) => answer
+                .header("x-codex-credits-has-credits", "True")
+                .header("x-codex-credits-unlimited", "False")
+                .header("x-codex-credits-balance", balance),
+            None => answer,
+        }
     }
 }
 
@@ -169,13 +193,17 @@ async fn write(socket: &mut tokio::net::TcpStream, answer: &Answer) {
         .iter()
         .map(|(name, value)| format!("{name}: {value}\r\n"))
         .collect();
-    let response = format!(
-        "HTTP/1.1 {} Test\r\nContent-Type: {content_type}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+    let head = format!(
+        "HTTP/1.1 {} Test\r\nContent-Type: {content_type}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n",
         answer.status,
         answer.body.len(),
-        answer.body,
     );
-    socket.write_all(response.as_bytes()).await.unwrap();
+    socket.write_all(head.as_bytes()).await.unwrap();
+    if !answer.body_delay.is_zero() {
+        socket.flush().await.unwrap();
+        tokio::time::sleep(answer.body_delay).await;
+    }
+    socket.write_all(answer.body.as_bytes()).await.unwrap();
 }
 
 /// Expires in 2100.
@@ -582,12 +610,20 @@ async fn credits_keep_an_account_usable() {
             response.model_call_usage.account.as_deref(),
             Some("primary")
         );
+        // The check is the first report of the window used up with credits
+        // left; the response's headers, saying the same, add nothing.
         let events = take(&events);
-        assert!(events.contains(&ChatGptAccountEvent::UsingCredits {
-            account: "primary".into(),
-            balance: Some("33950".into()),
-        }));
-        assert!(accounts.statuses()[0].using_credits());
+        assert_eq!(
+            using_credits_events(&events),
+            [&ChatGptAccountEvent::UsingCredits {
+                account: "primary".into(),
+                balance: Some("0".into()),
+            }]
+        );
+        let status = &accounts.statuses()[0];
+        assert!(status.using_credits());
+        let credits = status.plan_usage.as_ref().unwrap().credits.as_ref();
+        assert_eq!(credits.unwrap().balance.as_deref(), Some("33950"));
     })
     .await;
 }
@@ -1417,6 +1453,220 @@ async fn a_retry_that_fails_for_good_returns_that_failure_and_waits_for_a_check(
             .unwrap_err();
         assert!(error.is_usage_limit());
         assert_eq!(responses(&mock.take()).len(), 1);
+    })
+    .await;
+}
+
+fn using_credits_events(events: &[ChatGptAccountEvent]) -> Vec<&ChatGptAccountEvent> {
+    events
+        .iter()
+        .filter(|event| matches!(event, ChatGptAccountEvent::UsingCredits { .. }))
+        .collect()
+}
+
+/// The usage endpoint after a manual reset: the weekly window back at 1%,
+/// credits unchanged, one reset left.
+fn usage_after_reset() -> String {
+    json!({
+        "plan_type": "pro",
+        "rate_limit": {"allowed": true, "limit_reached": false,
+            "primary_window": {"used_percent": 1, "limit_window_seconds": 604800,
+                "reset_after_seconds": 600000, "reset_at": unix_now() + 600_000},
+            "secondary_window": null},
+        "credits": {"has_credits": true, "unlimited": false, "balance": "34571.40"},
+        "spend_control": {"reached": false},
+        "rate_limit_reached_type": null,
+        "rate_limit_reset_credits": {"available_count": 1},
+    })
+    .to_string()
+}
+
+/// `count` requests started in the background, to the next answers
+/// scripted for the first account.
+fn started_now(
+    accounts: &ChatGptAccounts,
+    count: usize,
+) -> Vec<tokio::task::JoinHandle<GenerationResponse>> {
+    (0..count)
+        .map(|_| {
+            let accounts = accounts.clone();
+            tokio::spawn(async move {
+                accounts
+                    .generate_text(&conversation(), &GenerationConfig::default())
+                    .await
+                    .unwrap()
+            })
+        })
+        .collect()
+}
+
+/// The production sequence: agents' responses report the weekly window used
+/// up with credits (one without credits headers), the operator presses a
+/// reset, and responses to requests accepted before it end afterwards.
+#[tokio::test]
+async fn drawing_on_credits_is_reported_once_and_older_headers_never_report_it_again() {
+    within(async {
+        let mock = Mock::start().await;
+        let (accounts, events) = pool(&mock);
+        let accounts = accounts.with_status_check_interval(Duration::from_secs(3600));
+        let ms = Duration::from_millis;
+
+        // Three requests at once; their responses end in another order than
+        // they were accepted, and one has no credits headers.
+        mock.expect([
+            answer(PRIMARY, "/responses", 200, &turn("enc_1", "a"))
+                .weekly("100", Some("34571.50"))
+                .ending_after(ms(300)),
+            answer(PRIMARY, "/responses", 200, &turn("enc_2", "b"))
+                .weekly("100", None)
+                .ending_after(ms(150)),
+            answer(PRIMARY, "/responses", 200, &turn("enc_3", "c")).weekly("100", Some("34571.40")),
+        ]);
+        for handle in started_now(&accounts, 3) {
+            let response = handle.await.unwrap();
+            assert_eq!(
+                response.model_call_usage.account.as_deref(),
+                Some("primary")
+            );
+        }
+        let reported = take(&events);
+        assert_eq!(using_credits_events(&reported).len(), 1, "{reported:#?}");
+        let status = &accounts.statuses()[0];
+        assert!(status.drawing_credits && status.using_credits());
+        assert!(!status.exhausted);
+
+        // Two more are accepted while the window is still used up; then the
+        // operator presses a reset and the usage is read; then a request
+        // reports the window at 1% and ends before the two older ones.
+        mock.expect([
+            answer(PRIMARY, "/responses", 200, &turn("enc_4", "d"))
+                .weekly("100", Some("34571.40"))
+                .ending_after(ms(600)),
+            answer(PRIMARY, "/responses", 200, &turn("enc_5", "e"))
+                .weekly("100", Some("34571.40"))
+                .ending_after(ms(700)),
+            answer(PRIMARY, "/wham/usage", 200, &usage_after_reset()),
+            answer(PRIMARY, "/responses", 200, &turn("enc_6", "f")).weekly("1", Some("34571.40")),
+        ]);
+        let older = started_now(&accounts, 2);
+        tokio::time::sleep(ms(150)).await;
+        let checked = accounts.read_usage("primary").await.unwrap();
+        assert_eq!(checked.reset_credits_available, Some(1));
+        assert!(!accounts.statuses()[0].drawing_credits);
+        let fresh = accounts
+            .generate_text(&conversation(), &GenerationConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(fresh.model_call_usage.account.as_deref(), Some("primary"));
+        for handle in older {
+            let response = handle.await.unwrap();
+            // The call still reports its own (older) usage.
+            let usage = response.model_call_usage.plan_usage.unwrap();
+            assert_eq!(usage.primary.unwrap().used_percent, 100.0);
+        }
+        let reported = take(&events);
+        assert!(using_credits_events(&reported).is_empty(), "{reported:#?}");
+        let status = &accounts.statuses()[0];
+        assert!(!status.drawing_credits);
+        // The account's plan usage is the newest response's.
+        let usage = status.plan_usage.as_ref().unwrap();
+        assert_eq!(usage.primary.as_ref().unwrap().used_percent, 1.0);
+        assert_eq!(mock.unanswered(), 0);
+
+        // The window used up again: a new episode, reported once. Headers
+        // without credits keep the last ones known, as in Codex.
+        mock.expect([
+            answer(PRIMARY, "/responses", 200, &turn("enc_7", "g")).weekly("100", Some("34500")),
+            answer(PRIMARY, "/responses", 200, &turn("enc_8", "h")).weekly("100", None),
+        ]);
+        for _ in 0..2 {
+            accounts
+                .generate_text(&conversation(), &GenerationConfig::default())
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            using_credits_events(&take(&events)),
+            [&ChatGptAccountEvent::UsingCredits {
+                account: "primary".into(),
+                balance: Some("34500".into()),
+            }]
+        );
+        let status = &accounts.statuses()[0];
+        assert!(status.drawing_credits);
+        let credits = status.plan_usage.as_ref().unwrap().credits.as_ref();
+        assert_eq!(credits.unwrap().balance.as_deref(), Some("34500"));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn check_now_and_mark_usable_end_drawing_on_credits() {
+    within(async {
+        let mock = Mock::start().await;
+        let (accounts, events) = pool(&mock);
+        let accounts = accounts.with_status_check_interval(Duration::from_secs(3600));
+        let ms = Duration::from_millis;
+        mock.expect([
+            answer(PRIMARY, "/responses", 200, &turn("enc_1", "a")).weekly("100", Some("34571.50"))
+        ]);
+        accounts
+            .generate_text(&conversation(), &GenerationConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(using_credits_events(&take(&events)).len(), 1);
+        mock.take();
+
+        // check_now reads an account drawing on credits too, though it is
+        // not set aside; an older response ending afterwards changes nothing.
+        mock.expect([
+            answer(PRIMARY, "/responses", 200, &turn("enc_2", "b"))
+                .weekly("100", Some("34571.50"))
+                .ending_after(ms(400)),
+            answer(PRIMARY, "/wham/usage", 200, &usage_after_reset()),
+        ]);
+        let older = started_now(&accounts, 1);
+        tokio::time::sleep(ms(100)).await;
+        let statuses = accounts.check_now().await;
+        assert!(!statuses[0].drawing_credits);
+        assert_eq!(
+            statuses[0].usage.as_ref().unwrap().reset_credits_available,
+            Some(1)
+        );
+        for handle in older {
+            handle.await.unwrap();
+        }
+        assert!(take(&events).is_empty());
+        assert!(!accounts.statuses()[0].drawing_credits);
+        let seen = mock.take();
+        assert!(
+            seen.iter()
+                .any(|seen| seen.method == "GET" && seen.account == PRIMARY)
+        );
+
+        // Drawing again; then the operator marks it usable after a reset,
+        // while an older request is under way.
+        mock.expect([
+            answer(PRIMARY, "/responses", 200, &turn("enc_3", "c")).weekly("100", Some("34571")),
+            answer(PRIMARY, "/responses", 200, &turn("enc_4", "d"))
+                .weekly("100", Some("34571"))
+                .ending_after(ms(400)),
+        ]);
+        accounts
+            .generate_text(&conversation(), &GenerationConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(using_credits_events(&take(&events)).len(), 1);
+        let older = started_now(&accounts, 1);
+        tokio::time::sleep(ms(100)).await;
+        accounts.mark_usable("primary").unwrap();
+        assert!(!accounts.statuses()[0].drawing_credits);
+        for handle in older {
+            handle.await.unwrap();
+        }
+        assert!(take(&events).is_empty());
+        assert!(!accounts.statuses()[0].drawing_credits);
+        assert_eq!(mock.unanswered(), 0);
     })
     .await;
 }

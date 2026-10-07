@@ -154,8 +154,16 @@ pub enum ChatGptAccountEvent {
     /// until the earliest known reset (`resets_at`), unless an account is
     /// found usable sooner.
     AllExhausted { resets_at: Option<SystemTime> },
-    /// `account`'s responses report a plan window used up while it has
-    /// credits: the backend is drawing on them.
+    /// A report on `account` (a response's usage headers, or a usage check)
+    /// says a plan window is used up while credits are left: the backend is
+    /// drawing on them. Sent once until a report says it no longer is (no
+    /// window used up, or no credits left) or the account is
+    /// [marked usable](ChatGptAccounts::mark_usable). Reports are taken in
+    /// the order they arrived: a response's usage headers arrive when its
+    /// request is accepted, so the headers of a request accepted before a
+    /// usage check (such as after a manual usage reset), or before another
+    /// request's headers, change nothing when the response ends later.
+    /// Headers without credits keep the last credits known, as in Codex.
     UsingCredits {
         account: String,
         balance: Option<String>,
@@ -390,27 +398,59 @@ pub struct ChatGptAccountStatus {
     pub resets_at: Option<SystemTime>,
     /// The code of the error that set it aside.
     pub error_code: Option<String>,
-    /// The plan usage its last response reported.
+    /// The plan usage of the newest response it served (the usage headers
+    /// of requests accepted earlier than the last report applied are left
+    /// out; see [`ChatGptAccountEvent::UsingCredits`]), with the last
+    /// credits known when a response reported none, as Codex keeps them.
     pub plan_usage: Option<PlanUsage>,
     /// The last usage-endpoint report, and when it came.
     pub usage: Option<ChatGptUsageStatus>,
     pub checked_at: Option<SystemTime>,
+    /// The newest report says a window is used up and credits are left:
+    /// the backend is drawing on them. See
+    /// [`ChatGptAccountEvent::UsingCredits`].
+    pub drawing_credits: bool,
 }
 
 impl ChatGptAccountStatus {
-    /// Whether its last response reported a plan window used up while it
-    /// has credits: the backend is drawing on them.
+    /// Whether the backend is drawing on the account's credits
+    /// ([`drawing_credits`](Self::drawing_credits)).
     pub fn using_credits(&self) -> bool {
-        self.plan_usage.as_ref().is_some_and(using_credits)
+        self.drawing_credits
     }
 }
 
-fn using_credits(usage: &PlanUsage) -> bool {
-    usage.credits.as_ref().is_some_and(PlanCredits::usable)
-        && [&usage.primary, &usage.secondary]
-            .into_iter()
-            .flatten()
-            .any(|window| window.used_percent >= 100.0)
+/// What one report about an account says about its windows and credits:
+/// the usage headers of a response, or a usage check.
+struct Report {
+    /// Some window is used up; `None` when the report has no window.
+    used_up: Option<bool>,
+    credits: Option<PlanCredits>,
+}
+
+impl Report {
+    fn new(windows: [Option<&PlanUsageWindow>; 2], credits: Option<PlanCredits>) -> Self {
+        let mut windows = windows.into_iter().flatten().peekable();
+        let used_up = windows
+            .peek()
+            .is_some()
+            .then(|| windows.any(|window| window.used_percent >= 100.0));
+        Self { used_up, credits }
+    }
+
+    fn of_headers(usage: &PlanUsage) -> Self {
+        Self::new(
+            [usage.primary.as_ref(), usage.secondary.as_ref()],
+            usage.credits.clone(),
+        )
+    }
+
+    fn of_check(status: &ChatGptUsageStatus) -> Self {
+        Self::new(
+            [status.primary.as_ref(), status.secondary.as_ref()],
+            status.credits.clone(),
+        )
+    }
 }
 
 /// An account set aside.
@@ -433,9 +473,22 @@ struct Block {
 struct AccountState {
     block: Option<Block>,
     plan_usage: Option<PlanUsage>,
-    using_credits: bool,
     usage: Option<ChatGptUsageStatus>,
     checked_at: Option<SystemTime>,
+    /// The last credits reported. A response's headers don't always carry
+    /// them; Codex then keeps the previous ones
+    /// (`merge_rate_limit_fields` in codex-rs/core/src/state/session.rs).
+    credits: Option<PlanCredits>,
+    /// The backend is drawing on the credits: set by the first report of a
+    /// used-up window with credits left (which sends
+    /// [`ChatGptAccountEvent::UsingCredits`]), cleared only by a report of
+    /// no used-up window or no credits left, or by
+    /// [`mark_usable`](ChatGptAccounts::mark_usable).
+    drawing_credits: bool,
+    /// The [stamp](PoolState::stamp) of the newest report applied: a report
+    /// stamped earlier (the headers of a request accepted before a check, a
+    /// reset, or a newer request's headers) changes nothing.
+    reported: u64,
 }
 
 impl AccountState {
@@ -443,6 +496,33 @@ impl AccountState {
         self.block
             .as_ref()
             .is_none_or(|block| block.retry.is_some())
+    }
+
+    /// Applies `report`, stamped `stamp`, unless a newer one was applied.
+    /// Returns whether it was applied and whether the backend started
+    /// drawing on the credits.
+    fn apply(&mut self, label: &str, stamp: u64, report: Report) -> (bool, bool) {
+        if stamp < self.reported {
+            return (false, false);
+        }
+        self.reported = stamp;
+        if report.credits.is_some() {
+            self.credits = report.credits;
+        }
+        let drawing = match report.used_up {
+            None => return (true, false),
+            Some(false) => false,
+            Some(true) => match &self.credits {
+                Some(credits) => credits.usable(),
+                None => return (true, false),
+            },
+        };
+        let started = drawing && !self.drawing_credits;
+        if self.drawing_credits && !drawing {
+            log::info!("arko_ai: ChatGPT account `{label}` is no longer drawing on its credits");
+        }
+        self.drawing_credits = drawing;
+        (true, started)
     }
 }
 
@@ -460,6 +540,20 @@ struct PoolState {
     /// [`ChatGptAccountEvent::AllExhausted`] was sent and no account has
     /// served since.
     all_exhausted_sent: bool,
+    /// The last [stamp](Self::stamp) handed out.
+    stamps: u64,
+}
+
+impl PoolState {
+    /// A number larger than every one handed out before: the order in which
+    /// reports about the accounts arrived. A response is stamped when the
+    /// backend accepts its request (its head, which carries the usage
+    /// headers, arrives), a usage check when its answer arrives, and
+    /// [`mark_usable`](ChatGptAccounts::mark_usable) when it is called.
+    fn stamp(&mut self) -> u64 {
+        self.stamps += 1;
+        self.stamps
+    }
 }
 
 fn fingerprint(text: &str) -> u64 {
@@ -592,6 +686,7 @@ impl ChatGptAccounts {
             origins: HashMap::new(),
             served: BTreeSet::new(),
             all_exhausted_sent: false,
+            stamps: 0,
         };
         Ok(Self {
             accounts: accounts.into(),
@@ -692,42 +787,68 @@ impl ChatGptAccounts {
                     plan_usage: account_state.plan_usage.clone(),
                     usage: account_state.usage.clone(),
                     checked_at: account_state.checked_at,
+                    drawing_credits: account_state.drawing_credits,
                 }
             })
             .collect()
     }
 
-    /// Checks every exhausted account on the usage endpoint now (for
-    /// example once the operator has pressed a usage reset), and returns the
-    /// accounts' states. The next request tries the first account a check
-    /// allowed (or couldn't decide on; see [`ChatGptAccountStatus::retry`]),
-    /// which is taken back once the backend accepts it. Waits for a check
-    /// under way.
+    /// Checks every exhausted account, and every account drawing on its
+    /// credits, on the usage endpoint now (for example once the operator has
+    /// pressed a usage reset), and returns the accounts' states. The next
+    /// request tries the first account a check allowed (or couldn't decide
+    /// on; see [`ChatGptAccountStatus::retry`]), which is taken back once the
+    /// backend accepts it. Waits for a check under way.
     pub async fn check_now(&self) -> Vec<ChatGptAccountStatus> {
         let _checking = self.check_lock.lock().await;
-        let exhausted: Vec<usize> = {
+        let checked: Vec<usize> = {
             let state = self.lock();
             (0..self.accounts.len())
-                .filter(|index| state.accounts[*index].block.is_some())
+                .filter(|index| {
+                    let account = &state.accounts[*index];
+                    account.block.is_some() || account.drawing_credits
+                })
                 .collect()
         };
-        self.check(&exhausted).await;
+        self.check(&checked).await;
         self.statuses()
     }
 
     /// Reads the usage of the account labelled `label` from the usage
-    /// endpoint, without changing whether it is set aside (the report shows
-    /// in its [status](Self::statuses)). Fails with
-    /// [`Error::InvalidRequest`] for an unknown label, and with the
-    /// endpoint's error.
+    /// endpoint, without changing whether it is set aside. The report shows
+    /// in its [status](Self::statuses), and tells whether the backend is
+    /// drawing on its credits (see [`ChatGptAccountEvent::UsingCredits`]).
+    /// Fails with [`Error::InvalidRequest`] for an unknown label, and with
+    /// the endpoint's error.
     pub async fn read_usage(&self, label: &str) -> Result<ChatGptUsageStatus, Error> {
         let index = self.index_of(label)?;
         let status = fetch_usage(&self.accounts[index].client, &self.usage_url).await?;
+        let events = self.record_check(index, &status);
+        self.emit(events);
+        Ok(status)
+    }
+
+    /// Records the usage-endpoint report `status` of `index`, a report newer
+    /// than every response accepted so far.
+    fn record_check(&self, index: usize, status: &ChatGptUsageStatus) -> Vec<ChatGptAccountEvent> {
         let now = self.now();
         let mut state = self.lock();
-        state.accounts[index].usage = Some(status.clone());
-        state.accounts[index].checked_at = Some(now);
-        Ok(status)
+        let stamp = state.stamp();
+        let account = &mut state.accounts[index];
+        account.usage = Some(status.clone());
+        account.checked_at = Some(now);
+        let label = &self.accounts[index].label;
+        let (_, started) = account.apply(label, stamp, Report::of_check(status));
+        started
+            .then(|| ChatGptAccountEvent::UsingCredits {
+                account: label.clone(),
+                balance: account
+                    .credits
+                    .as_ref()
+                    .and_then(|credits| credits.balance.clone()),
+            })
+            .into_iter()
+            .collect()
     }
 
     fn index_of(&self, label: &str) -> Result<usize, Error> {
@@ -738,14 +859,24 @@ impl ChatGptAccounts {
     }
 
     /// Takes the account labelled `label` back now, without a check (for
-    /// example when the operator says its usage was reset). Fails with
-    /// [`Error::InvalidRequest`] for an unknown label.
+    /// example when the operator says its usage was reset). As after a
+    /// reset, it is no longer taken to be drawing on its credits, and the
+    /// usage headers of requests it accepted before this call no longer
+    /// count. Fails with [`Error::InvalidRequest`] for an unknown label.
     pub fn mark_usable(&self, label: &str) -> Result<(), Error> {
         let index = self.index_of(label)?;
         let mut events = Vec::new();
         {
             let mut state = self.lock();
-            if state.accounts[index].block.take().is_some() {
+            let stamp = state.stamp();
+            let account = &mut state.accounts[index];
+            account.reported = stamp;
+            if std::mem::take(&mut account.drawing_credits) {
+                log::info!(
+                    "arko_ai: ChatGPT account `{label}` is no longer taken to be drawing on its credits"
+                );
+            }
+            if account.block.take().is_some() {
                 events.push(ChatGptAccountEvent::Usable {
                     account: label.into(),
                     reason: UsableReason::MarkedUsable,
@@ -850,30 +981,29 @@ impl ChatGptAccounts {
             let account = &self.accounts[index];
             let result = fetch_usage(&account.client, &self.usage_url).await;
             let now = self.now();
+            let mut events = Vec::new();
+            let (usable, exhausted_until) = match result {
+                Ok(status) => {
+                    events = self.record_check(index, &status);
+                    (status.usable(), status.exhausted_until())
+                }
+                Err(error) => {
+                    log::info!(
+                        "arko_ai: the usage of ChatGPT account `{}` could not be read ({error}); the next request tries it",
+                        account.label
+                    );
+                    (None, None)
+                }
+            };
             {
                 let mut state = self.lock();
                 let account_state = &mut state.accounts[index];
-                let usable = match result {
-                    Ok(status) => {
-                        let usable = status.usable();
-                        if usable == Some(false)
-                            && let Some(block) = account_state.block.as_mut()
-                            && let Some(until) = status.exhausted_until().filter(|at| *at > now)
-                        {
-                            block.until = Some(until);
-                        }
-                        account_state.usage = Some(status);
-                        account_state.checked_at = Some(now);
-                        usable
-                    }
-                    Err(error) => {
-                        log::info!(
-                            "arko_ai: the usage of ChatGPT account `{}` could not be read ({error}); the next request tries it",
-                            account.label
-                        );
-                        None
-                    }
-                };
+                if usable == Some(false)
+                    && let Some(block) = account_state.block.as_mut()
+                    && let Some(until) = exhausted_until.filter(|at| *at > now)
+                {
+                    block.until = Some(until);
+                }
                 if let Some(block) = account_state.block.as_mut() {
                     block.next_check = now + self.status_check_interval;
                     block.retry = match usable {
@@ -883,6 +1013,7 @@ impl ChatGptAccounts {
                     };
                 }
             }
+            self.emit(events);
         }
     }
 
@@ -1009,8 +1140,9 @@ impl ChatGptAccounts {
         self.emit(events);
     }
 
-    /// Records a response `index` served, and labels it.
-    fn served(&self, index: usize, response: &mut GenerationResponse) {
+    /// Records a response `index` served, whose request was accepted at
+    /// `stamp`, and labels it.
+    fn served(&self, index: usize, stamp: u64, response: &mut GenerationResponse) {
         let label = &self.accounts[index].label;
         response.model_call_usage.account = Some(label.clone());
         let mut events = Vec::new();
@@ -1018,20 +1150,27 @@ impl ChatGptAccounts {
             let mut state = self.lock();
             state.served.insert(index);
             state.all_exhausted_sent = false;
+            // The response's own usage is reported as it came; the account's
+            // state follows it only if no newer report was applied.
             if let Some(usage) = &response.model_call_usage.plan_usage {
                 let account = &mut state.accounts[index];
-                let on_credits = using_credits(usage);
-                if on_credits && !account.using_credits {
+                let (applied, started) = account.apply(label, stamp, Report::of_headers(usage));
+                if applied {
+                    let mut usage = usage.clone();
+                    if usage.credits.is_none() {
+                        usage.credits = account.credits.clone();
+                    }
+                    account.plan_usage = Some(usage);
+                }
+                if started {
                     events.push(ChatGptAccountEvent::UsingCredits {
                         account: label.clone(),
-                        balance: usage
+                        balance: account
                             .credits
                             .as_ref()
                             .and_then(|credits| credits.balance.clone()),
                     });
                 }
-                account.using_credits = on_credits;
-                account.plan_usage = Some(usage.clone());
             }
             if self.accounts.len() > 1 {
                 if state.origins.len() > MAX_ORIGINS {
@@ -1169,8 +1308,10 @@ impl ChatGptAccounts {
                 .await;
                 match opened {
                     Ok(stream) => {
+                        // The response head, with its usage headers, is in.
+                        let stamp = self.lock().stamp();
                         self.serving(index);
-                        return Ok(self.watch(stream, index, tried, conversation, config));
+                        return Ok(self.watch(stream, index, stamp, tried, conversation, config));
                     }
                     Err(error) if exhausts_account(&error) => {
                         self.exhaust(index, &error);
@@ -1188,14 +1329,16 @@ impl ChatGptAccounts {
         })
     }
 
-    /// Passes `index`'s stream on, labelling its response. A refusal before
-    /// anything was streamed moves the request to the next account; one
-    /// after it fails the stream with a transient error when another
-    /// account is usable (so the retry goes there), else with the refusal.
+    /// Passes `index`'s stream (accepted at `stamp`) on, labelling its
+    /// response. A refusal before anything was streamed moves the request
+    /// to the next account; one after it fails the stream with a transient
+    /// error when another account is usable (so the retry goes there), else
+    /// with the refusal.
     fn watch(
         &self,
         inner: BoxStream<'static, Result<StreamEvent, Error>>,
         index: usize,
+        stamp: u64,
         tried: BTreeSet<usize>,
         conversation: &Conversation,
         config: &GenerationConfig,
@@ -1222,7 +1365,7 @@ impl ChatGptAccounts {
                             delivered,
                         } => match inner.next().await? {
                             Ok(StreamEvent::End(mut response)) => {
-                                pool.served(index, &mut response);
+                                pool.served(index, stamp, &mut response);
                                 Some((Ok(StreamEvent::End(response)), WatchState::Done))
                             }
                             Ok(event) => Some((

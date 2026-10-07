@@ -611,8 +611,19 @@ quota wall (`credit_balance_exhausted`, `usage_not_included`, `insufficient_quot
 the other `ErrorKind::Billing` codes), the errors on which Codex stops a turn. Credits need
 no setting: Codex sends nothing to use them, and counts an account whose credits are left
 as usable once its windows are used up, so an account with credits goes on serving until
-the backend refuses it. While a response reports a window at 100% with credits left, the
-list sends `ChatGptAccountEvent::UsingCredits` once.
+the backend refuses it.
+
+**Drawing on credits.** When a report on an account (a response's usage headers, or a
+usage check) says a window is at 100% with credits left, the list sends
+`ChatGptAccountEvent::UsingCredits`, once: not again until a report says the account no
+longer draws on them (no window used up, or no credits left), or `mark_usable` is called
+for it (as after a reset). `ChatGptAccountStatus::drawing_credits` holds the state.
+Reports count in the order they arrived. A response's usage headers arrive when its request
+is accepted, so a long response that ends after a usage check (for example the check after
+the operator pressed a manual usage reset), or after a newer request was accepted, changes
+nothing with its older headers; the call's own `ModelCallUsage::plan_usage` still reports
+them. `check_now()` also checks every account drawing on credits, and `read_usage` counts
+as a check. Headers without credits keep the last credits known, as Codex keeps them.
 
 **Failover.** A refused request (nothing was generated) goes to the next account that is
 not set aside, unchanged, with `ChatGptAccountEvent::Exhausted` and
