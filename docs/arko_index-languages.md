@@ -114,8 +114,8 @@ of rules (`arko_index/src/rules/tables.rs`) that names node kinds:
 
 Every table also has these behaviours, which the classic table leaves off: a whitespace
 unit attaches forward, a short header (at most 256 bytes) before a split definition's
-first member joins that member, and packing joins only the units of the node being
-split, so the end of one JSON key's value never shares a chunk with the next key.
+first member joins that member, and packing joins only units that stayed whole, so the
+end of a large JSON value never shares a chunk with the next key.
 
 The tests check every kind and field a table names against its grammar
 (`rules::tests::every_kind_exists_in_its_grammar`), so a typo, or a grammar upgrade

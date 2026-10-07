@@ -434,7 +434,7 @@ pub(crate) const CLASSIC: Table = Table {
     ],
     attach_blank: false,
     join_header: false,
-    pack_within_scope: false,
+    pack_whole_units: false,
     classic: true,
     ..D
 };

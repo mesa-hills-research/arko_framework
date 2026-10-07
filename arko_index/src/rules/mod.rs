@@ -126,10 +126,10 @@ pub(crate) struct Table {
     /// A short first part of a split definition (its header: `module Orders =`) joins
     /// the definition after it instead of staying a chunk of its own.
     pub(crate) join_header: bool,
-    /// Packing joins only the units of the node being split, or the pieces of one of
-    /// them, never the tail of one unit's pieces with the next unit (the end of one
-    /// JSON key's value with the next key).
-    pub(crate) pack_within_scope: bool,
+    /// Packing joins only units of the node being split that stayed whole: the pieces
+    /// of a split unit were packed when it was split, and never join another unit (the
+    /// end of a large JSON value stays apart from the next key).
+    pub(crate) pack_whole_units: bool,
     /// The packing bound inside containers.
     pub(crate) container_pack: usize,
     /// The original rules (`CLASSIC`): scope labels come from `syntax::classic_label`.
@@ -183,7 +183,7 @@ impl Table {
         attach_blank: true,
         merge_clauses: false,
         join_header: true,
-        pack_within_scope: true,
+        pack_whole_units: true,
         container_pack: 1000,
         classic: false,
         content: Content::Code,

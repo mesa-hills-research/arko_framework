@@ -59,6 +59,10 @@ struct Part {
     /// The chain of enclosing definition labels (`Chunk::scope`). Metadata only:
     /// nothing below reads it to choose boundaries.
     scope: String,
+    /// While the node being split packs its parts: whether the unit the part came from
+    /// stayed one part (`Table::pack_whole_units`). The pieces of a split unit were
+    /// packed when that unit was split.
+    whole: bool,
 }
 /// Whether a semantic node is among `n`'s named descendants at most 12 named levels
 /// down (paths through named nodes only). One cursor walks the whole search instead
@@ -445,6 +449,7 @@ fn emit(
             atomic,
             sibling_scope: None,
             scope: scope.to_owned(),
+            whole: true,
         });
     }
 }
@@ -634,17 +639,6 @@ fn tiny_runs(parts: Vec<Part>, text: &str, limit: usize, parent_scope: &str) -> 
     result
 }
 
-/// Whether a part's scope is `scope` or one label below it: a unit of the node being
-/// split, not a piece of a deeper one.
-fn shallow(part: &str, scope: &str) -> bool {
-    let below = if scope.is_empty() {
-        Some(part)
-    } else {
-        part.strip_prefix(scope)
-            .map(|rest| rest.strip_prefix(SCOPE_SEPARATOR).unwrap_or(rest))
-    };
-    below.is_some_and(|rest| !rest.contains(SCOPE_SEPARATOR))
-}
 /// Adjacent definitions of the same kind and name in the same scope merge while the
 /// result fits: Haskell and Elixir write one function as several clauses.
 fn merge_clauses(parts: Vec<Part>, limit: usize) -> Vec<Part> {
@@ -751,8 +745,9 @@ fn split(
         fallback(text, s, e, &symbol, &scope, n.kind(), limit, out);
         return;
     }
-    let mut parts = Vec::new();
+    let mut parts: Vec<Part> = Vec::new();
     for i in 0..units.len() {
+        let first = parts.len();
         let a = if i == 0 { s } else { units[i].0 };
         let b = if i + 1 == units.len() {
             e
@@ -772,6 +767,13 @@ fn split(
             depth + 1,
             &mut parts,
         );
+        // A node with one unit passes its unit's marks on unchanged.
+        if units.len() > 1 {
+            let whole = parts.len() - first == 1;
+            for part in &mut parts[first..] {
+                part.whole = whole;
+            }
+        }
     }
     if rules.table.join_header
         && depth > 0
@@ -806,9 +808,7 @@ fn split(
             && last.s >= s
             && last.e == part.s
             && part.e - last.s <= pack
-            && (!rules.table.pack_within_scope
-                || last.scope == part.scope
-                || (shallow(&last.scope, &scope) && shallow(&part.scope, &scope)))
+            && (!rules.table.pack_whole_units || (last.whole && part.whole))
         {
             last.e = part.e;
             if last.kind != part.kind {
