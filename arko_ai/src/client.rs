@@ -12,6 +12,9 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct LLMClient {
     openai_client: Option<providers::openai::OpenAIClient>,
+    /// Set instead of `openai_client` by
+    /// [`with_chatgpt_accounts`](Self::with_chatgpt_accounts).
+    openai_accounts: Option<providers::openai::ChatGptAccounts>,
     anthropic_client: Option<providers::anthropic::AnthropicClient>,
     google_client: Option<providers::google::GoogleClient>,
     openrouter_client: Option<providers::openrouter::OpenRouterClient>,
@@ -26,6 +29,7 @@ impl LLMClient {
     pub fn new() -> Self {
         Self {
             openai_client: None,
+            openai_accounts: None,
             anthropic_client: None,
             google_client: None,
             openrouter_client: None,
@@ -170,10 +174,7 @@ impl LLMClient {
     /// the OpenAI provider whether configured before or after this call.
     pub fn with_openai_originator(mut self, originator: impl Into<String>) -> Self {
         self.openai_originator = Some(originator.into());
-        self.openai_client = self
-            .openai_client
-            .take()
-            .map(|client| self.configure_openai(client));
+        self.reconfigure_openai();
         self
     }
 
@@ -182,10 +183,7 @@ impl LLMClient {
     /// before or after this call.
     pub fn with_openai_user_agent(mut self, user_agent: impl Into<String>) -> Self {
         self.openai_user_agent = Some(user_agent.into());
-        self.openai_client = self
-            .openai_client
-            .take()
-            .map(|client| self.configure_openai(client));
+        self.reconfigure_openai();
         self
     }
 
@@ -196,10 +194,7 @@ impl LLMClient {
     /// that it is not traced.
     pub fn with_request_trace(mut self, trace: RequestTrace) -> Self {
         self.request_trace = Some(trace);
-        self.openai_client = self
-            .openai_client
-            .take()
-            .map(|client| self.configure_openai(client));
+        self.reconfigure_openai();
         self
     }
 
@@ -226,10 +221,7 @@ impl LLMClient {
     /// the model.
     pub fn with_stream_idle_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.stream_idle_timeout = Some(timeout);
-        self.openai_client = self
-            .openai_client
-            .take()
-            .map(|client| self.configure_openai(client));
+        self.reconfigure_openai();
         self.anthropic_client = self
             .anthropic_client
             .take()
@@ -261,11 +253,30 @@ impl LLMClient {
         hook: Arc<dyn providers::openai::OpenAIRequestHook>,
     ) -> Self {
         self.openai_request_hook = Some(hook);
-        self.openai_client = self
-            .openai_client
-            .take()
-            .map(|client| self.configure_openai(client));
+        self.reconfigure_openai();
         self
+    }
+
+    /// Applies the OpenAI settings made on this `LLMClient` to the OpenAI
+    /// client, or to every account's client of a ChatGPT account list.
+    fn reconfigure_openai(&mut self) {
+        if let Some(client) = self.openai_client.take() {
+            self.openai_client = Some(self.configure_openai(client));
+        }
+        if let Some(accounts) = self.openai_accounts.take() {
+            self.openai_accounts =
+                Some(accounts.map_clients(|client| self.configure_openai(client)));
+        }
+    }
+
+    /// The OpenAI client the OAuth methods act on: the configured one, or,
+    /// with a ChatGPT account list, the account the next request would go
+    /// to.
+    fn openai(&self) -> Option<&providers::openai::OpenAIClient> {
+        match &self.openai_accounts {
+            Some(accounts) => Some(accounts.preferred_client()),
+            None => self.openai_client.as_ref(),
+        }
     }
 
     /// Applies the OpenAI settings made on this `LLMClient`. Settings left
@@ -295,6 +306,7 @@ impl LLMClient {
     }
 
     pub fn with_openai_api_key(mut self, key: &str) -> Self {
+        self.openai_accounts = None;
         self.openai_client = Some(self.configure_openai(providers::openai::OpenAIClient::new(key)));
         self
     }
@@ -350,6 +362,7 @@ impl LLMClient {
         account_id: &str,
         retry_rate_limits: bool,
     ) -> Self {
+        self.openai_accounts = None;
         self.openai_client = Some(
             self.configure_openai(
                 providers::openai::OpenAIClient::new_chatgpt_oauth(
@@ -373,6 +386,7 @@ impl LLMClient {
         mut self,
         file: &crate::codex_auth::CodexAuthFile,
     ) -> Result<Self, Error> {
+        self.openai_accounts = None;
         self.openai_client = Some(self.configure_openai(file.openai_client()?));
         Ok(self)
     }
@@ -382,6 +396,7 @@ impl LLMClient {
     ///
     /// [`OpenAIAuth`]: crate::providers::openai::OpenAIAuth
     pub fn with_openai_auth(mut self, auth: providers::openai::OpenAIAuth) -> Self {
+        self.openai_accounts = None;
         self.openai_client =
             Some(self.configure_openai(providers::openai::OpenAIClient::with_auth(auth)));
         self
@@ -398,11 +413,18 @@ impl LLMClient {
     /// # Errors
     ///
     /// Returns [`Error::MissingApiKey`] if no OpenAI client has been
-    /// configured on this `LLMClient`.
+    /// configured on this `LLMClient`, and [`Error::InvalidRequest`] when the
+    /// OpenAI provider has a list of ChatGPT accounts (update an account's
+    /// own client instead).
     pub async fn update_openai_auth(
         &self,
         auth: providers::openai::OpenAIAuth,
     ) -> Result<(), Error> {
+        if self.openai_accounts.is_some() {
+            return Err(Error::InvalidRequest(
+                "The OpenAI provider has several ChatGPT accounts; update an account's own client (ChatGptAccount::client)".into(),
+            ));
+        }
         match &self.openai_client {
             Some(client) => {
                 client.update_auth(auth).await;
@@ -418,7 +440,7 @@ impl LLMClient {
     /// Returns `false` if no OpenAI client is configured or if it uses
     /// API key auth.
     pub async fn is_openai_chatgpt_oauth(&self) -> bool {
-        match &self.openai_client {
+        match self.openai() {
             Some(client) => client.is_chatgpt_oauth().await,
             None => false,
         }
@@ -442,7 +464,7 @@ impl LLMClient {
     pub async fn openai_chatgpt_oauth_credentials(
         &self,
     ) -> Option<providers::openai::ChatGptOAuthCredentials> {
-        match &self.openai_client {
+        match self.openai() {
             Some(client) => client.chatgpt_oauth_credentials().await,
             None => None,
         }
@@ -481,7 +503,7 @@ impl LLMClient {
         expected: &providers::openai::ChatGptOAuthCredentials,
         new: providers::openai::ChatGptOAuthCredentials,
     ) -> bool {
-        match &self.openai_client {
+        match self.openai() {
             Some(client) => client.replace_chatgpt_credentials(expected, new).await,
             None => false,
         }
@@ -494,7 +516,7 @@ impl LLMClient {
     /// API key auth. Returns `true` if the token cannot be parsed
     /// (conservative — triggers refresh).
     pub async fn is_openai_token_expired(&self, margin: std::time::Duration) -> bool {
-        match &self.openai_client {
+        match self.openai() {
             Some(client) => client.is_oauth_token_expired(margin).await,
             None => false,
         }
@@ -527,7 +549,7 @@ impl LLMClient {
     pub async fn refresh_openai_oauth_token(
         &self,
     ) -> Result<providers::openai::OAuthRefreshResult, Error> {
-        match &self.openai_client {
+        match self.openai() {
             Some(client) => client.refresh_oauth_token().await,
             None => Err(Error::MissingApiKey("OpenAI".to_string())),
         }
@@ -538,7 +560,7 @@ impl LLMClient {
     pub async fn refresh_openai_oauth_token_once(
         &self,
     ) -> Result<providers::openai::OAuthRefreshResult, Error> {
-        match &self.openai_client {
+        match self.openai() {
             Some(client) => client.refresh_oauth_token_once().await,
             None => Err(Error::MissingApiKey("OpenAI".to_string())),
         }
@@ -567,7 +589,7 @@ impl LLMClient {
         &self,
         margin: std::time::Duration,
     ) -> Result<Option<providers::openai::OAuthRefreshResult>, Error> {
-        match &self.openai_client {
+        match self.openai() {
             Some(client) => client.refresh_oauth_token_if_expiring(margin).await,
             None => Ok(None),
         }
@@ -611,9 +633,50 @@ impl LLMClient {
         Conversation::new(model)
     }
 
+    /// Configures the OpenAI provider with an ordered list of ChatGPT OAuth
+    /// accounts, first preferred: a request an account's usage limit (or
+    /// credits) refuses goes to the next account at once, and requests move
+    /// back as soon as a higher account is usable again. See
+    /// [`ChatGptAccounts`](providers::openai::ChatGptAccounts). The OpenAI
+    /// settings made on this `LLMClient` (originator, User-Agent, trace,
+    /// hook, idle timeout) apply to every account.
+    ///
+    /// The OAuth methods ([`refresh_openai_oauth_token_if_expiring`](Self::refresh_openai_oauth_token_if_expiring),
+    /// [`openai_chatgpt_oauth_credentials`](Self::openai_chatgpt_oauth_credentials)
+    /// and the others) act on the account the next request would go to;
+    /// each account refreshes its own credentials before it is used, and
+    /// with a Codex `auth.json` keeps its file in step.
+    pub fn with_chatgpt_accounts(mut self, accounts: providers::openai::ChatGptAccounts) -> Self {
+        self.openai_client = None;
+        self.openai_accounts = Some(accounts.map_clients(|client| self.configure_openai(client)));
+        self
+    }
+
+    /// Configures the OpenAI provider with the Codex `auth.json` files of
+    /// several ChatGPT accounts, labelled, first preferred; see
+    /// [`with_chatgpt_accounts`](Self::with_chatgpt_accounts) and
+    /// [`ChatGptAccounts::from_codex_auth_files`](providers::openai::ChatGptAccounts::from_codex_auth_files).
+    pub fn with_codex_auth_files<'a>(
+        self,
+        files: impl IntoIterator<Item = (&'a str, &'a crate::codex_auth::CodexAuthFile)>,
+    ) -> Result<Self, Error> {
+        let accounts = providers::openai::ChatGptAccounts::from_codex_auth_files(files)?;
+        Ok(self.with_chatgpt_accounts(accounts))
+    }
+
+    /// The ChatGPT account list installed with
+    /// [`with_chatgpt_accounts`](Self::with_chatgpt_accounts), for its
+    /// statuses, [`check_now`](providers::openai::ChatGptAccounts::check_now)
+    /// and [`mark_usable`](providers::openai::ChatGptAccounts::mark_usable).
+    /// Clones of this `LLMClient` share it.
+    pub fn chatgpt_accounts(&self) -> Option<&providers::openai::ChatGptAccounts> {
+        self.openai_accounts.as_ref()
+    }
+
     /// Installs a preconfigured OpenAI client (for example one with
     /// [`with_base_url`](providers::openai::OpenAIClient::with_base_url)).
     pub fn with_openai_client(mut self, client: providers::openai::OpenAIClient) -> Self {
+        self.openai_accounts = None;
         self.openai_client = Some(self.configure_openai(client));
         self
     }
@@ -639,9 +702,10 @@ impl LLMClient {
     fn get_provider(&self, provider: &Provider) -> Result<&dyn ProviderClient, Error> {
         match provider {
             Provider::OpenAI => self
-                .openai_client
+                .openai_accounts
                 .as_ref()
-                .map(|c| c as &dyn ProviderClient)
+                .map(|accounts| accounts as &dyn ProviderClient)
+                .or_else(|| self.openai_client.as_ref().map(|c| c as &dyn ProviderClient))
                 .ok_or_else(|| Error::MissingApiKey("OpenAI".to_string())),
             Provider::Anthropic => self
                 .anthropic_client

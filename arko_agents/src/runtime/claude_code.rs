@@ -3372,6 +3372,7 @@ fn plan_usage_of(info: &Value) -> ai::PlanUsage {
         active_limit: limit_type,
         primary,
         secondary,
+        credits: None,
     }
 }
 

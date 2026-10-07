@@ -388,8 +388,10 @@ on other models. Every OAuth request also carries Codex's `x-codex-routing-hint`
 `model=<model>`, with `;tier=priority` in Fast mode. Codex's catalog describes Fast mode
 as "2x speed, increased usage": it uses more of the plan's limits. `Default` sends no
 tier (standard processing, as Codex does); Flex and Auto are `Error::UnsupportedFeature`
-over OAuth. The response's `service_tier`, when the backend echoes one, is reported in
-`UsageInfo::service_tier` as on the API, and the subscription estimate uses it.
+over OAuth. `UsageInfo::service_tier` reports the requested tier (Fast when `priority`
+was sent, standard otherwise), and the subscription estimate uses it: the `service_tier`
+the backend echoes is ignored, as Codex ignores it, since it says `default` or `auto` for
+Fast calls that were served fast.
 
 **Turn state.** The backend returns an `x-codex-turn-state` routing token.
 `GenerationResponse::openai_turn_state` carries it, and
@@ -578,6 +580,99 @@ the credentials replaced returns them. They apply only to explicit
 runtime calls before each request) never wait, and a 429 from them is the request's
 error, which the agent's own rate-limit recovery handles.
 
+### Several ChatGPT accounts
+
+Opt-in: `LLMClient::with_chatgpt_accounts(ChatGptAccounts)` puts an ordered list of
+ChatGPT OAuth accounts behind the OpenAI provider, first preferred. When an account's
+plan is used up, requests go on on the next one at once, and come back as soon as the
+first is usable again. A client configured any other way has one account and behaves as
+before.
+
+```rust,no_run
+use arko_ai::{ChatGptAccounts, CodexAuthFile, LLMClient};
+
+# fn main() -> Result<(), arko_ai::Error> {
+let main = CodexAuthFile::load("/home/me/.codex-200/auth.json")?;
+let spare = CodexAuthFile::load("/home/me/.codex-100/auth.json")?;
+let accounts = ChatGptAccounts::from_codex_auth_files([("pro-200", &main), ("pro-100", &spare)])?
+    .with_observer(|event| println!("{event}")); // for example, text the operator
+let client = LLMClient::new().with_chatgpt_accounts(accounts);
+# Ok(()) }
+```
+
+Each account is its own client (`ChatGptAccount::new(label, OpenAIClient)` or
+`ChatGptAccount::from_codex_auth_file`), with its own refreshes and its own `auth.json` kept
+in step; a label names it in events, logs and usage, never a secret. The list rejects an
+empty list, repeated labels, API keys, and two labels for one ChatGPT account.
+
+**When an account is set aside.** Only when the backend refuses it: a plan usage limit
+(HTTP 429 `usage_limit_reached`, with the reset time in `resets_at`) or a credit, spend or
+quota wall (`credit_balance_exhausted`, `usage_not_included`, `insufficient_quota` and
+the other `ErrorKind::Billing` codes), the errors on which Codex stops a turn. Credits need
+no setting: Codex sends nothing to use them, and counts an account whose credits are left
+as usable once its windows are used up, so an account with credits goes on serving until
+the backend refuses it. While a response reports a window at 100% with credits left, the
+list sends `ChatGptAccountEvent::UsingCredits` once.
+
+**Failover.** A refused request (nothing was generated) goes to the next account that is
+not set aside, unchanged, with `ChatGptAccountEvent::Exhausted` and
+`ChatGptAccountEvent::Switched`. `Exhausted` is sent once per setting aside: other
+requests refused while the account is set aside (several agents' requests under way at
+once) send nothing more. A refusal streamed before any output does the same; one
+after output fails the stream with a transient `Error::StreamTruncated` when another
+account is usable, so the agent's retry goes there. When every account is set aside, the
+request fails with a `usage_limit_reached` error whose `retry_after` is the earliest known
+reset (the agent pauses until then, as with one account), and
+`ChatGptAccountEvent::AllExhausted` is sent once; later requests fail at once without
+being sent.
+
+**Coming back.** The next request tries an account set aside:
+
+- once its reset time has passed;
+- when the usage endpoint (`GET https://chatgpt.com/backend-api/wham/usage`, as Codex
+  reads it, with the bearer token, `chatgpt-account-id` and the configured User-Agent)
+  allows requests: `rate_limit.allowed`, or credits left, with no spend control or
+  reached-limit type, which is how Codex decides that usage has recovered. A manual usage
+  reset shows there at once. While a lower account serves, the accounts above it are
+  checked as requests are made, at most every 5 minutes
+  (`with_status_check_interval`; nothing runs in the background). A check that fails or
+  can't tell also lets the next request try the account;
+- after `ChatGptAccounts::check_now()`, which checks every account set aside now, for
+  example once the operator has pressed a reset.
+
+The account is taken back when the backend accepts that request (`Usable`, then
+`Switched` with `SwitchReason::Restored`). A refusal sets it aside again without a new
+event, so a limit the check doesn't show (such as a per-model limit) notifies nobody. Any
+other failure of the try moves the request on to the next account as well. A temporary
+one (a server error, a short rate limit, a connection or refresh timeout) leaves the
+account to be tried again by the next request; after any other, it waits for a check.
+When no other account can take the request, that failure is the request's error, as with
+one account, rather than a usage limit until another account's reset.
+
+`mark_usable(label)` takes an account back at once, without a check, and
+`read_usage(label)` reads one account's usage endpoint without changing whether it is set
+aside. `LLMClient::chatgpt_accounts()` returns the list; clones share it. `statuses()`
+reports each account: active, set aside since and until when, whether the next request
+tries it (`retry`), the last plan usage and credits its responses reported, and the last
+usage check or `read_usage` (with the manual resets left, `reset_credits_available`).
+
+**Conversation state across accounts.** The `x-codex-turn-state` routing token belongs to
+the account that issued it (Codex drops it when the signed-in account changes), and
+whether one account accepts another's encrypted reasoning is not known (Codex never
+switches accounts within a conversation). So each request carries only the reasoning
+items, and the turn-state token, of the account serving it; the conversation itself keeps
+everything. Items from before this process (a resumed conversation) count as the first
+account's. The `prompt_cache_key` stays the same; each account has its own prompt cache.
+
+**Usage.** `ModelCallUsage::account` names the account that served each call, and
+`PlanUsage::credits` holds the credits each response reported (`x-codex-credits-*`).
+
+**The `LLMClient`'s OpenAI settings** (originator, User-Agent, trace, request hook, idle
+timeout) apply to every account. Its OAuth methods (`refresh_openai_oauth_token_if_expiring`,
+`openai_chatgpt_oauth_credentials`, `CodexAuthFile::sync`) act on the account the next
+request would go to, and every account refreshes its own credentials before it is used.
+`update_openai_auth` is refused: update an account's own client.
+
 ## Usage and cost
 
 `UsageInfo` token counts mean the same thing for every provider:
@@ -597,7 +692,8 @@ actually used:
 
 - **Service tier.** The tier the response reports wins over the one requested (OpenAI
   echoes `service_tier`, for example `default` when a Fast request was downgraded;
-  Anthropic reports `speed: "fast"` and `service_tier`).
+  Anthropic reports `speed: "fast"` and `service_tier`), except over ChatGPT OAuth, where
+  the requested tier is used (the backend's echo doesn't tell Fast calls apart).
   `GenerationConfig::with_openai_service_tier` requests OpenAI Flex or Fast (sent as
   `priority`) on models that offer it. Over ChatGPT OAuth only Fast is available, as in
   Codex (see [ChatGPT OAuth requests](#openai-responses-replay-prompt-caching-and-chatgpt-oauth));
@@ -1136,6 +1232,16 @@ cargo run -p arko_ai --example llm_client_cli -- --help
 cargo run -p arko_ai --example llm_client_cli -- text -m claude-opus-5-5 -p "Hello"
 cargo run -p arko_ai --example llm_client_cli -- text -m gpt-6-astra -p "Hello" --codex-auth
 cargo run -p arko_ai --example llm_client_cli -- chat -m anthropic/claude-opus-5.5 --reasoning-level high
+```
+
+The `chatgpt_accounts_check` example checks [several ChatGPT accounts](#several-chatgpt-accounts)
+live: it reads each account's usage, and optionally sends one short request through the
+list (`--request`) or hands one account's encrypted reasoning to the other
+(`--portability`):
+
+```bash
+cargo run -p arko_ai --example chatgpt_accounts_check -- \
+    --auth ~/.codex-200/auth.json --auth ~/.codex-100/auth.json --request --portability
 ```
 
 `--reasoning` reasons at the model's defaults: no effort or level is sent. On OpenAI that

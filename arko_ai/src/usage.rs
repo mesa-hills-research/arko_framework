@@ -60,6 +60,12 @@ pub struct ModelCallUsage {
     /// ChatGPT backend's `x-codex-*` headers on ChatGPT OAuth requests).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_usage: Option<PlanUsage>,
+    /// The label of the ChatGPT account that served the call, when the
+    /// OpenAI provider has several
+    /// ([`ChatGptAccounts`](crate::providers::openai::ChatGptAccounts)).
+    /// Never a token or account id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 /// How much of a subscription plan's usage limits is used, as the ChatGPT
@@ -86,6 +92,34 @@ pub struct PlanUsage {
     /// The secondary window (`x-codex-secondary-*`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secondary: Option<PlanUsageWindow>,
+    /// The account's credits (`x-codex-credits-*`), when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<PlanCredits>,
+}
+
+/// A ChatGPT account's usage credits, as the backend reports them in the
+/// `x-codex-credits-*` response headers and on its usage endpoint (Codex's
+/// `CreditsSnapshot`). Codex sends nothing to opt in to them, and counts an
+/// account whose credits are left (or unlimited) as usable once its plan's
+/// windows are used up.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanCredits {
+    /// Credits are left (`x-codex-credits-has-credits`).
+    pub has_credits: bool,
+    /// The credits are unlimited (`x-codex-credits-unlimited`).
+    #[serde(default)]
+    pub unlimited: bool,
+    /// The balance, as the backend writes it (`x-codex-credits-balance`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balance: Option<String>,
+}
+
+impl PlanCredits {
+    /// Whether requests can go on when the plan's windows are used up:
+    /// credits are left, or unlimited.
+    pub fn usable(&self) -> bool {
+        self.has_credits || self.unlimited
+    }
 }
 
 /// The subscription a [`PlanUsage`] report is of. Each has its own usage
@@ -172,12 +206,27 @@ impl PlanUsage {
             (used_percent != 0.0 || window.window_minutes.is_some() || window.resets_at.is_some())
                 .then_some(window)
         };
+        let flag = |name: &str| match text(name)?.to_ascii_lowercase().as_str() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        };
+        // As Codex reads them (`parse_credits_snapshot` in
+        // codex-rs/codex-api/src/rate_limits.rs): both flags must be there.
+        let credits = flag("x-codex-credits-has-credits").and_then(|has_credits| {
+            Some(PlanCredits {
+                has_credits,
+                unlimited: flag("x-codex-credits-unlimited")?,
+                balance: text("x-codex-credits-balance").map(String::from),
+            })
+        });
         let usage = Self {
             plan: None,
             plan_type: text("x-codex-plan-type").map(String::from),
             active_limit: text("x-codex-active-limit").map(String::from),
             primary: window("primary"),
             secondary: window("secondary"),
+            credits,
         };
         (usage != Self::default()).then_some(Self {
             plan: Some(SubscriptionPlan::ChatGpt),
@@ -229,6 +278,7 @@ impl ModelCallUsage {
             served_model: None,
             rerouted: false,
             plan_usage: None,
+            account: None,
         }
     }
 
@@ -747,7 +797,38 @@ mod tests {
             })
         );
         assert_eq!(usage.secondary, None);
+        assert_eq!(usage.credits, None);
         assert_eq!(usage.most_used_window().unwrap().0, "primary");
+
+        // Credits, as Codex reads them: both flags, then the balance.
+        let mut with_credits = headers.clone();
+        for (name, value) in [
+            ("x-codex-credits-has-credits", "True"),
+            ("x-codex-credits-unlimited", "0"),
+            ("x-codex-credits-balance", "34012.5"),
+        ] {
+            with_credits.insert(name, value.parse().unwrap());
+        }
+        let credits = PlanUsage::from_codex_headers(&with_credits)
+            .unwrap()
+            .credits
+            .unwrap();
+        assert_eq!(
+            credits,
+            PlanCredits {
+                has_credits: true,
+                unlimited: false,
+                balance: Some("34012.5".into()),
+            }
+        );
+        assert!(credits.usable());
+        with_credits.remove("x-codex-credits-unlimited");
+        assert_eq!(
+            PlanUsage::from_codex_headers(&with_credits)
+                .unwrap()
+                .credits,
+            None
+        );
         assert_eq!(
             PlanUsage::from_codex_headers(&reqwest::header::HeaderMap::new()),
             None

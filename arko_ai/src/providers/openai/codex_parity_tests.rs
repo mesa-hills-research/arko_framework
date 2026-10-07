@@ -729,10 +729,12 @@ fn saved_conversations_with_reasoning_items_replay_through_reconstruction() {
 }
 
 /// Fast mode over ChatGPT OAuth goes out as Codex sends it: `service_tier:
-/// "priority"` in the body and `tier=priority` in the routing hint. The tier
-/// the response echoes prices the call, which the subscription covers.
+/// "priority"` in the body and `tier=priority` in the routing hint. The
+/// requested tier prices the call, which the subscription covers: the
+/// backend echoes `default` or `auto` for Fast calls served fast, and Codex
+/// never reads the echo. With an API key the echo still wins.
 #[tokio::test]
-async fn oauth_fast_mode_is_sent_as_codex_sends_it_and_priced_by_the_reported_tier() {
+async fn oauth_fast_mode_is_sent_as_codex_sends_it_and_priced_by_the_requested_tier() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let echoing = |tier: &str| {
             let mut response = completed(json!([]));
@@ -753,7 +755,7 @@ async fn oauth_fast_mode_is_sent_as_codex_sends_it_and_priced_by_the_reported_ti
             .generate_text(&conversation(), &fast)
             .await
             .unwrap();
-        let downgraded = client(&url)
+        let echoed_default = client(&url)
             .generate_text(&conversation(), &fast)
             .await
             .unwrap();
@@ -777,12 +779,12 @@ async fn oauth_fast_mode_is_sent_as_codex_sends_it_and_priced_by_the_reported_ti
         assert_eq!(usage.billing, crate::usage::BillingKind::Subscription);
         assert!((usage.total_cost - 102.0).abs() < 1e-9);
         assert_eq!(usage.billed(), 0.0);
-        // A Fast request the backend served at the standard tier.
+        // An echoed `default` changes nothing over OAuth.
         assert_eq!(
-            downgraded.usage.service_tier,
-            Some(crate::pricing::ServiceTier::Standard)
+            echoed_default.usage.service_tier,
+            Some(crate::pricing::ServiceTier::Fast)
         );
-        assert!((downgraded.usage.total_cost - 51.0).abs() < 1e-9);
+        assert!((echoed_default.usage.total_cost - 102.0).abs() < 1e-9);
 
         // API keys: the same body value, no routing hint, metered.
         let (raw, body) = &requests[2];
