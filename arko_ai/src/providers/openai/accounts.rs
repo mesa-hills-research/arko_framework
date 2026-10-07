@@ -129,7 +129,9 @@ impl ChatGptAccount {
 pub enum ChatGptAccountEvent {
     /// The backend refused `account`: its usage limit (or its credits) ran
     /// out. It is set aside until `resets_at`, when known, or until a status
-    /// check finds it usable.
+    /// check finds it usable. Sent once per setting aside: refusals while it
+    /// is set aside (other requests under way, a retry refused again) send
+    /// nothing.
     Exhausted {
         account: String,
         resets_at: Option<SystemTime>,
@@ -504,7 +506,10 @@ type Observer = Arc<dyn Fn(&ChatGptAccountEvent) + Send + Sync>;
 ///   requests, as after a manual usage reset, or can't tell. It is taken
 ///   back when the backend accepts that request, and a refusal sets it
 ///   aside again without a new event (so a limit the check doesn't show
-///   notifies nobody). [`mark_usable`](Self::mark_usable) takes it back at
+///   notifies nobody). A temporary failure of that request leaves the
+///   account to be tried again, and when no other account can take the
+///   request, the failure is its error (not a usage limit until another
+///   account's reset). [`mark_usable`](Self::mark_usable) takes it back at
 ///   once.
 /// - A request replays only the encrypted reasoning, and the
 ///   `x-codex-turn-state` token, of the account serving it; see the module
@@ -903,8 +908,9 @@ impl ChatGptAccounts {
                 .or_else(|| previous.as_ref().and_then(|block| block.until))
                 .filter(|until| *until > now);
             let code = error_code(error);
-            // A retry that was refused again: nothing new to report.
-            if !previous.as_ref().is_some_and(|block| block.retry.is_some()) {
+            // Already set aside (a retry refused again, or another request
+            // refused at the same time): nothing new to report.
+            if previous.is_none() {
                 events.push(ChatGptAccountEvent::Exhausted {
                     account: self.accounts[index].label.clone(),
                     resets_at: until,
@@ -970,12 +976,17 @@ impl ChatGptAccounts {
     }
 
     /// Records that `index` accepted a request, taking it back if it was
-    /// set aside.
+    /// being tried again. An account set aside without a retry was refused
+    /// by a later request while this one was under way: it stays aside.
     fn serving(&self, index: usize) {
         let mut events = Vec::new();
         {
             let mut state = self.lock();
-            if let Some(block) = state.accounts[index].block.take() {
+            let block = &mut state.accounts[index].block;
+            if block.as_ref().is_some_and(|block| block.retry.is_none()) {
+                return;
+            }
+            if let Some(block) = block.take() {
                 events.push(ChatGptAccountEvent::Usable {
                     account: self.accounts[index].label.clone(),
                     reason: block.retry.unwrap_or(UsableReason::Retried),
@@ -1097,9 +1108,19 @@ impl ChatGptAccounts {
             .is_some_and(|block| block.retry.is_some())
     }
 
-    /// Trying `index` again failed for another reason than its limit: it
-    /// stays set aside until a check allows it.
+    /// Trying `index` again failed for another reason than its limit. A
+    /// temporary failure (a server error, a short rate limit, a connection
+    /// or refresh timeout) says nothing about the limit: the next request
+    /// tries the account again. After any other failure it stays set aside
+    /// until a check allows it.
     fn retry_failed(&self, index: usize, error: &Error) {
+        if error.is_retryable() {
+            log::info!(
+                "arko_ai: trying ChatGPT account `{}` again failed ({error}); the next request tries it again",
+                self.accounts[index].label
+            );
+            return;
+        }
         log::info!(
             "arko_ai: trying ChatGPT account `{}` again failed ({error}); it stays set aside",
             self.accounts[index].label
@@ -1123,8 +1144,16 @@ impl ChatGptAccounts {
         Box::pin(async move {
             self.run_due_checks().await;
             let mut last_error = None;
+            let mut retry_error = None;
             loop {
                 let Some(index) = self.choose(&tried) else {
+                    // An account tried again failed for another reason than
+                    // its limit: that failure is the request's, as with one
+                    // account, not a usage limit until another account's
+                    // reset.
+                    if let Some(error) = retry_error {
+                        return Err(error);
+                    }
                     return Err(self.all_exhausted(last_error));
                 };
                 tried.insert(index);
@@ -1149,7 +1178,10 @@ impl ChatGptAccounts {
                     }
                     // Trying an account set aside is a guess; another
                     // account serves when it fails.
-                    Err(error) if retrying => self.retry_failed(index, &error),
+                    Err(error) if retrying => {
+                        self.retry_failed(index, &error);
+                        retry_error = Some(error);
+                    }
                     Err(error) => return Err(error),
                 }
             }

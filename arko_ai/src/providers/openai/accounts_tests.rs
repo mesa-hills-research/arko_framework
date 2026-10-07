@@ -15,6 +15,8 @@ struct Answer {
     status: u16,
     body: String,
     headers: Vec<(&'static str, String)>,
+    /// How long the mock waits before answering.
+    delay: Duration,
 }
 
 fn answer(account: &'static str, path: &'static str, status: u16, body: &str) -> Answer {
@@ -24,12 +26,18 @@ fn answer(account: &'static str, path: &'static str, status: u16, body: &str) ->
         status,
         body: body.into(),
         headers: Vec::new(),
+        delay: Duration::ZERO,
     }
 }
 
 impl Answer {
     fn header(mut self, name: &'static str, value: &str) -> Self {
         self.headers.push((name, value.into()));
+        self
+    }
+
+    fn after(mut self, delay: Duration) -> Self {
+        self.delay = delay;
         self
     }
 }
@@ -86,6 +94,7 @@ impl Mock {
                     let reply = scripted.unwrap_or_else(|| {
                         answer("", "", 500, r#"{"error":{"message":"unscripted request"}}"#)
                     });
+                    tokio::time::sleep(reply.delay).await;
                     write(&mut socket, &reply).await;
                 });
             }
@@ -1141,4 +1150,273 @@ fn credit_and_quota_walls_exhaust_an_account_but_other_errors_do_not() {
     ] {
         assert!(!exhausts_account(&error(status, body)), "{body}");
     }
+}
+
+fn exhausted_count(events: &[ChatGptAccountEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, ChatGptAccountEvent::Exhausted { .. }))
+        .count()
+}
+
+/// Three requests sent to the first account at once, all refused, then
+/// served by the second.
+async fn three_refused_at_once(mock: &Mock, accounts: &ChatGptAccounts) {
+    let resets = unix_now() + 3600;
+    let slow = Duration::from_millis(300);
+    mock.expect([
+        answer(PRIMARY, "/responses", 429, &usage_limit(resets)).after(slow),
+        answer(PRIMARY, "/responses", 429, &usage_limit(resets)).after(slow),
+        answer(PRIMARY, "/responses", 429, &usage_limit(resets)).after(slow),
+        answer(SECONDARY, "/responses", 200, &turn("enc_1", "s")),
+        answer(SECONDARY, "/responses", 200, &turn("enc_2", "s")),
+        answer(SECONDARY, "/responses", 200, &turn("enc_3", "s")),
+    ]);
+    let config = GenerationConfig::default();
+    let conversation = conversation();
+    let (a, b, c) = tokio::join!(
+        accounts.generate_text(&conversation, &config),
+        accounts.generate_text(&conversation, &config),
+        accounts.generate_text(&conversation, &config),
+    );
+    for result in [a, b, c] {
+        assert_eq!(
+            result.unwrap().model_call_usage.account.as_deref(),
+            Some("secondary")
+        );
+    }
+    let tried: Vec<String> = responses(&mock.take())
+        .iter()
+        .map(|seen| seen.account.clone())
+        .collect();
+    assert_eq!(
+        tried.iter().filter(|account| *account == PRIMARY).count(),
+        3
+    );
+    assert_eq!(mock.unanswered(), 0);
+}
+
+#[tokio::test]
+async fn requests_refused_at_once_report_the_account_exhausted_once() {
+    within(async {
+        let mock = Mock::start().await;
+        let (accounts, events) = pool(&mock);
+        let accounts = accounts.with_status_check_interval(Duration::from_secs(3600));
+        three_refused_at_once(&mock, &accounts).await;
+        let events = take(&events);
+        assert_eq!(exhausted_count(&events), 1, "{events:#?}");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ChatGptAccountEvent::Switched { .. }))
+                .count(),
+            1,
+            "{events:#?}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_retry_refused_by_requests_under_way_together_stays_quiet() {
+    within(async {
+        let mock = Mock::start().await;
+        let (accounts, events) = pool(&mock);
+        let accounts = accounts.with_status_check_interval(Duration::from_secs(3600));
+        mock.expect([
+            answer(PRIMARY, "/responses", 429, &usage_limit(unix_now() + 3600)),
+            answer(SECONDARY, "/responses", 200, &turn("enc_0", "s")),
+        ]);
+        accounts
+            .generate_text(&conversation(), &GenerationConfig::default())
+            .await
+            .unwrap();
+        mock.expect([answer(
+            PRIMARY,
+            "/wham/usage",
+            200,
+            &usage_status(true, false),
+        )]);
+        assert_eq!(
+            accounts.check_now().await[0].retry,
+            Some(UsableReason::StatusCheck)
+        );
+        mock.take();
+        take(&events);
+
+        three_refused_at_once(&mock, &accounts).await;
+        assert!(take(&events).is_empty());
+        let status = &accounts.statuses()[0];
+        assert!(status.exhausted && status.retry.is_none());
+    })
+    .await;
+}
+
+/// A request the first account accepted, whose response starts after a
+/// later request's refusal, doesn't take the account back.
+#[tokio::test]
+async fn an_acceptance_older_than_a_refusal_leaves_the_account_aside() {
+    within(async {
+        let mock = Mock::start().await;
+        let (accounts, events) = pool(&mock);
+        let accounts = accounts.with_status_check_interval(Duration::from_secs(3600));
+        let resets = unix_now() + 3600;
+        mock.expect([
+            answer(PRIMARY, "/responses", 200, &turn("enc_a", "a"))
+                .after(Duration::from_millis(500)),
+            answer(PRIMARY, "/responses", 429, &usage_limit(resets)),
+            answer(SECONDARY, "/responses", 200, &turn("enc_b", "b")),
+            answer(SECONDARY, "/responses", 200, &turn("enc_c", "c")),
+        ]);
+        let first = {
+            let accounts = accounts.clone();
+            tokio::spawn(async move {
+                accounts
+                    .generate_text(&conversation(), &GenerationConfig::default())
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let second = accounts
+            .generate_text(&conversation(), &GenerationConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            second.model_call_usage.account.as_deref(),
+            Some("secondary")
+        );
+        let first = first.await.unwrap().unwrap();
+        assert_eq!(first.model_call_usage.account.as_deref(), Some("primary"));
+        assert!(accounts.statuses()[0].exhausted);
+
+        // The next request goes straight to the second account.
+        let third = accounts
+            .generate_text(&conversation(), &GenerationConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(third.model_call_usage.account.as_deref(), Some("secondary"));
+        let tried: Vec<String> = responses(&mock.take())
+            .iter()
+            .map(|seen| seen.account.clone())
+            .collect();
+        assert_eq!(tried, [PRIMARY, PRIMARY, SECONDARY, SECONDARY]);
+        let events = take(&events);
+        assert!(
+            matches!(
+                events[..],
+                [
+                    ChatGptAccountEvent::Exhausted { .. },
+                    ChatGptAccountEvent::Switched { .. }
+                ]
+            ),
+            "{events:#?}"
+        );
+        assert_eq!(mock.unanswered(), 0);
+    })
+    .await;
+}
+
+/// Both accounts exhausted, the first resetting in 10 minutes and the second
+/// in 3 days; then 11 minutes pass, so the next request tries the first.
+async fn both_exhausted_then_the_first_resets(mock: &Mock) -> ChatGptAccounts {
+    let (accounts, _events) = pool(mock);
+    let mut accounts = accounts.with_status_check_interval(Duration::from_secs(3600));
+    let clock = Arc::new(Mutex::new(SystemTime::now()));
+    accounts.clock = Some(clock.clone());
+    let now = unix_now();
+    mock.expect([
+        answer(PRIMARY, "/responses", 429, &usage_limit(now + 600)),
+        answer(SECONDARY, "/responses", 429, &usage_limit(now + 3 * 86_400)),
+    ]);
+    let error = accounts
+        .generate_text(&conversation(), &GenerationConfig::default())
+        .await
+        .unwrap_err();
+    assert!(error.is_usage_limit());
+    mock.take();
+    *clock.lock().unwrap() += Duration::from_secs(660);
+    accounts
+}
+
+#[tokio::test]
+async fn a_retry_that_fails_for_a_moment_returns_that_failure_and_is_tried_again() {
+    within(async {
+        let mock = Mock::start().await;
+        let accounts = both_exhausted_then_the_first_resets(&mock).await;
+        mock.expect([
+            answer(
+                PRIMARY,
+                "/responses",
+                500,
+                r#"{"error":{"message":"An error occurred while processing your request.","type":"server_error"}}"#,
+            ),
+            answer(PRIMARY, "/responses", 200, &turn("enc_a", "primary")),
+        ]);
+        // As with one account: the server error, not a usage limit until
+        // the second account's reset three days later.
+        let error = accounts
+            .generate_text(&conversation(), &GenerationConfig::default())
+            .await
+            .unwrap_err();
+        assert!(!error.is_usage_limit() && error.is_retryable(), "{error}");
+        assert!(matches!(
+            error,
+            Error::ProviderError {
+                status: Some(500),
+                ..
+            }
+        ));
+        assert_eq!(
+            accounts.statuses()[0].retry,
+            Some(UsableReason::ResetTimePassed)
+        );
+        // The caller's retry tries the first account again.
+        let response = accounts
+            .generate_text(&conversation(), &GenerationConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(response.model_call_usage.account.as_deref(), Some("primary"));
+        let tried: Vec<String> = responses(&mock.take())
+            .iter()
+            .map(|seen| seen.account.clone())
+            .collect();
+        assert_eq!(tried, [PRIMARY, PRIMARY]);
+        assert!(!accounts.statuses()[0].exhausted);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_retry_that_fails_for_good_returns_that_failure_and_waits_for_a_check() {
+    within(async {
+        let mock = Mock::start().await;
+        let accounts = both_exhausted_then_the_first_resets(&mock).await;
+        mock.expect([answer(
+            PRIMARY,
+            "/responses",
+            403,
+            r#"{"error":{"code":"permission_denied","message":"no"}}"#,
+        )]);
+        let error = accounts
+            .generate_text(&conversation(), &GenerationConfig::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::ProviderError {
+                status: Some(403),
+                ..
+            }
+        ));
+        let status = &accounts.statuses()[0];
+        assert!(status.exhausted && status.retry.is_none());
+        // Until a check, requests fail at once with a usage limit.
+        let error = accounts
+            .generate_text(&conversation(), &GenerationConfig::default())
+            .await
+            .unwrap_err();
+        assert!(error.is_usage_limit());
+        assert_eq!(responses(&mock.take()).len(), 1);
+    })
+    .await;
 }

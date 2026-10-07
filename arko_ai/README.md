@@ -616,7 +616,9 @@ list sends `ChatGptAccountEvent::UsingCredits` once.
 
 **Failover.** A refused request (nothing was generated) goes to the next account that is
 not set aside, unchanged, with `ChatGptAccountEvent::Exhausted` and
-`ChatGptAccountEvent::Switched`. A refusal streamed before any output does the same; one
+`ChatGptAccountEvent::Switched`. `Exhausted` is sent once per setting aside: other
+requests refused while the account is set aside (several agents' requests under way at
+once) send nothing more. A refusal streamed before any output does the same; one
 after output fails the stream with a transient `Error::StreamTruncated` when another
 account is usable, so the agent's retry goes there. When every account is set aside, the
 request fails with a `usage_limit_reached` error whose `retry_after` is the earliest known
@@ -640,13 +642,19 @@ being sent.
 
 The account is taken back when the backend accepts that request (`Usable`, then
 `Switched` with `SwitchReason::Restored`). A refusal sets it aside again without a new
-event, so a limit the check doesn't show (such as a per-model limit) notifies nobody, and
-any other failure of the try moves the request on as well. `mark_usable(label)` takes an
-account back at once, without a check. `LLMClient::chatgpt_accounts()` returns the list;
-clones share it. `statuses()` reports each account: active, set aside since and until
-when, whether the next request tries it (`retry`), the last plan usage and credits its
-responses reported, and the last usage check (with the manual resets left,
-`reset_credits_available`).
+event, so a limit the check doesn't show (such as a per-model limit) notifies nobody. Any
+other failure of the try moves the request on to the next account as well. A temporary
+one (a server error, a short rate limit, a connection or refresh timeout) leaves the
+account to be tried again by the next request; after any other, it waits for a check.
+When no other account can take the request, that failure is the request's error, as with
+one account, rather than a usage limit until another account's reset.
+
+`mark_usable(label)` takes an account back at once, without a check, and
+`read_usage(label)` reads one account's usage endpoint without changing whether it is set
+aside. `LLMClient::chatgpt_accounts()` returns the list; clones share it. `statuses()`
+reports each account: active, set aside since and until when, whether the next request
+tries it (`retry`), the last plan usage and credits its responses reported, and the last
+usage check or `read_usage` (with the manual resets left, `reset_credits_available`).
 
 **Conversation state across accounts.** The `x-codex-turn-state` routing token belongs to
 the account that issued it (Codex drops it when the signed-in account changes), and
