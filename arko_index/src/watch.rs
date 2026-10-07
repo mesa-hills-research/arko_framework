@@ -59,6 +59,7 @@ fn engine_id() -> String {
             include_str!("rules/tables.rs"),
             include_str!("rules/tags.rs"),
             include_str!("headers.rs"),
+            include_str!("front_matter.rs"),
             include_str!("normalize.rs"),
             include_str!("files.rs"),
             include_str!("bench_v1.rs"),
