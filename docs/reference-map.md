@@ -1652,12 +1652,14 @@ Guides: [arko_index README](../arko_index/README.md) · [arko_index reference](a
 | `bench_v1::open_watch[_with]`, `Watcher` | The polling watcher (any platform): `next_change`, `ack`, `snapshot`, `flush`, `report`, `rules_changed`. | `arko_index/src/watch.rs` | [Watchers](arko_index-reference.md#watchers) |
 | `watch2::Watcher2` | Linux: inotify plus metadata reconciliation, a record store and a write-ahead journal; `open[_with]`, `next_change`, `next_change_to`, `ack`, `report`, `rules_changed`, `file_count`, `stats`. | `arko_index/src/watch2.rs` | [Watchers](arko_index-reference.md#watchers) |
 | `bench_scan[_with]` | Unix: prints timings of the scan primitives. | `arko_index/src/scan.rs` | [Command line](arko_index-reference.md#command-line) |
+| Feature `pgo` (default) | Grammars compiled with GCC profile-guided optimization by the build script, used after a check against the linked crates; `pgo/train.sh` regenerates the profiles. | `arko_index/build.rs`, `arko_index/src/pgo.rs`, `arko_index/pgo/` | [Features](arko_index-reference.md#features) |
 
 ### Defaults (arko_index)
 
 - Every regular file under the root is indexed, hidden and gitignored files included. Built-in exclusions: `.git` directories and files, directories with a valid `CACHEDIR.TAG` (not the root), and the tool's state directories. Ignore files are read only with `respect_ignore`, and never above the root.
 - Binary, non-UTF-8, unreadable and undecodably named entries are skipped and reported; a walk never stops for them. Symbolic links are not followed.
 - `max_bytes` 4,096; at most ten search hits; all available CPUs; a reorder window of 32 MB of source per thread; `index2` postings budget 256 MB in the CLI.
+- Feature `pgo` is on: optimized builds with GCC on x86-64 Linux parse with grammars compiled with GCC profile-guided optimization from `arko_index/pgo/` (identical output); other builds use the grammar crates' objects. Remove with `default-features = false`. See [The `pgo` feature](../arko_index/README.md#the-pgo-feature).
 
 ### Persisted data (arko_index)
 

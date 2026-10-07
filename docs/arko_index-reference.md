@@ -121,6 +121,17 @@ stderr lines from the report start with `arko_index: `.
 | `ARKO_INDEX_INDEX_MEM_MB` | 256 | CLI only: `index2`'s postings memory budget before spilling to runs. |
 | `ARKO_INDEX_STATS` | Unset | When set, `index2` prints per-phase timings to stderr. |
 | `MALLOC_MMAP_THRESHOLD_` | Unset: the CLI sets 1 MB | glibc's own variable; when set, the CLI leaves the threshold to glibc. |
+| `ARKO_INDEX_PGO_PROFILES` | Unset: `arko_index/pgo` | Build time, feature `pgo`: the directory holding `profile.txt` and `gcda/`. |
+| `ARKO_INDEX_PGO_TRAIN` | Unset | Build time, used by `pgo/train.sh`: build instrumented grammars and write the profile manifest and object directory to this directory. |
+
+## Features
+
+| Feature | Default | Effect |
+|---|---|---|
+| `pgo` | On | Optimized builds with GCC on x86-64 Linux compile the eight grammars a second time with GCC profile-guided optimization from `arko_index/pgo/` and parse with them, after a check against the linked grammar crates. Other builds, and builds whose GCC major version or grammar sources do not match the profiles, use the crates' grammars (with a cargo warning in the latter case). Output is identical either way. Remove with `default-features = false`. See [The `pgo` feature](../arko_index/README.md#the-pgo-feature). |
+
+The grammar crates are pinned to exact versions in `arko_index/Cargo.toml`: an upgrade
+changes chunk boundaries and IDs, and needs new profiles (`arko_index/pgo/train.sh`).
 
 ## Defaults
 
@@ -135,6 +146,7 @@ stderr lines from the report start with `arko_index: `.
 | Search results | At most ten |
 | Polling watcher debounce | 75 ms of stable inventory |
 | Threads | All available CPUs |
+| Feature `pgo` | On (applies with GCC on x86-64 Linux, optimized builds) |
 
 ## On-disk state
 
