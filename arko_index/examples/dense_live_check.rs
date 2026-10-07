@@ -13,14 +13,20 @@
 //!
 //! Flags: `--corpus DIR`, `--eval-dir DIR` (holding the two JSON files), `--state DIR`
 //! (kept between runs: a rerun embeds nothing new and spends only query tokens),
-//! `--model MODEL` (voyage-code-4), `--dimensions N` (the model's default),
-//! `--max-embed-tokens N` (2,500,000), `--fusion rrf|linear`, `--int8`, `--dry-run`
-//! (build with a cap of 0 tokens in a scratch state and print what embedding would
-//! take; needs no key, only the tokenizer download).
+//! `--model MODEL` (voyage-code-4; `hash` runs the whole check offline with the
+//! non-semantic hash embedder, to test the harness: its lexical column is the real
+//! lexical result), `--dimensions N` (the model's default), `--max-embed-tokens N`
+//! (2,500,000), `--fusion rrf|linear`, `--rrf-k K`, `--lexical-weight W`,
+//! `--dense-weight W`, `--candidates N` (hybrid tuning: a rerun on the same state costs
+//! only the queries' tokens), `--int8`, `--dry-run` (build with a cap of 0 tokens in a
+//! scratch state and print what embedding would take; needs no key, only the
+//! tokenizer download).
 //!
-//! The default corpus (7.7 MB, 265 files, 7,018 chunks) took 1,735,222 tokens without
-//! headers (path and source only); with the headers expect a few percent more: about
-//! $0.21 at voyage-code-4's list price of $0.12 per million tokens.
+//! The default corpus (7.7 MB, 265 files, 7,018 chunks) took 1,735,222 billed tokens
+//! without headers (path and source only, 2026-10-04). With the headers, `--dry-run`
+//! counted 1,797,537 tokens (2026-10-07; Voyage bills about one token per text less
+//! than its tokenizer counts): about $0.22 at voyage-code-4's list price of $0.12 per
+//! million tokens, plus about 200 tokens for the 19 queries.
 mod support;
 
 use arko_ai::EmbeddingClient;
@@ -34,6 +40,18 @@ use arko_index::{
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use support::voyage::VoyageEmbedder;
+
+/// The embedder of `--model`: Voyage (needs the key), or the offline hash embedder.
+fn embedder(args: &Args) -> Result<Box<dyn Embedder>, Error> {
+    if args.model == "hash" {
+        return support::embedder_for(&support::descriptor_for("hash", args.dimensions)?);
+    }
+    Ok(Box::new(VoyageEmbedder::from_env(
+        &args.model,
+        args.dimensions,
+        true,
+    )?))
+}
 
 #[derive(Deserialize, Clone)]
 struct Target {
@@ -100,6 +118,7 @@ struct Args {
     dimensions: Option<usize>,
     cap: u64,
     fusion: Fusion,
+    candidates: usize,
     quantization: Quantization,
     dry_run: bool,
 }
@@ -113,9 +132,12 @@ fn parse_args() -> Result<Args, Error> {
         dimensions: None,
         cap: 2_500_000,
         fusion: Fusion::default(),
+        candidates: 50,
         quantization: Quantization::F32,
         dry_run: false,
     };
+    let (mut method, mut rrf_k, mut lexical_weight, mut dense_weight) =
+        ("rrf".to_owned(), None::<f64>, None::<f64>, None::<f64>);
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or(format!("{flag} needs a value"));
@@ -126,26 +148,33 @@ fn parse_args() -> Result<Args, Error> {
             "--model" => a.model = value()?,
             "--dimensions" => a.dimensions = Some(value()?.parse()?),
             "--max-embed-tokens" => a.cap = value()?.parse()?,
-            "--fusion" => {
-                a.fusion = match value()?.as_str() {
-                    "rrf" => Fusion::default(),
-                    "linear" => Fusion::Linear {
-                        lexical_weight: 0.5,
-                    },
-                    other => return Err(format!("unknown fusion {other}").into()),
-                }
-            }
+            "--fusion" => method = value()?,
+            "--rrf-k" => rrf_k = Some(value()?.parse()?),
+            "--lexical-weight" => lexical_weight = Some(value()?.parse()?),
+            "--dense-weight" => dense_weight = Some(value()?.parse()?),
+            "--candidates" => a.candidates = value()?.parse()?,
             "--int8" => a.quantization = Quantization::Int8,
             "--dry-run" => a.dry_run = true,
             "--help" | "-h" => {
                 eprintln!(
-                    "usage: dense_live_check [--corpus DIR] [--eval-dir DIR] [--state DIR] [--model MODEL] [--dimensions N] [--max-embed-tokens N] [--fusion rrf|linear] [--int8] [--dry-run]"
+                    "usage: dense_live_check [--corpus DIR] [--eval-dir DIR] [--state DIR] [--model MODEL] [--dimensions N] [--max-embed-tokens N] [--fusion rrf|linear] [--rrf-k K] [--lexical-weight W] [--dense-weight W] [--candidates N] [--int8] [--dry-run]"
                 );
                 std::process::exit(0);
             }
             other => return Err(format!("unknown option {other}").into()),
         }
     }
+    a.fusion = match method.as_str() {
+        "rrf" => Fusion::Rrf {
+            k: rrf_k.unwrap_or(60.0),
+            lexical_weight: lexical_weight.unwrap_or(1.0),
+            dense_weight: dense_weight.unwrap_or(1.0),
+        },
+        "linear" => Fusion::Linear {
+            lexical_weight: lexical_weight.unwrap_or(0.5),
+        },
+        other => return Err(format!("unknown fusion {other}").into()),
+    };
     Ok(a)
 }
 
@@ -227,16 +256,19 @@ fn main() -> Result<(), Error> {
         return Ok(());
     }
 
-    let embedder = VoyageEmbedder::from_env(&args.model, args.dimensions, true)?;
+    let embedder = embedder(&args)?;
+    let embedder = embedder.as_ref();
     println!(
-        "corpus {}\nstate {}\nmodel {}, cap {} tokens",
+        "corpus {}\nstate {}\nmodel {}, cap {} tokens\nfusion {:?}, {} candidates per side",
         args.corpus.display(),
         state.display(),
         embedder.descriptor().display(),
-        args.cap
+        args.cap,
+        args.fusion,
+        args.candidates
     );
     let settings = BuildOptions::default().with_dense(
-        DenseBuild::new(&embedder)
+        DenseBuild::new(embedder)
             .with_quantization(args.quantization)
             .with_max_tokens(Some(args.cap))
             .with_progress(&progress),
@@ -284,6 +316,7 @@ fn main() -> Result<(), Error> {
                 .with_mode(*mode)
                 .with_limit(10)
                 .with_fusion(args.fusion.clone())
+                .with_candidates(args.candidates)
                 .with_query_vector(vector.clone());
             let hits = arko_index::hybrid::search(&state, &request, None)?.hits;
             let r = rank(&hits, &case.expect);
