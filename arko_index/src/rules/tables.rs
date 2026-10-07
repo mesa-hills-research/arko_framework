@@ -73,20 +73,279 @@ fn classic_index(parser: &str) -> usize {
     CLASSIC_KEYS.iter().position(|k| *k == parser).unwrap_or(0)
 }
 
-const fn classic(key: &'static str) -> Table {
-    Table { key, ..CLASSIC }
-}
-
+/// The classic tables: the shared rules, plus each language's fields for the next
+/// chunker steps (breadcrumbs, member groups, seams), which the engine does not read
+/// yet and so leave the output unchanged.
 const CLASSIC_TABLES: [Table; 9] = [
-    classic("rust"),
-    classic("python"),
-    classic("typescript"),
-    classic("tsx"),
-    classic("javascript"),
-    classic("go"),
-    classic("java"),
-    classic("c"),
-    classic("cpp"),
+    Table {
+        key: "rust",
+        breadcrumbs: &[
+            ("match_expression", "body"),
+            ("match_arm", "value"),
+            ("if_expression", "consequence"),
+            ("while_expression", "body"),
+            ("loop_expression", "body"),
+            ("for_expression", "body"),
+            ("closure_expression", "body"),
+            ("function_item", "body"),
+        ],
+        members: &[
+            "function_item",
+            "function_signature_item",
+            "const_item",
+            "type_item",
+            "associated_type",
+        ],
+        fields: &["field_declaration"],
+        group_in: &[
+            "impl_item",
+            "trait_item",
+            "mod_item",
+            "source_file",
+            "field_declaration_list",
+        ],
+        seams: &[
+            "expression_statement",
+            "let_declaration",
+            "match_arm",
+            "macro_invocation",
+        ],
+        ..CLASSIC
+    },
+    Table {
+        key: "python",
+        breadcrumbs: &[
+            ("if_statement", "consequence"),
+            ("elif_clause", "consequence"),
+            ("else_clause", "body"),
+            ("for_statement", "body"),
+            ("while_statement", "body"),
+            ("with_statement", "body"),
+            ("try_statement", "body"),
+            ("match_statement", "body"),
+            ("case_clause", "consequence"),
+            ("lambda", "body"),
+            ("function_definition", "body"),
+            ("class_definition", "body"),
+        ],
+        members: &["function_definition", "decorated_definition"],
+        fields: &["expression_statement"],
+        group_in: &["class_definition", "module"],
+        seams: &[
+            "expression_statement",
+            "if_statement",
+            "for_statement",
+            "while_statement",
+            "with_statement",
+            "try_statement",
+            "return_statement",
+            "case_clause",
+        ],
+        ..CLASSIC
+    },
+    Table {
+        key: "typescript",
+        breadcrumbs: &[
+            ("if_statement", "consequence"),
+            ("for_statement", "body"),
+            ("for_in_statement", "body"),
+            ("while_statement", "body"),
+            ("switch_statement", "body"),
+            ("switch_case", ""),
+            ("arrow_function", "body"),
+            ("function_expression", "body"),
+            ("function_declaration", "body"),
+            ("method_definition", "body"),
+            ("try_statement", "body"),
+            ("catch_clause", "body"),
+        ],
+        members: &[
+            "method_definition",
+            "method_signature",
+            "abstract_method_signature",
+        ],
+        fields: &["public_field_definition", "property_signature"],
+        group_in: &["class_body", "interface_body", "object_type", "program"],
+        seams: &[
+            "expression_statement",
+            "lexical_declaration",
+            "variable_declaration",
+            "if_statement",
+            "return_statement",
+            "switch_case",
+            "for_statement",
+        ],
+        ..CLASSIC
+    },
+    Table {
+        key: "tsx",
+        breadcrumbs: &[
+            ("if_statement", "consequence"),
+            ("for_statement", "body"),
+            ("for_in_statement", "body"),
+            ("while_statement", "body"),
+            ("switch_statement", "body"),
+            ("switch_case", ""),
+            ("arrow_function", "body"),
+            ("function_expression", "body"),
+            ("function_declaration", "body"),
+            ("method_definition", "body"),
+            ("try_statement", "body"),
+            ("catch_clause", "body"),
+        ],
+        members: &[
+            "method_definition",
+            "method_signature",
+            "abstract_method_signature",
+        ],
+        fields: &["public_field_definition", "property_signature"],
+        group_in: &["class_body", "interface_body", "object_type", "program"],
+        seams: &[
+            "expression_statement",
+            "lexical_declaration",
+            "variable_declaration",
+            "if_statement",
+            "return_statement",
+            "switch_case",
+            "for_statement",
+        ],
+        ..CLASSIC
+    },
+    Table {
+        key: "javascript",
+        breadcrumbs: &[
+            ("if_statement", "consequence"),
+            ("for_statement", "body"),
+            ("for_in_statement", "body"),
+            ("while_statement", "body"),
+            ("switch_statement", "body"),
+            ("switch_case", ""),
+            ("arrow_function", "body"),
+            ("function_expression", "body"),
+            ("function_declaration", "body"),
+            ("method_definition", "body"),
+            ("try_statement", "body"),
+            ("catch_clause", "body"),
+        ],
+        members: &["method_definition"],
+        fields: &["field_definition"],
+        group_in: &["class_body", "program"],
+        seams: &[
+            "expression_statement",
+            "lexical_declaration",
+            "variable_declaration",
+            "if_statement",
+            "return_statement",
+            "switch_case",
+            "for_statement",
+        ],
+        ..CLASSIC
+    },
+    Table {
+        key: "go",
+        breadcrumbs: &[
+            ("if_statement", "consequence"),
+            ("for_statement", "body"),
+            ("expression_case", ""),
+            ("type_case", ""),
+            ("communication_case", ""),
+            ("select_statement", ""),
+            ("func_literal", "body"),
+            ("function_declaration", "body"),
+            ("method_declaration", "body"),
+        ],
+        members: &["function_declaration", "method_declaration"],
+        fields: &["field_declaration"],
+        group_in: &["source_file", "field_declaration_list"],
+        seams: &[
+            "short_var_declaration",
+            "assignment_statement",
+            "expression_statement",
+            "if_statement",
+            "return_statement",
+            "for_statement",
+            "expression_case",
+        ],
+        ..CLASSIC
+    },
+    Table {
+        key: "java",
+        breadcrumbs: &[
+            ("if_statement", "consequence"),
+            ("for_statement", "body"),
+            ("enhanced_for_statement", "body"),
+            ("while_statement", "body"),
+            ("switch_block_statement_group", ""),
+            ("switch_rule", ""),
+            ("lambda_expression", "body"),
+            ("try_statement", "body"),
+            ("method_declaration", "body"),
+        ],
+        members: &["method_declaration", "constructor_declaration"],
+        fields: &["field_declaration"],
+        group_in: &["class_body", "interface_body", "enum_body_declarations"],
+        seams: &[
+            "expression_statement",
+            "local_variable_declaration",
+            "if_statement",
+            "return_statement",
+            "for_statement",
+            "switch_block_statement_group",
+        ],
+        ..CLASSIC
+    },
+    Table {
+        key: "c",
+        breadcrumbs: &[
+            ("if_statement", "consequence"),
+            ("for_statement", "body"),
+            ("while_statement", "body"),
+            ("do_statement", "body"),
+            ("case_statement", ""),
+            ("function_definition", "body"),
+        ],
+        members: &["function_definition", "declaration"],
+        fields: &["field_declaration"],
+        group_in: &["translation_unit", "field_declaration_list"],
+        seams: &[
+            "expression_statement",
+            "declaration",
+            "if_statement",
+            "return_statement",
+            "case_statement",
+        ],
+        ..CLASSIC
+    },
+    Table {
+        key: "cpp",
+        breadcrumbs: &[
+            ("if_statement", "consequence"),
+            ("for_statement", "body"),
+            ("while_statement", "body"),
+            ("do_statement", "body"),
+            ("case_statement", ""),
+            ("function_definition", "body"),
+            ("lambda_expression", "body"),
+            ("for_range_loop", "body"),
+            ("class_specifier", "body"),
+            ("namespace_definition", "body"),
+        ],
+        members: &["function_definition", "declaration", "template_declaration"],
+        fields: &["field_declaration"],
+        group_in: &[
+            "translation_unit",
+            "field_declaration_list",
+            "declaration_list",
+        ],
+        seams: &[
+            "expression_statement",
+            "declaration",
+            "if_statement",
+            "return_statement",
+            "case_statement",
+        ],
+        ..CLASSIC
+    },
 ];
 
 /// The original rules of the nine classic languages, one list for all of them (the
@@ -181,11 +440,79 @@ pub(crate) const CLASSIC: Table = Table {
 };
 
 /// CUDA and GLSL extend C and C++: they use the classic C++ rules and labels.
-const CUDA: Table = classic("cuda");
-const GLSL: Table = classic("glsl");
+const CUDA: Table = Table {
+    key: "cuda",
+    breadcrumbs: &[
+        ("if_statement", "consequence"),
+        ("for_statement", "body"),
+        ("while_statement", "body"),
+        ("do_statement", "body"),
+        ("case_statement", ""),
+        ("function_definition", "body"),
+        ("lambda_expression", "body"),
+        ("for_range_loop", "body"),
+        ("class_specifier", "body"),
+        ("namespace_definition", "body"),
+    ],
+    members: &["function_definition", "declaration", "template_declaration"],
+    fields: &["field_declaration"],
+    group_in: &[
+        "translation_unit",
+        "field_declaration_list",
+        "declaration_list",
+    ],
+    seams: &[
+        "expression_statement",
+        "declaration",
+        "if_statement",
+        "return_statement",
+        "case_statement",
+    ],
+    ..CLASSIC
+};
+const GLSL: Table = Table {
+    key: "glsl",
+    breadcrumbs: &[
+        ("if_statement", "consequence"),
+        ("for_statement", "body"),
+        ("while_statement", "body"),
+        ("do_statement", "body"),
+        ("case_statement", ""),
+        ("function_definition", "body"),
+    ],
+    members: &["function_definition"],
+    fields: &["field_declaration"],
+    group_in: &["translation_unit"],
+    seams: &[
+        "expression_statement",
+        "declaration",
+        "if_statement",
+        "return_statement",
+        "case_statement",
+    ],
+    ..CLASSIC
+};
 
 const BASH: Table = Table {
     key: "bash",
+    breadcrumbs: &[
+        ("if_statement", ""),
+        ("elif_clause", ""),
+        ("for_statement", "body"),
+        ("while_statement", "body"),
+        ("case_item", ""),
+        ("function_definition", "body"),
+    ],
+    members: &["function_definition"],
+    group_in: &["program"],
+    seams: &[
+        "command",
+        "pipeline",
+        "if_statement",
+        "for_statement",
+        "while_statement",
+        "case_item",
+    ],
     definitions: &["function_definition"],
     labels: &[("function_definition", Label::Keyword("function"))],
     families: &["function_definition"],
@@ -194,6 +521,32 @@ const BASH: Table = Table {
 
 const C_SHARP: Table = Table {
     key: "c_sharp",
+    breadcrumbs: &[
+        ("if_statement", "consequence"),
+        ("for_statement", "body"),
+        ("foreach_statement", "body"),
+        ("while_statement", "body"),
+        ("switch_section", ""),
+        ("lambda_expression", "body"),
+        ("try_statement", "body"),
+        ("method_declaration", "body"),
+        ("local_function_statement", "body"),
+    ],
+    members: &[
+        "method_declaration",
+        "constructor_declaration",
+        "property_declaration",
+        "local_function_statement",
+    ],
+    fields: &["field_declaration", "property_declaration"],
+    group_in: &["declaration_list"],
+    seams: &[
+        "expression_statement",
+        "local_declaration_statement",
+        "if_statement",
+        "return_statement",
+        "switch_section",
+    ],
     tags: tags::C_SHARP,
     definitions: &[
         "struct_declaration",
@@ -311,6 +664,21 @@ const CSS: Table = Table {
 
 const DART: Table = Table {
     key: "dart",
+    breadcrumbs: &[
+        ("if_statement", "consequence"),
+        ("for_statement", "body"),
+        ("while_statement", "body"),
+        ("switch_statement_case", ""),
+        ("function_expression", "body"),
+    ],
+    members: &["class_member"],
+    group_in: &["class_body"],
+    seams: &[
+        "expression_statement",
+        "local_variable_declaration",
+        "return_statement",
+        "if_statement",
+    ],
     tags: tags::DART,
     skip_tags: &[
         "constant_constructor_signature",
@@ -388,6 +756,8 @@ const ELIXIR_DEFINITIONS: &[&str] = &[
 const ELIXIR_MODULES: &[&str] = &["defmodule", "defprotocol", "defimpl", "describe"];
 const ELIXIR: Table = Table {
     key: "elixir",
+    breadcrumbs: &[("stab_clause", ""), ("anonymous_function", "")],
+    seams: &["stab_clause"],
     name_fields: &[],
     keyed: &[
         Keyed {
@@ -453,6 +823,15 @@ const EMBEDDED_TEMPLATE: Table = Table {
 
 const ERLANG: Table = Table {
     key: "erlang",
+    breadcrumbs: &[
+        ("case_expr", ""),
+        ("cr_clause", ""),
+        ("if_expr", ""),
+        ("anonymous_fun", ""),
+    ],
+    members: &["fun_decl"],
+    fields: &["record_decl"],
+    seams: &["cr_clause", "function_clause"],
     definitions: &[
         "fun_decl",
         "record_decl",
@@ -627,6 +1006,17 @@ const JSON: Table = Table {
 
 const JULIA: Table = Table {
     key: "julia",
+    breadcrumbs: &[
+        ("if_statement", ""),
+        ("for_statement", ""),
+        ("while_statement", ""),
+        ("do_clause", ""),
+        ("let_statement", ""),
+        ("try_statement", ""),
+    ],
+    members: &["function_definition", "assignment"],
+    group_in: &["module_definition"],
+    seams: &["if_statement", "for_statement"],
     definitions: &[
         "function_definition",
         "macro_definition",
@@ -668,6 +1058,18 @@ const JULIA: Table = Table {
 
 const KOTLIN: Table = Table {
     key: "kotlin",
+    breadcrumbs: &[
+        ("if_expression", ""),
+        ("when_entry", ""),
+        ("for_statement", ""),
+        ("while_statement", ""),
+        ("lambda_literal", ""),
+        ("function_declaration", ""),
+    ],
+    members: &["function_declaration", "property_declaration"],
+    fields: &["property_declaration"],
+    group_in: &["class_body"],
+    seams: &["statement", "when_entry"],
     definitions: &[
         "class_declaration",
         "object_declaration",
@@ -707,6 +1109,25 @@ const KOTLIN: Table = Table {
 
 const LUA: Table = Table {
     key: "lua",
+    breadcrumbs: &[
+        ("if_statement", "consequence"),
+        ("elseif_statement", "consequence"),
+        ("for_statement", "body"),
+        ("while_statement", "body"),
+        ("repeat_statement", "body"),
+        ("function_definition", "body"),
+        ("function_declaration", "body"),
+    ],
+    members: &["function_declaration"],
+    fields: &["field"],
+    group_in: &["table_constructor", "chunk"],
+    seams: &[
+        "function_call",
+        "assignment_statement",
+        "variable_declaration",
+        "return_statement",
+        "if_statement",
+    ],
     definitions: &["function_declaration"],
     // `local f = function () end`, `M.f = function () end`, `{ f = function () end }`
     bindings: &[
@@ -749,6 +1170,16 @@ const MAKE: Table = Table {
 
 const MARKDOWN: Table = Table {
     key: "markdown",
+    group_in: &["section"],
+    seams: &[
+        "paragraph",
+        "list",
+        "list_item",
+        "fenced_code_block",
+        "pipe_table",
+        "block_quote",
+        "html_block",
+    ],
     content: Content::Prose,
     definitions: &["section"],
     // A heading stays with the content after it; the front matter (when it is not
@@ -768,6 +1199,33 @@ const MARKDOWN: Table = Table {
 
 const OBJC: Table = Table {
     key: "objc",
+    breadcrumbs: &[
+        ("if_statement", "consequence"),
+        ("for_statement", "body"),
+        ("while_statement", "body"),
+        ("do_statement", "body"),
+        ("case_statement", ""),
+        ("function_definition", "body"),
+    ],
+    members: &[
+        "method_definition",
+        "method_declaration",
+        "function_definition",
+    ],
+    fields: &["property_declaration"],
+    group_in: &[
+        "class_interface",
+        "class_implementation",
+        "protocol_declaration",
+        "translation_unit",
+    ],
+    seams: &[
+        "expression_statement",
+        "declaration",
+        "if_statement",
+        "return_statement",
+        "case_statement",
+    ],
     definitions: &[
         "class_interface",
         "class_implementation",
@@ -853,6 +1311,16 @@ const OCAML_LABELS: &[(&str, Label)] = &[
 ];
 const OCAML: Table = Table {
     key: "ocaml",
+    breadcrumbs: &[
+        ("match_expression", ""),
+        ("match_case", ""),
+        ("let_expression", ""),
+        ("fun_expression", ""),
+        ("if_expression", ""),
+    ],
+    members: &["value_definition"],
+    group_in: &["structure"],
+    seams: &["match_case"],
     definitions: OCAML_DEFINITIONS,
     containers: &["module_definition", "module_type_definition"],
     compact: &["module_definition", "module_type_definition"],
@@ -904,6 +1372,15 @@ const ODIN: Table = Table {
 
 const PERL: Table = Table {
     key: "perl",
+    breadcrumbs: &[
+        ("conditional_statement", "block"),
+        ("for_statement", "block"),
+        ("cstyle_for_statement", "block"),
+        ("anonymous_subroutine_expression", "body"),
+        ("subroutine_declaration_statement", "body"),
+    ],
+    members: &["subroutine_declaration_statement"],
+    seams: &["expression_statement", "conditional_statement"],
     definitions: &["subroutine_declaration_statement"],
     attach: &["pod"],
     labels: &[("subroutine_declaration_statement", Label::Keyword("sub"))],
@@ -913,6 +1390,25 @@ const PERL: Table = Table {
 
 const PHP: Table = Table {
     key: "php",
+    breadcrumbs: &[
+        ("if_statement", "body"),
+        ("foreach_statement", "body"),
+        ("for_statement", "body"),
+        ("while_statement", "body"),
+        ("case_statement", ""),
+        ("anonymous_function", "body"),
+        ("arrow_function", "body"),
+        ("method_declaration", "body"),
+    ],
+    members: &["method_declaration"],
+    fields: &["property_declaration"],
+    group_in: &["declaration_list"],
+    seams: &[
+        "expression_statement",
+        "return_statement",
+        "if_statement",
+        "case_statement",
+    ],
     tags: tags::PHP,
     skip_tags: &["property_declaration"],
     definitions: &["enum_declaration"],
@@ -947,6 +1443,17 @@ const PHP: Table = Table {
 
 const POWERSHELL: Table = Table {
     key: "powershell",
+    breadcrumbs: &[
+        ("if_statement", ""),
+        ("foreach_statement", ""),
+        ("while_statement", ""),
+        ("switch_clause", ""),
+        ("function_statement", ""),
+    ],
+    members: &["function_statement", "class_method_definition"],
+    fields: &["class_property_definition"],
+    group_in: &["class_statement"],
+    seams: &["pipeline", "if_statement", "foreach_statement"],
     name_fields: &[],
     definitions: &[
         "function_statement",
@@ -994,6 +1501,14 @@ const PROTO: Table = Table {
 
 const R: Table = Table {
     key: "r",
+    breadcrumbs: &[
+        ("if_statement", "consequence"),
+        ("for_statement", "body"),
+        ("while_statement", "body"),
+        ("function_definition", "body"),
+    ],
+    members: &["binary_operator"],
+    seams: &["braced_expression"],
     // `f <- function(x) ...`
     bindings: &[("binary_operator", "rhs")],
     callables: &["function_definition"],
@@ -1005,6 +1520,22 @@ const R: Table = Table {
 
 const RUBY: Table = Table {
     key: "ruby",
+    breadcrumbs: &[
+        ("if", "consequence"),
+        ("elsif", "consequence"),
+        ("unless", "consequence"),
+        ("while", "body"),
+        ("for", "body"),
+        ("when", ""),
+        ("block", "body"),
+        ("do_block", "body"),
+        ("method", "body"),
+        ("singleton_method", "body"),
+    ],
+    members: &["method", "singleton_method"],
+    fields: &["call", "assignment"],
+    group_in: &["body_statement"],
+    seams: &["call", "assignment", "if", "when"],
     tags: tags::RUBY,
     skip_tags: &["alias"],
     containers: &["class", "module", "singleton_class"],
@@ -1022,6 +1553,23 @@ const RUBY: Table = Table {
 
 const SCALA: Table = Table {
     key: "scala",
+    breadcrumbs: &[
+        ("if_expression", "consequence"),
+        ("case_clause", "body"),
+        ("for_expression", "body"),
+        ("while_expression", "body"),
+        ("lambda_expression", ""),
+        ("function_definition", "body"),
+    ],
+    members: &[
+        "function_definition",
+        "function_declaration",
+        "val_definition",
+        "var_definition",
+    ],
+    fields: &["val_definition", "var_definition"],
+    group_in: &["template_body"],
+    seams: &["case_clause"],
     tags: tags::SCALA,
     skip_tags: &[
         "class_parameter",
@@ -1063,6 +1611,22 @@ const SCALA: Table = Table {
 
 const SOLIDITY: Table = Table {
     key: "solidity",
+    breadcrumbs: &[
+        ("if_statement", "body"),
+        ("for_statement", "body"),
+        ("while_statement", "body"),
+        ("function_definition", "body"),
+        ("modifier_definition", "body"),
+    ],
+    members: &["function_definition", "modifier_definition"],
+    fields: &["state_variable_declaration"],
+    group_in: &["contract_body"],
+    seams: &[
+        "expression_statement",
+        "variable_declaration_statement",
+        "return_statement",
+        "if_statement",
+    ],
     tags: tags::SOLIDITY,
     skip_tags: &["event_definition"],
     definitions: &[
@@ -1142,6 +1706,23 @@ const SVELTE: Table = Table {
 
 const SWIFT: Table = Table {
     key: "swift",
+    breadcrumbs: &[
+        ("if_statement", ""),
+        ("guard_statement", ""),
+        ("for_statement", ""),
+        ("while_statement", ""),
+        ("switch_entry", ""),
+        ("lambda_literal", ""),
+        ("function_declaration", "body"),
+    ],
+    members: &[
+        "function_declaration",
+        "init_declaration",
+        "property_declaration",
+    ],
+    fields: &["property_declaration"],
+    group_in: &["class_body", "protocol_body"],
+    seams: &["statements", "switch_entry"],
     tags: tags::SWIFT,
     skip_tags: &["property_declaration"],
     definitions: &[
@@ -1262,6 +1843,16 @@ const ZIG_TYPES: &[&str] = &[
 ];
 const ZIG: Table = Table {
     key: "zig",
+    breadcrumbs: &[
+        ("if_statement", "body"),
+        ("for_statement", "body"),
+        ("while_statement", "body"),
+        ("switch_case", ""),
+        ("function_declaration", "body"),
+    ],
+    members: &["function_declaration"],
+    fields: &["container_field"],
+    seams: &["expression_statement", "variable_declaration"],
     definitions: &["function_declaration", "test_declaration"],
     // `const Point = struct { ... }`
     bindings: &[(
