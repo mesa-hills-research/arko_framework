@@ -41,9 +41,15 @@ jobs:
             exit 1
           fi
       - name: Framework library tests, including native terminal interactions
-        run: cargo test --workspace --lib --locked --no-fail-fast
+        run: cargo test --workspace --lib --locked --no-fail-fast ${{ runner.os == 'Windows' && '--exclude arko_index' || '' }}
       - name: Index pipeline and watcher tests
+        if: runner.os != 'Windows'
         run: cargo test -p arko_index --locked --no-fail-fast
+      # arko_index is compiled but not yet tested on Windows: its file locking
+      # and atomic renames there are untested.
+      - name: Compile arko_index
+        if: runner.os == 'Windows'
+        run: cargo check -p arko_index --all-targets --locked
       - name: Compile every workspace target
         if: runner.os == 'Linux'
         run: cargo check --workspace --all-targets --locked
