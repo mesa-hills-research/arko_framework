@@ -233,9 +233,10 @@ A variant's fields:
 | `tools_text` | A tools paragraph of your own, for search flags whose output the standard ones don't describe |
 
 ```sh
+V=arko_workflows/examples/index_benchmark/variant-arms.json
 # Builds every variant's index of every prepared repository (beside a running `generate`)
-VOYAGE_API_KEY=... $B prepare-variants --out $OUT --variants variant-arms.json
-$B prepare-variants --out $OUT --variants variant-arms.json --names lex,lex-scope --only redis
+VOYAGE_API_KEY=... $B prepare-variants --out $OUT --variants $V
+$B prepare-variants --out $OUT --variants $V --names lex,lex-scope --only redis
 # Runs them with the built-in arms
 VOYAGE_API_KEY=... $B run --out $OUT --codex-home ~/.codex --name variants --arms B,lex,lex-scope,hyb-scope
 ```
@@ -243,8 +244,9 @@ VOYAGE_API_KEY=... $B run --out $OUT --codex-home ~/.codex --name variants --arm
 `prepare-variants` builds `indexes/<id>@<name>/` with `arko_index_cli index2 FLAGS`, and
 rebuilds one only when its flags, the CLI or the commit changed (`--force` rebuilds all).
 Each build follows its flags alone, and the index directory stays across rebuilds, so its
-embedding cache keeps the vectors already paid for. Variants that embed need `VOYAGE_API_KEY` in the benchmark's environment
-for `prepare-variants` and for `run`. In their shells, `arko_index search2` goes through
+embedding cache keeps the vectors already paid for. Variants that embed need
+`VOYAGE_API_KEY` in the benchmark's environment for `prepare-variants` and for `run`. In
+their shells, `arko_index search2` goes through
 a service in the benchmark process that runs the CLI with the key, the way arm C's
 `arko_index_dense` does. `--max-embed-tokens 0` in a variant's flags counts the tokens a
 build would embed and embeds nothing.
@@ -256,7 +258,7 @@ flags in a variants file: eight arms make a 2×2×2 factorial.
 Dry run, with the offline hashing embedder in place of Voyage:
 
 ```sh
-$B prepare-variants --out $OUT/dry --variants variant-arms.json --mock-embeddings
+$B prepare-variants --out $OUT/dry --variants $V --mock-embeddings
 $B run --out $OUT/dry --mock --name dry-variants --arms A,B,lex,lex-scope,hyb-src,hyb-scope
 ```
 
