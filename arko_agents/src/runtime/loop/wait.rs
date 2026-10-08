@@ -22,21 +22,36 @@ pub(super) enum CommandWait {
 }
 
 impl AgentLoop {
+    /// Takes what every place that reads commands takes alike: context,
+    /// kept for the next turn boundary, and a handover request, noted.
+    /// Returns any other command.
+    pub(super) fn absorb_command(&mut self, command: UserCommand) -> Option<UserCommand> {
+        match command {
+            UserCommand::InjectContext { content } => {
+                self.queue_context_injection(content);
+                None
+            }
+            UserCommand::RequestHandover => {
+                self.note_handover_request();
+                None
+            }
+            command => Some(command),
+        }
+    }
+
     /// Handle control commands at every interruptible model/recovery wait.
     pub(super) async fn handle_recovery_command(
         &mut self,
         command: Option<UserCommand>,
     ) -> Result<bool, ArkoAgentsError> {
-        match command {
-            Some(UserCommand::InjectContext { content }) => self.queue_context_injection(content),
-            Some(UserCommand::RequestHandover) => self.note_handover_request(),
-            Some(UserCommand::CancelTask) => {
+        match command.map(|command| self.absorb_command(command)) {
+            Some(Some(UserCommand::CancelTask)) => {
                 self.task.set_state(TaskState::Cancelled {
                     reason: CANCELLED_BY_USER.into(),
                 });
                 self.stop_requested = true;
             }
-            Some(UserCommand::SuspendTask) => self.stop_requested = true,
+            Some(Some(UserCommand::SuspendTask)) => self.stop_requested = true,
             None => {
                 self.task.set_state(TaskState::Interrupted {
                     reason: "Command channel disconnected during model recovery.".into(),
@@ -61,18 +76,19 @@ impl AgentLoop {
     /// [`keep_taken_context`](Self::keep_taken_context).
     pub(super) async fn take_queued_commands(&mut self) -> Result<bool, ArkoAgentsError> {
         loop {
-            match self.command_receiver.try_recv() {
-                Ok(UserCommand::InjectContext { content }) => {
-                    self.queue_context_injection(content);
-                }
-                Ok(UserCommand::RequestHandover) => self.note_handover_request(),
-                Ok(UserCommand::CancelTask) => {
+            match self
+                .command_receiver
+                .try_recv()
+                .map(|command| self.absorb_command(command))
+            {
+                Ok(None) => {}
+                Ok(Some(UserCommand::CancelTask)) => {
                     self.task.set_state(TaskState::Cancelled {
                         reason: CANCELLED_BY_USER.to_string(),
                     });
                     break;
                 }
-                Ok(UserCommand::SuspendTask) => break,
+                Ok(Some(UserCommand::SuspendTask)) => break,
                 Err(mpsc::error::TryRecvError::Empty) => return Ok(false),
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     // No call waits for its result at a boundary, so the
@@ -88,7 +104,7 @@ impl AgentLoop {
                     self.stop_requested = true;
                     return Ok(true);
                 }
-                Ok(other_cmd) => {
+                Ok(Some(other_cmd)) => {
                     log::warn!(
                         "Task {}: Unexpected command {:?} received outside of an approval state. Ignoring.",
                         self.task.id,
@@ -167,17 +183,12 @@ impl AgentLoop {
     /// handover requests are taken without ending it; any other command
     /// is applied to the state the task waits in.
     async fn apply_command(&mut self, cmd: UserCommand) -> Result<Flow, ArkoAgentsError> {
-        // Neither ends the wait or moves its deadline.
-        if let UserCommand::InjectContext { ref content } = cmd {
-            self.queue_context_injection(content.clone());
+        // None of these ends the wait or moves its deadline.
+        let Some(cmd) = self.absorb_command(cmd) else {
             return Ok(Flow::NextPass);
-        }
+        };
         if let UserCommand::HostDeciding = cmd {
             self.command_wait = CommandWait::HostDeciding;
-            return Ok(Flow::NextPass);
-        }
-        if let UserCommand::RequestHandover = cmd {
-            self.note_handover_request();
             return Ok(Flow::NextPass);
         }
         let original_state_before_command_processing = self.task.current_state.clone();

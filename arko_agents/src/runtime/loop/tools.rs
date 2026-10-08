@@ -181,24 +181,17 @@ impl AgentLoop {
                     None => return GroupRun { outcomes, stop },
                 },
                 command = self.command_receiver.recv(), if listening => {
-                    let stopped = match command {
-                        Some(UserCommand::InjectContext { content }) => {
-                            self.queue_context_injection(content);
-                            None
-                        }
-                        Some(UserCommand::RequestHandover) => {
-                            self.note_handover_request();
-                            None
-                        }
-                        Some(UserCommand::CancelTask) => {
+                    let stopped = match command.map(|command| self.absorb_command(command)) {
+                        Some(None) => None,
+                        Some(Some(UserCommand::CancelTask)) => {
                             self.calls_stop.stop("Task cancelled.");
                             Some(ToolsStopped::Cancelled)
                         }
-                        Some(UserCommand::SuspendTask) => {
+                        Some(Some(UserCommand::SuspendTask)) => {
                             self.calls_stop.stop("Task suspended.");
                             Some(ToolsStopped::Suspended)
                         }
-                        Some(other) => {
+                        Some(Some(other)) => {
                             log::warn!(
                                 "Task {}: Unexpected command {:?} received while tool calls ran. Ignoring.",
                                 self.task.id,

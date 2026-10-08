@@ -282,8 +282,8 @@ impl AgentLoop {
         final_generation_response: &Option<ai::GenerationResponse>,
         native_stream_call_ids: &mut HashMap<usize, (Uuid, String)>,
     ) -> Result<bool, ArkoAgentsError> {
-        match maybe_cmd {
-            Some(UserCommand::CancelTask) => {
+        match maybe_cmd.map(|command| self.absorb_command(command)) {
+            Some(Some(UserCommand::CancelTask)) => {
                 self.keep_partial_output(
                     current_assistant_response_text_for_conv,
                     final_generation_response,
@@ -299,7 +299,7 @@ impl AgentLoop {
                 .await?;
                 return Ok(true);
             }
-            Some(UserCommand::SuspendTask) => {
+            Some(Some(UserCommand::SuspendTask)) => {
                 self.keep_partial_output(
                     current_assistant_response_text_for_conv,
                     final_generation_response,
@@ -313,10 +313,6 @@ impl AgentLoop {
                 self.stop_requested = true;
                 return Ok(true);
             }
-            Some(UserCommand::InjectContext { content }) => {
-                self.queue_context_injection(content);
-            }
-            Some(UserCommand::RequestHandover) => self.note_handover_request(),
             Some(_) => {}
             None => {
                 self.keep_partial_output(
