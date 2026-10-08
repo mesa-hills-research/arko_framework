@@ -3899,67 +3899,12 @@ impl AgentLoop {
                     }
                 } else {
                     let current_group = tool_call_groups.remove(0);
-                    let calls_to_process_with_ids = self.calls_of_group(
+                    self.handle_text_group(
                         current_group,
                         &mut parsed_call_ids,
                         &mut next_user_message_str_accumulated,
-                    );
-
-                    let mut calls_needing_approval = Vec::new();
-                    // The results of the calls handled, recorded in
-                    // the task as they are produced.
-                    let start = self.task.pending_text_tool_results.len();
-                    let overall_batch_id = if calls_to_process_with_ids.len() > 1 {
-                        Some(Uuid::new_v4())
-                    } else {
-                        None
-                    };
-                    self.begin_tool_batch();
-
-                    for (parsed_tool_call_ref, tool_call_id_ref) in &calls_to_process_with_ids {
-                        match self
-                            .handle_text_call(parsed_tool_call_ref, *tool_call_id_ref)
-                            .await?
-                        {
-                            TextCall::Handled => {}
-                            TextCall::NeedsApproval(pending) => {
-                                calls_needing_approval.push(pending)
-                            }
-                            TextCall::EndsBatch => break,
-                        }
-                    }
-
-                    // Suspended while a call ran: the calls
-                    // awaiting approval are not asked about.
-                    if self.stop_requested {
-                        let not_run = self.not_run_after_stop();
-                        for pending in calls_needing_approval.drain(..) {
-                            self.emit_event(AgentEvent::ToolRejected {
-                                tool_call_id: pending.tool_call_id,
-                                tool_name: pending.tool_name.clone(),
-                                reason: Some(not_run.clone()),
-                            })
-                            .await?;
-                            self.record_text_result(format!(
-                                "Tool {}: {not_run}",
-                                pending.tool_name
-                            ))
-                            .await;
-                        }
-                    }
-                    if !calls_needing_approval.is_empty()
-                        && matches!(self.task.current_state, TaskState::InProgress)
-                    {
-                        self.await_approvals(calls_needing_approval, overall_batch_id)
-                            .await?;
-                    }
-                    // Pauses on the batch's tool errors now, or after
-                    // the calls still awaiting approval are decided.
-                    self.end_tool_batch().await?;
-                    // The results of the calls that ran, which wait
-                    // with the task below if it now waits.
-                    next_user_message_str_accumulated =
-                        self.take_text_results(start).join("\n\n---\n\n");
+                    )
+                    .await?;
                 }
             }
             Err(e) => {
@@ -3984,6 +3929,75 @@ impl AgentLoop {
             &final_generation_response,
         )?;
         Ok(Flow::Proceed)
+    }
+
+    /// The calls of an output-based turn's group: each is checked and run
+    /// or held for approval, in order, until one ends the batch; calls a
+    /// suspension left are answered as not run, the others wait for
+    /// approval, the batch's tool errors pause the task, and the results
+    /// become the turn's message.
+    async fn handle_text_group(
+        &mut self,
+        current_group: ToolCallGroup,
+        parsed_call_ids: &mut VecDeque<Uuid>,
+        next_user_message_str_accumulated: &mut String,
+    ) -> Result<(), ArkoAgentsError> {
+        let calls_to_process_with_ids = self.calls_of_group(
+            current_group,
+            parsed_call_ids,
+            next_user_message_str_accumulated,
+        );
+
+        let mut calls_needing_approval = Vec::new();
+        // The results of the calls handled, recorded in
+        // the task as they are produced.
+        let start = self.task.pending_text_tool_results.len();
+        let overall_batch_id = if calls_to_process_with_ids.len() > 1 {
+            Some(Uuid::new_v4())
+        } else {
+            None
+        };
+        self.begin_tool_batch();
+
+        for (parsed_tool_call_ref, tool_call_id_ref) in &calls_to_process_with_ids {
+            match self
+                .handle_text_call(parsed_tool_call_ref, *tool_call_id_ref)
+                .await?
+            {
+                TextCall::Handled => {}
+                TextCall::NeedsApproval(pending) => calls_needing_approval.push(pending),
+                TextCall::EndsBatch => break,
+            }
+        }
+
+        // Suspended while a call ran: the calls
+        // awaiting approval are not asked about.
+        if self.stop_requested {
+            let not_run = self.not_run_after_stop();
+            for pending in calls_needing_approval.drain(..) {
+                self.emit_event(AgentEvent::ToolRejected {
+                    tool_call_id: pending.tool_call_id,
+                    tool_name: pending.tool_name.clone(),
+                    reason: Some(not_run.clone()),
+                })
+                .await?;
+                self.record_text_result(format!("Tool {}: {not_run}", pending.tool_name))
+                    .await;
+            }
+        }
+        if !calls_needing_approval.is_empty()
+            && matches!(self.task.current_state, TaskState::InProgress)
+        {
+            self.await_approvals(calls_needing_approval, overall_batch_id)
+                .await?;
+        }
+        // Pauses on the batch's tool errors now, or after
+        // the calls still awaiting approval are decided.
+        self.end_tool_batch().await?;
+        // The results of the calls that ran, which wait
+        // with the task below if it now waits.
+        *next_user_message_str_accumulated = self.take_text_results(start).join("\n\n---\n\n");
+        Ok(())
     }
 
     /// Reports an output-based turn's parser events (unless tool events
