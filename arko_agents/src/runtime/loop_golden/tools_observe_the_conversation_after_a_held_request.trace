@@ -1,0 +1,23 @@
+N observer reset
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
+E {"TaskStateChanged":{"AwaitingErrorRecoveryApproval":{"cause":"budget_exceeded","error_message":"Held by the host."}}}
+E {"ErrorEncountered":{"error_message":"Held by the host.","requires_approval_to_retry":true,"tool_call_id":null}}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"budget_exceeded","error_message":"Held by the host."}} task=61e31a60d2631a89
+E {"TaskStateChanged":"InProgress"}
+N observer saw User: Do the task
+R msgs=1 model=gpt-5.6-luna request=30dbbb2712563e91
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=221e00ad7421de85
+E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id2","tool_name":"complete_task"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=c5cbf68fa3c413d0
+E {"ToolResult":{"output":"done","tool_call_id":"id2","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
+S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=1bde5625a5d879fc
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=93cb6e84d85811f1
+E "TaskStreamEnd"
+--- conversation: 3 messages, system prompt d1669b0441bd8242
+M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"summary":"done"},"id":"done","name":"complete_task"}]}
+M {"content":[{"ToolResult":{"call_id":"done","is_error":false,"name":"complete_task","output":"done"}}],"id":null,"reasoning_artifact":null,"role":"User"}

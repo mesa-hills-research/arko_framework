@@ -271,12 +271,24 @@ fn golden_loop(
     mpsc::Receiver<AgentEvent>,
     mpsc::Sender<UserCommand>,
 ) {
+    golden_loop_with(task, registry(tools), simplified_tool_events)
+}
+
+fn golden_loop_with(
+    task: Task,
+    registry: ToolRegistry,
+    simplified_tool_events: bool,
+) -> (
+    AgentLoop,
+    mpsc::Receiver<AgentEvent>,
+    mpsc::Sender<UserCommand>,
+) {
     let (events, receiver) = mpsc::channel(500);
     let (sender, commands) = mpsc::channel(10);
     let agent = AgentLoop::new(
         task,
         Arc::new(ai::LLMClient::new()),
-        Arc::new(registry(tools)),
+        Arc::new(registry),
         events,
         commands,
         None,
@@ -357,20 +369,26 @@ fn stream(events: Vec<ai::StreamEvent>) -> ScriptedStreamResult {
 
 /// A native turn calling `calls`, with `usage`.
 fn usage_turn(calls: Vec<ai::ToolCall>, usage: ai::UsageInfo) -> ScriptedStreamResult {
+    plan_usage_turn(calls, usage, None)
+}
+
+/// A native turn calling `calls`, with `usage` and the plan usage its
+/// provider reported.
+fn plan_usage_turn(
+    calls: Vec<ai::ToolCall>,
+    usage: ai::UsageInfo,
+    plan_usage: Option<ai::PlanUsage>,
+) -> ScriptedStreamResult {
     let mut message = ai::Message::new_assistant("");
     message.tool_calls = calls;
+    let mut model_call_usage =
+        ai::ModelCallUsage::new("golden".into(), "test".into(), "test".into(), 0, 0, 1000);
+    model_call_usage.plan_usage = plan_usage;
     stream(vec![ai::StreamEvent::End(Box::new(
         ai::GenerationResponse {
             message,
             usage,
-            model_call_usage: ai::ModelCallUsage::new(
-                "golden".into(),
-                "test".into(),
-                "test".into(),
-                0,
-                0,
-                1000,
-            ),
+            model_call_usage,
             stop_reason: ai::StopReason::ToolUse,
             refusal: None,
             openai_turn_state: None,
@@ -1110,5 +1128,186 @@ async fn stops_during_a_stream() {
         };
         golden.run_ended(&task);
     }
+    golden.check();
+}
+
+/// Context once, from the turn context source.
+struct ContextOnce(std::sync::atomic::AtomicBool);
+
+impl crate::runtime::TurnContextSource for ContextOnce {
+    fn turn_context(&self, _task_id: Uuid) -> Option<String> {
+        (!self.0.swap(true, std::sync::atomic::Ordering::SeqCst))
+            .then(|| "Context from the source.".to_string())
+    }
+}
+
+/// The turn boundary of a task run again whose conversation ends on the
+/// model's text (a stream suspended mid-way), with saved context, a turn
+/// context source and the file tree in diff mode: the saved context and the
+/// source's go out as one update, then the file tree's full snapshot, so
+/// the request ends on a user turn and needs no request to continue.
+#[tokio::test(start_paused = true)]
+async fn a_turn_boundary_adds_context_then_the_file_tree() {
+    let mut golden = Golden::start("a_turn_boundary_adds_context_then_the_file_tree");
+    let workspace = std::env::temp_dir().join(format!("arko-golden-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("notes.txt"), "notes").unwrap();
+    std::fs::write(workspace.join("plan.md"), "plan").unwrap();
+    golden
+        .trace
+        .mask(&workspace.to_string_lossy(), "<workspace>");
+    let mut config = golden_config(ToolCallingMode::Native, &["step"]);
+    let details = &mut config.environment_details_config;
+    details.file_tree.include = true;
+    details.file_tree_mode = crate::agent_config::FileTreeMode::Diff;
+    let mut task = Task::new(config, "Do the task".into(), workspace.clone(), None);
+    task.conversation.system_message = Some("The system prompt.".into());
+    task.conversation.add_user_message("Do the task");
+    task.user_message_count = 1;
+    task.conversation
+        .add_assistant_message("I was partway through the step");
+    task.pending_context_injections = vec!["Saved context.".into()];
+    task.set_state(TaskState::InProgress);
+    let (mut agent, events, commands) = golden_loop(reloaded(&task), vec![Step::new("step")], true);
+    agent.turn_context = Some(Arc::new(ContextOnce(Default::default())));
+    script(&mut agent, [complete()]);
+    let task = drive(agent, events, commands, no_commands).await;
+    golden.run_ended(&task);
+    std::fs::remove_dir_all(workspace).unwrap();
+    golden.check();
+}
+
+/// One response that crosses the plan-usage threshold (`Pause`) and the
+/// cache monitor's pause threshold: the boundary pauses for plan usage
+/// first, then, once that is approved, for the cache.
+#[tokio::test(start_paused = true)]
+async fn plan_usage_pauses_before_the_cache_monitor() {
+    let mut golden = Golden::start("plan_usage_pauses_before_the_cache_monitor");
+    let mut config = golden_config(ToolCallingMode::Native, &["step"]);
+    config.monitoring = MonitoringConfig {
+        plan_usage: Some(PlanUsageThreshold {
+            percent: 90.0,
+            action: PlanUsageAction::Pause,
+        }),
+        cache: Some(CacheMonitorConfig {
+            warmup_calls: 1,
+            window_calls: 1,
+            warn_below: None,
+            pause_below: Some(0.5),
+        }),
+    };
+    let (mut agent, events, commands) =
+        golden_loop(new_task(config), vec![Step::new("step")], true);
+    let plan = ai::PlanUsage {
+        plan_type: Some("pro".into()),
+        primary: Some(ai::PlanUsageWindow {
+            used_percent: 95.0,
+            window_minutes: Some(300),
+            resets_at: Some(4_102_444_800),
+            reset_after_seconds: None,
+        }),
+        ..Default::default()
+    };
+    script(
+        &mut agent,
+        [
+            usage_turn(
+                vec![step_call("a", "step", "one")],
+                ai::UsageInfo::new(1000, 10).with_cached_tokens(0),
+            ),
+            plan_usage_turn(
+                vec![step_call("b", "step", "two")],
+                ai::UsageInfo::new(2000, 10).with_cached_tokens(0),
+                Some(plan),
+            ),
+            complete(),
+        ],
+    );
+    let task = drive(agent, events, commands, |event| {
+        if is_pause(event) {
+            vec![UserCommand::ApproveErrorRecovery { message: None }]
+        } else {
+            Vec::new()
+        }
+    })
+    .await;
+    golden.run_ended(&task);
+    golden.check();
+}
+
+/// A tool that adds what it observes of the conversation to the trace.
+struct Observer(Arc<TestTrace>);
+
+impl std::fmt::Debug for Observer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Observer")
+    }
+}
+
+#[async_trait]
+impl Tool for Observer {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "observer".into(),
+            ..Step::new("observer").definition()
+        }
+    }
+
+    fn reset_context(&self, _task_id: Uuid) {
+        self.0.note("observer reset");
+    }
+
+    fn observe_context(&self, _task_id: Uuid, message: &ai::Message) {
+        self.0.note(&format!(
+            "observer saw {:?}: {}",
+            message.role,
+            message_text(message)
+        ));
+    }
+
+    async fn execute(
+        &self,
+        _: &TaskContext<'_>,
+        _: HashMap<String, Value>,
+    ) -> Result<String, ToolError> {
+        Ok("observed".into())
+    }
+}
+
+/// Holds the first request.
+struct HoldOnce(std::sync::atomic::AtomicBool);
+
+impl crate::runtime::TurnContextSource for HoldOnce {
+    fn turn_context(&self, _task_id: Uuid) -> Option<String> {
+        None
+    }
+
+    fn hold_request(&self, _task_id: Uuid) -> Option<String> {
+        (!self.0.swap(true, std::sync::atomic::Ordering::SeqCst))
+            .then(|| "Held by the host.".to_string())
+    }
+}
+
+/// The host holds the first request: the task pauses before the tools
+/// observe the conversation, and they observe it once the request is
+/// released, right before it is made.
+#[tokio::test(start_paused = true)]
+async fn tools_observe_the_conversation_after_a_held_request() {
+    let mut golden = Golden::start("tools_observe_the_conversation_after_a_held_request");
+    let config = golden_config(ToolCallingMode::Native, &["observer"]);
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(Observer(golden.trace.clone())));
+    let (mut agent, events, commands) = golden_loop_with(new_task(config), registry, true);
+    agent.turn_context = Some(Arc::new(HoldOnce(Default::default())));
+    script(&mut agent, [complete()]);
+    let task = drive(agent, events, commands, |event| {
+        if is_pause(event) {
+            vec![UserCommand::ContinueAfterError { note: None }]
+        } else {
+            Vec::new()
+        }
+    })
+    .await;
+    golden.run_ended(&task);
     golden.check();
 }

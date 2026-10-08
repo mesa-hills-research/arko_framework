@@ -20,7 +20,8 @@
 //! task=<hash>`, where the hash covers the whole task except its agent
 //! configuration (and its model, named by id), or `R msgs=<count>
 //! model=<id> request=<hash>` for each model request, the hash covering the
-//! conversation and generation settings sent. Normalizing sorts JSON keys,
+//! conversation and generation settings sent. A test can add `N <text>`
+//! lines of its own ([`TestTrace::note`]). Normalizing sorts JSON keys,
 //! replaces UUIDs with `id0`, `id1`, … in the order a test's trace first
 //! shows them, masks wall-clock times, the time to a usage-limit reset, the
 //! durations a test on the real clock measures (a test that pauses tokio's
@@ -250,6 +251,14 @@ impl TestTrace {
             conversation.messages.len(),
             conversation.model.id
         );
+        self.push(&mut state, line);
+    }
+
+    /// A line a test adds to its trace, among the loop's: what a tool
+    /// observed, say. Normalized as the loop's strings are.
+    pub(super) fn note(&self, text: &str) {
+        let mut state = self.state.lock().unwrap();
+        let line = format!("N {}", state.string(text, longest()));
         self.push(&mut state, line);
     }
 
