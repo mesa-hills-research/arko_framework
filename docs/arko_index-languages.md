@@ -293,6 +293,9 @@ The tests in `arko_index/tests/languages.rs` run on a sample of every grammar
 - nine adversarial inputs (among them a 70,000-byte line, deep bracket nesting, 1,000
   unclosed tags, runs of quotes and backticks), each chunked in under a minute with every
   grammar
+- every prefix, cut at each character boundary, of the first 300 bytes of each sample
+  and of an annotated Kotlin sample (16,591 files in one walk): the invariants, no parser
+  warning, and no 30 seconds without a file finishing
 - invariants on randomly mutated samples (deletions, duplications, inserted syntax,
   swapped lines, truncation) for every grammar
 - the scope each sample's rules give, and the structure small bounds give prose,

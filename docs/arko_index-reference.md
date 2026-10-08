@@ -34,8 +34,8 @@ Errors are `bench_v1::Error`, a boxed `std::error::Error + Send + Sync`.
 | `chunk_str_with_metadata(path, text, options)` | The same, as `FileChunks { metadata, chunks }`: a Markdown file's metadata region (`FileMetadata`) with its chunks. |
 | `chunk_file(path, options)`, `chunk_file_with_metadata(path, options)` | Reads and chunks one file under its file name. A binary or non-UTF-8 file gives no chunks. |
 | `chunk_dir(root, options)`, `chunk_dir_with(root, options, rules)` | Every file the rules select, in path order. `_with` also returns the `Report`. |
-| `chunk_dir_each[_with](root, options, [rules,] threads, sink)` | Streams each file's chunks to `sink` in path order, chunking on `threads` workers. |
-| `chunk_dir_map[_with](root, options, [rules,] threads, map, sink)` | Like `chunk_dir_each`, applying `map` to each file's `FileChunks` on the worker (the CLI renders JSON there). Memory is bounded by a reorder window of source bytes. |
+| `chunk_dir_each[_with](root, options, [rules,] threads, sink)` | Streams each file's chunks to `sink` in path order, chunking on `threads` workers. A panic in `sink` returns the error `panicked: MESSAGE`. |
+| `chunk_dir_map[_with](root, options, [rules,] threads, map, sink)` | Like `chunk_dir_each`, applying `map` to each file's `FileChunks` on the worker (the CLI renders JSON there). Memory is bounded by a reorder window of source bytes. A panic in `map` or `sink` returns the error `panicked: MESSAGE`. |
 
 ```rust
 use arko_index::bench_v1::{chunk_str, Options};
@@ -112,8 +112,11 @@ symbol path). Applying a delta as sets to the previous snapshot gives the next s
 * A deterministic work budget stops a parse after 100 × min(1,000 + one per 32 bytes of
   the file, 50,000) parser operations, at most 5 million, and the file is then split by
   the bounded fallback. The budget counts operations, not time, so the result is the same
-  on every machine. Some inputs still take long: deeply nested unclosed XML or Svelte tags
-  can take minutes on one file. A file with any physical line over 65,536 bytes is split
+  on every machine. Some inputs still take long: deeply nested unclosed XML or Svelte
+  tags can take minutes on one file. A file whose grammar panics, or whose scanner the
+  runtime stops because it keeps advancing at the end of the input, is split by the
+  bounded fallback too, and a walk lists it in the report's `warnings` (see [File
+  selection](#file-selection)). A file with any physical line over 65,536 bytes is split
   entirely by the bounded fallback. Single-child AST wrapper descent is iterative and
   depth-bounded. Missing parses, unsupported formats, deep recovery trees and oversized
   atomic literals also use the fallback, which prefers complete lines or whitespace, then
@@ -247,7 +250,9 @@ the counts are complete). `--exclude` and `--include` removals are counted
   than the built-in exclusions (`.git`, `CACHEDIR.TAG` directories, state directories)
   was skipped, a warning occurred, or nothing was indexed. Then up to 20 entries per
   reason for every reason except `binary`, `symlink`, `git-dir`, `git-file` and
-  `state-dir`, which are only counted. `--report FILE` is always written, complete:
+  `state-dir`, which are only counted, and each warning as `arko_index: warning: …`.
+  The summary line ends with `; N warnings` when there are any. `--report FILE` is
+  always written, complete:
 
   ```text
   arko_index: 90419 files indexed; 87 skipped (4 binary, 2 not-utf8, 81 symlink)
@@ -289,7 +294,18 @@ bytes that are not UTF-8 appear as `\xHH`):
 With `--respect-ignore`, `ignored` lists entries such as
 `{ "path": "target/", "reason": "gitignore" }` (reasons `gitignore`, `ignore-file`,
 `git-info-exclude`). `warnings` (present only when non-empty) lists problems that
-skipped nothing, such as an invalid line in an ignore file.
+skipped nothing: an invalid line in an ignore file, or a file whose parser failed and
+which was chunked as plain text:
+
+```text
+PATH: the LANG parser panicked (MESSAGE), chunked as plain text
+PATH: the LANG parser stopped (a scanner never returned), chunked as plain text
+```
+
+Parser warnings come from `chunk_dir*` walks, `index2` builds (`report.json` and
+`BuildStats::report`) and both watchers' `report()`. A watcher keeps one in memory
+only, while the file is unchanged in that process. `chunk_str`, `chunk_file` and
+`search::index` chunk such a file as text without a warning.
 
 **The API.** `FileRules` (`#[non_exhaustive]`, set fields on `FileRules::default()`):
 `respect_ignore` (default `false`), `exclude` and `include` (gitignore-syntax patterns,
@@ -338,7 +354,7 @@ entries), `excluded_by_pattern`, `not_included`, `ignored_by_gitignore`,
 | `index2::index[_with](root, state_dir, options, threads, mem_budget, [rules])` | Builds a new generation with postings memory bounded by `mem_budget` bytes, lexical only. Returns `BuildStats { docs, terms, runs, report, dense }`. |
 | `index2::build(root, state_dir, options, &BuildOptions)` | The same with `BuildOptions { threads, mem_budget, rules, lexical_scope, dense }` (`#[non_exhaustive]`, `Default`, `with_*`). `lexical_scope` (default `false`) also indexes the words of each chunk's scope for lexical search. With `dense: Some(DenseBuild)` the chunks are embedded too (below). |
 | `index2::search(state_dir, query)` | Reads only the query terms' postings of the current generation. Same results as `search::search` on the same tree (unless the index was built with `lexical_scope`). |
-| `index2::dense_info(state_dir)` | The current generation's `DenseIndexInfo` (model, render version, embedded text, quantization, chunks, chunks with vectors), or `None`. |
+| `index2::dense_info(state_dir)` | The current generation's `DenseIndexInfo` (model, render version, embedded text, quantization, chunks, chunks with vectors), or `None`. Like `hybrid::search`, it starts over when a build switches generations during the read, so the CLI's `search2` picks its default mode from the current generation. |
 
 `search` and `search2` score with BM25 (k1 = 1.2, b = 0.75) over lowercase words plus
 identifier components (snake_case parts and camelCase humps), so `retryPolicy` matches
@@ -346,8 +362,9 @@ identifier components (snake_case parts and camelCase humps), so `retryPolicy` m
 (`search2 --limit` and the library's `hybrid::search` choose another number).
 
 `index2` writes a new generation directory and publishes it by atomically rewriting
-`CURRENT2`, so readers keep the previous generation until the switch. Its build memory
-is bounded: postings accumulate up to a budget (the CLI's default is 256 MB,
+`CURRENT2`, so readers keep the previous generation until the switch. A build that fails
+before publishing removes the directory it was writing. Its build memory is bounded:
+postings accumulate up to a budget (the CLI's default is 256 MB,
 `ARKO_INDEX_INDEX_MEM_MB`) and then spill to sorted runs that are merged. The watchers
 maintain chunk snapshots, not an index: rerun `index2` to refresh search (with
 embeddings, a rerun embeds only the chunks whose text changed).
@@ -499,10 +516,12 @@ fingerprints detect same-sized trailing-whitespace changes that trimmed IDs alon
 miss, including while the watcher was down. Applying deltas as sets transforms the prior
 snapshot into the next complete snapshot.
 
-The CLI flushes stdout before acknowledging a delivered line and handles SIGINT and
-SIGTERM. A broken output pipe leaves the delta unacknowledged. Library callers should
-acknowledge only after their own durable processing and deduplicate by sequence:
-delivery is at-least-once across crashes.
+The CLI flushes stdout before acknowledging a delivered line. SIGINT or SIGTERM stops a
+watcher after its current batch, and a second signal ends it at once: it prints
+`arko_index: stopped by a second signal` and exits with status 130 (a delta not yet
+acknowledged replays on the next start). A broken output pipe leaves the delta
+unacknowledged. Library callers should acknowledge only after their own durable
+processing and deduplicate by sequence: delivery is at-least-once across crashes.
 
 ## Command line
 
@@ -517,7 +536,7 @@ delivery is at-least-once across crashes.
 | `search2 STATE_DIR QUERY...` | The best hits, up to `--limit` (10), as JSON lines: the chunk's fields plus `header`, `score`, `lexical_rank`, `dense_rank`. `--text` prints one line per hit, `rank. header  [mode score; ranks]`. A lexical search reads only the postings of the query's terms. Dense and hybrid print the query's tokens on stderr. Flags below. |
 | `index ROOT STATE_DIR` | The first index format: one JSON file that a search loads whole. stderr gets `indexed N chunks` and the report summary. |
 | `search STATE_DIR QUERY...` | Up to ten chunk JSON lines from `index`'s file (the words are joined with spaces). Same tokens, scores and ranking as a lexical `search2` of an `index2` built without `--lexical-scope`. |
-| `watch ROOT STATE_DIR` | Any platform: a polling watcher, which hashes the whole tree on every poll. Streams deltas as JSON lines, each acknowledged after it is flushed, and stops on SIGINT or SIGTERM. |
+| `watch ROOT STATE_DIR` | Any platform: a polling watcher, which hashes the whole tree on every poll. Streams deltas as JSON lines, each acknowledged after it is flushed. Stops after the current batch on SIGINT or SIGTERM, and at once on a second signal (status 130). |
 | `watch2 ROOT STATE_DIR` | Linux: inotify plus metadata reconciliation, otherwise as `watch`. stderr also gets a JSON line with the file count and timings at start, and one with the sequence and timings per delta. |
 | `bench-scan ROOT` | Unix: one JSON line of timings of the scan primitives a watcher pass needs. |
 | `--help`, `-h` | Usage on stderr. |
@@ -547,7 +566,7 @@ peak memory.
 | `--embed MODEL` | Embed with `MODEL`: a Voyage model (`voyage-code-4`), `voyage:MODEL`, or `hash` (offline, for trying things out). Saved in `dense.json`. Needs `VOYAGE_API_KEY` for Voyage. |
 | `--dimensions N` | Vector dimensions (voyage-code-4: 256, 512, 1024 by default, 2048). |
 | `--embed-text source\|path-source\|path-scope-source` | What each chunk's embedded text holds besides its source (default `path-scope-source`). Saved in `dense.json`. |
-| `--embed-config FILE` | Take the settings from a file in the format of `dense.json`. |
+| `--embed-config FILE` | Take the settings from a file in the format of `dense.json`. `--dimensions` applies after it, checked against the file's model. With `--embed` it is an error (`--embed and --embed-config both choose the model: give one`). |
 | `--quantize f32\|int8` | Vector storage (default `f32`). |
 | `--max-embed-tokens N\|none` | The per-build token cap (default none). |
 | `--no-embed` | Build lexically and remove `dense.json` (the cache stays). |
@@ -605,14 +624,18 @@ file's header and the [retrieval evaluation](arko_index-verification.md#retrieva
 ## Parsing
 
 Parsing uses [mhr_tree_sitter](https://github.com/mesa-hills-research/mhr_tree_sitter)
-(a Git dependency pinned to one commit in `Cargo.toml`), a pure, safe Rust port of
+(a Git dependency pinned to commit d56f609 in `Cargo.toml`), a pure, safe Rust port of
 tree-sitter 0.25.10 and 54 grammars, made by an AI agent swarm and differentially tested
 against the C library, so the library needs no C compiler. Its libraries keep
 tree-sitter's names (`tree_sitter`, `tree_sitter_rust`, ...). The port pins the grammar
 versions: an upgrade changes chunk boundaries and IDs. The grammars of the original nine
 languages are the versions this crate used with the C library: tree-sitter-rust 0.24.2,
 -python 0.25.0, -typescript 0.23.2 (TypeScript and TSX), -javascript 0.25.0, -go 0.25.0,
--java 0.23.5, -c 0.24.2 and -cpp 0.23.4. [arko_index verification](arko_index-verification.md#the-pure-rust-parser)
+-java 0.23.5, -c 0.24.2 and -cpp 0.23.4. Commit d56f609 fixes the Kotlin scanner's endless
+loop on an annotation at the end of a file and the Markdown scanner's overflow at 255
+nested blocks. Its `Parser::parse` returns no tree when a lexer or scanner keeps advancing
+at the end of the input (2^20 times in one token), a guard the C library lacks.
+[arko_index verification](arko_index-verification.md#the-pure-rust-parser)
 has the checks of the switch.
 
 arko_index has no cargo features. The examples use arko_ai for Voyage, a dev-dependency
@@ -654,7 +677,7 @@ directory that holds it) and `report.json` (the last walk's report).
 | Writer | Files |
 |---|---|
 | `search::index` | `index.json` (version 1), `.index.lock` |
-| `index2::index`, `index2::build` | `CURRENT2` (the name of the current generation), `.index.lock`, `index2-<stamp>-<pid>/` with `meta.json` (version 2), `lens.dat`, `docs.off`, `docs.dat`, `terms.dat`, `terms.idx`, `post.dat`, `files.dat` (each file's first document and path, for filters), and with embeddings also `dense.json` (`DenseIndexInfo`, version 1) and `dense/` (`slots.dat` with ids, paths, languages, int8 scales and a SHA-256 checksum; `vectors.f32`; `vectors.i8` with int8). Older generations are removed after a switch. |
+| `index2::index`, `index2::build` | `CURRENT2` (the name of the current generation), `.index.lock`, `index2-<stamp>-<pid>/` with `meta.json` (version 2, with `dense`: whether the generation has embeddings, `false` when absent), `lens.dat`, `docs.off`, `docs.dat`, `terms.dat`, `terms.idx`, `post.dat`, `files.dat` (each file's first document and path, for filters), and with embeddings also `dense.json` (`DenseIndexInfo`, version 1) and `dense/` (`slots.dat` with ids, paths, languages, int8 scales and a SHA-256 checksum; `vectors.f32`; `vectors.i8` with int8). Older generations are removed after a switch. |
 | `index2::build` with embeddings | `dense.json` (`DenseConfig`, version 1: the model and settings the CLI's later builds follow) and `embed-cache/<model key>/` (`cache.json` with the full descriptor and the epoch, `keys.<epoch>` with 32-byte text hashes, `vectors.<epoch>` with the vectors as returned, appended and fsynced per request). |
 | `open_watch` | `watch.json` (version 1: snapshot, fingerprints, sequence, acknowledgement, pending deltas, rules, and the engine-qualified parse cache) |
 | `Watcher2` | `watch2.snap` (version 3), `watch2.recs.N`, `watch2.wal` |
@@ -670,11 +693,12 @@ watcher's parse cache is reused only when the engine digest (the crate version, 
 chunking sources and the locked tree-sitter versions) and `max_bytes` match. Otherwise
 the files are parsed again, without spurious deltas, except once for chunk format 2:
 chunks that gain a `scope` are delivered as `changed`. The engine digest also changes
-with `Options::front_matter_description`. An index2 generation from before this version
-loads and searches lexically, and filters need its `files.dat` (rebuild to filter). Saved
-files with embeddings carry versions (`dense.json` 1, the generation's `dense.json` 1,
-`slots.dat` 1, `cache.json` 1) and new fields get serde defaults. The SQLite databases of
-the earlier, model-chunked arko_index are not readable by this crate.
+with `Options::front_matter_description`, and with the mhr_tree_sitter commit (the move
+to d56f609 rebuilds the watchers' cached chunks once). An index2 generation from before
+this version loads and searches lexically, and filters need its `files.dat` (rebuild to
+filter). Saved files with embeddings carry versions (`dense.json` 1, the generation's
+`dense.json` 1, `slots.dat` 1, `cache.json` 1) and new fields get serde defaults. The
+SQLite databases of the earlier, model-chunked arko_index are not readable by this crate.
 
 ## Platforms
 
