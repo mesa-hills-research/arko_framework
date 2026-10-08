@@ -130,10 +130,7 @@ impl AgentLoop {
                     Err(()) => results.push((index, self.unavailable_native_tool(&ai_call).await?)),
                 }
             }
-            self.finish_native_decisions(approved, results, |state| {
-                matches!(state, TaskState::AwaitingToolApproval { .. })
-            })
-            .await?;
+            self.finish_native_decisions(approved, results).await?;
             native_handled = true;
         } else {
             let start = self.task.pending_text_tool_results.len();
@@ -157,10 +154,12 @@ impl AgentLoop {
                 }
             }
             next_user_message_from_command = self.take_text_results(start).join("\n\n---\n\n");
-            if matches!(self.task.current_state, TaskState::AwaitingToolApproval { tool_call_id: current_id, .. } if current_id == tool_call_id)
-            {
-                self.task.set_state(TaskState::InProgress);
-            }
+            // The decision put the task in progress, and a call that ran
+            // doesn't wait for approval.
+            debug_assert!(!matches!(
+                self.task.current_state,
+                TaskState::AwaitingToolApproval { .. }
+            ));
             self.end_tool_batch().await?;
         }
         Ok(FollowUp {
@@ -199,10 +198,7 @@ impl AgentLoop {
             // Calls held for this one run now.
             self.begin_tool_batch();
             self.task.set_state(TaskState::InProgress);
-            self.finish_native_decisions(Vec::new(), results, |state| {
-                matches!(state, TaskState::AwaitingToolApproval { .. })
-            })
-            .await?;
+            self.finish_native_decisions(Vec::new(), results).await?;
             native_handled = true;
         } else {
             let pb = self.prompts();
@@ -333,10 +329,7 @@ impl AgentLoop {
                 }
             }
         }
-        self.finish_native_decisions(approved, results, |state| {
-            matches!(state, TaskState::AwaitingBatchToolApproval { .. })
-        })
-        .await?;
+        self.finish_native_decisions(approved, results).await?;
         let native_handled = true;
         Ok(FollowUp {
             native_handled,
