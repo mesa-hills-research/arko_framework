@@ -408,6 +408,26 @@ const INTERCEPTION_EXCLUDED_TOOLS: &[&str] = &[COMPLETE_TASK_TOOL_NAME, ASK_USER
 type ScriptedStreamResult =
     Result<futures::stream::BoxStream<'static, Result<ai::StreamEvent, ai::Error>>, ai::Error>;
 
+/// Where the loop of [`AgentLoop::run`] goes after a phase of a pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    /// On to the pass's next phase.
+    Proceed,
+    /// Out of the loop, to its finish (`break`).
+    Exit,
+}
+
+/// Applies a phase's [`Flow`] in the loop of [`AgentLoop::run`], at the top
+/// level of the loop's body (where `continue` and `break` are the loop's).
+macro_rules! step {
+    ($flow:expr) => {
+        match $flow {
+            Flow::Proceed => {}
+            Flow::Exit => break,
+        }
+    };
+}
+
 /// The main agent execution loop.
 pub struct AgentLoop {
     task: Task,
@@ -2542,8 +2562,10 @@ impl AgentLoop {
         Ok(())
     }
 
-    /// Runs the agent loop to completion.
-    pub async fn run(mut self) -> Result<Task, ArkoAgentsError> {
+    /// Checks the configuration before anything is reported (the
+    /// developer environment details the run can show need content), and
+    /// estimates the saved conversation's latest request.
+    fn check_config(&mut self) -> Result<(), ArkoAgentsError> {
         self.task.agent_config.validate()?;
         self.answered_request = self.saved_request_mark();
         if self.is_native_mode()
@@ -2584,7 +2606,32 @@ impl AgentLoop {
             self.task.id,
             self.task.agent_config.tool_config.tool_calling_mode
         );
+        Ok(())
+    }
 
+    /// The run's start: the task in progress (reported), what a stopped
+    /// run left settled, and the prompts written.
+    async fn start(&mut self) -> Result<(), ArkoAgentsError> {
+        let interrupted = self.start_state().await?;
+        // A task saved while its tool calls ran (by a host that stopped)
+        // settles them before anything else.
+        let recovered = self.recover_running_calls().await?;
+        if interrupted {
+            // Older versions left a native turn without results when an
+            // approval wait ended this way.
+            self.settle_interrupted_wait(UNDECIDED_CALL, UNDECIDED_CALL)
+                .await?;
+            self.end_tool_batch().await?;
+        } else {
+            self.settle_open_turn(recovered).await?;
+        }
+        self.write_prompts()
+    }
+
+    /// Puts a task that is pending or was interrupted in progress, and one
+    /// saved while approved calls ran out of its approval wait, and reports
+    /// a task in progress. Returns whether the task was interrupted.
+    async fn start_state(&mut self) -> Result<bool, ArkoAgentsError> {
         let interrupted = matches!(self.task.current_state, TaskState::Interrupted { .. });
         if matches!(self.task.current_state, TaskState::Pending)
             || matches!(self.task.current_state, TaskState::Interrupted { .. })
@@ -2610,19 +2657,12 @@ impl AgentLoop {
             ))
             .await?;
         }
-        // A task saved while its tool calls ran (by a host that stopped)
-        // settles them before anything else.
-        let recovered = self.recover_running_calls().await?;
-        if interrupted {
-            // Older versions left a native turn without results when an
-            // approval wait ended this way.
-            self.settle_interrupted_wait(UNDECIDED_CALL, UNDECIDED_CALL)
-                .await?;
-            self.end_tool_batch().await?;
-        } else {
-            self.settle_open_turn(recovered).await?;
-        }
+        Ok(interrupted)
+    }
 
+    /// Writes the system prompt and the task prompt, unless the
+    /// conversation has them already.
+    fn write_prompts(&mut self) -> Result<(), ArkoAgentsError> {
         if self.task.conversation.system_message.is_none() {
             let mut tool_defs_for_prompt: Vec<ToolDefinition> = Vec::new();
             for name in &self.task.agent_config.tool_config.available_tool_names {
@@ -2665,32 +2705,45 @@ impl AgentLoop {
                 self.reset_llm_recovery();
             }
         }
+        Ok(())
+    }
+
+    /// The start of a pass, after its snapshot: a stop requested since the
+    /// last pass, or a task that ended, leaves the loop.
+    async fn pass_start(&mut self) -> Result<Flow, ArkoAgentsError> {
+        if self.stop_requested {
+            // Suspended while tool calls ran, in the state the turn left
+            // it in, which is reported as a suspension always is, unless
+            // a call already ended the task and that was reported.
+            let ended_and_reported = self.task.current_state.is_terminal() && self.state_reported();
+            if std::mem::take(&mut self.suspended_tools) && !ended_and_reported {
+                self.emit_event(AgentEvent::TaskStateChanged(
+                    self.task.current_state.clone(),
+                ))
+                .await?;
+            }
+            return Ok(Flow::Exit);
+        }
+        if self.task.current_state.is_terminal() {
+            log::info!(
+                "Task {} reached terminal state: {:?}",
+                self.task.id,
+                self.task.current_state
+            );
+            return Ok(Flow::Exit);
+        }
+        Ok(Flow::Proceed)
+    }
+
+    /// Runs the agent loop to completion.
+    pub async fn run(mut self) -> Result<Task, ArkoAgentsError> {
+        self.check_config()?;
+        self.start().await?;
 
         'main_loop: loop {
             // Every turn boundary, pause and wait passes here.
             self.report_task(false).await;
-            if self.stop_requested {
-                // Suspended while tool calls ran, in the state the turn left
-                // it in, which is reported as a suspension always is, unless
-                // a call already ended the task and that was reported.
-                let ended_and_reported =
-                    self.task.current_state.is_terminal() && self.state_reported();
-                if std::mem::take(&mut self.suspended_tools) && !ended_and_reported {
-                    self.emit_event(AgentEvent::TaskStateChanged(
-                        self.task.current_state.clone(),
-                    ))
-                    .await?;
-                }
-                break 'main_loop;
-            }
-            if self.task.current_state.is_terminal() {
-                log::info!(
-                    "Task {} reached terminal state: {:?}",
-                    self.task.id,
-                    self.task.current_state
-                );
-                break 'main_loop;
-            }
+            step!(self.pass_start().await?);
 
             if self.task.current_state.is_awaiting_approval() {
                 let deadline = match self.command_wait {
@@ -4712,6 +4765,12 @@ impl AgentLoop {
             }
         }
 
+        self.finish().await
+    }
+
+    /// The end of the run, however the loop stopped: context taken is
+    /// kept, the task reported, and `TaskStreamEnd` sent.
+    async fn finish(mut self) -> Result<Task, ArkoAgentsError> {
         // Whatever stopped the loop, context it took is not lost.
         self.keep_taken_context()?;
         self.report_task(false).await;
