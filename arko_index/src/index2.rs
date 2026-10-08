@@ -1206,7 +1206,9 @@ impl Generation {
             return Err(format!("bad vector store name {:?}", info.store).into());
         }
         let dir = self.state_dir.join(&info.store);
-        let store = MhrStore::open(&dir)?;
+        let store = MhrStore::open(&dir).map_err(|e| {
+            format!("{e} (the vector store of this index: rebuild the index to restore it)")
+        })?;
         if !store.matches(&info.store_config()) {
             return Err(format!(
                 "the vector store {} does not hold this index's model and settings ({}): rebuild the index",
