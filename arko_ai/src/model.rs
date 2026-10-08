@@ -112,7 +112,8 @@ pub struct Model {
 ///   listed for short context only. Models without an entry do not offer the tier.
 /// - Anthropic 1-hour cache writes cost 2x base input on every model; fast mode
 ///   (Opus 5, Opus 4.8) is 2x across the full context window; US-only inference
-///   (`inference_geo: "us"`) is 1.1x on Claude 4.6 and later.
+///   (`inference_geo: "us"`) is 1.1x on Claude 4.6 and later. Claude Haiku 5.5
+///   prices prompts over 100,000 tokens higher (the `large_*` rates).
 /// - Gemini Flex/Priority require the v1beta endpoint, which this client does
 ///   not use, so no Gemini tiers are listed.
 impl Model {
@@ -912,6 +913,19 @@ impl Model {
         }
     }
 
+    /// Claude Fable 5.1 for organizations verified through one of Anthropic's
+    /// verification programs, such as the Cyber Verification Program: the same
+    /// model, limits and prices, so every Fable 5.1 rule applies to it too
+    /// ([`Model::is_fable_or_mythos_5_1`]). Released 2026-09-01, retirement not
+    /// sooner than 2027-09-01.
+    /// https://platform.claude.com/docs/en/models/mythos-5-1/overview
+    pub fn anthropic_claude_mythos_5_1() -> Self {
+        Self {
+            id: "claude-mythos-5-1".to_string(),
+            ..Self::anthropic_claude_fable_5_1()
+        }
+    }
+
     pub fn anthropic_claude_fable_5() -> Self {
         Self {
             provider: Provider::Anthropic,
@@ -1083,6 +1097,46 @@ impl Model {
                 large_cache_write_cost_per_million: None,
                 reasoning_output_cost_per_million: None,
                 cache_write_1h_cost_per_million: Some(4.00),
+                residency: vec![ResidencyPricing::new("us", 1.1)],
+                ..ModelPricing::default()
+            },
+        }
+    }
+
+    /// Released 2026-10-07, retirement not sooner than 2027-10-07. Adaptive
+    /// thinking is on by default (default effort `medium`, all five levels).
+    /// `thinking.type: "disabled"` is accepted at `high` effort or below, and arko
+    /// sends it only without an Anthropic reasoning config, so at the default
+    /// effort. Manual budgets, non-default sampling parameters and prefill are
+    /// rejected. A forced tool choice is accepted, and the response then starts
+    /// with the tool call, without thinking. No fast mode.
+    /// Prices depend on the prompt size: a prompt over 100,000 tokens (counting
+    /// cached and written input) pays 5x on every token class.
+    /// https://platform.claude.com/docs/en/models/haiku-5-5/overview
+    /// https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide
+    /// https://platform.claude.com/docs/en/about-claude/pricing
+    pub fn anthropic_claude_haiku_5_5() -> Self {
+        Self {
+            provider: Provider::Anthropic,
+            id: "claude-haiku-5-5".to_string(),
+            model_type: ModelType::Reasoning,
+            max_input_tokens: 1_000_000,
+            max_output_tokens: 128_000,
+            supports_image_input: true,
+            supports_cache: true,
+            openrouter: None,
+            pricing: ModelPricing {
+                input_cost_per_million: 0.10,
+                output_cost_per_million: 0.50,
+                cached_input_cost_per_million: Some(0.01),
+                cache_write_cost_per_million: Some(0.125),
+                cache_write_1h_cost_per_million: Some(0.20),
+                large_input_threshold: Some(100_000),
+                large_input_cost_per_million: Some(0.50),
+                large_output_cost_per_million: Some(2.50),
+                large_cached_input_cost_per_million: Some(0.05),
+                large_cache_write_cost_per_million: Some(0.625),
+                large_cache_write_1h_cost_per_million: Some(1.00),
                 residency: vec![ResidencyPricing::new("us", 1.1)],
                 ..ModelPricing::default()
             },
@@ -1866,12 +1920,14 @@ impl Model {
     pub(crate) fn list_anthropic_models() -> Vec<Self> {
         vec![
             Self::anthropic_claude_fable_5_1(),
+            Self::anthropic_claude_mythos_5_1(),
             Self::anthropic_claude_fable_5(),
             Self::anthropic_claude_opus_5_5(),
             Self::anthropic_claude_opus_5(),
             Self::anthropic_claude_opus_4_8(),
             Self::anthropic_claude_sonnet_5_5(),
             Self::anthropic_claude_sonnet_5(),
+            Self::anthropic_claude_haiku_5_5(),
             Self::anthropic_claude_opus_4_7(),
             Self::anthropic_claude_opus_4_6(),
             Self::anthropic_claude_opus_4_5(),
@@ -2162,6 +2218,16 @@ impl Model {
         self.id == "claude-fable-5-1"
     }
 
+    pub fn is_mythos_5_1(&self) -> bool {
+        self.id == "claude-mythos-5-1"
+    }
+
+    /// Claude Fable 5.1 or Claude Mythos 5.1, the same model under two ids,
+    /// so every Fable 5.1 rule applies to both.
+    pub fn is_fable_or_mythos_5_1(&self) -> bool {
+        self.is_fable_5_1() || self.is_mythos_5_1()
+    }
+
     pub fn is_opus_5_5(&self) -> bool {
         self.id == "claude-opus-5-5"
     }
@@ -2202,10 +2268,14 @@ impl Model {
         self.id == "claude-sonnet-5"
     }
 
+    pub fn is_haiku_5_5(&self) -> bool {
+        self.id == "claude-haiku-5-5"
+    }
+
     /// Claude models whose 1M context window is standard (no beta header), which
     /// is also the "Claude 4.6 and later" set used by data residency.
     fn is_anthropic_4_6_or_later(&self) -> bool {
-        self.is_fable_5_1()
+        self.is_fable_or_mythos_5_1()
             || self.is_fable_5()
             || self.is_opus_5_5()
             || self.is_opus_5()
@@ -2215,6 +2285,7 @@ impl Model {
             || self.is_sonnet_5_5()
             || self.is_sonnet_5()
             || self.is_sonnet_4_6()
+            || self.is_haiku_5_5()
     }
 
     /// Thinking predicates follow
@@ -2225,23 +2296,29 @@ impl Model {
     }
 
     pub fn defaults_anthropic_adaptive_thinking(&self) -> bool {
-        self.is_fable_5_1()
+        self.is_fable_or_mythos_5_1()
             || self.is_fable_5()
             || self.is_opus_5_5()
             || self.is_opus_5()
             || self.is_sonnet_5_5()
             || self.is_sonnet_5()
+            || self.is_haiku_5_5()
     }
 
     /// Adaptive thinking can't be disabled (`thinking.type: "disabled"` returns 400).
     /// Sonnet 5.5's lowest setting, `thinking.type: "between_tools"`, is not sent
-    /// by this client.
+    /// by this client. Opus 5 and Haiku 5.5 accept `"disabled"` at `high` effort or
+    /// below, and this client sends it only without an Anthropic reasoning config,
+    /// so at the model's default effort.
     pub fn always_uses_anthropic_adaptive_thinking(&self) -> bool {
-        self.is_fable_5_1() || self.is_fable_5() || self.is_opus_5_5() || self.is_sonnet_5_5()
+        self.is_fable_or_mythos_5_1()
+            || self.is_fable_5()
+            || self.is_opus_5_5()
+            || self.is_sonnet_5_5()
     }
 
     pub fn rejects_anthropic_manual_thinking(&self) -> bool {
-        self.is_fable_5_1()
+        self.is_fable_or_mythos_5_1()
             || self.is_fable_5()
             || self.is_opus_5_5()
             || self.is_opus_5()
@@ -2249,11 +2326,12 @@ impl Model {
             || self.is_opus_4_7()
             || self.is_sonnet_5_5()
             || self.is_sonnet_5()
+            || self.is_haiku_5_5()
     }
 
     /// Non-default `temperature`, `top_p` or `top_k` return 400 on these models.
     pub fn omits_anthropic_sampling_parameters(&self) -> bool {
-        self.is_fable_5_1()
+        self.is_fable_or_mythos_5_1()
             || self.is_fable_5()
             || self.is_opus_5_5()
             || self.is_opus_5()
@@ -2261,13 +2339,14 @@ impl Model {
             || self.is_opus_4_7()
             || self.is_sonnet_5_5()
             || self.is_sonnet_5()
+            || self.is_haiku_5_5()
     }
 
     /// Models whose thinking display defaults to `"omitted"`, so summarized text must
     /// be requested with `thinking.display`. On Opus 4.6, Sonnet 4.6 and earlier
     /// thinking models summarized text is already the default.
     pub fn supports_anthropic_summarized_thinking_display(&self) -> bool {
-        self.is_fable_5_1()
+        self.is_fable_or_mythos_5_1()
             || self.is_fable_5()
             || self.is_opus_5_5()
             || self.is_opus_5()
@@ -2275,6 +2354,7 @@ impl Model {
             || self.is_opus_4_7()
             || self.is_sonnet_5_5()
             || self.is_sonnet_5()
+            || self.is_haiku_5_5()
     }
 
     /// Effort predicates follow
@@ -2284,7 +2364,7 @@ impl Model {
     }
 
     pub fn supports_anthropic_xhigh_effort(&self) -> bool {
-        self.is_fable_5_1()
+        self.is_fable_or_mythos_5_1()
             || self.is_fable_5()
             || self.is_opus_5_5()
             || self.is_opus_5()
@@ -2292,6 +2372,7 @@ impl Model {
             || self.is_opus_4_7()
             || self.is_sonnet_5_5()
             || self.is_sonnet_5()
+            || self.is_haiku_5_5()
     }
 
     pub fn supports_anthropic_max_effort(&self) -> bool {
@@ -2303,7 +2384,7 @@ impl Model {
     /// is enabled.
     /// https://platform.claude.com/docs/en/build-with-claude/thinking
     pub fn rejects_anthropic_forced_tool_choice(&self) -> bool {
-        self.is_fable_5_1() || self.is_opus_5_5() || self.is_sonnet_5_5()
+        self.is_fable_or_mythos_5_1() || self.is_opus_5_5() || self.is_sonnet_5_5()
     }
 
     /// Fast mode (`speed: "fast"`, research preview): Opus 5.5, Opus 5 and Opus 4.8
@@ -2335,25 +2416,17 @@ impl Model {
         self.has_standard_anthropic_1m_context()
     }
 
+    /// Claude 4.6 and later models, and the earlier Claude 4 models listed here.
     pub fn supports_interleaved_thinking(&self) -> bool {
-        matches!(
-            self.id.as_str(),
-            "claude-fable-5-1"
-                | "claude-fable-5"
-                | "claude-opus-5-5"
-                | "claude-opus-5"
-                | "claude-opus-4-20250514"
-                | "claude-opus-4-1-20250805"
-                | "claude-opus-4-5-20251101"
-                | "claude-opus-4-6"
-                | "claude-opus-4-7"
-                | "claude-opus-4-8"
-                | "claude-sonnet-4-20250514"
-                | "claude-sonnet-4-5-20250929"
-                | "claude-sonnet-4-6"
-                | "claude-sonnet-5"
-                | "claude-sonnet-5-5"
-        )
+        self.is_anthropic_4_6_or_later()
+            || matches!(
+                self.id.as_str(),
+                "claude-opus-4-20250514"
+                    | "claude-opus-4-1-20250805"
+                    | "claude-opus-4-5-20251101"
+                    | "claude-sonnet-4-20250514"
+                    | "claude-sonnet-4-5-20250929"
+            )
     }
 
     /// Interleaved thinking is automatic on every model that supports adaptive
@@ -2550,21 +2623,32 @@ mod tests {
         }
     }
 
-    /// Cache reads cost 0.025x input on Fable 5.1, 0.05x on Opus 5.5 and
-    /// Sonnet 5.5, and 0.1x on every other Claude model.
+    /// Cache reads cost 0.025x input on Fable 5.1 and Mythos 5.1, 0.05x on
+    /// Opus 5.5 and Sonnet 5.5, and 0.1x on every other Claude model.
     /// https://platform.claude.com/docs/en/about-claude/pricing#prompt-caching
     #[test]
     fn claude_cache_reads_follow_the_documented_multipliers() {
         for model in Model::list(Provider::Anthropic) {
             let pricing = &model.pricing;
             let expected = match model.id.as_str() {
-                "claude-fable-5-1" => 0.025,
+                "claude-fable-5-1" | "claude-mythos-5-1" => 0.025,
                 "claude-opus-5-5" | "claude-sonnet-5-5" => 0.05,
                 _ => 0.1,
             };
             let ratio =
                 pricing.cached_input_cost_per_million.unwrap() / pricing.input_cost_per_million;
             assert!((ratio - expected).abs() < 1e-9, "{}: {ratio}", model.id);
+            if let (Some(large), Some(threshold)) = (
+                pricing.large_cached_input_cost_per_million,
+                pricing.large_input_threshold,
+            ) {
+                let large_ratio = large / pricing.large_input_cost_per_million.unwrap();
+                assert!(
+                    (large_ratio - expected).abs() < 1e-9,
+                    "{} over {threshold}: {large_ratio}",
+                    model.id
+                );
+            }
         }
     }
 
@@ -2586,6 +2670,42 @@ mod tests {
         assert!(opus.has_standard_anthropic_1m_context());
         assert!(opus.supports_interleaved_thinking());
         assert!(opus.auto_enables_interleaved_thinking());
+
+        // Mythos 5.1 is Fable 5.1 under another id: every rule, limit and
+        // price matches.
+        let rules = |model: &Model| {
+            [
+                model.supports_anthropic_adaptive_thinking(),
+                model.defaults_anthropic_adaptive_thinking(),
+                model.always_uses_anthropic_adaptive_thinking(),
+                model.rejects_anthropic_manual_thinking(),
+                model.omits_anthropic_sampling_parameters(),
+                model.supports_anthropic_summarized_thinking_display(),
+                model.supports_anthropic_effort(),
+                model.supports_anthropic_xhigh_effort(),
+                model.supports_anthropic_max_effort(),
+                model.rejects_anthropic_forced_tool_choice(),
+                model.supports_anthropic_fast_mode(),
+                model.supports_anthropic_inference_geo(),
+                model.has_standard_anthropic_1m_context(),
+                model.supports_interleaved_thinking(),
+                model.auto_enables_interleaved_thinking(),
+                model.supports_forced_tool_choice(&GenerationConfig::default()),
+            ]
+        };
+        let fable = Model::anthropic_claude_fable_5_1();
+        let mythos = Model::anthropic_claude_mythos_5_1();
+        assert!(mythos.is_mythos_5_1() && mythos.is_fable_or_mythos_5_1());
+        assert!(fable.is_fable_or_mythos_5_1() && !mythos.is_fable_5_1());
+        assert_eq!(rules(&mythos), rules(&fable));
+        assert_eq!(
+            serde_json::to_value(&mythos.pricing).unwrap(),
+            serde_json::to_value(&fable.pricing).unwrap()
+        );
+        assert_eq!(
+            (mythos.max_input_tokens, mythos.max_output_tokens),
+            (fable.max_input_tokens, fable.max_output_tokens)
+        );
 
         let sonnet = Model::anthropic_claude_sonnet_5_5();
         assert!(sonnet.is_sonnet_5_5());
@@ -2611,6 +2731,42 @@ mod tests {
                 .map(|model| model.id),
             Some("claude-sonnet-5-5".to_string())
         );
+
+        let haiku = Model::anthropic_claude_haiku_5_5();
+        assert!(haiku.is_haiku_5_5());
+        assert!(haiku.supports_anthropic_adaptive_thinking());
+        assert!(haiku.defaults_anthropic_adaptive_thinking());
+        // It accepts `thinking.type: "disabled"` at `high` effort or below.
+        assert!(!haiku.always_uses_anthropic_adaptive_thinking());
+        assert!(haiku.rejects_anthropic_manual_thinking());
+        assert!(haiku.omits_anthropic_sampling_parameters());
+        assert!(haiku.supports_anthropic_summarized_thinking_display());
+        assert!(haiku.supports_anthropic_effort());
+        assert!(haiku.supports_anthropic_xhigh_effort());
+        assert!(haiku.supports_anthropic_max_effort());
+        assert!(!haiku.rejects_anthropic_forced_tool_choice());
+        assert!(!haiku.supports_anthropic_fast_mode());
+        assert!(haiku.supports_anthropic_inference_geo());
+        assert!(haiku.has_standard_anthropic_1m_context());
+        assert!(haiku.supports_interleaved_thinking());
+        assert!(haiku.auto_enables_interleaved_thinking());
+        for (slug, id) in [
+            ("anthropic/claude-haiku-5.5", "claude-haiku-5-5"),
+            ("anthropic/claude-haiku-4.5", "claude-haiku-4-5-20251001"),
+            ("anthropic/claude-mythos-5.1", "claude-mythos-5-1"),
+        ] {
+            assert_eq!(
+                Model::openrouter(slug)
+                    .openrouter_claude_equivalent()
+                    .map(|model| model.id),
+                Some(id.to_string())
+            );
+        }
+        for id in ["claude-mythos-5-1", "claude-haiku-5-5"] {
+            let model = Model::get(Provider::ClaudeCode, id).unwrap();
+            assert_eq!(model.provider, Provider::ClaudeCode);
+            assert_eq!(model.max_input_tokens, 1_000_000);
+        }
 
         for model in [
             Model::google_gemini_3_8_flash(),
@@ -2726,6 +2882,8 @@ mod tests {
         assert!(!Model::anthropic_claude_fable_5_1().supports_forced_tool_choice(&default));
         assert!(!Model::anthropic_claude_opus_5_5().supports_forced_tool_choice(&default));
         assert!(!Model::anthropic_claude_sonnet_5_5().supports_forced_tool_choice(&default));
+        assert!(!Model::anthropic_claude_mythos_5_1().supports_forced_tool_choice(&default));
+        assert!(Model::anthropic_claude_haiku_5_5().supports_forced_tool_choice(&default));
         assert!(Model::anthropic_claude_sonnet_5().supports_forced_tool_choice(&default));
         assert!(Model::openai_gpt_6_astra().supports_forced_tool_choice(&default));
         assert!(Model::google_gemini_3_5_flash().supports_forced_tool_choice(&default));

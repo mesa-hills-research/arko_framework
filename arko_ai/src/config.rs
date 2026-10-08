@@ -29,8 +29,9 @@ pub struct GenerationConfig {
     /// Sampling temperature. `None` (the default) sends none, so the model's
     /// default applies. OpenAI reasoning models and Google's Interactions API
     /// take no temperature, so a set one is an error for requests to them;
-    /// Claude models that take no sampling parameters (Fable 5.x, Opus 4.7 and
-    /// later, Sonnet 5) drop it, with a warning logged once per model.
+    /// Claude models that take no sampling parameters (Fable 5.x, Mythos 5.1,
+    /// Opus 4.7 and later, Sonnet 5 and later, Haiku 5.5) drop it, with a
+    /// warning logged once per model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     /// Output token limit. `None` (the default) lets the model produce up to
@@ -90,17 +91,20 @@ pub struct GenerationConfig {
     /// Requests summarized Anthropic thinking text while thinking is enabled
     /// (adaptive or manual budgets).
     ///
-    /// Claude Fable 5.1, Fable 5, Opus 5.5, Opus 5, Opus 4.8, Opus 4.7 and Sonnet 5
-    /// default to omitted thinking text, so this sends `thinking.display:
-    /// "summarized"`. On Opus 4.6, Sonnet 4.6 and earlier thinking models
-    /// summarized text is already the default and nothing extra is sent.
+    /// Claude Fable 5.1, Mythos 5.1, Fable 5, Opus 5.5, Opus 5, Opus 4.8, Opus 4.7,
+    /// Sonnet 5.5, Sonnet 5 and Haiku 5.5 default to omitted thinking text, so this
+    /// sends `thinking.display: "summarized"`. On Opus 4.6, Sonnet 4.6 and earlier
+    /// thinking models summarized text is already the default and nothing extra
+    /// is sent.
     /// `None` and `Some(false)` keep the provider default.
     /// https://platform.claude.com/docs/en/build-with-claude/thinking
     pub anthropic_summarized_thinking: Option<bool>,
     /// Requests the 1M-token context window on Anthropic models.
     ///
-    /// Claude 4.6 and later models include 1M context at standard pricing, so the
-    /// flag is accepted there without a beta header or price change. The
+    /// Claude 4.6 and later models include 1M context without a beta header, so
+    /// the flag is accepted there and sends nothing. Their prices don't depend on
+    /// it: Claude Haiku 5.5 charges more for any prompt over 100,000 tokens, and
+    /// the other models charge the same rate across the window. The
     /// `context-1m-2025-08-07` beta that gave Claude Sonnet 4 and 4.5 1M context
     /// was retired on 2026-04-30, so the flag is rejected for those models and
     /// any other model without 1M context.

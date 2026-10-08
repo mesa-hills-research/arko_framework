@@ -30,11 +30,12 @@ pub enum OpenAIReasoningMode {
 ///
 /// `Low`, `Medium`, and `High` are available on all supported effort models.
 ///
-/// `XHigh` is available on Claude Fable 5, Claude Opus 4.8, Claude Opus 4.7,
-/// and Claude Sonnet 5.
+/// `XHigh` is available on Claude Fable 5.x, Mythos 5.1, Opus 4.7 and later,
+/// Sonnet 5 and later, and Haiku 5.5
+/// ([`Model::supports_anthropic_xhigh_effort`](crate::Model::supports_anthropic_xhigh_effort)).
 ///
-/// `Max` is available on Claude Fable 5, Claude Opus 4.8, Claude Opus 4.7,
-/// Claude Opus 4.6, Claude Sonnet 5, and Claude Sonnet 4.6.
+/// `Max` is available on Claude 4.6 and later models
+/// ([`Model::supports_anthropic_max_effort`](crate::Model::supports_anthropic_max_effort)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AnthropicReasoningEffort {
@@ -266,11 +267,12 @@ pub enum ReasoningConfig {
     /// Anthropic adaptive thinking where the model determines its own
     /// reasoning budget.
     ///
-    /// Supported on Claude Fable 5, Claude Opus 4.8, Claude Opus 4.7,
-    /// Claude Opus 4.6, Claude Sonnet 5, and Claude Sonnet 4.6.
+    /// Supported on Claude 4.6 and later models
+    /// ([`Model::supports_anthropic_adaptive_thinking`](crate::Model::supports_anthropic_adaptive_thinking)).
     ///
-    /// Claude Fable 5 always uses adaptive thinking. Claude Sonnet 5 also
-    /// enables adaptive thinking by default when this configuration is absent.
+    /// Claude Fable 5.x, Mythos 5.1, Opus 5.5 and Sonnet 5.5 always use adaptive
+    /// thinking. Claude Opus 5, Sonnet 5 and Haiku 5.5 also think adaptively by
+    /// default when this configuration is absent.
     AnthropicAdaptive {
         effort: Option<AnthropicReasoningEffort>,
     },

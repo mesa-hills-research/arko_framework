@@ -1794,7 +1794,12 @@ mod tests {
     #[test]
     fn latest_claude_models_build_adaptive_requests_without_beta_headers() {
         let client = AnthropicClient::new("test");
-        for id in ["claude-fable-5-1", "claude-opus-5"] {
+        for id in [
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
+            "claude-opus-5",
+            "claude-haiku-5-5",
+        ] {
             let conversation = Conversation::new(Model::get(Provider::Anthropic, id).unwrap());
             let config = GenerationConfig::default()
                 .with_long_context(true)
@@ -1836,30 +1841,36 @@ mod tests {
 
     #[test]
     fn fable_5_1_rejects_disabled_thinking_and_forced_tool_use() {
-        let conversation = Conversation::new(Model::anthropic_claude_fable_5_1());
-        let config = GenerationConfig::default().with_anthropic_thinking_enabled(false);
-        assert!(matches!(
-            AnthropicClient::validate_config(&conversation, &config),
-            Err(Error::InvalidRequest(_))
-        ));
-
-        for (choice, allowed) in [
-            (ToolChoice::Auto, true),
-            (ToolChoice::None, true),
-            (ToolChoice::Required, false),
-            (ToolChoice::Specific("lookup".to_string()), false),
+        // Mythos 5.1 is the same model for verified organizations.
+        for model in [
+            Model::anthropic_claude_fable_5_1(),
+            Model::anthropic_claude_mythos_5_1(),
         ] {
-            let tool = ToolDefinition::new(
-                "lookup",
-                "Look up a value",
-                serde_json::json!({"type": "object"}),
-            );
-            let config = GenerationConfig::default()
-                .with_tool_config(ToolConfig::new(vec![tool]).with_tool_choice(choice));
-            assert_eq!(
-                AnthropicClient::validate_config(&conversation, &config).is_ok(),
-                allowed
-            );
+            let conversation = Conversation::new(model);
+            let config = GenerationConfig::default().with_anthropic_thinking_enabled(false);
+            assert!(matches!(
+                AnthropicClient::validate_config(&conversation, &config),
+                Err(Error::InvalidRequest(_))
+            ));
+
+            for (choice, allowed) in [
+                (ToolChoice::Auto, true),
+                (ToolChoice::None, true),
+                (ToolChoice::Required, false),
+                (ToolChoice::Specific("lookup".to_string()), false),
+            ] {
+                let tool = ToolDefinition::new(
+                    "lookup",
+                    "Look up a value",
+                    serde_json::json!({"type": "object"}),
+                );
+                let config = GenerationConfig::default()
+                    .with_tool_config(ToolConfig::new(vec![tool]).with_tool_choice(choice));
+                assert_eq!(
+                    AnthropicClient::validate_config(&conversation, &config).is_ok(),
+                    allowed
+                );
+            }
         }
 
         let client = AnthropicClient::new("test");
@@ -2136,6 +2147,72 @@ mod tests {
 
     fn close(actual: f64, expected: f64) -> bool {
         (actual - expected).abs() < 1e-9
+    }
+
+    /// Claude Haiku 5.5 takes `thinking.type: "disabled"` and a forced tool
+    /// choice, drops sampling parameters, rejects manual budgets, and prices a
+    /// prompt over 100,000 tokens (cache reads included) at its higher rates.
+    /// https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide
+    #[test]
+    fn haiku_5_5_requests_and_prompt_size_pricing() {
+        let client = AnthropicClient::new("test");
+        let conversation = Conversation::new(Model::anthropic_claude_haiku_5_5());
+
+        let disabled = GenerationConfig::default()
+            .with_anthropic_thinking_enabled(false)
+            .with_temperature(0.2);
+        AnthropicClient::validate_config(&conversation, &disabled).unwrap();
+        let value =
+            serde_json::to_value(client.build_request(&conversation, &disabled).unwrap()).unwrap();
+        assert_eq!(value["thinking"], json!({"type": "disabled"}));
+        assert!(value.get("temperature").is_none());
+        assert!(value.get("output_config").is_none());
+        // Disabled thinking never comes with an effort, so never with `xhigh`
+        // or `max`, which Haiku 5.5 rejects it at.
+        let with_effort = disabled.with_reasoning(ReasoningConfig::anthropic_adaptive_with_effort(
+            AnthropicReasoningEffort::XHigh,
+        ));
+        assert!(matches!(
+            AnthropicClient::validate_config(&conversation, &with_effort),
+            Err(Error::InvalidRequest(_))
+        ));
+
+        let tool = ToolDefinition::new("lookup", "Look up a value", json!({"type": "object"}));
+        let forced = GenerationConfig::default()
+            .with_tool_config(ToolConfig::new(vec![tool]).with_tool_choice(ToolChoice::Required));
+        AnthropicClient::validate_config(&conversation, &forced).unwrap();
+        let value =
+            serde_json::to_value(client.build_request(&conversation, &forced).unwrap()).unwrap();
+        assert_eq!(value["tool_choice"]["type"], "any");
+
+        let manual = GenerationConfig::default().with_reasoning(ReasoningConfig::anthropic(4096));
+        assert!(matches!(
+            AnthropicClient::validate_config(&conversation, &manual),
+            Err(Error::InvalidRequest(_))
+        ));
+
+        let response = |cache_read: u64| -> super::AnthropicResponse {
+            serde_json::from_value(json!({
+                "id": "msg_haiku", "type": "message", "role": "assistant",
+                "model": "claude-haiku-5-5", "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1000, "output_tokens": 1000, "cache_read_input_tokens": cache_read}
+            }))
+            .unwrap()
+        };
+        let config = GenerationConfig::default();
+        // 100,000 tokens in all: $0.10 input, $0.01 reads, $0.50 output.
+        let small = AnthropicClient::generation_response(response(99_000), &conversation, &config);
+        assert!(close(
+            small.usage.total_cost,
+            (1000.0 * 0.10 + 99_000.0 * 0.01 + 1000.0 * 0.50) / 1e6
+        ));
+        // 121,000: $0.50 input, $0.05 reads, $2.50 output.
+        let large = AnthropicClient::generation_response(response(120_000), &conversation, &config);
+        assert!(close(
+            large.usage.total_cost,
+            (1000.0 * 0.50 + 120_000.0 * 0.05 + 1000.0 * 2.50) / 1e6
+        ));
     }
 
     #[test]

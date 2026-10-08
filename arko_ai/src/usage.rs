@@ -511,7 +511,8 @@ impl UsageInfo {
     ///
     /// Rules:
     /// - Long-context rates apply when total input exceeds the model's
-    ///   threshold (for Anthropic, only when `long_context` was requested).
+    ///   threshold. On Claude Sonnet 4 and 4.5, whose long context needed a
+    ///   (now retired) beta, they apply only when `long_context` was requested.
     /// - The tier is the reported `service_tier`, else the requested OpenAI
     ///   tier, else standard; unpriced tiers use standard rates.
     /// - Tier and residency multipliers stack and apply to every token class.
@@ -527,7 +528,7 @@ impl UsageInfo {
 
         let long_context = pricing.large_input_threshold.is_some_and(|threshold| {
             self.input_tokens > threshold
-                && (model.provider != crate::model::Provider::Anthropic
+                && (!model.had_retired_anthropic_long_context_beta()
                     || config.and_then(|c| c.long_context).unwrap_or(false))
         });
         let pick = |large: Option<f64>, standard: Option<f64>| {
@@ -930,6 +931,44 @@ mod tests {
         assert!(close(
             priced(&model, usage(), Some(&long)).total_cost,
             0.25 * 6.0
+        ));
+    }
+
+    /// Claude Haiku 5.5 charges 5x on every token class for a prompt over
+    /// 100,000 tokens, cached and written input included, with no
+    /// long-context request.
+    #[test]
+    fn haiku_5_5_prices_follow_the_prompt_size() {
+        let haiku = Model::anthropic_claude_haiku_5_5();
+        // At the threshold: $0.10 input, $0.50 output.
+        let at = priced(&haiku, UsageInfo::new(100_000, 1_000_000), None);
+        assert!(close(at.total_cost, 0.1 * 0.10 + 0.50));
+        // Over it, mostly from the cache: $0.50 input, $0.05 reads, $0.625
+        // 5-minute and $1 1-hour writes, $2.50 output.
+        let mut usage = UsageInfo::new(150_000, 1_000_000)
+            .with_cached_tokens(100_000)
+            .with_cache_write_tokens(40_000);
+        usage.cache_write_1h_tokens = Some(10_000);
+        let over = priced(&haiku, usage, None);
+        assert!(close(over.input_cost, 0.01 * 0.50));
+        assert!(close(over.cache_read_cost.unwrap(), 0.1 * 0.05));
+        assert!(close(
+            over.cache_write_cost.unwrap(),
+            0.03 * 0.625 + 0.01 * 1.00
+        ));
+        assert!(close(over.output_cost, 2.50));
+        // The same through Claude Code, and 1.1x with US-only inference.
+        let claude_code = priced(
+            &Model::claude_code(haiku.clone()),
+            UsageInfo::new(150_000, 0),
+            None,
+        );
+        assert!(close(claude_code.total_cost, 0.15 * 0.50));
+        let mut us = UsageInfo::new(150_000, 0);
+        us.inference_geo = Some("us".into());
+        assert!(close(
+            priced(&haiku, us, None).total_cost,
+            0.15 * 0.50 * 1.1
         ));
     }
 
