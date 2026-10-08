@@ -204,6 +204,37 @@ fn with_approval_message(effective: String, message_to_agent: Option<String>) ->
     }
 }
 
+/// The facts the notice of a shortened `result` gives: `text` is its text
+/// as it stands (without a notice it already ends with), at `tokens`
+/// tokens, under its opt-in `cap`.
+fn notice_facts<'a>(
+    result: &'a ai::ToolResult,
+    paths: &'a HashMap<String, String>,
+    reason: ShortenReason,
+    text: &str,
+    tokens: usize,
+    cap: Option<usize>,
+    tool_config: &crate::agent_config::AgentToolConfig,
+) -> result_budget::NoticeFacts<'a> {
+    result_budget::NoticeFacts {
+        tool_name: &result.name,
+        path: result
+            .call_id
+            .as_ref()
+            .and_then(|id| paths.get(id))
+            .map(String::as_str),
+        reason,
+        tokens,
+        bytes: text.len(),
+        lines: text.lines().count(),
+        head_lines: 0,
+        tail_lines: 0,
+        cap,
+        terminal: tool_config.offers_terminal(),
+        line_ranges: tool_config.read_file_line_ranges,
+    }
+}
+
 fn unix_millis_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2412,23 +2443,15 @@ impl AgentLoop {
         let paths = self.read_file_paths();
         let facts = |index: usize, reason: ShortenReason| {
             let result = &self.task.pending_native_tool_results[index];
-            result_budget::NoticeFacts {
-                tool_name: &result.name,
-                path: result
-                    .call_id
-                    .as_ref()
-                    .and_then(|id| paths.get(id))
-                    .map(String::as_str),
+            notice_facts(
+                result,
+                &paths,
                 reason,
-                tokens: sizes[index],
-                bytes: result.output.len(),
-                lines: result.output.lines().count(),
-                head_lines: 0,
-                tail_lines: 0,
-                cap: caps[index],
-                terminal: tool_config.offers_terminal(),
-                line_ranges: tool_config.read_file_line_ranges,
-            }
+                &result.output,
+                sizes[index],
+                caps[index],
+                &tool_config,
+            )
         };
         let notices: Vec<usize> = (0..sizes.len())
             .map(|index| {
@@ -2473,6 +2496,47 @@ impl AgentLoop {
         Ok(())
     }
 
+    /// The largest tool result added to the conversation since the
+    /// latest answered request (or since the last message with results):
+    /// its message, its place in it, and its size in bytes.
+    fn largest_new_result(&self) -> Option<(usize, usize, usize)> {
+        let messages = &self.task.conversation.messages;
+        // The results added since the latest answered request: one of them
+        // made this request too large.
+        let start = self
+            .answered_request
+            .filter(|mark| {
+                mark.conversation == self.task.conversation_usage_start
+                    && mark.messages <= messages.len()
+            })
+            .map(|mark| mark.messages)
+            .or_else(|| {
+                messages.iter().rposition(|message| {
+                    message
+                        .content
+                        .iter()
+                        .any(|content| content.as_tool_result().is_some())
+                })
+            })
+            .unwrap_or(messages.len());
+        messages
+            .iter()
+            .enumerate()
+            .skip(start)
+            .flat_map(|(message, content)| {
+                content
+                    .content
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(index, content)| {
+                        content
+                            .as_tool_result()
+                            .map(|result| (message, index, result.output.len()))
+                    })
+            })
+            .max_by_key(|(_, _, bytes)| *bytes)
+    }
+
     /// A request the provider found over the model's input limit
     /// ([`ai::ErrorKind::ContextOverflow`]): with the overflow guard on, in
     /// native tool calling, the largest tool result added since the latest
@@ -2496,42 +2560,7 @@ impl AgentLoop {
         {
             return Ok(false);
         }
-        let messages = &self.task.conversation.messages;
-        // The results added since the latest answered request: one of them
-        // made this request too large.
-        let start = self
-            .answered_request
-            .filter(|mark| {
-                mark.conversation == self.task.conversation_usage_start
-                    && mark.messages <= messages.len()
-            })
-            .map(|mark| mark.messages)
-            .or_else(|| {
-                messages.iter().rposition(|message| {
-                    message
-                        .content
-                        .iter()
-                        .any(|content| content.as_tool_result().is_some())
-                })
-            })
-            .unwrap_or(messages.len());
-        let largest = messages
-            .iter()
-            .enumerate()
-            .skip(start)
-            .flat_map(|(message, content)| {
-                content
-                    .content
-                    .iter()
-                    .enumerate()
-                    .filter_map(move |(index, content)| {
-                        content
-                            .as_tool_result()
-                            .map(|result| (message, index, result.output.len()))
-                    })
-            })
-            .max_by_key(|(_, _, bytes)| *bytes);
-        let Some((message, index, _)) = largest else {
+        let Some((message, index, _)) = self.largest_new_result() else {
             return Ok(false);
         };
         let ratio = self.bytes_per_token;
@@ -2568,23 +2597,15 @@ impl AgentLoop {
         } else {
             0
         };
-        let facts = result_budget::NoticeFacts {
-            tool_name: &result.name,
-            path: result
-                .call_id
-                .as_ref()
-                .and_then(|id| paths.get(id))
-                .map(String::as_str),
-            reason: ShortenReason::OverflowRecovery,
+        let facts = notice_facts(
+            result,
+            &paths,
+            ShortenReason::OverflowRecovery,
+            &output,
             tokens,
-            bytes: output.len(),
-            lines: output.lines().count(),
-            head_lines: 0,
-            tail_lines: 0,
-            cap: None,
-            terminal: tool_config.offers_terminal(),
-            line_ranges: tool_config.read_file_line_ranges,
-        };
+            None,
+            &tool_config,
+        );
         let (text, kept) = result_budget::shorten(&output, keep, ratio, facts);
         let shortened = AgentEvent::ToolResultShortened {
             call_id: result.call_id.clone(),
@@ -6687,50 +6708,52 @@ impl AgentLoop {
                 Ok(false)
             }
             PlanUsageAction::Pause => Ok(true),
-            PlanUsageAction::SlowDown { delay_ms } => {
-                if !std::mem::replace(&mut self.slow_down_cache_checked, true) {
-                    let lifetime = self
-                        .llm_client
-                        .prompt_cache_lifetime(
-                            &self.task.agent_config.llm_config.model,
-                            &self.task.agent_config.llm_config.generation_config,
-                        )
-                        .await;
-                    super::monitor::warn_if_slow_down_outlasts_cache(
-                        self.task.id,
-                        delay_ms,
-                        lifetime,
-                    );
+            PlanUsageAction::SlowDown { delay_ms } => self.slow_down(delay_ms).await,
+        }
+    }
+
+    /// The plan-usage slow-down: waits `delay_ms` before the request,
+    /// taking commands (a stop ends the wait and the request), then takes
+    /// the commands queued meanwhile as a turn boundary does, and the
+    /// context sent meanwhile joins this request. Returns whether to make
+    /// it.
+    async fn slow_down(&mut self, delay_ms: u64) -> Result<bool, ArkoAgentsError> {
+        if !std::mem::replace(&mut self.slow_down_cache_checked, true) {
+            let lifetime = self
+                .llm_client
+                .prompt_cache_lifetime(
+                    &self.task.agent_config.llm_config.model,
+                    &self.task.agent_config.llm_config.generation_config,
+                )
+                .await;
+            super::monitor::warn_if_slow_down_outlasts_cache(self.task.id, delay_ms, lifetime);
+        }
+        let Some(until) = tokio::time::Instant::now().checked_add(Duration::from_millis(delay_ms))
+        else {
+            return Ok(true);
+        };
+        let sleep = tokio::time::sleep_until(until);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                biased;
+                command = self.command_receiver.recv() => {
+                    if self.handle_recovery_command(command).await? { return Ok(false); }
                 }
-                let Some(until) =
-                    tokio::time::Instant::now().checked_add(Duration::from_millis(delay_ms))
-                else {
-                    return Ok(true);
-                };
-                let sleep = tokio::time::sleep_until(until);
-                tokio::pin!(sleep);
-                loop {
-                    tokio::select! {
-                        biased;
-                        command = self.command_receiver.recv() => {
-                            if self.handle_recovery_command(command).await? { return Ok(false); }
-                        }
-                        _ = &mut sleep => break,
-                    }
-                }
-                // The wait came after the boundary: commands sent meanwhile
-                // are taken as there, and context sent meanwhile joins this
-                // request rather than the next, under the boundary's rule
-                // (only a pending fallback holds it back).
-                if self.take_queued_commands().await? {
-                    return Ok(false);
-                }
-                if self.task.fallback_for.is_none() {
-                    self.add_taken_context()?;
-                }
-                Ok(true)
+                _ = &mut sleep => break,
             }
         }
+        // The wait came after the boundary: commands sent meanwhile
+        // are taken as there, and context sent meanwhile joins this
+        // request rather than the next, under the boundary's rule
+        // (only a pending fallback holds it back).
+        if self.take_queued_commands().await? {
+            return Ok(false);
+        }
+        if self.task.fallback_for.is_none() {
+            self.add_taken_context()?;
+        }
+        Ok(true)
     }
 
     async fn handle_tool_exec_error(
