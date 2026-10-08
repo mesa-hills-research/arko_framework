@@ -820,6 +820,38 @@ pub fn render(report: &Report) -> String {
             )),
         report.generated_at.format("%Y-%m-%d %H:%M UTC"),
     );
+    if !run.variants.is_empty() {
+        let _ = writeln!(
+            text,
+            "Variant arms (arm B's tools over another index, or other search flags):\n\n| arm | index2 flags | search2 flags | tools | description |\n|---|---|---|---|---|"
+        );
+        for (name, variant) in &run.variants {
+            let flags = variant
+                .repos
+                .values()
+                .next()
+                .map_or(variant.spec.index.join(" "), |index| index.flags.join(" "));
+            let tools = if variant.spec.tools_text.is_some() {
+                "own text".to_string()
+            } else {
+                variant.spec.prompt.clone().unwrap_or_else(|| {
+                    if variant.spec.embeds() {
+                        "hybrid".into()
+                    } else {
+                        "index".into()
+                    }
+                })
+            };
+            let _ = writeln!(
+                text,
+                "| {name} | `{}` | `{}` | {tools} | {} |",
+                flags,
+                variant.spec.search.join(" "),
+                variant.spec.description.replace('|', "\\|"),
+            );
+        }
+        text.push('\n');
+    }
     let _ = writeln!(
         text,
         "Correctness: **pass** is the blind grader's verdict `correct` (a run that didn't answer fails); **items** is the share of the key's required items the grader found met (0 for no answer); **check** is the deterministic check of the key's locations and files. Intervals are 95%: Wilson for rates (a bootstrap over tasks when tasks have several samples), a bootstrap over tasks for means. Time is working time: wall time less waits for usage limits and retries. Cost is the API list price of the tokens (ChatGPT OAuth itself bills nothing per call).\n"
@@ -1312,6 +1344,7 @@ mod tests {
             samples: 1,
             tasks_file: "tasks.json".into(),
             sessions: vec![],
+            variants: Default::default(),
         };
         let report = compute(
             &manifest_settings,
@@ -1423,6 +1456,7 @@ mod tests {
             samples: 3,
             tasks_file: "tasks.json".into(),
             sessions: vec![],
+            variants: Default::default(),
         };
         let report = compute(
             &manifest,

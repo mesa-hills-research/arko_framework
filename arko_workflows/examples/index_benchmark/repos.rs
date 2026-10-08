@@ -82,7 +82,22 @@ impl Layout {
     }
 
     pub fn bin_dir(&self, arm: crate::Arm) -> PathBuf {
-        self.out.join("bin").join(format!("arm-{}", arm.letter()))
+        self.out.join("bin").join(format!("arm-{}", arm.name()))
+    }
+
+    /// A variant arm's index of a repository.
+    pub fn variant_index_dir(&self, id: &str, variant: &str) -> PathBuf {
+        self.out.join("indexes").join(format!("{id}@{variant}"))
+    }
+
+    /// The prepared variants (`prepare-variants`).
+    pub fn variants_path(&self) -> PathBuf {
+        self.out.join("variants.json")
+    }
+
+    /// Holds `prepare-variants`' lock.
+    pub fn variants_lock_dir(&self) -> PathBuf {
+        self.out.join("variants")
     }
 
     pub fn prepared_path(&self) -> PathBuf {
@@ -196,7 +211,7 @@ pub struct PrepareOptions<'a> {
 pub async fn prepare(options: PrepareOptions<'_>) -> BenchResult<BTreeMap<String, PreparedRepo>> {
     let layout = options.layout;
     let _lock = crate::ledger::DirLock::acquire(&layout.out.join("prepare"), "a prepare")?;
-    let mut busy: Vec<PathBuf> = vec![layout.tasks_dir()];
+    let mut busy: Vec<PathBuf> = vec![layout.tasks_dir(), layout.variants_lock_dir()];
     if let Ok(runs) = std::fs::read_dir(layout.out.join("runs")) {
         busy.extend(runs.flatten().map(|entry| entry.path()));
     }
@@ -478,11 +493,19 @@ const INDEX_PROGRAMS: [&str; 3] = ["arko_index", "arko_index_cli", "arko_index_d
 /// Sets up each arm's tool directory, first on its shell's `PATH`: arm A
 /// gets stubs for every arko_index program; arm B the arko_index CLI as
 /// `arko_index` and a stub for `arko_index_dense`; arm C also
-/// `arko_index_dense`, which asks this process's dense search service.
-/// Only the directories of `arms` are touched (a command sets up the arms
-/// it runs, and leaves those of another process alone), and files are
-/// only replaced (atomically) when they differ.
-pub fn setup_arm_bins(layout: &Layout, arms: &[crate::Arm], index_cli: &Path) -> BenchResult<()> {
+/// `arko_index_dense`, which asks this process's dense search service. A
+/// variant arm gets B's, with `arko_index` adding the variant's search flags
+/// or asking the search service when its index embeds
+/// ([`crate::variants::arko_index_program`]). Only the directories of `arms`
+/// are touched (a command sets up the arms it runs, and leaves those of
+/// another process alone), and files are only replaced (atomically) when they
+/// differ.
+pub fn setup_arm_bins(
+    layout: &Layout,
+    arms: &[crate::Arm],
+    index_cli: &Path,
+    variants: &BTreeMap<String, crate::variants::PreparedVariant>,
+) -> BenchResult<()> {
     let stub =
         |name: &str| format!("#!/bin/sh\necho \"bash: {name}: command not found\" >&2\nexit 127\n");
     for &arm in arms {
@@ -490,13 +513,30 @@ pub fn setup_arm_bins(layout: &Layout, arms: &[crate::Arm], index_cli: &Path) ->
         std::fs::create_dir_all(&dir)?;
         let stubs: &[&str] = match arm {
             crate::Arm::A => &INDEX_PROGRAMS,
-            crate::Arm::B => &INDEX_PROGRAMS[1..],
+            crate::Arm::B | crate::Arm::Variant(_) => &INDEX_PROGRAMS[1..],
             crate::Arm::C => &INDEX_PROGRAMS[1..2],
         };
         for name in stubs {
             ensure_script(&dir.join(name), &stub(name))?;
         }
         if arm == crate::Arm::A {
+            continue;
+        }
+        if let crate::Arm::Variant(name) = arm {
+            let variant = variants
+                .get(name)
+                .ok_or_else(|| format!("arm {name} is not a prepared variant"))?;
+            let link = dir.join("arko_index");
+            match crate::variants::arko_index_program(variant, name, index_cli)? {
+                Some(script) => {
+                    // A symbolic link from an earlier definition is replaced.
+                    if std::fs::symlink_metadata(&link).is_ok_and(|meta| meta.is_symlink()) {
+                        std::fs::remove_file(&link)?;
+                    }
+                    ensure_script(&link, &script)?;
+                }
+                None => ensure_link(index_cli, &link)?,
+            }
             continue;
         }
         ensure_link(index_cli, &dir.join("arko_index"))?;

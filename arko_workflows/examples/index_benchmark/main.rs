@@ -8,7 +8,8 @@
 //! terminal with the arko_index CLI and a prebuilt index; (C, opt-in) B
 //! plus dense search. A grader that doesn't know the arm scores each answer
 //! against a verified key, beside a deterministic check of its locations.
-//! See README.md.
+//! Variant arms (`prepare-variants`) compare arko_index options on the same
+//! tasks. See README.md.
 
 mod agents;
 mod answer;
@@ -22,6 +23,7 @@ mod repos;
 mod runner;
 mod shell;
 mod tasks;
+mod variants;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -32,8 +34,9 @@ use serde::{Deserialize, Serialize};
 
 pub type BenchResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// A benchmark arm: what the solver has besides its terminal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+/// A benchmark arm: what the solver has besides its terminal. Serialized as its
+/// name (`"A"`, `"B"`, `"C"`, or a variant's name).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Arm {
     /// A terminal only.
     A,
@@ -41,16 +44,20 @@ pub enum Arm {
     B,
     /// B plus dense (embedding) search.
     C,
+    /// A variant arm (`prepare-variants`): B's tools over an index built, or
+    /// searched, with other arko_index options. Holds the variant's name.
+    Variant(&'static str),
 }
 
 impl Arm {
     pub const ALL: [Arm; 3] = [Arm::A, Arm::B, Arm::C];
 
-    pub fn letter(self) -> char {
+    pub fn name(self) -> &'static str {
         match self {
-            Arm::A => 'A',
-            Arm::B => 'B',
-            Arm::C => 'C',
+            Arm::A => "A",
+            Arm::B => "B",
+            Arm::C => "C",
+            Arm::Variant(name) => name,
         }
     }
 
@@ -59,18 +66,39 @@ impl Arm {
             Arm::A => "terminal",
             Arm::B => "terminal + arko_index",
             Arm::C => "terminal + arko_index + dense",
+            Arm::Variant(_) => "terminal + arko_index variant",
         }
+    }
+
+    /// The arm named `name`: A, B or C (any case), else a variant. A variant's
+    /// name is 1 to 32 letters, digits, `-` or `_`.
+    pub fn parse(name: &str) -> BenchResult<Arm> {
+        let name = name.trim();
+        Ok(match name.to_ascii_uppercase().as_str() {
+            "A" => Arm::A,
+            "B" => Arm::B,
+            "C" => Arm::C,
+            _ => {
+                if name.is_empty()
+                    || name.len() > 32
+                    || !name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                {
+                    return Err(format!(
+                        "arm {name:?}: A, B, C or a variant's name (1 to 32 letters, digits, - or _)"
+                    )
+                    .into());
+                }
+                Arm::Variant(intern(name))
+            }
+        })
     }
 
     pub fn parse_list(text: &str) -> BenchResult<Vec<Arm>> {
         let mut arms = Vec::new();
-        for part in text.split(',') {
-            let arm = match part.trim().to_ascii_uppercase().as_str() {
-                "A" => Arm::A,
-                "B" => Arm::B,
-                "C" => Arm::C,
-                other => return Err(format!("unknown arm {other:?} (A, B or C)").into()),
-            };
+        for part in text.split(',').filter(|part| !part.trim().is_empty()) {
+            let arm = Arm::parse(part)?;
             if !arms.contains(&arm) {
                 arms.push(arm);
             }
@@ -83,9 +111,36 @@ impl Arm {
     }
 }
 
+/// A variant's name, kept for the rest of the process (a handful per run).
+fn intern(name: &str) -> &'static str {
+    static NAMES: std::sync::OnceLock<
+        parking_lot::Mutex<std::collections::BTreeSet<&'static str>>,
+    > = std::sync::OnceLock::new();
+    let mut names = NAMES.get_or_init(Default::default).lock();
+    if let Some(known) = names.get(name) {
+        return known;
+    }
+    let name: &'static str = Box::leak(name.to_string().into_boxed_str());
+    names.insert(name);
+    name
+}
+
 impl std::fmt::Display for Arm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.letter())
+        f.write_str(self.name())
+    }
+}
+
+impl Serialize for Arm {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.name())
+    }
+}
+
+impl<'de> Deserialize<'de> for Arm {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Arm::parse(&name).map_err(serde::de::Error::custom)
     }
 }
 
@@ -135,6 +190,10 @@ enum Command {
     /// Fetch the pinned repositories, make them read-only, and build their
     /// arko_index indexes (timed, outside the benchmark).
     Prepare(PrepareArgs),
+    /// Build the indexes of variant arms from a variants file: arm B's tools
+    /// over an index built, or searched, with other arko_index options. Runs
+    /// beside `generate`.
+    PrepareVariants(PrepareVariantsArgs),
     /// Write questions with a writer agent, check each with a verifier agent,
     /// and assemble the task set from the seed tasks and the questions both
     /// agree on.
@@ -153,6 +212,10 @@ enum Command {
     /// shells (talks to the running benchmark).
     #[command(hide = true)]
     DenseQuery(DenseQueryArgs),
+    /// A variant arm's `arko_index search2` when its index embeds, as the
+    /// agents' shells run it (talks to the running benchmark).
+    #[command(hide = true)]
+    IndexSearch(IndexSearchArgs),
 }
 
 #[derive(Debug, Args)]
@@ -385,6 +448,40 @@ struct ReportArgs {
 }
 
 #[derive(Debug, Args)]
+struct PrepareVariantsArgs {
+    #[command(flatten)]
+    out: OutArgs,
+    /// The variants file: a JSON list of variants (see README.md).
+    #[arg(long)]
+    variants: PathBuf,
+    /// Only these variants (comma-separated names).
+    #[arg(long)]
+    names: Option<String>,
+    /// Only these repository ids (comma-separated).
+    #[arg(long)]
+    only: Option<String>,
+    /// The arko_index CLI (default: `arko_index_cli` next to this binary).
+    #[arg(long)]
+    index_cli: Option<PathBuf>,
+    /// Embed with the offline hashing embedder instead of the variants' models
+    /// (for dry runs).
+    #[arg(long)]
+    mock_embeddings: bool,
+    /// Build again even when built with the same flags, CLI and commit.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Args)]
+struct IndexSearchArgs {
+    /// The variant arm.
+    variant: String,
+    /// `search2` and its arguments.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
+}
+
+#[derive(Debug, Args)]
 struct DenseQueryArgs {
     /// Results to print.
     #[arg(long, default_value_t = 10)]
@@ -453,6 +550,7 @@ async fn main() {
 async fn run(cli: Cli) -> BenchResult<()> {
     match cli.command {
         Command::Prepare(args) => prepare(args).await,
+        Command::PrepareVariants(args) => prepare_variants(args),
         Command::Generate(args) => generate_command(args).await,
         Command::Assemble(args) => {
             let layout = repos::Layout::new(&args.out.out)?;
@@ -495,6 +593,10 @@ async fn run(cli: Cli) -> BenchResult<()> {
             Ok(())
         }
         Command::DenseQuery(args) => dense::query_command(&args.query.join(" "), args.limit).await,
+        Command::IndexSearch(args) => {
+            let code = variants::search_command(&args.variant, &args.args).await?;
+            std::process::exit(code);
+        }
     }
 }
 
@@ -508,6 +610,61 @@ fn print_counts(layout: &repos::Layout, tasks: &[tasks::BenchTask]) -> BenchResu
         languages.insert(id, repo.spec.language);
     }
     println!("{}", tasks::count_table(tasks, &languages));
+    Ok(())
+}
+
+fn prepare_variants(args: PrepareVariantsArgs) -> BenchResult<()> {
+    let layout = repos::Layout::new(&args.out.out)?;
+    let mut specs = variants::load_specs(&args.variants)?;
+    if let Some(names) = split_list(&args.names) {
+        for name in &names {
+            if !specs.iter().any(|spec| &spec.name == name) {
+                return Err(
+                    format!("{} defines no variant {name}", args.variants.display()).into(),
+                );
+            }
+        }
+        specs.retain(|spec| names.contains(&spec.name));
+    }
+    let mut prepared = repos::load_prepared(&layout)?;
+    if prepared.is_empty() {
+        return Err("no prepared repositories: run `prepare` first".into());
+    }
+    if let Some(only) = split_list(&args.only) {
+        for id in &only {
+            if !prepared.contains_key(id) {
+                return Err(format!("repository {id} is not prepared").into());
+            }
+        }
+        prepared.retain(|id, _| only.contains(id));
+    }
+    let index_cli = repos::find_index_cli(args.index_cli.as_deref())?;
+    let built = variants::prepare(variants::PrepareVariants {
+        layout: &layout,
+        specs: specs.clone(),
+        repos: &prepared,
+        index_cli,
+        mock_embeddings: args.mock_embeddings,
+        force: args.force,
+    })?;
+    println!("| variant | repo | index2 flags | dense | build (s) |\n|---|---|---|---|---|");
+    for spec in &specs {
+        let Some(variant) = built.get(&spec.name) else {
+            continue;
+        };
+        for (id, index) in &variant.repos {
+            if !prepared.contains_key(id) {
+                continue;
+            }
+            println!(
+                "| {} | {id} | {} | {} | {:.1} |",
+                spec.name,
+                index.flags.join(" "),
+                if index.dense { "yes" } else { "-" },
+                index.build_ms as f64 / 1000.0
+            );
+        }
+    }
     Ok(())
 }
 
@@ -601,10 +758,10 @@ async fn generate_command(args: GenerateArgs) -> BenchResult<()> {
     }
     if writer_arm == Arm::B {
         let index_cli = repos::find_index_cli(args.index_cli.as_deref())?;
-        repos::setup_arm_bins(&layout, &[Arm::B], &index_cli)?;
+        repos::setup_arm_bins(&layout, &[Arm::B], &index_cli, &Default::default())?;
     } else {
         // Arm A's stubs need no CLI; the path is not used.
-        repos::setup_arm_bins(&layout, &[Arm::A], Path::new(""))?;
+        repos::setup_arm_bins(&layout, &[Arm::A], Path::new(""), &Default::default())?;
     }
     let path = args.tasks.clone().unwrap_or_else(|| layout.default_tasks());
     let tasks = generate::generate(generate::GenerateOptions {
@@ -677,17 +834,25 @@ async fn run_command(args: RunArgs) -> BenchResult<()> {
             .into());
         }
     }
+    let task_repos: std::collections::BTreeSet<String> =
+        task_set.iter().map(|task| task.repo.clone()).collect();
+    let variants = variants::for_arms(&layout, &arms, &task_repos)?;
     let _lock =
         ledger::DirLock::acquire(&layout.run_dir(&args.name), &format!("run {}", args.name))?;
     if let Some(pid) = ledger::DirLock::holder(&layout.out.join("prepare")) {
         return Err(format!("`prepare` is running (pid {pid}); wait for it").into());
+    }
+    if !variants.is_empty()
+        && let Some(pid) = ledger::DirLock::holder(&layout.variants_lock_dir())
+    {
+        return Err(format!("`prepare-variants` is running (pid {pid}); wait for it").into());
     }
     let index_cli = repos::find_index_cli(args.index_cli.as_deref())?;
     let index_cli_sha256 = repos::sha256_file(&index_cli)?;
     for task in &task_set {
         if let Some(repo) = prepared.get(&task.repo)
             && repo.index_cli_sha256 != index_cli_sha256
-            && arms.iter().any(|arm| *arm != Arm::A)
+            && arms.iter().any(|arm| matches!(arm, Arm::B | Arm::C))
         {
             eprintln!(
                 "warning: the index of {} was built by another arko_index CLI than {}; run `prepare` again to rebuild it",
@@ -697,12 +862,24 @@ async fn run_command(args: RunArgs) -> BenchResult<()> {
             break;
         }
     }
+    for (name, variant) in &variants {
+        if variant
+            .repos
+            .iter()
+            .any(|(id, index)| task_repos.contains(id) && index.cli_sha256 != index_cli_sha256)
+        {
+            eprintln!(
+                "warning: variant {name}'s indexes were built by another arko_index CLI than {}; run `prepare-variants` again to rebuild them",
+                index_cli.display()
+            );
+        }
+    }
     let mut bin_arms = arms.clone();
     if !bin_arms.contains(&Arm::A) {
         // The graders' shells are arm A's.
         bin_arms.push(Arm::A);
     }
-    repos::setup_arm_bins(&layout, &bin_arms, &index_cli)?;
+    repos::setup_arm_bins(&layout, &bin_arms, &index_cli, &variants)?;
     let mock = start_mock(&args.model).await?;
     let client =
         agents::build_client(&args.model.codex_home, mock.as_ref().map(|mock| mock.url()))?;
@@ -726,6 +903,7 @@ async fn run_command(args: RunArgs) -> BenchResult<()> {
         tasks_file: tasks_path,
         index_cli,
         index_cli_sha256,
+        variants,
     };
     let summary = runner::run(runner::RunInputs {
         layout: layout.clone(),

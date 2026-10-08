@@ -24,6 +24,7 @@ use crate::prompts;
 use crate::repos::{Layout, PreparedRepo};
 use crate::shell::{ShellEnvironment, ShellSettings, ShellTool};
 use crate::tasks::{BenchTask, TaskKind};
+use crate::variants::PreparedVariant;
 use crate::{Arm, BenchResult};
 
 // ---------------------------------------------------------------------------
@@ -471,6 +472,8 @@ pub struct RunSettings {
     pub tasks_file: PathBuf,
     pub index_cli: PathBuf,
     pub index_cli_sha256: String,
+    /// The variant arms among `arms`, as prepared.
+    pub variants: BTreeMap<String, PreparedVariant>,
 }
 
 /// What a run was made with, saved in its directory.
@@ -497,6 +500,9 @@ pub struct RunManifest {
     /// Each start of the run: when, and with which task count.
     #[serde(default)]
     pub sessions: Vec<RunSession>,
+    /// The variant arms' definitions and indexes (`prepare-variants`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub variants: BTreeMap<String, PreparedVariant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -525,6 +531,7 @@ impl RunManifest {
             samples: settings.samples,
             tasks_file: settings.tasks_file.clone(),
             sessions: Vec::new(),
+            variants: settings.variants.clone(),
         }
     }
 
@@ -574,6 +581,22 @@ impl RunManifest {
             "arko_index CLI",
             self.index_cli_sha256 == other.index_cli_sha256,
         );
+        // A variant must keep its definition and the indexes it was run with
+        // (a rebuild with the same flags, CLI and commit makes the same index).
+        for (name, variant) in &self.variants {
+            if let Some(other) = other.variants.get(name) {
+                let same_indexes = variant.repos.iter().all(|(id, index)| {
+                    other.repos.get(id).is_none_or(|o| {
+                        (&o.flags, &o.cli_sha256, &o.commit)
+                            == (&index.flags, &index.cli_sha256, &index.commit)
+                    })
+                });
+                check(
+                    &format!("variant {name}"),
+                    variant.spec == other.spec && same_indexes,
+                );
+            }
+        }
         differences
     }
 }
@@ -918,6 +941,7 @@ struct RunContext {
     stop: Arc<StopState>,
     plan_usage: Arc<PlanUsageLog>,
     dense_socket: Option<PathBuf>,
+    search_socket: Option<PathBuf>,
 }
 
 enum JobDone {
@@ -953,11 +977,14 @@ pub async fn run(inputs: RunInputs) -> BenchResult<String> {
             }
         }
         arms.sort();
+        let mut variants = existing.variants.clone();
+        variants.extend(manifest.variants.clone());
         manifest = RunManifest {
             arms,
             samples: existing.samples.max(settings.samples),
             created_at: existing.created_at,
             sessions: existing.sessions,
+            variants,
             ..manifest
         };
     }
@@ -997,8 +1024,8 @@ pub async fn run(inputs: RunInputs) -> BenchResult<String> {
     }
 
     let mut solver_configs = HashMap::new();
-    for arm in Arm::ALL {
-        solver_configs.insert(arm, solver_config(&settings, arm)?);
+    for arm in Arm::ALL.iter().chain(&settings.arms) {
+        solver_configs.insert(*arm, solver_config(&settings, *arm)?);
     }
     let grader_config = agent_config(
         "grader",
@@ -1014,6 +1041,20 @@ pub async fn run(inputs: RunInputs) -> BenchResult<String> {
     } else {
         None
     };
+    let search_service =
+        if settings.variants.values().any(PreparedVariant::dense) && !settings.grade_only {
+            Some(
+                crate::variants::SearchService::start(
+                    &layout,
+                    &settings.variants,
+                    &settings.index_cli,
+                    settings.shell.timeout,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
     let context = Arc::new(RunContext {
         layout,
         run_dir: run_dir.clone(),
@@ -1031,6 +1072,9 @@ pub async fn run(inputs: RunInputs) -> BenchResult<String> {
         stop: Arc::new(StopState::default()),
         plan_usage: Arc::new(PlanUsageLog::default()),
         dense_socket: dense_service
+            .as_ref()
+            .map(|service| service.socket().to_path_buf()),
+        search_socket: search_service
             .as_ref()
             .map(|service| service.socket().to_path_buf()),
         settings,
@@ -1202,6 +1246,9 @@ pub async fn run(inputs: RunInputs) -> BenchResult<String> {
     if let Some(service) = dense_service {
         service.stop();
     }
+    if let Some(service) = search_service {
+        service.stop();
+    }
     let stopped = context.stop.reason();
     let mut summary = format!(
         "run {}: {solved} solver runs ({answered} answered) and {graded} gradings in {:.1} min",
@@ -1243,7 +1290,7 @@ fn solver_config(settings: &RunSettings, arm: Arm) -> BenchResult<AgentConfig> {
         "solver",
         "Solver",
         prompts::SOLVER_ROLE,
-        &solver_instructions(arm, which_rg()),
+        &solver_instructions(arm, which_rg(), &settings.variants)?,
         "Your whole answer, in the format of your instructions: ANSWER: then LOCATIONS:.",
         &settings.model,
         settings.shell.timeout.as_secs() + 60,
@@ -1251,7 +1298,11 @@ fn solver_config(settings: &RunSettings, arm: Arm) -> BenchResult<AgentConfig> {
 }
 
 /// The solver's instructions in `arm`.
-pub fn solver_instructions(arm: Arm, has_rg: bool) -> String {
+pub fn solver_instructions(
+    arm: Arm,
+    has_rg: bool,
+    variants: &BTreeMap<String, PreparedVariant>,
+) -> BenchResult<String> {
     let rg = if has_rg {
         ", including `rg` (ripgrep)"
     } else {
@@ -1265,8 +1316,14 @@ pub fn solver_instructions(arm: Arm, has_rg: bool) -> String {
             prompts::TOOLS_INDEX.replace("{rg}", rg),
             prompts::TOOLS_DENSE
         ),
+        Arm::Variant(name) => variants
+            .get(name)
+            .ok_or_else(|| format!("arm {name} is not a prepared variant"))?
+            .spec
+            .tools_paragraph()?
+            .replace("{rg}", rg),
     };
-    prompts::SOLVER_INSTRUCTIONS.replace("{tools}", &tools)
+    Ok(prompts::SOLVER_INSTRUCTIONS.replace("{tools}", &tools))
 }
 
 /// Whether ripgrep is installed (every arm's prompt says so the same way).
@@ -1308,8 +1365,23 @@ fn shell_environment(
         arm,
         repo,
         scratch,
-        context.dense_socket.as_deref(),
+        ArmServices {
+            dense_socket: context.dense_socket.as_deref(),
+            search_socket: context.search_socket.as_deref(),
+            variants: Some(&context.settings.variants),
+        },
     )
+}
+
+/// What the arms' shells need besides their repository: the run's services
+/// and its variants.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ArmServices<'a> {
+    /// Arm C's dense search service.
+    pub dense_socket: Option<&'a Path>,
+    /// The search service of variant arms whose index embeds.
+    pub search_socket: Option<&'a Path>,
+    pub variants: Option<&'a BTreeMap<String, PreparedVariant>>,
 }
 
 pub fn arm_environment(
@@ -1317,17 +1389,33 @@ pub fn arm_environment(
     arm: Arm,
     repo: &PreparedRepo,
     scratch: &Path,
-    dense_socket: Option<&Path>,
+    services: ArmServices<'_>,
 ) -> ShellEnvironment {
     let mut vars = vec![("TMPDIR".to_string(), scratch.as_os_str().to_owned())];
-    if arm != Arm::A {
+    if let Arm::Variant(name) = arm {
+        let variant = services.variants.and_then(|variants| variants.get(name));
+        if let Some(index) = variant.and_then(|variant| variant.repos.get(&repo.spec.id)) {
+            vars.push((
+                "ARKO_INDEX_STATE".to_string(),
+                index.dir.as_os_str().to_owned(),
+            ));
+        }
+        if variant.is_some_and(PreparedVariant::dense)
+            && let Some(socket) = services.search_socket
+        {
+            vars.push((
+                crate::variants::SOCKET_VARIABLE.to_string(),
+                socket.as_os_str().to_owned(),
+            ));
+        }
+    } else if arm != Arm::A {
         vars.push((
             "ARKO_INDEX_STATE".to_string(),
             repo.index.as_os_str().to_owned(),
         ));
     }
     if arm == Arm::C {
-        if let Some(socket) = dense_socket {
+        if let Some(socket) = services.dense_socket {
             vars.push((
                 crate::dense::SOCKET_VARIABLE.to_string(),
                 socket.as_os_str().to_owned(),
@@ -1776,6 +1864,7 @@ mod tests {
             tasks_file: "tasks.json".into(),
             index_cli: "cli".into(),
             index_cli_sha256: "abc".into(),
+            variants: BTreeMap::new(),
         };
         let manifest = RunManifest::of(&settings);
         let mut other = manifest.clone();
@@ -1803,7 +1892,32 @@ mod tests {
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
-        crate::repos::setup_arm_bins(&layout, &Arm::ALL, &cli).unwrap();
+        // Two variants: one with the CLI as it is, one that adds search flags.
+        let variant = |name: &str, search: &[&str]| crate::variants::PreparedVariant {
+            spec: serde_json::from_value(serde_json::json!({ "name": name, "search": search }))
+                .unwrap(),
+            mock_embeddings: false,
+            repos: BTreeMap::from([(
+                "demo".to_string(),
+                crate::variants::VariantIndex {
+                    dir: layout.variant_index_dir("demo", name),
+                    commit: "abc".into(),
+                    flags: vec!["--no-embed".into()],
+                    cli_sha256: String::new(),
+                    dense: false,
+                    build_ms: 0,
+                    summary: String::new(),
+                },
+            )]),
+        };
+        let variants = BTreeMap::from([
+            ("plain".to_string(), variant("plain", &[])),
+            ("text".to_string(), variant("text", &["--text"])),
+        ]);
+        let (plain, text) = (Arm::parse("plain").unwrap(), Arm::parse("text").unwrap());
+        let mut arms = Arm::ALL.to_vec();
+        arms.extend([plain, text]);
+        crate::repos::setup_arm_bins(&layout, &arms, &cli, &variants).unwrap();
         let repo = PreparedRepo {
             spec: crate::repos::RepoSpec {
                 id: "demo".into(),
@@ -1824,20 +1938,23 @@ mod tests {
             index_cli_sha256: String::new(),
             dense: None,
         };
-        async fn run(
-            layout: &Layout,
-            repo: &PreparedRepo,
-            dir: &Path,
-            arm: Arm,
-            command: &str,
-        ) -> String {
+        let run = async |layout: &Layout,
+                         repo: &PreparedRepo,
+                         dir: &Path,
+                         arm: Arm,
+                         command: &str|
+               -> String {
+            let services = ArmServices {
+                variants: Some(&variants),
+                ..ArmServices::default()
+            };
             let shell = ShellTool::new(
                 ShellSettings {
                     timeout: Duration::from_secs(5),
                     max_output_bytes: 4096,
                     max_calls: 10,
                 },
-                arm_environment(layout, arm, repo, dir, None),
+                arm_environment(layout, arm, repo, dir, services),
                 None,
             );
             let context = arko_agents::TaskContext::new(Uuid::new_v4(), "solver", "", dir);
@@ -1846,7 +1963,7 @@ mod tests {
                 serde_json::Value::String(command.to_string()),
             )]);
             shell.execute(&context, params).await.unwrap()
-        }
+        };
         let a = run(
             &layout,
             &repo,
@@ -1866,6 +1983,17 @@ mod tests {
         assert!(b_dense.starts_with("exit code: 127"), "{b_dense}");
         let c_dense = run(&layout, &repo, &dir, Arm::C, "command -v arko_index_dense").await;
         assert!(c_dense.starts_with("exit code: 0"), "{c_dense}");
+        // Variant arms: B's tools over their own index, with their search flags.
+        let p = run(&layout, &repo, &dir, plain, "arko_index search2 q").await;
+        assert!(p.contains("index cli: search2"), "{p}");
+        assert!(p.contains("demo@plain"), "{p}");
+        let t = run(&layout, &repo, &dir, text, "arko_index search2 q").await;
+        assert!(t.contains("index cli: search2"), "{t}");
+        assert!(t.contains("demo@text"), "{t}");
+        let flags = std::fs::read_to_string(layout.bin_dir(text).join("arko_index")).unwrap();
+        assert!(flags.contains("search2 '--text' \"$@\""), "{flags}");
+        let t_dense = run(&layout, &repo, &dir, text, "arko_index_dense query").await;
+        assert!(t_dense.starts_with("exit code: 127"), "{t_dense}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1974,6 +2102,7 @@ mod tests {
             tasks_file: "tasks.json".into(),
             index_cli: "cli".into(),
             index_cli_sha256: String::new(),
+            variants: BTreeMap::new(),
         };
         // More resumes than attempts, all with the login still broken.
         for _ in 0..4 {
@@ -2048,6 +2177,7 @@ mod tests {
             tasks_file: "tasks.json".into(),
             index_cli: "cli".into(),
             index_cli_sha256: String::new(),
+            variants: BTreeMap::new(),
         };
         let summary = run(RunInputs {
             layout: layout.clone(),
@@ -2068,9 +2198,10 @@ mod tests {
 
     #[test]
     fn arm_prompts_differ_only_in_their_tool_section() {
-        let a = solver_instructions(Arm::A, true);
-        let b = solver_instructions(Arm::B, true);
-        let c = solver_instructions(Arm::C, true);
+        let variants = BTreeMap::new();
+        let a = solver_instructions(Arm::A, true, &variants).unwrap();
+        let b = solver_instructions(Arm::B, true, &variants).unwrap();
+        let c = solver_instructions(Arm::C, true, &variants).unwrap();
         assert!(!a.contains("arko_index"));
         assert!(b.contains("arko_index search2") && !b.contains("arko_index_dense"));
         assert!(c.contains("arko_index_dense"));

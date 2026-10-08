@@ -911,7 +911,7 @@ impl GenerateContext {
                 self.options.writer_arm,
                 repo,
                 scratch,
-                None,
+                crate::runner::ArmServices::default(),
             ),
             Some(control.limit_callback()),
         )

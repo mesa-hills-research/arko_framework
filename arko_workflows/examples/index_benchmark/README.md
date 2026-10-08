@@ -10,6 +10,7 @@ their tools, and a grader that doesn't know the arm scores every answer against 
 | A | a terminal (a `shell` tool in a read-only checkout; `rg`, `grep`, `sed`, `git grep`, ...) |
 | B | the same terminal, plus the arko_index CLI as `arko_index`, with an index of the checkout built beforehand |
 | C (opt-in) | B, plus dense search over the same chunks (`arko_index_dense`, Voyage embeddings) |
+| variants (opt-in) | B's tools over an index built, or searched, with other arko_index options ([Variant arms](#variant-arms)) |
 
 Every agent (the solvers of every arm, the grader, the question writer and the verifier) runs
 in an arko workflow on the same model and settings: `gpt-6-astra` at `xhigh` effort, Fast mode,
@@ -205,13 +206,69 @@ $B generate --out $OUT/dry --mock --per-kind 4
 $B run --out $OUT/dry --mock --name dry --arms A,B,C
 ```
 
+## Variant arms
+
+Variant arms compare arko_index options on the same tasks with the same solvers. Each one
+has arm B's tools over its own index, built with other `index2` flags, and can add
+`search2` flags to every search. A variants file defines them, and `variant-arms.json` here
+defines the first set:
+
+| Arm | What changes |
+|---|---|
+| `lex` | Nothing: the default lexical index, built by this CLI (the baseline for the others) |
+| `lex-scope` | Lexical search also indexes each chunk's scope (`--lexical-scope`) |
+| `lex-scope-desc` | As `lex-scope`, with Markdown scopes rooted at the front matter's title and description |
+| `hyb-src`, `hyb-path`, `hyb-scope` | Hybrid search, the embedding seeing the source, path and source, or path, scope and source |
+| `hyb-scope-desc` | As `hyb-scope`, with Markdown scopes rooted at title and description |
+
+A variant's fields:
+
+| Field | |
+|---|---|
+| `name` | The arm's name in `--arms`, records and reports: letters, digits, `-` and `_` |
+| `description` | For the report |
+| `index` | `index2` flags, such as `["--lexical-scope"]` or `["--embed", "voyage-code-4", "--embed-text", "source"]` |
+| `search` | `search2` flags put before the solver's own, such as `["--text"]` or `["--mode", "lexical"]` |
+| `prompt` | The tools paragraph: `index` (arm B's) or `hybrid` (says search2 also ranks by meaning). Default: `hybrid` when the index embeds |
+| `tools_text` | A tools paragraph of your own, for search flags whose output the standard ones don't describe |
+
+```sh
+# Builds every variant's index of every prepared repository (beside a running `generate`)
+VOYAGE_API_KEY=... $B prepare-variants --out $OUT --variants variant-arms.json
+$B prepare-variants --out $OUT --variants variant-arms.json --names lex,lex-scope --only redis
+# Runs them with the built-in arms
+VOYAGE_API_KEY=... $B run --out $OUT --codex-home ~/.codex --name variants --arms B,lex,lex-scope,hyb-scope
+```
+
+`prepare-variants` builds `indexes/<id>@<name>/` with `arko_index_cli index2 FLAGS`, and
+rebuilds one only when its flags, the CLI or the commit changed (`--force` rebuilds all).
+The index directory stays across rebuilds, so its embedding cache keeps the vectors
+already paid for. Variants that embed need `VOYAGE_API_KEY` in the benchmark's environment
+for `prepare-variants` and for `run`. In their shells, `arko_index search2` goes through
+a service in the benchmark process that runs the CLI with the key, the way arm C's
+`arko_index_dense` does. `--max-embed-tokens 0` in a variant's flags counts the tokens a
+build would embed and embeds nothing.
+
+A resumed run keeps each variant's definition and indexes, and may add variants. Later
+variants, such as chunk sizes or breadcrumbs inside large definitions, are new `index2`
+flags in a variants file: eight arms make a 2×2×2 factorial.
+
+Dry run, with the offline hashing embedder in place of Voyage:
+
+```sh
+$B prepare-variants --out $OUT/dry --variants variant-arms.json --mock-embeddings
+$B run --out $OUT/dry --mock --name dry-variants --arms A,B,lex,lex-scope,hyb-src,hyb-scope
+```
+
 ## Layout of `--out`
 
 ```text
 repos/<id>/               read-only checkouts
 indexes/<id>/             arko_index index2 state (and <id>.dense/ for arm C)
+indexes/<id>@<variant>/   a variant arm's index
 prepare.json              commits, sizes, index build times, the CLI's hash
-bin/arm-{A,B,C}/          the programs first on each arm's PATH
+variants.json             the variants' definitions, index flags, builds and CLI hashes
+bin/arm-<arm>/            the programs first on each arm's PATH
 tasks/                    candidates, verifications and writer runs (JSON lines), transcripts
 tasks.json                the task set
 runs/<name>/              manifest.json, attempts.jsonl, grades.jsonl, transcripts/,
@@ -219,4 +276,4 @@ runs/<name>/              manifest.json, attempts.jsonl, grades.jsonl, transcrip
 scratch/                  each agent run's TMPDIR, removed when it ends
 ```
 
-`runs/<name>/`, `tasks/` and `prepare/` hold a `LOCK` file while a process works on them.
+`runs/<name>/`, `tasks/`, `prepare/` and `variants/` hold a `LOCK` file while a process works on them.

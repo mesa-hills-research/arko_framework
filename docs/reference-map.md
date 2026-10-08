@@ -1451,7 +1451,7 @@ Agents are named by their registration name (the one given to `WorkflowBuilder::
 | `forge --use-case`, `--output`, `--involvement`, `--backend` | A workflow that builds workflows: describe a use case, get a checked, documented crate. | `arko_workflows/examples/forge/main.rs` | [Forge](../arko_workflows/examples/forge/README.md) |
 | `forge --trial-runs`, `--no-explorers`, `--max-active-calls`, `--resume` | Live trial runs, the explorer agents, and resuming a run. | `arko_workflows/examples/forge/main.rs` | [Example binaries](#example-binaries-arko_workflows) |
 | `complete_workflow --data-dir DIR`, `--dry-run`, `--resume PATH`, `--owner TEXT` | Complete three-agent incident-report workflow; validates without credentials in dry-run mode and can resume a checkpoint. | `arko_workflows/examples/complete_workflow.rs` | [Complete workflow example](#complete-workflow-example) |
-| `index_benchmark prepare`, `generate`, `run`, `report` (`--out`, `--arms`, `--concurrency`, `--codex-home`, `--mock`) | The arko_index agent benchmark: code-understanding questions on pinned repositories, answered with a terminal alone or with arko_index, graded blind against verified keys. | `arko_workflows/examples/index_benchmark/main.rs` | [Example binaries](#example-binaries-arko_workflows) |
+| `index_benchmark prepare`, `prepare-variants`, `generate`, `run`, `report` (`--out`, `--arms`, `--variants`, `--concurrency`, `--codex-home`, `--mock`) | The arko_index agent benchmark: code-understanding questions on pinned repositories, answered with a terminal alone or with arko_index (and variant arms with other arko_index options), graded blind against verified keys. | `arko_workflows/examples/index_benchmark/main.rs` | [Example binaries](#example-binaries-arko_workflows) |
 | `runctl note RUN_DIR TEXT` (`--file`, `--to`, `--except`, `--once`, `--from-agent`, `--from-host`), `runctl status RUN_DIR` | Post a note to any workflow run built with `control_folder()`, live or stopped; print a run's status from its latest checkpoint. No model requests. | `arko_workflows/examples/runctl.rs` | [Example binaries](#example-binaries-arko_workflows) |
 
 ### Builder defaults (arko_workflows)
@@ -1650,9 +1650,11 @@ control-folder notes not yet posted. It makes no model requests and reads no cre
 **`index_benchmark`**: subcommands `prepare` (fetch the pinned repositories of `repos.json`,
 make them read-only, build their arko_index indexes with the `arko_index_cli` next to the
 binary or `--index-cli`), `generate` (writer and verifier agents, with a terminal unless
-`--writer-tools index`; `assemble` rebuilds the task set without agents), `validate`, `run` and `report`; every one takes `--out DIR`. Every agent
+`--writer-tools index`; `assemble` rebuilds the task set without agents), `prepare-variants`
+(`--variants FILE`: one index per variant arm and repository, with that variant's `index2`
+flags), `validate`, `run` and `report`; every one takes `--out DIR`. Every agent
 runs on `--model` (`gpt-6-astra:xhigh`) in Fast mode (`--no-fast` for standard) over the ChatGPT
-login of `--codex-home` (one, in this build); `--index-cli` on `prepare`, `generate` and `run`. `run` defaults: `--arms A,B`, `--samples 1`,
+login of `--codex-home` (repeatable: failover between accounts, first preferred); `--index-cli` on `prepare`, `prepare-variants`, `generate` and `run`. `run` defaults: `--arms A,B`, `--samples 1`,
 `--concurrency 24`, `--max-output-bytes 16384`, `--command-timeout 120`, `--max-shell-calls 80`,
 `--max-input-tokens 8000000`, `--attempt-timeout-minutes 60`, `--max-attempts 3`; resumable by
 `--name`, stopped gracefully by a signal or a `STOP` file. `--mock` runs every role against a
@@ -1683,7 +1685,7 @@ Guides: [arko_index README](../arko_index/README.md) · [arko_index reference](a
 | `threads()` | Worker count: `ARKO_INDEX_THREADS`, else the CPUs the process may use. | `arko_index/src/par.rs` | [Environment variables](arko_index-reference.md#environment-variables) |
 | `search::index[_with]`, `search::search`, `search::outline` | The JSON index (`index.json`), loaded whole by a search; at most ten hits. | `arko_index/src/search.rs` | [Search](arko_index-reference.md#search) |
 | `index2::index[_with]`, `index2::build`, `BuildOptions`, `index2::search`, `index2::dense_info`, `BuildStats` | The disk-resident index: generations published through `CURRENT2`, bounded build memory, searches that read only the query terms' postings (same results as `search`); `build` with `BuildOptions::dense` also embeds the chunks. | `arko_index/src/index2.rs` | [Search](arko_index-reference.md#search) |
-| `dense::Embedder`, `ModelDescriptor`, `HashEmbedder`, `DenseConfig`, `DenseBuild`, `EmbedStats`, `render` | The embedding interface providers implement, the model's identity (the cache key), the offline test embedder, the per-index settings (`dense.json`), one build's embedding settings and statistics, the embedded text. | `arko_index/src/dense/` | [Dense and hybrid search](../arko_index/README.md#dense-and-hybrid-search) |
+| `dense::Embedder`, `ModelDescriptor`, `HashEmbedder`, `DenseConfig`, `DenseBuild`, `EmbedStats`, `render`, `render_with`, `EmbedText` | The embedding interface providers implement, the model's identity (the cache key), the offline test embedder, the per-index settings (`dense.json`), one build's embedding settings and statistics, the embedded text and its parts. | `arko_index/src/dense/` | [Dense and hybrid search](../arko_index/README.md#dense-and-hybrid-search) |
 | `vector::VectorStore`, `BruteForceStore`, `Filter` | Vector storage (insert, delete, top-k with a path-prefix or language filter, persist, open) and the exact store (f32, optional int8 with rescoring). | `arko_index/src/vector.rs` | [Dense and hybrid search](arko_index-reference.md#dense-and-hybrid-search) |
 | `hybrid::search`, `SearchRequest`, `Mode`, `Fusion`, `SearchResults` | Lexical, dense or hybrid search of one generation, with filters, headers and the query's tokens; reciprocal rank fusion by default. | `arko_index/src/hybrid.rs` | [Dense and hybrid search](arko_index-reference.md#dense-and-hybrid-search) |
 | `bench_v1::Delta` | `sequence`, `added`, `removed` (IDs), `changed`. | `arko_index/src/bench_v1.rs` | [Durable watching](../arko_index/README.md#durable-watching) |
@@ -1697,7 +1699,7 @@ Guides: [arko_index README](../arko_index/README.md) · [arko_index reference](a
 - Every regular file under the root is indexed, hidden and gitignored files included. Built-in exclusions: `.git` directories and files, directories with a valid `CACHEDIR.TAG` (not the root), and the tool's state directories. Ignore files are read only with `respect_ignore`, and never above the root.
 - Binary, non-UTF-8, unreadable and undecodably named entries are skipped and reported; a walk never stops for them. Symbolic links are not followed.
 - `max_bytes` 4,096; at most ten search hits; all available CPUs; a reorder window of 32 MB of source per thread; `index2` postings budget 256 MB in the CLI.
-- Dense search is opt-in (`BuildOptions::dense` is `None`; CLI `--embed`). Once chosen, the model is saved per index (`dense.json`) and later builds follow it. No token cap (`DenseBuild::max_tokens` `None`). Vectors f32 (`Quantization::Int8` opt-in). `SearchRequest`: lexical, ten results, 50 hybrid candidates per side, reciprocal rank fusion (k = 60, weights 1), no filter; the CLI's `search2` is hybrid when the index has embeddings. Render version 1 (path, scope, trimmed source).
+- Dense search is opt-in (`BuildOptions::dense` is `None`; CLI `--embed`). Once chosen, the model is saved per index (`dense.json`) and later builds follow it. No token cap (`DenseBuild::max_tokens` `None`). Vectors f32 (`Quantization::Int8` opt-in). `SearchRequest`: lexical, ten results, 50 hybrid candidates per side, reciprocal rank fusion (k = 60, weights 1), no filter; the CLI's `search2` is hybrid when the index has embeddings. Render version 1 (path, scope, trimmed source; `EmbedText::PathScopeSource`). Lexical search indexes path and source, the scope only with `BuildOptions::lexical_scope`.
 
 ### Persisted data (arko_index)
 
@@ -1708,7 +1710,7 @@ Guides: [arko_index README](../arko_index/README.md) · [arko_index reference](a
 
 ### Example CLI (arko_index)
 
-`arko_index_cli` (`cargo run --release -p arko_index --example arko_index_cli -- COMMAND`): `chunk`, `outline`, `index`/`search`, `index2`/`search2`, `watch`, `watch2` (Linux) and `bench-scan` (Unix). Commands that walk a tree take `--respect-ignore`, `--exclude PATTERN`, `--include PATTERN`, `--report FILE` and `--front-matter-description`; `index2` also `--embed MODEL`, `--dimensions`, `--embed-config`, `--quantize`, `--max-embed-tokens`, `--no-embed`; `search2` `--mode`, `--limit`, `--candidates`, `--fusion`, `--path-prefix`, `--language`, `--text`. `dense_live_check` runs the retrieval evaluation with Voyage (spends tokens). See [Command line](arko_index-reference.md#command-line).
+`arko_index_cli` (`cargo run --release -p arko_index --example arko_index_cli -- COMMAND`): `chunk`, `outline`, `index`/`search`, `index2`/`search2`, `watch`, `watch2` (Linux) and `bench-scan` (Unix). Commands that walk a tree take `--respect-ignore`, `--exclude PATTERN`, `--include PATTERN`, `--report FILE` and `--front-matter-description`; `index2` also `--lexical-scope`, `--embed MODEL`, `--dimensions`, `--embed-text`, `--embed-config`, `--quantize`, `--max-embed-tokens`, `--no-embed`; `search2` `--mode`, `--limit`, `--candidates`, `--fusion`, `--path-prefix`, `--language`, `--text`. `dense_live_check` runs the retrieval evaluation with Voyage (spends tokens). See [Command line](arko_index-reference.md#command-line).
 
 ## Across crates
 

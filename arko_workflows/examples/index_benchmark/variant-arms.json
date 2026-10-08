@@ -1,0 +1,37 @@
+[
+  {
+    "name": "lex",
+    "description": "baseline: the default lexical index, built by this CLI",
+    "index": []
+  },
+  {
+    "name": "lex-scope",
+    "description": "(b) lexical search also indexes each chunk's scope",
+    "index": ["--lexical-scope"]
+  },
+  {
+    "name": "lex-scope-desc",
+    "description": "(c) as lex-scope, with Markdown scopes rooted at title and front-matter description",
+    "index": ["--lexical-scope", "--front-matter-description"]
+  },
+  {
+    "name": "hyb-src",
+    "description": "(a) hybrid search, the embedding sees the source only",
+    "index": ["--embed", "voyage-code-4", "--embed-text", "source"]
+  },
+  {
+    "name": "hyb-path",
+    "description": "(a) hybrid search, the embedding sees path and source",
+    "index": ["--embed", "voyage-code-4", "--embed-text", "path-source"]
+  },
+  {
+    "name": "hyb-scope",
+    "description": "(a) hybrid search, the embedding sees path, scope and source (the default)",
+    "index": ["--embed", "voyage-code-4", "--embed-text", "path-scope-source"]
+  },
+  {
+    "name": "hyb-scope-desc",
+    "description": "(c) as hyb-scope, with Markdown scopes rooted at title and front-matter description",
+    "index": ["--embed", "voyage-code-4", "--embed-text", "path-scope-source", "--front-matter-description"]
+  }
+]

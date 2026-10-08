@@ -55,6 +55,19 @@ pub const TOOLS_INDEX: &str = r#"The usual command-line tools are installed{rg},
 - `arko_index outline PATH` lists the chunks of a file, or of every file under a directory,
   as `path:start-end<TAB>kind<TAB>symbol` (paths relative to PATH): a quick table of contents."#;
 
+/// The tool section of a variant arm whose index embeds: arm B's, with
+/// `search2` ranking by meaning too (hybrid search).
+pub const TOOLS_INDEX_HYBRID: &str = r#"The usual command-line tools are installed{rg}, and also
+`arko_index`, a code search engine with a prebuilt index of this checkout:
+- `arko_index search2 "$ARKO_INDEX_STATE" 'words, identifiers or a description'` prints the 10
+  code chunks (functions, methods, types, ...) that best match the query, best first, one JSON
+  line each, with `path`, `start_line`, `end_line`, `kind` and `symbol_path`. It combines BM25
+  over words and identifier parts (snake_case and camelCase are split) with ranking by meaning
+  (embeddings), so both 'retry backoff delay' and a description of what the code does find code
+  that does it, even in other words. It prints locations, not code: read the lines with `sed -n`.
+- `arko_index outline PATH` lists the chunks of a file, or of every file under a directory,
+  as `path:start-end<TAB>kind<TAB>symbol` (paths relative to PATH): a quick table of contents."#;
+
 /// What arm C adds to arm B's section (dense search).
 pub const TOOLS_DENSE: &str = r#"
 - `arko_index_dense 'a description of the code'` ranks the same chunks by meaning
