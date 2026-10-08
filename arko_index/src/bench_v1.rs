@@ -134,7 +134,8 @@ pub fn chunk_file_with_metadata(path: &Path, options: &Options) -> Result<FileCh
         options,
     )
 }
-/// Chunks every file the default [`FileRules`] select (see README, "What gets indexed").
+/// Chunks every file the default [`FileRules`] select (see `docs/arko_index-reference.md`,
+/// "File selection").
 /// Files that cannot be indexed are skipped; [`chunk_dir_with`] also returns the report.
 pub fn chunk_dir(root: &Path, options: &Options) -> Result<Vec<Chunk>, Error> {
     Ok(chunk_dir_with(root, options, &FileRules::default())?.0)

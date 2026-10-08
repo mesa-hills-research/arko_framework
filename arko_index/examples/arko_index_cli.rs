@@ -2,7 +2,8 @@
 //! `index2`/`search2` (lexical, dense or hybrid), `watch`, `watch2` (Linux) and
 //! `bench-scan` (Unix). Run
 //! `cargo run --release -p arko_index --example arko_index_cli -- --help`; the
-//! crate README describes the commands, the file selection flags and the protocol.
+//! `docs/arko_index-reference.md` describes the commands, the file selection flags and
+//! the protocol.
 //! Embedding with Voyage goes through arko_ai (`support/voyage.rs`) and needs
 //! `VOYAGE_API_KEY`.
 mod support;

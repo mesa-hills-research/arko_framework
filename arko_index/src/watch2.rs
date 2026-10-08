@@ -644,7 +644,8 @@ impl Watcher2 {
         Self::open_with(root, state_dir, options, &FileRules::default())
     }
     /// [`Watcher2::open`] with explicit file selection rules. A restart with rules that
-    /// differ from the previous run's reconciles to the new rules (see README).
+    /// differ from the previous run's reconciles to the new rules (see
+    /// `docs/arko_index-reference.md`, "File selection").
     pub fn open_with(
         root: &Path,
         state_dir: &Path,

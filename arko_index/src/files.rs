@@ -1,7 +1,8 @@
 //! Which files a directory walk indexes, and the report of what it skipped.
 //!
 //! Every command and library entry point that walks a tree goes through
-//! [`walk_files`], so the rules are the same everywhere (README, "What gets indexed").
+//! [`walk_files`], so the rules are the same everywhere (`docs/arko_index-reference.md`,
+//! "File selection").
 use crate::bench_v1::Error;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::{Deserialize, Serialize};

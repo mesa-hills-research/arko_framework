@@ -2,8 +2,8 @@
 //! (embedding) and hybrid search, and durable watchers. Chunking and the polling
 //! watcher are in [`bench_v1`]; the indexes in [`search`] and [`index2`]; embeddings in
 //! [`dense`], vector storage in [`vector`], and lexical, dense and hybrid search in
-//! [`hybrid`]; the inotify watcher in `watch2` (Linux). See the README for the rules
-//! and trade-offs.
+//! [`hybrid`]; the inotify watcher in `watch2` (Linux). See
+//! `docs/arko_index-reference.md` for the rules and trade-offs.
 pub mod bench_v1;
 pub mod dense;
 mod files;
