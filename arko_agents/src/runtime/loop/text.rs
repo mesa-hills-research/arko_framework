@@ -96,18 +96,12 @@ impl AgentLoop {
                     if self.handover_report_due() {
                         self.take_handover_report(plain_text_from_assembler.clone())
                             .await?;
-                        if self.task.current_state.is_terminal() {
-                            return Ok(Flow::Exit);
-                        }
-                        return Ok(Flow::NextPass);
+                        return Ok(self.end_of_pass());
                     }
                     if !self.task.current_state.is_terminal() {
                         self.handle_model_output_failure(NO_TEXT_TOOL_CALL.to_string())
                             .await?;
-                        if self.task.current_state.is_terminal() {
-                            return Ok(Flow::Exit);
-                        }
-                        return Ok(Flow::NextPass);
+                        return Ok(self.end_of_pass());
                     }
                 } else {
                     let current_group = tool_call_groups.remove(0);
@@ -129,10 +123,7 @@ impl AgentLoop {
                     "Your tool call could not be read ({e}). Write it again in the format the system prompt describes."
                 ))
                 .await?;
-                if self.task.current_state.is_terminal() {
-                    return Ok(Flow::Exit);
-                }
-                return Ok(Flow::NextPass);
+                return Ok(self.end_of_pass());
             }
         }
 

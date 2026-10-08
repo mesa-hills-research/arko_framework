@@ -258,10 +258,7 @@ impl AgentLoop {
             || self.task.current_state.is_terminal()
             || !matches!(self.task.current_state, TaskState::InProgress)
         {
-            if self.task.current_state.is_terminal() {
-                return Ok(ModelTurn::Ended(Flow::Exit));
-            }
-            return Ok(ModelTurn::Ended(Flow::NextPass));
+            return Ok(ModelTurn::Ended(self.end_of_pass()));
         }
         Ok(ModelTurn::Streamed(StreamedTurn {
             response: final_generation_response,

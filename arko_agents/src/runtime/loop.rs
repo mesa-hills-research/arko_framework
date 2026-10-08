@@ -349,6 +349,17 @@ impl AgentLoop {
         Ok(Flow::Proceed)
     }
 
+    /// A pass that ends before its turn's calls (the turn was answered
+    /// with a note, or no usable turn came): `Exit` for a task that ended,
+    /// `NextPass` otherwise.
+    fn end_of_pass(&self) -> Flow {
+        if self.task.current_state.is_terminal() {
+            Flow::Exit
+        } else {
+            Flow::NextPass
+        }
+    }
+
     /// Runs the agent loop to completion.
     pub async fn run(mut self) -> Result<Task, ArkoAgentsError> {
         self.check_config()?;

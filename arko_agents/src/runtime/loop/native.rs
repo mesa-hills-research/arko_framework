@@ -572,10 +572,7 @@ impl AgentLoop {
                 .map(|response| message_text(&response.message))
                 .unwrap_or_default();
             self.take_handover_report(report).await?;
-            if self.task.current_state.is_terminal() {
-                return Ok(Flow::Exit);
-            }
-            return Ok(Flow::NextPass);
+            return Ok(self.end_of_pass());
         }
         log::warn!(
             "LLM response for task {} did not contain a native tool call.",
@@ -583,10 +580,7 @@ impl AgentLoop {
         );
         self.handle_model_output_failure(NO_NATIVE_TOOL_CALL.to_string())
             .await?;
-        if self.task.current_state.is_terminal() {
-            return Ok(Flow::Exit);
-        }
-        Ok(Flow::NextPass)
+        Ok(self.end_of_pass())
     }
 
     /// A native call's checks, in order: arguments that aren't JSON, a
