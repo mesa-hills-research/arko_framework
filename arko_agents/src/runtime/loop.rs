@@ -179,6 +179,31 @@ fn retry_delay_for(
     }
 }
 
+/// A tool's images as images of its result, after its text.
+fn result_images(images: Vec<ToolImage>) -> Vec<ai::ToolResultImage> {
+    images
+        .into_iter()
+        .map(|image| ai::ToolResultImage::new(image.description, image.image))
+        .collect()
+}
+
+/// A native result's text with the host's message given with the call's
+/// approval.
+fn with_approval_message(effective: String, message_to_agent: Option<String>) -> String {
+    match message_to_agent {
+        Some(message) => {
+            let mut text = effective;
+            if !text.is_empty() {
+                text.push_str("\n\n");
+            }
+            text.push_str("Message from user on approval:\n");
+            text.push_str(&message);
+            text
+        }
+        None => effective,
+    }
+}
+
 fn unix_millis_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1503,55 +1528,7 @@ impl AgentLoop {
             if to_run.is_empty() {
                 continue;
             }
-            let (calls, group_runs): (Vec<_>, Vec<_>) = to_run
-                .into_iter()
-                .map(|native| {
-                    let id = native.run.tool_call_id;
-                    let mut run = native.run;
-                    run.call_id = native.call.id.clone();
-                    run.message_to_agent = native.message_to_agent.clone();
-                    (
-                        (native.index, native.call, id, native.message_to_agent),
-                        run,
-                    )
-                })
-                .unzip();
-            let group = self.run_group(group_runs).await;
-            let mut stopped = Vec::new();
-            for ((index, call, id, message), outcome) in calls.into_iter().zip(group.outcomes) {
-                match outcome {
-                    Some(outcome) => {
-                        let result = self
-                            .finish_native_call(&call, id, outcome?, message)
-                            .await?;
-                        if result.is_error {
-                            failed.insert(index);
-                        }
-                        results.record(&mut self.task, index, result);
-                        self.call_settled(id);
-                    }
-                    None => stopped.push((index, call, id)),
-                }
-            }
-            if let Some(stop) = group.stop {
-                self.stop_after_calls(stop).await?;
-                let reason = stopped_call_reason(stop, &self.task.current_state);
-                for (index, call, id) in stopped {
-                    self.emit_event(AgentEvent::ToolRejected {
-                        tool_call_id: id,
-                        tool_name: call.name.clone(),
-                        reason: Some(reason.to_string()),
-                    })
-                    .await?;
-                    results.record(
-                        &mut self.task,
-                        index,
-                        ai::ToolResult::error_from_tool_call(&call, reason),
-                    );
-                    self.call_settled(id);
-                }
-            }
-            self.report_task(false).await;
+            self.run_native_group(to_run, &mut failed, results).await?;
         }
         if !unreached.is_empty() {
             let not_run = self.not_run_after_stop();
@@ -1571,6 +1548,68 @@ impl AgentLoop {
                 self.call_settled(native.run.tool_call_id);
             }
         }
+        Ok(())
+    }
+
+    /// Runs one group of native calls at the same time (see
+    /// [`run_group`](Self::run_group)), records each call's result (those
+    /// that fail join `failed`), answers the calls a stop ended, and
+    /// reports the task.
+    async fn run_native_group(
+        &mut self,
+        to_run: Vec<NativeRun>,
+        failed: &mut std::collections::BTreeSet<usize>,
+        results: &mut NativeResults,
+    ) -> Result<(), ArkoAgentsError> {
+        let (calls, group_runs): (Vec<_>, Vec<_>) = to_run
+            .into_iter()
+            .map(|native| {
+                let id = native.run.tool_call_id;
+                let mut run = native.run;
+                run.call_id = native.call.id.clone();
+                run.message_to_agent = native.message_to_agent.clone();
+                (
+                    (native.index, native.call, id, native.message_to_agent),
+                    run,
+                )
+            })
+            .unzip();
+        let group = self.run_group(group_runs).await;
+        let mut stopped = Vec::new();
+        for ((index, call, id, message), outcome) in calls.into_iter().zip(group.outcomes) {
+            match outcome {
+                Some(outcome) => {
+                    let result = self
+                        .finish_native_call(&call, id, outcome?, message)
+                        .await?;
+                    if result.is_error {
+                        failed.insert(index);
+                    }
+                    results.record(&mut self.task, index, result);
+                    self.call_settled(id);
+                }
+                None => stopped.push((index, call, id)),
+            }
+        }
+        if let Some(stop) = group.stop {
+            self.stop_after_calls(stop).await?;
+            let reason = stopped_call_reason(stop, &self.task.current_state);
+            for (index, call, id) in stopped {
+                self.emit_event(AgentEvent::ToolRejected {
+                    tool_call_id: id,
+                    tool_name: call.name.clone(),
+                    reason: Some(reason.to_string()),
+                })
+                .await?;
+                results.record(
+                    &mut self.task,
+                    index,
+                    ai::ToolResult::error_from_tool_call(&call, reason),
+                );
+                self.call_settled(id);
+            }
+        }
+        self.report_task(false).await;
         Ok(())
     }
 
@@ -1610,11 +1649,7 @@ impl AgentLoop {
                 reason,
                 is_error,
             } => {
-                let images = output
-                    .images
-                    .into_iter()
-                    .map(|image| ai::ToolResultImage::new(image.description, image.image))
-                    .collect();
+                let images = result_images(output.images);
                 let raw = output.text;
                 self.emit_tool_result_events(
                     tool_call_id,
@@ -1624,18 +1659,7 @@ impl AgentLoop {
                     intercepted,
                 )
                 .await?;
-                let text = match message_to_agent {
-                    Some(message) => {
-                        let mut text = effective;
-                        if !text.is_empty() {
-                            text.push_str("\n\n");
-                        }
-                        text.push_str("Message from user on approval:\n");
-                        text.push_str(&message);
-                        text
-                    }
-                    None => effective,
-                };
+                let text = with_approval_message(effective, message_to_agent);
                 self.pause_for_middleware_error(tool_call_id, tool_name, reason)
                     .await?;
                 let result = if is_error {
@@ -1666,58 +1690,62 @@ impl AgentLoop {
                 effective,
                 intercepted,
             } => {
-                let images = output
-                    .images
-                    .into_iter()
-                    .map(|image| ai::ToolResultImage::new(image.description, image.image))
-                    .collect();
-                let raw = output.text;
-                // A call of a group another call already ended (possible only
-                // for tools configured parallel-safe) changes no state.
-                let open = !self.task.current_state.is_terminal();
-                if tool_name == ASK_USER_TOOL_NAME && open {
-                    self.task.set_state(TaskState::AwaitingUserResponse {
-                        questions: raw.clone(),
-                    });
-                    self.emit_event(AgentEvent::TaskStateChanged(
-                        self.task.current_state.clone(),
-                    ))
-                    .await?;
-                    self.emit_event(AgentEvent::UserQuestionsAsked {
-                        questions: raw.clone(),
-                    })
-                    .await?;
-                }
-                self.emit_tool_result_events(
+                self.finish_native_result(
+                    call,
                     tool_call_id,
-                    tool_name,
-                    &raw,
-                    &effective,
+                    output,
+                    effective,
                     intercepted,
+                    message_to_agent,
                 )
-                .await?;
-                let text = match message_to_agent {
-                    Some(message) => {
-                        let mut text = effective;
-                        if !text.is_empty() {
-                            text.push_str("\n\n");
-                        }
-                        text.push_str("Message from user on approval:\n");
-                        text.push_str(&message);
-                        text
-                    }
-                    None => effective,
-                };
-                if tool_name == COMPLETE_TASK_TOOL_NAME && open {
-                    self.task.set_state(TaskState::Completed { summary: raw });
-                    self.emit_event(AgentEvent::TaskStateChanged(
-                        self.task.current_state.clone(),
-                    ))
-                    .await?;
-                }
-                Ok(ai::ToolResult::from_tool_call(call, &text).with_images(images))
+                .await
             }
         }
+    }
+
+    /// A native call that finished: `ask_user` awaits the answer and
+    /// `complete_task` completes the task (unless another call of its
+    /// group already ended it), the result events are sent, and the result
+    /// carries the host's message and the tool's images.
+    async fn finish_native_result(
+        &mut self,
+        call: &ai::ToolCall,
+        tool_call_id: Uuid,
+        output: crate::tool::ToolOutput,
+        effective: String,
+        intercepted: bool,
+        message_to_agent: Option<String>,
+    ) -> Result<ai::ToolResult, ArkoAgentsError> {
+        let tool_name = call.name.as_str();
+        let images = result_images(output.images);
+        let raw = output.text;
+        // A call of a group another call already ended (possible only
+        // for tools configured parallel-safe) changes no state.
+        let open = !self.task.current_state.is_terminal();
+        if tool_name == ASK_USER_TOOL_NAME && open {
+            self.task.set_state(TaskState::AwaitingUserResponse {
+                questions: raw.clone(),
+            });
+            self.emit_event(AgentEvent::TaskStateChanged(
+                self.task.current_state.clone(),
+            ))
+            .await?;
+            self.emit_event(AgentEvent::UserQuestionsAsked {
+                questions: raw.clone(),
+            })
+            .await?;
+        }
+        self.emit_tool_result_events(tool_call_id, tool_name, &raw, &effective, intercepted)
+            .await?;
+        let text = with_approval_message(effective, message_to_agent);
+        if tool_name == COMPLETE_TASK_TOOL_NAME && open {
+            self.task.set_state(TaskState::Completed { summary: raw });
+            self.emit_event(AgentEvent::TaskStateChanged(
+                self.task.current_state.clone(),
+            ))
+            .await?;
+        }
+        Ok(ai::ToolResult::from_tool_call(call, &text).with_images(images))
     }
 
     /// A middleware stopped the task at a call: it fails, or with `cancel`
@@ -6987,53 +7015,72 @@ impl AgentLoop {
                 effective,
                 intercepted,
             } => {
-                let raw = output.text;
-                // A call of a group another call already ended (possible only
-                // for tools configured parallel-safe) changes no state.
-                let open = !self.task.current_state.is_terminal();
-                if tool_name == ASK_USER_TOOL_NAME && open {
-                    self.task.set_state(TaskState::AwaitingUserResponse {
-                        questions: raw.clone(),
-                    });
-                    self.emit_event(AgentEvent::TaskStateChanged(
-                        self.task.current_state.clone(),
-                    ))
-                    .await?;
-                    self.emit_event(AgentEvent::UserQuestionsAsked {
-                        questions: raw.clone(),
-                    })
-                    .await?;
-                    self.emit_event(AgentEvent::ToolResult {
-                        tool_call_id,
-                        tool_name: tool_name.to_string(),
-                        output: raw,
-                    })
-                    .await?;
-                    self.queue_tool_images(tool_name, tool_call_id, output.images);
-                    return Ok(String::new());
-                }
-                self.emit_tool_result_events(
-                    tool_call_id,
+                self.finish_text_result(
                     tool_name,
-                    &raw,
-                    &effective,
+                    tool_call_id,
+                    output,
+                    effective,
                     intercepted,
+                    message_to_agent_on_approval,
                 )
-                .await?;
-                let formatted =
-                    PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None)
-                        .format_tool_result_as_user_message(
-                            tool_name,
-                            &effective,
-                            message_to_agent_on_approval.as_deref(),
-                        );
-                self.queue_tool_images(tool_name, tool_call_id, output.images);
-                if tool_name == COMPLETE_TASK_TOOL_NAME {
-                    self.task.set_state(TaskState::Completed { summary: raw });
-                }
-                Ok(formatted)
+                .await
             }
         }
+    }
+
+    /// An output-based call that finished: `ask_user` awaits the answer
+    /// (its result is the questions alone, and no message follows), and
+    /// `complete_task` completes the task; the result is formatted with
+    /// the host's message, and the tool's images wait for the next
+    /// message.
+    async fn finish_text_result(
+        &mut self,
+        tool_name: &str,
+        tool_call_id: Uuid,
+        output: crate::tool::ToolOutput,
+        effective: String,
+        intercepted: bool,
+        message_to_agent_on_approval: Option<String>,
+    ) -> Result<String, ArkoAgentsError> {
+        let raw = output.text;
+        // A call of a group another call already ended (possible only
+        // for tools configured parallel-safe) changes no state.
+        let open = !self.task.current_state.is_terminal();
+        if tool_name == ASK_USER_TOOL_NAME && open {
+            self.task.set_state(TaskState::AwaitingUserResponse {
+                questions: raw.clone(),
+            });
+            self.emit_event(AgentEvent::TaskStateChanged(
+                self.task.current_state.clone(),
+            ))
+            .await?;
+            self.emit_event(AgentEvent::UserQuestionsAsked {
+                questions: raw.clone(),
+            })
+            .await?;
+            self.emit_event(AgentEvent::ToolResult {
+                tool_call_id,
+                tool_name: tool_name.to_string(),
+                output: raw,
+            })
+            .await?;
+            self.queue_tool_images(tool_name, tool_call_id, output.images);
+            return Ok(String::new());
+        }
+        self.emit_tool_result_events(tool_call_id, tool_name, &raw, &effective, intercepted)
+            .await?;
+        let formatted =
+            PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None)
+                .format_tool_result_as_user_message(
+                    tool_name,
+                    &effective,
+                    message_to_agent_on_approval.as_deref(),
+                );
+        self.queue_tool_images(tool_name, tool_call_id, output.images);
+        if tool_name == COMPLETE_TASK_TOOL_NAME {
+            self.task.set_state(TaskState::Completed { summary: raw });
+        }
+        Ok(formatted)
     }
 }
 
