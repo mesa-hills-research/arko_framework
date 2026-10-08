@@ -5,7 +5,8 @@
 //! `docs/arko_index-reference.md` describes the commands, the file selection flags and
 //! the protocol.
 //! Embedding with Voyage goes through arko_ai (`support/voyage.rs`) and needs
-//! `VOYAGE_API_KEY`.
+//! `VOYAGE_API_KEY`. Local models (`--embed local`, `support/local.rs`) need
+//! `--features local-embed`.
 mod support;
 
 use arko_index::{

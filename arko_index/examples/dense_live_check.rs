@@ -20,7 +20,11 @@
 //! `--dense-weight W`, `--candidates N` (hybrid tuning: a rerun on the same state costs
 //! only the queries' tokens), `--f32` (f32 vector codes instead of int8), `--dry-run`
 //! (build with a cap of 0 tokens in a scratch state and print what embedding would
-//! take; needs no key, only the tokenizer download).
+//! take; needs no key, only the tokenizer download), `--top FILE` (write every
+//! question's top 10 per mode as JSON lines, to compare models; `-` prints them last),
+//! `--voyage-key-stdin` (read the key from standard input instead of the environment).
+//! `--model local` or `local:MODEL` runs a local model (`--features local-embed`): no
+//! key, no tokens billed.
 //!
 //! The default corpus (7.7 MB, 265 files, 7,018 chunks) took 1,735,222 billed tokens
 //! without headers (path and source only, 2026-10-04). With the headers, `--dry-run`
@@ -41,10 +45,11 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use support::voyage::VoyageEmbedder;
 
-/// The embedder of `--model`: Voyage (needs the key), or the offline hash embedder.
+/// The embedder of `--model`: Voyage (needs the key), a local model, or the offline
+/// hash embedder.
 fn embedder(args: &Args) -> Result<Box<dyn Embedder>, Error> {
-    if args.model == "hash" {
-        return support::embedder_for(&support::descriptor_for("hash", args.dimensions)?);
+    if args.model == "hash" || args.model.starts_with("local") {
+        return support::embedder_for(&support::descriptor_for(&args.model, args.dimensions)?);
     }
     Ok(Box::new(VoyageEmbedder::from_env(
         &args.model,
@@ -121,6 +126,7 @@ struct Args {
     candidates: usize,
     quantization: Quantization,
     dry_run: bool,
+    top: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, Error> {
@@ -135,6 +141,7 @@ fn parse_args() -> Result<Args, Error> {
         candidates: 50,
         quantization: Quantization::default(),
         dry_run: false,
+        top: None,
     };
     let (mut method, mut rrf_k, mut lexical_weight, mut dense_weight) =
         ("rrf".to_owned(), None::<f64>, None::<f64>, None::<f64>);
@@ -155,9 +162,16 @@ fn parse_args() -> Result<Args, Error> {
             "--candidates" => a.candidates = value()?.parse()?,
             "--f32" => a.quantization = Quantization::F32,
             "--dry-run" => a.dry_run = true,
+            "--top" => a.top = Some(value()?.into()),
+            "--voyage-key-stdin" => {
+                let mut key = String::new();
+                std::io::stdin().read_line(&mut key)?;
+                // SAFETY: no other thread runs yet.
+                unsafe { std::env::set_var("VOYAGE_API_KEY", key.trim()) };
+            }
             "--help" | "-h" => {
                 eprintln!(
-                    "usage: dense_live_check [--corpus DIR] [--eval-dir DIR] [--state DIR] [--model MODEL] [--dimensions N] [--max-embed-tokens N] [--fusion rrf|linear] [--rrf-k K] [--lexical-weight W] [--dense-weight W] [--candidates N] [--f32] [--dry-run]"
+                    "usage: dense_live_check [--corpus DIR] [--eval-dir DIR] [--state DIR] [--model MODEL] [--dimensions N] [--max-embed-tokens N] [--fusion rrf|linear] [--rrf-k K] [--lexical-weight W] [--dense-weight W] [--candidates N] [--f32] [--dry-run] [--top FILE] [--voyage-key-stdin]"
                 );
                 std::process::exit(0);
             }
@@ -273,10 +287,12 @@ fn main() -> Result<(), Error> {
             .with_max_tokens(Some(args.cap))
             .with_progress(&progress),
     );
+    let started = std::time::Instant::now();
     let s = build(&args.corpus, &state, &Options::default(), &settings)?;
+    let build_secs = started.elapsed().as_secs_f64();
     let d = s.dense.expect("built with embeddings");
     println!(
-        "index: {} chunks, {} distinct texts, {} from the cache, {} embedded now in {} requests: {} tokens{}",
+        "index: {} chunks, {} distinct texts, {} from the cache, {} embedded now in {} requests: {} tokens, {build_secs:.1} s{}",
         d.docs,
         d.texts,
         d.cached,
@@ -295,12 +311,16 @@ fn main() -> Result<(), Error> {
 
     // Every query embedded once, in one request.
     let queries: Vec<&str> = cases.iter().map(|c| c.query.as_str()).collect();
+    let started = std::time::Instant::now();
     let embedded = embedder.embed(&queries, InputKind::Query)?;
     let query_tokens = embedded.tokens;
     println!(
-        "queries: {} embedded in one request: {query_tokens} tokens",
-        queries.len()
+        "queries: {} embedded in one request: {query_tokens} tokens, {:.2} s",
+        queries.len(),
+        started.elapsed().as_secs_f64()
     );
+    // `--top`: one JSON line per question and mode, written at the end.
+    let mut top = Vec::new();
 
     let modes = [Mode::Lexical, Mode::Dense, Mode::Hybrid];
     // (depth found, definitions found, callers found, behaviour found) per mode.
@@ -319,6 +339,21 @@ fn main() -> Result<(), Error> {
                 .with_candidates(args.candidates)
                 .with_query_vector(vector.clone());
             let hits = arko_index::hybrid::search(&state, &request, None)?.hits;
+            if args.top.is_some() {
+                let spans: Vec<String> = hits
+                    .iter()
+                    .map(|h| {
+                        format!(
+                            "{}:{}-{}",
+                            h.chunk.path, h.chunk.start_line, h.chunk.end_line
+                        )
+                    })
+                    .collect();
+                top.push(
+                    serde_json::json!({"id": case.id, "mode": mode.as_str(), "query": case.query, "hits": spans})
+                        .to_string(),
+                );
+            }
             let r = rank(&hits, &case.expect);
             match case.kind {
                 "depth" => {
@@ -380,5 +415,14 @@ fn main() -> Result<(), Error> {
         d.tokens,
         d.tokens + query_tokens
     );
+    if let Some(path) = &args.top {
+        let mut lines = top.join("\n");
+        lines.push('\n');
+        if path.as_os_str() == "-" {
+            print!("{lines}");
+        } else {
+            std::fs::write(path, lines)?;
+        }
+    }
     Ok(())
 }

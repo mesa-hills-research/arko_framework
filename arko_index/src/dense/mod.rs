@@ -5,13 +5,17 @@
 //!
 //! arko_index makes no network calls itself: an [`Embedder`] is supplied by the
 //! caller. The crate ships [`HashEmbedder`] (offline, deterministic, not semantic: for
-//! tests and examples); the `arko_index_cli` example adapts arko_ai's Voyage client.
+//! tests and examples) and, with the `local-embed` feature, `local::LocalEmbedder`,
+//! which runs a code-embedding model on the CPU; the `arko_index_cli` example adapts
+//! arko_ai's Voyage client too.
 //! An index is built with embeddings by [`index2::build`](crate::index2::build) with
 //! [`BuildOptions::dense`](crate::index2::BuildOptions::dense) set, and searched by
 //! [`hybrid::search`](crate::hybrid::search). A build publishes its generation for
 //! lexical search before it embeds, and [`index2::embed`](crate::index2::embed) adds the
 //! vectors a generation lacks, so dense coverage fills in while the index is in use.
 pub(crate) mod cache;
+#[cfg(feature = "local-embed")]
+pub mod local;
 pub(crate) mod run;
 
 use crate::{
@@ -135,7 +139,7 @@ pub enum InputKind {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ModelDescriptor {
-    /// `voyage`, `hash`, and later local providers.
+    /// `voyage`, `hash` or `local`.
     pub provider: String,
     /// The provider's model name, such as `voyage-code-4`.
     pub model: String,

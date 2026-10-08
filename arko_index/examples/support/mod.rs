@@ -1,7 +1,10 @@
-//! Embedders for the examples: Voyage through arko_ai, and arko_index's offline
-//! `HashEmbedder`, and the processes of the CLI's background embedding (`process`).
-//! Shared by `arko_index_cli` and `dense_live_check`.
+//! Embedders for the examples: Voyage through arko_ai, local models (with
+//! `--features local-embed`), and arko_index's offline `HashEmbedder`, and the
+//! processes of the CLI's background embedding (`process`). Shared by
+//! `arko_index_cli`, `dense_live_check` and `local_embed_bench`.
 #![allow(dead_code)]
+#[cfg(feature = "local-embed")]
+pub mod local;
 pub mod process;
 pub mod voyage;
 
@@ -15,16 +18,18 @@ use arko_index::{
 pub const HASH_DIMENSIONS: usize = 256;
 
 /// The model an `--embed` value names: `voyage-code-4` (a bare Voyage model name),
-/// `voyage:MODEL`, or `hash` / `hash:hash-v1` (offline; for trying things out without
-/// a key). `dimensions` overrides the model's default.
+/// `voyage:MODEL`, `local` or `local:MODEL` (a model run on this machine; needs
+/// `--features local-embed`), or `hash` / `hash:hash-v1` (offline; for trying things
+/// out without a key). `dimensions` overrides the model's default.
 pub fn descriptor_for(spec: &str, dimensions: Option<usize>) -> Result<ModelDescriptor, Error> {
     let (provider, model) = match spec.split_once(':') {
         Some((p, m)) => (p, m),
         None if spec == "hash" => ("hash", "hash-v1"),
+        None if spec == "local" => ("local", ""),
         None if spec.starts_with("voyage") => ("voyage", spec),
         None => {
             return Err(format!(
-                "unknown embedding model {spec:?}: use a Voyage model (voyage-code-4), voyage:MODEL or hash"
+                "unknown embedding model {spec:?}: use a Voyage model (voyage-code-4), voyage:MODEL, local, local:MODEL or hash"
             )
             .into());
         }
@@ -47,12 +52,41 @@ pub fn descriptor_for(spec: &str, dimensions: Option<usize>) -> Result<ModelDesc
             "hash-v1",
             dimensions.unwrap_or(HASH_DIMENSIONS),
         )),
+        "local" => local_descriptor(model, dimensions),
         _ => Err(format!("unknown embedding model {spec:?}").into()),
     }
 }
 
+/// A local model by name or repository (`""`: the default model).
+#[cfg(feature = "local-embed")]
+fn local_descriptor(model: &str, dimensions: Option<usize>) -> Result<ModelDescriptor, Error> {
+    use arko_index::dense::local;
+    let m = if model.is_empty() {
+        local::DEFAULT_MODEL
+    } else {
+        local::find(model).ok_or_else(|| {
+            let names: Vec<&str> = local::MODELS.iter().map(|m| m.name).collect();
+            format!(
+                "unknown local model {model:?}: use one of {}",
+                names.join(", ")
+            )
+        })?
+    };
+    if let Some(d) = dimensions.filter(|&d| d != m.dimensions) {
+        return Err(format!("{} has {} dimensions, not {d}", m.name, m.dimensions).into());
+    }
+    Ok(m.descriptor())
+}
+
+#[cfg(not(feature = "local-embed"))]
+fn local_descriptor(_: &str, _: Option<usize>) -> Result<ModelDescriptor, Error> {
+    Err(NO_LOCAL.into())
+}
+
+const NO_LOCAL: &str = "local models need arko_index built with --features local-embed";
+
 /// An embedder that produces the vectors `descriptor` names (Voyage needs
-/// `VOYAGE_API_KEY`).
+/// `VOYAGE_API_KEY`; a local model is downloaded on first use).
 pub fn embedder_for(descriptor: &ModelDescriptor) -> Result<Box<dyn Embedder>, Error> {
     let embedder: Box<dyn Embedder> = match descriptor.provider.as_str() {
         "voyage" => Box::new(voyage::VoyageEmbedder::from_env(
@@ -61,6 +95,12 @@ pub fn embedder_for(descriptor: &ModelDescriptor) -> Result<Box<dyn Embedder>, E
             descriptor.input_types,
         )?),
         "hash" => Box::new(PacedHash::new(descriptor.dimensions)),
+        #[cfg(feature = "local-embed")]
+        "local" => Box::new(local::embedder(
+            arko_index::dense::local::LocalModel::for_descriptor(descriptor)?,
+        )?),
+        #[cfg(not(feature = "local-embed"))]
+        "local" => return Err(NO_LOCAL.into()),
         p => return Err(format!("unknown embedding provider {p:?}").into()),
     };
     if &embedder.descriptor() != descriptor {
