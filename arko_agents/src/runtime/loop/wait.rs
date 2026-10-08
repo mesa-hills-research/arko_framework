@@ -191,7 +191,7 @@ impl AgentLoop {
             self.command_wait = CommandWait::HostDeciding;
             return Ok(Flow::NextPass);
         }
-        let original_state_before_command_processing = self.task.current_state.clone();
+        let state_before = self.task.current_state.clone();
 
         let decision = match self.task.current_state.clone() {
             TaskState::AwaitingToolApproval {
@@ -226,8 +226,7 @@ impl AgentLoop {
         let Decision::Decided(follow_up) = decision else {
             return Ok(Flow::NextPass);
         };
-        self.after_decision(&cmd, original_state_before_command_processing, follow_up)
-            .await
+        self.after_decision(&cmd, state_before, follow_up).await
     }
 
     /// After a command the wait didn't ignore: the wait ends, a
@@ -237,7 +236,7 @@ impl AgentLoop {
     async fn after_decision(
         &mut self,
         cmd: &UserCommand,
-        original_state_before_command_processing: TaskState,
+        state_before: TaskState,
         follow_up: FollowUp,
     ) -> Result<Flow, ArkoAgentsError> {
         let FollowUp {
@@ -267,9 +266,7 @@ impl AgentLoop {
             return Ok(Flow::Exit);
         }
 
-        if self.task.current_state != original_state_before_command_processing
-            && !self.state_reported()
-        {
+        if self.task.current_state != state_before && !self.state_reported() {
             self.emit_event(AgentEvent::TaskStateChanged(
                 self.task.current_state.clone(),
             ))

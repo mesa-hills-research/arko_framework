@@ -150,7 +150,7 @@ impl AgentLoop {
 
         let mut turn_ended = false;
         let mut final_generation_response: Option<ai::GenerationResponse> = None;
-        let mut current_assistant_response_text_for_conv = String::new();
+        let mut streamed_text = String::new();
         let mut native_stream_call_ids: HashMap<usize, (Uuid, String)> = HashMap::new();
         let mut streamed_refusal: Option<ai::Refusal> = None;
 
@@ -163,7 +163,7 @@ impl AgentLoop {
             tokio::select! {
                 biased;
                 maybe_cmd = self.command_receiver.recv() => {
-                    if self.on_stream_command(maybe_cmd, &current_assistant_response_text_for_conv, &mut native_stream_call_ids).await? {
+                    if self.on_stream_command(maybe_cmd, &streamed_text, &mut native_stream_call_ids).await? {
                         turn_ended = true;
                         break;
                     }
@@ -172,7 +172,7 @@ impl AgentLoop {
                 stream_item = response_stream.try_next() => {
                     match stream_item {
                         Ok(Some(ai::StreamEvent::TextChunk(text_chunk))) => {
-                            current_assistant_response_text_for_conv.push_str(&text_chunk);
+                            streamed_text.push_str(&text_chunk);
                             if self.is_native_mode() {
                                 self.text_buffer.push_str(&text_chunk);
                                 self.emit_throttled_text().await?;
@@ -212,7 +212,7 @@ impl AgentLoop {
                                 raw_events_for_turn.extend(p.finalize());
                             }
                             if let Some(refusal) = streamed_refusal.take() {
-                                let partial = ai::Message::new_assistant(&current_assistant_response_text_for_conv);
+                                let partial = ai::Message::new_assistant(&streamed_text);
                                 let plain_text = parser.is_some().then(|| parsed_plain_text(&raw_events_for_turn));
                                 self.reject_announced_calls(&mut native_stream_call_ids, REFUSED_TURN_CALL).await?;
                                 self.handle_refusal(refusal, partial, plain_text).await?;
@@ -221,10 +221,10 @@ impl AgentLoop {
                             }
                             // Without a final response no announced call runs.
                             self.reject_announced_calls(&mut native_stream_call_ids, FAILED_STREAM_CALL).await?;
-                            if !current_assistant_response_text_for_conv.is_empty() {
-                                self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
+                            if !streamed_text.is_empty() {
+                                self.task.conversation.add_assistant_message(&streamed_text);
                             }
-                            if current_assistant_response_text_for_conv.is_empty() {
+                            if streamed_text.is_empty() {
                                 self.handle_llm_error(ai::Error::StreamTruncated("the response stream ended with no output".to_string()), None).await?;
                                 turn_ended = true;
                             }
@@ -274,16 +274,13 @@ impl AgentLoop {
     async fn on_stream_command(
         &mut self,
         maybe_cmd: Option<UserCommand>,
-        current_assistant_response_text_for_conv: &str,
+        streamed_text: &str,
         native_stream_call_ids: &mut HashMap<usize, (Uuid, String)>,
     ) -> Result<bool, ArkoAgentsError> {
         match maybe_cmd.map(|command| self.absorb_command(command)) {
             Some(Some(UserCommand::CancelTask)) => {
-                self.keep_partial_output(
-                    current_assistant_response_text_for_conv,
-                    native_stream_call_ids,
-                )
-                .await?;
+                self.keep_partial_output(streamed_text, native_stream_call_ids)
+                    .await?;
                 self.task.set_state(TaskState::Cancelled {
                     reason: CANCELLED_BY_USER.to_string(),
                 });
@@ -294,11 +291,8 @@ impl AgentLoop {
                 return Ok(true);
             }
             Some(Some(UserCommand::SuspendTask)) => {
-                self.keep_partial_output(
-                    current_assistant_response_text_for_conv,
-                    native_stream_call_ids,
-                )
-                .await?;
+                self.keep_partial_output(streamed_text, native_stream_call_ids)
+                    .await?;
                 self.emit_event(AgentEvent::TaskStateChanged(
                     self.task.current_state.clone(),
                 ))
@@ -308,11 +302,8 @@ impl AgentLoop {
             }
             Some(_) => {}
             None => {
-                self.keep_partial_output(
-                    current_assistant_response_text_for_conv,
-                    native_stream_call_ids,
-                )
-                .await?;
+                self.keep_partial_output(streamed_text, native_stream_call_ids)
+                    .await?;
                 self.stop_requested = true;
                 self.interrupt("Command channel disconnected during LLM streaming.".to_string())
                     .await?;

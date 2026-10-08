@@ -89,7 +89,7 @@ impl AgentLoop {
         } = turn;
         let mut parsed_call_ids = self.emit_parser_events(&raw_events_for_turn).await?;
 
-        let mut next_user_message_str_accumulated = String::new();
+        let mut turn_message = String::new();
 
         match assemble_tool_calls(raw_events_for_turn) {
             Ok((plain_text_from_assembler, mut tool_call_groups)) => {
@@ -101,8 +101,8 @@ impl AgentLoop {
 
                 if tool_call_groups.len() > 1 {
                     // The turn's message is still empty.
-                    debug_assert!(next_user_message_str_accumulated.is_empty());
-                    next_user_message_str_accumulated.push_str(
+                    debug_assert!(turn_message.is_empty());
+                    turn_message.push_str(
                         "Error: Only one tool call or one batch of the same tool can be used per turn.",
                     );
                 } else if tool_call_groups.is_empty() {
@@ -118,12 +118,8 @@ impl AgentLoop {
                     return Ok(self.end_of_pass());
                 } else {
                     let current_group = tool_call_groups.remove(0);
-                    self.handle_text_group(
-                        current_group,
-                        &mut parsed_call_ids,
-                        &mut next_user_message_str_accumulated,
-                    )
-                    .await?;
+                    self.handle_text_group(current_group, &mut parsed_call_ids, &mut turn_message)
+                        .await?;
                 }
             }
             Err(e) => {
@@ -140,10 +136,7 @@ impl AgentLoop {
             }
         }
 
-        self.text_turn_message(
-            next_user_message_str_accumulated,
-            &final_generation_response,
-        )?;
+        self.text_turn_message(turn_message, &final_generation_response)?;
         Ok(Flow::Proceed)
     }
 
@@ -156,13 +149,10 @@ impl AgentLoop {
         &mut self,
         current_group: ToolCallGroup,
         parsed_call_ids: &mut VecDeque<Uuid>,
-        next_user_message_str_accumulated: &mut String,
+        turn_message: &mut String,
     ) -> Result<(), ArkoAgentsError> {
-        let calls_to_process_with_ids = self.calls_of_group(
-            current_group,
-            parsed_call_ids,
-            next_user_message_str_accumulated,
-        );
+        let calls_to_process_with_ids =
+            self.calls_of_group(current_group, parsed_call_ids, turn_message);
 
         let mut calls_needing_approval = Vec::new();
         // The results of the calls handled, recorded in
@@ -175,11 +165,8 @@ impl AgentLoop {
         };
         self.begin_tool_batch();
 
-        for (parsed_tool_call_ref, tool_call_id_ref) in &calls_to_process_with_ids {
-            match self
-                .handle_text_call(parsed_tool_call_ref, *tool_call_id_ref)
-                .await?
-            {
+        for (call, tool_call_id) in &calls_to_process_with_ids {
+            match self.handle_text_call(call, *tool_call_id).await? {
                 TextCall::Handled => {}
                 TextCall::NeedsApproval(pending) => calls_needing_approval.push(pending),
                 TextCall::EndsBatch => break,
@@ -212,7 +199,7 @@ impl AgentLoop {
         self.end_tool_batch().await?;
         // The results of the calls that ran, which wait
         // with the task below if it now waits.
-        *next_user_message_str_accumulated = self.take_text_results(start).join("\n\n---\n\n");
+        *turn_message = self.take_text_results(start).join("\n\n---\n\n");
         Ok(())
     }
 
@@ -224,7 +211,7 @@ impl AgentLoop {
         &mut self,
         raw_events_for_turn: &[RawParserEvent],
     ) -> Result<VecDeque<Uuid>, ArkoAgentsError> {
-        let mut assistant_text_from_raw_events_for_pass1 = String::new();
+        let mut plain_text = String::new();
         let mut parsed_call_ids = VecDeque::new();
 
         if !self.simplified_tool_events {
@@ -234,7 +221,7 @@ impl AgentLoop {
             for raw_event in raw_events_for_turn {
                 match raw_event {
                     RawParserEvent::Text(text) => {
-                        assistant_text_from_raw_events_for_pass1.push_str(text);
+                        plain_text.push_str(text);
                     }
                     RawParserEvent::Error(err) => {
                         log::warn!("Raw parser emitted error event: {}", err);
@@ -290,9 +277,8 @@ impl AgentLoop {
                     RawParserEvent::BatchedToolCallStart | RawParserEvent::BatchedToolCallEnd => {}
                 }
             }
-            if !assistant_text_from_raw_events_for_pass1.is_empty() {
-                self.text_buffer
-                    .push_str(&assistant_text_from_raw_events_for_pass1);
+            if !plain_text.is_empty() {
+                self.text_buffer.push_str(&plain_text);
                 self.emit_throttled_text().await?;
             }
         }
@@ -308,7 +294,7 @@ impl AgentLoop {
         &self,
         current_group: ToolCallGroup,
         parsed_call_ids: &mut VecDeque<Uuid>,
-        next_user_message_str_accumulated: &mut String,
+        turn_message: &mut String,
     ) -> Vec<(ParsedToolCall, Uuid)> {
         let calls_to_process_with_ids: Vec<(ParsedToolCall, Uuid)> = match current_group {
             ToolCallGroup::Single(pc) => {
@@ -327,8 +313,8 @@ impl AgentLoop {
                                 first_tool_name_in_batch
                             );
                             // The turn's message is still empty.
-                            debug_assert!(next_user_message_str_accumulated.is_empty());
-                            next_user_message_str_accumulated.push_str(&err_msg);
+                            debug_assert!(turn_message.is_empty());
+                            turn_message.push_str(&err_msg);
                             Vec::new()
                         } else {
                             pcs.into_iter()
@@ -371,50 +357,47 @@ impl AgentLoop {
     /// recorded in the task.
     async fn handle_text_call(
         &mut self,
-        parsed_tool_call_ref: &ParsedToolCall,
+        call: &ParsedToolCall,
         tool_call_id: Uuid,
     ) -> Result<TextCall, ArkoAgentsError> {
         if self.simplified_tool_events {
             self.emit_event(AgentEvent::ToolCallInitiated {
                 tool_call_id,
-                tool_name: parsed_tool_call_ref.name.clone(),
+                tool_name: call.name.clone(),
             })
             .await?;
         }
         self.emit_event(AgentEvent::ToolCallFormatted {
             tool_call_id,
-            tool_name: parsed_tool_call_ref.name.clone(),
-            parameters: parsed_tool_call_ref.parameters.clone(),
+            tool_name: call.name.clone(),
+            parameters: call.parameters.clone(),
         })
         .await?;
 
-        if self.handover_blocks(&parsed_tool_call_ref.name) {
+        if self.handover_blocks(&call.name) {
             self.emit_event(AgentEvent::ToolRejected {
                 tool_call_id,
-                tool_name: parsed_tool_call_ref.name.clone(),
+                tool_name: call.name.clone(),
                 reason: Some(HANDOVER_REPORT_DUE.to_string()),
             })
             .await?;
-            self.record_text_result(self.prompts().format_tool_execution_error_as_user_message(
-                &parsed_tool_call_ref.name,
-                HANDOVER_REPORT_DUE,
-            ))
+            self.record_text_result(
+                self.prompts()
+                    .format_tool_execution_error_as_user_message(&call.name, HANDOVER_REPORT_DUE),
+            )
             .await;
             return Ok(TextCall::Handled);
         }
 
-        let tool_arc = match self.tool_registry.get(&parsed_tool_call_ref.name) {
+        let tool_arc = match self.tool_registry.get(&call.name) {
             Some(t) => t,
             None => {
                 self.emit_event(AgentEvent::UnavailableToolAttempted {
-                    tool_name: parsed_tool_call_ref.name.clone(),
+                    tool_name: call.name.clone(),
                 })
                 .await?;
-                self.record_text_result(format!(
-                    "Error: Tool '{}' is not available.",
-                    parsed_tool_call_ref.name
-                ))
-                .await;
+                self.record_text_result(format!("Error: Tool '{}' is not available.", call.name))
+                    .await;
                 return Ok(TextCall::Handled);
             }
         };
@@ -422,11 +405,8 @@ impl AgentLoop {
 
         // The path parameter that forces an approval.
         let mut outside_workspace = None;
-        let path_rejection = match self.path_verdict(
-            &parsed_tool_call_ref.name,
-            &tool_definition,
-            &parsed_tool_call_ref.parameters,
-        ) {
+        let path_rejection = match self.path_verdict(&call.name, &tool_definition, &call.parameters)
+        {
             PathVerdict::Allowed => None,
             PathVerdict::NeedsApproval(param_name) => {
                 outside_workspace = Some(param_name);
@@ -444,7 +424,7 @@ impl AgentLoop {
         };
         if let Some(tool_error) = path_rejection {
             let error_message_for_llm = self
-                .handle_tool_exec_error(&parsed_tool_call_ref.name, tool_error, Some(tool_call_id))
+                .handle_tool_exec_error(&call.name, tool_error, Some(tool_call_id))
                 .await?;
             self.record_text_result(error_message_for_llm).await;
             // Under `FailTask` the rest of the batch stops.
@@ -454,16 +434,13 @@ impl AgentLoop {
             return Ok(TextCall::Handled);
         }
 
-        let normal_approval_needed = !self
-            .task
-            .agent_config
-            .should_auto_approve_tool(&parsed_tool_call_ref.name);
+        let normal_approval_needed = !self.task.agent_config.should_auto_approve_tool(&call.name);
 
         if outside_workspace.is_some() || normal_approval_needed {
             Ok(TextCall::NeedsApproval(PendingToolCallInfo {
                 tool_call_id,
-                tool_name: parsed_tool_call_ref.name.clone(),
-                parameters: parsed_tool_call_ref.parameters.clone(),
+                tool_name: call.name.clone(),
+                parameters: call.parameters.clone(),
                 tool_description: tool_definition.description.clone(),
                 approval_reason: ApprovalReason {
                     tool_not_auto_approved: normal_approval_needed,
@@ -473,8 +450,8 @@ impl AgentLoop {
         } else {
             match self
                 .execute_text_call(
-                    &parsed_tool_call_ref.name,
-                    parsed_tool_call_ref.parameters.clone(),
+                    &call.name,
+                    call.parameters.clone(),
                     tool_call_id,
                     None,
                     None,
@@ -500,7 +477,7 @@ impl AgentLoop {
     /// the task if it now waits), or a request to use a tool.
     fn text_turn_message(
         &mut self,
-        mut next_user_message_str_accumulated: String,
+        mut turn_message: String,
         final_generation_response: &Option<ai::GenerationResponse>,
     ) -> Result<(), ArkoAgentsError> {
         if final_generation_response.is_some() && !self.task.current_state.is_awaiting_approval() {
@@ -509,19 +486,17 @@ impl AgentLoop {
 
         // Results of calls that ran in a turn that now waits (for
         // other calls' approval, or on a pause) wait with it.
-        if !next_user_message_str_accumulated.is_empty()
-            && self.task.current_state.is_awaiting_approval()
-        {
+        if !turn_message.is_empty() && self.task.current_state.is_awaiting_approval() {
             self.task
                 .pending_text_tool_results
-                .push(std::mem::take(&mut next_user_message_str_accumulated));
+                .push(std::mem::take(&mut turn_message));
         }
-        if !next_user_message_str_accumulated.is_empty()
+        if !turn_message.is_empty()
             && !self.task.current_state.is_terminal()
             && !self.task.current_state.is_awaiting_approval()
         {
-            self.add_results_message(&next_user_message_str_accumulated)?;
-        } else if next_user_message_str_accumulated.is_empty()
+            self.add_results_message(&turn_message)?;
+        } else if turn_message.is_empty()
             && !self.task.current_state.is_terminal()
             && !self.task.current_state.is_awaiting_approval()
             && final_generation_response.is_some()
