@@ -2052,6 +2052,7 @@ dependencies = [
 [[package]]
 name = "mhr_vector"
 version = "0.1.0"
+source = "git+https://github.com/mesa-hills-research/mhr_vector?rev=d7eb201e00af249552d2798c7f00aacbc7e348d2#d7eb201e00af249552d2798c7f00aacbc7e348d2"
 dependencies = [
  "crc32fast",
  "pulp",

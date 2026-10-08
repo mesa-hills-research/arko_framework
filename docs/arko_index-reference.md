@@ -497,32 +497,33 @@ hybrid `candidates` above 1,000 are capped there.
 
 ## Vector store measurements
 
-Measured through `vector::MhrStore` on one thread with a warm page cache, on a VMware
-VM with 6 cores of an Intel i9-13980HX (AVX2) and 22 GB of RAM. Each store was built
-from vectors in memory (upserts in batches of 1,024, then `compact` and `persist`, as a
-build does for a new store), reopened read-only, and searched for the top 10 with no
-filter. Recall@10 is against an exact f64 cosine ranking of every vector. Latencies
-are the medians over three runs of 1,000 queries (300 for f32 codes and for the
-synthetic set). Memory is the resident memory the open store added, disk is the
-store's directory.
+Measured through `vector::MhrStore` at mhr_vector d7eb201, on one thread with a warm
+page cache, on a VMware VM with 6 cores of an Intel i9-13980HX (AVX2) and 22 GB of RAM.
+Each store was built from vectors in memory (upserts in batches of 1,024, then
+`compact` and `persist`, as a build does for a new store), reopened read-only, and
+searched for the top 10 with no filter. Recall@10 is against an exact f64 cosine
+ranking of every vector. Latencies are the medians of three runs (2,000, 1,000 and
+1,000 queries on the Voyage sets, 500, 300 and 300 on the synthetic set). Memory is
+the resident memory the open store added, disk is the store's directory.
 
 | Vectors (1,024 dimensions) | Store | Build | Disk | Memory | Open | Median | p99 | Recall@10 |
 |---|---|---|---|---|---|---|---|---|
-| 34,601 documentation chunks (voyage-4) | int8, flat (default) | 1.5 s | 172 MB | 38 MB | 0.02 s | 2.8 ms | 3.8 ms | 1.000 |
-| | f32, flat | 0.8 s | 138 MB | 139 MB | 0.1 s | 18.5 ms | 21.9 ms | 1.000 |
-| | int8, graph | 16 s | 180 MB | 46 MB | 0.04 s | 0.4 ms | 1.0 ms | 0.999 |
-| 199,999 code chunks (voyage-code-4) | int8, flat (default) | 6–37 s | 987 MB | 207 MB | 0.12 s | 17.1 ms | 20.5 ms | 1.000 |
-| | f32, flat | 5.5–28 s | 791 MB | 793 MB | 0.58 s | 98.2 ms | 101.7 ms | 1.000 |
-| | int8, graph | 189 s | 1,035 MB | 256 MB | 0.23 s | 1.5 ms | 2.9 ms | 0.973 |
-| 1,000,000 synthetic | int8, flat (default) | 145 s | 4,933 MB | 1,033 MB | 0.62 s | 75.9 ms | 91.0 ms | 1.000 |
+| 34,601 documentation chunks (voyage-4) | int8, flat (default) | 1.2 s | 172 MB | 38 MB | 0.02 s | 2.2 ms | 2.8 ms | 1.000 |
+| | f32, flat | 0.8 s | 138 MB | 139 MB | 0.11 s | 4.8 ms | 5.5 ms | 1.000 |
+| | int8, graph | 15 s | 180 MB | 46 MB | 0.04 s | 0.41 ms | 1.0 ms | 0.999 |
+| 199,999 code chunks (voyage-code-4) | int8, flat (default) | 6.1 s | 987 MB | 207 MB | 0.13 s | 13.5 ms | 18.8 ms | 1.000 |
+| | f32, flat | 4.5 s | 791 MB | 793 MB | 0.60 s | 28.2 ms | 30.9 ms | 1.000 |
+| | int8, graph | 192 s | 1,035 MB | 256 MB | 0.24 s | 1.6 ms | 3.0 ms | 0.973 |
+| 1,000,000 synthetic | int8, flat (default) | 130 s | 4,933 MB | 1,033 MB | 0.65 s | 67.0 ms | 87.0 ms | 1.000 |
 
 The recall of the Voyage sets is over 2,000 queries each (doc-comment sentences for
 code, the Cloudflare evaluation questions and page headings for documentation), that
 of the synthetic set over 500. The sets are mhr_vector's `docs-voyage4-200k` and
 `code-voyagecode4-200k` (described in its `docs/datasets.md`) and its clustered
 generator (1,000 clusters, spread 0.35, seed 1). Builds write the whole store and
-are bound by the disk, which other work on the VM shared: a range spans repeated
-runs. The synthetic build includes generating the vectors.
+are bound by the disk, so their times vary with other work on the machine: earlier
+builds of the code set's int8 store took from 6 to 37 s. The synthetic build includes
+generating the vectors.
 
 Int8 rescoring depth, recall@10 over the same 2,000 queries of each set (the default
 is `max(4k, 40)`, so 40 at k = 10):
@@ -533,8 +534,8 @@ is `max(4k, 40)`, so 40 at k = 10):
 | Code chunks | 0.9954 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
 
 Updating the 199,999-vector store as a build does (open it for writing, upsert 1,000
-vectors, delete 1,000, persist) took 0.11 s to open (it loads the codes), 5 ms to
-apply and 16 ms to persist. A search runs on one thread, and a one-off search (the
+vectors, delete 1,000, persist) took 0.13 s to open (it loads the codes), 6 ms to
+apply and 17 ms to persist. A search runs on one thread, and a one-off search (the
 CLI's `search2`) pays the open time first.
 
 ## Watchers
@@ -705,8 +706,8 @@ at the end of the input (2^20 times in one token), a guard the C library lacks.
 [arko_index verification](arko_index-verification.md#the-pure-rust-parser)
 has the checks of the switch.
 
-Dense search stores its vectors with [mhr_vector](https://github.com/mesa-hills-research/mhr_vector),
-also pure, safe Rust.
+Dense search stores its vectors with [mhr_vector](https://github.com/mesa-hills-research/mhr_vector)
+(a Git dependency pinned to commit d7eb201 in `Cargo.toml`), also pure, safe Rust.
 
 arko_index has no cargo features. The examples use arko_ai for Voyage, a dev-dependency
 whose dependencies need a C compiler, so building the tests and examples needs one.

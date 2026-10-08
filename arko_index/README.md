@@ -13,8 +13,8 @@ caller supplies (the CLI uses Voyage through arko_ai), and the library itself ne
 network call. The vectors live in [mhr_vector](https://github.com/mesa-hills-research/mhr_vector),
 a pure-Rust store that each build updates in place. A search scans int8 codes held in
 memory and rescores the best candidates at full precision: on 199,999 code chunks it took
-17 ms per query and returned the exact top ten
-([measurements](../docs/arko_index-reference.md#vector-store-measurements)).
+13.5 ms per query and returned the exact top ten (mhr_vector d7eb201,
+[measurements](../docs/arko_index-reference.md#vector-store-measurements)).
 
 It is built for coding agents and the tools around them. A result names an exact byte and
 line range of the source, the same tree and options always give the same chunks and IDs,
