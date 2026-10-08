@@ -113,10 +113,10 @@ pub fn codex_auth_path(codex_home: Option<&Path>) -> BenchResult<PathBuf> {
 /// The client for every agent: ChatGPT OAuth from a Codex `auth.json`
 /// (tokens are refreshed in step with the file), or the mock model.
 ///
-/// One login only: failover between several ChatGPT accounts needs
-/// `ChatGptAccounts` (`LLMClient::with_codex_auth_files`), which is not on
-/// this branch yet. With it, each `--codex-home` becomes one account,
-/// first preferred.
+/// Several `--codex-home`s become a list of ChatGPT accounts with failover,
+/// first preferred (`LLMClient::with_codex_auth_files`): a request an
+/// account's usage limit refuses goes to the next account, and requests move
+/// back once the first is usable again.
 pub fn build_client(
     codex_homes: &[PathBuf],
     mock_url: Option<&str>,
@@ -126,17 +126,45 @@ pub fn build_client(
             arko_ai::providers::openai::OpenAIClient::new("mock-key").with_base_url(url),
         )));
     }
-    if codex_homes.len() > 1 {
-        return Err("more than one --codex-home: failover between ChatGPT accounts needs arko's ChatGptAccounts (branch oauth-failover), which this build doesn't have; pass one".into());
+    let load = |home: Option<&Path>| -> BenchResult<(String, CodexAuthFile)> {
+        let path = codex_auth_path(home)?;
+        let auth = CodexAuthFile::load(&path).map_err(|error| {
+            format!(
+                "the ChatGPT login at {} could not be read ({error}); run `codex login` (with CODEX_HOME set to the Codex home you pass) first",
+                path.display()
+            )
+        })?;
+        Ok((account_label(&path), auth))
+    };
+    if codex_homes.len() <= 1 {
+        let (_, auth) = load(codex_homes.first().map(PathBuf::as_path))?;
+        return Ok(Arc::new(LLMClient::new().with_codex_auth_file(&auth)?));
     }
-    let path = codex_auth_path(codex_homes.first().map(PathBuf::as_path))?;
-    let auth = CodexAuthFile::load(&path).map_err(|error| {
-        format!(
-            "the ChatGPT login at {} could not be read ({error}); run `codex login` (with CODEX_HOME set to the Codex home you pass) first",
-            path.display()
-        )
-    })?;
-    Ok(Arc::new(LLMClient::new().with_codex_auth_file(&auth)?))
+    let mut accounts = Vec::new();
+    let mut labels = std::collections::HashSet::new();
+    for (position, home) in codex_homes.iter().enumerate() {
+        let (label, auth) = load(Some(home))?;
+        // Labels name the accounts in failover events, so keep them distinct.
+        let label = if labels.insert(label.clone()) {
+            label
+        } else {
+            format!("{label}-{}", position + 1)
+        };
+        accounts.push((label, auth));
+    }
+    Ok(Arc::new(LLMClient::new().with_codex_auth_files(
+        accounts.iter().map(|(label, auth)| (label.as_str(), auth)),
+    )?))
+}
+
+/// An account's label: the name of its Codex home (`~/.codex-200` is
+/// `codex-200`).
+fn account_label(auth_path: &Path) -> String {
+    auth_path
+        .parent()
+        .and_then(|dir| dir.file_name())
+        .map(|name| name.to_string_lossy().trim_start_matches('.').to_string())
+        .unwrap_or_else(|| auth_path.display().to_string())
 }
 
 /// An agent with the given role and instructions on `model`, running every

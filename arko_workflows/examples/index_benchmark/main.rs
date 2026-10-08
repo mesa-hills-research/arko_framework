@@ -171,8 +171,8 @@ struct ModelArgs {
     #[arg(long)]
     no_fast: bool,
     /// The Codex home whose `auth.json` holds the ChatGPT login (default:
-    /// `$CODEX_HOME`, else `~/.codex`). One only in this build: failover
-    /// between accounts needs arko's ChatGptAccounts.
+    /// `$CODEX_HOME`, else `~/.codex`). Repeat it for failover between
+    /// ChatGPT accounts, first preferred.
     #[arg(long)]
     codex_home: Vec<PathBuf>,
     /// Dry run: a local mock model answers instead (no model calls). Tool

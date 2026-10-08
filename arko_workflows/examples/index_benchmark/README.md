@@ -75,9 +75,9 @@ benchmark's environment (never in the agents' shells: their commands get no vari
 like a credential). Don't run it as root: the read-only checkouts are what keep concurrent agents
 from changing each other's code.
 
-Failover between two ChatGPT accounts needs arko's `ChatGptAccounts`, which this build doesn't
-have (branch `oauth-failover`); `--codex-home` takes one login until it is merged, and then
-becomes repeatable (`LLMClient::with_codex_auth_files`, one account per home, first preferred).
+With two or more ChatGPT accounts, repeat `--codex-home` (one login per home, first preferred):
+a request an account's usage limit refuses goes to the next account, and requests move back
+once the first is usable again (arko's `ChatGptAccounts`).
 
 ## Running it
 

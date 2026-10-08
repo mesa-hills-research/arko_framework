@@ -559,8 +559,9 @@ identity checks and measurements behind this README were made on Linux.
 
 ## Parsing
 
-Parsing uses mhr_tree_sitter (until it is published, a local checkout: see
-`Cargo.toml`), a pure, safe Rust port of tree-sitter 0.25.10 and 54 grammars, made by
+Parsing uses [mhr_tree_sitter](https://github.com/mesa-hills-research/mhr_tree_sitter)
+(a Git dependency pinned to one commit in `Cargo.toml`), a pure, safe Rust port of
+tree-sitter 0.25.10 and 54 grammars, made by
 an AI agent swarm and differentially tested against the C library. Its libraries keep
 tree-sitter's names (`tree_sitter`, `tree_sitter_rust`, ...). The grammars of the
 original eight languages are the versions this crate used with the C library:
