@@ -339,16 +339,27 @@ impl AgentLoop {
     }
 
     /// An output-based batch decided: in order, each call runs or is
-    /// answered as rejected, until one changes the state; the results are
-    /// the next message.
+    /// answered as rejected; once a call changed the state (or the task was
+    /// suspended while it ran), the approved calls after it are answered as
+    /// not run, as in native mode. The results are the next message.
     async fn decide_text_batch(
         &mut self,
         pending_calls: &[PendingToolCallInfo],
         decisions: &HashMap<Uuid, ToolApprovalDecision>,
     ) -> Result<FollowUp, ArkoAgentsError> {
         let start = self.task.pending_text_tool_results.len();
+        let mut stopped = false;
         for pending_call_info in pending_calls {
             match decisions.get(&pending_call_info.tool_call_id) {
+                Some(ToolApprovalDecision::Approve { .. }) if stopped => {
+                    let not_run = self.not_run_after_stop();
+                    self.answer_text_call_not_run(
+                        pending_call_info.tool_call_id,
+                        &pending_call_info.tool_name,
+                        &not_run,
+                    )
+                    .await?;
+                }
                 Some(ToolApprovalDecision::Approve {
                     custom_tool_output,
                     message_to_agent,
@@ -401,11 +412,11 @@ impl AgentLoop {
                     .await;
                 }
             }
-            // A call that changed the state (asked
-            // the user, completed or ended the
-            // task) ends the batch.
+            // A call that changed the state (asked the user,
+            // completed or ended the task) or a suspension stops
+            // the batch's approved calls.
             if !matches!(self.task.current_state, TaskState::InProgress) || self.stop_requested {
-                break;
+                stopped = true;
             }
         }
         let next_user_message_from_command = self.take_text_results(start).join("\n\n---\n\n");

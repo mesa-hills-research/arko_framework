@@ -13,6 +13,8 @@ E {"ToolParamName":{"param_name":"what","tool_call_id":"id3"}}
 E {"ToolParamValueChunk":{"chunk":"b","param_name":"what","tool_call_id":"id3"}}
 E {"ToolParamEnd":{"param_name":"what","tool_call_id":"id3"}}
 E {"AssistantResponseChunk":"\n\n\n\n\n\n\n"}
+E {"ToolRejected":{"reason":"Error: Tool 'step' cannot be used in a batch.","tool_call_id":"id2","tool_name":"step"}}
+E {"ToolRejected":{"reason":"Error: Tool 'step' cannot be used in a batch.","tool_call_id":"id3","tool_name":"step"}}
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=593fe96a6aa92f1b
 R msgs=3 model=gpt-5.6-luna request=fe72a0813182982d
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}

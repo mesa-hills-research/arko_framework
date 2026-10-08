@@ -400,7 +400,10 @@ command timeout or a closed channel), a held call's result says an earlier call 
 was still waiting for approval. Among the calls that run once approvals are decided, only
 a call that ends the task (failing or cancelling it, or `complete_task`) leaves the rest
 unrun. Every call gets exactly one result either way, although the results of calls that
-waited follow the others in the message.
+waited follow the others in the message. Output-based mode answers its calls the same way:
+when a call of a batch ends the task, makes it wait, or is stopped by a suspension, each
+call of the batch that didn't run gets `ToolRejected` and a line in the turn's message
+saying why.
 
 Parameters marked `is_path` are checked against the task's working directory. A path
 outside it is handled by `default_out_of_workspace_path_policy` or a per-tool override:
@@ -772,7 +775,7 @@ unclassified ones, and in a task saved by an older version, and left out when `N
 | `ToolCallInitiated`, `ToolCallFormatted` | A tool call was announced, then parsed. Output-based mode with `simplified_tool_events` off also emits `ToolParamName`, `ToolParamValueChunk`, and `ToolParamEnd`. |
 | `ToolCallAwaitingApproval`, `BatchToolCallAwaitingApproval`, `UserQuestionsAsked` | The task waits for a command. |
 | `ToolResultShortened` | A result was shortened before it went into the conversation (`reason`: the overflow guard, a cap, or overflow recovery); see [Tool result size](#tool-result-size). |
-| `ToolResult`, `ToolResultIntercepted`, `ToolRejected`, `UnavailableToolAttempted` | Tool outcomes. `ToolRejected` also reports calls that did not run: stopped, held, not reached, or a `complete_task` refused after an earlier call of its turn was rejected or failed. |
+| `ToolResult`, `ToolResultIntercepted`, `ToolRejected`, `UnavailableToolAttempted` | Tool outcomes. `ToolRejected` also reports calls that did not run: stopped, held, not reached, announced in an output-based turn that can't run them, or a `complete_task` refused after an earlier call of its turn was rejected or failed. |
 | `ErrorEncountered`, `RetryScheduled`, `UsageLimitReached` | Errors and recovery. `requires_approval_to_retry` marks a pause; `error_kind` is a failed model request's `arko_ai::ErrorKind`, when classified; `RetryScheduled` carries the attempt, delay, and elapsed milliseconds, and `rate_limit` when the retry waits out a provider rate limit. |
 | `OutputTokenLimitReached` | A response ended at its output-token limit, so its text may be cut short and a call still being written was dropped. The response is handled as usual; a host can tell the user, who can ask the agent to continue. |
 | `RefusalReceived`, `RefusedInput`, `RefusalFallback` | Refusals. |

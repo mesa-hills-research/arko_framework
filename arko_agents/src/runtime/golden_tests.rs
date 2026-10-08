@@ -1698,3 +1698,93 @@ async fn an_approved_complete_task_reports_the_completion_once() {
     }
     golden.check();
 }
+
+/// Output-based calls the parser announced (`ToolCallInitiated`, with
+/// granular events) in a turn that can't run them are rejected with the
+/// error the model is given: a turn of two tool calls, and a batch that
+/// mixes tools (it can't be read). Then the task completes.
+#[tokio::test(start_paused = true)]
+async fn output_based_announced_calls_a_turn_cannot_run_are_rejected() {
+    let mut golden = Golden::start("output_based_announced_calls_a_turn_cannot_run_are_rejected");
+    let config = golden_config(ToolCallingMode::OutputBased, &["step", "check"]);
+    let (mut agent, events, commands) = golden_loop(
+        new_task(config),
+        vec![
+            Step::new("step").parallel_safe(),
+            Step::new("check").parallel_safe(),
+        ],
+        false,
+    );
+    script(
+        &mut agent,
+        [
+            text_turn("<step>\n<what>a</what>\n</step>\n<check>\n<what>b</what>\n</check>"),
+            text_turn(
+                "<batched_tool_call>\n<step>\n<what>c</what>\n</step>\n<check>\n<what>d</what>\n</check>\n</batched_tool_call>",
+            ),
+            text_turn("<complete_task>\n<summary>done</summary>\n</complete_task>"),
+        ],
+    );
+    let task = drive(agent, events, commands, no_commands).await;
+    golden.run_ended(&task);
+    golden.check();
+}
+
+/// Output-based batches a stop leaves unfinished answer every other call
+/// once, as native mode does, with `ToolRejected` and a line in the turn's
+/// message: a suspension while the first call of an auto-approved batch
+/// runs, and while the first call of an approved batch runs (each task then
+/// runs again to completion); and a call that fails the task
+/// (`ToolErrorPolicy::FailTask`) after a call that awaits approval and
+/// before one it doesn't reach.
+#[tokio::test(start_paused = true)]
+async fn output_based_calls_a_stop_leaves_are_answered_as_not_run() {
+    let mut golden = Golden::start("output_based_calls_a_stop_leaves_are_answered_as_not_run");
+    let tools = || vec![Step::new("step").parallel_safe()];
+    let batch = "<batched_tool_call>\n<step>\n<what>hang</what>\n</step>\n<step>\n<what>b</what>\n</step>\n<step>\n<what>c</what>\n</step>\n</batched_tool_call>";
+    let complete_text = || text_turn("<complete_task>\n<summary>done</summary>\n</complete_task>");
+    for approving in [false, true] {
+        let mut config = golden_config(ToolCallingMode::OutputBased, &["step"]);
+        if approving {
+            needs_approval(&mut config, "step");
+        }
+        let (mut agent, events, commands) = golden_loop(new_task(config), tools(), true);
+        script(&mut agent, [text_turn(batch)]);
+        let task = drive(agent, events, commands, |event| match event {
+            AgentEvent::BatchToolCallAwaitingApproval {
+                batch_id,
+                pending_calls,
+            } => vec![
+                approve_all(*batch_id, pending_calls),
+                UserCommand::SuspendTask,
+            ],
+            AgentEvent::ToolCallFormatted { parameters, .. }
+                if !approving && parameters.get("what") == Some(&Value::from("hang")) =>
+            {
+                vec![UserCommand::SuspendTask]
+            }
+            _ => Vec::new(),
+        })
+        .await;
+        golden.run_ended(&task);
+
+        let (mut agent, events, commands) = golden_loop(reloaded(&task), tools(), true);
+        script(&mut agent, [complete_text()]);
+        let task = drive(agent, events, commands, no_commands).await;
+        golden.run_ended(&task);
+    }
+
+    let mut config = golden_config(ToolCallingMode::OutputBased, &["step"]);
+    config.tool_config.default_out_of_workspace_path_policy = PathSafetyPolicy::RequireApproval;
+    config.error_recovery_config.on_tool_execution_error = ToolErrorPolicy::FailTask;
+    let (mut agent, events, commands) = golden_loop(new_task(config), tools(), true);
+    script(
+        &mut agent,
+        [text_turn(
+            "<batched_tool_call>\n<step>\n<what>a</what>\n<path>../outside.txt</path>\n</step>\n<step>\n<what>fail</what>\n</step>\n<step>\n<what>c</what>\n</step>\n</batched_tool_call>",
+        )],
+    );
+    let task = drive(agent, events, commands, no_commands).await;
+    golden.run_ended(&task);
+    golden.check();
+}

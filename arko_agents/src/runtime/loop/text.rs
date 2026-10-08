@@ -105,6 +105,9 @@ impl AgentLoop {
                     turn_message.push_str(
                         "Error: Only one tool call or one batch of the same tool can be used per turn.",
                     );
+                    // None of the turn's calls runs.
+                    self.reject_announced_text_calls(&mut parsed_call_ids, &turn_message)
+                        .await?;
                 } else if tool_call_groups.is_empty() {
                     if self.handover_report_due() {
                         self.take_handover_report(plain_text_from_assembler.clone())
@@ -120,6 +123,8 @@ impl AgentLoop {
                     let current_group = tool_call_groups.remove(0);
                     self.handle_text_group(current_group, &mut parsed_call_ids, &mut turn_message)
                         .await?;
+                    // Every call the parser announced belongs to this group.
+                    debug_assert!(parsed_call_ids.is_empty());
                 }
             }
             Err(e) => {
@@ -128,10 +133,14 @@ impl AgentLoop {
                     self.task.id,
                     e
                 );
-                self.handle_model_output_failure(format!(
+                let note = format!(
                     "Your tool call could not be read ({e}). Write it again in the format the system prompt describes."
-                ))
-                .await?;
+                );
+                // The calls announced before the turn proved unreadable
+                // don't run.
+                self.reject_announced_text_calls(&mut parsed_call_ids, &note)
+                    .await?;
+                self.handle_model_output_failure(note).await?;
                 return Ok(self.end_of_pass());
             }
         }
@@ -141,19 +150,26 @@ impl AgentLoop {
     }
 
     /// The calls of an output-based turn's group: each is checked and run
-    /// or held for approval, in order, until one ends the batch; calls a
-    /// suspension left are answered as not run, the others wait for
-    /// approval, the batch's tool errors pause the task, and the results
-    /// become the turn's message (for a batch of a tool that can't be
-    /// batched, which runs no call, the error saying so).
+    /// or held for approval, in order, until one ends the batch; then, as
+    /// in native mode, a turn a call stopped answers the calls awaiting
+    /// approval and the calls it didn't reach as not run, and otherwise the
+    /// calls awaiting approval wait for it. The batch's tool errors pause
+    /// the task, and the results become the turn's message (for a batch of
+    /// a tool that can't be batched, which runs no call, the error saying
+    /// so, its announced calls rejected).
     async fn handle_text_group(
         &mut self,
         current_group: ToolCallGroup,
-        parsed_call_ids: &mut VecDeque<Uuid>,
+        parsed_call_ids: &mut VecDeque<(Uuid, String)>,
         turn_message: &mut String,
     ) -> Result<(), ArkoAgentsError> {
         let calls_to_process_with_ids =
             self.calls_of_group(current_group, parsed_call_ids, turn_message);
+        if !turn_message.is_empty() {
+            // The batch can't run: its announced calls get the error.
+            self.reject_announced_text_calls(parsed_call_ids, turn_message)
+                .await?;
+        }
 
         let mut calls_needing_approval = Vec::new();
         // The results of the calls handled, recorded in
@@ -166,27 +182,29 @@ impl AgentLoop {
         };
         self.begin_tool_batch();
 
-        for (call, tool_call_id) in &calls_to_process_with_ids {
-            match self.handle_text_call(call, *tool_call_id).await? {
+        let mut calls = calls_to_process_with_ids.into_iter();
+        for (call, tool_call_id) in calls.by_ref() {
+            match self.handle_text_call(&call, tool_call_id).await? {
                 TextCall::Handled => {}
                 TextCall::NeedsApproval(pending) => calls_needing_approval.push(pending),
                 TextCall::EndsBatch => break,
             }
         }
 
-        // Suspended while a call ran: the calls
-        // awaiting approval are not asked about.
-        if self.stop_requested {
+        // A turn a call stopped (it ended the task or made it wait, or
+        // the task was suspended while it ran) answers every other call
+        // once, as native mode does: the calls awaiting approval are not
+        // asked about, and the calls after it don't run.
+        if self.stop_requested || !matches!(self.task.current_state, TaskState::InProgress) {
             let not_run = self.not_run_after_stop();
-            for pending in calls_needing_approval.drain(..) {
-                self.emit_event(AgentEvent::ToolRejected {
-                    tool_call_id: pending.tool_call_id,
-                    tool_name: pending.tool_name.clone(),
-                    reason: Some(not_run.clone()),
-                })
-                .await?;
-                self.record_text_result(format!("Tool {}: {not_run}", pending.tool_name))
-                    .await;
+            let unanswered: Vec<(Uuid, String)> = calls_needing_approval
+                .drain(..)
+                .map(|pending| (pending.tool_call_id, pending.tool_name))
+                .chain(calls.map(|(call, tool_call_id)| (tool_call_id, call.name)))
+                .collect();
+            for (tool_call_id, tool_name) in unanswered {
+                self.answer_text_call_not_run(tool_call_id, &tool_name, &not_run)
+                    .await?;
             }
         }
         if !calls_needing_approval.is_empty()
@@ -209,14 +227,53 @@ impl AgentLoop {
         Ok(())
     }
 
+    /// An output-based call that doesn't run (`reason` says why): it is
+    /// reported rejected, and the turn's message says so.
+    pub(super) async fn answer_text_call_not_run(
+        &mut self,
+        tool_call_id: Uuid,
+        tool_name: &str,
+        reason: &str,
+    ) -> Result<(), ArkoAgentsError> {
+        self.emit_event(AgentEvent::ToolRejected {
+            tool_call_id,
+            tool_name: tool_name.to_string(),
+            reason: Some(reason.to_string()),
+        })
+        .await?;
+        self.record_text_result(format!("Tool {tool_name}: {reason}"))
+            .await;
+        Ok(())
+    }
+
+    /// Rejects, in order, the calls the parser announced
+    /// (`ToolCallInitiated`) that the turn won't run, with `reason`, the
+    /// error the turn's message gives: every announced call gets an
+    /// outcome, as in native mode.
+    async fn reject_announced_text_calls(
+        &self,
+        announced: &mut VecDeque<(Uuid, String)>,
+        reason: &str,
+    ) -> Result<(), ArkoAgentsError> {
+        for (tool_call_id, tool_name) in announced.drain(..) {
+            self.emit_event(AgentEvent::ToolRejected {
+                tool_call_id,
+                tool_name,
+                reason: Some(reason.to_string()),
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
     /// Reports an output-based turn's parser events (unless tool events
     /// are simplified): `ToolCallInitiated` and the parameters of each
     /// call, then the turn's plain text. Returns the ids given to the
-    /// calls, in order.
+    /// calls, with their tools' names, in order.
     async fn emit_parser_events(
         &mut self,
         raw_events_for_turn: &[RawParserEvent],
-    ) -> Result<VecDeque<Uuid>, ArkoAgentsError> {
+    ) -> Result<VecDeque<(Uuid, String)>, ArkoAgentsError> {
         let mut plain_text = String::new();
         let mut parsed_call_ids = VecDeque::new();
 
@@ -234,7 +291,7 @@ impl AgentLoop {
                     }
                     RawParserEvent::ToolCallStart(name) => {
                         let tool_call_id = Uuid::new_v4();
-                        parsed_call_ids.push_back(tool_call_id);
+                        parsed_call_ids.push_back((tool_call_id, name.clone()));
                         current_tool_call_id_granular = Some(tool_call_id);
                         self.emit_event(AgentEvent::ToolCallInitiated {
                             tool_call_id,
@@ -299,12 +356,18 @@ impl AgentLoop {
     fn calls_of_group(
         &self,
         current_group: ToolCallGroup,
-        parsed_call_ids: &mut VecDeque<Uuid>,
+        parsed_call_ids: &mut VecDeque<(Uuid, String)>,
         turn_message: &mut String,
     ) -> Vec<(ParsedToolCall, Uuid)> {
+        // The id the parser gave the next call, or a new one.
+        let mut next_id = || {
+            parsed_call_ids
+                .pop_front()
+                .map_or_else(Uuid::new_v4, |(id, _)| id)
+        };
         let calls_to_process_with_ids: Vec<(ParsedToolCall, Uuid)> = match current_group {
             ToolCallGroup::Single(pc) => {
-                vec![(pc, parsed_call_ids.pop_front().unwrap_or_else(Uuid::new_v4))]
+                vec![(pc, next_id())]
             }
             ToolCallGroup::Batch(pcs) => {
                 if let Some(first_tool_name_in_batch) = pcs.first().map(|call| &call.name) {
@@ -323,21 +386,10 @@ impl AgentLoop {
                             turn_message.push_str(&err_msg);
                             Vec::new()
                         } else {
-                            pcs.into_iter()
-                                .map(|pc| {
-                                    let id =
-                                        parsed_call_ids.pop_front().unwrap_or_else(Uuid::new_v4);
-                                    (pc, id)
-                                })
-                                .collect()
+                            pcs.into_iter().map(|pc| (pc, next_id())).collect()
                         }
                     } else {
-                        pcs.into_iter()
-                            .map(|pc| {
-                                let id = parsed_call_ids.pop_front().unwrap_or_else(Uuid::new_v4);
-                                (pc, id)
-                            })
-                            .collect()
+                        pcs.into_iter().map(|pc| (pc, next_id())).collect()
                     }
                 } else {
                     Vec::new()
