@@ -322,6 +322,27 @@ async fn drive(
     run.await.unwrap().unwrap()
 }
 
+/// Runs `agent` until it ends, closing its command channel (as a host that
+/// stopped) at the first event `close` accepts, and returns its task.
+async fn drive_closing(
+    agent: AgentLoop,
+    mut events: mpsc::Receiver<AgentEvent>,
+    commands: mpsc::Sender<UserCommand>,
+    close: impl Fn(&AgentEvent) -> bool,
+) -> Task {
+    let run = tokio::spawn(agent.run());
+    let mut commands = Some(commands);
+    while let Some(event) = timeout(Duration::from_secs(3_600), events.recv())
+        .await
+        .expect("the run stalled")
+    {
+        if close(&event) {
+            drop(commands.take());
+        }
+    }
+    run.await.unwrap().unwrap()
+}
+
 fn no_commands(_: &AgentEvent) -> Vec<UserCommand> {
     Vec::new()
 }
@@ -1046,6 +1067,47 @@ async fn streams_that_end_without_a_final_response() {
             }
         })
         .await;
+        golden.run_ended(&task);
+    }
+    golden.check();
+}
+
+/// A response stopped mid-stream, after partial text and an announced
+/// call: by `CancelTask` (the text is kept, the call rejected, and the loop
+/// ends at once, without another pass) and by a closed command channel (the
+/// task is interrupted, and the loop ends after one more pass start).
+#[tokio::test(start_paused = true)]
+async fn stops_during_a_stream() {
+    let mut golden = Golden::start("stops_during_a_stream");
+    for close in [false, true] {
+        let config = golden_config(ToolCallingMode::Native, &["step"]);
+        let (mut agent, events, commands) =
+            golden_loop(new_task(config), vec![Step::new("step")], true);
+        script(
+            &mut agent,
+            [Ok(futures::stream::iter([
+                Ok(ai::StreamEvent::TextChunk("Starting the step".into())),
+                Ok(ai::StreamEvent::ToolCallStart {
+                    index: 0,
+                    name: "step".into(),
+                }),
+            ])
+            .chain(futures::stream::pending())
+            .boxed())],
+        );
+        let announced = |event: &AgentEvent| matches!(event, AgentEvent::ToolCallInitiated { .. });
+        let task = if close {
+            drive_closing(agent, events, commands, announced).await
+        } else {
+            drive(agent, events, commands, |event| {
+                if announced(event) {
+                    vec![UserCommand::CancelTask]
+                } else {
+                    Vec::new()
+                }
+            })
+            .await
+        };
         golden.run_ended(&task);
     }
     golden.check();

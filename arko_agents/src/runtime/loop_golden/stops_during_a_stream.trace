@@ -1,0 +1,24 @@
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
+E {"AssistantResponseChunk":"Starting the step"}
+E {"ToolCallInitiated":{"tool_call_id":"id2","tool_name":"step"}}
+E {"ToolRejected":{"reason":"The model's response was interrupted before this call finished; it was not run.","tool_call_id":"id2","tool_name":"step"}}
+E {"TaskStateChanged":{"Cancelled":{"reason":"Task cancelled by user."}}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Cancelled":{"reason":"Task cancelled by user."}} task=cc3a0969ecf0c583
+E "TaskStreamEnd"
+--- conversation: 2 messages, system prompt d1669b0441bd8242
+M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"Starting the step"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=5a6d937287fecacf
+E {"AssistantResponseChunk":"Starting the step"}
+E {"ToolCallInitiated":{"tool_call_id":"id5","tool_name":"step"}}
+E {"ToolRejected":{"reason":"The model's response was interrupted before this call finished; it was not run.","tool_call_id":"id5","tool_name":"step"}}
+E {"TaskStateChanged":{"Interrupted":{"reason":"Command channel disconnected during LLM streaming."}}}
+E {"ErrorEncountered":{"error_message":"Command channel disconnected during LLM streaming.","requires_approval_to_retry":false,"tool_call_id":null}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Interrupted":{"reason":"Command channel disconnected during LLM streaming."}} task=ef5ef9bc77d3c7e7
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Interrupted":{"reason":"Command channel disconnected during LLM streaming."}} task=ef5ef9bc77d3c7e7
+E "TaskStreamEnd"
+--- conversation: 2 messages, system prompt d1669b0441bd8242
+M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"Starting the step"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
