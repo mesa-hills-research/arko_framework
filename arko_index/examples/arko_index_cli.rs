@@ -226,6 +226,19 @@ fn write_report_file(walk: &Walk, report: &Report) -> Result<(), Error> {
     }
     Ok(())
 }
+/// SIGINT and SIGTERM: the first stops the watcher after its current batch, a second
+/// exits at once (status 130).
+fn stop_on_signal() -> Result<Arc<AtomicBool>, Error> {
+    let running = Arc::new(AtomicBool::new(true));
+    let flag = running.clone();
+    ctrlc::set_handler(move || {
+        if !flag.swap(false, Ordering::SeqCst) {
+            eprintln!("arko_index: stopped by a second signal");
+            std::process::exit(130);
+        }
+    })?;
+    Ok(running)
+}
 fn rules_changed_note() {
     eprintln!(
         "arko_index: the file selection rules differ from the previous run's (or the state predates recorded rules); the first delta applies the new rules"
@@ -594,9 +607,7 @@ fn run() -> Result<(), Error> {
         }
         #[cfg(target_os = "linux")]
         Some("watch2") if args.len() == 3 => {
-            let running = Arc::new(AtomicBool::new(true));
-            let flag = running.clone();
-            ctrlc::set_handler(move || flag.store(false, Ordering::SeqCst))?;
+            let running = stop_on_signal()?;
             let mut watcher = arko_index::watch2::Watcher2::open_with(
                 Path::new(&args[1]),
                 Path::new(&args[2]),
@@ -641,9 +652,7 @@ fn run() -> Result<(), Error> {
             }
         }
         Some("watch") if args.len() == 3 => {
-            let running = Arc::new(AtomicBool::new(true));
-            let flag = running.clone();
-            ctrlc::set_handler(move || flag.store(false, Ordering::SeqCst))?;
+            let running = stop_on_signal()?;
             let root = Path::new(&args[1]);
             let state = Path::new(&args[2]);
             let mut watcher = open_watch_with(root, state, &options, &walk.rules)?;
