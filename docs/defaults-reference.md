@@ -34,6 +34,12 @@ Defaults of operator notes and graceful stops:
   nothing is timed until a stop is under way: a `StopAwareCommand`'s graces (10 s, then
   5 s after `SIGTERM`) start only then. See
   [Stopping tool calls](reference-map.md#stopping-tool-calls-arko_agents).
+- A stop of one agent run (`Workflow::stop_run`, `stop_agent`) takes the same request,
+  without a wrap-up unless it asks for one, and an intent the host always states
+  (`RunStopIntent::Retire` or `Relaunch`). A stop request in the control folder
+  (`notes::control::request_stop`) defaults to an operator's stop without a wrap-up that
+  retires the runs. The workflow reads the requests every second while agents run, and
+  only those written after it was built. `runctl stop` asks for a 600-second wrap-up.
 
 Defaults of arko_index (see [Defaults (arko_index)](reference-map.md#defaults-arko_index)):
 

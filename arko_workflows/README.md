@@ -284,6 +284,22 @@ See [graceful stop](INDEX.md#graceful-stop) for the wrap-up notice and the
 rules, and the [workflow design guide](../docs/guides/workflow-design.md#make-side-effects-durable)
 for what a resume after a redeploy allows to change.
 
+`stop_run` and `stop_agent` stop one agent run, or one agent's runs, the same
+way while the rest of the workflow runs on: to retire an agent, or to replace it
+with another model once it has saved its work and reported where it stands. The
+host states what it means to do with the run, and the intent is saved:
+`RunStopIntent::Retire` keeps it out of `stopped_runs()` for good, and
+`Relaunch` lists it there for a later `restart`:
+
+```rust
+use arko_workflows::{RunStopIntent, StopRequest};
+
+let request = StopRequest::operator("moving it to Opus 5.5").wrap_up(Duration::from_secs(600));
+workflow.stop_agent("worker-7", request, RunStopIntent::Retire)?;
+```
+
+See [stopping one agent run](INDEX.md#stopping-one-agent-run).
+
 ## Shared memory
 
 Memory tiers are named, access-controlled text stores shared by the agents:
