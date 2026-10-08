@@ -64,6 +64,10 @@ A note is delivered in the user role, labelled with its source, as a refinement 
 
 Keep independent roles independent. A completion verifier's review gets a note only when the note names it, and judges the completion without the target's notes: when a note changes what counts as done ("skip the appendix"), address it to the verifier too, or it may keep rejecting completions that follow the note. Mark other roles that must not be steered, such as a checker or an independent replicator, with `notes_by_name_only`. Since an agent that receives a note can pass it on in a message, restrict whom such a role can hear from with the `MessagingPolicy`; the workflow logs a warning when a note can reach such an agent that way.
 
+### Capacity while running
+
+A long-running workflow that fans work out to many agents should let its operator change how many agents run, and which models they use, while it runs. Expose that through the same channel as notes, for example `<wf> workers RUN 32`, and have the scheduler read it at the top of its loop. New agents start at once, surplus agents finish their current work before they retire, and the change goes into the run's saved state so a resume keeps it. Treat the model mix the same way: a run that can add two agents of another model beside its main ones gets a second perspective on stuck work without a rebuild. Otherwise every change in capacity means a stop and a restart, which redoes interrupted host work, and a changed agent configuration also makes the saved runs unresumable (see [Make side effects durable](#make-side-effects-durable)).
+
 ### Freshness
 
 When agents can read and write the same files, memory tiers, or other resources concurrently, enable context-freshness tracking. A freshness conflict means an agent is about to act on data that another actor changed after it read it. Decide whether the agent should reread, merge, retry, or stop for review.
@@ -146,6 +150,7 @@ Build and validate the workflow before making provider calls. The complete workf
 - Each memory tier has an owner, access policy, write mode, and size limit where needed.
 - Messages carry handoff information, while durable facts live in memory or files.
 - A run someone steers while it runs takes operator notes instead of configuration changes, and independent roles get only the notes that name them.
+- A long run's capacity and model mix can change while it runs, through the operator channel.
 - Shared resources have freshness tracking or an explicit conflict policy.
 - Each agent has only the tools and context required for its role. Roles that meet large files read them through the terminal; caps on tool results are set only where a role needs a tighter budget than the overflow guard gives.
 - Completion verification checks the artifact, not only the agent's summary.
