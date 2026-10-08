@@ -55,6 +55,10 @@ struct Meta {
     total: u64,
     average_bits: u64,
     terms: u64,
+    /// The generation has embeddings (`dense.json` and `dense/`). Absent before this
+    /// was recorded.
+    #[serde(default)]
+    dense: bool,
 }
 
 fn put_varint(out: &mut Vec<u8>, mut v: u64) {
@@ -778,6 +782,7 @@ pub fn build(
         total,
         average_bits: average.to_bits(),
         terms: nterms,
+        dense: dense_stats.is_some(),
     };
     atomic_write(&dir, "meta.json", &serde_json::to_vec(&meta)?)?;
     crate::files::sync_dir(&state_dir)?;
@@ -942,9 +947,14 @@ impl Scores {
 
 /// The first doc and the path of every file with chunks (`files.dat`).
 fn read_files(dir: &Path) -> Result<Vec<(u32, String)>, Error> {
+    // The kind stays: a search that finds the file gone (a build removed the
+    // generation) starts over.
     let raw = std::fs::read(dir.join("files.dat")).map_err(|e| {
-        format!(
-            "{e}: this index has no file table (built by an earlier version); rebuild it to filter"
+        std::io::Error::new(
+            e.kind(),
+            format!(
+                "{e}: this index has no file table (built by an earlier version); rebuild it to filter"
+            ),
         )
     })?;
     let mut c = crate::fsio::Cursor::new(&raw);
@@ -978,7 +988,9 @@ impl Generation {
     pub(crate) fn dense_info(&self) -> Result<Option<DenseIndexInfo>, Error> {
         match std::fs::read(self.dir.join("dense.json")) {
             Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            // Missing from a generation built with embeddings: a build removed the
+            // generation, and the error makes a search start over on the new one.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !self.meta.dense => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
@@ -1083,7 +1095,20 @@ impl Generation {
 /// The embeddings of the current generation (model, render version, coverage), or
 /// `None` when it was built without them.
 pub fn dense_info(state_dir: &Path) -> Result<Option<DenseIndexInfo>, Error> {
-    Generation::open(state_dir)?.dense_info()
+    // A build may publish a new generation and remove the one being read: start over.
+    let current = || std::fs::read_to_string(state_dir.join("CURRENT2")).ok();
+    for attempt in 0.. {
+        let before = current();
+        match Generation::open(state_dir).and_then(|g| g.dense_info()) {
+            Err(e)
+                if attempt < 2
+                    && e.downcast_ref::<std::io::Error>()
+                        .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                    && current() != before => {}
+            result => return result,
+        }
+    }
+    unreachable!()
 }
 
 /// The ten best chunks for `query` by BM25 (lexical). [`hybrid::search`](crate::hybrid::search)
@@ -1096,4 +1121,45 @@ pub fn search(state_dir: &Path, query: &str) -> Result<Vec<Chunk>, Error> {
         .map(|(d, _)| d)
         .collect();
     generation.chunks(&best)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn not_found(e: Error) -> bool {
+        e.downcast_ref::<std::io::Error>()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+    }
+
+    /// Reads of a generation that a build has since removed fail with "not found", so a
+    /// search starts over on the new generation instead of reporting that the index
+    /// has no embeddings or no file table.
+    #[test]
+    fn reads_of_a_removed_generation_are_not_found() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.rs"), "fn journal() {}\n").unwrap();
+        let embedder = crate::dense::HashEmbedder::new(16);
+        let dense = BuildOptions::default().with_dense(DenseBuild::new(&embedder));
+        let options = Options::default();
+        build(root.path(), state.path(), &options, &dense).unwrap();
+        let old = Generation::open(state.path()).unwrap();
+        assert!(old.meta.dense && old.dense_info().unwrap().is_some());
+        build(root.path(), state.path(), &options, &dense).unwrap();
+        assert!(!old.dir.exists());
+        assert!(not_found(old.dense_info().unwrap_err()));
+        assert!(not_found(read_files(&old.dir).unwrap_err()));
+        // A generation without embeddings has none.
+        build(
+            root.path(),
+            state.path(),
+            &options,
+            &BuildOptions::default(),
+        )
+        .unwrap();
+        let lexical = Generation::open(state.path()).unwrap();
+        assert!(!lexical.meta.dense && lexical.dense_info().unwrap().is_none());
+        assert!(dense_info(state.path()).unwrap().is_none());
+    }
 }
