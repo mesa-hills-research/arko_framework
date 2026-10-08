@@ -286,7 +286,7 @@ impl AgentLoop {
                     message.role == ai::Role::Assistant && message.tool_calls.is_empty()
                 });
         if ends_on_assistant_text {
-            self.add_runtime_message("Continue the task from where your previous response ended.")?;
+            self.add_runtime_message(CONTINUE_FROM_PARTIAL_TURN)?;
         }
         Ok(())
     }

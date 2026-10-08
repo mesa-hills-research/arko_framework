@@ -3,15 +3,15 @@
 
 use super::*;
 
-/// The runtime's notes on a response it can't use, added to the
-/// conversation before it asks again; see
-/// [`AgentLoop::handle_model_output_failure`].
 /// The result of a tool call made while a handover report is due.
 pub(super) const HANDOVER_REPORT_DUE: &str = "This call was not run: your handover report is due. Reply with the report as plain text, without calling a tool (call complete_task instead if the task is done).";
 
 /// The note after a reply to a report request that had no text.
 pub(super) const NO_HANDOVER_REPORT: &str = "Your reply had no text, so no handover report was received. Reply with the handover report as plain text, without calling a tool.";
 
+/// The runtime's notes on a response it can't use, added to the
+/// conversation before it asks again; see
+/// [`AgentLoop::handle_model_output_failure`].
 pub(super) const NO_NATIVE_TOOL_CALL: &str = "Your response did not call a tool, so the task is still open. Continue with your tools, or call complete_task with a summary if the task is finished.";
 pub(super) const NO_TEXT_TOOL_CALL: &str = "Your response did not contain a tool call. Use one of your tools in the format the system prompt describes, or complete_task if the task is finished.";
 
@@ -53,6 +53,27 @@ pub(super) const TASK_SUSPENDED_CALL: &str = "The task was suspended before this
 /// arrived; see [`AgentLoop::run_group`].
 pub(super) const STOPPED_BY_CANCEL: &str = "The task was cancelled while this call was running, so the call was stopped before it finished.";
 pub(super) const STOPPED_BY_SUSPEND: &str = "The task was suspended while this call was running, so the call was stopped before it finished. Call it again if it is still needed.";
+
+/// The result of a call the host rejected without giving a reason.
+pub(super) const REJECTED_BY_USER: &str = "Rejected by user";
+/// A call of a batch the host decided without a decision for it: the
+/// `ToolRejected` reason, and its result (native) or the reason in its
+/// result (output-based).
+pub(super) const NO_DECISION: &str = "No decision provided";
+pub(super) const NO_DECISION_CALL: &str = "No decision provided, implicitly rejected";
+pub(super) const NO_DECISION_TEXT_CALL: &str = "Implicitly rejected: No decision provided.";
+
+/// The runtime's request to continue after a decision that leaves no
+/// message of its own (a decision on a pause, say).
+pub(super) const CONTINUE_AFTER_DECISION: &str =
+    "Please continue with the task based on the previous actions.";
+/// The runtime's request to continue after an output-based turn that left
+/// no results (its calls returned nothing).
+pub(super) const CONTINUE_WITH_A_TOOL: &str = "Please continue with the task or use the 'complete_task' tool if finished. Ensure you use a tool.";
+/// The request to continue a conversation that ends on an assistant turn
+/// (output kept from an interrupted stream, or a kept refusal).
+pub(super) const CONTINUE_FROM_PARTIAL_TURN: &str =
+    "Continue the task from where your previous response ended.";
 
 /// Results of calls held behind a call awaiting approval (they never needed
 /// approval themselves) when the wait ended without a decision.

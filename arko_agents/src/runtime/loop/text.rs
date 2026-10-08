@@ -531,9 +531,7 @@ impl AgentLoop {
             && !self.task.current_state.is_awaiting_approval()
             && final_generation_response.is_some()
         {
-            self.add_runtime_message(
-                "Please continue with the task or use the 'complete_task' tool if finished. Ensure you use a tool.",
-            )?;
+            self.add_runtime_message(CONTINUE_WITH_A_TOOL)?;
         }
         Ok(())
     }

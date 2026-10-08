@@ -316,9 +316,7 @@ impl AgentLoop {
                 self.task.increment_user_message_count();
                 self.reset_llm_recovery();
             } else {
-                self.add_runtime_message(
-                    "Please continue with the task based on the previous actions.",
-                )?;
+                self.add_runtime_message(CONTINUE_AFTER_DECISION)?;
                 self.reset_llm_recovery();
             }
         }

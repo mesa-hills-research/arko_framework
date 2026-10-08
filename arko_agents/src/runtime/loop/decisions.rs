@@ -190,7 +190,7 @@ impl AgentLoop {
         if self.is_native_mode() {
             let mut results = Vec::new();
             if let Some(ai_call) = self.task.pending_native_tool_calls.remove(&tool_call_id) {
-                let reason_str = reason.as_deref().unwrap_or("Rejected by user");
+                let reason_str = reason.as_deref().unwrap_or(REJECTED_BY_USER);
                 results.push((
                     self.turn_position(&ai_call),
                     ai::ToolResult::error_from_tool_call(&ai_call, reason_str),
@@ -314,7 +314,7 @@ impl AgentLoop {
                         reason: (*reason).clone(),
                     })
                     .await?;
-                    let reason_str = reason.as_deref().unwrap_or("Rejected by user");
+                    let reason_str = reason.as_deref().unwrap_or(REJECTED_BY_USER);
                     results.push((
                         index,
                         ai::ToolResult::error_from_tool_call(&ai_call, reason_str),
@@ -324,15 +324,12 @@ impl AgentLoop {
                     self.emit_event(AgentEvent::ToolRejected {
                         tool_call_id: pending_call_info.tool_call_id,
                         tool_name: pending_call_info.tool_name.clone(),
-                        reason: Some("No decision provided".to_string()),
+                        reason: Some(NO_DECISION.to_string()),
                     })
                     .await?;
                     results.push((
                         index,
-                        ai::ToolResult::error_from_tool_call(
-                            &ai_call,
-                            "No decision provided, implicitly rejected",
-                        ),
+                        ai::ToolResult::error_from_tool_call(&ai_call, NO_DECISION_CALL),
                     ));
                 }
             }
@@ -404,7 +401,7 @@ impl AgentLoop {
                     self.emit_event(AgentEvent::ToolRejected {
                         tool_call_id: pending_call_info.tool_call_id,
                         tool_name: pending_call_info.tool_name.clone(),
-                        reason: Some("No decision provided".to_string()),
+                        reason: Some(NO_DECISION.to_string()),
                     })
                     .await?;
                     let pb = PromptBuilder::new(
@@ -415,7 +412,7 @@ impl AgentLoop {
                     );
                     self.record_text_result(pb.format_tool_rejection_as_user_message(
                         &pending_call_info.tool_name,
-                        Some("Implicitly rejected: No decision provided."),
+                        Some(NO_DECISION_TEXT_CALL),
                     ))
                     .await;
                 }
