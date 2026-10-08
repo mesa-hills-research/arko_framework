@@ -365,7 +365,9 @@ identifier components (snake_case parts and camelCase humps), so `retryPolicy` m
 `CURRENT2`, so readers keep the previous generation until the switch. A build that fails
 before publishing removes the directory it was writing. Its build memory is bounded:
 postings accumulate up to a budget (the CLI's default is 256 MB,
-`ARKO_INDEX_INDEX_MEM_MB`) and then spill to sorted runs that are merged. The watchers
+`ARKO_INDEX_INDEX_MEM_MB`) and then spill to sorted runs that are merged. A build with
+embeddings also opens the vector store for writing, which loads its codes (1 KB per
+chunk with int8 codes at 1,024 dimensions, 4 KB with f32). The watchers
 maintain chunk snapshots, not an index: rerun `index2` to refresh search (with
 embeddings, a rerun embeds only the chunks whose text changed).
 
@@ -452,9 +454,12 @@ build that fails before publishing (and removes its generation) leaves only addi
 A search skips vectors its generation lacks, fetching as many more as the store holds
 beyond the generation's, and starts over when a build switched generations under it.
 The next build removes the extra vectors. Stores of other models or settings are
-removed after a switch, and a build replaces a store it cannot use (damaged, or in a
-format this version cannot read) with a new one, taking the vectors from the embedding
-cache.
+removed after a switch (renamed to `vectors-removed-...` first, so a removal that stops
+halfway leaves nothing a build opens), and a build replaces a store it cannot use
+(damaged, missing a file, or in a format this version cannot read) with a new one,
+taking the vectors from the embedding cache. Until that build fills it, a search
+refuses the new store, which holds fewer vectors than the generation, and asks for a
+rebuild.
 
 **Hybrid fusion.** `hybrid::search` takes the best 50 chunks (`candidates`) from each
 side and fuses the rankings with reciprocal rank fusion by default: a chunk scores
@@ -771,9 +776,10 @@ this version loads and searches lexically, and filters need its `files.dat` (reb
 filter). Saved files with embeddings carry versions (`dense.json` 1, the generation's
 `dense.json` 2, `cache.json` 1, and mhr_vector's own format versions) and new fields get
 serde defaults. A generation whose vectors an earlier version stored (its `dense.json`
-is version 1) searches lexically, and dense search asks for a rebuild, which takes the
+is version 1) searches lexically with `--mode lexical`, and dense and hybrid search
+(the CLI's default) ask for a rebuild before embedding the query. The rebuild takes the
 vectors from the embedding cache. A build replaces a vector store it cannot use
-(damaged, or in a format this version cannot read) with a new one. The SQLite
+(damaged, missing a file, or in a format this version cannot read) with a new one. The SQLite
 databases of the earlier, model-chunked arko_index are not readable by this crate.
 
 ## Platforms

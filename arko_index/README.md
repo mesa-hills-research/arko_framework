@@ -46,8 +46,9 @@ arko_index = { path = "../arko_index" }
 
 The library needs no C compiler: it parses with
 [mhr_tree_sitter](https://github.com/mesa-hills-research/mhr_tree_sitter), a pure-Rust port
-of tree-sitter, and stores vectors with mhr_vector, also pure Rust. Its examples use arko_ai for Voyage, a dev-dependency whose dependencies need
-one, so building the tests and examples does too. Linux is the primary platform. macOS has
+of tree-sitter, and stores vectors with mhr_vector, also pure Rust. Its examples use arko_ai
+for Voyage, a dev-dependency whose dependencies need one, so building the tests and examples
+does too. Linux is the primary platform. macOS has
 everything but `watch2`, and Windows compiles (see [Platforms](../docs/arko_index-reference.md#platforms)).
 
 ## Usage
