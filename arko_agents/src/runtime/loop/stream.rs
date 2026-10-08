@@ -284,15 +284,12 @@ impl AgentLoop {
     ) -> Result<bool, ArkoAgentsError> {
         match maybe_cmd {
             Some(UserCommand::CancelTask) => {
-                if !current_assistant_response_text_for_conv.is_empty()
-                    && final_generation_response.is_none()
-                {
-                    self.task
-                        .conversation
-                        .add_assistant_message(current_assistant_response_text_for_conv);
-                }
-                self.reject_announced_calls(native_stream_call_ids, INTERRUPTED_CALL)
-                    .await?;
+                self.keep_partial_output(
+                    current_assistant_response_text_for_conv,
+                    final_generation_response,
+                    native_stream_call_ids,
+                )
+                .await?;
                 self.task.set_state(TaskState::Cancelled {
                     reason: CANCELLED_BY_USER.to_string(),
                 });
@@ -303,15 +300,12 @@ impl AgentLoop {
                 return Ok(true);
             }
             Some(UserCommand::SuspendTask) => {
-                if !current_assistant_response_text_for_conv.is_empty()
-                    && final_generation_response.is_none()
-                {
-                    self.task
-                        .conversation
-                        .add_assistant_message(current_assistant_response_text_for_conv);
-                }
-                self.reject_announced_calls(native_stream_call_ids, INTERRUPTED_CALL)
-                    .await?;
+                self.keep_partial_output(
+                    current_assistant_response_text_for_conv,
+                    final_generation_response,
+                    native_stream_call_ids,
+                )
+                .await?;
                 self.emit_event(AgentEvent::TaskStateChanged(
                     self.task.current_state.clone(),
                 ))
@@ -325,15 +319,12 @@ impl AgentLoop {
             Some(UserCommand::RequestHandover) => self.note_handover_request(),
             Some(_) => {}
             None => {
-                if !current_assistant_response_text_for_conv.is_empty()
-                    && final_generation_response.is_none()
-                {
-                    self.task
-                        .conversation
-                        .add_assistant_message(current_assistant_response_text_for_conv);
-                }
-                self.reject_announced_calls(native_stream_call_ids, INTERRUPTED_CALL)
-                    .await?;
+                self.keep_partial_output(
+                    current_assistant_response_text_for_conv,
+                    final_generation_response,
+                    native_stream_call_ids,
+                )
+                .await?;
                 self.stop_requested = true;
                 self.interrupt("Command channel disconnected during LLM streaming.".to_string())
                     .await?;
@@ -341,6 +332,22 @@ impl AgentLoop {
             }
         }
         Ok(false)
+    }
+
+    /// A stream the host stopped: the text it delivered is kept as the
+    /// turn (unless a final response holds it), and the calls it announced
+    /// are rejected.
+    async fn keep_partial_output(
+        &mut self,
+        text: &str,
+        final_generation_response: &Option<ai::GenerationResponse>,
+        native_stream_call_ids: &mut HashMap<usize, (Uuid, String)>,
+    ) -> Result<(), ArkoAgentsError> {
+        if !text.is_empty() && final_generation_response.is_none() {
+            self.task.conversation.add_assistant_message(text);
+        }
+        self.reject_announced_calls(native_stream_call_ids, INTERRUPTED_CALL)
+            .await
     }
 
     /// A response's `End`: its usage and the request it answered are
