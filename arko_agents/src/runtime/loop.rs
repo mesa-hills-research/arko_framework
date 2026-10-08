@@ -2896,45 +2896,9 @@ impl AgentLoop {
             tokio::select! {
                 biased;
                 maybe_cmd = self.command_receiver.recv() => {
-                    match maybe_cmd {
-                        Some(UserCommand::CancelTask) => {
-                            if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
-                                self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
-                            }
-                            self.reject_announced_calls(&mut native_stream_call_ids, INTERRUPTED_CALL).await?;
-                            self.task.set_state(TaskState::Cancelled { reason: CANCELLED_BY_USER.to_string() });
-                            self.emit_event(AgentEvent::TaskStateChanged(self.task.current_state.clone())).await?;
-                            had_stream_error = true;
-                            break;
-                        }
-                        Some(UserCommand::SuspendTask) => {
-                            if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
-                                self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
-                            }
-                            self.reject_announced_calls(&mut native_stream_call_ids, INTERRUPTED_CALL).await?;
-                            self.emit_event(AgentEvent::TaskStateChanged(self.task.current_state.clone())).await?;
-                            self.stop_requested = true;
-                            had_stream_error = true;
-                            break;
-                        }
-                        Some(UserCommand::InjectContext { content }) => {
-                            self.queue_context_injection(content);
-                        }
-                        Some(UserCommand::RequestHandover) => self.note_handover_request(),
-                        Some(_) => {}
-                        None => {
-                            if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
-                                self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
-                            }
-                            self.reject_announced_calls(&mut native_stream_call_ids, INTERRUPTED_CALL).await?;
-                            self.stop_requested = true;
-                            let reason = "Command channel disconnected during LLM streaming.".to_string();
-                            self.task.set_state(TaskState::Interrupted { reason: reason.clone() });
-                            self.emit_event(AgentEvent::TaskStateChanged(self.task.current_state.clone())).await?;
-                            self.emit_event(AgentEvent::ErrorEncountered { error_message: reason, requires_approval_to_retry: false, tool_call_id: None, error_kind: None }).await?;
-                            had_stream_error = true;
-                            break;
-                        }
+                    if self.on_stream_command(maybe_cmd, &current_assistant_response_text_for_conv, &final_generation_response, &mut native_stream_call_ids).await? {
+                        had_stream_error = true;
+                        break;
                     }
                 }
 
@@ -2971,62 +2935,8 @@ impl AgentLoop {
                             streamed_refusal = Some(refusal);
                         }
                         Ok(Some(ai::StreamEvent::End(boxed_generation_response))) => {
-                            let mut generation_response = *boxed_generation_response;
-                            if self.current_request_is_fallback {
-                                self.prepare_fallback_response(&mut generation_response);
-                            }
-                            self.task.usage_history.push(generation_response.usage.clone());
-                            // The request was answered: its usage calibrates
-                            // the estimate of the next one.
-                            self.answered_request = self.sent_request.take();
-                            if let Some(ratio) = self.answered_request.and_then(|mark| {
-                                result_budget::calibrated_ratio(mark.bytes, generation_response.usage.input_tokens)
-                            }) {
-                                self.bytes_per_token = ratio;
-                            }
-                            self.overflow_recoveries = 0;
-                            self.emit_event(AgentEvent::UsageReported(generation_response.usage.clone())).await?;
-                            self.record_and_emit_model_call_usage(generation_response.model_call_usage.clone()).await?;
-                            if generation_response.stop_reason == ai::StopReason::MaxTokens {
-                                let usage = &generation_response.model_call_usage;
-                                log::warn!("Task {}: the response of {} ended at its output-token limit.", self.task.id, usage.model);
-                                self.emit_event(AgentEvent::OutputTokenLimitReached {
-                                    model: usage.served_model.clone().unwrap_or_else(|| usage.model.clone()),
-                                    output_tokens: generation_response.usage.output_tokens,
-                                }).await?;
-                            }
-                            // A refused turn is reported, never retried
-                            // unchanged, and never treated as a turn that
-                            // failed to call a tool.
-                            if let Some(refusal) = generation_response.refusal.clone() {
-                                // The call's routing token still belongs
-                                // to this turn, as for any other response.
-                                if let Some(token) = &generation_response.openai_turn_state {
-                                    self.task.conversation.record_openai_turn_state(token);
-                                }
-                                if let Some(ref mut p) = parser {
-                                    raw_events_for_turn.extend(p.finalize());
-                                }
-                                let plain_text = parser.is_some().then(|| parsed_plain_text(&raw_events_for_turn));
-                                self.reject_announced_calls(&mut native_stream_call_ids, REFUSED_TURN_CALL).await?;
-                                self.handle_refusal(refusal, generation_response.message, plain_text).await?;
+                            if self.on_response_end(*boxed_generation_response, &mut parser, &mut raw_events_for_turn, &mut native_stream_call_ids, &mut final_generation_response).await? {
                                 had_stream_error = true;
-                                break;
-                            }
-                            // A completed turn ends any fallback after a
-                            // refusal and answers any refused input.
-                            self.task.fallback_for = None;
-                            self.task.refused_input = None;
-                            // The provider answered: an outage is over, so
-                            // its elapsed budget no longer runs (a response
-                            // the runtime can't use still counts as an
-                            // attempt).
-                            self.recovery_started = None;
-                            self.paused_recovery_elapsed = None;
-                            self.task.conversation.add_assistant_message_from_response(generation_response.clone());
-                            final_generation_response = Some(generation_response);
-                            if let Some(ref mut p) = parser {
-                                raw_events_for_turn.extend(p.finalize());
                             }
                             break;
                         }
@@ -3093,6 +3003,180 @@ impl AgentLoop {
             parser_events: raw_events_for_turn,
             announced: native_stream_call_ids,
         }))
+    }
+
+    /// A command that arrived while a response streamed. `CancelTask`,
+    /// `SuspendTask` or a closed channel stops the stream: the partial
+    /// text is kept, the calls it announced are rejected, and `true` says
+    /// the pass ends. Context and handover requests are taken; other
+    /// commands are ignored.
+    async fn on_stream_command(
+        &mut self,
+        maybe_cmd: Option<UserCommand>,
+        current_assistant_response_text_for_conv: &str,
+        final_generation_response: &Option<ai::GenerationResponse>,
+        native_stream_call_ids: &mut HashMap<usize, (Uuid, String)>,
+    ) -> Result<bool, ArkoAgentsError> {
+        match maybe_cmd {
+            Some(UserCommand::CancelTask) => {
+                if !current_assistant_response_text_for_conv.is_empty()
+                    && final_generation_response.is_none()
+                {
+                    self.task
+                        .conversation
+                        .add_assistant_message(current_assistant_response_text_for_conv);
+                }
+                self.reject_announced_calls(native_stream_call_ids, INTERRUPTED_CALL)
+                    .await?;
+                self.task.set_state(TaskState::Cancelled {
+                    reason: CANCELLED_BY_USER.to_string(),
+                });
+                self.emit_event(AgentEvent::TaskStateChanged(
+                    self.task.current_state.clone(),
+                ))
+                .await?;
+                return Ok(true);
+            }
+            Some(UserCommand::SuspendTask) => {
+                if !current_assistant_response_text_for_conv.is_empty()
+                    && final_generation_response.is_none()
+                {
+                    self.task
+                        .conversation
+                        .add_assistant_message(current_assistant_response_text_for_conv);
+                }
+                self.reject_announced_calls(native_stream_call_ids, INTERRUPTED_CALL)
+                    .await?;
+                self.emit_event(AgentEvent::TaskStateChanged(
+                    self.task.current_state.clone(),
+                ))
+                .await?;
+                self.stop_requested = true;
+                return Ok(true);
+            }
+            Some(UserCommand::InjectContext { content }) => {
+                self.queue_context_injection(content);
+            }
+            Some(UserCommand::RequestHandover) => self.note_handover_request(),
+            Some(_) => {}
+            None => {
+                if !current_assistant_response_text_for_conv.is_empty()
+                    && final_generation_response.is_none()
+                {
+                    self.task
+                        .conversation
+                        .add_assistant_message(current_assistant_response_text_for_conv);
+                }
+                self.reject_announced_calls(native_stream_call_ids, INTERRUPTED_CALL)
+                    .await?;
+                self.stop_requested = true;
+                let reason = "Command channel disconnected during LLM streaming.".to_string();
+                self.task.set_state(TaskState::Interrupted {
+                    reason: reason.clone(),
+                });
+                self.emit_event(AgentEvent::TaskStateChanged(
+                    self.task.current_state.clone(),
+                ))
+                .await?;
+                self.emit_event(AgentEvent::ErrorEncountered {
+                    error_message: reason,
+                    requires_approval_to_retry: false,
+                    tool_call_id: None,
+                    error_kind: None,
+                })
+                .await?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// A response's `End`: its usage and the request it answered are
+    /// recorded and reported, then a refused turn is handled as a refusal
+    /// (`true`: the pass ends), and any other turn joins the conversation
+    /// as the final response.
+    async fn on_response_end(
+        &mut self,
+        mut generation_response: ai::GenerationResponse,
+        parser: &mut Option<ToolCallParser>,
+        raw_events_for_turn: &mut Vec<RawParserEvent>,
+        native_stream_call_ids: &mut HashMap<usize, (Uuid, String)>,
+        final_generation_response: &mut Option<ai::GenerationResponse>,
+    ) -> Result<bool, ArkoAgentsError> {
+        if self.current_request_is_fallback {
+            self.prepare_fallback_response(&mut generation_response);
+        }
+        self.task
+            .usage_history
+            .push(generation_response.usage.clone());
+        // The request was answered: its usage calibrates
+        // the estimate of the next one.
+        self.answered_request = self.sent_request.take();
+        if let Some(ratio) = self.answered_request.and_then(|mark| {
+            result_budget::calibrated_ratio(mark.bytes, generation_response.usage.input_tokens)
+        }) {
+            self.bytes_per_token = ratio;
+        }
+        self.overflow_recoveries = 0;
+        self.emit_event(AgentEvent::UsageReported(generation_response.usage.clone()))
+            .await?;
+        self.record_and_emit_model_call_usage(generation_response.model_call_usage.clone())
+            .await?;
+        if generation_response.stop_reason == ai::StopReason::MaxTokens {
+            let usage = &generation_response.model_call_usage;
+            log::warn!(
+                "Task {}: the response of {} ended at its output-token limit.",
+                self.task.id,
+                usage.model
+            );
+            self.emit_event(AgentEvent::OutputTokenLimitReached {
+                model: usage
+                    .served_model
+                    .clone()
+                    .unwrap_or_else(|| usage.model.clone()),
+                output_tokens: generation_response.usage.output_tokens,
+            })
+            .await?;
+        }
+        // A refused turn is reported, never retried
+        // unchanged, and never treated as a turn that
+        // failed to call a tool.
+        if let Some(refusal) = generation_response.refusal.clone() {
+            // The call's routing token still belongs
+            // to this turn, as for any other response.
+            if let Some(token) = &generation_response.openai_turn_state {
+                self.task.conversation.record_openai_turn_state(token);
+            }
+            if let Some(ref mut p) = *parser {
+                raw_events_for_turn.extend(p.finalize());
+            }
+            let plain_text = parser
+                .is_some()
+                .then(|| parsed_plain_text(raw_events_for_turn));
+            self.reject_announced_calls(native_stream_call_ids, REFUSED_TURN_CALL)
+                .await?;
+            self.handle_refusal(refusal, generation_response.message, plain_text)
+                .await?;
+            return Ok(true);
+        }
+        // A completed turn ends any fallback after a
+        // refusal and answers any refused input.
+        self.task.fallback_for = None;
+        self.task.refused_input = None;
+        // The provider answered: an outage is over, so
+        // its elapsed budget no longer runs (a response
+        // the runtime can't use still counts as an
+        // attempt).
+        self.recovery_started = None;
+        self.paused_recovery_elapsed = None;
+        self.task
+            .conversation
+            .add_assistant_message_from_response(generation_response.clone());
+        *final_generation_response = Some(generation_response);
+        if let Some(ref mut p) = *parser {
+            raw_events_for_turn.extend(p.finalize());
+        }
+        Ok(false)
     }
 
     /// Runs the agent loop to completion.
