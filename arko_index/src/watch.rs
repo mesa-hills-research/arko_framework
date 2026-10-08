@@ -85,7 +85,10 @@ impl CachedFile {
         if self.hash != file.hash || self.chunks.len() != self.fingerprints.len() {
             return false;
         }
-        let mut end = 0;
+        // The chunks cover the file from the end of its metadata region (Markdown front
+        // matter) on.
+        let mut end =
+            crate::syntax::metadata_region(Path::new(path), &file.text).map_or(0, |r| r.end);
         for c in &self.chunks {
             if c.path != path
                 || c.start_byte != end
@@ -630,6 +633,23 @@ mod cache_tests {
         let mut w = Watcher::open(root.path(), state.path(), &Options::default()).unwrap();
         assert_eq!(work(), (0, 0));
         assert!(w.next_change(Duration::ZERO).unwrap().is_none());
+    }
+    #[test]
+    fn reopen_reuses_the_cache_of_markdown_files_with_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let r = root.path();
+        std::fs::write(
+            r.join("page.md"),
+            "---\ntitle: Page\n---\n# Page\n\nText.\n",
+        )
+        .unwrap();
+        std::fs::write(r.join("only.md"), "---\ntitle: Only metadata\n---\n").unwrap();
+        std::fs::write(r.join("doc.mdx"), "import X from './x'\n\n# Doc\n").unwrap();
+        drop(Watcher::open(r, state.path(), &Options::default()).unwrap());
+        reset_work();
+        drop(Watcher::open(r, state.path(), &Options::default()).unwrap());
+        assert_eq!(work(), (0, 0));
     }
     #[test]
     fn a_failed_parser_is_a_report_warning_while_the_file_is_unchanged() {
