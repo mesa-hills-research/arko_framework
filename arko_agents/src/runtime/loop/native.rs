@@ -656,26 +656,18 @@ impl AgentLoop {
 
         // The path parameter that forces an approval.
         let mut outside_workspace = None;
-        let path_rejection = match self.check_path_parameters(&tool_definition, &params_map) {
-            PathCheck::Inside => None,
-            PathCheck::Invalid(reason) => Some(reason),
-            PathCheck::Outside(param_name) => {
-                match self
-                    .task
-                    .agent_config
-                    .get_path_safety_policy(&ai_tool_call.name)
-                {
-                    PathSafetyPolicy::AutoReject => Some(format!(
-                        "Path for parameter '{param_name}' is outside the workspace."
-                    )),
-                    PathSafetyPolicy::RequireApproval => {
-                        outside_workspace = Some(param_name);
-                        None
-                    }
-                    PathSafetyPolicy::AutoApprove => None,
+        let path_rejection =
+            match self.path_verdict(&ai_tool_call.name, &tool_definition, &params_map) {
+                PathVerdict::Allowed => None,
+                PathVerdict::NeedsApproval(param_name) => {
+                    outside_workspace = Some(param_name);
+                    None
                 }
-            }
-        };
+                PathVerdict::Outside(param_name) => Some(format!(
+                    "Path for parameter '{param_name}' is outside the workspace."
+                )),
+                PathVerdict::Invalid(reason) => Some(reason),
+            };
         // A rejected call gets this one result and is not run.
         if let Some(reason) = path_rejection {
             self.emit_event(AgentEvent::ToolRejected {

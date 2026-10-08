@@ -410,30 +410,25 @@ impl AgentLoop {
 
         // The path parameter that forces an approval.
         let mut outside_workspace = None;
-        let path_rejection = match self
-            .check_path_parameters(&tool_definition, &parsed_tool_call_ref.parameters)
-        {
-            PathCheck::Inside => None,
-            PathCheck::Invalid(reason) => Some(crate::tool::ToolError::ExecutionFailed(reason)),
-            PathCheck::Outside(param_name) => match self
-                .task
-                .agent_config
-                .get_path_safety_policy(&parsed_tool_call_ref.name)
-            {
-                PathSafetyPolicy::AutoReject => Some(crate::tool::ToolError::PathAccessRejected {
-                    param_name,
-                    workspace_path: self
-                        .task
-                        .current_working_directory
-                        .to_string_lossy()
-                        .to_string(),
-                }),
-                PathSafetyPolicy::RequireApproval => {
-                    outside_workspace = Some(param_name);
-                    None
-                }
-                PathSafetyPolicy::AutoApprove => None,
-            },
+        let path_rejection = match self.path_verdict(
+            &parsed_tool_call_ref.name,
+            &tool_definition,
+            &parsed_tool_call_ref.parameters,
+        ) {
+            PathVerdict::Allowed => None,
+            PathVerdict::NeedsApproval(param_name) => {
+                outside_workspace = Some(param_name);
+                None
+            }
+            PathVerdict::Outside(param_name) => Some(crate::tool::ToolError::PathAccessRejected {
+                param_name,
+                workspace_path: self
+                    .task
+                    .current_working_directory
+                    .to_string_lossy()
+                    .to_string(),
+            }),
+            PathVerdict::Invalid(reason) => Some(crate::tool::ToolError::ExecutionFailed(reason)),
         };
         if let Some(tool_error) = path_rejection {
             let error_message_for_llm = self

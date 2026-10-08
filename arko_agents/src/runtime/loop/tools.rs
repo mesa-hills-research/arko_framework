@@ -30,6 +30,21 @@ pub(super) enum PathCheck {
     Invalid(String),
 }
 
+/// A call's paths under the path-safety policy; see
+/// [`AgentLoop::path_verdict`].
+pub(super) enum PathVerdict {
+    /// The paths don't stop the call.
+    Allowed,
+    /// This parameter's path is outside the workspace, and the policy asks
+    /// for approval.
+    NeedsApproval(String),
+    /// This parameter's path is outside the workspace, and the policy
+    /// rejects the call.
+    Outside(String),
+    /// A path couldn't be judged; the call is rejected with this reason.
+    Invalid(String),
+}
+
 /// Tool names excluded from result interception because their results
 /// carry semantic meaning used directly by the runtime (task state
 /// transitions, user-facing questions, etc.).
@@ -389,6 +404,29 @@ impl AgentLoop {
             }
         }
         PathCheck::Inside
+    }
+
+    /// A call's `is_path` parameters checked against the workspace (see
+    /// [`check_path_parameters`](Self::check_path_parameters)), and a path
+    /// outside it judged under the tool's path-safety policy. Each tool
+    /// calling mode answers a rejection its own way.
+    pub(super) fn path_verdict(
+        &self,
+        tool_name: &str,
+        definition: &ToolDefinition,
+        params: &HashMap<String, Value>,
+    ) -> PathVerdict {
+        match self.check_path_parameters(definition, params) {
+            PathCheck::Inside => PathVerdict::Allowed,
+            PathCheck::Invalid(reason) => PathVerdict::Invalid(reason),
+            PathCheck::Outside(param_name) => {
+                match self.task.agent_config.get_path_safety_policy(tool_name) {
+                    PathSafetyPolicy::AutoReject => PathVerdict::Outside(param_name),
+                    PathSafetyPolicy::RequireApproval => PathVerdict::NeedsApproval(param_name),
+                    PathSafetyPolicy::AutoApprove => PathVerdict::Allowed,
+                }
+            }
+        }
     }
 
     /// Emits `ToolResult` with the original output and, when interception
