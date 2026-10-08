@@ -265,6 +265,38 @@ impl NativeResults {
     }
 }
 
+/// A native turn's calls once checked; see [`AgentLoop::native_turn`].
+struct NativePlan {
+    /// The results recorded so far, in the task.
+    results: NativeResults,
+    /// The calls awaiting approval, with their positions in the turn.
+    calls_needing_approval: Vec<(usize, PendingToolCallInfo)>,
+    /// The calls that run now.
+    runs: Vec<NativeRun>,
+    /// Auto-approved calls that must wait for a call awaiting approval:
+    /// they run once it is decided.
+    held: Vec<NativeRun>,
+}
+
+/// What a native call's checks decided; see
+/// [`AgentLoop::classify_native_call`].
+#[allow(
+    clippy::large_enum_variant,
+    reason = "returned once per call and taken apart at once: a box would only add an allocation"
+)]
+enum NativeCall {
+    /// Answered at once: its result is recorded.
+    Answered,
+    /// It waits for approval; `exclusive`: it doesn't run beside other
+    /// calls.
+    NeedsApproval {
+        pending: PendingToolCallInfo,
+        exclusive: bool,
+    },
+    /// It runs without approval.
+    Run(NativeRun),
+}
+
 /// A request as it was sent: what its reported usage is compared with to
 /// estimate the next request (see [`result_budget`]).
 #[derive(Debug, Clone, Copy)]
@@ -3196,29 +3228,9 @@ impl AgentLoop {
             .unwrap_or_default();
 
         if tool_calls.is_empty() {
-            self.reject_announced_calls(&mut native_stream_call_ids, UNDELIVERED_CALL)
-                .await?;
-            if self.handover_report_due() {
-                let report = final_generation_response
-                    .as_ref()
-                    .map(|response| message_text(&response.message))
-                    .unwrap_or_default();
-                self.take_handover_report(report).await?;
-                if self.task.current_state.is_terminal() {
-                    return Ok(Flow::Exit);
-                }
-                return Ok(Flow::NextPass);
-            }
-            log::warn!(
-                "LLM response for task {} did not contain a native tool call.",
-                self.task.id
-            );
-            self.handle_model_output_failure(NO_NATIVE_TOOL_CALL.to_string())
-                .await?;
-            if self.task.current_state.is_terminal() {
-                return Ok(Flow::Exit);
-            }
-            return Ok(Flow::NextPass);
+            return self
+                .native_turn_without_calls(final_generation_response, native_stream_call_ids)
+                .await;
         }
 
         self.reset_llm_recovery();
@@ -3227,12 +3239,12 @@ impl AgentLoop {
         // Every call gets exactly one result, in the order the model
         // made them: checks answer some at once, the auto-approved
         // calls run, and the calls that need approval wait for it.
-        let mut results = NativeResults::new(&self.task);
-        let mut calls_needing_approval: Vec<(usize, PendingToolCallInfo)> = Vec::new();
-        let mut runs: Vec<NativeRun> = Vec::new();
-        // Auto-approved calls that must wait for a call awaiting
-        // approval (see below): they run once it is decided.
-        let mut held: Vec<NativeRun> = Vec::new();
+        let mut plan = NativePlan {
+            results: NativeResults::new(&self.task),
+            calls_needing_approval: Vec::new(),
+            runs: Vec::new(),
+            held: Vec::new(),
+        };
         // Whether an earlier call of the turn awaits approval or is
         // held, and whether one of those isn't parallel-safe. A call
         // waiting for approval counts as not finished: a
@@ -3241,157 +3253,266 @@ impl AgentLoop {
         let mut waiting_any = false;
         let mut waiting_exclusive = false;
         for (call_index, ai_tool_call) in tool_calls.iter().enumerate() {
-            let tool_call_id = native_stream_call_ids
-                .remove(&call_index)
-                .map_or_else(Uuid::new_v4, |(id, _)| id);
-            let params_map = Self::tool_call_args_to_map(ai_tool_call);
-
-            self.emit_event(AgentEvent::ToolCallFormatted {
-                tool_call_id,
-                tool_name: ai_tool_call.name.clone(),
-                parameters: params_map.clone(),
-            })
-            .await?;
-
-            if let Some(raw) = &ai_tool_call.invalid_arguments {
-                let reason = format!(
-                    "The arguments for tool '{}' are not valid JSON, so the tool was not run. Call it again with a JSON object. Received: {}",
-                    ai_tool_call.name, raw
-                );
-                self.emit_event(AgentEvent::ToolRejected {
-                    tool_call_id,
-                    tool_name: ai_tool_call.name.clone(),
-                    reason: Some(reason.clone()),
-                })
+            let call = self
+                .classify_native_call(
+                    call_index,
+                    ai_tool_call,
+                    &mut native_stream_call_ids,
+                    &mut plan.results,
+                )
                 .await?;
-                results.record(
-                    &mut self.task,
-                    call_index,
-                    ai::ToolResult::error_from_tool_call(ai_tool_call, &reason),
-                );
-                continue;
-            }
-
-            if self.handover_blocks(&ai_tool_call.name) {
-                self.emit_event(AgentEvent::ToolRejected {
-                    tool_call_id,
-                    tool_name: ai_tool_call.name.clone(),
-                    reason: Some(HANDOVER_REPORT_DUE.to_string()),
-                })
-                .await?;
-                results.record(
-                    &mut self.task,
-                    call_index,
-                    ai::ToolResult::error_from_tool_call(ai_tool_call, HANDOVER_REPORT_DUE),
-                );
-                continue;
-            }
-
-            let tool_arc = match self.tool_registry.get(&ai_tool_call.name) {
-                Some(t) => t,
-                None => {
-                    let result = self.unavailable_native_tool(ai_tool_call).await?;
-                    results.record(&mut self.task, call_index, result);
-                    continue;
-                }
-            };
-            let tool_definition = tool_arc.definition();
-
-            // The path parameter that forces an approval.
-            let mut outside_workspace = None;
-            let path_rejection = match self.check_path_parameters(&tool_definition, &params_map) {
-                PathCheck::Inside => None,
-                PathCheck::Invalid(reason) => Some(reason),
-                PathCheck::Outside(param_name) => {
-                    match self
-                        .task
-                        .agent_config
-                        .get_path_safety_policy(&ai_tool_call.name)
-                    {
-                        PathSafetyPolicy::AutoReject => Some(format!(
-                            "Path for parameter '{param_name}' is outside the workspace."
-                        )),
-                        PathSafetyPolicy::RequireApproval => {
-                            outside_workspace = Some(param_name);
-                            None
-                        }
-                        PathSafetyPolicy::AutoApprove => None,
-                    }
-                }
-            };
-            // A rejected call gets this one result and is not run.
-            if let Some(reason) = path_rejection {
-                self.emit_event(AgentEvent::ToolRejected {
-                    tool_call_id,
-                    tool_name: ai_tool_call.name.clone(),
-                    reason: Some(reason.clone()),
-                })
-                .await?;
-                results.record(
-                    &mut self.task,
-                    call_index,
-                    ai::ToolResult::error_from_tool_call(ai_tool_call, &reason),
-                );
-                continue;
-            }
-
-            let normal_approval_needed = !self
-                .task
-                .agent_config
-                .should_auto_approve_tool(&ai_tool_call.name);
-
-            if outside_workspace.is_some() || normal_approval_needed {
-                waiting_any = true;
-                waiting_exclusive |= !self.runs_in_parallel(&tool_definition);
-                self.task
-                    .pending_native_tool_calls
-                    .insert(tool_call_id, ai_tool_call.clone());
-                calls_needing_approval.push((
-                    call_index,
-                    PendingToolCallInfo {
-                        tool_call_id,
-                        tool_name: ai_tool_call.name.clone(),
-                        parameters: params_map,
-                        tool_description: tool_definition.description.clone(),
-                        approval_reason: ApprovalReason {
-                            tool_not_auto_approved: normal_approval_needed,
-                            path_outside_workspace: outside_workspace,
-                        },
-                    },
-                ));
-            } else {
-                let run = NativeRun {
-                    index: call_index,
-                    call: ai_tool_call.clone(),
-                    run: self.tool_run(
-                        tool_call_id,
-                        &ai_tool_call.name,
-                        tool_arc,
-                        params_map,
-                        None,
-                    ),
-                    message_to_agent: None,
-                };
-                let must_wait = if run.run.parallel_safe {
-                    waiting_exclusive
-                } else {
-                    waiting_any
-                };
-                if must_wait {
+            match call {
+                NativeCall::Answered => {}
+                NativeCall::NeedsApproval { pending, exclusive } => {
                     waiting_any = true;
-                    waiting_exclusive |= !run.run.parallel_safe;
-                    held.push(run);
-                } else {
-                    runs.push(run);
+                    waiting_exclusive |= exclusive;
+                    plan.calls_needing_approval.push((call_index, pending));
+                }
+                NativeCall::Run(run) => {
+                    let must_wait = if run.run.parallel_safe {
+                        waiting_exclusive
+                    } else {
+                        waiting_any
+                    };
+                    if must_wait {
+                        waiting_any = true;
+                        waiting_exclusive |= !run.run.parallel_safe;
+                        plan.held.push(run);
+                    } else {
+                        plan.runs.push(run);
+                    }
                 }
             }
         }
+        self.run_planned_calls(&mut plan).await?;
+        let NativePlan {
+            results,
+            calls_needing_approval,
+            held,
+            ..
+        } = plan;
+        // Held calls wait with the calls awaiting approval (and are
+        // saved with them).
+        for native in held {
+            self.task
+                .pending_native_tool_calls
+                .insert(native.run.tool_call_id, native.call);
+        }
+        results.finish(&mut self.task);
+        // Calls announced while streaming that the response doesn't
+        // hold (for example cut off at the token limit) are not run.
+        self.reject_announced_calls(&mut native_stream_call_ids, UNDELIVERED_CALL)
+            .await?;
+
+        if !calls_needing_approval.is_empty() {
+            let calls_needing_approval: Vec<PendingToolCallInfo> = calls_needing_approval
+                .into_iter()
+                .map(|(_, pending)| pending)
+                .collect();
+            self.await_approvals(calls_needing_approval, overall_batch_id)
+                .await?;
+        }
+        // Pauses on the turn's tool errors now, or after the calls
+        // still awaiting approval are decided.
+        self.end_tool_batch().await?;
+        if self.native_results_are_due() {
+            self.flush_native_results_to_conversation(None).await?;
+        }
+        Ok(Flow::Proceed)
+    }
+
+    /// A native turn without calls: the handover report, when it is due,
+    /// or a response without a tool call, which gets a note and is asked
+    /// again under the error policy. Calls the stream announced are
+    /// rejected.
+    async fn native_turn_without_calls(
+        &mut self,
+        final_generation_response: Option<ai::GenerationResponse>,
+        mut native_stream_call_ids: HashMap<usize, (Uuid, String)>,
+    ) -> Result<Flow, ArkoAgentsError> {
+        self.reject_announced_calls(&mut native_stream_call_ids, UNDELIVERED_CALL)
+            .await?;
+        if self.handover_report_due() {
+            let report = final_generation_response
+                .as_ref()
+                .map(|response| message_text(&response.message))
+                .unwrap_or_default();
+            self.take_handover_report(report).await?;
+            if self.task.current_state.is_terminal() {
+                return Ok(Flow::Exit);
+            }
+            return Ok(Flow::NextPass);
+        }
+        log::warn!(
+            "LLM response for task {} did not contain a native tool call.",
+            self.task.id
+        );
+        self.handle_model_output_failure(NO_NATIVE_TOOL_CALL.to_string())
+            .await?;
+        if self.task.current_state.is_terminal() {
+            return Ok(Flow::Exit);
+        }
+        Ok(Flow::NextPass)
+    }
+
+    /// A native call's checks, in order: arguments that aren't JSON, a
+    /// handover report that is due, a tool the run doesn't offer, and its
+    /// paths. A call they reject is answered (`ToolRejected` or
+    /// `UnavailableToolAttempted`, and its result recorded); otherwise it
+    /// needs approval (it waits in the task's pending calls) or runs.
+    async fn classify_native_call(
+        &mut self,
+        call_index: usize,
+        ai_tool_call: &ai::ToolCall,
+        native_stream_call_ids: &mut HashMap<usize, (Uuid, String)>,
+        results: &mut NativeResults,
+    ) -> Result<NativeCall, ArkoAgentsError> {
+        let tool_call_id = native_stream_call_ids
+            .remove(&call_index)
+            .map_or_else(Uuid::new_v4, |(id, _)| id);
+        let params_map = Self::tool_call_args_to_map(ai_tool_call);
+
+        self.emit_event(AgentEvent::ToolCallFormatted {
+            tool_call_id,
+            tool_name: ai_tool_call.name.clone(),
+            parameters: params_map.clone(),
+        })
+        .await?;
+
+        if let Some(raw) = &ai_tool_call.invalid_arguments {
+            let reason = format!(
+                "The arguments for tool '{}' are not valid JSON, so the tool was not run. Call it again with a JSON object. Received: {}",
+                ai_tool_call.name, raw
+            );
+            self.emit_event(AgentEvent::ToolRejected {
+                tool_call_id,
+                tool_name: ai_tool_call.name.clone(),
+                reason: Some(reason.clone()),
+            })
+            .await?;
+            results.record(
+                &mut self.task,
+                call_index,
+                ai::ToolResult::error_from_tool_call(ai_tool_call, &reason),
+            );
+            return Ok(NativeCall::Answered);
+        }
+
+        if self.handover_blocks(&ai_tool_call.name) {
+            self.emit_event(AgentEvent::ToolRejected {
+                tool_call_id,
+                tool_name: ai_tool_call.name.clone(),
+                reason: Some(HANDOVER_REPORT_DUE.to_string()),
+            })
+            .await?;
+            results.record(
+                &mut self.task,
+                call_index,
+                ai::ToolResult::error_from_tool_call(ai_tool_call, HANDOVER_REPORT_DUE),
+            );
+            return Ok(NativeCall::Answered);
+        }
+
+        let tool_arc = match self.tool_registry.get(&ai_tool_call.name) {
+            Some(t) => t,
+            None => {
+                let result = self.unavailable_native_tool(ai_tool_call).await?;
+                results.record(&mut self.task, call_index, result);
+                return Ok(NativeCall::Answered);
+            }
+        };
+        let tool_definition = tool_arc.definition();
+
+        // The path parameter that forces an approval.
+        let mut outside_workspace = None;
+        let path_rejection = match self.check_path_parameters(&tool_definition, &params_map) {
+            PathCheck::Inside => None,
+            PathCheck::Invalid(reason) => Some(reason),
+            PathCheck::Outside(param_name) => {
+                match self
+                    .task
+                    .agent_config
+                    .get_path_safety_policy(&ai_tool_call.name)
+                {
+                    PathSafetyPolicy::AutoReject => Some(format!(
+                        "Path for parameter '{param_name}' is outside the workspace."
+                    )),
+                    PathSafetyPolicy::RequireApproval => {
+                        outside_workspace = Some(param_name);
+                        None
+                    }
+                    PathSafetyPolicy::AutoApprove => None,
+                }
+            }
+        };
+        // A rejected call gets this one result and is not run.
+        if let Some(reason) = path_rejection {
+            self.emit_event(AgentEvent::ToolRejected {
+                tool_call_id,
+                tool_name: ai_tool_call.name.clone(),
+                reason: Some(reason.clone()),
+            })
+            .await?;
+            results.record(
+                &mut self.task,
+                call_index,
+                ai::ToolResult::error_from_tool_call(ai_tool_call, &reason),
+            );
+            return Ok(NativeCall::Answered);
+        }
+
+        let normal_approval_needed = !self
+            .task
+            .agent_config
+            .should_auto_approve_tool(&ai_tool_call.name);
+
+        if outside_workspace.is_some() || normal_approval_needed {
+            let exclusive = !self.runs_in_parallel(&tool_definition);
+            self.task
+                .pending_native_tool_calls
+                .insert(tool_call_id, ai_tool_call.clone());
+            return Ok(NativeCall::NeedsApproval {
+                pending: PendingToolCallInfo {
+                    tool_call_id,
+                    tool_name: ai_tool_call.name.clone(),
+                    parameters: params_map,
+                    tool_description: tool_definition.description.clone(),
+                    approval_reason: ApprovalReason {
+                        tool_not_auto_approved: normal_approval_needed,
+                        path_outside_workspace: outside_workspace,
+                    },
+                },
+                exclusive,
+            });
+        }
+        let run = NativeRun {
+            index: call_index,
+            call: ai_tool_call.clone(),
+            run: self.tool_run(tool_call_id, &ai_tool_call.name, tool_arc, params_map, None),
+            message_to_agent: None,
+        };
+        Ok(NativeCall::Run(run))
+    }
+
+    /// Runs a native turn's planned calls. A turn a call stopped (a tool
+    /// error that fails the task, `complete_task` or `ask_user`, a
+    /// cancellation or a suspension) answers the calls awaiting approval
+    /// and the held ones as not run; otherwise `complete_task` awaiting
+    /// approval after a failed call is answered, and with no approval
+    /// left to wait for, the held calls run.
+    async fn run_planned_calls(&mut self, plan: &mut NativePlan) -> Result<(), ArkoAgentsError> {
+        let NativePlan {
+            results,
+            calls_needing_approval,
+            runs,
+            held,
+        } = plan;
         let failed = results.failed(&self.task);
         self.run_native_calls(
-            runs,
+            std::mem::take(runs),
             |state| matches!(state, TaskState::InProgress),
             failed,
-            &mut results,
+            results,
         )
         .await?;
         // A turn a call stopped (a tool error that fails the task,
@@ -3461,87 +3582,73 @@ impl AgentLoop {
                     );
                 }
             }
-            calls_needing_approval = still_awaiting;
+            *calls_needing_approval = still_awaiting;
             // With no approval left to wait for, held calls run now.
             if calls_needing_approval.is_empty() && !held.is_empty() {
                 let failed = results.failed(&self.task);
                 self.run_native_calls(
-                    std::mem::take(&mut held),
+                    std::mem::take(held),
                     |state| matches!(state, TaskState::InProgress),
                     failed,
-                    &mut results,
+                    results,
                 )
                 .await?;
             }
         }
-        // Held calls wait with the calls awaiting approval (and are
-        // saved with them).
-        for native in held {
-            self.task
-                .pending_native_tool_calls
-                .insert(native.run.tool_call_id, native.call);
-        }
-        results.finish(&mut self.task);
-        // Calls announced while streaming that the response doesn't
-        // hold (for example cut off at the token limit) are not run.
-        self.reject_announced_calls(&mut native_stream_call_ids, UNDELIVERED_CALL)
-            .await?;
+        Ok(())
+    }
 
-        if !calls_needing_approval.is_empty() {
-            let mut calls_needing_approval: Vec<PendingToolCallInfo> = calls_needing_approval
-                .into_iter()
-                .map(|(_, pending)| pending)
-                .collect();
-            if calls_needing_approval.len() == 1 && overall_batch_id.is_none() {
-                let single_pending = calls_needing_approval.remove(0);
-                self.task.set_state(TaskState::AwaitingToolApproval {
-                    tool_call_id: single_pending.tool_call_id,
-                    tool_name: single_pending.tool_name.clone(),
-                    parameters: single_pending.parameters.clone(),
-                    tool_description: single_pending.tool_description.clone(),
-                    approval_reason: single_pending.approval_reason.clone(),
-                });
-                self.emit_event(AgentEvent::TaskStateChanged(
-                    self.task.current_state.clone(),
-                ))
-                .await?;
-                self.emit_event(AgentEvent::ToolCallAwaitingApproval {
-                    tool_call_id: single_pending.tool_call_id,
-                    tool_name: single_pending.tool_name,
-                    parameters: single_pending.parameters,
-                    tool_description: single_pending.tool_description,
-                    approval_reason: single_pending.approval_reason,
-                })
-                .await?;
-            } else {
-                let batch_id_for_state = overall_batch_id.unwrap_or_else(Uuid::new_v4);
-                self.task.set_state(TaskState::AwaitingBatchToolApproval {
-                    batch_id: batch_id_for_state,
-                    pending_calls: calls_needing_approval,
-                });
-                self.emit_event(AgentEvent::TaskStateChanged(
-                    self.task.current_state.clone(),
-                ))
-                .await?;
-                self.emit_event(AgentEvent::BatchToolCallAwaitingApproval {
-                    batch_id: batch_id_for_state,
-                    pending_calls: match &self.task.current_state {
-                        TaskState::AwaitingBatchToolApproval { pending_calls, .. } => {
-                            pending_calls.clone()
-                        }
-                        _ => vec![],
-                    },
-                })
-                .await?;
-            }
+    /// Waits for the approval of a turn's calls: one call alone, or the
+    /// calls of a turn of several as a batch (`TaskStateChanged`, then
+    /// `ToolCallAwaitingApproval` or `BatchToolCallAwaitingApproval`).
+    async fn await_approvals(
+        &mut self,
+        mut calls_needing_approval: Vec<PendingToolCallInfo>,
+        overall_batch_id: Option<Uuid>,
+    ) -> Result<(), ArkoAgentsError> {
+        if calls_needing_approval.len() == 1 && overall_batch_id.is_none() {
+            let single_pending = calls_needing_approval.remove(0);
+            self.task.set_state(TaskState::AwaitingToolApproval {
+                tool_call_id: single_pending.tool_call_id,
+                tool_name: single_pending.tool_name.clone(),
+                parameters: single_pending.parameters.clone(),
+                tool_description: single_pending.tool_description.clone(),
+                approval_reason: single_pending.approval_reason.clone(),
+            });
+            self.emit_event(AgentEvent::TaskStateChanged(
+                self.task.current_state.clone(),
+            ))
+            .await?;
+            self.emit_event(AgentEvent::ToolCallAwaitingApproval {
+                tool_call_id: single_pending.tool_call_id,
+                tool_name: single_pending.tool_name,
+                parameters: single_pending.parameters,
+                tool_description: single_pending.tool_description,
+                approval_reason: single_pending.approval_reason,
+            })
+            .await?;
+        } else {
+            let batch_id_for_state = overall_batch_id.unwrap_or_else(Uuid::new_v4);
+            self.task.set_state(TaskState::AwaitingBatchToolApproval {
+                batch_id: batch_id_for_state,
+                pending_calls: calls_needing_approval,
+            });
+            self.emit_event(AgentEvent::TaskStateChanged(
+                self.task.current_state.clone(),
+            ))
+            .await?;
+            self.emit_event(AgentEvent::BatchToolCallAwaitingApproval {
+                batch_id: batch_id_for_state,
+                pending_calls: match &self.task.current_state {
+                    TaskState::AwaitingBatchToolApproval { pending_calls, .. } => {
+                        pending_calls.clone()
+                    }
+                    _ => vec![],
+                },
+            })
+            .await?;
         }
-        // Pauses on the turn's tool errors now, or after the calls
-        // still awaiting approval are decided.
-        self.end_tool_batch().await?;
-        if self.native_results_are_due() {
-            self.flush_native_results_to_conversation(None).await?;
-        }
-        Ok(Flow::Proceed)
+        Ok(())
     }
 
     /// Runs the agent loop to completion.
