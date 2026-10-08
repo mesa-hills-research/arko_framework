@@ -144,7 +144,8 @@ impl AgentLoop {
     /// or held for approval, in order, until one ends the batch; calls a
     /// suspension left are answered as not run, the others wait for
     /// approval, the batch's tool errors pause the task, and the results
-    /// become the turn's message.
+    /// become the turn's message (for a batch of a tool that can't be
+    /// batched, which runs no call, the error saying so).
     async fn handle_text_group(
         &mut self,
         current_group: ToolCallGroup,
@@ -198,8 +199,13 @@ impl AgentLoop {
         // the calls still awaiting approval are decided.
         self.end_tool_batch().await?;
         // The results of the calls that ran, which wait
-        // with the task below if it now waits.
-        *turn_message = self.take_text_results(start).join("\n\n---\n\n");
+        // with the task below if it now waits. A batch that
+        // couldn't run has none, and keeps the error saying why.
+        let results = self.take_text_results(start).join("\n\n---\n\n");
+        if !results.is_empty() {
+            debug_assert!(turn_message.is_empty(), "a batch that ran has no error");
+            *turn_message = results;
+        }
         Ok(())
     }
 

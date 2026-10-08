@@ -1522,3 +1522,26 @@ async fn context_after_a_results_message_comes_without_the_details_again() {
     golden.run_ended(&task);
     golden.check();
 }
+
+/// An output-based batch of a tool that can't be batched (not
+/// parallel-safe): none of its calls runs, and the turn's message tells the
+/// model why. The task then completes.
+#[tokio::test(start_paused = true)]
+async fn an_output_based_batch_of_a_tool_that_cannot_be_batched() {
+    let mut golden = Golden::start("an_output_based_batch_of_a_tool_that_cannot_be_batched");
+    let config = golden_config(ToolCallingMode::OutputBased, &["step"]);
+    let (mut agent, events, commands) =
+        golden_loop(new_task(config), vec![Step::new("step")], false);
+    script(
+        &mut agent,
+        [
+            text_turn(
+                "<batched_tool_call>\n<step>\n<what>a</what>\n</step>\n<step>\n<what>b</what>\n</step>\n</batched_tool_call>",
+            ),
+            text_turn("<complete_task>\n<summary>done</summary>\n</complete_task>"),
+        ],
+    );
+    let task = drive(agent, events, commands, no_commands).await;
+    golden.run_ended(&task);
+    golden.check();
+}
