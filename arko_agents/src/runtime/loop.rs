@@ -470,6 +470,10 @@ pub struct AgentLoop {
     /// The model of every request made, in order.
     #[cfg(test)]
     requested_models: Arc<std::sync::Mutex<Vec<String>>>,
+    /// The test's trace of the loop's events and snapshots; see
+    /// [`loop_trace`].
+    #[cfg(test)]
+    trace: loop_trace::LoopTrace,
 
     skill_prompt_context: Option<SkillPromptContext>,
 
@@ -586,6 +590,8 @@ impl AgentLoop {
             scripted_responses: std::sync::Mutex::new(VecDeque::new()),
             #[cfg(test)]
             requested_models: Arc::default(),
+            #[cfg(test)]
+            trace: loop_trace::LoopTrace::for_current_test(),
             skill_prompt_context,
             interceptor_config,
             execution_middleware,
@@ -1163,6 +1169,8 @@ impl AgentLoop {
     /// (see [`TaskSnapshotSink`](crate::snapshot::TaskSnapshotSink)). With
     /// `durable`, returns once the sink has saved it.
     async fn report_task(&mut self, durable: bool) {
+        #[cfg(test)]
+        self.trace.snapshot(&self.task, durable);
         self.snapshots.report(&self.task, durable).await;
     }
 
@@ -5232,6 +5240,8 @@ impl AgentLoop {
     }
 
     async fn emit_event(&self, event: AgentEvent) -> Result<(), ArkoAgentsError> {
+        #[cfg(test)]
+        self.trace.event(&event);
         if let AgentEvent::TaskStateChanged(state) = &event {
             *self.last_reported_state.lock().unwrap() = Some(state.clone());
         }
@@ -6842,6 +6852,10 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "loop_trace.rs"]
+mod loop_trace;
 
 #[cfg(test)]
 #[path = "retry_tests.rs"]
