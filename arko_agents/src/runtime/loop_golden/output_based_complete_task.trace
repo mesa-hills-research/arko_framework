@@ -26,6 +26,7 @@ E {"AssistantResponseChunk":"All steps are done.\n\n\n"}
 E {"ToolCallFormatted":{"parameters":{"summary":"All done."},"tool_call_id":"id3","tool_name":"complete_task"}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=80553e369af05e25
 E {"ToolResult":{"output":"All done.","tool_call_id":"id3","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"All done."}}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"All done."}} task=44b1016f4393c256
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"All done."}} task=d23bf38b61dd5ac8
 E "TaskStreamEnd"

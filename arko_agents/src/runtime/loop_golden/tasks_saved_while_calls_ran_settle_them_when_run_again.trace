@@ -42,6 +42,7 @@ E {"AssistantResponseChunk":"\n\n"}
 E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id10","tool_name":"complete_task"}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=c1a525cfcc422559
 E {"ToolResult":{"output":"done","tool_call_id":"id10","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=5a0bcc2dd7fd56f7
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=3311a914e7221a2a
 E "TaskStreamEnd"

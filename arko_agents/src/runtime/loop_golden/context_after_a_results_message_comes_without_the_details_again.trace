@@ -23,6 +23,7 @@ E {"ToolCallInitiated":{"tool_call_id":"id3","tool_name":"complete_task"}}
 E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id3","tool_name":"complete_task"}}
 S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=4b276f5ae40423b2
 E {"ToolResult":{"output":"done","tool_call_id":"id3","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
 S durable=0 msgs=5 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=025ba1958ca1adc2
 S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=991f6f7694e95d17
 E "TaskStreamEnd"
@@ -54,6 +55,7 @@ E {"ToolCallInitiated":{"tool_call_id":"id7","tool_name":"complete_task"}}
 E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id7","tool_name":"complete_task"}}
 S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=6a83e0c8dc36c51d
 E {"ToolResult":{"output":"done","tool_call_id":"id7","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
 S durable=0 msgs=5 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=bec04ed779907d8f
 S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=e04301badbfa4b28
 E "TaskStreamEnd"
@@ -105,6 +107,7 @@ E {"ToolCallInitiated":{"tool_call_id":"id15","tool_name":"complete_task"}}
 E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id15","tool_name":"complete_task"}}
 S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=1ee4874aac4abd2c
 E {"ToolResult":{"output":"done","tool_call_id":"id15","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
 S durable=0 msgs=5 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=32cedb3e73bbd623
 S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=6afaecc9c19973d8
 E "TaskStreamEnd"

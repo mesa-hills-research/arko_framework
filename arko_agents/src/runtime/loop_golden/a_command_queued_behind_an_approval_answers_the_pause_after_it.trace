@@ -47,6 +47,7 @@ E {"ToolCallInitiated":{"tool_call_id":"id6","tool_name":"complete_task"}}
 E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id6","tool_name":"complete_task"}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=1242aca991eba30e
 E {"ToolResult":{"output":"done","tool_call_id":"id6","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=c5a8c9a584fc17df
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=5f6eddff9772a3fa
 E "TaskStreamEnd"

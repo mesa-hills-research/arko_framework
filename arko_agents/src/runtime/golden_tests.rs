@@ -582,9 +582,9 @@ async fn output_based_batch_pauses_once_for_a_path_rejection_and_a_failure() {
     golden.check();
 }
 
-/// An output-based call, then `complete_task`: the task completes without
-/// a `TaskStateChanged(Completed)` event (native mode emits one; question
-/// Q1 of the loop refactor).
+/// An output-based call, then `complete_task`: the task completes, reported
+/// with `TaskStateChanged(Completed)` after the call's result, as in native
+/// mode.
 #[tokio::test(start_paused = true)]
 async fn output_based_complete_task() {
     let mut golden = Golden::start("output_based_complete_task");

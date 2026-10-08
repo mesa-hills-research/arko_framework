@@ -693,7 +693,8 @@ impl AgentLoop {
 
     /// An output-based call that finished: `ask_user` awaits the answer
     /// (its result is the questions alone, and no message follows), and
-    /// `complete_task` completes the task; the result is formatted with
+    /// `complete_task` completes the task (reported with
+    /// `TaskStateChanged`, as in native mode); the result is formatted with
     /// the host's message, and the tool's images wait for the next
     /// message.
     async fn finish_text_result(
@@ -740,6 +741,11 @@ impl AgentLoop {
         self.queue_tool_images(tool_name, tool_call_id, output.images);
         if tool_name == COMPLETE_TASK_TOOL_NAME {
             self.task.set_state(TaskState::Completed { summary: raw });
+            // Reported as in native mode, after the call's result.
+            self.emit_event(AgentEvent::TaskStateChanged(
+                self.task.current_state.clone(),
+            ))
+            .await?;
         }
         Ok(formatted)
     }
