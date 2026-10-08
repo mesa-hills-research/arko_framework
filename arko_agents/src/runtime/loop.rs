@@ -413,6 +413,9 @@ type ScriptedStreamResult =
 enum Flow {
     /// On to the pass's next phase.
     Proceed,
+    /// To the next pass (`continue`), which reports the task, then checks
+    /// for a stop or an end.
+    NextPass,
     /// Out of the loop, to its finish (`break`).
     Exit,
 }
@@ -423,6 +426,7 @@ macro_rules! step {
     ($flow:expr) => {
         match $flow {
             Flow::Proceed => {}
+            Flow::NextPass => continue,
             Flow::Exit => break,
         }
     };
@@ -2735,6 +2739,61 @@ impl AgentLoop {
         Ok(Flow::Proceed)
     }
 
+    /// The turn boundary before a model request: a stop or the end of the
+    /// task, the commands queued meanwhile, then the handover, context and
+    /// file tree, a user turn to answer, and the monitors and the host's
+    /// hold, any of which can end the pass instead of the request.
+    async fn turn_boundary(&mut self) -> Result<Flow, ArkoAgentsError> {
+        // A suspension while approved calls ran stops the loop here.
+        if self.stop_requested {
+            return Ok(Flow::NextPass);
+        }
+        // Every command queued by now, also after an approved call ran,
+        // so all context sent before this boundary (for example while a
+        // tool call ran) reaches the next request together. The task is
+        // not terminal here: a command or call that ended it broke out
+        // of the loop above.
+        if self.take_queued_commands().await? {
+            return Ok(Flow::Exit);
+        }
+
+        if !matches!(self.task.current_state, TaskState::InProgress) {
+            if self.task.current_state.is_terminal() {
+                return Ok(Flow::Exit);
+            }
+            tokio_sleep(Duration::from_millis(100)).await;
+            return Ok(Flow::NextPass);
+        }
+
+        // The fallback answers exactly the refused input: context updates
+        // and file-tree changes wait for the next request.
+        if self.task.fallback_for.is_none() {
+            // First: context that arrives as a handover starts waits for
+            // the fresh conversation.
+            self.start_handover_if_due().await?;
+            self.flush_context_injections()?;
+            self.refresh_file_tree_context();
+        }
+        self.ensure_user_turn_before_request()?;
+        if !self.apply_plan_usage_threshold().await? {
+            return Ok(Flow::NextPass);
+        }
+        if let Some(message) = self.cache_pause_pending.take() {
+            self.finish_monitor_pause(message).await?;
+            return Ok(Flow::NextPass);
+        }
+        if let Some(reason) = self
+            .turn_context
+            .as_ref()
+            .and_then(|source| source.hold_request(self.task.id))
+        {
+            self.hold_request(reason).await?;
+            return Ok(Flow::NextPass);
+        }
+        self.observe_committed_tool_context();
+        Ok(Flow::Proceed)
+    }
+
     /// Runs the agent loop to completion.
     pub async fn run(mut self) -> Result<Task, ArkoAgentsError> {
         self.check_config()?;
@@ -3606,53 +3665,7 @@ impl AgentLoop {
                     }
                 }
             }
-            // A suspension while approved calls ran stops the loop here.
-            if self.stop_requested {
-                continue 'main_loop;
-            }
-            // Every command queued by now, also after an approved call ran,
-            // so all context sent before this boundary (for example while a
-            // tool call ran) reaches the next request together. The task is
-            // not terminal here: a command or call that ended it broke out
-            // of the loop above.
-            if self.take_queued_commands().await? {
-                break 'main_loop;
-            }
-
-            if !matches!(self.task.current_state, TaskState::InProgress) {
-                if self.task.current_state.is_terminal() {
-                    break 'main_loop;
-                }
-                tokio_sleep(Duration::from_millis(100)).await;
-                continue 'main_loop;
-            }
-
-            // The fallback answers exactly the refused input: context updates
-            // and file-tree changes wait for the next request.
-            if self.task.fallback_for.is_none() {
-                // First: context that arrives as a handover starts waits for
-                // the fresh conversation.
-                self.start_handover_if_due().await?;
-                self.flush_context_injections()?;
-                self.refresh_file_tree_context();
-            }
-            self.ensure_user_turn_before_request()?;
-            if !self.apply_plan_usage_threshold().await? {
-                continue 'main_loop;
-            }
-            if let Some(message) = self.cache_pause_pending.take() {
-                self.finish_monitor_pause(message).await?;
-                continue 'main_loop;
-            }
-            if let Some(reason) = self
-                .turn_context
-                .as_ref()
-                .and_then(|source| source.hold_request(self.task.id))
-            {
-                self.hold_request(reason).await?;
-                continue 'main_loop;
-            }
-            self.observe_committed_tool_context();
+            step!(self.turn_boundary().await?);
 
             let llm_client = Arc::clone(&self.llm_client);
             let (conversation, gen_config) = self.next_request();
