@@ -431,12 +431,13 @@ async fn an_approved_call_to_a_tool_the_run_does_not_offer_is_answered_as_unavai
             result.output
         } else {
             agent
-                .execute_tool_and_handle_result(
+                .execute_text_call(
                     "counter",
                     HashMap::new(),
                     Uuid::new_v4(),
                     custom_output,
                     None,
+                    false,
                 )
                 .await
                 .unwrap()

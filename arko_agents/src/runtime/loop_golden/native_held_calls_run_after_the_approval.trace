@@ -1,0 +1,43 @@
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
+R msgs=1 model=gpt-5.6-luna request=57f6809297595541
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=b2fad5f809a767e8
+E {"ToolCallFormatted":{"parameters":{"what":"zero"},"tool_call_id":"id2","tool_name":"read"}}
+E {"ToolCallFormatted":{"parameters":{"what":"one"},"tool_call_id":"id3","tool_name":"gate"}}
+E {"ToolCallFormatted":{"parameters":{"what":"two"},"tool_call_id":"id4","tool_name":"write"}}
+E {"ToolCallFormatted":{"parameters":{"what":"three"},"tool_call_id":"id5","tool_name":"read"}}
+S durable=1 msgs=2 native_results=0 native_calls=1 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=070350040ee04743
+E {"ToolResult":{"output":"read ran zero","tool_call_id":"id2","tool_name":"read"}}
+S durable=0 msgs=2 native_results=1 native_calls=1 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=09f988c7919f76c9
+E {"TaskStateChanged":{"AwaitingBatchToolApproval":{"batch_id":"id6","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"one"},"tool_call_id":"id3","tool_description":"Does the gate step","tool_name":"gate"}]}}}
+E {"BatchToolCallAwaitingApproval":{"batch_id":"id6","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"one"},"tool_call_id":"id3","tool_description":"Does the gate step","tool_name":"gate"}]}}
+S durable=0 msgs=2 native_results=1 native_calls=3 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingBatchToolApproval":{"batch_id":"id6","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"one"},"tool_call_id":"id3","tool_description":"Does the gate step","tool_name":"gate"}]}} task=2b5f7b02135cc57a
+S durable=1 msgs=2 native_results=1 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=e0f98eb2e99e5b84
+E {"ToolResult":{"output":"gate ran one","tool_call_id":"id3","tool_name":"gate"}}
+S durable=0 msgs=2 native_results=2 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=be889028520e6a79
+S durable=1 msgs=2 native_results=2 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=2c43ba7f0fc9cdcf
+E {"ToolResult":{"output":"write ran two","tool_call_id":"id4","tool_name":"write"}}
+S durable=0 msgs=2 native_results=3 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=d008d1ee6b9c6a95
+S durable=1 msgs=2 native_results=3 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=607938085f8b5c3f
+E {"ToolResult":{"output":"read ran three","tool_call_id":"id5","tool_name":"read"}}
+S durable=0 msgs=2 native_results=4 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=ba8646762628cc51
+E {"TaskStateChanged":"InProgress"}
+R msgs=3 model=gpt-5.6-luna request=54dd5b8ba97325a3
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=97dd0635d9517736
+E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id7","tool_name":"complete_task"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=0bb0b2301c72f872
+E {"ToolResult":{"output":"done","tool_call_id":"id7","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
+S durable=0 msgs=4 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=b6bcf9b56211cd21
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=9ba14f3a79840938
+E "TaskStreamEnd"
+--- conversation: 5 messages, system prompt d1669b0441bd8242
+M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"what":"zero"},"id":"r0","name":"read"},{"arguments":{"what":"one"},"id":"g1","name":"gate"},{"arguments":{"what":"two"},"id":"w2","name":"write"},{"arguments":{"what":"three"},"id":"r3","name":"read"}]}
+M {"content":[{"ToolResult":{"call_id":"r0","is_error":false,"name":"read","output":"read ran zero"}},{"ToolResult":{"call_id":"g1","is_error":false,"name":"gate","output":"gate ran one"}},{"ToolResult":{"call_id":"w2","is_error":false,"name":"write","output":"write ran two"}},{"ToolResult":{"call_id":"r3","is_error":false,"name":"read","output":"read ran three"}}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"summary":"done"},"id":"done","name":"complete_task"}]}
+M {"content":[{"ToolResult":{"call_id":"done","is_error":false,"name":"complete_task","output":"done"}}],"id":null,"reasoning_artifact":null,"role":"User"}

@@ -1,0 +1,44 @@
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=04c2ca0d5373010c
+R msgs=1 model=gpt-5.6-luna request=eb38d8d37def20a2
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=b99fcea3661b1f1a
+E {"AssistantResponseChunk":"\n\n"}
+E {"ToolCallInitiated":{"tool_call_id":"id2","tool_name":"step"}}
+E {"ToolCallFormatted":{"parameters":{"what":"image"},"tool_call_id":"id2","tool_name":"step"}}
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=ba41ac572b579115
+E {"ToolResult":{"output":"step looked at picture.png","tool_call_id":"id2","tool_name":"step"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=b31fb6a0ae174be7
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=36cc6250b85313a8
+R msgs=3 model=gpt-5.6-luna request=737f5cb4f0f24290
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=fd97c3783e2e973a
+E {"AssistantResponseChunk":"\n\n"}
+E {"ToolCallInitiated":{"tool_call_id":"id3","tool_name":"step"}}
+E {"ToolCallFormatted":{"parameters":{"what":"two"},"tool_call_id":"id3","tool_name":"step"}}
+S durable=1 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=98bce9277e0c7ed7
+E {"ToolResult":{"output":"step ran two","tool_call_id":"id3","tool_name":"step"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=8985bd1442ca06b3
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=4ff7458ff14ebbdb
+R msgs=5 model=gpt-5.6-luna request=26e6d9b8364f0a1e
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=ce75baa4dee8b3b7
+E {"AssistantResponseChunk":"\n\n"}
+E {"ToolCallInitiated":{"tool_call_id":"id4","tool_name":"complete_task"}}
+E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id4","tool_name":"complete_task"}}
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=e182890c5bbf0226
+E {"ToolResult":{"output":"done","tool_call_id":"id4","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=03ec3a8257aaf185
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=e4bc2fd507dcaeb2
+E "TaskStreamEnd"
+--- conversation: 6 messages, system prompt ba61cb6754594d5e
+M {"content":[{"Text":"Do the task\n\n# Reminder\nCheck the plan."}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"<step>\n<what>image</what>\n</step>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
+M {"content":[{"Text":"Tool step finished with the following result:\nstep looked at picture.png"},{"Text":"Image from tool step, call id2: picture.png, 2 × 2"},{"Image":{"Base64":{"data":"cGl4ZWxz","mime_type":"image/png"}}}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"<step>\n<what>two</what>\n</step>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
+M {"content":[{"Text":"Tool step finished with the following result:\nstep ran two\n\n# Reminder\nCheck the plan."}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"<complete_task>\n<summary>done</summary>\n</complete_task>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}

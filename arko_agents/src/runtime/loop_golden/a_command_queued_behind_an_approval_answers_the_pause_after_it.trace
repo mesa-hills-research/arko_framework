@@ -1,0 +1,58 @@
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
+R msgs=1 model=gpt-5.6-luna request=4d589790b26063d7
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=97c5387ecdb3d77c
+E {"ToolCallFormatted":{"parameters":{"what":"fail"},"tool_call_id":"id2","tool_name":"gate"}}
+E {"TaskStateChanged":{"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"fail"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"}}}
+E {"ToolCallAwaitingApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"fail"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"}}
+S durable=0 msgs=2 native_results=0 native_calls=1 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"fail"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"}} task=e0ef0409837c75a9
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=9c5377e80592d80c
+S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=e6a912ae65e0e261
+E {"TaskStateChanged":{"AwaitingErrorRecoveryApproval":{"cause":"tool_error","error_message":"Tool 'gate' execution failed: Execution failed: gate could not do it"}}}
+E {"ErrorEncountered":{"error_message":"Tool 'gate' execution failed: Execution failed: gate could not do it","requires_approval_to_retry":true,"tool_call_id":"id2"}}
+S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"tool_error","error_message":"Tool 'gate' execution failed: Execution failed: gate could not do it"}} task=d9936389608d60e0
+E {"TaskStateChanged":{"Cancelled":{"reason":"Task cancelled by user."}}}
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Cancelled":{"reason":"Task cancelled by user."}} task=33ea412a28d22c0a
+E "TaskStreamEnd"
+--- conversation: 3 messages, system prompt d1669b0441bd8242
+M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"what":"fail"},"id":"g","name":"gate"}]}
+M {"content":[{"ToolResult":{"call_id":"g","is_error":true,"name":"gate","output":"Tool 'gate' execution failed: Execution failed: gate could not do it"}}],"id":null,"reasoning_artifact":null,"role":"User"}
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=a56f17f07f08a6d1
+R msgs=1 model=gpt-5.6-luna request=e30487314b3449b2
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=c4decd37f645dfd2
+E {"AssistantResponseChunk":"\n\n"}
+E {"ToolCallInitiated":{"tool_call_id":"id5","tool_name":"gate"}}
+E {"ToolCallFormatted":{"parameters":{"what":"fail"},"tool_call_id":"id5","tool_name":"gate"}}
+E {"TaskStateChanged":{"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"fail"},"tool_call_id":"id5","tool_description":"Does the gate step","tool_name":"gate"}}}
+E {"ToolCallAwaitingApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"fail"},"tool_call_id":"id5","tool_description":"Does the gate step","tool_name":"gate"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"fail"},"tool_call_id":"id5","tool_description":"Does the gate step","tool_name":"gate"}} task=ea49fde3436fc0ad
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=6a81963b27cb4318
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=012cb126f61a127a
+E {"TaskStateChanged":{"AwaitingErrorRecoveryApproval":{"cause":"tool_error","error_message":"Tool 'gate' execution failed: Execution failed: gate could not do it"}}}
+E {"ErrorEncountered":{"error_message":"Tool 'gate' execution failed: Execution failed: gate could not do it","requires_approval_to_retry":true,"tool_call_id":"id5"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"tool_error","error_message":"Tool 'gate' execution failed: Execution failed: gate could not do it"}} task=f587f38a4c48eae6
+E {"TaskStateChanged":"InProgress"}
+R msgs=3 model=gpt-5.6-luna request=f9f8df8bf7c93d16
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=70d0fb3731dbacfb
+E {"AssistantResponseChunk":"\n\n"}
+E {"ToolCallInitiated":{"tool_call_id":"id6","tool_name":"complete_task"}}
+E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id6","tool_name":"complete_task"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=1242aca991eba30e
+E {"ToolResult":{"output":"done","tool_call_id":"id6","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=c5a8c9a584fc17df
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=5f6eddff9772a3fa
+E "TaskStreamEnd"
+--- conversation: 4 messages, system prompt dc2b9cdf97c4749a
+M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"<gate>\n<what>fail</what>\n</gate>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
+M {"content":[{"Text":"Tool gate failed during execution. Error: Execution failed: gate could not do it\n\n---\n\nGo on without the gate."}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"<complete_task>\n<summary>done</summary>\n</complete_task>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}

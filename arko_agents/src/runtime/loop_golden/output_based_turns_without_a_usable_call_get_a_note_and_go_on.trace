@@ -1,0 +1,37 @@
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=8301c3c6073043de
+R msgs=1 model=gpt-5.6-luna request=439dafb33ed37922
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=94b3960fe1997e64
+E {"AssistantResponseChunk":"I will look at the files first."}
+E {"ErrorEncountered":{"error_message":"Model response not usable (attempt 1/10): Your response did not contain a tool call. Use one of your tools in the format the system prompt describes, or complete_task if the task is finished.","requires_approval_to_retry":false,"tool_call_id":null}}
+E {"RetryScheduled":{"attempt":1,"delay_ms":0,"elapsed_ms":0,"rate_limit":false}}
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=40f834bb1fed4fc0
+R msgs=3 model=gpt-5.6-luna request=3a17d1edeafd6b5f
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=5a79f0c74096add6
+E {"ErrorEncountered":{"error_message":"Model response not usable (attempt 2/10): Your tool call could not be read (Batch tool calls must all be for the same tool, found mixed types.). Write it again in the format the system prompt describes.","requires_approval_to_retry":false,"tool_call_id":null}}
+E {"RetryScheduled":{"attempt":2,"delay_ms":0,"elapsed_ms":0,"rate_limit":false}}
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=9ed4ac6c12fcad80
+R msgs=5 model=gpt-5.6-luna request=37c2fcea2a2dd5ac
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=3d9a4996f3e1238e
+E {"AssistantResponseChunk":"\n\n"}
+E {"ToolCallInitiated":{"tool_call_id":"id2","tool_name":"complete_task"}}
+E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id2","tool_name":"complete_task"}}
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=aa37aeb0a543faaf
+E {"ToolResult":{"output":"done","tool_call_id":"id2","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=2b134d09b94b82a8
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=7975735c4f2a1351
+E "TaskStreamEnd"
+--- conversation: 6 messages, system prompt c90fa11952b09f53
+M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"I will look at the files first."}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
+M {"content":[{"Text":"Your response did not contain a tool call. Use one of your tools in the format the system prompt describes, or complete_task if the task is finished."}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"<batched_tool_call>\n<step>\n<what>a</what>\n</step>\n<check>\n<what>b</what>\n</check>\n</batched_tool_call>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
+M {"content":[{"Text":"Your tool call could not be read (Batch tool calls must all be for the same tool, found mixed types.). Write it again in the format the system prompt describes."}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"<complete_task>\n<summary>done</summary>\n</complete_task>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}

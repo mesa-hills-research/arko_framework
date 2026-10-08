@@ -1,0 +1,55 @@
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
+R msgs=1 model=gpt-5.6-luna request=4d589790b26063d7
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=dfa2e6bf698006ff
+E {"ToolCallFormatted":{"parameters":{"what":"one"},"tool_call_id":"id2","tool_name":"gate"}}
+E {"TaskStateChanged":{"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"one"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"}}}
+E {"ToolCallAwaitingApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"one"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"}}
+S durable=0 msgs=2 native_results=0 native_calls=1 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"one"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"}} task=338e503713a4108d
+S durable=0 msgs=2 native_results=0 native_calls=1 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"one"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"}} task=338e503713a4108d
+E {"TaskStateChanged":{"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"one"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"}}}
+S durable=0 msgs=2 native_results=0 native_calls=1 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"one"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"}} task=338e503713a4108d
+E {"TaskStateChanged":{"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"one"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"}}}
+S durable=0 msgs=2 native_results=0 native_calls=1 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"one"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"}} task=338e503713a4108d
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=4a69fdb47ea908b6
+E {"ToolResult":{"output":"gate ran one","tool_call_id":"id2","tool_name":"gate"}}
+S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=0a80d299550d5f1d
+E {"TaskStateChanged":"InProgress"}
+R msgs=3 model=gpt-5.6-luna request=e0d3091c20a00426
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=9106ae4b0ae8fc0b
+E {"ToolCallFormatted":{"parameters":{"what":"two"},"tool_call_id":"id3","tool_name":"gate"}}
+E {"ToolCallFormatted":{"parameters":{"what":"three"},"tool_call_id":"id4","tool_name":"gate"}}
+E {"TaskStateChanged":{"AwaitingBatchToolApproval":{"batch_id":"id5","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"two"},"tool_call_id":"id3","tool_description":"Does the gate step","tool_name":"gate"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"three"},"tool_call_id":"id4","tool_description":"Does the gate step","tool_name":"gate"}]}}}
+E {"BatchToolCallAwaitingApproval":{"batch_id":"id5","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"two"},"tool_call_id":"id3","tool_description":"Does the gate step","tool_name":"gate"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"three"},"tool_call_id":"id4","tool_description":"Does the gate step","tool_name":"gate"}]}}
+S durable=0 msgs=4 native_results=0 native_calls=2 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingBatchToolApproval":{"batch_id":"id5","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"two"},"tool_call_id":"id3","tool_description":"Does the gate step","tool_name":"gate"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"three"},"tool_call_id":"id4","tool_description":"Does the gate step","tool_name":"gate"}]}} task=41b507e089504fde
+S durable=0 msgs=4 native_results=0 native_calls=2 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingBatchToolApproval":{"batch_id":"id5","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"two"},"tool_call_id":"id3","tool_description":"Does the gate step","tool_name":"gate"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"three"},"tool_call_id":"id4","tool_description":"Does the gate step","tool_name":"gate"}]}} task=41b507e089504fde
+S durable=1 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=4c78105ede7527d6
+E {"ToolResult":{"output":"gate ran two","tool_call_id":"id3","tool_name":"gate"}}
+S durable=0 msgs=4 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=036c9a899937baf6
+S durable=1 msgs=4 native_results=1 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=128325e405a76b39
+E {"ToolResult":{"output":"gate ran three","tool_call_id":"id4","tool_name":"gate"}}
+S durable=0 msgs=4 native_results=2 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=c058fd84b2276e5b
+E {"TaskStateChanged":"InProgress"}
+R msgs=5 model=gpt-5.6-luna request=4ced36587f0b1d6a
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=ab32a962ee4d473e
+E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id6","tool_name":"complete_task"}}
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=aaf1eceb015f85a5
+E {"ToolResult":{"output":"done","tool_call_id":"id6","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
+S durable=0 msgs=6 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=d8afa101e9b3167d
+S durable=0 msgs=7 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=5a1951e44af7102e
+E "TaskStreamEnd"
+--- conversation: 7 messages, system prompt d1669b0441bd8242
+M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"what":"one"},"id":"g1","name":"gate"}]}
+M {"content":[{"ToolResult":{"call_id":"g1","is_error":false,"name":"gate","output":"gate ran one"}}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"what":"two"},"id":"g2","name":"gate"},{"arguments":{"what":"three"},"id":"g3","name":"gate"}]}
+M {"content":[{"ToolResult":{"call_id":"g2","is_error":false,"name":"gate","output":"gate ran two"}},{"ToolResult":{"call_id":"g3","is_error":false,"name":"gate","output":"gate ran three"}}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"summary":"done"},"id":"done","name":"complete_task"}]}
+M {"content":[{"ToolResult":{"call_id":"done","is_error":false,"name":"complete_task","output":"done"}}],"id":null,"reasoning_artifact":null,"role":"User"}

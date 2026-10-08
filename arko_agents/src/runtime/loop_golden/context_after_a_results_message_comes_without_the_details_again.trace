@@ -1,0 +1,119 @@
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=d59170caa061cbaa
+R msgs=1 model=gpt-5.6-luna request=9d6e8f36fb95f768
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=71c963090d4ca0eb
+E {"AssistantResponseChunk":"\n\n"}
+E {"ToolCallInitiated":{"tool_call_id":"id2","tool_name":"gate"}}
+E {"ToolCallFormatted":{"parameters":{"what":"one"},"tool_call_id":"id2","tool_name":"gate"}}
+E {"TaskStateChanged":{"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"one"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"}}}
+E {"ToolCallAwaitingApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"one"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"one"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"}} task=5331f30776f8fbff
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=c09db7819cfbe214
+E {"ToolResult":{"output":"gate ran one","tool_call_id":"id2","tool_name":"gate"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=1f5d0acd941e2b52
+E {"TaskStateChanged":"InProgress"}
+R msgs=4 model=gpt-5.6-luna request=2d5f7d161e42e49b
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=4e947ea77b3752e6
+E {"AssistantResponseChunk":"\n\n"}
+E {"ToolCallInitiated":{"tool_call_id":"id3","tool_name":"complete_task"}}
+E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id3","tool_name":"complete_task"}}
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=4b276f5ae40423b2
+E {"ToolResult":{"output":"done","tool_call_id":"id3","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=025ba1958ca1adc2
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=991f6f7694e95d17
+E "TaskStreamEnd"
+--- conversation: 5 messages, system prompt 7b0aec3f12aa3438
+M {"content":[{"Text":"Do the task\n\n# Initial Environment Information\nCurrent Working Directory:\n/arko-golden-workspace\n"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"<gate>\n<what>one</what>\n</gate>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
+M {"content":[{"Text":"Tool gate finished with the following result:\ngate ran one\n\n# Current Environment Information (updated this turn)\nCurrent Working Directory:\n/arko-golden-workspace\n"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"# Workflow context update\n\nSent with the approval."}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"<complete_task>\n<summary>done</summary>\n</complete_task>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=1eaaa16d6a197f42
+R msgs=1 model=gpt-5.6-luna request=7fefd53d9d97e3ac
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=cd96fb7d321e9acb
+E {"AssistantResponseChunk":"\n\n"}
+E {"ToolCallInitiated":{"tool_call_id":"id6","tool_name":"step"}}
+E {"ToolCallFormatted":{"parameters":{"what":"two"},"tool_call_id":"id6","tool_name":"step"}}
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=85b431f6dda8188f
+E {"ToolResult":{"output":"step ran two","tool_call_id":"id6","tool_name":"step"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=94baef155192c644
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f8afd6d4bd6c0e48
+R msgs=4 model=gpt-5.6-luna request=bd9df5ec91a811ee
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=d5c0e0b7d3a65a45
+E {"AssistantResponseChunk":"\n\n"}
+E {"ToolCallInitiated":{"tool_call_id":"id7","tool_name":"complete_task"}}
+E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id7","tool_name":"complete_task"}}
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=6a83e0c8dc36c51d
+E {"ToolResult":{"output":"done","tool_call_id":"id7","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=bec04ed779907d8f
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=e04301badbfa4b28
+E "TaskStreamEnd"
+--- conversation: 5 messages, system prompt 7b0aec3f12aa3438
+M {"content":[{"Text":"Do the task\n\n# Initial Environment Information\nCurrent Working Directory:\n/arko-golden-workspace\n"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"<step>\n<what>two</what>\n</step>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
+M {"content":[{"Text":"Tool step finished with the following result:\nstep ran two\n\n# Current Environment Information (updated this turn)\nCurrent Working Directory:\n/arko-golden-workspace\n"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"# Workflow context update\n\nSent at the second turn boundary."}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"<complete_task>\n<summary>done</summary>\n</complete_task>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=59ad0ac39d798ed2
+R msgs=1 model=gpt-5.6-luna request=f09f09b179a958c6
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=db7d9b116657f4f0
+E {"ToolCallFormatted":{"parameters":{"what":"two"},"tool_call_id":"id10","tool_name":"step"}}
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=cd59fb2e9548954c
+E {"ToolResult":{"output":"step ran two","tool_call_id":"id10","tool_name":"step"}}
+S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=9d75748767aabc23
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=b38630be5e8535e2
+R msgs=4 model=gpt-5.6-luna request=2861c1139a527398
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=de77b18ecf7c0b76
+E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id11","tool_name":"complete_task"}}
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=40368f61d391c0e9
+E {"ToolResult":{"output":"done","tool_call_id":"id11","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
+S durable=0 msgs=5 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=090a210db9399953
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=f0c2b5bd70b981f0
+E "TaskStreamEnd"
+--- conversation: 6 messages, system prompt d1669b0441bd8242
+M {"content":[{"Text":"Do the task\n\n# Initial Environment Information\nCurrent Working Directory:\n/arko-golden-workspace\n"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"what":"two"},"id":"s","name":"step"}]}
+M {"content":[{"ToolResult":{"call_id":"s","is_error":false,"name":"step","output":"step ran two"}},{"Text":"# Current Environment Information (updated this turn)\nCurrent Working Directory:\n/arko-golden-workspace\n"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"# Workflow context update\n\nSent at the second turn boundary."}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"summary":"done"},"id":"done","name":"complete_task"}]}
+M {"content":[{"ToolResult":{"call_id":"done","is_error":false,"name":"complete_task","output":"done"}},{"Text":"# Current Environment Information (updated this turn)\nCurrent Working Directory:\n/arko-golden-workspace\n"}],"id":null,"reasoning_artifact":null,"role":"User"}
+E {"TaskStateChanged":"InProgress"}
+E {"ToolRejected":{"reason":"The task was restarted while this call was running (its host stopped), so it may have run partly or fully. Check its effects before calling it again.","tool_call_id":"id12","tool_name":"step"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=37d6d122b9a6bfd5
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=5a9f57021b4d0305
+R msgs=4 model=gpt-5.6-luna request=a83d1485e7ca46b0
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=fb4a04879d29649f
+E {"AssistantResponseChunk":"\n\n"}
+E {"ToolCallInitiated":{"tool_call_id":"id15","tool_name":"complete_task"}}
+E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id15","tool_name":"complete_task"}}
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=1ee4874aac4abd2c
+E {"ToolResult":{"output":"done","tool_call_id":"id15","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=32cedb3e73bbd623
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=6afaecc9c19973d8
+E "TaskStreamEnd"
+--- conversation: 5 messages, system prompt 3d34e5f8139235b9
+M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"<step>\n<what>three</what>\n</step>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
+M {"content":[{"Text":"Tool step failed during execution. Error: The task was restarted while this call was running (its host stopped), so it may have run partly or fully. Check its effects before calling it again.\n\n---\n\nThe task was restarted while this turn's tool calls ran (its host stopped). A call of the turn without a result here was not run; call it again if it is still needed.\n\n# Current Environment Information (updated this turn)\nCurrent Working Directory:\n/arko-golden-workspace\n"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"# Workflow context update\n\nSent before the run."}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"<complete_task>\n<summary>done</summary>\n</complete_task>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}

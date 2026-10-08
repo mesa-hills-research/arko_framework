@@ -1,0 +1,37 @@
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=d3069058f481d131
+R msgs=1 model=gpt-5.6-luna request=b32c14822bb9aab7
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=7409764ebbcf6de7
+E {"ToolCallInitiated":{"tool_call_id":"id2","tool_name":"step"}}
+E {"ToolParamName":{"param_name":"what","tool_call_id":"id2"}}
+E {"ToolParamValueChunk":{"chunk":"one","param_name":"what","tool_call_id":"id2"}}
+E {"ToolParamEnd":{"param_name":"what","tool_call_id":"id2"}}
+E {"AssistantResponseChunk":"First the step.\n\n\n"}
+E {"ToolCallFormatted":{"parameters":{"what":"one"},"tool_call_id":"id2","tool_name":"step"}}
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=db3cb017101a3bfd
+E {"ToolResult":{"output":"step ran one","tool_call_id":"id2","tool_name":"step"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=ebfae0e09fc1c156
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=11ed8926a4bc14d5
+R msgs=3 model=gpt-5.6-luna request=fb67925495b81321
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=533ef11ad39e4f76
+E {"ToolCallInitiated":{"tool_call_id":"id3","tool_name":"complete_task"}}
+E {"ToolParamName":{"param_name":"summary","tool_call_id":"id3"}}
+E {"ToolParamValueChunk":{"chunk":"All done.","param_name":"summary","tool_call_id":"id3"}}
+E {"ToolParamEnd":{"param_name":"summary","tool_call_id":"id3"}}
+E {"AssistantResponseChunk":"All steps are done.\n\n\n"}
+E {"ToolCallFormatted":{"parameters":{"summary":"All done."},"tool_call_id":"id3","tool_name":"complete_task"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=80553e369af05e25
+E {"ToolResult":{"output":"All done.","tool_call_id":"id3","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"All done."}}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"All done."}} task=44b1016f4393c256
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"All done."}} task=d23bf38b61dd5ac8
+E "TaskStreamEnd"
+--- conversation: 4 messages, system prompt ba61cb6754594d5e
+M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"First the step.\n<step>\n<what>one</what>\n</step>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
+M {"content":[{"Text":"Tool step finished with the following result:\nstep ran one"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"All steps are done.\n<complete_task>\n<summary>All done.</summary>\n</complete_task>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}

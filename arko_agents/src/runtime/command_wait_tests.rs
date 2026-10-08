@@ -96,10 +96,14 @@ async fn injected_context_does_not_extend_the_wait() {
         std::future::pending::<()>().await;
     });
     let task = agent.run().await.unwrap();
-    assert!(
-        matches!(task.current_state, TaskState::Interrupted { .. }),
-        "{:?}",
-        task.current_state
+    // The reason names the state the task waited in.
+    assert_eq!(
+        task.current_state,
+        TaskState::Interrupted {
+            reason: format!(
+                "Timeout ({TIMEOUT}s) waiting for user command in state AwaitingErrorRecoveryApproval."
+            ),
+        }
     );
     assert_eq!(
         start.elapsed(),
@@ -156,6 +160,43 @@ async fn ignored_commands_do_not_extend_the_wait() {
             .await;
         // Keeps the channels open.
         while events.recv().await.is_some() {}
+        std::future::pending::<()>().await;
+    });
+    let task = agent.run().await.unwrap();
+    assert!(
+        matches!(task.current_state, TaskState::Interrupted { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert_eq!(
+        start.elapsed(),
+        Duration::from_secs(TIMEOUT),
+        "{:?}",
+        task.current_state
+    );
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+/// A refusal resolution the task can't apply (here, it has no refused
+/// input) is reported and the wait goes on: it doesn't restart the
+/// deadline either.
+#[tokio::test(start_paused = true)]
+async fn a_refusal_resolution_that_fails_does_not_extend_the_wait() {
+    let (agent, _events, commands, workspace) = waiting_for_recovery(false);
+    let start = TokioInstant::now();
+    let _script = tokio::spawn(async move {
+        sleep_until(start, 60).await;
+        let _ = commands
+            .send(UserCommand::ResolveRefusal {
+                changes: vec![crate::task::RefusalResolution::RemoveUserMessage {
+                    message_index: 0,
+                }],
+            })
+            .await;
+        sleep_until(start, 120).await;
+        let _ = commands
+            .send(UserCommand::ApproveErrorRecovery { message: None })
+            .await;
         std::future::pending::<()>().await;
     });
     let task = agent.run().await.unwrap();

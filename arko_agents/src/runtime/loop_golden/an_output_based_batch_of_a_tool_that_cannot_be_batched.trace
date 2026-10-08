@@ -1,0 +1,39 @@
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=d3069058f481d131
+R msgs=1 model=gpt-5.6-luna request=b32c14822bb9aab7
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=075073d55521e8aa
+E {"ToolCallInitiated":{"tool_call_id":"id2","tool_name":"step"}}
+E {"ToolParamName":{"param_name":"what","tool_call_id":"id2"}}
+E {"ToolParamValueChunk":{"chunk":"a","param_name":"what","tool_call_id":"id2"}}
+E {"ToolParamEnd":{"param_name":"what","tool_call_id":"id2"}}
+E {"ToolCallInitiated":{"tool_call_id":"id3","tool_name":"step"}}
+E {"ToolParamName":{"param_name":"what","tool_call_id":"id3"}}
+E {"ToolParamValueChunk":{"chunk":"b","param_name":"what","tool_call_id":"id3"}}
+E {"ToolParamEnd":{"param_name":"what","tool_call_id":"id3"}}
+E {"AssistantResponseChunk":"\n\n\n\n\n\n\n"}
+E {"ToolRejected":{"reason":"Error: Tool 'step' cannot be used in a batch.","tool_call_id":"id2","tool_name":"step"}}
+E {"ToolRejected":{"reason":"Error: Tool 'step' cannot be used in a batch.","tool_call_id":"id3","tool_name":"step"}}
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=593fe96a6aa92f1b
+R msgs=3 model=gpt-5.6-luna request=fe72a0813182982d
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=bdb41689d7cc7825
+E {"ToolCallInitiated":{"tool_call_id":"id4","tool_name":"complete_task"}}
+E {"ToolParamName":{"param_name":"summary","tool_call_id":"id4"}}
+E {"ToolParamValueChunk":{"chunk":"done","param_name":"summary","tool_call_id":"id4"}}
+E {"ToolParamEnd":{"param_name":"summary","tool_call_id":"id4"}}
+E {"AssistantResponseChunk":"\n\n"}
+E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id4","tool_name":"complete_task"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=e5fb4353f2b0c062
+E {"ToolResult":{"output":"done","tool_call_id":"id4","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=d451b55d55586c39
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=f24a10d614e45aa0
+E "TaskStreamEnd"
+--- conversation: 4 messages, system prompt ba61cb6754594d5e
+M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"<batched_tool_call>\n<step>\n<what>a</what>\n</step>\n<step>\n<what>b</what>\n</step>\n</batched_tool_call>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
+M {"content":[{"Text":"Error: Tool 'step' cannot be used in a batch."}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"<complete_task>\n<summary>done</summary>\n</complete_task>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}

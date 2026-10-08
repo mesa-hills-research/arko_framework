@@ -1,0 +1,53 @@
+E {"TaskStateChanged":"InProgress"}
+E {"ToolRejected":{"reason":"The task was restarted while this call was running (its host stopped), so it may have run partly or fully. Check its effects before calling it again.","tool_call_id":"id0","tool_name":"writer"}}
+S durable=0 msgs=2 native_results=2 native_calls=1 text_results=0 running=2 injections=0 handovers=0 state="InProgress" task=36d89e7d7a47c377
+E {"ToolResult":{"output":"reader ran r","tool_call_id":"id4","tool_name":"reader"}}
+S durable=0 msgs=2 native_results=3 native_calls=1 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=dc7dc94b8d257d39
+S durable=1 msgs=2 native_results=3 native_calls=1 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=dc7dc94b8d257d39
+E {"ToolResult":{"output":"resumer resumed child","tool_call_id":"id5","tool_name":"resumer"}}
+S durable=0 msgs=2 native_results=4 native_calls=1 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=bedd7cc56880e94c
+E {"ToolRejected":{"reason":"The turn ended before this call ran; it was not run.","tool_call_id":"id3","tool_name":"gate"}}
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=7371d5b512d228db
+R msgs=3 model=gpt-5.6-luna request=56619b1a3a49a097
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=c221a7ab5af13e65
+E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id6","tool_name":"complete_task"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=d7a73ee63183b472
+E {"ToolResult":{"output":"done","tool_call_id":"id6","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
+S durable=0 msgs=4 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=b2886ceff83c645a
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=b6ab6fc2f1f8c05f
+E "TaskStreamEnd"
+--- conversation: 5 messages, system prompt 3d34e5f8139235b9
+M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"what":"zero"},"id":"answered","name":"reader"},{"arguments":{"what":"w"},"id":"write","name":"writer"},{"arguments":{"what":"r"},"id":"read","name":"reader"},{"arguments":{"what":"child"},"id":"resume","name":"resumer"},{"arguments":{"what":"g"},"id":"gate","name":"gate"},{"arguments":{"what":"u"},"id":"unreached","name":"writer"}]}
+M {"content":[{"ToolResult":{"call_id":"answered","is_error":false,"name":"reader","output":"kept"}},{"ToolResult":{"call_id":"write","is_error":true,"name":"writer","output":"The task was restarted while this call was running (its host stopped), so it may have run partly or fully. Check its effects before calling it again."}},{"ToolResult":{"call_id":"read","is_error":false,"name":"reader","output":"reader ran r"}},{"ToolResult":{"call_id":"resume","is_error":false,"name":"resumer","output":"resumer resumed child"}},{"ToolResult":{"call_id":"gate","is_error":true,"name":"gate","output":"The turn ended before this call ran; it was not run."}},{"ToolResult":{"call_id":"unreached","is_error":true,"name":"writer","output":"The turn ended before this call ran; it was not run."}}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"summary":"done"},"id":"done","name":"complete_task"}]}
+M {"content":[{"ToolResult":{"call_id":"done","is_error":false,"name":"complete_task","output":"done"}}],"id":null,"reasoning_artifact":null,"role":"User"}
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=1 injections=0 handovers=0 state="InProgress" task=de3b9c2704798016
+E {"ToolResult":{"output":"reader ran r","tool_call_id":"id9","tool_name":"reader"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state="InProgress" task=bc2b157edaa2f88c
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=98d38aa83959040a
+R msgs=3 model=gpt-5.6-luna request=c2506e99b89a87de
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=1930128eb7fdf8f7
+E {"ToolCallInitiated":{"tool_call_id":"id10","tool_name":"complete_task"}}
+E {"ToolParamName":{"param_name":"summary","tool_call_id":"id10"}}
+E {"ToolParamValueChunk":{"chunk":"done","param_name":"summary","tool_call_id":"id10"}}
+E {"ToolParamEnd":{"param_name":"summary","tool_call_id":"id10"}}
+E {"AssistantResponseChunk":"\n\n"}
+E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id10","tool_name":"complete_task"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=c1a525cfcc422559
+E {"ToolResult":{"output":"done","tool_call_id":"id10","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=5a0bcc2dd7fd56f7
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=3311a914e7221a2a
+E "TaskStreamEnd"
+--- conversation: 4 messages, system prompt 3d34e5f8139235b9
+M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"<batched_tool_call>\n<writer>\n<what>w</what>\n</writer>\n<reader>\n<what>r</what>\n</reader>\n</batched_tool_call>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
+M {"content":[{"Text":"Tool writer finished with the following result:\nwriter ran w\n\n---\n\nTool reader finished with the following result:\nreader ran r\n\n---\n\nThe task was restarted while this turn's tool calls ran (its host stopped). A call of the turn without a result here was not run; call it again if it is still needed."}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"<complete_task>\n<summary>done</summary>\n</complete_task>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}

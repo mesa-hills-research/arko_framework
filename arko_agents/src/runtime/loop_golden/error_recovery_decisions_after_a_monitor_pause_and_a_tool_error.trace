@@ -1,0 +1,151 @@
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
+R msgs=1 model=gpt-5.6-luna request=b5c44a4af91fa165
+E {"UsageReported":{"billing":"metered","cached_tokens":0,"input_cost":0.0,"input_tokens":1000,"output_cost":0.0,"output_tokens":10,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"golden","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=89fdd36c73993842
+E {"ToolCallFormatted":{"parameters":{"what":"one"},"tool_call_id":"id2","tool_name":"step"}}
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=d38e36b576b6f61d
+E {"ToolResult":{"output":"step ran one","tool_call_id":"id2","tool_name":"step"}}
+S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=e0b12c3a5a1d18b3
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=df7a12d5e7856286
+R msgs=3 model=gpt-5.6-luna request=f7d487b2b9211e89
+E {"UsageReported":{"billing":"metered","cached_tokens":900,"input_cost":0.0,"input_tokens":2000,"output_cost":0.0,"output_tokens":10,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"golden","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+E {"CacheEfficiencyReported":{"call_efficiency":0.9,"calls":1,"rolling_efficiency":0.9}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=1b44bbcd8896d3d7
+E {"ToolCallFormatted":{"parameters":{"what":"two"},"tool_call_id":"id3","tool_name":"step"}}
+S durable=1 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=550201b3f0f3c0bc
+E {"ToolResult":{"output":"step ran two","tool_call_id":"id3","tool_name":"step"}}
+S durable=0 msgs=4 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=56fe3caf917e591b
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=4c55f33721c42206
+R msgs=5 model=gpt-5.6-luna request=c5688749edfe55f1
+E {"UsageReported":{"billing":"metered","cached_tokens":200,"input_cost":0.0,"input_tokens":3000,"output_cost":0.0,"output_tokens":10,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"golden","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+E {"CacheEfficiencyReported":{"call_efficiency":0.1,"calls":2,"rolling_efficiency":0.36666666666666664}}
+E {"CacheEfficiencyLow":{"pausing":false,"rolling_efficiency":0.36666666666666664,"threshold":0.8}}
+E {"CacheEfficiencyLow":{"pausing":true,"rolling_efficiency":0.36666666666666664,"threshold":0.5}}
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=533ed85329b86790
+E {"ToolCallFormatted":{"parameters":{"what":"three"},"tool_call_id":"id4","tool_name":"step"}}
+S durable=1 msgs=6 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=1e00e0fecdaebf7b
+E {"ToolResult":{"output":"step ran three","tool_call_id":"id4","tool_name":"step"}}
+S durable=0 msgs=6 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=eb391583a8377a2f
+S durable=0 msgs=7 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=9fa5ac7b92bae4be
+E {"TaskStateChanged":{"AwaitingErrorRecoveryApproval":{"cause":"monitor","error_message":"Prompt cache efficiency fell to 36.7% over the last 2 calls (threshold 50.0%)."}}}
+E {"ErrorEncountered":{"error_message":"Prompt cache efficiency fell to 36.7% over the last 2 calls (threshold 50.0%).","requires_approval_to_retry":true,"tool_call_id":null}}
+S durable=0 msgs=7 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"monitor","error_message":"Prompt cache efficiency fell to 36.7% over the last 2 calls (threshold 50.0%)."}} task=71b7ab30c8b8ef56
+E {"TaskStateChanged":"InProgress"}
+R msgs=7 model=gpt-5.6-luna request=1b977585a4d718e5
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=8 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=4e66455d2d585883
+E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id5","tool_name":"complete_task"}}
+S durable=0 msgs=8 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=dcb6c5d6c6aff1a1
+E {"ToolResult":{"output":"done","tool_call_id":"id5","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
+S durable=0 msgs=8 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=b43cb079ffb5f0ce
+S durable=0 msgs=9 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=3c3cf10fb2a61ea7
+E "TaskStreamEnd"
+--- conversation: 9 messages, system prompt d1669b0441bd8242
+M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"what":"one"},"id":"a","name":"step"}]}
+M {"content":[{"ToolResult":{"call_id":"a","is_error":false,"name":"step","output":"step ran one"}}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"what":"two"},"id":"b","name":"step"}]}
+M {"content":[{"ToolResult":{"call_id":"b","is_error":false,"name":"step","output":"step ran two"}}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"what":"three"},"id":"c","name":"step"}]}
+M {"content":[{"ToolResult":{"call_id":"c","is_error":false,"name":"step","output":"step ran three"}}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"summary":"done"},"id":"done","name":"complete_task"}]}
+M {"content":[{"ToolResult":{"call_id":"done","is_error":false,"name":"complete_task","output":"done"}}],"id":null,"reasoning_artifact":null,"role":"User"}
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=07219a83ca117d39
+R msgs=1 model=gpt-5.6-luna request=e1fdf6fd1d00d7df
+E {"UsageReported":{"billing":"metered","cached_tokens":0,"input_cost":0.0,"input_tokens":1000,"output_cost":0.0,"output_tokens":10,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"golden","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=ef626157d0ea23da
+E {"ToolCallFormatted":{"parameters":{"what":"one"},"tool_call_id":"id8","tool_name":"step"}}
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=ac608aef2098de2b
+E {"ToolResult":{"output":"step ran one","tool_call_id":"id8","tool_name":"step"}}
+S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=15c7edf430feb46b
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=c26f3db0fc63f4b6
+R msgs=3 model=gpt-5.6-luna request=52bff72950dfb8cb
+E {"UsageReported":{"billing":"metered","cached_tokens":900,"input_cost":0.0,"input_tokens":2000,"output_cost":0.0,"output_tokens":10,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"golden","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+E {"CacheEfficiencyReported":{"call_efficiency":0.9,"calls":1,"rolling_efficiency":0.9}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=d78aa91f39d67ee7
+E {"ToolCallFormatted":{"parameters":{"what":"two"},"tool_call_id":"id9","tool_name":"step"}}
+S durable=1 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=d1fea3515bc2f3be
+E {"ToolResult":{"output":"step ran two","tool_call_id":"id9","tool_name":"step"}}
+S durable=0 msgs=4 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f22f5a9560bd30cb
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=e7cfa92ccdd3fa16
+R msgs=5 model=gpt-5.6-luna request=bb9bd42f3d20bd13
+E {"UsageReported":{"billing":"metered","cached_tokens":200,"input_cost":0.0,"input_tokens":3000,"output_cost":0.0,"output_tokens":10,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"golden","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+E {"CacheEfficiencyReported":{"call_efficiency":0.1,"calls":2,"rolling_efficiency":0.36666666666666664}}
+E {"CacheEfficiencyLow":{"pausing":false,"rolling_efficiency":0.36666666666666664,"threshold":0.8}}
+E {"CacheEfficiencyLow":{"pausing":true,"rolling_efficiency":0.36666666666666664,"threshold":0.5}}
+S durable=0 msgs=6 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=2dee60eb446da748
+E {"ToolCallFormatted":{"parameters":{"what":"three"},"tool_call_id":"id10","tool_name":"step"}}
+S durable=1 msgs=6 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=6949858a978762c2
+E {"ToolResult":{"output":"step ran three","tool_call_id":"id10","tool_name":"step"}}
+S durable=0 msgs=6 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=74b97d3b6a4d7d17
+S durable=0 msgs=7 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=87065d41d5cf968e
+E {"TaskStateChanged":{"AwaitingErrorRecoveryApproval":{"cause":"monitor","error_message":"Prompt cache efficiency fell to 36.7% over the last 2 calls (threshold 50.0%)."}}}
+E {"ErrorEncountered":{"error_message":"Prompt cache efficiency fell to 36.7% over the last 2 calls (threshold 50.0%).","requires_approval_to_retry":true,"tool_call_id":null}}
+S durable=0 msgs=7 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"monitor","error_message":"Prompt cache efficiency fell to 36.7% over the last 2 calls (threshold 50.0%)."}} task=c4562ee589cc960e
+E {"TaskStateChanged":"InProgress"}
+R msgs=8 model=gpt-5.6-luna request=34de56c98312987f
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=9 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=051f80b5b00609f0
+E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id11","tool_name":"complete_task"}}
+S durable=0 msgs=9 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=752185f8ceaff34b
+E {"ToolResult":{"output":"done","tool_call_id":"id11","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
+S durable=0 msgs=9 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=1c5d61e9cb36cacd
+S durable=0 msgs=10 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=5423231b72a9195a
+E "TaskStreamEnd"
+--- conversation: 10 messages, system prompt d1669b0441bd8242
+M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"what":"one"},"id":"a","name":"step"}]}
+M {"content":[{"ToolResult":{"call_id":"a","is_error":false,"name":"step","output":"step ran one"}}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"what":"two"},"id":"b","name":"step"}]}
+M {"content":[{"ToolResult":{"call_id":"b","is_error":false,"name":"step","output":"step ran two"}}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"what":"three"},"id":"c","name":"step"}]}
+M {"content":[{"ToolResult":{"call_id":"c","is_error":false,"name":"step","output":"step ran three"}}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":"The cache is cold after a deploy; keep going."}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"summary":"done"},"id":"done","name":"complete_task"}]}
+M {"content":[{"ToolResult":{"call_id":"done","is_error":false,"name":"complete_task","output":"done"}}],"id":null,"reasoning_artifact":null,"role":"User"}
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=7e68806af40fba69
+R msgs=1 model=gpt-5.6-luna request=c4d4962d467b01aa
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=8a19109095dd18db
+E {"ToolCallFormatted":{"parameters":{"what":"one"},"tool_call_id":"id14","tool_name":"step"}}
+E {"ToolCallFormatted":{"parameters":{"what":"fail"},"tool_call_id":"id15","tool_name":"step"}}
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=0f17d78cf7308283
+E {"ToolResult":{"output":"step ran one","tool_call_id":"id14","tool_name":"step"}}
+S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=8921417a709b719a
+S durable=1 msgs=2 native_results=1 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=27a2d887e849da28
+S durable=0 msgs=2 native_results=2 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=bd0e81c3cd315522
+E {"TaskStateChanged":{"AwaitingErrorRecoveryApproval":{"cause":"tool_error","error_message":"Tool 'step' execution failed: Execution failed: step could not do it"}}}
+E {"ErrorEncountered":{"error_message":"Tool 'step' execution failed: Execution failed: step could not do it","requires_approval_to_retry":true,"tool_call_id":"id15"}}
+S durable=0 msgs=2 native_results=2 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"tool_error","error_message":"Tool 'step' execution failed: Execution failed: step could not do it"}} task=5a94c55efc5f0543
+E {"TaskStateChanged":"InProgress"}
+R msgs=3 model=gpt-5.6-luna request=32a5bea32a04fe19
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=19cff1f41819bd9e
+E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id16","tool_name":"complete_task"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=e58e4bc756368d06
+E {"ToolResult":{"output":"done","tool_call_id":"id16","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
+S durable=0 msgs=4 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=e318884560b5a98d
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=26cd9f17169ba236
+E "TaskStreamEnd"
+--- conversation: 5 messages, system prompt d1669b0441bd8242
+M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"what":"one"},"id":"a","name":"step"},{"arguments":{"what":"fail"},"id":"b","name":"step"}]}
+M {"content":[{"ToolResult":{"call_id":"a","is_error":false,"name":"step","output":"step ran one"}},{"ToolResult":{"call_id":"b","is_error":true,"name":"step","output":"Tool 'step' execution failed: Execution failed: step could not do it"}},{"Text":"Skip the failing step and finish."}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"summary":"done"},"id":"done","name":"complete_task"}]}
+M {"content":[{"ToolResult":{"call_id":"done","is_error":false,"name":"complete_task","output":"done"}}],"id":null,"reasoning_artifact":null,"role":"User"}
