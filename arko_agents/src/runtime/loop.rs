@@ -432,6 +432,32 @@ macro_rules! step {
     };
 }
 
+/// A model's turn, streamed to its end, for the turn phase.
+struct StreamedTurn {
+    /// The final response, which the conversation holds; `None` for a
+    /// stream that ended without one, its partial text kept.
+    response: Option<ai::GenerationResponse>,
+    /// The output-based parser's events (none in native mode).
+    parser_events: Vec<RawParserEvent>,
+    /// The calls the stream announced (`ToolCallInitiated`), by index, with
+    /// their runtime ids and names: the turn runs those its response holds
+    /// and rejects the others.
+    announced: HashMap<usize, (Uuid, String)>,
+}
+
+/// How a pass's model request and its stream ended.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "returned once per turn and taken apart at once: a box would only add an allocation"
+)]
+enum ModelTurn {
+    /// With a turn whose calls the turn phase handles.
+    Streamed(StreamedTurn),
+    /// Otherwise: the pass ends (`NextPass`, or `Exit` for a task that
+    /// ended).
+    Ended(Flow),
+}
+
 /// The main agent execution loop.
 pub struct AgentLoop {
     task: Task,
@@ -2794,6 +2820,281 @@ impl AgentLoop {
         Ok(Flow::Proceed)
     }
 
+    /// The pass's model request (to the refusal fallback's model while one
+    /// is pending), made under the error policy's recovery, and its stream.
+    async fn model_turn(&mut self) -> Result<ModelTurn, ArkoAgentsError> {
+        let llm_client = Arc::clone(&self.llm_client);
+        let (conversation, gen_config) = self.next_request();
+        // What this request's usage is compared with, to estimate the
+        // next one (not for the refusal fallback's model).
+        self.sent_request = (!self.current_request_is_fallback).then(|| RequestMark {
+            messages: conversation.messages.len(),
+            bytes: result_budget::request_bytes(&conversation, &gen_config),
+            conversation: self.task.conversation_usage_start,
+        });
+        #[cfg(test)]
+        let scripted_response = self.scripted_responses.get_mut().unwrap().pop_front();
+        let request = async move {
+            #[cfg(test)]
+            if let Some(response) = scripted_response {
+                return response;
+            }
+            if conversation.model.provider == ai::Provider::OpenAI {
+                // Decided under the credential lock, so tasks sharing a
+                // client (or an auth.json) don't rotate twice.
+                llm_client
+                    .refresh_openai_oauth_token_if_expiring(Duration::from_secs(
+                        OAUTH_REFRESH_MARGIN_SECS,
+                    ))
+                    .await?;
+            }
+            llm_client.generate_stream(&conversation, gen_config).await
+        };
+        let Some(response_stream) = self.run_llm_attempt(request).await? else {
+            return Ok(ModelTurn::Ended(Flow::NextPass));
+        };
+        // The provider accepted the request: the elapsed budget stops
+        // counting while the response runs, however long that is, and
+        // resumes if it fails (the waits between attempts still count,
+        // so failures that keep coming stay bounded).
+        self.pause_ordinary_recovery_clock();
+        self.stream_response(response_stream).await
+    }
+
+    /// Streams a response to its end, or until the host stops the task:
+    /// its text and reasoning are sent as they come, the calls it
+    /// announces are reported, and its end is accounted for (usage, the
+    /// request estimate, refusals). Every outcome but a usable turn ends
+    /// the pass.
+    async fn stream_response(
+        &mut self,
+        mut response_stream: futures::stream::BoxStream<
+            'static,
+            Result<ai::StreamEvent, ai::Error>,
+        >,
+    ) -> Result<ModelTurn, ArkoAgentsError> {
+        let mut raw_events_for_turn: Vec<RawParserEvent> = Vec::new();
+        let mut parser = if !self.is_native_mode() {
+            Some(ToolCallParser::new(
+                self.task.agent_config.tool_config.offered_tool_names(),
+                self.parsing_config.clone(),
+            ))
+        } else {
+            None
+        };
+
+        let mut had_stream_error = false;
+        let mut final_generation_response: Option<ai::GenerationResponse> = None;
+        let mut current_assistant_response_text_for_conv = String::new();
+        let mut native_stream_call_ids: HashMap<usize, (Uuid, String)> = HashMap::new();
+        let mut streamed_refusal: Option<ai::Refusal> = None;
+
+        // The stream runs until it ends or fails, or the host stops the
+        // task; no recovery budget cuts it off (only arko_ai's opt-in
+        // stream idle timeout can).
+        loop {
+            tokio::select! {
+                biased;
+                maybe_cmd = self.command_receiver.recv() => {
+                    match maybe_cmd {
+                        Some(UserCommand::CancelTask) => {
+                            if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
+                                self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
+                            }
+                            self.reject_announced_calls(&mut native_stream_call_ids, INTERRUPTED_CALL).await?;
+                            self.task.set_state(TaskState::Cancelled { reason: CANCELLED_BY_USER.to_string() });
+                            self.emit_event(AgentEvent::TaskStateChanged(self.task.current_state.clone())).await?;
+                            had_stream_error = true;
+                            break;
+                        }
+                        Some(UserCommand::SuspendTask) => {
+                            if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
+                                self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
+                            }
+                            self.reject_announced_calls(&mut native_stream_call_ids, INTERRUPTED_CALL).await?;
+                            self.emit_event(AgentEvent::TaskStateChanged(self.task.current_state.clone())).await?;
+                            self.stop_requested = true;
+                            had_stream_error = true;
+                            break;
+                        }
+                        Some(UserCommand::InjectContext { content }) => {
+                            self.queue_context_injection(content);
+                        }
+                        Some(UserCommand::RequestHandover) => self.note_handover_request(),
+                        Some(_) => {}
+                        None => {
+                            if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
+                                self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
+                            }
+                            self.reject_announced_calls(&mut native_stream_call_ids, INTERRUPTED_CALL).await?;
+                            self.stop_requested = true;
+                            let reason = "Command channel disconnected during LLM streaming.".to_string();
+                            self.task.set_state(TaskState::Interrupted { reason: reason.clone() });
+                            self.emit_event(AgentEvent::TaskStateChanged(self.task.current_state.clone())).await?;
+                            self.emit_event(AgentEvent::ErrorEncountered { error_message: reason, requires_approval_to_retry: false, tool_call_id: None, error_kind: None }).await?;
+                            had_stream_error = true;
+                            break;
+                        }
+                    }
+                }
+
+                stream_item = response_stream.try_next() => {
+                    match stream_item {
+                        Ok(Some(ai::StreamEvent::TextChunk(text_chunk))) => {
+                            current_assistant_response_text_for_conv.push_str(&text_chunk);
+                            if self.is_native_mode() {
+                                self.text_buffer.push_str(&text_chunk);
+                                self.emit_throttled_text().await?;
+                            } else {
+                                raw_events_for_turn.extend(parser.as_mut().unwrap().ingest_chunk(&text_chunk));
+                            }
+                        }
+                        Ok(Some(ai::StreamEvent::ReasoningChunk(reasoning))) => {
+                            self.reasoning_buffer.push_str(&reasoning);
+                            self.emit_throttled_reasoning().await?;
+                        }
+                        Ok(Some(ai::StreamEvent::ToolCallStart { index, name })) => {
+                            if self.is_native_mode() {
+                                self.flush_throttled_text().await?;
+                                let uuid = Uuid::new_v4();
+                                native_stream_call_ids.insert(index, (uuid, name.clone()));
+                                self.emit_event(AgentEvent::ToolCallInitiated {
+                                    tool_call_id: uuid,
+                                    tool_name: name,
+                                }).await?;
+                            }
+                        }
+                        Ok(Some(ai::StreamEvent::ToolCallArgumentsDelta { .. })) => {}
+                        // Providers repeat the refusal on `End`; it is
+                        // kept only for a stream that ends without one.
+                        Ok(Some(ai::StreamEvent::Refusal(refusal))) => {
+                            streamed_refusal = Some(refusal);
+                        }
+                        Ok(Some(ai::StreamEvent::End(boxed_generation_response))) => {
+                            let mut generation_response = *boxed_generation_response;
+                            if self.current_request_is_fallback {
+                                self.prepare_fallback_response(&mut generation_response);
+                            }
+                            self.task.usage_history.push(generation_response.usage.clone());
+                            // The request was answered: its usage calibrates
+                            // the estimate of the next one.
+                            self.answered_request = self.sent_request.take();
+                            if let Some(ratio) = self.answered_request.and_then(|mark| {
+                                result_budget::calibrated_ratio(mark.bytes, generation_response.usage.input_tokens)
+                            }) {
+                                self.bytes_per_token = ratio;
+                            }
+                            self.overflow_recoveries = 0;
+                            self.emit_event(AgentEvent::UsageReported(generation_response.usage.clone())).await?;
+                            self.record_and_emit_model_call_usage(generation_response.model_call_usage.clone()).await?;
+                            if generation_response.stop_reason == ai::StopReason::MaxTokens {
+                                let usage = &generation_response.model_call_usage;
+                                log::warn!("Task {}: the response of {} ended at its output-token limit.", self.task.id, usage.model);
+                                self.emit_event(AgentEvent::OutputTokenLimitReached {
+                                    model: usage.served_model.clone().unwrap_or_else(|| usage.model.clone()),
+                                    output_tokens: generation_response.usage.output_tokens,
+                                }).await?;
+                            }
+                            // A refused turn is reported, never retried
+                            // unchanged, and never treated as a turn that
+                            // failed to call a tool.
+                            if let Some(refusal) = generation_response.refusal.clone() {
+                                // The call's routing token still belongs
+                                // to this turn, as for any other response.
+                                if let Some(token) = &generation_response.openai_turn_state {
+                                    self.task.conversation.record_openai_turn_state(token);
+                                }
+                                if let Some(ref mut p) = parser {
+                                    raw_events_for_turn.extend(p.finalize());
+                                }
+                                let plain_text = parser.is_some().then(|| parsed_plain_text(&raw_events_for_turn));
+                                self.reject_announced_calls(&mut native_stream_call_ids, REFUSED_TURN_CALL).await?;
+                                self.handle_refusal(refusal, generation_response.message, plain_text).await?;
+                                had_stream_error = true;
+                                break;
+                            }
+                            // A completed turn ends any fallback after a
+                            // refusal and answers any refused input.
+                            self.task.fallback_for = None;
+                            self.task.refused_input = None;
+                            // The provider answered: an outage is over, so
+                            // its elapsed budget no longer runs (a response
+                            // the runtime can't use still counts as an
+                            // attempt).
+                            self.recovery_started = None;
+                            self.paused_recovery_elapsed = None;
+                            self.task.conversation.add_assistant_message_from_response(generation_response.clone());
+                            final_generation_response = Some(generation_response);
+                            if let Some(ref mut p) = parser {
+                                raw_events_for_turn.extend(p.finalize());
+                            }
+                            break;
+                        }
+                        Ok(None) => {
+                            if let Some(ref mut p) = parser {
+                                raw_events_for_turn.extend(p.finalize());
+                            }
+                            if let Some(refusal) = streamed_refusal.take() {
+                                let partial = ai::Message::new_assistant(&current_assistant_response_text_for_conv);
+                                let plain_text = parser.is_some().then(|| parsed_plain_text(&raw_events_for_turn));
+                                self.reject_announced_calls(&mut native_stream_call_ids, REFUSED_TURN_CALL).await?;
+                                self.handle_refusal(refusal, partial, plain_text).await?;
+                                had_stream_error = true;
+                                break;
+                            }
+                            // Without a final response no announced call runs.
+                            self.reject_announced_calls(&mut native_stream_call_ids, FAILED_STREAM_CALL).await?;
+                            if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
+                                self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
+                            }
+                            if current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
+                                self.handle_llm_error(ai::Error::StreamTruncated("the response stream ended with no output".to_string()), None).await?;
+                                had_stream_error = true;
+                            }
+                            break;
+                        }
+                        // A refusal reported as an error (Gemini
+                        // generation-blocked codes): its partial text is
+                        // not kept.
+                        Err(ai::Error::Refusal(refusal)) => {
+                            self.reject_announced_calls(&mut native_stream_call_ids, REFUSED_TURN_CALL).await?;
+                            self.handle_refusal(*refusal, ai::Message::new_assistant(""), None).await?;
+                            had_stream_error = true;
+                            break;
+                        }
+                        // The request is sent again unchanged, so what the
+                        // failed stream delivered is not kept: it would end
+                        // the retried request on an assistant turn (a
+                        // prefill, which Claude 4.6 and later reject).
+                        Err(e) => {
+                            self.reject_announced_calls(&mut native_stream_call_ids, FAILED_STREAM_CALL).await?;
+                            self.handle_llm_error(e, None).await?;
+                            had_stream_error = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        self.flush_throttled_reasoning().await?;
+        self.flush_throttled_text().await?;
+
+        if had_stream_error
+            || self.task.current_state.is_terminal()
+            || !matches!(self.task.current_state, TaskState::InProgress)
+        {
+            if self.task.current_state.is_terminal() {
+                return Ok(ModelTurn::Ended(Flow::Exit));
+            }
+            return Ok(ModelTurn::Ended(Flow::NextPass));
+        }
+        Ok(ModelTurn::Streamed(StreamedTurn {
+            response: final_generation_response,
+            parser_events: raw_events_for_turn,
+            announced: native_stream_call_ids,
+        }))
+    }
+
     /// Runs the agent loop to completion.
     pub async fn run(mut self) -> Result<Task, ArkoAgentsError> {
         self.check_config()?;
@@ -3667,257 +3968,15 @@ impl AgentLoop {
             }
             step!(self.turn_boundary().await?);
 
-            let llm_client = Arc::clone(&self.llm_client);
-            let (conversation, gen_config) = self.next_request();
-            // What this request's usage is compared with, to estimate the
-            // next one (not for the refusal fallback's model).
-            self.sent_request = (!self.current_request_is_fallback).then(|| RequestMark {
-                messages: conversation.messages.len(),
-                bytes: result_budget::request_bytes(&conversation, &gen_config),
-                conversation: self.task.conversation_usage_start,
-            });
-            #[cfg(test)]
-            let scripted_response = self.scripted_responses.get_mut().unwrap().pop_front();
-            let request = async move {
-                #[cfg(test)]
-                if let Some(response) = scripted_response {
-                    return response;
-                }
-                if conversation.model.provider == ai::Provider::OpenAI {
-                    // Decided under the credential lock, so tasks sharing a
-                    // client (or an auth.json) don't rotate twice.
-                    llm_client
-                        .refresh_openai_oauth_token_if_expiring(Duration::from_secs(
-                            OAUTH_REFRESH_MARGIN_SECS,
-                        ))
-                        .await?;
-                }
-                llm_client.generate_stream(&conversation, gen_config).await
+            let StreamedTurn {
+                response: final_generation_response,
+                parser_events: raw_events_for_turn,
+                announced: mut native_stream_call_ids,
+            } = match self.model_turn().await? {
+                ModelTurn::Streamed(turn) => turn,
+                ModelTurn::Ended(Flow::Exit) => break,
+                ModelTurn::Ended(_) => continue,
             };
-            let Some(mut response_stream) = self.run_llm_attempt(request).await? else {
-                continue 'main_loop;
-            };
-            // The provider accepted the request: the elapsed budget stops
-            // counting while the response runs, however long that is, and
-            // resumes if it fails (the waits between attempts still count,
-            // so failures that keep coming stay bounded).
-            self.pause_ordinary_recovery_clock();
-
-            let mut raw_events_for_turn: Vec<RawParserEvent> = Vec::new();
-            let mut parser = if !self.is_native_mode() {
-                Some(ToolCallParser::new(
-                    self.task.agent_config.tool_config.offered_tool_names(),
-                    self.parsing_config.clone(),
-                ))
-            } else {
-                None
-            };
-
-            let mut had_stream_error = false;
-            let mut final_generation_response: Option<ai::GenerationResponse> = None;
-            let mut current_assistant_response_text_for_conv = String::new();
-            let mut native_stream_call_ids: HashMap<usize, (Uuid, String)> = HashMap::new();
-            let mut streamed_refusal: Option<ai::Refusal> = None;
-
-            // The stream runs until it ends or fails, or the host stops the
-            // task; no recovery budget cuts it off (only arko_ai's opt-in
-            // stream idle timeout can).
-            loop {
-                tokio::select! {
-                    biased;
-                    maybe_cmd = self.command_receiver.recv() => {
-                        match maybe_cmd {
-                            Some(UserCommand::CancelTask) => {
-                                if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
-                                    self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
-                                }
-                                self.reject_announced_calls(&mut native_stream_call_ids, INTERRUPTED_CALL).await?;
-                                self.task.set_state(TaskState::Cancelled { reason: CANCELLED_BY_USER.to_string() });
-                                self.emit_event(AgentEvent::TaskStateChanged(self.task.current_state.clone())).await?;
-                                had_stream_error = true;
-                                break;
-                            }
-                            Some(UserCommand::SuspendTask) => {
-                                if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
-                                    self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
-                                }
-                                self.reject_announced_calls(&mut native_stream_call_ids, INTERRUPTED_CALL).await?;
-                                self.emit_event(AgentEvent::TaskStateChanged(self.task.current_state.clone())).await?;
-                                self.stop_requested = true;
-                                had_stream_error = true;
-                                break;
-                            }
-                            Some(UserCommand::InjectContext { content }) => {
-                                self.queue_context_injection(content);
-                            }
-                            Some(UserCommand::RequestHandover) => self.note_handover_request(),
-                            Some(_) => {}
-                            None => {
-                                if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
-                                    self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
-                                }
-                                self.reject_announced_calls(&mut native_stream_call_ids, INTERRUPTED_CALL).await?;
-                                self.stop_requested = true;
-                                let reason = "Command channel disconnected during LLM streaming.".to_string();
-                                self.task.set_state(TaskState::Interrupted { reason: reason.clone() });
-                                self.emit_event(AgentEvent::TaskStateChanged(self.task.current_state.clone())).await?;
-                                self.emit_event(AgentEvent::ErrorEncountered { error_message: reason, requires_approval_to_retry: false, tool_call_id: None, error_kind: None }).await?;
-                                had_stream_error = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    stream_item = response_stream.try_next() => {
-                        match stream_item {
-                            Ok(Some(ai::StreamEvent::TextChunk(text_chunk))) => {
-                                current_assistant_response_text_for_conv.push_str(&text_chunk);
-                                if self.is_native_mode() {
-                                    self.text_buffer.push_str(&text_chunk);
-                                    self.emit_throttled_text().await?;
-                                } else {
-                                    raw_events_for_turn.extend(parser.as_mut().unwrap().ingest_chunk(&text_chunk));
-                                }
-                            }
-                            Ok(Some(ai::StreamEvent::ReasoningChunk(reasoning))) => {
-                                self.reasoning_buffer.push_str(&reasoning);
-                                self.emit_throttled_reasoning().await?;
-                            }
-                            Ok(Some(ai::StreamEvent::ToolCallStart { index, name })) => {
-                                if self.is_native_mode() {
-                                    self.flush_throttled_text().await?;
-                                    let uuid = Uuid::new_v4();
-                                    native_stream_call_ids.insert(index, (uuid, name.clone()));
-                                    self.emit_event(AgentEvent::ToolCallInitiated {
-                                        tool_call_id: uuid,
-                                        tool_name: name,
-                                    }).await?;
-                                }
-                            }
-                            Ok(Some(ai::StreamEvent::ToolCallArgumentsDelta { .. })) => {}
-                            // Providers repeat the refusal on `End`; it is
-                            // kept only for a stream that ends without one.
-                            Ok(Some(ai::StreamEvent::Refusal(refusal))) => {
-                                streamed_refusal = Some(refusal);
-                            }
-                            Ok(Some(ai::StreamEvent::End(boxed_generation_response))) => {
-                                let mut generation_response = *boxed_generation_response;
-                                if self.current_request_is_fallback {
-                                    self.prepare_fallback_response(&mut generation_response);
-                                }
-                                self.task.usage_history.push(generation_response.usage.clone());
-                                // The request was answered: its usage calibrates
-                                // the estimate of the next one.
-                                self.answered_request = self.sent_request.take();
-                                if let Some(ratio) = self.answered_request.and_then(|mark| {
-                                    result_budget::calibrated_ratio(mark.bytes, generation_response.usage.input_tokens)
-                                }) {
-                                    self.bytes_per_token = ratio;
-                                }
-                                self.overflow_recoveries = 0;
-                                self.emit_event(AgentEvent::UsageReported(generation_response.usage.clone())).await?;
-                                self.record_and_emit_model_call_usage(generation_response.model_call_usage.clone()).await?;
-                                if generation_response.stop_reason == ai::StopReason::MaxTokens {
-                                    let usage = &generation_response.model_call_usage;
-                                    log::warn!("Task {}: the response of {} ended at its output-token limit.", self.task.id, usage.model);
-                                    self.emit_event(AgentEvent::OutputTokenLimitReached {
-                                        model: usage.served_model.clone().unwrap_or_else(|| usage.model.clone()),
-                                        output_tokens: generation_response.usage.output_tokens,
-                                    }).await?;
-                                }
-                                // A refused turn is reported, never retried
-                                // unchanged, and never treated as a turn that
-                                // failed to call a tool.
-                                if let Some(refusal) = generation_response.refusal.clone() {
-                                    // The call's routing token still belongs
-                                    // to this turn, as for any other response.
-                                    if let Some(token) = &generation_response.openai_turn_state {
-                                        self.task.conversation.record_openai_turn_state(token);
-                                    }
-                                    if let Some(ref mut p) = parser {
-                                        raw_events_for_turn.extend(p.finalize());
-                                    }
-                                    let plain_text = parser.is_some().then(|| parsed_plain_text(&raw_events_for_turn));
-                                    self.reject_announced_calls(&mut native_stream_call_ids, REFUSED_TURN_CALL).await?;
-                                    self.handle_refusal(refusal, generation_response.message, plain_text).await?;
-                                    had_stream_error = true;
-                                    break;
-                                }
-                                // A completed turn ends any fallback after a
-                                // refusal and answers any refused input.
-                                self.task.fallback_for = None;
-                                self.task.refused_input = None;
-                                // The provider answered: an outage is over, so
-                                // its elapsed budget no longer runs (a response
-                                // the runtime can't use still counts as an
-                                // attempt).
-                                self.recovery_started = None;
-                                self.paused_recovery_elapsed = None;
-                                self.task.conversation.add_assistant_message_from_response(generation_response.clone());
-                                final_generation_response = Some(generation_response);
-                                if let Some(ref mut p) = parser {
-                                    raw_events_for_turn.extend(p.finalize());
-                                }
-                                break;
-                            }
-                            Ok(None) => {
-                                if let Some(ref mut p) = parser {
-                                    raw_events_for_turn.extend(p.finalize());
-                                }
-                                if let Some(refusal) = streamed_refusal.take() {
-                                    let partial = ai::Message::new_assistant(&current_assistant_response_text_for_conv);
-                                    let plain_text = parser.is_some().then(|| parsed_plain_text(&raw_events_for_turn));
-                                    self.reject_announced_calls(&mut native_stream_call_ids, REFUSED_TURN_CALL).await?;
-                                    self.handle_refusal(refusal, partial, plain_text).await?;
-                                    had_stream_error = true;
-                                    break;
-                                }
-                                // Without a final response no announced call runs.
-                                self.reject_announced_calls(&mut native_stream_call_ids, FAILED_STREAM_CALL).await?;
-                                if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
-                                    self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
-                                }
-                                if current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
-                                    self.handle_llm_error(ai::Error::StreamTruncated("the response stream ended with no output".to_string()), None).await?;
-                                    had_stream_error = true;
-                                }
-                                break;
-                            }
-                            // A refusal reported as an error (Gemini
-                            // generation-blocked codes): its partial text is
-                            // not kept.
-                            Err(ai::Error::Refusal(refusal)) => {
-                                self.reject_announced_calls(&mut native_stream_call_ids, REFUSED_TURN_CALL).await?;
-                                self.handle_refusal(*refusal, ai::Message::new_assistant(""), None).await?;
-                                had_stream_error = true;
-                                break;
-                            }
-                            // The request is sent again unchanged, so what the
-                            // failed stream delivered is not kept: it would end
-                            // the retried request on an assistant turn (a
-                            // prefill, which Claude 4.6 and later reject).
-                            Err(e) => {
-                                self.reject_announced_calls(&mut native_stream_call_ids, FAILED_STREAM_CALL).await?;
-                                self.handle_llm_error(e, None).await?;
-                                had_stream_error = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            self.flush_throttled_reasoning().await?;
-            self.flush_throttled_text().await?;
-
-            if had_stream_error
-                || self.task.current_state.is_terminal()
-                || !matches!(self.task.current_state, TaskState::InProgress)
-            {
-                if self.task.current_state.is_terminal() {
-                    break 'main_loop;
-                }
-                continue 'main_loop;
-            }
             // The model's turn is in the conversation; its calls haven't run.
             self.report_task(false).await;
 
@@ -4711,7 +4770,6 @@ impl AgentLoop {
                 }
 
                 if final_generation_response.is_some()
-                    && !had_stream_error
                     && !self.task.current_state.is_awaiting_approval()
                 {
                     self.reset_llm_recovery();
