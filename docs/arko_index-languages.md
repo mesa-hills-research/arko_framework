@@ -290,8 +290,9 @@ The tests in `arko_index/tests/languages.rs` run on a sample of every grammar
   and trimmed content, one language per file
 - determinism
 - IDs that survive an edit in another chunk
-- bounded work on adversarial input (a 70,000-byte line, deep nesting, runs of
-  brackets, quotes and backticks)
+- nine adversarial inputs (among them a 70,000-byte line, deep bracket nesting, 1,000
+  unclosed tags, runs of quotes and backticks), each chunked in under a minute with every
+  grammar
 - invariants on randomly mutated samples (deletions, duplications, inserted syntax,
   swapped lines, truncation) for every grammar
 - the scope each sample's rules give, and the structure small bounds give prose,
