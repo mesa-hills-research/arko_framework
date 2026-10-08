@@ -110,9 +110,8 @@ impl VariantSpec {
         Ok(())
     }
 
-    /// The `index2` flags of a build: the variant's, with `--no-embed` when they
-    /// don't embed (so a `dense.json` left by an earlier definition doesn't
-    /// apply), and with the offline hashing embedder for `--mock-embeddings`.
+    /// The `index2` flags of a build: the variant's, with the offline hashing
+    /// embedder for `--mock-embeddings`.
     pub fn build_flags(&self, mock_embeddings: bool) -> Vec<String> {
         let mut flags = Vec::new();
         let mut iter = self.index.iter();
@@ -125,9 +124,6 @@ impl VariantSpec {
                 }
                 _ => flags.push(flag.clone()),
             }
-        }
-        if !self.embeds() && !flags.iter().any(|flag| flag == "--no-embed") {
-            flags.push("--no-embed".into());
         }
         flags
     }
@@ -294,6 +290,14 @@ fn build(
 ) -> BenchResult<VariantIndex> {
     std::fs::create_dir_all(dir)?;
     set_writable(dir, true);
+    // The index's saved embedding settings go: the CLI would otherwise keep the
+    // ones flags leave out (an earlier definition's cap, quantization or text),
+    // so each build is what its flags say. The embedding cache stays.
+    match std::fs::remove_file(dir.join("dense.json")) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     eprintln!(
         "{id}@{name}: building the index: index2 {}",
         flags.join(" ")
@@ -314,12 +318,20 @@ fn build(
     if !output.status.success() {
         return Err(format!("{id}@{name}: arko_index index2 failed: {summary}").into());
     }
-    // The last lines: counts, the embedding summary, the report summary.
-    let tail: Vec<&str> = summary.lines().rev().take(6).collect();
+    // The counts, the embedding summary and the report summary.
+    let lines: Vec<&str> = summary
+        .lines()
+        .filter(|line| {
+            line.starts_with("indexed ")
+                || line.contains(": embeddings: ")
+                || line.contains("token cap")
+                || line.contains(" files indexed")
+        })
+        .collect();
     eprintln!(
         "{id}@{name}: indexed in {:.1} s: {}",
         build_ms as f64 / 1000.0,
-        tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
+        lines.join(" | ")
     );
     Ok(VariantIndex {
         dir: dir.to_path_buf(),
@@ -605,10 +617,7 @@ mod tests {
             lexical.tools_paragraph().unwrap(),
             crate::prompts::TOOLS_INDEX
         );
-        assert_eq!(
-            lexical.build_flags(false),
-            ["--lexical-scope", "--no-embed"]
-        );
+        assert_eq!(lexical.build_flags(true), ["--lexical-scope"]);
         let dense = spec(
             "src",
             &["--embed", "voyage-code-4", "--embed-text", "source"],

@@ -1877,6 +1877,40 @@ mod tests {
             manifest.incompatible_with(&other),
             vec!["model".to_string(), "shell settings".to_string()]
         );
+        // A variant keeps its definition and indexes; new variants may join.
+        let variant = |flags: &[&str]| crate::variants::PreparedVariant {
+            spec: serde_json::from_value(serde_json::json!({ "name": "v", "index": flags }))
+                .unwrap(),
+            mock_embeddings: false,
+            repos: BTreeMap::from([(
+                "demo".to_string(),
+                crate::variants::VariantIndex {
+                    dir: PathBuf::new(),
+                    commit: "abc".into(),
+                    flags: flags.iter().map(|flag| flag.to_string()).collect(),
+                    cli_sha256: "abc".into(),
+                    dense: false,
+                    build_ms: 1,
+                    summary: String::new(),
+                },
+            )]),
+        };
+        let mut first = manifest.clone();
+        first
+            .variants
+            .insert("v".into(), variant(&["--lexical-scope"]));
+        let mut later = manifest.clone();
+        assert!(first.incompatible_with(&later).is_empty());
+        let mut rebuilt = variant(&["--lexical-scope"]);
+        rebuilt.repos.get_mut("demo").unwrap().build_ms = 2;
+        later.variants.insert("v".into(), rebuilt);
+        later.variants.insert("w".into(), variant(&[]));
+        assert!(first.incompatible_with(&later).is_empty());
+        later.variants.insert("v".into(), variant(&[]));
+        assert_eq!(
+            first.incompatible_with(&later),
+            vec!["variant v".to_string()]
+        );
     }
 
     #[cfg(unix)]

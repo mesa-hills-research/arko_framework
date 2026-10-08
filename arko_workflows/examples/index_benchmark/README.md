@@ -242,8 +242,8 @@ VOYAGE_API_KEY=... $B run --out $OUT --codex-home ~/.codex --name variants --arm
 
 `prepare-variants` builds `indexes/<id>@<name>/` with `arko_index_cli index2 FLAGS`, and
 rebuilds one only when its flags, the CLI or the commit changed (`--force` rebuilds all).
-The index directory stays across rebuilds, so its embedding cache keeps the vectors
-already paid for. Variants that embed need `VOYAGE_API_KEY` in the benchmark's environment
+Each build follows its flags alone, and the index directory stays across rebuilds, so its
+embedding cache keeps the vectors already paid for. Variants that embed need `VOYAGE_API_KEY` in the benchmark's environment
 for `prepare-variants` and for `run`. In their shells, `arko_index search2` goes through
 a service in the benchmark process that runs the CLI with the key, the way arm C's
 `arko_index_dense` does. `--max-embed-tokens 0` in a variant's flags counts the tokens a
