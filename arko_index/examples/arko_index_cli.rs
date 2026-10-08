@@ -246,8 +246,8 @@ fn rules_changed_note() {
 }
 
 /// The embedding settings of an `index2` run: `--no-embed` (lexical, and forget the
-/// saved settings), `--embed-config FILE`, `--embed MODEL`, else the index's saved
-/// `dense.json`; then `--dimensions`, `--embed-text`, `--quantize` and
+/// saved settings), or one of `--embed-config FILE` and `--embed MODEL`, else the
+/// index's saved `dense.json`; then `--dimensions`, `--embed-text`, `--quantize` and
 /// `--max-embed-tokens`.
 fn dense_config(state: &Path, f: &Flags) -> Result<Option<DenseConfig>, Error> {
     if f.no_embed {
@@ -259,9 +259,19 @@ fn dense_config(state: &Path, f: &Flags) -> Result<Option<DenseConfig>, Error> {
         }
         return Ok(None);
     }
+    if f.embed.is_some() && f.embed_config.is_some() {
+        return Err("--embed and --embed-config both choose the model: give one".into());
+    }
     let saved = DenseConfig::load(state)?;
     let mut config = if let Some(path) = &f.embed_config {
-        DenseConfig::read(path)?
+        let mut config = DenseConfig::read(path)?;
+        if let Some(dims) = f.dimensions {
+            // Checked against the model; the file's other model settings stay.
+            let spec = format!("{}:{}", config.embedder.provider, config.embedder.model);
+            support::descriptor_for(&spec, Some(dims))?;
+            config.embedder.dimensions = dims;
+        }
+        config
     } else if let Some(spec) = &f.embed {
         let embedder = support::descriptor_for(spec, f.dimensions)?;
         // A new model keeps the saved quantization, cap and embedded text unless they
