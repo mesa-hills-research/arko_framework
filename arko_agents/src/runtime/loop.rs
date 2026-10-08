@@ -6858,6 +6858,10 @@ mod tests {
 mod loop_trace;
 
 #[cfg(test)]
+#[path = "golden_tests.rs"]
+mod golden_tests;
+
+#[cfg(test)]
 #[path = "retry_tests.rs"]
 mod retry_tests;
 

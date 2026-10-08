@@ -1,0 +1,37 @@
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=7e1b36a0af0b5628
+E {"ToolCallFormatted":{"parameters":{"what":"one"},"tool_call_id":"id2","tool_name":"gate"}}
+E {"ToolCallFormatted":{"parameters":{"what":"two"},"tool_call_id":"id3","tool_name":"gate"}}
+E {"ToolCallFormatted":{"parameters":{"what":"three"},"tool_call_id":"id4","tool_name":"gate"}}
+E {"ToolCallFormatted":{"parameters":{"what":"four"},"tool_call_id":"id5","tool_name":"gate"}}
+E {"TaskStateChanged":{"AwaitingBatchToolApproval":{"batch_id":"id6","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"one"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"two"},"tool_call_id":"id3","tool_description":"Does the gate step","tool_name":"gate"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"three"},"tool_call_id":"id4","tool_description":"Does the gate step","tool_name":"gate"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"four"},"tool_call_id":"id5","tool_description":"Does the gate step","tool_name":"gate"}]}}}
+E {"BatchToolCallAwaitingApproval":{"batch_id":"id6","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"one"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"two"},"tool_call_id":"id3","tool_description":"Does the gate step","tool_name":"gate"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"three"},"tool_call_id":"id4","tool_description":"Does the gate step","tool_name":"gate"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"four"},"tool_call_id":"id5","tool_description":"Does the gate step","tool_name":"gate"}]}}
+S durable=0 msgs=2 native_results=0 native_calls=4 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingBatchToolApproval":{"batch_id":"id6","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"one"},"tool_call_id":"id2","tool_description":"Does the gate step","tool_name":"gate"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"two"},"tool_call_id":"id3","tool_description":"Does the gate step","tool_name":"gate"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"three"},"tool_call_id":"id4","tool_description":"Does the gate step","tool_name":"gate"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"four"},"tool_call_id":"id5","tool_description":"Does the gate step","tool_name":"gate"}]}} task=c5003214152fb1a7
+E {"ToolRejected":{"reason":"Not this one.","tool_call_id":"id4","tool_name":"gate"}}
+E {"ToolRejected":{"reason":"No decision provided","tool_call_id":"id5","tool_name":"gate"}}
+S durable=1 msgs=2 native_results=2 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=31a9cb302bfca47c
+E {"ToolResult":{"output":"gate ran one","tool_call_id":"id2","tool_name":"gate"}}
+S durable=0 msgs=2 native_results=3 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=3a48841e2130ae1b
+S durable=1 msgs=2 native_results=3 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=7e13f8c36c2b034f
+E {"ToolResult":{"output":"The host's own output.","tool_call_id":"id3","tool_name":"gate"}}
+S durable=0 msgs=2 native_results=4 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=99863183ccb8c343
+E {"TaskStateChanged":"InProgress"}
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=997d165bdb531a68
+E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id7","tool_name":"complete_task"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=fbee818d011d9eb8
+E {"ToolResult":{"output":"done","tool_call_id":"id7","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
+S durable=0 msgs=4 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=33a5c028b8db3f8f
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=871af94dafe0b72e
+E "TaskStreamEnd"
+--- conversation: 5 messages, system prompt d1669b0441bd8242
+M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"what":"one"},"id":"g1","name":"gate"},{"arguments":{"what":"two"},"id":"g2","name":"gate"},{"arguments":{"what":"three"},"id":"g3","name":"gate"},{"arguments":{"what":"four"},"id":"g4","name":"gate"}]}
+M {"content":[{"ToolResult":{"call_id":"g1","is_error":false,"name":"gate","output":"gate ran one\n\nMessage from user on approval:\nGo ahead."}},{"ToolResult":{"call_id":"g2","is_error":false,"name":"gate","output":"The host's own output."}},{"ToolResult":{"call_id":"g3","is_error":true,"name":"gate","output":"Not this one."}},{"ToolResult":{"call_id":"g4","is_error":true,"name":"gate","output":"No decision provided, implicitly rejected"}}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"summary":"done"},"id":"done","name":"complete_task"}]}
+M {"content":[{"ToolResult":{"call_id":"done","is_error":false,"name":"complete_task","output":"done"}}],"id":null,"reasoning_artifact":null,"role":"User"}

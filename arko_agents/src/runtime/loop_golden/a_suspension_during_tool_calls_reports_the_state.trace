@@ -1,0 +1,37 @@
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=2b1064390afb3a38
+E {"ToolCallFormatted":{"parameters":{"what":"hang"},"tool_call_id":"id2","tool_name":"hangs"}}
+E {"ToolCallFormatted":{"parameters":{"what":"after"},"tool_call_id":"id3","tool_name":"step"}}
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=04919d10f74b4407
+E {"ToolRejected":{"reason":"The task was suspended while this call was running, so the call was stopped before it finished. Call it again if it is still needed.","tool_call_id":"id2","tool_name":"hangs"}}
+S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=23aff0242ed5221f
+E {"ToolRejected":{"reason":"The task was suspended before this call ran, so it was not run. Call it again if it is still needed.","tool_call_id":"id3","tool_name":"step"}}
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=9655d0c3e82e33c3
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=9655d0c3e82e33c3
+E "TaskStreamEnd"
+--- conversation: 3 messages, system prompt d1669b0441bd8242
+M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"what":"hang"},"id":"h","name":"hangs"},{"arguments":{"what":"after"},"id":"s","name":"step"}]}
+M {"content":[{"ToolResult":{"call_id":"h","is_error":true,"name":"hangs","output":"The task was suspended while this call was running, so the call was stopped before it finished. Call it again if it is still needed."}},{"ToolResult":{"call_id":"s","is_error":true,"name":"step","output":"The task was suspended before this call ran, so it was not run. Call it again if it is still needed."}}],"id":null,"reasoning_artifact":null,"role":"User"}
+E {"TaskStateChanged":"InProgress"}
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=9655d0c3e82e33c3
+E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
+E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=54f7bda7b12c012a
+E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id4","tool_name":"complete_task"}}
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=08cd052ddc699f9d
+E {"ToolResult":{"output":"done","tool_call_id":"id4","tool_name":"complete_task"}}
+E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
+S durable=0 msgs=4 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=d1daea82286b3d35
+S durable=0 msgs=5 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=6f7e0fa7467e7344
+E "TaskStreamEnd"
+--- conversation: 5 messages, system prompt d1669b0441bd8242
+M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"what":"hang"},"id":"h","name":"hangs"},{"arguments":{"what":"after"},"id":"s","name":"step"}]}
+M {"content":[{"ToolResult":{"call_id":"h","is_error":true,"name":"hangs","output":"The task was suspended while this call was running, so the call was stopped before it finished. Call it again if it is still needed."}},{"ToolResult":{"call_id":"s","is_error":true,"name":"step","output":"The task was suspended before this call ran, so it was not run. Call it again if it is still needed."}}],"id":null,"reasoning_artifact":null,"role":"User"}
+M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"summary":"done"},"id":"done","name":"complete_task"}]}
+M {"content":[{"ToolResult":{"call_id":"done","is_error":false,"name":"complete_task","output":"done"}}],"id":null,"reasoning_artifact":null,"role":"User"}

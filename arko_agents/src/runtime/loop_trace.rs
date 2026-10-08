@@ -5,7 +5,8 @@
 //! behaviour.
 //!
 //! A loop is traced when its test is: a test that calls [`record`] (the
-//! golden scenarios), or every test when one of these variables is set:
+//! golden scenarios of `golden_tests.rs`), or every test when one of these
+//! variables is set:
 //!
 //! - `ARKO_LOOP_TRACE_DIR=<dir>`: each test's trace goes to
 //!   `<dir>/<test>.trace`, appended line by line (clear the folder first).
@@ -20,9 +21,10 @@
 //! task=<hash>`, where the hash covers the whole task except its agent
 //! configuration (and its model, named by id). Normalizing sorts JSON keys,
 //! replaces UUIDs with `id0`, `id1`, … in the order a test's trace first
-//! shows them, masks wall-clock times and the time to a usage-limit reset,
-//! and shortens strings over [`LONG_STRING`] characters to their head and a
-//! hash.
+//! shows them, masks wall-clock times, the time to a usage-limit reset and
+//! the awaiting state a command timeout prints with `{:?}` (its maps print
+//! in a different order each run), and shortens strings over
+//! [`LONG_STRING`] characters to their head and a hash.
 //!
 //! The test is the thread the loop is created on: libtest runs each test on
 //! a thread named after it, and the loop's tests use tokio's current-thread
@@ -71,6 +73,11 @@ fn env_set(name: &str) -> bool {
 
 fn full() -> bool {
     env_set("ARKO_LOOP_TRACE_FULL")
+}
+
+/// The longest string a line keeps whole.
+fn longest() -> Option<usize> {
+    (!full()).then_some(LONG_STRING)
 }
 
 fn current_test() -> String {
@@ -155,20 +162,25 @@ impl TestTrace {
         self.state.lock().unwrap().lines.clone()
     }
 
+    /// `value` normalized as the trace's lines are (UUID labels shared with
+    /// them), with strings over `longest` characters shortened to their head
+    /// and a hash.
+    pub(super) fn normalized(&self, value: Value, longest: usize) -> Value {
+        self.state.lock().unwrap().value(value, Some(longest))
+    }
+
     fn event(&self, event: &AgentEvent) {
         let value = serde_json::to_value(event).expect("an event serializes");
         let mut state = self.state.lock().unwrap();
-        let shorten = !full();
-        let line = format!("E {}", state.value(value, shorten));
+        let line = format!("E {}", state.value(value, longest()));
         self.push(&mut state, line);
     }
 
     fn snapshot(&self, task: &Task, durable: bool) {
         let mut state = self.state.lock().unwrap();
-        let shorten = !full();
         let current_state = serde_json::to_value(&task.current_state).expect("a state serializes");
-        let current_state = state.value(current_state, shorten);
-        let digest = state.value(task_digest(task), false).to_string();
+        let current_state = state.value(current_state, longest());
+        let digest = state.value(task_digest(task), None).to_string();
         let digest = if full() {
             digest
         } else {
@@ -274,16 +286,17 @@ struct Normalizer {
 }
 
 impl Normalizer {
-    fn value(&mut self, value: Value, shorten: bool) -> Value {
+    /// `value` normalized, with strings over `longest` characters shortened.
+    fn value(&mut self, value: Value, longest: Option<usize>) -> Value {
         match value {
-            Value::String(text) => Value::String(self.string(&text, shorten)),
+            Value::String(text) => Value::String(self.string(&text, longest)),
             Value::Array(items) => Value::Array(
                 items
                     .into_iter()
-                    .map(|item| self.value(item, shorten))
+                    .map(|item| self.value(item, longest))
                     .collect(),
             ),
-            Value::Object(map) => Value::Object(self.object(map, shorten)),
+            Value::Object(map) => Value::Object(self.object(map, longest)),
             other => other,
         }
     }
@@ -291,7 +304,7 @@ impl Normalizer {
     /// An object with its keys sorted. Its entries are normalized in an
     /// order that doesn't depend on UUIDs not labelled yet (a map keyed by
     /// call ids, say), so that labels are given in the same order each run.
-    fn object(&mut self, map: Map<String, Value>, shorten: bool) -> Map<String, Value> {
+    fn object(&mut self, map: Map<String, Value>, longest: Option<usize>) -> Map<String, Value> {
         let mut entries: Vec<((String, String), String, Value)> = map
             .into_iter()
             .map(|(key, value)| {
@@ -305,9 +318,9 @@ impl Normalizer {
             let value = if is_time_key(&key) && !value.is_null() {
                 Value::String("<time>".into())
             } else {
-                self.value(value, shorten)
+                self.value(value, longest)
             };
-            normalized.push((self.string(&key, false), value));
+            normalized.push((self.string(&key, None), value));
         }
         normalized.sort_by(|(a, _), (b, _)| a.cmp(b));
         normalized.into_iter().collect()
@@ -336,7 +349,7 @@ impl Normalizer {
         text
     }
 
-    fn string(&mut self, text: &str, shorten: bool) -> String {
+    fn string(&mut self, text: &str, longest: Option<usize>) -> String {
         let text = self.masked(text);
         let labels = &mut self.labels;
         let text = UUID.replace_all(&text, |found: &regex::Captures<'_>| {
@@ -350,7 +363,7 @@ impl Normalizer {
         let text = RESETS_IN.replace_all(&text, "resets in about <duration>");
         let text = TIMEOUT_STATE.replace_all(&text, "${1}<state>.");
         let characters = text.chars().count();
-        if !shorten || characters <= LONG_STRING {
+        if longest.is_none_or(|longest| characters <= longest) {
             return text.into_owned();
         }
         let head: String = text.chars().take(LONG_STRING_HEAD).collect();
@@ -372,7 +385,7 @@ mod tests {
         let b = "6f1c1a2e-2222-4aaa-8bbb-000000000002";
         let value = serde_json::json!([format!("call {b}"), {"id": a, "other": b}]);
         assert_eq!(
-            normalizer.value(value, true),
+            normalizer.value(value, Some(LONG_STRING)),
             serde_json::json!(["call id0", {"id": "id1", "other": "id0"}])
         );
     }
@@ -388,7 +401,7 @@ mod tests {
             let mut map = Map::new();
             map.insert(first.into(), serde_json::json!({"name": first == a}));
             map.insert(second.into(), serde_json::json!({"name": second == a}));
-            let value = normalizer.value(Value::Object(map), true);
+            let value = normalizer.value(Value::Object(map), Some(LONG_STRING));
             assert_eq!(
                 value,
                 serde_json::json!({"id0": {"name": false}, "id1": {"name": true}})
@@ -407,7 +420,7 @@ mod tests {
             "reason": "Timeout (5s) waiting for user command in state AwaitingToolApproval { a: {\"x\": 1} }.",
         });
         assert_eq!(
-            normalizer.value(value, true),
+            normalizer.value(value, Some(LONG_STRING)),
             serde_json::json!({
                 "reason": "Timeout (5s) waiting for user command in state <state>.",
                 "resets_at_unix_ms": "<time>",
@@ -459,9 +472,9 @@ mod tests {
     fn long_strings_keep_their_head_and_a_hash() {
         let mut normalizer = Normalizer::default();
         let long = "x".repeat(LONG_STRING + 1);
-        let shortened = normalizer.string(&long, true);
+        let shortened = normalizer.string(&long, Some(LONG_STRING));
         assert!(shortened.starts_with(&"x".repeat(LONG_STRING_HEAD)));
         assert!(shortened.ends_with(&format!("<401 chars, {:016x}>", fnv1a(long.as_bytes()))));
-        assert_eq!(normalizer.string(&long, false), long);
+        assert_eq!(normalizer.string(&long, None), long);
     }
 }
