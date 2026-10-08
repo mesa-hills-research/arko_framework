@@ -20,7 +20,7 @@
 //!              ([`DenseIndexInfo`])
 //!   vkeys.dat  per doc with a vector, sorted by vector id: u128 BE id, u32 LE doc
 //! The vectors themselves are in a store beside the generations,
-//! `STATE_DIR/vectors-<digest of model and settings>/` ([`MhrStore`]), which every
+//! `STATE_DIR/vectors-<digest of model and settings>/` ([`CaprockStore`]), which every
 //! build updates in place: a doc's vector id is a digest of its path and its embedded
 //! text, so an unchanged chunk keeps its vector, whatever its doc id.
 //! Build memory is bounded: postings accumulate up to `mem_budget` bytes, then spill
@@ -39,7 +39,7 @@ use crate::{
     search::tokens,
     tokenize::{self, Counts, FxHasher, FxMap},
     vector::{
-        self, Filter, MhrStore, StoreConfig, VectorId, VectorMeta, VectorRecord, VectorStore,
+        self, CaprockStore, Filter, StoreConfig, VectorId, VectorMeta, VectorRecord, VectorStore,
     },
 };
 use fs2::FileExt;
@@ -740,7 +740,7 @@ pub fn build(
     // Embeddings: embed what the cache lacks, then bring the vector store up to date.
     let mut dense_stats = None;
     // The store's directory name, the store, and the vectors to remove after the switch.
-    let mut store_update: Option<(String, MhrStore, Vec<VectorId>)> = None;
+    let mut store_update: Option<(String, CaprockStore, Vec<VectorId>)> = None;
     if let (Some(d), Some(cache), Some(mut vhash), Some(spool)) =
         (dense, cache.as_mut(), vhash.take(), spool.take())
     {
@@ -1232,13 +1232,13 @@ impl Generation {
     /// The vector store of this generation's embeddings, read-only. It holds every
     /// vector of the generation, and can hold others: those a build in progress (or an
     /// interrupted one) added for its own generation.
-    pub(crate) fn open_store(&self, info: &DenseIndexInfo) -> Result<MhrStore, Error> {
+    pub(crate) fn open_store(&self, info: &DenseIndexInfo) -> Result<CaprockStore, Error> {
         check_dense_format(info)?;
         if !info.store.starts_with("vectors-") || info.store.contains(['/', '\\']) {
             return Err(format!("bad vector store name {:?}", info.store).into());
         }
         let dir = self.state_dir.join(&info.store);
-        let store = MhrStore::open(&dir).map_err(|e| {
+        let store = CaprockStore::open(&dir).map_err(|e| {
             format!("{e} (the vector store of this index: rebuild the index to restore it)")
         })?;
         if !store.matches(&info.store_config()) {

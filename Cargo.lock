@@ -179,6 +179,7 @@ name = "arko_index"
 version = "0.3.0"
 dependencies = [
  "arko_ai",
+ "caprock",
  "ctrlc",
  "fs2",
  "ignore",
@@ -233,7 +234,6 @@ dependencies = [
  "mhr_tree_sitter_xml",
  "mhr_tree_sitter_yaml",
  "mhr_tree_sitter_zig",
- "mhr_vector",
  "serde",
  "serde_json",
  "sha2",
@@ -398,6 +398,18 @@ name = "bytes"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
+
+[[package]]
+name = "caprock"
+version = "0.1.0"
+source = "git+https://github.com/mesa-hills-research/caprock?rev=5ec18cc45672156ad7ff6ba1bbca6983cf3160a0#5ec18cc45672156ad7ff6ba1bbca6983cf3160a0"
+dependencies = [
+ "crc32fast",
+ "pulp",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "castaway"
@@ -2047,18 +2059,6 @@ version = "0.1.0"
 source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
 dependencies = [
  "mhr_tree_sitter_language",
-]
-
-[[package]]
-name = "mhr_vector"
-version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_vector?rev=d7eb201e00af249552d2798c7f00aacbc7e348d2#d7eb201e00af249552d2798c7f00aacbc7e348d2"
-dependencies = [
- "crc32fast",
- "pulp",
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
-//! Vector storage for dense search: the [`VectorStore`] trait and [`MhrStore`], its
-//! implementation on [mhr_vector](https://github.com/mesa-hills-research/mhr_vector).
+//! Vector storage for dense search: the [`VectorStore`] trait and [`CaprockStore`], its
+//! implementation on [Caprock](https://github.com/mesa-hills-research/caprock).
 //!
 //! A store maps 128-bit ids to vectors, each with the path and language of what it
 //! embeds, and returns the `k` most similar ids for a query, optionally restricted by a
@@ -7,7 +7,7 @@
 //! in `[-1, 1]`. Results are ordered by score, best first, then by id ascending, so
 //! equal scores always come out in the same order.
 use crate::{bench_v1::Error, dense::ModelDescriptor};
-use mhr_vector::{
+use caprock::{
     AnnKind, CodeKind, EmbeddingModel, IndexConfig, Op, Record, SearchParams, StoreOptions,
     VamanaParams,
 };
@@ -48,11 +48,11 @@ impl Filter {
     pub fn matches(&self, path: &str, language: &str) -> bool {
         self.path_prefix
             .as_deref()
-            .is_none_or(|p| mhr_vector::filter::path_has_prefix(path, p))
+            .is_none_or(|p| caprock::filter::path_has_prefix(path, p))
             && self.language.as_deref().is_none_or(|l| l == language)
     }
-    fn to_mhr(&self) -> Option<mhr_vector::Filter> {
-        (!self.is_empty()).then(|| mhr_vector::Filter {
+    fn to_caprock(&self) -> Option<caprock::Filter> {
+        (!self.is_empty()).then(|| caprock::Filter {
             path_prefixes: self.path_prefix.iter().cloned().collect(),
             languages: self.language.iter().cloned().collect(),
         })
@@ -81,7 +81,7 @@ pub struct VectorHit {
     pub score: f32,
 }
 
-/// A searchable set of vectors. Implementation: [`MhrStore`].
+/// A searchable set of vectors. Implementation: [`CaprockStore`].
 ///
 /// `upsert` and `delete` change what the store's own searches see at once; `persist`
 /// makes every change since the last `persist` durable at once, and visible to stores
@@ -142,7 +142,7 @@ pub enum VectorIndex {
 const RESCORE_FACTOR: u32 = 4;
 const RESCORE_MIN: u32 = 40;
 /// Part of every store directory's name: a change to how ids or settings map onto
-/// mhr_vector gets a new store.
+/// Caprock gets a new store.
 const STORE_FORMAT: u32 = 1;
 
 /// What a store holds and how it searches, fixed when it is created.
@@ -220,15 +220,15 @@ impl StoreConfig {
     }
 }
 
-/// A vector store in a directory, kept by mhr_vector: segments of codes held in memory
+/// A vector store in a directory, kept by Caprock: segments of codes held in memory
 /// (1 byte per dimension with [`Quantization::Int8`]) beside full-precision vectors read
 /// from disk for rescoring, an in-memory delta of recent upserts, and deletions as
 /// tombstones. [`persist`](VectorStore::persist) merges segments by its policy and
 /// commits a new generation atomically: a crash keeps the last persisted state.
 ///
 /// One handle writes a directory at a time (an exclusive lock); any number of
-/// read-only handles ([`MhrStore::open`]) search its last persisted state meanwhile.
-pub struct MhrStore {
+/// read-only handles ([`CaprockStore::open`]) search its last persisted state meanwhile.
+pub struct CaprockStore {
     handle: Handle,
     dims: usize,
     /// Changes since the last persist.
@@ -236,8 +236,8 @@ pub struct MhrStore {
 }
 
 enum Handle {
-    Writer(Box<mhr_vector::Writer>),
-    Reader(mhr_vector::Snapshot),
+    Writer(Box<caprock::Writer>),
+    Reader(caprock::Snapshot),
 }
 
 fn store_options() -> StoreOptions {
@@ -247,7 +247,7 @@ fn store_options() -> StoreOptions {
     }
 }
 
-/// The mhr_vector key of an id: 32 hex digits, so key order is id order.
+/// The Caprock key of an id: 32 hex digits, so key order is id order.
 fn key(id: VectorId) -> String {
     format!("{id:032x}")
 }
@@ -258,7 +258,7 @@ fn parse_key(key: &str) -> Result<VectorId, Error> {
     }
 }
 
-impl MhrStore {
+impl CaprockStore {
     /// Creates an empty store in `dir` (created if missing; it must not already hold a
     /// store).
     pub fn create(dir: &Path, config: &StoreConfig) -> Result<Self, Error> {
@@ -270,7 +270,7 @@ impl MhrStore {
         config: &StoreConfig,
         options: StoreOptions,
     ) -> Result<Self, Error> {
-        let writer = mhr_vector::Writer::create(dir, config.index_config()?, options)?;
+        let writer = caprock::Writer::create(dir, config.index_config()?, options)?;
         Ok(Self::from_writer(writer))
     }
 
@@ -278,7 +278,7 @@ impl MhrStore {
     /// vectors or was created with other settings.
     pub fn open_for(dir: &Path, config: &StoreConfig) -> Result<Self, Error> {
         let expected = config.index_config()?;
-        let writer = mhr_vector::Writer::open(dir, store_options())?;
+        let writer = caprock::Writer::open(dir, store_options())?;
         check_config(writer.config(), &expected, dir)?;
         Ok(Self::from_writer(writer))
     }
@@ -289,7 +289,7 @@ impl MhrStore {
             threads: 1,
             ..StoreOptions::default()
         };
-        let snapshot = mhr_vector::Reader::open(dir, options)?.snapshot();
+        let snapshot = caprock::Reader::open(dir, options)?.snapshot();
         Ok(Self {
             dims: snapshot.config().dim as usize,
             handle: Handle::Reader(snapshot),
@@ -313,7 +313,7 @@ impl MhrStore {
         Ok(())
     }
 
-    fn from_writer(writer: mhr_vector::Writer) -> Self {
+    fn from_writer(writer: caprock::Writer) -> Self {
         Self {
             dims: writer.config().dim as usize,
             handle: Handle::Writer(Box::new(writer)),
@@ -321,14 +321,14 @@ impl MhrStore {
         }
     }
 
-    fn snapshot(&self) -> mhr_vector::Snapshot {
+    fn snapshot(&self) -> caprock::Snapshot {
         match &self.handle {
             Handle::Writer(w) => w.snapshot(),
             Handle::Reader(s) => s.clone(),
         }
     }
 
-    fn writer(&mut self) -> Result<&mut mhr_vector::Writer, Error> {
+    fn writer(&mut self) -> Result<&mut caprock::Writer, Error> {
         match &mut self.handle {
             Handle::Writer(w) => Ok(w),
             Handle::Reader(_) => Err("this vector store was opened read-only".into()),
@@ -367,22 +367,25 @@ fn check_config(stored: &IndexConfig, expected: &IndexConfig, dir: &Path) -> Res
 /// none. A store that cannot be used (another model or settings, a format this
 /// version cannot read, damage or a missing file) is replaced by an empty one. Returns
 /// whether the store is new.
-pub(crate) fn open_or_create(dir: &Path, config: &StoreConfig) -> Result<(MhrStore, bool), Error> {
+pub(crate) fn open_or_create(
+    dir: &Path,
+    config: &StoreConfig,
+) -> Result<(CaprockStore, bool), Error> {
     let expected = config.index_config()?;
-    match mhr_vector::Writer::open(dir, store_options()) {
+    match caprock::Writer::open(dir, store_options()) {
         Ok(writer) if *writer.config() == expected => {
-            return Ok((MhrStore::from_writer(writer), false));
+            return Ok((CaprockStore::from_writer(writer), false));
         }
         Ok(_)
         | Err(
-            mhr_vector::Error::NotFound(_)
-            | mhr_vector::Error::Corrupt { .. }
-            | mhr_vector::Error::UnsupportedFormat { .. }
-            | mhr_vector::Error::InvalidConfig(_),
+            caprock::Error::NotFound(_)
+            | caprock::Error::Corrupt { .. }
+            | caprock::Error::UnsupportedFormat { .. }
+            | caprock::Error::InvalidConfig(_),
         ) => {}
         // A file its manifest names is missing (a removal stopped halfway, say). The
         // writer lock rules out another writer's cleanup, so the store is damaged.
-        Err(mhr_vector::Error::Io { ref source, .. })
+        Err(caprock::Error::Io { ref source, .. })
             if source.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
@@ -390,10 +393,10 @@ pub(crate) fn open_or_create(dir: &Path, config: &StoreConfig) -> Result<(MhrSto
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
         _ => {}
     }
-    Ok((MhrStore::create(dir, config)?, true))
+    Ok((CaprockStore::create(dir, config)?, true))
 }
 
-impl VectorStore for MhrStore {
+impl VectorStore for CaprockStore {
     fn dimensions(&self) -> usize {
         self.dims
     }
@@ -443,8 +446,8 @@ impl VectorStore for MhrStore {
         }
         let hits = self.snapshot().search(
             query,
-            k.min(mhr_vector::MAX_K),
-            filter.to_mhr().as_ref(),
+            k.min(caprock::MAX_K),
+            filter.to_caprock().as_ref(),
             &SearchParams::default(),
         )?;
         hits.into_iter()
@@ -557,7 +560,7 @@ mod tests {
         ]
     }
 
-    fn assert_exact(store: &MhrStore, vectors: &Vectors, dims: usize) {
+    fn assert_exact(store: &CaprockStore, vectors: &Vectors, dims: usize) {
         for filter in filters() {
             for seed in [7u64, 11, 500, 9001] {
                 let q = vector(seed, dims);
@@ -597,7 +600,8 @@ mod tests {
         for quantization in [Quantization::F32, Quantization::Int8] {
             let dir = tempfile::tempdir().unwrap();
             let config = config("m", dims, quantization);
-            let mut store = MhrStore::create_with(dir.path(), &config, small_segments()).unwrap();
+            let mut store =
+                CaprockStore::create_with(dir.path(), &config, small_segments()).unwrap();
             let mut vectors: Vec<(VectorId, Vec<f32>, usize)> = (0..600u64)
                 .map(|i| {
                     let id = u128::from(i) * 0x1_0000_0001 + 3;
@@ -619,7 +623,7 @@ mod tests {
             store.persist().unwrap();
             assert_exact(&store, &vectors, dims);
             drop(store);
-            let store = MhrStore::open(dir.path()).unwrap();
+            let store = CaprockStore::open(dir.path()).unwrap();
             assert_eq!(store.len(), vectors.len());
             assert_eq!(store.dimensions(), dims);
             assert_exact(&store, &vectors, dims);
@@ -633,7 +637,7 @@ mod tests {
         let dims = 16;
         let dir = tempfile::tempdir().unwrap();
         let config = config("m", dims, Quantization::Int8);
-        let mut store = MhrStore::create_with(dir.path(), &config, small_segments()).unwrap();
+        let mut store = CaprockStore::create_with(dir.path(), &config, small_segments()).unwrap();
         let mut vectors: Vec<(VectorId, Vec<f32>, usize)> = (0..300u64)
             .map(|i| (u128::from(i), vector(i, dims), i as usize % PATHS.len()))
             .collect();
@@ -643,7 +647,7 @@ mod tests {
 
         // Reopened for writing: delete some, replace some (another vector and path),
         // add some.
-        let mut store = MhrStore::open_for(dir.path(), &config).unwrap();
+        let mut store = CaprockStore::open_for(dir.path(), &config).unwrap();
         assert_eq!(store.len(), 300);
         let gone: Vec<VectorId> = (0..300).step_by(3).collect();
         assert_eq!(store.delete(&gone).unwrap(), 100);
@@ -664,7 +668,7 @@ mod tests {
         store.persist().unwrap();
         drop(store);
 
-        let store = MhrStore::open(dir.path()).unwrap();
+        let store = CaprockStore::open(dir.path()).unwrap();
         let mut ids: Vec<VectorId> = vectors.iter().map(|(id, _, _)| *id).collect();
         ids.sort_unstable();
         assert_eq!(store.ids().unwrap(), ids);
@@ -676,7 +680,7 @@ mod tests {
         let dims = 8;
         let dir = tempfile::tempdir().unwrap();
         let config = config("m", dims, Quantization::Int8);
-        let mut store = MhrStore::create_with(dir.path(), &config, small_segments()).unwrap();
+        let mut store = CaprockStore::create_with(dir.path(), &config, small_segments()).unwrap();
         let vectors: Vec<(VectorId, Vec<f32>, usize)> = (0..200u64)
             .map(|i| (u128::from(i), vector(i, dims), i as usize % PATHS.len()))
             .collect();
@@ -691,10 +695,10 @@ mod tests {
         assert_eq!(store.len(), 497);
         drop(store);
 
-        let store = MhrStore::open(dir.path()).unwrap();
+        let store = CaprockStore::open(dir.path()).unwrap();
         assert_eq!(store.len(), 200);
         assert_exact(&store, &vectors, dims);
-        let mut store = MhrStore::open_for(dir.path(), &config).unwrap();
+        let mut store = CaprockStore::open_for(dir.path(), &config).unwrap();
         assert_eq!(store.ids().unwrap(), (0..200).collect::<Vec<_>>());
         store.persist().unwrap();
     }
@@ -703,19 +707,19 @@ mod tests {
     fn another_model_or_setting_is_refused_or_replaced() {
         let dir = tempfile::tempdir().unwrap();
         let a = config("model-a", 8, Quantization::Int8);
-        let mut store = MhrStore::create(dir.path(), &a).unwrap();
+        let mut store = CaprockStore::create(dir.path(), &a).unwrap();
         store.upsert(&records(&[(5, vector(5, 8), 0)])).unwrap();
         store.persist().unwrap();
         assert!(store.matches(&a));
         drop(store);
-        assert!(MhrStore::create(dir.path(), &a).is_err());
+        assert!(CaprockStore::create(dir.path(), &a).is_err());
 
         let b = config("model-b", 8, Quantization::Int8);
-        assert!(!MhrStore::open(dir.path()).unwrap().matches(&b));
-        let err = MhrStore::open_for(dir.path(), &b).err().unwrap();
+        assert!(!CaprockStore::open(dir.path()).unwrap().matches(&b));
+        let err = CaprockStore::open_for(dir.path(), &b).err().unwrap();
         assert!(err.to_string().contains("holds test/model-a"), "{err}");
         let f32 = config("model-a", 8, Quantization::F32);
-        let err = MhrStore::open_for(dir.path(), &f32).err().unwrap();
+        let err = CaprockStore::open_for(dir.path(), &f32).err().unwrap();
         assert!(err.to_string().contains("other settings"), "{err}");
         assert_ne!(a.dir_name().unwrap(), b.dir_name().unwrap());
         assert_ne!(a.dir_name().unwrap(), f32.dir_name().unwrap());
@@ -733,12 +737,12 @@ mod tests {
     fn damage_fails_clearly_and_is_replaced_by_a_writer() {
         let dir = tempfile::tempdir().unwrap();
         let a = config("model-a", 8, Quantization::Int8);
-        let mut store = MhrStore::create(dir.path(), &a).unwrap();
+        let mut store = CaprockStore::create(dir.path(), &a).unwrap();
         store.upsert(&records(&[(5, vector(5, 8), 0)])).unwrap();
         store.persist().unwrap();
         drop(store);
         std::fs::write(dir.path().join("CURRENT"), b"garbage").unwrap();
-        assert!(MhrStore::open(dir.path()).is_err());
+        assert!(CaprockStore::open(dir.path()).is_err());
         let (store, created) = open_or_create(dir.path(), &a).unwrap();
         assert!(created && store.is_empty());
     }
@@ -746,7 +750,8 @@ mod tests {
     #[test]
     fn rejects_bad_vectors_and_writes_to_a_reader() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = MhrStore::create(dir.path(), &config("m", 4, Quantization::F32)).unwrap();
+        let mut store =
+            CaprockStore::create(dir.path(), &config("m", 4, Quantization::F32)).unwrap();
         let meta = VectorMeta {
             path: "a.rs",
             language: "rust",
@@ -768,7 +773,7 @@ mod tests {
         assert!(store.search(&[0.0; 4], 1, &Filter::default()).is_err());
         store.persist().unwrap();
         drop(store);
-        let mut reader = MhrStore::open(dir.path()).unwrap();
+        let mut reader = CaprockStore::open(dir.path()).unwrap();
         assert!(reader.upsert(&[good]).is_err());
         assert!(reader.delete(&[1]).is_err());
         let hits = reader.search(&[1.0; 4], 5, &Filter::default()).unwrap();

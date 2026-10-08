@@ -10,7 +10,7 @@ use arko_index::{
     },
     hybrid::{self, Fusion, Mode, SearchRequest},
     index2::{self, BuildOptions, BuildStats},
-    vector::{Filter, MhrStore, Quantization, VectorMeta, VectorRecord, VectorStore},
+    vector::{CaprockStore, Filter, Quantization, VectorMeta, VectorRecord, VectorStore},
 };
 use std::{
     collections::BTreeSet,
@@ -764,7 +764,7 @@ fn an_interrupted_build_leaves_searches_exact_and_the_next_build_cleans_up() {
     // What an interrupted build's upserts leave: vectors under ids this generation
     // lacks, at least as similar to the query as its own.
     let dir = state.path().join(&info.store);
-    let mut store = MhrStore::open_for(&dir, &info.store_config()).unwrap();
+    let mut store = CaprockStore::open_for(&dir, &info.store_config()).unwrap();
     let (query, _) =
         arko_index::dense::embed_query(&e, "exponential backoff journal entry").unwrap();
     let vectors: Vec<Vec<f32>> = (0..40)
@@ -795,15 +795,15 @@ fn an_interrupted_build_leaves_searches_exact_and_the_next_build_cleans_up() {
     assert_eq!((d.vectors_added, d.vectors_removed), (0, 40));
     assert_eq!((search(Mode::Dense), search(Mode::Hybrid)), before);
     assert_eq!(
-        MhrStore::open(&dir).unwrap().len() as u64,
+        CaprockStore::open(&dir).unwrap().len() as u64,
         index2::dense_info(state.path()).unwrap().unwrap().embedded
     );
 }
 
-/// Vectors stored by an earlier version (a generation's `dense.json` of format 1), a
-/// damaged store, one missing a file, or an empty replacement (a repair that stopped)
-/// fail dense search with a clear error; lexical search still works, and the next
-/// build stores the vectors again from the cache.
+/// Vectors stored by an earlier version (a generation's `dense.json` of format 1, or a
+/// store in an earlier store format), a damaged store, one missing a file, or an empty
+/// replacement (a repair that stopped) fail dense search with a clear error. Lexical
+/// search still works, and the next build stores the vectors again from the cache.
 #[test]
 fn old_or_damaged_vectors_fail_clearly_and_a_build_recovers() {
     let root = tempfile::tempdir().unwrap();
@@ -856,8 +856,29 @@ fn old_or_damaged_vectors_fail_clearly_and_a_build_recovers() {
         good
     );
 
-    // A store missing a file its manifest names (what a removal stopped halfway leaves).
+    // A store written in an earlier store format (Caprock refuses the format version):
+    // a rebuild, never a misread.
     let store = state.path().join(&info.store);
+    let manifest = store.join(fs::read_to_string(store.join("CURRENT")).unwrap().trim());
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    json["format_version"] = 1.into();
+    fs::write(&manifest, serde_json::to_vec(&json).unwrap()).unwrap();
+    let err = hybrid::search(state.path(), &dense, Some(&e)).unwrap_err();
+    assert!(err.to_string().contains("rebuild"), "{err}");
+    assert!(!index2::search(state.path(), "journal").unwrap().is_empty());
+    e.reset();
+    let d = build_with(root.path(), state.path(), Some(&e), None, 1)
+        .unwrap()
+        .dense
+        .unwrap();
+    assert!(d.store_created && d.new == 0 && e.embedded().is_empty());
+    assert_eq!(
+        ranked(&hybrid::search(state.path(), &dense, Some(&e)).unwrap()),
+        good
+    );
+
+    // A store missing a file its manifest names (what a removal stopped halfway leaves).
     let segment = fs::read_dir(&store)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -879,7 +900,7 @@ fn old_or_damaged_vectors_fail_clearly_and_a_build_recovers() {
     // An empty replacement under the same name (a build replacing the store stopped
     // before filling it): an error, not a search that finds nothing.
     fs::remove_dir_all(&store).unwrap();
-    MhrStore::create(&store, &info.store_config())
+    CaprockStore::create(&store, &info.store_config())
         .unwrap()
         .persist()
         .unwrap();
