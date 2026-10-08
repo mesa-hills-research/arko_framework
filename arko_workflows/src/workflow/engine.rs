@@ -268,8 +268,8 @@ pub(crate) fn fire_stop_hook(ctx: &SharedContext) {
 
 /// Unregisters agent run `agent_run_id` from the run's stop and, when it was
 /// the last running agent of a graceful stop's wrap-up, stops the run.
-fn unregister_run(ctx: &SharedContext, agent_run_id: uuid::Uuid) {
-    ctx.run_control.unregister(agent_run_id);
+fn unregister_run(ctx: &SharedContext, agent_run_id: uuid::Uuid, launch: u64) {
+    ctx.run_control.unregister(agent_run_id, launch);
     if ctx.run_control.end_wrap_up_if_idle() {
         fire_stop_hook(ctx);
     }
@@ -1477,6 +1477,8 @@ pub(crate) struct StartedRun {
     pub recovered: bool,
     /// The task journal saving the run while it runs, if any.
     pub journal: Option<Arc<PersistenceManager>>,
+    /// This launch of the run (see `RunControl::begin_run`).
+    pub launch: u64,
 }
 
 /// What an agent runtime's task returned.
@@ -1628,6 +1630,7 @@ async fn drive_run_to_result(
         host_decisions,
         recovered,
         journal,
+        launch,
     } = run;
     host_decisions.set(true);
     // Until the end is recorded below: if this future is dropped (and with
@@ -1636,6 +1639,7 @@ async fn drive_run_to_result(
         ctx,
         agent_name: agent_name.clone(),
         agent_run_id,
+        launch,
         journal,
         armed: true,
     };
@@ -1647,7 +1651,19 @@ async fn drive_run_to_result(
             ctx,
             persistence,
         };
-        answer_saved_wait(&drive, &started_task, &cmd_tx).await
+        // The run's own stop ends the wait (an automatic recovery's can last
+        // until a usage limit resets), as it ends the event loop's.
+        tokio::select! {
+            biased;
+            reason = stop_set(ctx.run_control.run_cancel(agent_run_id)) => {
+                Err(WorkflowError::AgentStopped {
+                    agent: agent_name.clone(),
+                    task_id: agent_run_id,
+                    reason,
+                })
+            }
+            answered = answer_saved_wait(&drive, &started_task, &cmd_tx) => answered,
+        }
     } else {
         Ok(())
     };
@@ -1759,7 +1775,7 @@ async fn drive_run_to_result(
         }
         Err(error) => Err(error),
     };
-    unregister_run(ctx, agent_run_id);
+    unregister_run(ctx, agent_run_id, launch);
     // Set when a verifier that failed paused the task.
     let verifier_failure = ctx.verifier_failures.lock().remove(&agent_run_id);
 
@@ -1787,8 +1803,17 @@ async fn drive_run_to_result(
             reason,
         });
     }
-    drive_result?;
-    run_outcome(result)
+    match drive_result {
+        // Its own stop's cancel came after it completed: the completion
+        // (a progress report, if it was told) is its outcome.
+        Err(WorkflowError::AgentStopped { .. }) if result.status == AgentRunStatus::Completed => {
+            Ok(result)
+        }
+        drive_result => {
+            drive_result?;
+            run_outcome(result)
+        }
+    }
 }
 
 /// What a run call returns for a run that ended as `result`: the result
@@ -1966,13 +1991,20 @@ pub(crate) fn reopened_message(prompt: &str) -> String {
 /// aborted with it): its agent is finished, cancelled, unless another run
 /// of it is running.
 pub(crate) fn abandon_run(run: &StartedRun, ctx: &SharedContext) {
-    abandon(ctx, &run.agent_name, run.agent_run_id, run.journal.as_ref());
+    abandon(
+        ctx,
+        &run.agent_name,
+        run.agent_run_id,
+        run.launch,
+        run.journal.as_ref(),
+    );
 }
 
 fn abandon(
     ctx: &SharedContext,
     agent_name: &str,
     agent_run_id: uuid::Uuid,
+    launch: u64,
     journal: Option<&Arc<PersistenceManager>>,
 ) {
     ctx.registry.finish(agent_run_id, AgentRunStatus::Cancelled);
@@ -1985,7 +2017,7 @@ fn abandon(
         tracker.finish_actor(&ActorId::new(agent_run_id, agent_name), false);
     }
     ctx.messages.unregister_active(agent_name, agent_run_id);
-    unregister_run(ctx, agent_run_id);
+    unregister_run(ctx, agent_run_id, launch);
 }
 
 /// Records a run whose driver was dropped before it recorded the run's end.
@@ -1993,6 +2025,7 @@ struct Abandoned<'a> {
     ctx: &'a SharedContext,
     agent_name: String,
     agent_run_id: uuid::Uuid,
+    launch: u64,
     journal: Option<Arc<PersistenceManager>>,
     armed: bool,
 }
@@ -2004,6 +2037,7 @@ impl Drop for Abandoned<'_> {
                 self.ctx,
                 &self.agent_name,
                 self.agent_run_id,
+                self.launch,
                 self.journal.as_ref(),
             );
         }
@@ -2601,6 +2635,11 @@ impl WorkflowEngine {
             .set_parent(agent_run_id, task.parent.map(|parent| parent.task_id));
         let started_task = task.clone();
         let host_decisions = HostDecisions::new(driven);
+        let (stop_signal, launch) = ctx.run_control.begin_run(
+            agent_run_id,
+            review,
+            task.parent.map(|parent| parent.task_id),
+        );
         let mut runtime = AgentRuntime::new(self.llm_client.clone())
             .with_turn_context(Arc::new(crate::notes::WithNotes {
                 inner: ActivityNotices {
@@ -2613,7 +2652,7 @@ impl WorkflowEngine {
                 review,
             }))
             .with_host_decisions(host_decisions.clone())
-            .with_stop_signal(ctx.run_control.begin_run(agent_run_id, review))
+            .with_stop_signal(stop_signal)
             .with_handover_hook(Arc::new(WorkflowHandover {
                 context: ctx.clone(),
                 agent_name: agent_name.to_string(),
@@ -2662,6 +2701,7 @@ impl WorkflowEngine {
             host_decisions,
             recovered: false,
             journal,
+            launch,
         }
     }
 

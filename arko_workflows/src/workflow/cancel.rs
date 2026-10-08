@@ -156,6 +156,13 @@ struct RunStop {
 
 /// A running agent run, from its launch until it ends.
 struct RunEntry {
+    /// This launch of the run (see [`RunControl::begin_run`]): a run
+    /// relaunched with the same task ID (a restart, a continuation) gets a
+    /// new entry, which the old launch's late `unregister` leaves alone.
+    launch: u64,
+    /// The run inside whose tool call this one runs, if any: it takes over
+    /// that run's own stop (see [`RunControl::begin_run`]).
+    parent: Option<uuid::Uuid>,
     /// Its tools' stop signal
     /// ([`TaskContext::stop`](arko_agents::TaskContext::stop)): fired when
     /// the workflow starts stopping, and by the run's own stop.
@@ -210,6 +217,8 @@ pub(crate) struct RunControl {
     /// The running agent runs, with their own stops. Locked before
     /// `agents`, never after.
     runs: parking_lot::Mutex<HashMap<uuid::Uuid, RunEntry>>,
+    /// The last launch number given (see [`RunEntry::launch`]).
+    launches: std::sync::atomic::AtomicU64,
 }
 
 impl RunControl {
@@ -226,6 +235,7 @@ impl RunControl {
             host_stop: parking_lot::Mutex::new(None),
             told: parking_lot::Mutex::new(HashSet::new()),
             runs: parking_lot::Mutex::new(HashMap::new()),
+            launches: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -331,33 +341,81 @@ impl RunControl {
         }
     }
 
-    pub fn unregister(&self, task_id: uuid::Uuid) {
-        self.runs.lock().remove(&task_id);
+    /// Unregisters launch `launch` of agent run `task_id` once it has
+    /// ended. When the run was launched again meanwhile (a host may restart
+    /// it as soon as its result is recorded), the entries are the new
+    /// launch's, and are kept.
+    pub fn unregister(&self, task_id: uuid::Uuid, launch: u64) {
+        let mut runs = self.runs.lock();
+        if runs
+            .get(&task_id)
+            .is_some_and(|entry| entry.launch != launch)
+        {
+            return;
+        }
+        runs.remove(&task_id);
         self.agents.lock().remove(&task_id);
         self.stopping.lock().remove(&task_id);
     }
 
     /// Records agent run `task_id` as running from its launch (`review`: a
-    /// completion verifier's review), and returns the stop signal its tools
-    /// see: it fires when the workflow starts stopping (at once if it has),
-    /// and when the run's own stop begins.
-    pub fn begin_run(&self, task_id: uuid::Uuid, review: bool) -> arko_agents::StopSignal {
+    /// completion verifier's review; `parent`: the run inside whose tool
+    /// call it runs), and returns the stop signal its tools see, and the
+    /// launch's number for [`unregister`](Self::unregister). The signal
+    /// fires when the workflow starts stopping (at once if it has), and when
+    /// the run's own stop begins. A run started inside the tool call of a
+    /// run being stopped alone (other than a review) is stopped with it: it
+    /// takes over that stop, and is cancelled at once if that run is.
+    pub fn begin_run(
+        &self,
+        task_id: uuid::Uuid,
+        review: bool,
+        parent: Option<uuid::Uuid>,
+    ) -> (arko_agents::StopSignal, u64) {
+        let launch = self
+            .launches
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
         let mut runs = self.runs.lock();
         let tools = arko_agents::StopSource::new();
         if let Some(reason) = self.tools_stop.signal().reason() {
             tools.stop(reason);
         }
+        let inherited = parent
+            .filter(|_| !review)
+            .and_then(|parent| runs.get(&parent))
+            .and_then(|entry| {
+                let stop = entry.stop.as_ref()?;
+                Some((
+                    RunStop {
+                        id: uuid::Uuid::new_v4(),
+                        record: stop.record.clone(),
+                        notice: stop.notice.clone(),
+                        told: false,
+                    },
+                    entry.cancel.borrow().clone(),
+                ))
+            });
+        let (stop, cancel) = match inherited {
+            Some((stop, cancel)) => {
+                tools.stop(stop.record.run_reason());
+                (Some(stop), cancel)
+            }
+            None => (None, None),
+        };
         let signal = tools.signal();
         runs.insert(
             task_id,
             RunEntry {
+                launch,
+                parent,
                 tools,
-                cancel: watch::Sender::new(None),
+                cancel: watch::Sender::new(cancel),
                 review,
-                stop: None,
+                stop,
             },
         );
-        signal
+        (signal, launch)
     }
 
     /// Begins a stop of agent run `task_id` alone, recorded as `record`:
@@ -410,36 +468,50 @@ impl RunControl {
     /// it is being cancelled already. Its driver winds it down within the
     /// grace period; a run driven through `into_parts` is sent `CancelTask`.
     /// Returns whether this call cancelled it.
+    ///
+    /// The runs inside its tool calls that are being stopped alone (with it)
+    /// are cancelled with it.
     pub fn cancel_run(&self, task_id: uuid::Uuid, id: Option<uuid::Uuid>) -> bool {
-        let runs = self.runs.lock();
-        let Some(entry) = runs.get(&task_id) else {
-            return false;
-        };
-        let Some(stop) = entry
-            .stop
-            .as_ref()
-            .filter(|stop| id.is_none_or(|id| stop.id == id))
-        else {
-            return false;
-        };
-        let reason = stop.record.run_reason();
-        let cancelled = entry.cancel.send_if_modified(|cancel| {
-            if cancel.is_some() {
+        let children = {
+            let runs = self.runs.lock();
+            let Some(entry) = runs.get(&task_id) else {
+                return false;
+            };
+            let Some(stop) = entry
+                .stop
+                .as_ref()
+                .filter(|stop| id.is_none_or(|id| stop.id == id))
+            else {
+                return false;
+            };
+            let reason = stop.record.run_reason();
+            let cancelled = entry.cancel.send_if_modified(|cancel| {
+                if cancel.is_some() {
+                    return false;
+                }
+                *cancel = Some(reason);
+                true
+            });
+            if !cancelled {
                 return false;
             }
-            *cancel = Some(reason);
-            true
-        });
-        if cancelled
-            && let Some(sender) = self
+            if let Some(sender) = self
                 .agents
                 .lock()
                 .get(&task_id)
                 .and_then(mpsc::WeakSender::upgrade)
-        {
-            let _ = sender.try_send(UserCommand::CancelTask);
+            {
+                let _ = sender.try_send(UserCommand::CancelTask);
+            }
+            runs.iter()
+                .filter(|(_, child)| child.parent == Some(task_id))
+                .map(|(child, _)| *child)
+                .collect::<Vec<_>>()
+        };
+        for child in children {
+            self.cancel_run(child, None);
         }
-        cancelled
+        true
     }
 
     /// Set, with the reason, once agent run `task_id`'s own stop cancels

@@ -963,3 +963,334 @@ fn records_without_an_intent_load_and_requests_default() {
     );
     assert_eq!(stop.intent, RunStopIntent::Relaunch);
 }
+
+/// A server whose first run never gets an answer, and whose reopened run
+/// waits at its gate, then completes.
+async fn relaunch_server() -> ResponsesServer {
+    ResponsesServer::start(|_, body| {
+        if body.contains(REOPENED) {
+            return Some(if body.contains("call_gate") {
+                complete_turn("again", "Finished again.")
+            } else {
+                tool_call_turn("gate", "gate", json!({}))
+            });
+        }
+        None
+    })
+    .await
+}
+
+/// A host may relaunch a run as soon as `stopped_runs` lists it, while the
+/// old launch's driver is still finishing: the relaunched run keeps its own
+/// stop state, so it can be stopped alone, and a workflow stop gives it a
+/// wrap-up. (The hook holds the old driver where it is anyway: its result
+/// recorded, not yet unregistered.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_run_relaunched_while_its_old_launch_finishes_keeps_its_stop_state() {
+    let workspace = Workspace::new();
+    let server = relaunch_server().await;
+    let gate = Arc::new(Gate::default());
+    let (hit_tx, hit_rx) = std::sync::mpsc::channel::<()>();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let hold = std::sync::Mutex::new(Some((hit_tx, go_rx)));
+    let workflow = Arc::new(
+        builder(&server, &workspace)
+            .global_tool(gate.clone())
+            .hook(
+                HookPoint::PostAgentCancellation,
+                Arc::new(move |_| {
+                    if let Some((hit, go)) = hold.lock().unwrap().take() {
+                        let _ = hit.send(());
+                        let _ = go.recv_timeout(Duration::from_secs(10));
+                    }
+                    HookResult::Continue
+                }),
+            )
+            .build()
+            .unwrap(),
+    );
+    let first = tokio::spawn({
+        let workflow = workflow.clone();
+        async move { workflow.run_agent("reviewer", "REVIEWER-TASK").await }
+    });
+    server.wait_for_requests(1).await;
+    let id = running(&workflow, "reviewer");
+    assert!(workflow.stop_run(
+        id,
+        StopRequest::operator("relaunch it"),
+        RunStopIntent::Relaunch
+    ));
+    tokio::task::spawn_blocking(move || hit_rx.recv_timeout(Duration::from_secs(10)).unwrap())
+        .await
+        .unwrap();
+    let stopped = workflow.stopped_runs();
+    assert_eq!(stopped.len(), 1);
+    let again = tokio::spawn({
+        let workflow = workflow.clone();
+        let run = stopped[0].clone();
+        async move { workflow.restart(&run, "Carry on.").await }
+    });
+    within(gate.started.notified()).await;
+    go_tx.send(()).unwrap();
+    assert!(matches!(
+        within(first).await.unwrap(),
+        Err(WorkflowError::AgentStopped { .. })
+    ));
+    assert!(workflow.context().registry.is_running(id));
+    assert!(workflow.context().run_control.run_cancel(id).is_some());
+    assert!(workflow.stop(StopRequest::operator("deploying").wrap_up(Duration::from_secs(600))));
+    assert!(workflow.is_stopping(), "the relaunched run is wrapping up");
+    until(|| gate.stopped.load(Ordering::SeqCst)).await;
+    let _ = within(again).await;
+    assert!(workflow.is_cancelled());
+}
+
+/// A delegated run the host retired, which the process ended in its
+/// wrap-up, stays retired when its caller is recovered: the caller's call
+/// fails, naming it, instead of running it again.
+#[tokio::test]
+async fn a_retired_delegated_run_stays_stopped_when_its_caller_is_recovered() {
+    let workspace = Workspace::new();
+    let resumed = Arc::new(AtomicBool::new(false));
+    let server = ResponsesServer::start({
+        let resumed = resumed.clone();
+        move |_, body| {
+            let resumed = resumed.load(Ordering::SeqCst);
+            if body.contains("LEAD-TASK") {
+                if body.contains("The host retired it") {
+                    return Some(complete_turn("lead-again", "Lead finished."));
+                }
+                if resumed {
+                    return None;
+                }
+                return Some(tool_call_turn(
+                    "delegate",
+                    RUN_WORKFLOW_AGENT_TOOL_NAME,
+                    json!({"agent": "coder", "prompt": "CODER-TASK"}),
+                ));
+            }
+            if resumed {
+                return Some(complete_turn("coder-again", "Coder ran again."));
+            }
+            if body.contains(RUN_NOTICE) {
+                return None;
+            }
+            Some(tool_call_turn("save", "saver", json!({})))
+        }
+    })
+    .await;
+    let saver = Arc::new(Saver::default());
+    let build = |resume: Option<&std::path::Path>| {
+        let mut builder = builder(&server, &workspace)
+            .agent("lead", agent_config("Lead"))
+            .workflow_services(
+                crate::services::WorkflowServicesConfig::default()
+                    .allow_caller("lead")
+                    .allow_target("coder"),
+            )
+            .global_tool(saver.clone())
+            .persistence(persistence(&workspace));
+        if let Some(path) = resume {
+            builder = builder.resume_from(path);
+        }
+        builder.build().unwrap()
+    };
+    let workflow = Arc::new(build(None));
+    let lead = tokio::spawn({
+        let workflow = workflow.clone();
+        async move { workflow.run_agent("lead", "LEAD-TASK").await }
+    });
+    within(saver.started.notified()).await;
+    let (lead_id, coder_id) = (running(&workflow, "lead"), running(&workflow, "coder"));
+    assert!(workflow.stop_run(
+        coder_id,
+        StopRequest::operator("replacing the coder").wrap_up(Duration::from_secs(3_600)),
+        RunStopIntent::Retire
+    ));
+    until(|| server.bodies().iter().any(|body| body.contains(RUN_NOTICE))).await;
+    let run = run_dir(&workspace);
+    until(|| {
+        std::fs::read_to_string(run.join(LIVE_CHECKPOINT_FILE))
+            .ok()
+            .and_then(|json| serde_json::from_str::<WorkflowState>(&json).ok())
+            .is_some_and(|state| {
+                state
+                    .agent_runs
+                    .iter()
+                    .any(|record| record.agent_run_id == coder_id && record.stopped_by.is_some())
+            })
+    })
+    .await;
+    let path = run.join(LIVE_CHECKPOINT_FILE);
+    workflow.engine.persistence().unwrap().simulate_crash();
+    lead.abort();
+    let _ = lead.await;
+    drop(workflow);
+
+    resumed.store(true, Ordering::SeqCst);
+    let resumed = build(Some(&path));
+    let interrupted = resumed
+        .interrupted_runs()
+        .into_iter()
+        .map(|run| run.agent_run_id)
+        .collect::<Vec<_>>();
+    assert_eq!(interrupted, [lead_id]);
+    let lead = resumed.agent_result(lead_id).unwrap();
+    let lead = within(resumed.recover_agent(&lead)).await.unwrap();
+    assert_eq!(lead.summary, "Lead finished.");
+    let delegated = tool_output(&lead, "call_delegate").unwrap();
+    assert!(
+        delegated.ends_with(&format!(
+            "Agent run {coder_id} of agent 'coder' was stopped by the workflow's host (replacing the coder) and did not finish. The host retired it, so it can't be resumed."
+        )),
+        "{delegated}"
+    );
+    let coder = resumed.agent_result(coder_id).unwrap();
+    assert_eq!(coder.status, AgentRunStatus::Interrupted);
+    assert!(coder.stopped_by().unwrap().is_retired());
+    assert!(
+        !server
+            .bodies()
+            .iter()
+            .any(|body| body.contains("Coder ran again.")),
+        "the retired run didn't run again"
+    );
+}
+
+/// A run recovered while it waited out an error-recovery pause (an outage,
+/// a usage limit) is stopped at once by its own stop, as a run that wasn't
+/// recovered is.
+#[tokio::test]
+async fn a_recovered_run_waiting_out_a_pause_is_stopped_at_once() {
+    let workspace = Workspace::new();
+    let server = ResponsesServer::start_async(|_, _| {
+        Box::pin(async {
+            Some(crate::test_support::Reply::Status {
+                status: 503,
+                retry_after: None,
+                body: json!({"error": {"message": "unavailable", "type": "server_error"}})
+                    .to_string(),
+            })
+        })
+    })
+    .await;
+    let mut coder = agent_config("Friendly Coder");
+    coder.llm_error_policy =
+        arko_agents::LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts: 1 };
+    let build = |resume: Option<&std::path::Path>| {
+        let mut builder = Workflow::builder()
+            .name("run-stop-test")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(server.client()))
+            .agent("coder", coder.clone())
+            .persistence(persistence(&workspace));
+        if let Some(path) = resume {
+            builder = builder.resume_from(path);
+        }
+        builder.build().unwrap()
+    };
+    let workflow = Arc::new(build(None));
+    let run = tokio::spawn({
+        let workflow = workflow.clone();
+        async move { workflow.run_agent("coder", "CODER-TASK").await }
+    });
+    // It waits out the pause, 30 seconds or more.
+    until(|| {
+        matches!(
+            workflow.agent_status("coder"),
+            Some(AgentStatus::Waiting(_))
+        )
+    })
+    .await;
+    let id = running(&workflow, "coder");
+    let dir = run_dir(&workspace);
+    until(|| {
+        std::fs::read_to_string(dir.join(LIVE_CHECKPOINT_FILE))
+            .ok()
+            .and_then(|json| serde_json::from_str::<WorkflowState>(&json).ok())
+            .is_some_and(|state| {
+                state
+                    .agent_runs
+                    .iter()
+                    .any(|record| record.agent_run_id == id)
+            })
+    })
+    .await;
+    let path = dir.join(LIVE_CHECKPOINT_FILE);
+    workflow.engine.persistence().unwrap().simulate_crash();
+    run.abort();
+    let _ = run.await;
+    drop(workflow);
+
+    let resumed = Arc::new(build(Some(&path)));
+    let saved = resumed.agent_result(id).unwrap();
+    assert!(matches!(
+        saved.task.current_state,
+        arko_agents::TaskState::AwaitingErrorRecoveryApproval { .. }
+    ));
+    let recovering = tokio::spawn({
+        let resumed = resumed.clone();
+        async move { resumed.recover_agent(&saved).await }
+    });
+    until(|| resumed.context().registry.is_running(id)).await;
+    assert!(resumed.stop_run(
+        id,
+        StopRequest::operator("replacing it"),
+        RunStopIntent::Retire
+    ));
+    let outcome = tokio::time::timeout(Duration::from_secs(5), recovering)
+        .await
+        .expect("the stop ends the wait")
+        .unwrap();
+    assert!(
+        matches!(outcome, Err(WorkflowError::AgentStopped { task_id, .. }) if task_id == id),
+        "{outcome:?}"
+    );
+    let result = resumed.agent_result(id).unwrap();
+    assert_eq!(result.status, AgentRunStatus::Cancelled);
+    assert!(result.stopped_by().unwrap().is_retired());
+}
+
+/// A run started inside the tool call of a run being stopped alone takes
+/// over that stop (its notice, its record), and is cancelled with it.
+#[test]
+fn a_run_started_inside_a_stopped_run_takes_over_its_stop() {
+    let control = super::cancel::RunControl::new(Duration::from_secs(30));
+    let (parent, child, review) = (
+        uuid::Uuid::new_v4(),
+        uuid::Uuid::new_v4(),
+        uuid::Uuid::new_v4(),
+    );
+    let (_, parent_launch) = control.begin_run(parent, false, None);
+    let record = StopRecord {
+        kind: StopKind::Operator,
+        reason: "retiring the lead".to_string(),
+        timestamp: chrono::Utc::now(),
+        intent: Some(RunStopIntent::Retire),
+    };
+    assert!(matches!(
+        control.begin_run_stop(parent, record.clone(), Some("Wrap up.".to_string())),
+        super::cancel::RunStopBegun::WrapUp(_)
+    ));
+    let (signal, _) = control.begin_run(child, false, Some(parent));
+    let (review_signal, _) = control.begin_run(review, true, Some(parent));
+    assert!(signal.is_stopping());
+    assert!(!review_signal.is_stopping(), "a review isn't stopped alone");
+    assert_eq!(control.run_stop_record(child), Some(record.clone()));
+    assert_eq!(control.wrap_up_notice(child).as_deref(), Some("Wrap up."));
+    assert_eq!(control.run_stop_record(review), None);
+
+    assert!(control.cancel_run(parent, None));
+    assert_eq!(
+        control.run_cancel_reason(child).as_deref(),
+        Some("Run stopped (operator): retiring the lead.")
+    );
+    assert_eq!(control.run_cancel_reason(review), None);
+    // A run launched again under the same ID keeps its entry when the old
+    // launch unregisters late.
+    let (_, relaunch) = control.begin_run(parent, false, None);
+    control.unregister(parent, parent_launch);
+    assert!(control.run_cancel(parent).is_some());
+    control.unregister(parent, relaunch);
+    assert!(control.run_cancel(parent).is_none());
+}

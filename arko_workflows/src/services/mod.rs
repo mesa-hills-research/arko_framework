@@ -303,6 +303,22 @@ impl WorkflowServices {
             .find(|result| result.task.parent == Some(parent))
             .cloned();
         match started {
+            // Retired by the host in its wrap-up when the workflow stopped:
+            // it stays stopped, and the call fails naming it.
+            Some(run)
+                if run.status == AgentRunStatus::Interrupted
+                    && run.stopped_by.as_ref().is_some_and(StopRecord::is_retired) =>
+            {
+                Err(WorkflowError::AgentStopped {
+                    agent: run.agent_name.clone(),
+                    task_id: run.agent_run_id,
+                    reason: run
+                        .stopped_by
+                        .as_ref()
+                        .map(StopRecord::run_reason)
+                        .unwrap_or_default(),
+                })
+            }
             Some(run) if run.status == AgentRunStatus::Interrupted => {
                 log::info!(
                     "Recovering agent run {} of agent '{}', which agent '{caller}' was running when the workflow stopped",
@@ -482,6 +498,15 @@ impl WorkflowServices {
             return None;
         }
         let state = match run.status {
+            // Stopped alone by the host: it says whether it may go on.
+            AgentRunStatus::Cancelled | AgentRunStatus::Completed | AgentRunStatus::Interrupted
+                if run
+                    .stopped_by
+                    .as_ref()
+                    .is_some_and(|stop| stop.intent.is_some()) =>
+            {
+                return Some(self.stopped_alone_note(caller, run));
+            }
             AgentRunStatus::Interrupted => "was interrupted and did not finish",
             AgentRunStatus::Paused
                 if matches!(
@@ -492,15 +517,6 @@ impl WorkflowServices {
                 "is paused after an error"
             }
             AgentRunStatus::WaitingForInput => "is waiting for an answer to its questions",
-            // Stopped alone by the host: it says whether it may go on.
-            AgentRunStatus::Cancelled | AgentRunStatus::Completed
-                if run
-                    .stopped_by
-                    .as_ref()
-                    .is_some_and(|stop| stop.intent.is_some()) =>
-            {
-                return Some(self.stopped_alone_note(caller, run));
-            }
             // Reopened when the caller is restarted after the stop.
             AgentRunStatus::Cancelled
                 if run.stopped_by.is_some() && !crate::workflow::engine::is_superseded(run) =>

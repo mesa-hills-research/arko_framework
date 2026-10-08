@@ -409,7 +409,9 @@ impl Workflow {
     ///
     /// The runs inside the run's tool calls (agents it delegated to with
     /// `run_workflow_agent`) are stopped with it, with the same request and
-    /// intent, and the run can't start new ones. A delegated run stopped
+    /// intent, and the run can't start new ones (one that starts all the
+    /// same, from a call already under way, takes over the stop). They are
+    /// cancelled when the run is. A delegated run stopped
     /// alone returns its progress report to its caller, followed by a note
     /// naming the run and saying whether the caller can resume it (not when
     /// it was retired).
