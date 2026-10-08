@@ -101,6 +101,12 @@ fn options(max_bytes: usize) -> Options {
 /// estimates, all in one language.
 fn verify(path: &str, text: &str, max: usize) -> FileChunks {
     let file = chunk_str_with_metadata(Path::new(path), text, &options(max)).unwrap();
+    check(path, text, max, &file);
+    file
+}
+
+/// The invariants of [`verify`] on chunks made elsewhere.
+fn check(path: &str, text: &str, max: usize, file: &FileChunks) {
     let mut at = 0;
     if let Some(m) = &file.metadata {
         assert_eq!(m.file, path);
@@ -152,7 +158,6 @@ fn verify(path: &str, text: &str, max: usize) -> FileChunks {
         at = c.end_byte;
     }
     assert_eq!(at, text.len(), "{path} (max {max}): covered to {at}");
-    file
 }
 
 #[test]
@@ -242,6 +247,89 @@ fn adversarial_inputs_stay_bounded() {
             );
         }
     }
+}
+
+/// Every prefix, cut at each character boundary, of an annotated Kotlin sample and of
+/// the first `PREFIX_BYTES` of every sample, chunked in one walk under a stall watchdog.
+/// A Kotlin file cut right after an annotation once sent the scanner into an endless
+/// loop at the end of the input. No prefix may stall, make its parser fail (a report
+/// warning) or break an invariant.
+#[test]
+fn every_prefix_chunks_without_stalling() {
+    const PREFIX_BYTES: usize = 300;
+    let root = tempfile::tempdir().unwrap();
+    let mut sources: Vec<(String, String)> = all_samples()
+        .map(|(sample, _)| (name(sample).to_owned(), read(sample)))
+        .collect();
+    let annotations = fs::read_to_string(Path::new(DATA).join("prefixes/Annotations.kt"));
+    sources.push(("Annotations.kt".to_owned(), annotations.unwrap()));
+    let mut texts: HashMap<String, String> = HashMap::new();
+    for (i, (name, text)) in sources.iter().enumerate() {
+        let cap = match name.as_str() {
+            "Annotations.kt" => text.len(),
+            _ => PREFIX_BYTES.min(text.len()),
+        };
+        for end in (1..=cap).filter(|&end| text.is_char_boundary(end)) {
+            // Languages detected by the whole file name get a directory per prefix.
+            let rel = match name.as_str() {
+                "CMakeLists.txt" | "Makefile" => format!("{i:02}/{end:05}/{name}"),
+                _ => format!("{i:02}/{end:05}.{name}"),
+            };
+            let path = root.path().join(&rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, &text[..end]).unwrap();
+            texts.insert(rel, text[..end].to_owned());
+        }
+    }
+    let files = texts.len();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let last = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let walk = {
+        let (root, done, last) = (root.path().to_owned(), done.clone(), last.clone());
+        std::thread::spawn(move || {
+            chunk_dir_map_with(
+                &root,
+                &options(4096),
+                &FileRules::default(),
+                arko_index::threads().min(8),
+                // The invariants, on the workers.
+                |file| {
+                    let path = match (&file.metadata, file.chunks.first()) {
+                        (Some(m), _) => Some(m.file.clone()),
+                        (None, Some(c)) => Some(c.path.clone()),
+                        (None, None) => None,
+                    };
+                    if let Some(path) = &path {
+                        check(path, &texts[path], 4096, &file);
+                    }
+                    Ok(path)
+                },
+                |path| {
+                    if let Some(path) = path {
+                        *last.lock().unwrap() = path;
+                    }
+                    done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Ok(())
+                },
+            )
+        })
+    };
+    let (mut seen, mut since) = (0, Instant::now());
+    while !walk.is_finished() {
+        std::thread::sleep(Duration::from_millis(20));
+        let now = done.load(std::sync::atomic::Ordering::Relaxed);
+        if now != seen {
+            (seen, since) = (now, Instant::now());
+        }
+        assert!(
+            since.elapsed() < Duration::from_secs(30),
+            "chunking stalled after {seen} of {files} files: the file after {} in walk order",
+            last.lock().unwrap()
+        );
+    }
+    let report = walk.join().unwrap().unwrap();
+    assert_eq!(report.files as usize, files);
+    assert!(report.warnings.is_empty(), "{:#?}", report.warnings);
 }
 
 /// A small deterministic generator (xorshift).
