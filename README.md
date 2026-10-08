@@ -16,7 +16,7 @@ arko_agents builds on arko_ai; arko_workflows builds on both; arko_index depends
 
 ## Build and test
 
-Building requires Rust 1.89 or later and a C compiler.
+Building requires Rust 1.89 or later and a C compiler (arko_index alone needs none).
 
 ```bash
 cargo check --workspace --all-targets --locked

@@ -1,8 +1,19 @@
 //! Command-line interface to arko_index: `chunk`, `outline`, `index`/`search`,
-//! `index2`/`search2`, `watch`, `watch2` (Linux) and `bench-scan` (Unix). Run
+//! `index2`/`search2` (lexical, dense or hybrid), `watch`, `watch2` (Linux) and
+//! `bench-scan` (Unix). Run
 //! `cargo run --release -p arko_index --example arko_index_cli -- --help`; the
 //! crate README describes the commands, the file selection flags and the protocol.
-use arko_index::{bench_v1::*, search};
+//! Embedding with Voyage goes through arko_ai (`support/voyage.rs`) and needs
+//! `VOYAGE_API_KEY`.
+mod support;
+
+use arko_index::{
+    bench_v1::*,
+    dense::{DenseBuild, DenseConfig, EmbedProgress, EmbedStats},
+    hybrid::{Fusion, Mode, SearchRequest},
+    search,
+    vector::{Filter, Quantization},
+};
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
@@ -23,15 +34,77 @@ fn write_json<T: serde::Serialize>(value: &T) -> Result<(), Error> {
 struct Walk {
     rules: FileRules,
     report: Option<PathBuf>,
+    /// `--front-matter-description`: Markdown scopes start with title and description.
+    front_matter_description: bool,
 }
-const RULE_FLAGS: &str =
-    "[--respect-ignore] [--exclude PATTERN]... [--include PATTERN]... [--report FILE]";
-/// Splits the file selection flags from the positional arguments. `--` ends the flags.
-fn walk_args(args: &[String]) -> Result<(Walk, Vec<String>), Error> {
-    let mut walk = Walk {
-        rules: FileRules::default(),
-        report: None,
+const RULE_FLAGS: &str = "[--respect-ignore] [--exclude PATTERN]... [--include PATTERN]... [--report FILE] [--front-matter-description]";
+const EMBED_FLAGS: &str = "[--embed MODEL] [--dimensions N] [--embed-config FILE] [--quantize f32|int8] [--max-embed-tokens N|none] [--no-embed]";
+const SEARCH_FLAGS: &str = "[--mode lexical|dense|hybrid] [--limit N] [--candidates N] [--fusion rrf|linear] [--rrf-k K] [--lexical-weight W] [--dense-weight W] [--path-prefix P] [--language L] [--text]";
+
+/// Every command's flags; a command accepts the groups it passes to `parse_flags`.
+struct Flags {
+    walk: Walk,
+    embed: Option<String>,
+    dimensions: Option<usize>,
+    embed_config: Option<PathBuf>,
+    quantize: Option<Quantization>,
+    /// `Some(None)`: `--max-embed-tokens none`.
+    max_embed_tokens: Option<Option<u64>>,
+    no_embed: bool,
+    mode: Option<Mode>,
+    limit: Option<usize>,
+    candidates: Option<usize>,
+    fusion: Option<String>,
+    rrf_k: Option<f64>,
+    lexical_weight: Option<f64>,
+    dense_weight: Option<f64>,
+    filter: Filter,
+    text: bool,
+}
+#[derive(Clone, Copy, Default)]
+struct Accepts {
+    walk: bool,
+    embed: bool,
+    search: bool,
+}
+fn number<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T, Error> {
+    value
+        .parse()
+        .map_err(|_| format!("{flag} needs a number, not {value:?}").into())
+}
+/// Splits the flags from the positional arguments. `--` ends the flags.
+fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>), Error> {
+    let mut f = Flags {
+        walk: Walk {
+            rules: FileRules::default(),
+            report: None,
+            front_matter_description: false,
+        },
+        embed: None,
+        dimensions: None,
+        embed_config: None,
+        quantize: None,
+        max_embed_tokens: None,
+        no_embed: false,
+        mode: None,
+        limit: None,
+        candidates: None,
+        fusion: None,
+        rrf_k: None,
+        lexical_weight: None,
+        dense_weight: None,
+        filter: Filter::default(),
+        text: false,
     };
+    let options: Vec<&str> = [
+        (accepts.walk, RULE_FLAGS),
+        (accepts.embed, EMBED_FLAGS),
+        (accepts.search, SEARCH_FLAGS),
+    ]
+    .into_iter()
+    .filter_map(|(on, list)| on.then_some(list))
+    .collect();
+    let options = options.join(" ");
     let mut positional = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -47,23 +120,83 @@ fn walk_args(args: &[String]) -> Result<(Walk, Vec<String>), Error> {
             Some((f, v)) => (f, Some(v.to_owned())),
             None => (a.as_str(), None),
         };
-        if flag == "--respect-ignore" && inline.is_none() {
-            walk.rules.respect_ignore = true;
-            continue;
+        let unknown = || -> Error { format!("unknown option {a}; options: {options}").into() };
+        let accepted = match flag {
+            "--respect-ignore"
+            | "--exclude"
+            | "--include"
+            | "--report"
+            | "--front-matter-description" => accepts.walk,
+            "--embed" | "--dimensions" | "--embed-config" | "--quantize" | "--max-embed-tokens"
+            | "--no-embed" => accepts.embed,
+            "--mode" | "--limit" | "--candidates" | "--fusion" | "--rrf-k" | "--lexical-weight"
+            | "--dense-weight" | "--path-prefix" | "--language" | "--text" => accepts.search,
+            _ => false,
+        };
+        if !accepted {
+            return Err(unknown());
+        }
+        // Switches take no value.
+        if inline.is_none() {
+            match flag {
+                "--respect-ignore" => {
+                    f.walk.rules.respect_ignore = true;
+                    continue;
+                }
+                "--front-matter-description" => {
+                    f.walk.front_matter_description = true;
+                    continue;
+                }
+                "--no-embed" => {
+                    f.no_embed = true;
+                    continue;
+                }
+                "--text" => {
+                    f.text = true;
+                    continue;
+                }
+                _ => {}
+            }
         }
         let value = match inline {
             Some(v) => v,
             None => it.next().cloned().ok_or(format!("{flag} needs a value"))?,
         };
         match flag {
-            "--exclude" => walk.rules.exclude.push(value),
-            "--include" => walk.rules.include.push(value),
-            "--report" => walk.report = Some(PathBuf::from(value)),
-            _ => return Err(format!("unknown option {a}; options: {RULE_FLAGS}").into()),
+            "--exclude" => f.walk.rules.exclude.push(value),
+            "--include" => f.walk.rules.include.push(value),
+            "--report" => f.walk.report = Some(PathBuf::from(value)),
+            "--embed" => f.embed = Some(value),
+            "--dimensions" => f.dimensions = Some(number(flag, &value)?),
+            "--embed-config" => f.embed_config = Some(PathBuf::from(value)),
+            "--quantize" => {
+                f.quantize = Some(match value.as_str() {
+                    "f32" => Quantization::F32,
+                    "int8" => Quantization::Int8,
+                    _ => return Err(format!("--quantize takes f32 or int8, not {value:?}").into()),
+                })
+            }
+            "--max-embed-tokens" => {
+                f.max_embed_tokens = Some(if value == "none" {
+                    None
+                } else {
+                    Some(number(flag, &value)?)
+                })
+            }
+            "--mode" => f.mode = Some(value.parse()?),
+            "--limit" => f.limit = Some(number(flag, &value)?),
+            "--candidates" => f.candidates = Some(number(flag, &value)?),
+            "--fusion" => f.fusion = Some(value),
+            "--rrf-k" => f.rrf_k = Some(number(flag, &value)?),
+            "--lexical-weight" => f.lexical_weight = Some(number(flag, &value)?),
+            "--dense-weight" => f.dense_weight = Some(number(flag, &value)?),
+            "--path-prefix" => f.filter = f.filter.clone().with_path_prefix(value),
+            "--language" => f.filter = f.filter.clone().with_language(value),
+            _ => return Err(unknown()),
         }
     }
-    walk.rules.validate()?;
-    Ok((walk, positional))
+    f.walk.rules.validate()?;
+    Ok((f, positional))
 }
 /// Prints the report summary and the entries worth listing to stderr, and writes the
 /// full report to `--report FILE` if given.
@@ -88,28 +221,211 @@ fn rules_changed_note() {
         "arko_index: the file selection rules differ from the previous run's (or the state predates recorded rules); the first delta applies the new rules"
     );
 }
+
+/// The embedding settings of an `index2` run: `--no-embed` (lexical, and forget the
+/// saved settings), `--embed-config FILE`, `--embed MODEL`, else the index's saved
+/// `dense.json`; then `--dimensions`, `--quantize` and `--max-embed-tokens`.
+fn dense_config(state: &Path, f: &Flags) -> Result<Option<DenseConfig>, Error> {
+    if f.no_embed {
+        if f.embed.is_some() || f.embed_config.is_some() {
+            return Err("--no-embed contradicts --embed and --embed-config".into());
+        }
+        if DenseConfig::remove(state)? {
+            eprintln!("arko_index: embeddings turned off for this index (removed dense.json)");
+        }
+        return Ok(None);
+    }
+    let saved = DenseConfig::load(state)?;
+    let mut config = if let Some(path) = &f.embed_config {
+        DenseConfig::read(path)?
+    } else if let Some(spec) = &f.embed {
+        let embedder = support::descriptor_for(spec, f.dimensions)?;
+        // A new model keeps the saved quantization and cap unless they are given.
+        match saved {
+            Some(saved) => DenseConfig::new(embedder)
+                .with_quantization(saved.quantization)
+                .with_max_tokens_per_run(saved.max_tokens_per_run),
+            None => DenseConfig::new(embedder),
+        }
+    } else if let Some(mut saved) = saved {
+        if let Some(dims) = f.dimensions {
+            let spec = format!("{}:{}", saved.embedder.provider, saved.embedder.model);
+            saved.embedder = support::descriptor_for(&spec, Some(dims))?;
+        }
+        saved
+    } else {
+        if f.dimensions.is_some() || f.quantize.is_some() || f.max_embed_tokens.is_some() {
+            return Err("this index has no saved embedding model: choose one with --embed".into());
+        }
+        return Ok(None);
+    };
+    if let Some(q) = f.quantize {
+        config = config.with_quantization(q);
+    }
+    if let Some(cap) = f.max_embed_tokens {
+        config = config.with_max_tokens_per_run(cap);
+    }
+    Ok(Some(config))
+}
+
+/// The stderr lines of an embedding run.
+fn print_embed_stats(s: &EmbedStats) {
+    eprintln!(
+        "arko_index: embeddings: {}; {} chunks, {} distinct texts: {} from the cache, {} embedded now in {} requests, {} tokens",
+        s.embedder.display(),
+        s.docs,
+        s.texts,
+        s.cached,
+        s.new,
+        s.requests,
+        s.tokens
+    );
+    if s.cap_reached {
+        eprintln!(
+            "arko_index: stopped at the token cap ({}): {} texts ({} counted tokens) not embedded; their chunks are found by lexical search only. Rerun with a higher --max-embed-tokens (or none) to finish; embedded texts come from the cache",
+            s.max_tokens.unwrap_or(0),
+            s.not_embedded - s.too_long,
+            s.not_embedded_tokens
+        );
+    }
+    if s.too_long > 0 {
+        eprintln!(
+            "arko_index: {} texts are over the model's per-input token limit and were not embedded",
+            s.too_long
+        );
+    }
+    eprintln!(
+        "arko_index: {} of {} chunks have vectors; the cache holds {} vectors for this model",
+        s.embedded_docs, s.docs, s.cache_records
+    );
+}
+
+/// `search2`: the request from the flags; the default mode is hybrid when the index
+/// has embeddings, else lexical.
+fn search2(state: &Path, query: &str, f: &Flags) -> Result<(), Error> {
+    let info = arko_index::index2::dense_info(state)?;
+    let mode = f.mode.unwrap_or(if info.is_some() {
+        Mode::Hybrid
+    } else {
+        Mode::Lexical
+    });
+    let fusion = match f.fusion.as_deref().unwrap_or("rrf") {
+        "rrf" => {
+            let Fusion::Rrf {
+                k,
+                lexical_weight,
+                dense_weight,
+            } = Fusion::default()
+            else {
+                unreachable!()
+            };
+            Fusion::Rrf {
+                k: f.rrf_k.unwrap_or(k),
+                lexical_weight: f.lexical_weight.unwrap_or(lexical_weight),
+                dense_weight: f.dense_weight.unwrap_or(dense_weight),
+            }
+        }
+        "linear" => {
+            if f.rrf_k.is_some() || f.dense_weight.is_some() {
+                return Err("--fusion linear takes --lexical-weight only".into());
+            }
+            Fusion::Linear {
+                lexical_weight: f.lexical_weight.unwrap_or(0.5),
+            }
+        }
+        other => return Err(format!("--fusion takes rrf or linear, not {other:?}").into()),
+    };
+    let mut request = SearchRequest::new(query)
+        .with_mode(mode)
+        .with_fusion(fusion)
+        .with_filter(f.filter.clone());
+    if let Some(limit) = f.limit {
+        request = request.with_limit(limit);
+    }
+    if let Some(candidates) = f.candidates {
+        request = request.with_candidates(candidates);
+    }
+    let embedder = match (&info, mode) {
+        (Some(info), Mode::Dense | Mode::Hybrid) => Some(
+            support::embedder_for(&info.embedder)
+                .map_err(|e| format!("{e} (or search with --mode lexical)"))?,
+        ),
+        _ => None,
+    };
+    let results = arko_index::hybrid::search(state, &request, embedder.as_deref())?;
+    let mut out = io::BufWriter::new(io::stdout().lock());
+    for (i, hit) in results.hits.iter().enumerate() {
+        if f.text {
+            let mut ranks = Vec::new();
+            if let Some(r) = hit.lexical_rank {
+                ranks.push(format!("lexical #{r}"));
+            }
+            if let Some(r) = hit.dense_rank {
+                ranks.push(format!("dense #{r}"));
+            }
+            writeln!(
+                out,
+                "{:>2}. {}  [{} {:.4}; {}]",
+                i + 1,
+                hit.header,
+                results.mode.as_str(),
+                hit.score,
+                ranks.join(", ")
+            )?;
+        } else {
+            serde_json::to_writer(&mut out, hit)?;
+            writeln!(out)?;
+        }
+    }
+    out.flush()?;
+    if mode != Mode::Lexical
+        && let Some(info) = &results.dense
+    {
+        eprintln!(
+            "arko_index: query embedded with {}: {} tokens",
+            info.embedder.display(),
+            results.query_tokens
+        );
+        if !info.complete() {
+            eprintln!(
+                "arko_index: {} of {} chunks have vectors (the build stopped at its token cap); the others are found by lexical search only",
+                info.embedded, info.docs
+            );
+        }
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), Error> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let options = Options::default();
     let usage = format!(
         "usage: arko_index_cli chunk ROOT | index ROOT STATE_DIR | search STATE_DIR QUERY | watch ROOT STATE_DIR | outline ROOT\n\
          \x20      (also index2, search2, watch2, bench-scan)\n\
-         commands that walk a tree accept: {RULE_FLAGS}"
+         commands that walk a tree accept: {RULE_FLAGS}\n\
+         index2 ROOT STATE_DIR also accepts: {EMBED_FLAGS}\n\
+         search2 STATE_DIR QUERY... accepts: {SEARCH_FLAGS}"
     );
+    let command = args.first().map(String::as_str);
     let walks = matches!(
-        args.first().map(String::as_str),
+        command,
         Some("chunk" | "outline" | "index" | "index2" | "watch" | "watch2" | "bench-scan")
     );
-    let (walk, args) = if walks {
-        let (walk, mut rest) = walk_args(&args[1..])?;
+    let accepts = Accepts {
+        walk: walks,
+        embed: command == Some("index2"),
+        search: command == Some("search2"),
+    };
+    let (flags, args) = if accepts.walk || accepts.search {
+        let (flags, mut rest) = parse_flags(&args[1..], accepts)?;
         rest.insert(0, args[0].clone());
-        (walk, rest)
+        (flags, rest)
     } else {
-        let walk = Walk {
-            rules: FileRules::default(),
-            report: None,
-        };
-        (walk, args)
+        (parse_flags(&[], accepts)?.0, args)
+    };
+    let walk = &flags.walk;
+    let options = Options {
+        front_matter_description: walk.front_matter_description,
+        ..Options::default()
     };
     match args.first().map(String::as_str) {
         Some("chunk") | Some("outline") if args.len() == 2 => {
@@ -118,9 +434,28 @@ fn run() -> Result<(), Error> {
             // writes the rendered bytes in sequential file order through one buffer.
             let outline = args[0] == "outline";
             let mut out = io::BufWriter::with_capacity(1 << 20, io::stdout().lock());
-            let render = |chunks: Vec<Chunk>| -> Result<Vec<u8>, Error> {
+            // A file's metadata region (Markdown front matter) comes before its chunks:
+            // in the outline as `path:start-end\tmetadata\ttitle`, in JSON as a line
+            // with a `file` key.
+            let render = |file: FileChunks| -> Result<Vec<u8>, Error> {
                 let mut buf = Vec::new();
-                for c in chunks {
+                if let Some(m) = &file.metadata {
+                    if outline {
+                        let span = &m.metadata_range;
+                        writeln!(
+                            buf,
+                            "{}:{}-{}\tmetadata\t{}",
+                            m.file,
+                            span.start_line,
+                            span.end_line,
+                            m.title.as_deref().unwrap_or("")
+                        )?;
+                    } else {
+                        serde_json::to_writer(&mut buf, m)?;
+                        buf.push(b'\n');
+                    }
+                }
+                for c in file.chunks {
                     if outline {
                         writeln!(
                             buf,
@@ -151,13 +486,13 @@ fn run() -> Result<(), Error> {
                 // directories) or the user's own rules removed anything; the full
                 // report still goes to --report FILE.
                 if r.worth_printing() {
-                    report(&walk, &r)?;
+                    report(walk, &r)?;
                 } else {
-                    write_report_file(&walk, &r)?;
+                    write_report_file(walk, &r)?;
                 }
             } else {
-                let chunks = chunk_file(root, &options)?;
-                if chunks.is_empty() {
+                let file = chunk_file_with_metadata(root, &options)?;
+                if file.chunks.is_empty() && file.metadata.is_none() {
                     // Say why a single file produced nothing (empty, binary or not UTF-8).
                     let bytes = std::fs::read(root)?;
                     if bytes.contains(&0) {
@@ -166,7 +501,7 @@ fn run() -> Result<(), Error> {
                         eprintln!("arko_index: skipped (not-utf8): {}", root.display());
                     }
                 }
-                out.write_all(&render(chunks)?)?;
+                out.write_all(&render(file)?)?;
             }
             out.flush()?;
         }
@@ -178,34 +513,62 @@ fn run() -> Result<(), Error> {
                 &walk.rules,
             )?;
             eprintln!("indexed {n} chunks");
-            report(&walk, &r)?;
+            report(walk, &r)?;
         }
         Some("index2") if args.len() == 3 => {
             let budget_mb = std::env::var("ARKO_INDEX_INDEX_MEM_MB")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(256);
-            let s = arko_index::index2::index_with(
-                Path::new(&args[1]),
-                Path::new(&args[2]),
-                &options,
-                arko_index::threads(),
-                budget_mb << 20,
-                &walk.rules,
-            )?;
+            let state = Path::new(&args[2]);
+            std::fs::create_dir_all(state)?;
+            let config = dense_config(state, &flags)?;
+            let embedder = config
+                .as_ref()
+                .map(|c| {
+                    support::embedder_for(&c.embedder).map_err(|e| {
+                        format!(
+                            "{e} (this index embeds with {}; --no-embed builds it lexically and forgets the model)",
+                            c.embedder.display()
+                        )
+                    })
+                })
+                .transpose()?;
+            let progress = |p: &EmbedProgress| {
+                eprintln!(
+                    "arko_index: embedded {}/{} texts, {} tokens, {} requests",
+                    p.texts, p.total, p.tokens, p.requests
+                );
+            };
+            let mut settings = arko_index::index2::BuildOptions::default()
+                .with_threads(arko_index::threads())
+                .with_mem_budget(budget_mb << 20)
+                .with_rules(walk.rules.clone());
+            if let (Some(config), Some(embedder)) = (&config, &embedder) {
+                eprintln!(
+                    "arko_index: embedding with {}{}",
+                    config.embedder.display(),
+                    match config.max_tokens_per_run {
+                        Some(cap) => format!(", at most {cap} tokens"),
+                        None => String::new(),
+                    }
+                );
+                settings = settings.with_dense(
+                    DenseBuild::from_config(embedder.as_ref(), config).with_progress(&progress),
+                );
+            }
+            let s = arko_index::index2::build(Path::new(&args[1]), state, &options, &settings)?;
             eprintln!(
                 "indexed {} chunks, {} terms, {} runs",
                 s.docs, s.terms, s.runs
             );
-            report(&walk, &s.report)?;
+            if let Some(dense) = &s.dense {
+                print_embed_stats(dense);
+            }
+            report(walk, &s.report)?;
         }
         Some("search2") if args.len() >= 3 => {
-            let mut out = io::BufWriter::new(io::stdout().lock());
-            for c in arko_index::index2::search(Path::new(&args[1]), &args[2..].join(" "))? {
-                serde_json::to_writer(&mut out, &c)?;
-                writeln!(out)?;
-            }
-            out.flush()?;
+            search2(Path::new(&args[1]), &args[2..].join(" "), &flags)?;
         }
         #[cfg(target_os = "linux")]
         Some("watch2") if args.len() == 3 => {
@@ -225,7 +588,7 @@ fn run() -> Result<(), Error> {
                 "{}",
                 serde_json::json!({"files": watcher.file_count(), "stats": watcher.stats})
             );
-            report(&walk, watcher.report())?;
+            report(walk, watcher.report())?;
             let mut shown = watcher.report().clone();
             // Each delta is streamed from the record store as one complete, flushed
             // line before it is acknowledged (the same bytes as `write_json`).
@@ -265,7 +628,7 @@ fn run() -> Result<(), Error> {
             if watcher.rules_changed() {
                 rules_changed_note();
             }
-            report(&walk, watcher.report())?;
+            report(walk, watcher.report())?;
             let mut shown = watcher.report().clone();
             while running.load(Ordering::SeqCst) {
                 if let Some(d) = watcher.next_change(Duration::from_millis(250))? {

@@ -45,7 +45,23 @@ Defaults of arko_index (see [Defaults (arko_index)](reference-map.md#defaults-ar
   never stops for them.
 - Chunking, indexing and watching use every available CPU (`ARKO_INDEX_THREADS`
   overrides), with identical output at any thread count.
-- The `pgo` feature is on: optimized builds with GCC on x86-64 Linux parse with grammars
-  compiled with GCC profile-guided optimization (identical output, about a quarter less
-  chunking CPU on mixed-language code, none measurable on Rust); other builds use the
-  grammar crates' objects. `default-features = false` removes it.
+- Dense (embedding) search is opt-in: an index is lexical unless a build sets
+  `BuildOptions::dense` (CLI `index2 --embed MODEL`). The library makes no network
+  calls and reads no credentials; the examples embed with Voyage through arko_ai
+  (`VOYAGE_API_KEY`). Once chosen, the model is saved with the index
+  (`STATE_DIR/dense.json`) and later builds follow it; embeddings are cached by model
+  and text, so a rebuild embeds only changed chunks.
+- No token cap by default (`DenseBuild::max_tokens`, `--max-embed-tokens`): set one
+  for unattended builds. At the cap a build stops embedding, still publishes, and
+  reports what is left. Builds and searches report the tokens billed.
+- Searches return ten results. The library's `SearchRequest` is lexical by default;
+  the CLI's `search2` is hybrid when the index has embeddings. Hybrid fusion is
+  reciprocal rank fusion (k = 60, equal weights) over 50 candidates per side.
+  Vectors are stored as f32 (`Quantization::Int8` opt-in).
+- Chunks carry a context header (`scope`: enclosing definitions or Markdown headings),
+  chunk JSON format 2; boundaries and IDs are unchanged.
+- 50 languages are parsed and chunked along their structure; anything else is split by
+  the bounded fallback. A Markdown file's front matter is file metadata (chunk format 3
+  records it), and its title, without the description, roots every chunk's scope
+  (`Options::front_matter_description` adds the description). See
+  [arko_index languages](arko_index-languages.md).

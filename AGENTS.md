@@ -17,8 +17,9 @@
   Either way, start simple and change only what the results show is necessary.
 - Crates: arko_agents builds on arko_ai and arko_workflows on both; arko_index stands
   alone (tree-sitter chunking, offline search, watchers).
-- Building needs Rust 1.89 or later and a C compiler. Run `cargo fmt --all` before
-  committing; CI checks formatting.
+- Building needs Rust 1.89 or later and a C compiler, for arko_ai's dependencies (ring,
+  and Oniguruma through tokenizers); arko_index alone needs none. Run `cargo fmt --all`
+  before committing; CI checks formatting.
 - Test with `cargo test --workspace --locked`. The tests make no provider calls; the
   terminal, MCP and Claude Code tests need Python 3 (`ARKO_TEST_PYTHON` selects the
   interpreter).

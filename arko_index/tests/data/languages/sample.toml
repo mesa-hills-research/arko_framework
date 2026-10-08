@@ -1,0 +1,32 @@
+# The service's configuration.
+title = "orders"
+version = 3
+
+[server]
+host = "0.0.0.0"
+port = 8080
+timeouts = { read = 30, write = 30 }
+
+[database]
+url = "postgres://localhost/orders"
+pool_size = 16
+
+# Feature flags.
+[features]
+fast_checkout = true
+beta = ["search", "export"]
+
+[[workers]]
+name = "mailer"
+threads = 2
+
+[[workers]]
+name = "exporter"
+threads = 1
+
+[workers.limits]
+memory = "512M"
+
+[profile.release]
+lto = true
+codegen-units = 1

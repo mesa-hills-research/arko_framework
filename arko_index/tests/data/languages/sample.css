@@ -1,0 +1,51 @@
+@charset "utf-8";
+@import url("reset.css");
+
+/* Theme colors. */
+:root {
+  --accent: #3366ff;
+  --text: #1a1a1a;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+  color: var(--text);
+}
+
+.card,
+.panel > header {
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+/* Wide screens get two columns. */
+@media (min-width: 800px) {
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .card:hover {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("inter.woff2") format("woff2");
+}
+
+a:not(.plain)::after {
+  content: " →";
+}

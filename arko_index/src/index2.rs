@@ -11,21 +11,33 @@
 //!   terms.dat  sorted entries: u32 len, term, u32 df, u64 postings offset, u32 postings len
 //!   terms.idx  every BLOCK-th term: u32 len, term, u64 offset into terms.dat
 //!   post.dat   per term: (varint doc delta, varint tf)*
+//!   files.dat  per file with chunks: u32 LE first doc, u32 LE path length, path
+//!              (for path and language filters)
+//! With embeddings ([`BuildOptions::dense`]) also:
+//!   dense.json the generation's embedding model and coverage ([`DenseIndexInfo`])
+//!   dense/     the vector store ([`BruteForceStore`]), vector ids = doc ids
 //! Build memory is bounded: postings accumulate up to `mem_budget` bytes, then spill
 //! to a sorted run file; runs cover increasing doc ranges and are merged by term.
+//! Texts to embed are spooled to disk; the vector store is written as it is filled.
 use crate::{
     bench_v1::{Chunk, Error, Options, chunk_str},
+    dense::{
+        DenseBuild, DenseConfig, DenseIndexInfo, EmbedStats, RENDER_VERSION, cache::Cache, render,
+        run, text_hash,
+    },
     files,
     files::{FileRules, Report},
+    fsio::{atomic_write, read_exact_at, read_u32, read_u64},
     par,
     search::tokens,
     tokenize::{self, Counts, FxHasher, FxMap},
+    vector::{BruteForceStore, Filter, VectorMeta, VectorStore},
 };
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
-    collections::{BTreeSet, BinaryHeap},
+    collections::{BTreeSet, BinaryHeap, HashSet},
     fs::{File, OpenOptions},
     hash::Hasher,
     io::{BufReader, BufWriter, Read, Write},
@@ -162,10 +174,15 @@ impl Shard {
 struct FileDocs {
     /// Not indexed: the report entry (`None` for a file that vanished).
     skip: Option<Option<files::Skipped>>,
+    path: String,
     json: Vec<u8>,
     ends: Vec<u64>,
     lens: Vec<u32>,
     shards: Vec<Vec<u8>>,
+    /// With embeddings: each chunk's rendered-text hash...
+    hashes: Vec<[u8; 32]>,
+    /// ...and the rendered text of each chunk the cache does not hold.
+    missing: Vec<([u8; 32], String)>,
 }
 
 fn shard_of(term: &[u8], shards: usize) -> usize {
@@ -178,13 +195,21 @@ fn shard_of(term: &[u8], shards: usize) -> usize {
 }
 
 /// Reads, chunks and tokenizes one file (runs on a worker thread).
-fn file_docs(item: &files::Listed, options: &Options, shards: usize) -> Result<FileDocs, Error> {
+fn file_docs(
+    item: &files::Listed,
+    options: &Options,
+    shards: usize,
+    cache: Option<&Cache>,
+) -> Result<FileDocs, Error> {
     let mut out = FileDocs {
         skip: None,
+        path: String::new(),
         json: Vec::new(),
         ends: Vec::new(),
         lens: Vec::new(),
         shards: vec![Vec::new(); shards],
+        hashes: Vec::new(),
+        missing: Vec::new(),
     };
     let (path, file) = match files::read_listed(item, false) {
         files::Read::Text(path, file) => (path, file),
@@ -227,7 +252,16 @@ fn file_docs(item: &files::Listed, options: &Options, shards: usize) -> Result<F
         out.lens.push(len);
         serde_json::to_writer(&mut out.json, chunk)?;
         out.ends.push(out.json.len() as u64);
+        if let Some(cache) = cache {
+            let text = render(chunk, &file.text[s..e]);
+            let hash = text_hash(&text);
+            out.hashes.push(hash);
+            if !cache.contains(&hash) {
+                out.missing.push((hash, text));
+            }
+        }
     }
+    out.path = path;
     Ok(out)
 }
 
@@ -263,47 +297,56 @@ impl RunReader {
     }
 }
 
-/// Reads exactly `buf.len()` bytes at `offset` without moving a shared cursor.
-#[cfg(unix)]
-fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
-    std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
-}
-/// Reads exactly `buf.len()` bytes at `offset`.
-#[cfg(windows)]
-fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
-    use std::os::windows::fs::FileExt as _;
-    while !buf.is_empty() {
-        match file.seek_read(buf, offset) {
-            Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
-            Ok(n) => {
-                buf = &mut buf[n..];
-                offset += n as u64;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
-}
-
-fn atomic_write(dir: &Path, name: &str, data: &[u8]) -> Result<(), Error> {
-    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
-    {
-        let mut f = File::create(&tmp)?;
-        f.write_all(data)?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, dir.join(name))?;
-    crate::files::sync_dir(dir)?;
-    Ok(())
-}
-
 pub struct BuildStats {
     pub docs: u64,
     pub terms: u64,
     pub runs: usize,
     /// What the walk indexed and skipped (also written to `STATE_DIR/report.json`).
     pub report: Report,
+    /// What embedding did, when the build had [`BuildOptions::dense`].
+    pub dense: Option<EmbedStats>,
+}
+
+/// Settings of [`build`]. `Default`: [`threads()`](crate::threads), a 256 MB postings
+/// budget, the default [`FileRules`], no embeddings.
+#[non_exhaustive]
+pub struct BuildOptions<'a> {
+    /// Worker threads for chunking and accumulating postings.
+    pub threads: usize,
+    /// Bytes of postings held in memory before spilling a sorted run.
+    pub mem_budget: usize,
+    pub rules: FileRules,
+    /// Embed the chunks too (dense search). `None`: lexical only. Opt-in: embedding
+    /// calls the embedder's provider, which may bill for it.
+    pub dense: Option<DenseBuild<'a>>,
+}
+impl Default for BuildOptions<'_> {
+    fn default() -> Self {
+        Self {
+            threads: crate::threads(),
+            mem_budget: 256 << 20,
+            rules: FileRules::default(),
+            dense: None,
+        }
+    }
+}
+impl<'a> BuildOptions<'a> {
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads;
+        self
+    }
+    pub fn with_mem_budget(mut self, bytes: usize) -> Self {
+        self.mem_budget = bytes;
+        self
+    }
+    pub fn with_rules(mut self, rules: FileRules) -> Self {
+        self.rules = rules;
+        self
+    }
+    pub fn with_dense(mut self, dense: DenseBuild<'a>) -> Self {
+        self.dense = Some(dense);
+        self
+    }
 }
 
 pub fn index(
@@ -332,6 +375,32 @@ pub fn index_with(
     mem_budget: usize,
     rules: &FileRules,
 ) -> Result<BuildStats, Error> {
+    build(
+        root,
+        state_dir,
+        options,
+        &BuildOptions {
+            threads,
+            mem_budget,
+            rules: rules.clone(),
+            dense: None,
+        },
+    )
+}
+
+/// Builds a new generation and publishes it. With [`BuildOptions::dense`] the chunks
+/// are also embedded: texts the state's embedding cache holds for the embedder's
+/// model are reused, the others are embedded (stopping cleanly at the token cap), the
+/// vectors are stored with the generation, and the settings are saved as the index's
+/// [`DenseConfig`]. Without it, a saved config is left as it is.
+pub fn build(
+    root: &Path,
+    state_dir: &Path,
+    options: &Options,
+    settings: &BuildOptions<'_>,
+) -> Result<BuildStats, Error> {
+    let (threads, mem_budget, rules) = (settings.threads, settings.mem_budget, &settings.rules);
+    let dense = settings.dense.as_ref();
     rules.validate()?;
     let root = root.canonicalize()?;
     if !root.is_dir() {
@@ -371,6 +440,25 @@ pub fn index_with(
     let mut docs_dat = w("docs.dat")?;
     let mut docs_off = w("docs.off")?;
     let mut lens = w("lens.dat")?;
+    let mut files_dat = w("files.dat")?;
+    // (first doc, path) of every file with chunks, for the vector store's metadata.
+    let mut file_table: Vec<(u32, String)> = Vec::new();
+    // Embeddings: the cache of the embedder's model, each doc's text hash (in doc
+    // order), the texts to embed, and the distinct hashes seen.
+    let mut cache = match dense {
+        Some(d) => Some(Cache::open(&state_dir, &d.embedder.descriptor())?),
+        None => None,
+    };
+    let mut vhash = match dense {
+        Some(_) => Some(w("vhash.tmp")?),
+        None => None,
+    };
+    let mut spool = match dense {
+        Some(_) => Some(run::Spool::create(&dir.join("embed-spool.tmp"))?),
+        None => None,
+    };
+    let mut seen: HashSet<[u8; 32]> = HashSet::new();
+    let mut pending: HashSet<[u8; 32]> = HashSet::new();
     let (mut offset, mut next_doc, mut total) = (0u64, 0u32, 0u64);
     let clock = std::time::Instant::now();
     let mut phases: Vec<(&str, f64)> = Vec::new();
@@ -416,7 +504,7 @@ pub fn index_with(
             threads,
             par::window_bytes(threads),
             |i| weights.get(i).copied().unwrap_or(1),
-            |item| file_docs(item, options, shards),
+            |item| file_docs(item, options, shards, cache.as_ref()),
             |f| {
                 match f.skip {
                     Some(skip) => {
@@ -435,6 +523,25 @@ pub fn index_with(
                     total += u64::from(len);
                 }
                 docs_dat.write_all(&f.json)?;
+                if !f.ends.is_empty() {
+                    files_dat.write_all(&base.to_le_bytes())?;
+                    files_dat.write_all(&(f.path.len() as u32).to_le_bytes())?;
+                    files_dat.write_all(f.path.as_bytes())?;
+                    if dense.is_some() {
+                        file_table.push((base, f.path.clone()));
+                    }
+                }
+                if let (Some(vhash), Some(spool)) = (&mut vhash, &mut spool) {
+                    for h in &f.hashes {
+                        vhash.write_all(h)?;
+                        seen.insert(*h);
+                    }
+                    for (h, text) in &f.missing {
+                        if pending.insert(*h) {
+                            spool.push(h, text)?;
+                        }
+                    }
+                }
                 next_doc = u32::try_from(f.ends.len())
                     .ok()
                     .and_then(|n| next_doc.checked_add(n))
@@ -479,7 +586,7 @@ pub fn index_with(
     docs_off.write_all(&offset.to_le_bytes())?;
     // Written now, made durable after the merge (before publishing), so their
     // writeback overlaps the merge instead of blocking it.
-    for f in [&mut docs_dat, &mut docs_off, &mut lens] {
+    for f in [&mut docs_dat, &mut docs_off, &mut lens, &mut files_dat] {
         f.flush()?;
     }
     // Merge runs by term; runs hold increasing doc ranges, so a term's postings are
@@ -550,11 +657,79 @@ pub fn index_with(
     for f in [&mut terms_dat, &mut terms_idx, &mut post] {
         f.flush()?;
     }
-    for f in [&docs_dat, &docs_off, &lens, &terms_dat, &terms_idx, &post] {
+    for f in [
+        &docs_dat, &docs_off, &lens, &files_dat, &terms_dat, &terms_idx, &post,
+    ] {
         f.get_ref().sync_all()?;
     }
     for p in &runs {
         std::fs::remove_file(p)?;
+    }
+    // Embeddings: embed what the cache lacks, then store every doc's vector.
+    let mut dense_stats = None;
+    if let (Some(d), Some(cache), Some(mut vhash), Some(spool)) =
+        (dense, cache.as_mut(), vhash.take(), spool.take())
+    {
+        vhash.flush()?;
+        drop(vhash);
+        let (spool_path, to_embed) = spool.finish()?;
+        let descriptor = d.embedder.descriptor();
+        let totals = run::embed_spool(
+            &spool_path,
+            to_embed,
+            cache,
+            d.embedder,
+            d.max_tokens,
+            d.progress,
+        )?;
+        phases.push(("embedded_s", clock.elapsed().as_secs_f64()));
+        let mut store =
+            BruteForceStore::create(&dir.join("dense"), descriptor.dimensions, d.quantization)?;
+        let mut hashes = BufReader::with_capacity(1 << 20, File::open(dir.join("vhash.tmp"))?);
+        let (mut vector, mut hash, mut file, mut embedded) = (Vec::new(), [0u8; 32], 0, 0u64);
+        for doc in 0..next_doc {
+            hashes.read_exact(&mut hash)?;
+            while file + 1 < file_table.len() && file_table[file + 1].0 <= doc {
+                file += 1;
+            }
+            if cache.get(&hash, &mut vector)? {
+                let path = &file_table[file].1;
+                let language = crate::syntax::language(Path::new(path));
+                store.insert(u64::from(doc), &vector, VectorMeta { path, language })?;
+                embedded += 1;
+            }
+        }
+        drop(hashes);
+        store.persist()?;
+        let info = DenseIndexInfo {
+            version: 1,
+            embedder: descriptor.clone(),
+            render_version: RENDER_VERSION,
+            quantization: d.quantization,
+            docs: n,
+            embedded,
+        };
+        atomic_write(&dir, "dense.json", &serde_json::to_vec_pretty(&info)?)?;
+        std::fs::remove_file(dir.join("vhash.tmp"))?;
+        std::fs::remove_file(&spool_path)?;
+        phases.push(("vectors_stored_s", clock.elapsed().as_secs_f64()));
+        dense_stats = Some(EmbedStats {
+            embedder: descriptor,
+            render_version: RENDER_VERSION,
+            docs: n,
+            embedded_docs: embedded,
+            texts: seen.len() as u64,
+            cached: (seen.len() - pending.len()) as u64,
+            new: totals.new,
+            requests: totals.requests,
+            tokens: totals.tokens,
+            max_tokens: d.max_tokens,
+            cap_reached: totals.cap_reached,
+            not_embedded: totals.not_embedded,
+            not_embedded_tokens: totals.not_embedded_tokens,
+            too_long: totals.too_long,
+            cache_records: 0,
+        });
     }
     let average = if n > 0 { total as f64 / n as f64 } else { 1.0 };
     let meta = Meta {
@@ -585,19 +760,23 @@ pub fn index_with(
         }
     }
     files::write_report(&state_dir, &report)?;
+    if let (Some(d), Some(cache)) = (dense, cache.as_mut()) {
+        DenseConfig::new(d.embedder.descriptor())
+            .with_quantization(d.quantization)
+            .with_max_tokens_per_run(d.max_tokens)
+            .save(&state_dir)?;
+        cache.compact_if_sparse(&seen)?;
+        if let Some(stats) = &mut dense_stats {
+            stats.cache_records = cache.records();
+        }
+    }
     Ok(BuildStats {
         docs: n,
         terms: nterms,
         runs: runs.len(),
         report,
+        dense: dense_stats,
     })
-}
-
-fn read_u32(b: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(b[at..at + 4].try_into().unwrap())
-}
-fn read_u64(b: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(b[at..at + 8].try_into().unwrap())
 }
 
 /// The sparse term index (`terms.idx`) without a `String` per entry: the raw bytes
@@ -693,18 +872,21 @@ impl Scores {
             Scores::Sparse(m) => *m.entry(d).or_insert(0.0) += v,
         }
     }
-    /// The 10 best (doc, score) by score desc, doc asc, without collecting all
-    /// touched documents first.
-    fn top10(self) -> Vec<(u32, f64)> {
+    /// The `k` best (doc, score) among the docs `allow` accepts, by score desc, doc
+    /// asc, without collecting all touched documents first.
+    fn top(self, k: usize, allow: &dyn Fn(u32) -> bool) -> Vec<(u32, f64)> {
         // Doc ids are assigned in (path, start_byte) order, so the original tie-break
         // (score desc, path asc, start_byte asc) is score desc, doc id asc.
         let cmp = |a: &(u32, f64), b: &(u32, f64)| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0));
-        let mut best: Vec<(u32, f64)> = Vec::with_capacity(11);
+        let mut best: Vec<(u32, f64)> = Vec::with_capacity(k + 1);
+        if k == 0 {
+            return best;
+        }
         let mut offer = |p: (u32, f64)| {
-            if best.len() < 10 || cmp(&p, &best[9]).is_lt() {
+            if (best.len() < k || cmp(&p, &best[k - 1]).is_lt()) && allow(p.0) {
                 let at = best.partition_point(|b| cmp(b, &p).is_lt());
                 best.insert(at, p);
-                best.truncate(10);
+                best.truncate(k);
             }
         };
         match self {
@@ -717,28 +899,98 @@ impl Scores {
     }
 }
 
-pub fn search(state_dir: &Path, query: &str) -> Result<Vec<Chunk>, Error> {
-    let generation = std::fs::read_to_string(state_dir.join("CURRENT2"))?;
-    let dir = state_dir.join(generation.trim());
-    let meta: Meta = serde_json::from_slice(&std::fs::read(dir.join("meta.json"))?)?;
-    if meta.version != 2 {
-        return Err("unsupported index version".into());
+/// The first doc and the path of every file with chunks (`files.dat`).
+fn read_files(dir: &Path) -> Result<Vec<(u32, String)>, Error> {
+    let raw = std::fs::read(dir.join("files.dat")).map_err(|e| {
+        format!(
+            "{e}: this index has no file table (built by an earlier version); rebuild it to filter"
+        )
+    })?;
+    let mut c = crate::fsio::Cursor::new(&raw);
+    let mut out = Vec::new();
+    while c.at < raw.len() {
+        let first = c.u32()?;
+        out.push((first, c.string()?));
     }
-    let average = f64::from_bits(meta.average_bits);
-    let n_docs = meta.docs as f64;
-    let idx = TermIndex::read(&dir.join("terms.idx"))?;
-    let terms = File::open(dir.join("terms.dat"))?;
-    let terms_len = terms.metadata()?.len();
-    let query: BTreeSet<_> = tokens(query).into_iter().collect();
-    // Same accumulation order per document as search::search: query terms ascending.
-    let mut found = Vec::new();
-    for t in &query {
-        if let Some(hit) = lookup(&idx, &terms, terms_len, t)? {
-            found.push(hit);
+    Ok(out)
+}
+
+/// The current generation of an index2 state directory, opened for reading: every
+/// read goes to the generation `CURRENT2` named when it was opened, so lexical and
+/// dense results of one search come from the same build.
+pub(crate) struct Generation {
+    dir: PathBuf,
+    meta: Meta,
+}
+impl Generation {
+    pub(crate) fn open(state_dir: &Path) -> Result<Self, Error> {
+        let generation = std::fs::read_to_string(state_dir.join("CURRENT2"))?;
+        let dir = state_dir.join(generation.trim());
+        let meta: Meta = serde_json::from_slice(&std::fs::read(dir.join("meta.json"))?)?;
+        if meta.version != 2 {
+            return Err("unsupported index version".into());
+        }
+        Ok(Self { dir, meta })
+    }
+
+    /// The embeddings of this generation, if it has them.
+    pub(crate) fn dense_info(&self) -> Result<Option<DenseIndexInfo>, Error> {
+        match std::fs::read(self.dir.join("dense.json")) {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
         }
     }
-    let mut best = Vec::new();
-    if !found.is_empty() {
+
+    pub(crate) fn open_store(&self) -> Result<BruteForceStore, Error> {
+        BruteForceStore::open(&self.dir.join("dense"))
+    }
+
+    /// The best `k` docs for `query` by BM25 among those whose file passes `filter`.
+    pub(crate) fn lexical(
+        &self,
+        query: &str,
+        k: usize,
+        filter: &Filter,
+    ) -> Result<Vec<(u32, f64)>, Error> {
+        let meta = &self.meta;
+        let dir = &self.dir;
+        let average = f64::from_bits(meta.average_bits);
+        let n_docs = meta.docs as f64;
+        let idx = TermIndex::read(&dir.join("terms.idx"))?;
+        let terms = File::open(dir.join("terms.dat"))?;
+        let terms_len = terms.metadata()?.len();
+        let query: BTreeSet<_> = tokens(query).into_iter().collect();
+        // Same accumulation order per document as search::search: query terms ascending.
+        let mut found = Vec::new();
+        for t in &query {
+            if let Some(hit) = lookup(&idx, &terms, terms_len, t)? {
+                found.push(hit);
+            }
+        }
+        if found.is_empty() || k == 0 {
+            return Ok(Vec::new());
+        }
+        // A filter is applied per file: (first doc, passes) of each file, by doc.
+        let allowed: Option<Vec<(u32, bool)>> = if filter.is_empty() {
+            None
+        } else {
+            Some(
+                read_files(dir)?
+                    .into_iter()
+                    .map(|(first, path)| {
+                        let language = crate::syntax::language(Path::new(&path));
+                        (first, filter.matches(&path, language))
+                    })
+                    .collect(),
+            )
+        };
+        let allow = |doc: u32| -> bool {
+            allowed.as_ref().is_none_or(|files| {
+                let i = files.partition_point(|(first, _)| *first <= doc);
+                i > 0 && files[i - 1].1
+            })
+        };
         let post = File::open(dir.join("post.dat"))?;
         let lens_raw = std::fs::read(dir.join("lens.dat"))?;
         let postings: u64 = found.iter().map(|&(df, _, _)| u64::from(df)).sum();
@@ -764,18 +1016,43 @@ pub fn search(state_dir: &Path, query: &str) -> Result<Vec<Chunk>, Error> {
                 scores.add(d as u32, idf * tf as f64 * 2.2 / (tf as f64 + norm));
             }
         }
-        best = scores.top10();
+        Ok(scores.top(k, &allow))
     }
-    let offs = File::open(dir.join("docs.off"))?;
-    let docs = File::open(dir.join("docs.dat"))?;
-    let mut out = Vec::new();
-    for (d, _) in best {
-        let mut o = [0u8; 16];
-        read_exact_at(&offs, &mut o, u64::from(d) * 8)?;
-        let (s, e) = (read_u64(&o, 0), read_u64(&o, 8));
-        let mut j = vec![0u8; (e - s) as usize];
-        read_exact_at(&docs, &mut j, s)?;
-        out.push(serde_json::from_slice(&j)?);
+
+    /// The chunks of `docs`, in the given order.
+    pub(crate) fn chunks(&self, docs: &[u32]) -> Result<Vec<Chunk>, Error> {
+        let offs = File::open(self.dir.join("docs.off"))?;
+        let store = File::open(self.dir.join("docs.dat"))?;
+        let mut out = Vec::with_capacity(docs.len());
+        for &d in docs {
+            if u64::from(d) >= self.meta.docs {
+                return Err(format!("doc {d} is not in the index").into());
+            }
+            let mut o = [0u8; 16];
+            read_exact_at(&offs, &mut o, u64::from(d) * 8)?;
+            let (s, e) = (read_u64(&o, 0), read_u64(&o, 8));
+            let mut j = vec![0u8; (e - s) as usize];
+            read_exact_at(&store, &mut j, s)?;
+            out.push(serde_json::from_slice(&j)?);
+        }
+        Ok(out)
     }
-    Ok(out)
+}
+
+/// The embeddings of the current generation (model, render version, coverage), or
+/// `None` when it was built without them.
+pub fn dense_info(state_dir: &Path) -> Result<Option<DenseIndexInfo>, Error> {
+    Generation::open(state_dir)?.dense_info()
+}
+
+/// The ten best chunks for `query` by BM25 (lexical). [`hybrid::search`](crate::hybrid::search)
+/// also searches embeddings, filters, and returns more or fewer results.
+pub fn search(state_dir: &Path, query: &str) -> Result<Vec<Chunk>, Error> {
+    let generation = Generation::open(state_dir)?;
+    let best: Vec<u32> = generation
+        .lexical(query, 10, &Filter::default())?
+        .into_iter()
+        .map(|(d, _)| d)
+        .collect();
+    generation.chunks(&best)
 }

@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title><%= @title %></title>
+</head>
+<body>
+  <%# The list of orders. %>
+  <h1>Orders for <%= @customer.name %></h1>
+  <% if @orders.empty? %>
+    <p>No orders yet.</p>
+  <% else %>
+    <table>
+      <% @orders.each do |order| %>
+        <tr>
+          <td><%= order.id %></td>
+          <td><%= number_to_currency(order.total) %></td>
+          <td><%= link_to "Show", order_path(order) %></td>
+        </tr>
+      <% end %>
+    </table>
+  <% end %>
+  <%- render partial: "footer" -%>
+</body>
+</html>

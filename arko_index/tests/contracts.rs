@@ -6,7 +6,15 @@ use std::{
 };
 
 fn verify(path: &str, text: &str, max: usize) -> Vec<Chunk> {
-    let chunks = chunk_str(Path::new(path), text, &Options { max_bytes: max }).unwrap();
+    let chunks = chunk_str(
+        Path::new(path),
+        text,
+        &Options {
+            max_bytes: max,
+            ..Options::default()
+        },
+    )
+    .unwrap();
     let mut prev = 0;
     let mut ids = HashSet::new();
     for c in &chunks {
@@ -319,7 +327,17 @@ fn parser_work_and_render_bounds() {
     let path = format!("{}.txt", "x".repeat(23000));
     verify(&path, &"🦀".repeat(100), 4096);
     assert!(chunk_str(Path::new(&"x".repeat(24000)), "abc", &Options::default()).is_err());
-    assert!(chunk_str(Path::new("x.rs"), "abc", &Options { max_bytes: 0 }).is_err());
+    assert!(
+        chunk_str(
+            Path::new("x.rs"),
+            "abc",
+            &Options {
+                max_bytes: 0,
+                ..Options::default()
+            }
+        )
+        .is_err()
+    );
 }
 #[test]
 fn macro_recovery_and_nonspecific_wrappers() {

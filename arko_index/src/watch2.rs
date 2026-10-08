@@ -661,7 +661,11 @@ impl Watcher2 {
         lock.try_lock_exclusive()
             .map_err(|e| format!("watch state already in use: {e}"))?;
         let root_name = root.to_str().ok_or("root must be UTF-8")?.to_owned();
-        let engine = format!("{}-max{}", crate::watch::engine_id_pub(), options.max_bytes);
+        let engine = format!(
+            "{}-max{}",
+            crate::watch::engine_for(options),
+            options.max_bytes
+        );
         let mut snap = match File::open(dir.join("watch2.snap")) {
             Ok(f) => {
                 // Check the version before the shape: older prototype states differ.
