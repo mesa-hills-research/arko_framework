@@ -243,7 +243,7 @@ impl AgentLoop {
         let FollowUp {
             mut next_user_message_from_command,
             mut next_message_is_runtime,
-            native_handled,
+            follow_up_done,
         } = follow_up;
         // A command the wait didn't ignore (those continue
         // above) ends it; a later wait gets its own deadline.
@@ -283,7 +283,7 @@ impl AgentLoop {
         // Output-based results of a command that leaves the
         // task waiting (a pause on a tool error) wait with it;
         // the message that ends a wait carries them first.
-        if !self.is_native_mode() && !native_handled {
+        if !self.is_native_mode() && !follow_up_done {
             if self.task.current_state.is_awaiting_approval() {
                 if !next_user_message_from_command.is_empty() {
                     self.task
@@ -298,7 +298,7 @@ impl AgentLoop {
             }
         }
 
-        if matches!(self.task.current_state, TaskState::InProgress) && !native_handled {
+        if matches!(self.task.current_state, TaskState::InProgress) && !follow_up_done {
             if !next_user_message_from_command.is_empty() {
                 self.add_results_message(&next_user_message_from_command)?;
                 if next_message_is_runtime {

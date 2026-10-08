@@ -14,7 +14,7 @@ pub(super) struct FollowUp {
     /// That message is the runtime's.
     pub(super) next_message_is_runtime: bool,
     /// The decision needs no follow-up message (it added what it had to).
-    pub(super) native_handled: bool,
+    pub(super) follow_up_done: bool,
 }
 
 /// How a command applied to the state a task waits in.
@@ -107,7 +107,7 @@ impl AgentLoop {
         message_to_agent: &Option<String>,
     ) -> Result<FollowUp, ArkoAgentsError> {
         let mut next_user_message_from_command = String::new();
-        let mut native_handled = false;
+        let mut follow_up_done = false;
         self.begin_tool_batch();
         // Decided: a snapshot taken while the
         // call runs no longer waits for it.
@@ -131,16 +131,17 @@ impl AgentLoop {
                 }
             }
             self.finish_native_decisions(approved, results).await?;
-            native_handled = true;
+            follow_up_done = true;
         } else {
             let start = self.task.pending_text_tool_results.len();
             match self
-                .execute_tool_and_handle_result(
+                .execute_text_call(
                     &tool_name,
                     parameters,
                     tool_call_id,
                     custom_tool_output.clone(),
                     message_to_agent.clone(),
+                    false,
                 )
                 .await
             {
@@ -164,7 +165,7 @@ impl AgentLoop {
         }
         Ok(FollowUp {
             next_user_message_from_command,
-            native_handled,
+            follow_up_done,
             ..Default::default()
         })
     }
@@ -178,7 +179,7 @@ impl AgentLoop {
         reason: &Option<String>,
     ) -> Result<FollowUp, ArkoAgentsError> {
         let mut next_user_message_from_command = String::new();
-        let mut native_handled = false;
+        let mut follow_up_done = false;
         self.emit_event(AgentEvent::ToolRejected {
             tool_call_id,
             tool_name: tool_name.clone(),
@@ -199,7 +200,7 @@ impl AgentLoop {
             self.begin_tool_batch();
             self.task.set_state(TaskState::InProgress);
             self.finish_native_decisions(Vec::new(), results).await?;
-            native_handled = true;
+            follow_up_done = true;
         } else {
             let pb = self.prompts();
             next_user_message_from_command =
@@ -208,7 +209,7 @@ impl AgentLoop {
         }
         Ok(FollowUp {
             next_user_message_from_command,
-            native_handled,
+            follow_up_done,
             ..Default::default()
         })
     }
@@ -330,9 +331,9 @@ impl AgentLoop {
             }
         }
         self.finish_native_decisions(approved, results).await?;
-        let native_handled = true;
+        let follow_up_done = true;
         Ok(FollowUp {
-            native_handled,
+            follow_up_done,
             ..Default::default()
         })
     }
@@ -353,12 +354,13 @@ impl AgentLoop {
                     message_to_agent,
                 }) => {
                     match self
-                        .execute_tool_and_handle_result(
+                        .execute_text_call(
                             &pending_call_info.tool_name,
                             pending_call_info.parameters.clone(),
                             pending_call_info.tool_call_id,
                             custom_tool_output.clone(),
                             message_to_agent.clone(),
+                            false,
                         )
                         .await
                     {
@@ -423,7 +425,7 @@ impl AgentLoop {
         questions: &str,
     ) -> Result<Decision, ArkoAgentsError> {
         let mut next_user_message_from_command = String::new();
-        let mut native_handled = false;
+        let mut follow_up_done = false;
         match *cmd {
             UserCommand::SubmitUserResponse { ref response } => {
                 log::info!("Task {}: User response received.", self.task.id);
@@ -434,7 +436,7 @@ impl AgentLoop {
                 if self.is_native_mode() {
                     self.flush_native_results_to_conversation(Some(&formatted))
                         .await?;
-                    native_handled = true;
+                    follow_up_done = true;
                 } else {
                     next_user_message_from_command = formatted;
                 }
@@ -455,7 +457,7 @@ impl AgentLoop {
         }
         Ok(Decision::Decided(FollowUp {
             next_user_message_from_command,
-            native_handled,
+            follow_up_done,
             ..Default::default()
         }))
     }
@@ -493,7 +495,7 @@ impl AgentLoop {
                         self.tool_context_cursor = usize::MAX;
                         // The changed input is sent as it is.
                         FollowUp {
-                            native_handled: true,
+                            follow_up_done: true,
                             ..Default::default()
                         }
                     }
@@ -560,7 +562,7 @@ impl AgentLoop {
     ) -> Result<FollowUp, ArkoAgentsError> {
         let mut next_user_message_from_command = String::new();
         let mut next_message_is_runtime = false;
-        let mut native_handled = false;
+        let mut follow_up_done = false;
         log::info!(
             "Task {}: Continuing after an error-recovery pause.",
             self.task.id
@@ -580,21 +582,21 @@ impl AgentLoop {
             if let Some(note) = note {
                 self.queue_context_injection(note.to_string());
             }
-            native_handled = true;
+            follow_up_done = true;
         } else if self.is_native_mode() && !self.task.pending_native_tool_results.is_empty() {
             self.flush_native_results_to_conversation(note).await?;
             if note.is_some() {
                 // The note beside the results is the runtime's.
                 self.task.mark_last_message_runtime_text();
             }
-            native_handled = true;
+            follow_up_done = true;
         } else if let Some(note) = note {
             next_user_message_from_command = note.to_string();
             next_message_is_runtime = true;
         } else if self.is_native_mode() || self.task.pending_text_tool_results.is_empty() {
             // The failed request is sent again
             // as it was.
-            native_handled = true;
+            follow_up_done = true;
         }
         // Otherwise the output-based results the
         // pause left waiting are the next message.
@@ -604,7 +606,7 @@ impl AgentLoop {
         Ok(FollowUp {
             next_user_message_from_command,
             next_message_is_runtime,
-            native_handled,
+            follow_up_done,
         })
     }
 
@@ -618,7 +620,7 @@ impl AgentLoop {
     ) -> Result<FollowUp, ArkoAgentsError> {
         let mut next_user_message_from_command = String::new();
         let mut next_message_is_runtime = false;
-        let mut native_handled = false;
+        let mut follow_up_done = false;
         log::info!("Task {}: Error recovery approved by user.", self.task.id);
         let monitor_pause = std::mem::take(&mut self.task.monitor_pause);
         if self.fallback_resend() {
@@ -638,7 +640,7 @@ impl AgentLoop {
             {
                 self.queue_context_injection(text.to_string());
             }
-            native_handled = true;
+            follow_up_done = true;
         } else if monitor_pause {
             // A monitor paused the task, not a
             // model error: nothing to report to
@@ -648,7 +650,7 @@ impl AgentLoop {
                 .filter(|text| !text.is_empty())
             {
                 Some(text) => next_user_message_from_command = text.to_string(),
-                None => native_handled = true,
+                None => follow_up_done = true,
             }
         } else {
             let mut recovery_prompt = format!(
@@ -673,7 +675,7 @@ impl AgentLoop {
                     .await?;
                 // The note beside the results is the runtime's.
                 self.task.mark_last_message_runtime_text();
-                native_handled = true;
+                follow_up_done = true;
             } else {
                 next_user_message_from_command = recovery_prompt;
                 next_message_is_runtime = true;
@@ -687,7 +689,7 @@ impl AgentLoop {
         Ok(FollowUp {
             next_user_message_from_command,
             next_message_is_runtime,
-            native_handled,
+            follow_up_done,
         })
     }
 }

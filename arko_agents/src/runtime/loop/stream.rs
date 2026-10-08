@@ -148,7 +148,7 @@ impl AgentLoop {
             None
         };
 
-        let mut had_stream_error = false;
+        let mut turn_ended = false;
         let mut final_generation_response: Option<ai::GenerationResponse> = None;
         let mut current_assistant_response_text_for_conv = String::new();
         let mut native_stream_call_ids: HashMap<usize, (Uuid, String)> = HashMap::new();
@@ -164,7 +164,7 @@ impl AgentLoop {
                 biased;
                 maybe_cmd = self.command_receiver.recv() => {
                     if self.on_stream_command(maybe_cmd, &current_assistant_response_text_for_conv, &mut native_stream_call_ids).await? {
-                        had_stream_error = true;
+                        turn_ended = true;
                         break;
                     }
                 }
@@ -203,7 +203,7 @@ impl AgentLoop {
                         }
                         Ok(Some(ai::StreamEvent::End(boxed_generation_response))) => {
                             if self.on_response_end(*boxed_generation_response, &mut parser, &mut raw_events_for_turn, &mut native_stream_call_ids, &mut final_generation_response).await? {
-                                had_stream_error = true;
+                                turn_ended = true;
                             }
                             break;
                         }
@@ -216,7 +216,7 @@ impl AgentLoop {
                                 let plain_text = parser.is_some().then(|| parsed_plain_text(&raw_events_for_turn));
                                 self.reject_announced_calls(&mut native_stream_call_ids, REFUSED_TURN_CALL).await?;
                                 self.handle_refusal(refusal, partial, plain_text).await?;
-                                had_stream_error = true;
+                                turn_ended = true;
                                 break;
                             }
                             // Without a final response no announced call runs.
@@ -226,7 +226,7 @@ impl AgentLoop {
                             }
                             if current_assistant_response_text_for_conv.is_empty() {
                                 self.handle_llm_error(ai::Error::StreamTruncated("the response stream ended with no output".to_string()), None).await?;
-                                had_stream_error = true;
+                                turn_ended = true;
                             }
                             break;
                         }
@@ -236,7 +236,7 @@ impl AgentLoop {
                         Err(ai::Error::Refusal(refusal)) => {
                             self.reject_announced_calls(&mut native_stream_call_ids, REFUSED_TURN_CALL).await?;
                             self.handle_refusal(*refusal, ai::Message::new_assistant(""), None).await?;
-                            had_stream_error = true;
+                            turn_ended = true;
                             break;
                         }
                         // The request is sent again unchanged, so what the
@@ -246,7 +246,7 @@ impl AgentLoop {
                         Err(e) => {
                             self.reject_announced_calls(&mut native_stream_call_ids, FAILED_STREAM_CALL).await?;
                             self.handle_llm_error(e, None).await?;
-                            had_stream_error = true;
+                            turn_ended = true;
                             break;
                         }
                     }
@@ -256,7 +256,7 @@ impl AgentLoop {
         self.flush_throttled_reasoning().await?;
         self.flush_throttled_text().await?;
 
-        if had_stream_error || !matches!(self.task.current_state, TaskState::InProgress) {
+        if turn_ended || !matches!(self.task.current_state, TaskState::InProgress) {
             return Ok(ModelTurn::Ended(self.end_of_pass()));
         }
         Ok(ModelTurn::Streamed(StreamedTurn {

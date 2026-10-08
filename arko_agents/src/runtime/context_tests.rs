@@ -130,12 +130,13 @@ async fn exact_results_bypass_distillation_and_are_observed_only_after_delivery_
             String::new()
         } else {
             agent
-                .execute_tool_and_handle_result(
+                .execute_text_call(
                     "context_fixture",
                     HashMap::new(),
                     Uuid::new_v4(),
                     None,
                     None,
+                    false,
                 )
                 .await
                 .unwrap()

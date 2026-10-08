@@ -51,10 +51,6 @@ impl AgentLoop {
             }));
     }
 
-    fn take_tool_image_content(&mut self) -> Vec<ai::Content> {
-        self.task.take_tool_image_content()
-    }
-
     /// Adds output-based results (or an answer, or a note) as the next
     /// user message, with the environment details and reminder due with it
     /// and the tool images waiting for it.
@@ -74,7 +70,7 @@ impl AgentLoop {
 
     pub(super) fn add_text_tool_results_to_conversation(&mut self, text: &str) {
         let mut content = vec![ai::Content::Text(text.to_string())];
-        content.extend(self.take_tool_image_content());
+        content.extend(self.task.take_tool_image_content());
         self.task
             .conversation
             .add_user_message_with_contents(content);
@@ -476,12 +472,13 @@ impl AgentLoop {
             }))
         } else {
             match self
-                .execute_tool_and_handle_result(
+                .execute_text_call(
                     &parsed_tool_call_ref.name,
                     parsed_tool_call_ref.parameters.clone(),
                     tool_call_id,
                     None,
                     None,
+                    false,
                 )
                 .await
             {
@@ -536,29 +533,9 @@ impl AgentLoop {
 
     /// Runs an output-based call (auto-approved or approved) and returns
     /// its result as text for the next user message. A cancellation or
-    /// suspension while it runs stops it.
-    pub(super) async fn execute_tool_and_handle_result(
-        &mut self,
-        tool_name: &str,
-        parameters: HashMap<String, Value>,
-        tool_call_id: Uuid,
-        custom_tool_output: Option<String>,
-        message_to_agent_on_approval: Option<String>,
-    ) -> Result<String, ArkoAgentsError> {
-        self.execute_text_call(
-            tool_name,
-            parameters,
-            tool_call_id,
-            custom_tool_output,
-            message_to_agent_on_approval,
-            false,
-        )
-        .await
-    }
-
-    /// [`execute_tool_and_handle_result`](Self::execute_tool_and_handle_result);
-    /// `recovering`: the call runs again after the task stopped while it ran
-    /// (see [`TaskContext::recovering`](crate::tool::TaskContext::recovering)).
+    /// suspension while it runs stops it. `recovering`: the call runs again
+    /// after the task stopped while it ran (see
+    /// [`TaskContext::recovering`](crate::tool::TaskContext::recovering)).
     pub(super) async fn execute_text_call(
         &mut self,
         tool_name: &str,
@@ -647,7 +624,7 @@ impl AgentLoop {
     }
 
     /// The text result of an output-based call that ran; see
-    /// [`execute_tool_and_handle_result`](Self::execute_tool_and_handle_result).
+    /// [`execute_text_call`](Self::execute_text_call).
     async fn finish_text_call(
         &mut self,
         tool_name: &str,

@@ -243,7 +243,14 @@ async fn an_older_task_with_images_beside_its_results_still_sends_them() {
 async fn text_mode_approval_errors_and_legacy_tools_preserve_their_semantics() {
     let (mut agent, _events, _commands) = harness(ToolCallingMode::OutputBased);
     let text = agent
-        .execute_tool_and_handle_result("view_image", HashMap::new(), Uuid::new_v4(), None, None)
+        .execute_text_call(
+            "view_image",
+            HashMap::new(),
+            Uuid::new_v4(),
+            None,
+            None,
+            false,
+        )
         .await
         .unwrap();
     assert!(text.contains("fixture.png"));
@@ -251,7 +258,14 @@ async fn text_mode_approval_errors_and_legacy_tools_preserve_their_semantics() {
     agent.add_text_tool_results_to_conversation(&text);
     assert_image(&agent.task.conversation.messages[0].content[2]);
     let text = agent
-        .execute_tool_and_handle_result("plain_text", HashMap::new(), Uuid::new_v4(), None, None)
+        .execute_text_call(
+            "plain_text",
+            HashMap::new(),
+            Uuid::new_v4(),
+            None,
+            None,
+            false,
+        )
         .await
         .unwrap();
     assert!(text.contains("Legacy text output"));
