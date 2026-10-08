@@ -18,7 +18,7 @@ environment variables, the defaults and the on-disk state.
 | `arko_index::search` | The first index format (one JSON file): `index`, `index_with`, `search`, `outline`. | `arko_index/src/search.rs` |
 | `arko_index::index2` | The disk-resident index: `index`, `index_with`, `build`, `BuildOptions`, `search`, `dense_info`, `BuildStats`. | `arko_index/src/index2.rs` |
 | `arko_index::dense` | Embeddings: `Embedder`, `ModelDescriptor`, `EmbedLimits`, `Embedding`, `InputKind`, `HashEmbedder`, `embed_query`, `render`, `render_with`, `EmbedText`, `RENDER_VERSION`, `DenseConfig`, `DenseBuild`, `EmbedProgress`, `EmbedStats`, `DenseIndexInfo`. | `arko_index/src/dense/` |
-| `arko_index::vector` | Vector storage: `VectorStore`, `MhrStore`, `StoreConfig`, `Quantization`, `VectorIndex`, `Filter`, `VectorId`, `VectorMeta`, `VectorRecord`, `VectorHit`. | `arko_index/src/vector.rs` |
+| `arko_index::vector` | Vector storage: `VectorStore`, `CaprockStore`, `StoreConfig`, `Quantization`, `VectorIndex`, `Filter`, `VectorId`, `VectorMeta`, `VectorRecord`, `VectorHit`. | `arko_index/src/vector.rs` |
 | `arko_index::hybrid` | Lexical, dense and hybrid search: `search`, `SearchRequest`, `Mode`, `Fusion`, `fuse`, `Fused`, `SearchHit`, `SearchResults`. | `arko_index/src/hybrid.rs` |
 | `arko_index::watch2` | Linux only: `Watcher2`, the inotify watcher. | `arko_index/src/watch2.rs` |
 | crate root | `FileRules`, `Report`, `SkipReason`, `Skipped`, `threads()`, and on Unix `bench_scan`, `bench_scan_with`. | `arko_index/src/lib.rs`, `arko_index/src/files.rs`, `arko_index/src/par.rs`, `arko_index/src/scan.rs` |
@@ -431,7 +431,7 @@ those. `--max-embed-tokens 0` sends nothing and reports the full count. A search
 search, or when the caller passes a vector it embedded with `dense::embed_query`), for
 callers that charge queries to a budget.
 
-**Vectors** are kept by [mhr_vector](https://github.com/mesa-hills-research/mhr_vector),
+**Vectors** are kept by [Caprock](https://github.com/mesa-hills-research/caprock),
 a pure, safe Rust vector store, in `STATE_DIR/vectors-<digest>/`, one store per model and
 settings (`vector::StoreConfig::dir_name`). A build updates it in place. A chunk's vector
 id is a digest of its path, its embedded text's hash and its rank among the file's chunks
@@ -484,7 +484,7 @@ components: `src/net` finds `src/net/retry.rs` and `src/net`, but not `src/netwo
 | `dense::DenseBuild` | One build's embedding: `embedder`, `quantization` (`Int8`), `vector_index` (`Flat`), `max_tokens` (`None`), `embed_text` (`PathScopeSource`), `progress` (called after each request with `EmbedProgress { texts, total, tokens, requests }`), with `new`, `from_config`, `with_*`. |
 | `dense::EmbedStats` | `BuildStats::dense`: `embedder`, `render_version`, `embed_text`, `docs`, `embedded_docs`, `texts` (distinct), `cached`, `new`, `requests`, `tokens` (billed), `max_tokens`, `cap_reached`, `not_embedded`, `not_embedded_tokens` (counted), `too_long`, `cache_records`, `vectors_added`, `vectors_removed` (the vector store's update), `store_created`. |
 | `vector::VectorStore` | `dimensions`, `len`, `is_empty`, `upsert(&[VectorRecord { id, vector, meta: VectorMeta { path, language } }])` (replaces, a batch all or nothing), `delete(&[id])`, `ids()` (ascending), `search(query, k, &Filter) -> Vec<VectorHit { id, score }>` (cosine, best first, then id ascending), `persist` (atomic). Ids are `VectorId` (`u128`). |
-| `vector::MhrStore` | The store, on mhr_vector: `create(dir, &StoreConfig)`, `open_for(dir, &StoreConfig)` (for writing, an error for another model or settings), `open(dir)` (read-only, the last persisted state), `matches(&StoreConfig)`, `compact()`. One writer per directory, any number of readers. A search returns at most 1,000 hits (mhr_vector's limit). |
+| `vector::CaprockStore` | The store, on Caprock: `create(dir, &StoreConfig)`, `open_for(dir, &StoreConfig)` (for writing, an error for another model or settings), `open(dir)` (read-only, the last persisted state), `matches(&StoreConfig)`, `compact()`. One writer per directory, any number of readers. A search returns at most 1,000 hits (Caprock's limit). |
 | `vector::StoreConfig` | `model` (a `ModelDescriptor`), `text_format` (how the texts were rendered), `quantization`, `index`, with `new`, `with_quantization`, `with_index`, `dir_name()` (`vectors-` and 16 hex digits of a digest of the model and settings). |
 | `vector::Quantization` | The codes kept in memory: `Int8` (default, 1 byte per dimension, each segment's best `max(4k, 40)` candidates rescored with the full-precision vectors) or `F32` (exact). |
 | `vector::VectorIndex` | `Flat` (default, a scan of every code) or `Graph` (a Vamana graph on each segment of 20,000 vectors or more, searched approximately). |
@@ -497,13 +497,14 @@ components: `src/net` finds `src/net/retry.rs` and `src/net`, but not `src/netwo
 
 Dense and hybrid modes need the generation to have embeddings and an embedder whose
 descriptor equals the generation's (or a `query_vector`), and filters apply to both
-sides. The dense side returns at most 1,000 candidates (mhr_vector's `MAX_K`), so
+sides. The dense side returns at most 1,000 candidates (Caprock's `MAX_K`), so
 hybrid `candidates` above 1,000 are capped there.
 
 ## Vector store measurements
 
-Measured through `vector::MhrStore` at mhr_vector d7eb201, on one thread with a warm
-page cache, on a VMware VM with 6 cores of an Intel i9-13980HX (AVX2) and 22 GB of RAM.
+Measured through `vector::CaprockStore` on mhr_vector d7eb201, Caprock's earlier name,
+whose search kernels are those of the pinned Caprock commit. One thread, a warm page
+cache, a VMware VM with 6 cores of an Intel i9-13980HX (AVX2) and 22 GB of RAM.
 Each store was built from vectors in memory (upserts in batches of 1,024, then
 `compact` and `persist`, as a build does for a new store), reopened read-only, and
 searched for the top 10 with no filter. Recall@10 is against an exact f64 cosine
@@ -523,9 +524,9 @@ the resident memory the open store added, disk is the store's directory.
 
 The recall of the Voyage sets is over 2,000 queries each (doc-comment sentences for
 code, the Cloudflare evaluation questions and page headings for documentation), that
-of the synthetic set over 500. The sets are mhr_vector's `docs-voyage4-200k` and
-`code-voyagecode4-200k` (described in its `docs/datasets.md`) and its clustered
-generator (1,000 clusters, spread 0.35, seed 1). Builds write the whole store and
+of the synthetic set over 500. The sets are Caprock's `docs-voyage4-200k` and
+`code-voyagecode4-200k` (see its [benchmarks](https://github.com/mesa-hills-research/caprock/blob/main/docs/benchmarks.md)) and
+its clustered generator (1,000 clusters, spread 0.35, seed 1). Builds write the whole store and
 are bound by the disk, so their times vary with other work on the machine: earlier
 builds of the code set's int8 store took from 6 to 37 s. The synthetic build includes
 generating the vectors.
@@ -711,8 +712,8 @@ at the end of the input (2^20 times in one token), a guard the C library lacks.
 [arko_index verification](arko_index-verification.md#the-pure-rust-parser)
 has the checks of the switch.
 
-Dense search stores its vectors with [mhr_vector](https://github.com/mesa-hills-research/mhr_vector)
-(a Git dependency pinned to commit d7eb201 in `Cargo.toml`), also pure, safe Rust.
+Dense search stores its vectors with [Caprock](https://github.com/mesa-hills-research/caprock) (a Git dependency pinned to
+commit 5ec18cc in `Cargo.toml`), also pure, safe Rust.
 
 arko_index has no cargo features. The examples use arko_ai for Voyage, a dev-dependency
 whose dependencies need a C compiler, so building the tests and examples needs one.
@@ -755,7 +756,7 @@ directory that holds it) and `report.json` (the last walk's report).
 |---|---|
 | `search::index` | `index.json` (version 1), `.index.lock` |
 | `index2::index`, `index2::build` | `CURRENT2` (the name of the current generation), `.index.lock`, `index2-<stamp>-<pid>/` with `meta.json` (version 2, with `dense`: whether the generation has embeddings, `false` when absent), `lens.dat`, `docs.off`, `docs.dat`, `terms.dat`, `terms.idx`, `post.dat`, `files.dat` (each file's first document and path, for filters), and with embeddings also `dense.json` (`DenseIndexInfo`, version 2, naming the vector store) and `vkeys.dat` (per document with a vector, by vector id: the 128-bit id big-endian, then the document as u32). Older generations are removed after a switch. |
-| `index2::build` with embeddings | `vectors-<digest>/`, the vector store (mhr_vector's files: `CURRENT`, manifests, segments, tombstones, `LOCK`), updated in place by each build and shared by the generations. Also `dense.json` (`DenseConfig`, version 1: the model and settings the CLI's later builds follow) and `embed-cache/<model key>/` (`cache.json` with the full descriptor and the epoch, `keys.<epoch>` with 32-byte text hashes, `vectors.<epoch>` with the vectors as returned, appended and fsynced per request). |
+| `index2::build` with embeddings | `vectors-<digest>/`, the vector store (Caprock's files: `CURRENT`, manifests, segments, tombstones, `LOCK`), updated in place by each build and shared by the generations. Also `dense.json` (`DenseConfig`, version 1: the model and settings the CLI's later builds follow) and `embed-cache/<model key>/` (`cache.json` with the full descriptor and the epoch, `keys.<epoch>` with 32-byte text hashes, `vectors.<epoch>` with the vectors as returned, appended and fsynced per request). |
 | `open_watch` | `watch.json` (version 1: snapshot, fingerprints, sequence, acknowledgement, pending deltas, rules, and the engine-qualified parse cache) |
 | `Watcher2` | `watch2.snap` (version 3), `watch2.recs.N`, `watch2.wal` |
 
@@ -774,12 +775,15 @@ with `Options::front_matter_description`, and with the mhr_tree_sitter commit (t
 to d56f609 rebuilds the watchers' cached chunks once). An index2 generation from before
 this version loads and searches lexically, and filters need its `files.dat` (rebuild to
 filter). Saved files with embeddings carry versions (`dense.json` 1, the generation's
-`dense.json` 2, `cache.json` 1, and mhr_vector's own format versions) and new fields get
+`dense.json` 2, `cache.json` 1, and Caprock's own format versions) and new fields get
 serde defaults. A generation whose vectors an earlier version stored (its `dense.json`
 is version 1) searches lexically with `--mode lexical`, and dense and hybrid search
 (the CLI's default) ask for a rebuild before embedding the query. The rebuild takes the
 vectors from the embedding cache. A build replaces a vector store it cannot use
-(damaged, missing a file, or in a format this version cannot read) with a new one. The SQLite
+(damaged, missing a file, or in a format this version cannot read) with a new one, from
+the embedding cache. The stores of arko_index versions that used mhr_vector, Caprock's
+earlier name, are in such a format: dense search asks for a rebuild, and the first build
+replaces them. The SQLite
 databases of the earlier, model-chunked arko_index are not readable by this crate.
 
 ## Platforms
