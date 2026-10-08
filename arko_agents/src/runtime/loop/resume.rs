@@ -348,9 +348,7 @@ impl AgentLoop {
             self.answer_open_native_calls(UNREACHED_CALL, UNREACHED_CALL)
                 .await?;
             self.end_tool_batch().await?;
-            if self.native_results_are_due() {
-                self.flush_native_results_to_conversation(None).await?;
-            }
+            self.flush_native_results_if_due().await?;
             return Ok(());
         }
         if !recovered && self.task.pending_text_tool_results.is_empty() {

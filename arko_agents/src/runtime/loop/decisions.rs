@@ -138,9 +138,7 @@ impl AgentLoop {
                 self.task.set_state(TaskState::InProgress);
             }
             self.end_tool_batch().await?;
-            if self.native_results_are_due() {
-                self.flush_native_results_to_conversation(None).await?;
-            }
+            self.flush_native_results_if_due().await?;
             native_handled = true;
         } else {
             let start = self.task.pending_text_tool_results.len();
@@ -214,9 +212,7 @@ impl AgentLoop {
                 self.task.set_state(TaskState::InProgress);
             }
             self.end_tool_batch().await?;
-            if self.native_results_are_due() {
-                self.flush_native_results_to_conversation(None).await?;
-            }
+            self.flush_native_results_if_due().await?;
             native_handled = true;
         } else {
             let pb =
@@ -359,9 +355,7 @@ impl AgentLoop {
             self.task.set_state(TaskState::InProgress);
         }
         self.end_tool_batch().await?;
-        if self.native_results_are_due() {
-            self.flush_native_results_to_conversation(None).await?;
-        }
+        self.flush_native_results_if_due().await?;
         let native_handled = true;
         Ok(FollowUp {
             native_handled,

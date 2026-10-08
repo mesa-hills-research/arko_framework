@@ -447,6 +447,15 @@ impl AgentLoop {
             )
     }
 
+    /// Adds the turn's native results to the conversation if they are due
+    /// now; see [`native_results_are_due`](Self::native_results_are_due).
+    pub(super) async fn flush_native_results_if_due(&mut self) -> Result<(), ArkoAgentsError> {
+        if self.native_results_are_due() {
+            self.flush_native_results_to_conversation(None).await?;
+        }
+        Ok(())
+    }
+
     /// A native turn. Its calls are checked, and in call order those that
     /// need no approval run (or are held behind a call awaiting approval)
     /// and those that need it wait for it; every call gets one result. A
@@ -554,9 +563,7 @@ impl AgentLoop {
         // Pauses on the turn's tool errors now, or after the calls
         // still awaiting approval are decided.
         self.end_tool_batch().await?;
-        if self.native_results_are_due() {
-            self.flush_native_results_to_conversation(None).await?;
-        }
+        self.flush_native_results_if_due().await?;
         Ok(Flow::Proceed)
     }
 
