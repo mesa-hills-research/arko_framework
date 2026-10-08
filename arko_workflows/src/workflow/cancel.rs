@@ -872,7 +872,9 @@ impl WorkflowCancelHandle {
             self.control.cancel_run(task_id, Some(id));
             return;
         };
-        let control = self.control.clone();
+        // Held weakly: once the workflow is dropped, the run's entry and
+        // with it the sender are gone, and the timer ends.
+        let control = Arc::downgrade(&self.control);
         runtime.spawn(async move {
             let start = tokio::time::Instant::now();
             // A wrap-up too long to represent lasts as long as possible.
@@ -881,7 +883,9 @@ impl WorkflowCancelHandle {
                 .unwrap_or_else(|| start + Duration::from_secs(30 * 365 * 86_400));
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => {
-                    control.cancel_run(task_id, Some(id));
+                    if let Some(control) = control.upgrade() {
+                        control.cancel_run(task_id, Some(id));
+                    }
                 }
                 // Cancelled sooner, or ended (its entry, and the sender, are gone).
                 _ = cancel.changed() => {}
