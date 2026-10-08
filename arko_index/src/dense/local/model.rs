@@ -512,6 +512,9 @@ impl Encoder {
         tasks
             .par_iter()
             .for_each_init(Vec::<f32>::new, |scores, &(s, head, r0)| {
+                // Captures the whole wrapper: a closure using only `out.0` would
+                // capture the bare pointer, which is not Sync.
+                #[allow(clippy::redundant_locals)]
                 let out = out;
                 let (start, len) = (starts[s], lens[s]);
                 let rows = QUERY_BLOCK.min(len - r0);

@@ -7,6 +7,8 @@ use super::*;
 use std::collections::HashMap;
 
 type Weights = HashMap<String, Vec<f32>>;
+/// A tensor to write: name, shape, values.
+type Tensor = (String, Vec<usize>, Vec<f32>);
 
 struct Tiny {
     arch: Architecture,
@@ -55,10 +57,10 @@ impl Rng {
     }
 }
 
-fn weights(t: &Tiny, seed: u64) -> (Weights, Vec<(String, Vec<usize>, Vec<f32>)>) {
+fn weights(t: &Tiny, seed: u64) -> (Weights, Vec<Tensor>) {
     let mut r = Rng(seed);
     let (h, i) = (t.hidden, t.inter);
-    let mut list: Vec<(String, Vec<usize>, Vec<f32>)> = Vec::new();
+    let mut list: Vec<Tensor> = Vec::new();
     let mut add = |name: String, shape: Vec<usize>, values: Vec<f32>| {
         list.push((name, shape, values));
     };
@@ -221,12 +223,12 @@ fn tiny_model(
         ("model.safetensors", write_safetensors(&list, dtype)),
     ];
     let mut entries = Vec::new();
-    for (name, bytes) in &files {
-        std::fs::write(dir.join(name), bytes).unwrap();
+    for (name, bytes) in files {
+        std::fs::write(dir.join(name), &bytes).unwrap();
         entries.push(ModelFile {
-            name: *name,
+            name,
             size: bytes.len() as u64,
-            sha256: Box::leak(hex(bytes).into_boxed_str()),
+            sha256: Box::leak(hex(&bytes).into_boxed_str()),
         });
     }
     let model = LocalModel {
