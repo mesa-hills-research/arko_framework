@@ -35,10 +35,12 @@ pub struct VariantSpec {
     /// What the variant tests, for the report.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
-    /// Another arm whose index (and tools) this one uses instead of building
-    /// its own: `B`, `C` (B's index and arm C's `arko_index_dense`), or a variant
-    /// with an index of its own. `index` stays empty then. For example
-    /// `{"name": "B-guided", "base": "B", "prompt": "guided"}`.
+    /// Another arm whose index this one uses instead of building its own: `B`,
+    /// `C` (B's index and arm C's `arko_index_dense`), or a variant with an
+    /// index of its own, as that arm's index is when a run starts. `index`
+    /// stays empty then, and `search`, `prompt` and `tools_text` stay this
+    /// variant's. For example `{"name": "B-guided", "base": "B", "prompt":
+    /// "guided"}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
     /// `arko_index index2` flags for the variant's index, such as
@@ -278,54 +280,73 @@ pub fn prepare(options: PrepareVariants<'_>) -> BenchResult<BTreeMap<String, Pre
     if let Some(pid) = crate::ledger::DirLock::holder(&layout.out.join("prepare")) {
         return Err(format!("`prepare` is running (pid {pid}); wait for it").into());
     }
-    // A running run that uses one of these variants reads its indexes: wait for it.
-    // Runs of other arms (a baseline of A and B, say) go on beside the builds.
-    if let Ok(runs) = std::fs::read_dir(layout.out.join("runs")) {
+    let cli_sha = crate::repos::sha256_file(&options.index_cli)?;
+    let mut prepared = load_prepared(layout)?;
+    // Variants with an index of their own first, then those that reuse one.
+    let (own, based): (Vec<&VariantSpec>, Vec<&VariantSpec>) =
+        options.specs.iter().partition(|spec| spec.base.is_none());
+    // The indexes to build: those not built with the same flags, CLI and commit
+    // yet. A definition's other fields (description, search flags, prompt) leave
+    // its indexes as they are.
+    let mut stale = std::collections::BTreeSet::new();
+    for spec in &own {
+        let flags = spec.build_flags(options.mock_embeddings);
+        let existing = prepared.get(&spec.name);
+        for (id, repo) in options.repos {
+            let dir = layout.variant_index_dir(id, &spec.name);
+            let current = existing
+                .and_then(|variant| variant.repos.get(id))
+                .is_some_and(|index| {
+                    index.dir == dir
+                        && index.flags == flags
+                        && index.cli_sha256 == cli_sha
+                        && index.commit == repo.commit
+                        && dir.join("CURRENT2").exists()
+                });
+            if !current || options.force {
+                stale.insert(dir);
+            }
+        }
+    }
+    // A running run that reads one of these indexes (a variant's own, or one
+    // based on it) must end first. Other runs go on beside the builds.
+    if !stale.is_empty()
+        && let Ok(runs) = std::fs::read_dir(layout.out.join("runs"))
+    {
         for run in runs.flatten() {
             let Some(pid) = crate::ledger::DirLock::holder(&run.path()) else {
                 continue;
             };
-            let uses_these =
+            let reads_these =
                 crate::runner::RunManifest::load(&run.path()).map_or(true, |manifest| {
-                    options
-                        .specs
-                        .iter()
-                        .any(|spec| manifest.variants.contains_key(&spec.name))
+                    manifest
+                        .variants
+                        .values()
+                        .flat_map(|variant| variant.repos.values())
+                        .any(|index| stale.contains(&index.dir))
                 });
-            if uses_these {
+            if reads_these {
                 return Err(format!(
-                    "{} is in use by process {pid} and may read these variants' indexes; wait for it, or stop it",
+                    "{} is in use by process {pid} and reads indexes this would rebuild; wait for it, or stop it",
                     run.path().display()
                 )
                 .into());
             }
         }
     }
-    let cli_sha = crate::repos::sha256_file(&options.index_cli)?;
-    let mut prepared = load_prepared(layout)?;
-    // Variants with an index of their own first, then those that reuse one.
-    let (own, based): (Vec<&VariantSpec>, Vec<&VariantSpec>) =
-        options.specs.iter().partition(|spec| spec.base.is_none());
     for spec in own {
         let flags = spec.build_flags(options.mock_embeddings);
-        let mut variant = match prepared.get(&spec.name) {
-            Some(existing) if existing.spec == *spec => existing.clone(),
-            _ => PreparedVariant {
-                spec: spec.clone(),
-                mock_embeddings: options.mock_embeddings,
-                repos: BTreeMap::new(),
-            },
+        let mut variant = PreparedVariant {
+            spec: spec.clone(),
+            mock_embeddings: options.mock_embeddings,
+            repos: prepared
+                .get(&spec.name)
+                .map(|existing| existing.repos.clone())
+                .unwrap_or_default(),
         };
-        variant.mock_embeddings = options.mock_embeddings;
         for (id, repo) in options.repos {
             let dir = layout.variant_index_dir(id, &spec.name);
-            let current = variant.repos.get(id).is_some_and(|index| {
-                index.flags == flags
-                    && index.cli_sha256 == cli_sha
-                    && index.commit == repo.commit
-                    && dir.join("CURRENT2").exists()
-            });
-            if current && !options.force {
+            if !stale.contains(&dir) {
                 eprintln!("{}@{}: index present", id, spec.name);
                 continue;
             }
@@ -358,15 +379,7 @@ pub fn prepare(options: PrepareVariants<'_>) -> BenchResult<BTreeMap<String, Pre
                         )
                         .into());
                     }
-                    VariantIndex {
-                        dir: repo.index.clone(),
-                        commit: repo.commit.clone(),
-                        flags: Vec::new(),
-                        cli_sha256: repo.index_cli_sha256.clone(),
-                        dense: false,
-                        build_ms: repo.index_build_ms,
-                        summary: format!("arm {base}'s index"),
-                    }
+                    arm_index(base, repo)
                 }
                 variant => prepared
                     .get(variant)
@@ -396,6 +409,19 @@ pub fn prepare(options: PrepareVariants<'_>) -> BenchResult<BTreeMap<String, Pre
         save_prepared(layout, &prepared)?;
     }
     Ok(prepared)
+}
+
+/// Arm B's index of `repo`, for a variant based on arm `base` (`B` or `C`).
+fn arm_index(base: &str, repo: &PreparedRepo) -> VariantIndex {
+    VariantIndex {
+        dir: repo.index.clone(),
+        commit: repo.commit.clone(),
+        flags: Vec::new(),
+        cli_sha256: repo.index_cli_sha256.clone(),
+        dense: false,
+        build_ms: repo.index_build_ms,
+        summary: format!("arm {base}'s index"),
+    }
 }
 
 /// Builds one variant index with the CLI, timed.
@@ -464,11 +490,14 @@ fn build(
     })
 }
 
-/// The variants among `arms`, each prepared for every repository in `repos`.
+/// The variants among `arms`, each with an index of every repository in
+/// `task_repos` of the commit `repos` has checked out. A variant based on
+/// another arm gets that arm's indexes as they are now.
 pub fn for_arms(
     layout: &Layout,
     arms: &[Arm],
-    repos: &std::collections::BTreeSet<String>,
+    repos: &BTreeMap<String, PreparedRepo>,
+    task_repos: &std::collections::BTreeSet<String>,
 ) -> BenchResult<BTreeMap<String, PreparedVariant>> {
     let names: Vec<&str> = arms
         .iter()
@@ -483,22 +512,65 @@ pub fn for_arms(
     let prepared = load_prepared(layout)?;
     let mut out = BTreeMap::new();
     for name in names {
-        let variant = prepared.get(name).ok_or_else(|| {
-            format!("arm {name} is not a prepared variant: run `prepare-variants` with a variants file that defines it")
-        })?;
-        let missing: Vec<&str> = repos
+        let mut variant = prepared
+            .get(name)
+            .ok_or_else(|| {
+                format!("arm {name} is not a prepared variant: run `prepare-variants` with a variants file that defines it")
+            })?
+            .clone();
+        // variants.json holds a copy of the base's records from when this
+        // variant was prepared: the base may have been rebuilt since.
+        if let Some(base) = variant.spec.base.clone() {
+            variant.repos = match base.as_str() {
+                "B" | "C" => repos
+                    .iter()
+                    .filter(|(_, repo)| base == "B" || repo.dense.is_some())
+                    .map(|(id, repo)| (id.clone(), arm_index(&base, repo)))
+                    .collect(),
+                other => prepared
+                    .get(other)
+                    .ok_or_else(|| {
+                        format!(
+                            "variant {name}: its base {other} is not prepared: run `prepare-variants` for it"
+                        )
+                    })?
+                    .repos
+                    .clone(),
+            };
+        }
+        let whose = variant.spec.base.as_deref().unwrap_or(name);
+        let missing: Vec<&str> = task_repos
             .iter()
             .filter(|repo| !variant.repos.contains_key(*repo))
             .map(String::as_str)
             .collect();
         if !missing.is_empty() {
+            let fix = match whose {
+                "B" => "run `prepare` for them".to_string(),
+                "C" => "run `prepare --dense` for them".to_string(),
+                _ => format!("run `prepare-variants` for {whose}"),
+            };
             return Err(format!(
-                "variant {name} has no index of {}: run `prepare-variants` for them",
+                "variant {name} has no index of {}: {fix}",
                 missing.join(", ")
             )
             .into());
         }
-        out.insert(name.to_string(), variant.clone());
+        for id in task_repos {
+            let (Some(index), Some(repo)) = (variant.repos.get(id), repos.get(id)) else {
+                continue;
+            };
+            if index.commit != repo.commit {
+                let short = |commit: &str| commit[..commit.len().min(10)].to_string();
+                return Err(format!(
+                    "variant {name}'s index of {id} is of commit {}, but the checkout is of {}: run `prepare-variants` for {whose} again",
+                    short(&index.commit),
+                    short(&repo.commit)
+                )
+                .into());
+            }
+        }
+        out.insert(name.to_string(), variant);
     }
     Ok(out)
 }
@@ -882,6 +954,152 @@ mod tests {
         );
         let script = arko_index_program(&variant, "text", cli).unwrap().unwrap();
         assert!(script.contains("index-search 'text' \"$@\""), "{script}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_rebuilds_what_changed_and_runs_use_the_current_indexes() {
+        use std::collections::BTreeSet;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::test_dir("prepare-variants");
+        let layout = Layout::new(&dir.join("out")).unwrap();
+        // A fake CLI: `index2 FLAGS -- CHECKOUT DIR` logs its flags and
+        // publishes a generation.
+        let log = dir.join("builds.log");
+        let cli = dir.join("fake_cli");
+        std::fs::write(
+            &cli,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\nfor last; do :; done\nmkdir -p \"$last/g\"\necho g > \"$last/CURRENT2\"\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let builds = || {
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .count()
+        };
+        let mut repos = BTreeMap::from([("demo".to_string(), crate::mock::demo_repo(&layout.out))]);
+        let specs = |lex_index: &str, lex_description: &str| {
+            parse_specs(&format!(
+                r#"[{{"name": "lex", "description": "{lex_description}", "index": [{lex_index}]}},
+                    {{"name": "scope", "index": ["--lexical-scope"]}},
+                    {{"name": "lex-guided", "base": "lex", "prompt": "guided"}},
+                    {{"name": "B-guided", "base": "B", "prompt": "guided"}}]"#
+            ))
+            .unwrap()
+        };
+        let prepare = |specs: Vec<VariantSpec>, repos: &BTreeMap<String, PreparedRepo>| {
+            super::prepare(PrepareVariants {
+                layout: &layout,
+                specs,
+                repos,
+                index_cli: cli.clone(),
+                mock_embeddings: false,
+                force: false,
+            })
+        };
+        let only = |specs: Vec<VariantSpec>, name: &str| -> Vec<VariantSpec> {
+            specs.into_iter().filter(|spec| spec.name == name).collect()
+        };
+        let task_repos = BTreeSet::from(["demo".to_string()]);
+        let for_arms = |name: &'static str, repos: &BTreeMap<String, PreparedRepo>| {
+            super::for_arms(&layout, &[Arm::Variant(name)], repos, &task_repos)
+        };
+        prepare(specs("", "baseline"), &repos).unwrap();
+        assert_eq!(builds(), 2, "lex and scope");
+        // A new description builds nothing; new flags rebuild.
+        prepare(specs("", "reworded"), &repos).unwrap();
+        assert_eq!(builds(), 2);
+        prepare(
+            only(specs("\"--lexical-scope\"", "reworded"), "lex"),
+            &repos,
+        )
+        .unwrap();
+        assert_eq!(builds(), 3);
+        // lex-guided, prepared before, gets lex's index as it is now.
+        let guided = for_arms("lex-guided", &repos).unwrap();
+        let index = &guided["lex-guided"].repos["demo"];
+        assert_eq!(index.flags, ["--lexical-scope"]);
+        assert_eq!(index.dir, layout.variant_index_dir("demo", "lex"));
+        assert_eq!(
+            load_prepared(&layout).unwrap()["lex-guided"].repos["demo"].flags,
+            Vec::<String>::new(),
+            "variants.json keeps the copy from when lex-guided was prepared"
+        );
+
+        // A running run of lex-guided reads lex's index: rebuilding it waits for
+        // the run. Other variants build beside it, and so do based ones.
+        let run_dir = layout.run_dir("guided");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let manifest = crate::runner::RunManifest {
+            name: "guided".into(),
+            created_at: chrono::Utc::now(),
+            model: crate::agents::ModelSettings::parse("gpt-6-astra:xhigh", true).unwrap(),
+            mock: true,
+            shell_timeout_seconds: 120,
+            shell_max_output_bytes: 16384,
+            shell_max_calls: 80,
+            max_input_tokens: 1000,
+            attempt_timeout_seconds: None,
+            grader_shell: true,
+            index_cli_sha256: String::new(),
+            index_cli: cli.clone(),
+            arms: vec![Arm::Variant("lex-guided")],
+            samples: 1,
+            tasks_file: "tasks.json".into(),
+            sessions: Vec::new(),
+            variants: guided,
+        };
+        std::fs::write(
+            run_dir.join("manifest.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            run_dir.join("LOCK"),
+            std::os::unix::process::parent_id().to_string(),
+        )
+        .unwrap();
+        let error = prepare(only(specs("", "reworded"), "lex"), &repos).unwrap_err();
+        assert!(error.to_string().contains("in use"), "{error}");
+        prepare(only(specs("\"--lexical-scope\"", "again"), "lex"), &repos).unwrap();
+        prepare(only(specs("", ""), "lex-guided"), &repos).unwrap();
+        let mut scope = only(specs("", ""), "scope");
+        scope[0].index = vec![
+            "--lexical-scope".into(),
+            "--max-bytes".into(),
+            "2048".into(),
+        ];
+        prepare(scope, &repos).unwrap();
+        assert_eq!(builds(), 4, "scope rebuilt beside the run");
+        std::fs::remove_file(run_dir.join("LOCK")).unwrap();
+
+        // After `prepare` checks out another commit, a run refuses the variants
+        // whose indexes are of the old one, until they are prepared again.
+        repos.get_mut("demo").unwrap().commit = "def".into();
+        for name in ["lex", "lex-guided"] {
+            let error = for_arms(name, &repos).unwrap_err().to_string();
+            assert!(
+                error.contains("commit abc, but the checkout is of def")
+                    && error.contains("`prepare-variants` for lex again"),
+                "{error}"
+            );
+        }
+        let b_guided = for_arms("B-guided", &repos).unwrap();
+        assert_eq!(b_guided["B-guided"].repos["demo"].commit, "def");
+        assert_eq!(b_guided["B-guided"].repos["demo"].dir, repos["demo"].index);
+        prepare(only(specs("\"--lexical-scope\"", "again"), "lex"), &repos).unwrap();
+        assert_eq!(builds(), 5);
+        assert_eq!(
+            for_arms("lex-guided", &repos).unwrap()["lex-guided"].repos["demo"].commit,
+            "def"
+        );
+        set_writable(&layout.out, true);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]

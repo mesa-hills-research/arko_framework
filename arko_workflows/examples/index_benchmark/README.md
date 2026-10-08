@@ -68,7 +68,7 @@ The repositories (`repos.json`; each checked out at its tag, depth 1, and made r
 
 ## Requirements
 
-Linux (arm C needs a Unix host), `git`, `bash`, and network access for `prepare`. `rg`
+Linux (arm C, and variant arms whose index embeds, need a Unix host), `git`, `bash`, and network access for `prepare`. `rg`
 (ripgrep) is recommended: both arms are told it is there when it is. A ChatGPT login: run
 `codex login` (with `CODEX_HOME` set if you keep several), and pass that home with
 `--codex-home` (default `$CODEX_HOME`, else `~/.codex`). Arm C needs `VOYAGE_API_KEY` in the
@@ -230,7 +230,7 @@ A variant's fields:
 | `name` | The arm's name in `--arms`, records and reports: letters, digits, `-` and `_` |
 | `description` | For the report |
 | `index` | `index2` flags, such as `["--lexical-scope"]` or `["--embed", "voyage-code-4", "--embed-text", "source"]` |
-| `base` | Another arm whose index and tools to use instead of building one: `B`, `C` (with `arko_index_dense`), or a variant with an index of its own |
+| `base` | Another arm whose index to use instead of building one: `B`, `C` (with `arko_index_dense`), or a variant with an index of its own. A run uses the base's index as it is when the run starts, and this variant's own `search`, `prompt` and `tools_text` |
 | `search` | `search2` flags put before the solver's own, such as `["--text"]` or `["--mode", "lexical"]` |
 | `prompt` | The tool section: `standard` (arm B's, its hybrid version when the index embeds, arm C's with base C) or `guided` |
 | `tools_text` | A tool section of your own, for search flags whose output the standard ones don't describe |
@@ -242,7 +242,8 @@ search, the read of its first hit and an outline, in about 15 lines.
 
 ```sh
 V=arko_workflows/examples/index_benchmark/variant-arms.json
-# Builds every variant's index of every prepared repository, beside a running `generate` or run of other arms
+# Builds every variant's index of every prepared repository, beside a running `generate`
+# or a run that reads none of the indexes it rebuilds
 VOYAGE_API_KEY=... $B prepare-variants --out $OUT --variants $V
 $B prepare-variants --out $OUT --variants $V --names lex,lex-scope --only redis
 # Runs them with the built-in arms
@@ -251,9 +252,12 @@ VOYAGE_API_KEY=... $B run --out $OUT --codex-home ~/.codex --name variants --arm
 
 `prepare-variants` builds `indexes/<id>@<name>/` with `arko_index_cli index2 FLAGS`, and
 rebuilds one only when its flags, the CLI or the commit changed (`--force` rebuilds all).
-Each build follows its flags alone, and the index directory stays across rebuilds, so its
-embedding cache keeps the vectors already paid for. Variants that embed need
-`VOYAGE_API_KEY` in the benchmark's environment for `prepare-variants` and for `run`. In
+A new description, search flags or tool section rebuild nothing. Each build follows its
+flags alone, and the index directory stays across rebuilds, so its embedding cache keeps
+the vectors already paid for. After `prepare` checks out another commit, run
+`prepare-variants` again: `run` refuses a variant whose index is of another commit than
+the checkout. Variants that embed need `VOYAGE_API_KEY` in the benchmark's environment
+for `prepare-variants` and for `run`. In
 their shells, `arko_index search2` goes through
 a service in the benchmark process that runs the CLI with the key, the way arm C's
 `arko_index_dense` does. `--max-embed-tokens 0` in a variant's flags counts the tokens a
