@@ -297,6 +297,18 @@ enum NativeCall {
     Run(NativeRun),
 }
 
+/// What became of one call of an output-based turn; see
+/// [`AgentLoop::handle_text_call`].
+enum TextCall {
+    /// Answered or run: the turn goes on with its next call.
+    Handled,
+    /// It waits for approval.
+    NeedsApproval(PendingToolCallInfo),
+    /// The task stopped or no longer runs calls: the turn's other calls
+    /// don't run.
+    EndsBatch,
+}
+
 /// A request as it was sent: what its reported usage is compared with to
 /// estimate the next request (see [`result_budget`]).
 #[derive(Debug, Clone, Copy)]
@@ -3664,6 +3676,138 @@ impl AgentLoop {
             parser_events: raw_events_for_turn,
             ..
         } = turn;
+        let mut parsed_call_ids = self.emit_parser_events(&raw_events_for_turn).await?;
+
+        let mut next_user_message_str_accumulated = String::new();
+
+        match assemble_tool_calls(raw_events_for_turn) {
+            Ok((plain_text_from_assembler, mut tool_call_groups)) => {
+                if self.simplified_tool_events && !plain_text_from_assembler.is_empty() {
+                    self.text_buffer.push_str(&plain_text_from_assembler);
+                    self.emit_throttled_text().await?;
+                    self.flush_throttled_text().await?;
+                }
+
+                if tool_call_groups.len() > 1 {
+                    let error_msg = "Error: Only one tool call or one batch of the same tool can be used per turn.".to_string();
+                    if !next_user_message_str_accumulated.is_empty() {
+                        next_user_message_str_accumulated.push_str("\n\n");
+                    }
+                    next_user_message_str_accumulated.push_str(&error_msg);
+                } else if tool_call_groups.is_empty() {
+                    if self.handover_report_due() {
+                        self.take_handover_report(plain_text_from_assembler.clone())
+                            .await?;
+                        if self.task.current_state.is_terminal() {
+                            return Ok(Flow::Exit);
+                        }
+                        return Ok(Flow::NextPass);
+                    }
+                    if !self.task.current_state.is_terminal() {
+                        self.handle_model_output_failure(NO_TEXT_TOOL_CALL.to_string())
+                            .await?;
+                        if self.task.current_state.is_terminal() {
+                            return Ok(Flow::Exit);
+                        }
+                        return Ok(Flow::NextPass);
+                    }
+                } else {
+                    let current_group = tool_call_groups.remove(0);
+                    let calls_to_process_with_ids = self.calls_of_group(
+                        current_group,
+                        &mut parsed_call_ids,
+                        &mut next_user_message_str_accumulated,
+                    );
+
+                    let mut calls_needing_approval = Vec::new();
+                    // The results of the calls handled, recorded in
+                    // the task as they are produced.
+                    let start = self.task.pending_text_tool_results.len();
+                    let overall_batch_id = if calls_to_process_with_ids.len() > 1 {
+                        Some(Uuid::new_v4())
+                    } else {
+                        None
+                    };
+                    self.begin_tool_batch();
+
+                    for (parsed_tool_call_ref, tool_call_id_ref) in &calls_to_process_with_ids {
+                        match self
+                            .handle_text_call(parsed_tool_call_ref, *tool_call_id_ref)
+                            .await?
+                        {
+                            TextCall::Handled => {}
+                            TextCall::NeedsApproval(pending) => {
+                                calls_needing_approval.push(pending)
+                            }
+                            TextCall::EndsBatch => break,
+                        }
+                    }
+
+                    // Suspended while a call ran: the calls
+                    // awaiting approval are not asked about.
+                    if self.stop_requested {
+                        let not_run = self.not_run_after_stop();
+                        for pending in calls_needing_approval.drain(..) {
+                            self.emit_event(AgentEvent::ToolRejected {
+                                tool_call_id: pending.tool_call_id,
+                                tool_name: pending.tool_name.clone(),
+                                reason: Some(not_run.clone()),
+                            })
+                            .await?;
+                            self.record_text_result(format!(
+                                "Tool {}: {not_run}",
+                                pending.tool_name
+                            ))
+                            .await;
+                        }
+                    }
+                    if !calls_needing_approval.is_empty()
+                        && matches!(self.task.current_state, TaskState::InProgress)
+                    {
+                        self.await_approvals(calls_needing_approval, overall_batch_id)
+                            .await?;
+                    }
+                    // Pauses on the batch's tool errors now, or after
+                    // the calls still awaiting approval are decided.
+                    self.end_tool_batch().await?;
+                    // The results of the calls that ran, which wait
+                    // with the task below if it now waits.
+                    next_user_message_str_accumulated =
+                        self.take_text_results(start).join("\n\n---\n\n");
+                }
+            }
+            Err(e) => {
+                log::error!(
+                    "Failed to assemble tool calls for task {}: {}",
+                    self.task.id,
+                    e
+                );
+                self.handle_model_output_failure(format!(
+                    "Your tool call could not be read ({e}). Write it again in the format the system prompt describes."
+                ))
+                .await?;
+                if self.task.current_state.is_terminal() {
+                    return Ok(Flow::Exit);
+                }
+                return Ok(Flow::NextPass);
+            }
+        }
+
+        self.text_turn_message(
+            next_user_message_str_accumulated,
+            &final_generation_response,
+        )?;
+        Ok(Flow::Proceed)
+    }
+
+    /// Reports an output-based turn's parser events (unless tool events
+    /// are simplified): `ToolCallInitiated` and the parameters of each
+    /// call, then the turn's plain text. Returns the ids given to the
+    /// calls, in order.
+    async fn emit_parser_events(
+        &mut self,
+        raw_events_for_turn: &[RawParserEvent],
+    ) -> Result<VecDeque<Uuid>, ArkoAgentsError> {
         let mut assistant_text_from_raw_events_for_pass1 = String::new();
         let mut parsed_call_ids = VecDeque::new();
 
@@ -3671,7 +3815,7 @@ impl AgentLoop {
             let mut current_tool_call_id_granular: Option<Uuid> = None;
             let mut current_param_name_granular: Option<String> = None;
 
-            for raw_event in &raw_events_for_turn {
+            for raw_event in raw_events_for_turn {
                 match raw_event {
                     RawParserEvent::Text(text) => {
                         assistant_text_from_raw_events_for_pass1.push_str(text);
@@ -3737,350 +3881,220 @@ impl AgentLoop {
             }
         }
         self.flush_throttled_text().await?;
+        Ok(parsed_call_ids)
+    }
 
-        let mut next_user_message_str_accumulated = String::new();
-
-        match assemble_tool_calls(raw_events_for_turn) {
-            Ok((plain_text_from_assembler, mut tool_call_groups)) => {
-                if self.simplified_tool_events && !plain_text_from_assembler.is_empty() {
-                    self.text_buffer.push_str(&plain_text_from_assembler);
-                    self.emit_throttled_text().await?;
-                    self.flush_throttled_text().await?;
-                }
-
-                if tool_call_groups.len() > 1 {
-                    let error_msg = "Error: Only one tool call or one batch of the same tool can be used per turn.".to_string();
-                    if !next_user_message_str_accumulated.is_empty() {
-                        next_user_message_str_accumulated.push_str("\n\n");
-                    }
-                    next_user_message_str_accumulated.push_str(&error_msg);
-                } else if tool_call_groups.is_empty() {
-                    if self.handover_report_due() {
-                        self.take_handover_report(plain_text_from_assembler.clone())
-                            .await?;
-                        if self.task.current_state.is_terminal() {
-                            return Ok(Flow::Exit);
-                        }
-                        return Ok(Flow::NextPass);
-                    }
-                    if !self.task.current_state.is_terminal() {
-                        self.handle_model_output_failure(NO_TEXT_TOOL_CALL.to_string())
-                            .await?;
-                        if self.task.current_state.is_terminal() {
-                            return Ok(Flow::Exit);
-                        }
-                        return Ok(Flow::NextPass);
-                    }
-                } else {
-                    let current_group = tool_call_groups.remove(0);
-                    let calls_to_process_with_ids: Vec<(ParsedToolCall, Uuid)> =
-                        match current_group {
-                            ToolCallGroup::Single(pc) => {
-                                vec![(pc, parsed_call_ids.pop_front().unwrap_or_else(Uuid::new_v4))]
-                            }
-                            ToolCallGroup::Batch(pcs) => {
-                                if let Some(first_tool_name_in_batch) =
-                                    pcs.first().map(|call| &call.name)
-                                {
-                                    if let Some(tool_def_arc) =
-                                        self.tool_registry.get(first_tool_name_in_batch)
-                                    {
-                                        if !self.task.agent_config.allows_batched_calls_for_tool(
-                                            &tool_def_arc.definition(),
-                                        ) {
-                                            let err_msg = format!(
-                                                "Error: Tool '{}' cannot be used in a batch.",
-                                                first_tool_name_in_batch
-                                            );
-                                            if !next_user_message_str_accumulated.is_empty() {
-                                                next_user_message_str_accumulated.push_str("\n\n");
-                                            }
-                                            next_user_message_str_accumulated.push_str(&err_msg);
-                                            Vec::new()
-                                        } else {
-                                            pcs.into_iter()
-                                                .map(|pc| {
-                                                    let id = parsed_call_ids
-                                                        .pop_front()
-                                                        .unwrap_or_else(Uuid::new_v4);
-                                                    (pc, id)
-                                                })
-                                                .collect()
-                                        }
-                                    } else {
-                                        pcs.into_iter()
-                                            .map(|pc| {
-                                                let id = parsed_call_ids
-                                                    .pop_front()
-                                                    .unwrap_or_else(Uuid::new_v4);
-                                                (pc, id)
-                                            })
-                                            .collect()
-                                    }
-                                } else {
-                                    Vec::new()
-                                }
-                            }
-                        };
-
-                    // Text calls carry every value as a string: give
-                    // boolean parameters booleans, as in native mode.
-                    let mut calls_to_process_with_ids = calls_to_process_with_ids;
-                    for (call, _) in &mut calls_to_process_with_ids {
-                        if let Some(tool) = self.tool_registry.get(&call.name) {
-                            tool.definition()
-                                .coerce_text_arguments(&mut call.parameters);
-                        }
-                    }
-
-                    let mut calls_needing_approval = Vec::new();
-                    // The results of the calls handled, recorded in
-                    // the task as they are produced.
-                    let start = self.task.pending_text_tool_results.len();
-                    let overall_batch_id = if calls_to_process_with_ids.len() > 1 {
-                        Some(Uuid::new_v4())
-                    } else {
-                        None
-                    };
-                    self.begin_tool_batch();
-
-                    for (parsed_tool_call_ref, tool_call_id_ref) in &calls_to_process_with_ids {
-                        let tool_call_id = *tool_call_id_ref;
-
-                        if self.simplified_tool_events {
-                            self.emit_event(AgentEvent::ToolCallInitiated {
-                                tool_call_id,
-                                tool_name: parsed_tool_call_ref.name.clone(),
-                            })
-                            .await?;
-                        }
-                        self.emit_event(AgentEvent::ToolCallFormatted {
-                            tool_call_id,
-                            tool_name: parsed_tool_call_ref.name.clone(),
-                            parameters: parsed_tool_call_ref.parameters.clone(),
-                        })
-                        .await?;
-
-                        if self.handover_blocks(&parsed_tool_call_ref.name) {
-                            self.emit_event(AgentEvent::ToolRejected {
-                                tool_call_id,
-                                tool_name: parsed_tool_call_ref.name.clone(),
-                                reason: Some(HANDOVER_REPORT_DUE.to_string()),
-                            })
-                            .await?;
-                            self.record_text_result(
-                                PromptBuilder::new(
-                                    &self.task.agent_config,
-                                    vec![],
-                                    &self.parsing_config,
-                                    None,
-                                )
-                                .format_tool_execution_error_as_user_message(
-                                    &parsed_tool_call_ref.name,
-                                    HANDOVER_REPORT_DUE,
-                                ),
-                            )
-                            .await;
-                            continue;
-                        }
-
-                        let tool_arc = match self.tool_registry.get(&parsed_tool_call_ref.name) {
-                            Some(t) => t,
-                            None => {
-                                self.emit_event(AgentEvent::UnavailableToolAttempted {
-                                    tool_name: parsed_tool_call_ref.name.clone(),
-                                })
-                                .await?;
-                                self.record_text_result(format!(
-                                    "Error: Tool '{}' is not available.",
-                                    parsed_tool_call_ref.name
-                                ))
-                                .await;
-                                continue;
-                            }
-                        };
-                        let tool_definition = tool_arc.definition();
-
-                        // The path parameter that forces an approval.
-                        let mut outside_workspace = None;
-                        let path_rejection = match self.check_path_parameters(
-                            &tool_definition,
-                            &parsed_tool_call_ref.parameters,
-                        ) {
-                            PathCheck::Inside => None,
-                            PathCheck::Invalid(reason) => {
-                                Some(crate::tool::ToolError::ExecutionFailed(reason))
-                            }
-                            PathCheck::Outside(param_name) => match self
-                                .task
-                                .agent_config
-                                .get_path_safety_policy(&parsed_tool_call_ref.name)
-                            {
-                                PathSafetyPolicy::AutoReject => {
-                                    Some(crate::tool::ToolError::PathAccessRejected {
-                                        param_name,
-                                        workspace_path: self
-                                            .task
-                                            .current_working_directory
-                                            .to_string_lossy()
-                                            .to_string(),
-                                    })
-                                }
-                                PathSafetyPolicy::RequireApproval => {
-                                    outside_workspace = Some(param_name);
-                                    None
-                                }
-                                PathSafetyPolicy::AutoApprove => None,
-                            },
-                        };
-                        if let Some(tool_error) = path_rejection {
-                            let error_message_for_llm = self
-                                .handle_tool_exec_error(
-                                    &parsed_tool_call_ref.name,
-                                    tool_error,
-                                    Some(tool_call_id),
-                                )
-                                .await?;
-                            self.record_text_result(error_message_for_llm).await;
-                            // Under `FailTask` the rest of the batch stops.
-                            if self.task.current_state.is_terminal() {
-                                break;
-                            }
-                            continue;
-                        }
-
-                        let normal_approval_needed = !self
+    /// The calls of an output-based turn's group, with their ids (those
+    /// the parser events gave, or new ones), and their boolean parameters
+    /// made booleans. A batch of a tool that can't be batched has no calls:
+    /// the turn's message says why.
+    fn calls_of_group(
+        &self,
+        current_group: ToolCallGroup,
+        parsed_call_ids: &mut VecDeque<Uuid>,
+        next_user_message_str_accumulated: &mut String,
+    ) -> Vec<(ParsedToolCall, Uuid)> {
+        let calls_to_process_with_ids: Vec<(ParsedToolCall, Uuid)> = match current_group {
+            ToolCallGroup::Single(pc) => {
+                vec![(pc, parsed_call_ids.pop_front().unwrap_or_else(Uuid::new_v4))]
+            }
+            ToolCallGroup::Batch(pcs) => {
+                if let Some(first_tool_name_in_batch) = pcs.first().map(|call| &call.name) {
+                    if let Some(tool_def_arc) = self.tool_registry.get(first_tool_name_in_batch) {
+                        if !self
                             .task
                             .agent_config
-                            .should_auto_approve_tool(&parsed_tool_call_ref.name);
-
-                        if outside_workspace.is_some() || normal_approval_needed {
-                            calls_needing_approval.push(PendingToolCallInfo {
-                                tool_call_id,
-                                tool_name: parsed_tool_call_ref.name.clone(),
-                                parameters: parsed_tool_call_ref.parameters.clone(),
-                                tool_description: tool_definition.description.clone(),
-                                approval_reason: ApprovalReason {
-                                    tool_not_auto_approved: normal_approval_needed,
-                                    path_outside_workspace: outside_workspace,
-                                },
-                            });
-                        } else {
-                            match self
-                                .execute_tool_and_handle_result(
-                                    &parsed_tool_call_ref.name,
-                                    parsed_tool_call_ref.parameters.clone(),
-                                    tool_call_id,
-                                    None,
-                                    None,
-                                )
-                                .await
-                            {
-                                Ok(msg_part) => self.record_text_result(msg_part).await,
-                                Err(e) => log::error!(
-                                    "Task {}: Error during auto-approved tool execution: {}",
-                                    self.task.id,
-                                    e
-                                ),
+                            .allows_batched_calls_for_tool(&tool_def_arc.definition())
+                        {
+                            let err_msg = format!(
+                                "Error: Tool '{}' cannot be used in a batch.",
+                                first_tool_name_in_batch
+                            );
+                            if !next_user_message_str_accumulated.is_empty() {
+                                next_user_message_str_accumulated.push_str("\n\n");
                             }
-                            if !matches!(self.task.current_state, TaskState::InProgress)
-                                || self.stop_requested
-                            {
-                                break;
-                            }
-                        }
-                    }
-
-                    // Suspended while a call ran: the calls
-                    // awaiting approval are not asked about.
-                    if self.stop_requested {
-                        let not_run = self.not_run_after_stop();
-                        for pending in calls_needing_approval.drain(..) {
-                            self.emit_event(AgentEvent::ToolRejected {
-                                tool_call_id: pending.tool_call_id,
-                                tool_name: pending.tool_name.clone(),
-                                reason: Some(not_run.clone()),
-                            })
-                            .await?;
-                            self.record_text_result(format!(
-                                "Tool {}: {not_run}",
-                                pending.tool_name
-                            ))
-                            .await;
-                        }
-                    }
-                    if !calls_needing_approval.is_empty()
-                        && matches!(self.task.current_state, TaskState::InProgress)
-                    {
-                        if calls_needing_approval.len() == 1 && overall_batch_id.is_none() {
-                            let single_pending = calls_needing_approval.remove(0);
-                            self.task.set_state(TaskState::AwaitingToolApproval {
-                                tool_call_id: single_pending.tool_call_id,
-                                tool_name: single_pending.tool_name.clone(),
-                                parameters: single_pending.parameters.clone(),
-                                tool_description: single_pending.tool_description.clone(),
-                                approval_reason: single_pending.approval_reason.clone(),
-                            });
-                            self.emit_event(AgentEvent::TaskStateChanged(
-                                self.task.current_state.clone(),
-                            ))
-                            .await?;
-                            self.emit_event(AgentEvent::ToolCallAwaitingApproval {
-                                tool_call_id: single_pending.tool_call_id,
-                                tool_name: single_pending.tool_name,
-                                parameters: single_pending.parameters,
-                                tool_description: single_pending.tool_description,
-                                approval_reason: single_pending.approval_reason,
-                            })
-                            .await?;
+                            next_user_message_str_accumulated.push_str(&err_msg);
+                            Vec::new()
                         } else {
-                            let batch_id_for_state = overall_batch_id.unwrap_or_else(Uuid::new_v4);
-                            self.task.set_state(TaskState::AwaitingBatchToolApproval {
-                                batch_id: batch_id_for_state,
-                                pending_calls: calls_needing_approval,
-                            });
-                            self.emit_event(AgentEvent::TaskStateChanged(
-                                self.task.current_state.clone(),
-                            ))
-                            .await?;
-                            self.emit_event(AgentEvent::BatchToolCallAwaitingApproval {
-                                batch_id: batch_id_for_state,
-                                pending_calls: match &self.task.current_state {
-                                    TaskState::AwaitingBatchToolApproval {
-                                        pending_calls, ..
-                                    } => pending_calls.clone(),
-                                    _ => vec![],
-                                },
-                            })
-                            .await?;
+                            pcs.into_iter()
+                                .map(|pc| {
+                                    let id =
+                                        parsed_call_ids.pop_front().unwrap_or_else(Uuid::new_v4);
+                                    (pc, id)
+                                })
+                                .collect()
                         }
+                    } else {
+                        pcs.into_iter()
+                            .map(|pc| {
+                                let id = parsed_call_ids.pop_front().unwrap_or_else(Uuid::new_v4);
+                                (pc, id)
+                            })
+                            .collect()
                     }
-                    // Pauses on the batch's tool errors now, or after
-                    // the calls still awaiting approval are decided.
-                    self.end_tool_batch().await?;
-                    // The results of the calls that ran, which wait
-                    // with the task below if it now waits.
-                    next_user_message_str_accumulated =
-                        self.take_text_results(start).join("\n\n---\n\n");
+                } else {
+                    Vec::new()
                 }
             }
-            Err(e) => {
-                log::error!(
-                    "Failed to assemble tool calls for task {}: {}",
-                    self.task.id,
-                    e
-                );
-                self.handle_model_output_failure(format!(
-                    "Your tool call could not be read ({e}). Write it again in the format the system prompt describes."
-                ))
-                .await?;
-                if self.task.current_state.is_terminal() {
-                    return Ok(Flow::Exit);
-                }
-                return Ok(Flow::NextPass);
+        };
+
+        // Text calls carry every value as a string: give
+        // boolean parameters booleans, as in native mode.
+        let mut calls_to_process_with_ids = calls_to_process_with_ids;
+        for (call, _) in &mut calls_to_process_with_ids {
+            if let Some(tool) = self.tool_registry.get(&call.name) {
+                tool.definition()
+                    .coerce_text_arguments(&mut call.parameters);
             }
         }
+        calls_to_process_with_ids
+    }
 
+    /// One call of an output-based turn: reported, then checked (a due
+    /// handover report, a tool the run doesn't offer, its paths), then run
+    /// or, if it needs approval, returned to wait for it. Its result is
+    /// recorded in the task.
+    async fn handle_text_call(
+        &mut self,
+        parsed_tool_call_ref: &ParsedToolCall,
+        tool_call_id: Uuid,
+    ) -> Result<TextCall, ArkoAgentsError> {
+        if self.simplified_tool_events {
+            self.emit_event(AgentEvent::ToolCallInitiated {
+                tool_call_id,
+                tool_name: parsed_tool_call_ref.name.clone(),
+            })
+            .await?;
+        }
+        self.emit_event(AgentEvent::ToolCallFormatted {
+            tool_call_id,
+            tool_name: parsed_tool_call_ref.name.clone(),
+            parameters: parsed_tool_call_ref.parameters.clone(),
+        })
+        .await?;
+
+        if self.handover_blocks(&parsed_tool_call_ref.name) {
+            self.emit_event(AgentEvent::ToolRejected {
+                tool_call_id,
+                tool_name: parsed_tool_call_ref.name.clone(),
+                reason: Some(HANDOVER_REPORT_DUE.to_string()),
+            })
+            .await?;
+            self.record_text_result(
+                PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None)
+                    .format_tool_execution_error_as_user_message(
+                        &parsed_tool_call_ref.name,
+                        HANDOVER_REPORT_DUE,
+                    ),
+            )
+            .await;
+            return Ok(TextCall::Handled);
+        }
+
+        let tool_arc = match self.tool_registry.get(&parsed_tool_call_ref.name) {
+            Some(t) => t,
+            None => {
+                self.emit_event(AgentEvent::UnavailableToolAttempted {
+                    tool_name: parsed_tool_call_ref.name.clone(),
+                })
+                .await?;
+                self.record_text_result(format!(
+                    "Error: Tool '{}' is not available.",
+                    parsed_tool_call_ref.name
+                ))
+                .await;
+                return Ok(TextCall::Handled);
+            }
+        };
+        let tool_definition = tool_arc.definition();
+
+        // The path parameter that forces an approval.
+        let mut outside_workspace = None;
+        let path_rejection = match self
+            .check_path_parameters(&tool_definition, &parsed_tool_call_ref.parameters)
+        {
+            PathCheck::Inside => None,
+            PathCheck::Invalid(reason) => Some(crate::tool::ToolError::ExecutionFailed(reason)),
+            PathCheck::Outside(param_name) => match self
+                .task
+                .agent_config
+                .get_path_safety_policy(&parsed_tool_call_ref.name)
+            {
+                PathSafetyPolicy::AutoReject => Some(crate::tool::ToolError::PathAccessRejected {
+                    param_name,
+                    workspace_path: self
+                        .task
+                        .current_working_directory
+                        .to_string_lossy()
+                        .to_string(),
+                }),
+                PathSafetyPolicy::RequireApproval => {
+                    outside_workspace = Some(param_name);
+                    None
+                }
+                PathSafetyPolicy::AutoApprove => None,
+            },
+        };
+        if let Some(tool_error) = path_rejection {
+            let error_message_for_llm = self
+                .handle_tool_exec_error(&parsed_tool_call_ref.name, tool_error, Some(tool_call_id))
+                .await?;
+            self.record_text_result(error_message_for_llm).await;
+            // Under `FailTask` the rest of the batch stops.
+            if self.task.current_state.is_terminal() {
+                return Ok(TextCall::EndsBatch);
+            }
+            return Ok(TextCall::Handled);
+        }
+
+        let normal_approval_needed = !self
+            .task
+            .agent_config
+            .should_auto_approve_tool(&parsed_tool_call_ref.name);
+
+        if outside_workspace.is_some() || normal_approval_needed {
+            Ok(TextCall::NeedsApproval(PendingToolCallInfo {
+                tool_call_id,
+                tool_name: parsed_tool_call_ref.name.clone(),
+                parameters: parsed_tool_call_ref.parameters.clone(),
+                tool_description: tool_definition.description.clone(),
+                approval_reason: ApprovalReason {
+                    tool_not_auto_approved: normal_approval_needed,
+                    path_outside_workspace: outside_workspace,
+                },
+            }))
+        } else {
+            match self
+                .execute_tool_and_handle_result(
+                    &parsed_tool_call_ref.name,
+                    parsed_tool_call_ref.parameters.clone(),
+                    tool_call_id,
+                    None,
+                    None,
+                )
+                .await
+            {
+                Ok(msg_part) => self.record_text_result(msg_part).await,
+                Err(e) => log::error!(
+                    "Task {}: Error during auto-approved tool execution: {}",
+                    self.task.id,
+                    e
+                ),
+            }
+            if !matches!(self.task.current_state, TaskState::InProgress) || self.stop_requested {
+                return Ok(TextCall::EndsBatch);
+            }
+            Ok(TextCall::Handled)
+        }
+    }
+
+    /// The message after an output-based turn: its results (which wait with
+    /// the task if it now waits), or a request to use a tool.
+    fn text_turn_message(
+        &mut self,
+        mut next_user_message_str_accumulated: String,
+        final_generation_response: &Option<ai::GenerationResponse>,
+    ) -> Result<(), ArkoAgentsError> {
         if final_generation_response.is_some() && !self.task.current_state.is_awaiting_approval() {
             self.reset_llm_recovery();
         }
@@ -4129,7 +4143,7 @@ impl AgentLoop {
             self.task.mark_last_message_runtime();
             self.task.increment_user_message_count();
         }
-        Ok(Flow::Proceed)
+        Ok(())
     }
 
     /// Runs the agent loop to completion.
