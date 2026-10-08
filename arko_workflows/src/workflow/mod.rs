@@ -37,7 +37,7 @@ use crate::workflow::cancel::{
 use crate::workflow::config::{WorkflowConfig, WorkflowMetadata};
 use crate::workflow::engine::{StartedRun, WorkflowEngine, fire_hooks_on_context};
 use crate::workflow::result::{AgentResult, AgentRunStatus, WorkflowEvent, WorkflowResult};
-use crate::workflow::stop::{Restart, StopRequest, StoppedRun};
+use crate::workflow::stop::{Restart, RunStopIntent, StopRecord, StopRequest, StoppedRun};
 
 /// A configured multi-agent workflow.
 ///
@@ -101,6 +101,7 @@ impl Workflow {
         if let Err(error) = &result
             && !matches!(error, WorkflowError::Cancelled)
             && !engine::is_pause(error)
+            && !engine::is_run_stop(error)
             && let Err(hook_error) =
                 fire_hooks_on_context(&self.context, HookPoint::OnWorkflowFailed, |hook| {
                     configure(hook);
@@ -211,7 +212,10 @@ impl Workflow {
     ///
     /// A run started inside a tool call its parent still holds open is not
     /// listed: recovering the parent recovers it (or supersedes it, for a
-    /// completion verifier's review or a call that can't resume).
+    /// completion verifier's review or a call that can't resume). Neither
+    /// is a run the host retired ([`stop_run`](Self::stop_run) with
+    /// [`RunStopIntent::Retire`]) that the process ended in its wrap-up;
+    /// `recover_agent` still takes it.
     pub fn interrupted_runs(&self) -> Vec<AgentResult> {
         let interrupted = self
             .context
@@ -221,6 +225,10 @@ impl Workflow {
             .filter(|result| {
                 result.status == AgentRunStatus::Interrupted
                     && !self.context.registry.is_running(result.agent_run_id)
+                    && !result
+                        .stopped_by
+                        .as_ref()
+                        .is_some_and(StopRecord::is_retired)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -375,6 +383,67 @@ impl Workflow {
         self.cancel_handle().stop(request)
     }
 
+    /// Stops agent run `agent_run_id` alone, for `request`'s kind and
+    /// reason, while the rest of the workflow runs on: other runs carry on,
+    /// and new runs start as usual. `intent` says what the host means to do
+    /// with the run afterwards, and is saved with the stop
+    /// ([`StopRecord::intent`](crate::workflow::stop::StopRecord::intent)):
+    /// [`RunStopIntent::Retire`] (removed, or replaced by another run) or
+    /// [`RunStopIntent::Relaunch`] (listed by
+    /// [`stopped_runs`](Self::stopped_runs) for [`restart`](Self::restart)).
+    ///
+    /// With a [wrap-up](StopRequest::wrap_up), the run's tools see their
+    /// stop signal at once, and the run is told at its next turn boundary
+    /// to save its progress and call `complete_task`
+    /// ([`run_wrap_up_notice`](crate::workflow::stop::run_wrap_up_notice),
+    /// or the request's message). A completion after the notice reports
+    /// progress: completion verifiers don't review it, and the run call
+    /// returns the result, with [`AgentResult::stopped_by`] set. When the
+    /// wrap-up's time is up first, or without a wrap-up, the run is
+    /// cancelled, within the [grace period](WorkflowBuilder::cancel_grace_period)
+    /// as a stopped workflow's agents are, and its run call returns
+    /// [`WorkflowError::AgentStopped`] (its result is `Cancelled`, with
+    /// `stopped_by` set). Neither is a failure: `OnWorkflowFailed` doesn't
+    /// fire, `fail_fast` isn't triggered, and `run_agents_parallel` returns
+    /// the result in its place.
+    ///
+    /// The runs inside the run's tool calls (agents it delegated to with
+    /// `run_workflow_agent`) are stopped with it, with the same request and
+    /// intent, and the run can't start new ones. A delegated run stopped
+    /// alone returns its progress report to its caller, followed by a note
+    /// naming the run and saying whether the caller can resume it (not when
+    /// it was retired).
+    ///
+    /// Returns `false`, changing nothing, when the run isn't running, is a
+    /// completion verifier's review (stop the run under review instead),
+    /// the workflow is stopped, or the run is being stopped alone already
+    /// and `request` has a wrap-up too. A request without a wrap-up during
+    /// the run's wrap-up cancels it at once; the first stop's record stands.
+    /// With persistence and the task journal, the stop is saved with the
+    /// live checkpoint at once, so a resume keeps the host's intent for a
+    /// run the process ended in its wrap-up.
+    pub fn stop_run(
+        &self,
+        agent_run_id: uuid::Uuid,
+        request: StopRequest,
+        intent: RunStopIntent,
+    ) -> bool {
+        self.cancel_handle().stop_run(agent_run_id, request, intent)
+    }
+
+    /// Stops every running run of `agent_name` alone, as
+    /// [`stop_run`](Self::stop_run) does, and returns the runs whose stop
+    /// began (none when none runs). An unknown agent returns
+    /// `AgentNotFound`.
+    pub fn stop_agent(
+        &self,
+        agent_name: &str,
+        request: StopRequest,
+        intent: RunStopIntent,
+    ) -> Result<Vec<uuid::Uuid>, WorkflowError> {
+        self.cancel_handle().stop_agent(agent_name, request, intent)
+    }
+
     /// Whether a graceful stop's wrap-up is under way: the run is stopping
     /// but not stopped yet ([`is_cancelled`](Self::is_cancelled) is still
     /// `false`).
@@ -383,7 +452,9 @@ impl Workflow {
     }
 
     /// The runs to relaunch after resuming a stopped run (with
-    /// [`WorkflowBuilder::resume_from`]), in the order they were recorded,
+    /// [`WorkflowBuilder::resume_from`]), or, while the workflow runs, after
+    /// stopping runs alone to relaunch them ([`stop_run`](Self::stop_run)
+    /// with [`RunStopIntent::Relaunch`]), in the order they were recorded,
     /// each with how [`restart`](Self::restart) relaunches it:
     /// - runs a stop cancelled ([`AgentResult::stopped_by`] set, status
     ///   `Cancelled`): [`Restart::Reopen`];
@@ -392,6 +463,9 @@ impl Workflow {
     /// - the [`interrupted_runs`](Self::interrupted_runs) (the process
     ///   ended while they ran, before or during a stop):
     ///   [`Restart::Recover`].
+    ///
+    /// Runs the host retired ([`RunStopIntent::Retire`]) are never listed,
+    /// also when a later stop of the workflow ended them in their wrap-up.
     ///
     /// A run started inside another run's tool call is listed only when
     /// that run can no longer resume it, as for `interrupted_runs`, and
@@ -415,7 +489,13 @@ impl Workflow {
         let candidates = results
             .into_iter()
             .filter_map(|result| {
-                let restart = if interrupted.contains(&result.agent_run_id) {
+                let restart = if result
+                    .stopped_by
+                    .as_ref()
+                    .is_some_and(StopRecord::is_retired)
+                {
+                    return None;
+                } else if interrupted.contains(&result.agent_run_id) {
                     Restart::Recover
                 } else if result.stopped_by.is_none()
                     || self.context.registry.is_running(result.agent_run_id)
@@ -463,13 +543,26 @@ impl Workflow {
     /// message; `note` is not used),
     /// [`reopen_agent`](Self::reopen_agent) with `note` after its reopened
     /// notice, or [`continue_agent`](Self::continue_agent) with a message
-    /// saying the workflow was stopped and has restarted, then `note`.
-    /// `note` may be empty. Returns as those do.
+    /// saying the workflow (or, for a run stopped alone, the run) was
+    /// stopped and has restarted, then `note`. `note` may be empty. Returns
+    /// as those do. A retired run ([`RunStopIntent::Retire`]) returns
+    /// `BuilderInvalid`.
     pub async fn restart(
         &self,
         run: &StoppedRun,
         note: &str,
     ) -> Result<AgentResult, WorkflowError> {
+        if run
+            .result
+            .stopped_by
+            .as_ref()
+            .is_some_and(StopRecord::is_retired)
+        {
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "agent run {} of agent '{}' was retired (Workflow::stop_run with RunStopIntent::Retire), so restart doesn't relaunch it",
+                run.result.agent_run_id, run.result.agent_name
+            )));
+        }
         match run.restart {
             Restart::Recover => self.recover_agent(&run.result).await,
             Restart::Reopen => self.reopen_agent(&run.result, note).await,
@@ -1556,8 +1649,12 @@ impl WorkflowBuilder {
     /// workflow runs or is stopped. `build` creates the folder. The
     /// workflow reads it at its agents' turn boundaries and when it starts
     /// an agent, and posts each note as [`Workflow::post_note`] does.
-    /// Requires [`persistence`](Self::persistence). Whoever can write the
-    /// folder can post notes: keep the run directory out of the agents'
+    /// While agents run, it also reads stop requests from the folder
+    /// ([`notes::control::request_stop`](crate::notes::control::request_stop))
+    /// every second and stops the runs they name, as
+    /// [`Workflow::stop_run`] does. Requires
+    /// [`persistence`](Self::persistence). Whoever can write the folder can
+    /// post notes and stop runs: keep the run directory out of the agents'
     /// reach.
     pub fn control_folder(mut self) -> Self {
         self.control_folder = true;
@@ -2189,6 +2286,8 @@ impl WorkflowBuilder {
             paused: std::sync::atomic::AtomicBool::new(false),
             resume_notify: tokio::sync::Notify::new(),
             run_control: Arc::new(RunControl::new(self.cancel_grace_period)),
+            persistence: persistence.clone(),
+            control_stops: crate::notes::control::StopReader::new(control_folder.clone()),
             registry: match &resume_state {
                 Some(state) => {
                     AgentRegistry::restore(state.agent_registry.clone(), &resumed_results)
@@ -2606,3 +2705,7 @@ mod plan_budget_tests;
 #[cfg(test)]
 #[path = "stop_tests.rs"]
 mod stop_tests;
+
+#[cfg(test)]
+#[path = "run_stop_tests.rs"]
+mod run_stop_tests;

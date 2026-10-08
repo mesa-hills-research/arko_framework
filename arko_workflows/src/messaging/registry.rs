@@ -317,6 +317,28 @@ impl AgentRegistry {
         self.state.lock().runs.contains_key(&task_id)
     }
 
+    /// The runs of `agent` marked running.
+    pub fn runs_of(&self, agent: &str) -> Vec<Uuid> {
+        self.state
+            .lock()
+            .runs
+            .iter()
+            .filter(|(_, run)| run.agent == agent)
+            .map(|(task_id, _)| *task_id)
+            .collect()
+    }
+
+    /// The running runs inside a tool call of run `task_id`.
+    pub fn children(&self, task_id: Uuid) -> Vec<Uuid> {
+        self.state
+            .lock()
+            .runs
+            .iter()
+            .filter(|(_, run)| run.parent == Some(task_id))
+            .map(|(child, _)| *child)
+            .collect()
+    }
+
     /// Marks run `task_id` of `agent` running, as [`start`](Self::start)
     /// does, unless it is running already; returns whether it was marked.
     pub fn start_unless_running(&self, task_id: Uuid, agent: &str) -> bool {

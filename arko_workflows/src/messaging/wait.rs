@@ -340,10 +340,11 @@ impl Tool for WaitForMessageTool {
         loop {
             // Stopped, or a graceful stop's wrap-up began: the agent is
             // told what to do at its next turn boundary.
-            if context.run_control.is_stopped() || task_context.stop.is_stopping() {
+            if context.run_control.is_stopped() || context.run_control.is_wrapping_up() {
                 return Ok("Workflow stopping.".to_string());
             }
-            if *stopping.borrow_and_update() {
+            // The run alone is being stopped (its tools' stop signal fired).
+            if *stopping.borrow_and_update() || task_context.stop.is_stopping() {
                 return Ok("Run stopping.".to_string());
             }
             let unseen = context.messages.unseen_messages(&self.agent_name, task_id);

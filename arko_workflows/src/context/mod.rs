@@ -61,6 +61,11 @@ pub struct SharedContext {
     pub(crate) notes: crate::notes::NoteBoard,
     /// Whether and why the run was stopped (cancelled or aborted by a hook).
     pub(crate) run_control: Arc<crate::workflow::cancel::RunControl>,
+    /// The run's persistence, when configured: changes the host makes
+    /// while agents run (such as a stop of one run) are saved with it.
+    pub(crate) persistence: Option<crate::persistence::PersistenceManager>,
+    /// Reads stop requests from the control folder, when enabled.
+    pub(crate) control_stops: crate::notes::control::StopReader,
     pub user_input_handler: Option<Arc<dyn crate::user_input::UserInputHandler>>,
     /// `run_agents_parallel`'s concurrency cap and fail-fast setting.
     pub(crate) parallel: ParallelSettings,
@@ -154,6 +159,32 @@ impl SharedContext {
             )
             .remove(0)
             .1
+    }
+}
+
+impl SharedContext {
+    /// With the task journal, writes the live checkpoint soon (spawned)
+    /// while agents run, so that a change the host made to the running
+    /// workflow (`what`) is saved before their next turns.
+    pub(crate) fn save_live_checkpoint_soon(self: &Arc<Self>, what: &'static str) {
+        let Some(persistence) = self.persistence.clone() else {
+            return;
+        };
+        if !persistence.has_live_runs() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let context = self.clone();
+        runtime.spawn(async move {
+            if let Err(error) = persistence.write_live_checkpoint(&context, false).await {
+                log::warn!(
+                    "Workflow '{}': could not save {what}: {error}",
+                    context.workflow_name
+                );
+            }
+        });
     }
 }
 

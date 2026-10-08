@@ -26,6 +26,19 @@ pub enum WorkflowError {
     #[error("Agent '{agent}' was cancelled: {reason}")]
     AgentCancelled { agent: String, reason: String },
 
+    /// The host stopped the run alone
+    /// ([`Workflow::stop_run`](crate::Workflow::stop_run)), and it was
+    /// cancelled: its wrap-up's time was up, or the stop had none. Its
+    /// result ([`Workflow::agent_result`](crate::Workflow::agent_result)`(task_id)`)
+    /// is `Cancelled`, with `stopped_by` set. Not a failure: the rest of
+    /// the workflow runs on.
+    #[error("Agent '{agent}' was stopped: {reason}")]
+    AgentStopped {
+        agent: String,
+        task_id: uuid::Uuid,
+        reason: String,
+    },
+
     /// The agent asked the user a question and no user input handler is
     /// set: it is suspended, recorded with status `WaitingForInput`; answer
     /// with `Workflow::continue_agent`. A pause, not a failure.

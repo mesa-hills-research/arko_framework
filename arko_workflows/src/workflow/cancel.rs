@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::context::SharedContext;
 use crate::error::WorkflowError;
-use crate::workflow::stop::{StopKind, StopRecord, StopRequest};
+use crate::workflow::stop::{RunStopIntent, StopKind, StopRecord, StopRequest};
 
 /// How long a stopped run waits for each running agent to stop before it
 /// aborts the agent; see [`WorkflowBuilder::cancel_grace_period`](crate::WorkflowBuilder::cancel_grace_period).
@@ -141,6 +141,47 @@ struct WrapUpState {
     notice: String,
 }
 
+/// A stop of one agent run ([`WorkflowCancelHandle::stop_run`]).
+struct RunStop {
+    /// Tells this stop from a later one of the same run (a continuation):
+    /// its wrap-up's timer cancels only the stop it was started for.
+    id: uuid::Uuid,
+    /// What its result records (`intent` set).
+    record: StopRecord,
+    /// What the run is told; `None` for a stop without a wrap-up.
+    notice: Option<String>,
+    /// The run was given the notice: its completion reports progress.
+    told: bool,
+}
+
+/// A running agent run, from its launch until it ends.
+struct RunEntry {
+    /// Its tools' stop signal
+    /// ([`TaskContext::stop`](arko_agents::TaskContext::stop)): fired when
+    /// the workflow starts stopping, and by the run's own stop.
+    tools: arko_agents::StopSource,
+    /// Set, with the reason, once the run's own stop cancels it: its driver
+    /// winds it down within the grace period.
+    cancel: watch::Sender<Option<String>>,
+    /// A completion verifier's review, which is never stopped alone.
+    review: bool,
+    /// The run's own stop, once the host asked for one.
+    stop: Option<RunStop>,
+}
+
+/// What [`RunControl::begin_run_stop`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunStopBegun {
+    /// Nothing: the run isn't running (or is a review), the workflow is
+    /// stopped, or the run is being stopped already and the request has a
+    /// wrap-up too.
+    Unchanged,
+    /// The run is told to wrap up; the caller times it (stop `id`).
+    WrapUp(uuid::Uuid),
+    /// The run is being cancelled.
+    Cancelled,
+}
+
 /// The stop state of one run, shared by the engine, tools and handles.
 pub(crate) struct RunControl {
     state: watch::Sender<Option<Cancellation>>,
@@ -166,6 +207,9 @@ pub(crate) struct RunControl {
     host_stop: parking_lot::Mutex<Option<StopRecord>>,
     /// The agent runs given the wrap-up notice.
     told: parking_lot::Mutex<HashSet<uuid::Uuid>>,
+    /// The running agent runs, with their own stops. Locked before
+    /// `agents`, never after.
+    runs: parking_lot::Mutex<HashMap<uuid::Uuid, RunEntry>>,
 }
 
 impl RunControl {
@@ -181,6 +225,17 @@ impl RunControl {
             wrap_up: parking_lot::Mutex::new(None),
             host_stop: parking_lot::Mutex::new(None),
             told: parking_lot::Mutex::new(HashSet::new()),
+            runs: parking_lot::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Fires the tools' stop signal of the run and of every running agent
+    /// run (the first reason stands).
+    fn fire_tools_stop(&self, reason: String) {
+        let runs = self.runs.lock();
+        self.tools_stop.stop(reason.clone());
+        for entry in runs.values() {
+            entry.tools.stop(reason.clone());
         }
     }
 
@@ -213,7 +268,7 @@ impl RunControl {
                     *host_stop = StopRecord::of_cause(&cause, timestamp);
                 }
             }
-            self.tools_stop.stop(cause.agent_reason());
+            self.fire_tools_stop(cause.agent_reason());
             *self.stopped_at.lock() = Some(tokio::time::Instant::now());
             // Queued before any agent takes its next step; the driver's own
             // (awaited) CancelTask covers a full command channel.
@@ -266,19 +321,165 @@ impl RunControl {
             agents.retain(|_, sender| sender.strong_count() > 0);
             agents.insert(task_id, sender.downgrade());
         }
-        if self.is_stopped() {
+        let cancelled = self
+            .runs
+            .lock()
+            .get(&task_id)
+            .is_some_and(|entry| entry.cancel.borrow().is_some());
+        if self.is_stopped() || cancelled {
             let _ = sender.try_send(UserCommand::CancelTask);
         }
     }
 
     pub fn unregister(&self, task_id: uuid::Uuid) {
+        self.runs.lock().remove(&task_id);
         self.agents.lock().remove(&task_id);
         self.stopping.lock().remove(&task_id);
     }
 
-    /// The signal the run's agents' tool calls see
-    /// ([`TaskContext::stop`](arko_agents::TaskContext::stop)): it fires
-    /// when a wrap-up begins, or when the run stops.
+    /// Records agent run `task_id` as running from its launch (`review`: a
+    /// completion verifier's review), and returns the stop signal its tools
+    /// see: it fires when the workflow starts stopping (at once if it has),
+    /// and when the run's own stop begins.
+    pub fn begin_run(&self, task_id: uuid::Uuid, review: bool) -> arko_agents::StopSignal {
+        let mut runs = self.runs.lock();
+        let tools = arko_agents::StopSource::new();
+        if let Some(reason) = self.tools_stop.signal().reason() {
+            tools.stop(reason);
+        }
+        let signal = tools.signal();
+        runs.insert(
+            task_id,
+            RunEntry {
+                tools,
+                cancel: watch::Sender::new(None),
+                review,
+                stop: None,
+            },
+        );
+        signal
+    }
+
+    /// Begins a stop of agent run `task_id` alone, recorded as `record`:
+    /// with a wrap-up (`notice`), the run's tools see their stop signal and
+    /// the run is told at its next turn boundary; without one, it is
+    /// cancelled at once. A request without a wrap-up during the run's
+    /// wrap-up cancels it at once (the first stop's record stands); one with
+    /// a wrap-up changes nothing.
+    pub fn begin_run_stop(
+        &self,
+        task_id: uuid::Uuid,
+        record: StopRecord,
+        notice: Option<String>,
+    ) -> RunStopBegun {
+        if self.is_stopped() {
+            return RunStopBegun::Unchanged;
+        }
+        let mut runs = self.runs.lock();
+        let Some(entry) = runs.get_mut(&task_id).filter(|entry| !entry.review) else {
+            return RunStopBegun::Unchanged;
+        };
+        if entry.stop.is_some() {
+            drop(runs);
+            return if notice.is_none() && self.cancel_run(task_id, None) {
+                RunStopBegun::Cancelled
+            } else {
+                RunStopBegun::Unchanged
+            };
+        }
+        let id = uuid::Uuid::new_v4();
+        let wraps_up = notice.is_some();
+        entry.tools.stop(record.run_reason());
+        entry.stop = Some(RunStop {
+            id,
+            record,
+            notice,
+            told: false,
+        });
+        drop(runs);
+        if wraps_up {
+            RunStopBegun::WrapUp(id)
+        } else {
+            self.cancel_run(task_id, Some(id));
+            RunStopBegun::Cancelled
+        }
+    }
+
+    /// Cancels agent run `task_id` for its own stop (stop `id`, when given:
+    /// a wrap-up's timer cancels only the stop it was started for), unless
+    /// it is being cancelled already. Its driver winds it down within the
+    /// grace period; a run driven through `into_parts` is sent `CancelTask`.
+    /// Returns whether this call cancelled it.
+    pub fn cancel_run(&self, task_id: uuid::Uuid, id: Option<uuid::Uuid>) -> bool {
+        let runs = self.runs.lock();
+        let Some(entry) = runs.get(&task_id) else {
+            return false;
+        };
+        let Some(stop) = entry
+            .stop
+            .as_ref()
+            .filter(|stop| id.is_none_or(|id| stop.id == id))
+        else {
+            return false;
+        };
+        let reason = stop.record.run_reason();
+        let cancelled = entry.cancel.send_if_modified(|cancel| {
+            if cancel.is_some() {
+                return false;
+            }
+            *cancel = Some(reason);
+            true
+        });
+        if cancelled
+            && let Some(sender) = self
+                .agents
+                .lock()
+                .get(&task_id)
+                .and_then(mpsc::WeakSender::upgrade)
+        {
+            let _ = sender.try_send(UserCommand::CancelTask);
+        }
+        cancelled
+    }
+
+    /// Set, with the reason, once agent run `task_id`'s own stop cancels
+    /// it; `None` for a run that isn't running.
+    pub fn run_cancel(&self, task_id: uuid::Uuid) -> Option<watch::Receiver<Option<String>>> {
+        self.runs
+            .lock()
+            .get(&task_id)
+            .map(|entry| entry.cancel.subscribe())
+    }
+
+    /// The reason agent run `task_id`'s own stop cancels it, once it does.
+    pub fn run_cancel_reason(&self, task_id: uuid::Uuid) -> Option<String> {
+        self.runs
+            .lock()
+            .get(&task_id)
+            .and_then(|entry| entry.cancel.borrow().clone())
+    }
+
+    /// The record of agent run `task_id`'s own stop, while the run runs.
+    pub fn run_stop_record(&self, task_id: uuid::Uuid) -> Option<StopRecord> {
+        self.runs
+            .lock()
+            .get(&task_id)
+            .and_then(|entry| entry.stop.as_ref())
+            .map(|stop| stop.record.clone())
+    }
+
+    /// Whether agent run `task_id` is being stopped alone.
+    pub fn is_run_stopping(&self, task_id: uuid::Uuid) -> bool {
+        self.runs
+            .lock()
+            .get(&task_id)
+            .is_some_and(|entry| entry.stop.is_some())
+    }
+
+    /// The signal that fires when a wrap-up begins, or when the run stops:
+    /// each agent run's tools see it through their own
+    /// ([`begin_run`](Self::begin_run)).
+    #[cfg(test)]
     pub fn tools_signal(&self) -> arko_agents::StopSignal {
         self.tools_stop.signal()
     }
@@ -297,7 +498,7 @@ impl RunControl {
             *wrap_up = Some(WrapUpState { cause, notice });
             *self.host_stop.lock() = Some(record);
         }
-        self.tools_stop.stop(reason);
+        self.fire_tools_stop(reason);
         true
     }
 
@@ -343,31 +544,69 @@ impl RunControl {
         Ok(())
     }
 
-    /// The wrap-up notice for agent run `task_id`, once: `None` outside a
-    /// wrap-up and after the first call for the run.
+    /// The wrap-up notices for agent run `task_id` not given yet, each once:
+    /// its own stop's, then the workflow's. `None` when there are none.
     pub fn wrap_up_notice(&self, task_id: uuid::Uuid) -> Option<String> {
-        let wrap_up = self.wrap_up.lock();
-        let notice = &wrap_up.as_ref()?.notice;
-        self.told.lock().insert(task_id).then(|| notice.clone())
+        let mut notices = Vec::new();
+        if let Some(stop) = self
+            .runs
+            .lock()
+            .get_mut(&task_id)
+            .and_then(|entry| entry.stop.as_mut())
+            .filter(|stop| !stop.told)
+            && let Some(notice) = &stop.notice
+        {
+            stop.told = true;
+            notices.push(notice.clone());
+        }
+        {
+            let wrap_up = self.wrap_up.lock();
+            if let Some(wrap_up) = wrap_up.as_ref()
+                && self.told.lock().insert(task_id)
+            {
+                notices.push(wrap_up.notice.clone());
+            }
+        }
+        (!notices.is_empty()).then(|| notices.join("\n"))
     }
 
-    /// Whether agent run `task_id` was given the wrap-up notice: its
-    /// completion is a progress report, which completion verifiers don't
-    /// review.
+    /// Whether agent run `task_id` was given a wrap-up notice, the
+    /// workflow's or its own stop's: its completion is a progress report,
+    /// which completion verifiers don't review.
     pub fn was_told(&self, task_id: uuid::Uuid) -> bool {
-        self.told.lock().contains(&task_id)
+        self.told.lock().contains(&task_id) || self.told_to_stop_alone(task_id)
+    }
+
+    fn told_to_stop_alone(&self, task_id: uuid::Uuid) -> bool {
+        self.runs
+            .lock()
+            .get(&task_id)
+            .and_then(|entry| entry.stop.as_ref())
+            .is_some_and(|stop| stop.told)
     }
 
     /// The stop that ended agent run `task_id` with `status`, if a stop the
-    /// host asked for did: a run cancelled once the run is stopped (by a
-    /// stop request or a cancellation), or a run that completed after it
-    /// was given the wrap-up notice.
+    /// host asked for did: the run's own stop, when it has one and the run
+    /// was cancelled, interrupted, or completed after a wrap-up notice;
+    /// otherwise the workflow's, for a run cancelled once the run is
+    /// stopped (by a stop request or a cancellation), or a run that
+    /// completed after it was given the wrap-up notice.
     pub fn stopped_by(
         &self,
         task_id: uuid::Uuid,
         status: &crate::workflow::result::AgentRunStatus,
     ) -> Option<StopRecord> {
         use crate::workflow::result::AgentRunStatus;
+        if let Some(record) = self.run_stop_record(task_id) {
+            let applies = match status {
+                AgentRunStatus::Cancelled | AgentRunStatus::Interrupted => true,
+                AgentRunStatus::Completed => self.was_told(task_id),
+                _ => false,
+            };
+            if applies {
+                return Some(record);
+            }
+        }
         let applies = match status {
             AgentRunStatus::Cancelled => self.is_stopped(),
             AgentRunStatus::Completed => self.was_told(task_id),
@@ -472,6 +711,7 @@ impl WorkflowCancelHandle {
             kind,
             reason: reason.clone(),
             timestamp: chrono::Utc::now(),
+            intent: None,
         };
         let notice = wrap_up
             .message
@@ -512,6 +752,141 @@ impl WorkflowCancelHandle {
             }
         });
         true
+    }
+
+    /// Stops agent run `agent_run_id` alone, with the runs inside its tool
+    /// calls; see [`Workflow::stop_run`](crate::Workflow::stop_run).
+    pub fn stop_run(
+        &self,
+        agent_run_id: uuid::Uuid,
+        request: StopRequest,
+        intent: RunStopIntent,
+    ) -> bool {
+        let Some(context) = self.context.upgrade() else {
+            return false;
+        };
+        self.stop_one(&context, agent_run_id, &request, intent)
+    }
+
+    /// Stops every running run of `agent_name` alone; see
+    /// [`Workflow::stop_agent`](crate::Workflow::stop_agent).
+    pub fn stop_agent(
+        &self,
+        agent_name: &str,
+        request: StopRequest,
+        intent: RunStopIntent,
+    ) -> Result<Vec<uuid::Uuid>, WorkflowError> {
+        let context = self
+            .context
+            .upgrade()
+            .ok_or_else(|| WorkflowError::BuilderInvalid("the workflow was dropped".to_string()))?;
+        if !context.agent_configs.contains_key(agent_name) {
+            return Err(WorkflowError::AgentNotFound(agent_name.to_string()));
+        }
+        let runs = context.registry.runs_of(agent_name);
+        Ok(runs
+            .into_iter()
+            .filter(|task_id| self.stop_one(&context, *task_id, &request, intent))
+            .collect())
+    }
+
+    /// Stops run `root` alone, then the runs inside its tool calls (a
+    /// delegated agent's, deeper ones after): returns whether `root`'s stop
+    /// began (or, without a wrap-up, ended its wrap-up).
+    fn stop_one(
+        &self,
+        context: &Arc<SharedContext>,
+        root: uuid::Uuid,
+        request: &StopRequest,
+        intent: RunStopIntent,
+    ) -> bool {
+        let record = StopRecord {
+            kind: request.kind,
+            reason: request.reason.clone(),
+            timestamp: chrono::Utc::now(),
+            intent: Some(intent),
+        };
+        let notice = request.wrap_up.as_ref().map(|wrap_up| {
+            wrap_up.message.clone().unwrap_or_else(|| {
+                crate::workflow::stop::run_wrap_up_notice(&request.reason, wrap_up.within)
+            })
+        });
+        let mut runs = vec![root];
+        let mut next = 0;
+        while next < runs.len() {
+            runs.extend(context.registry.children(runs[next]));
+            next += 1;
+        }
+        for (index, task_id) in runs.into_iter().enumerate() {
+            match self
+                .control
+                .begin_run_stop(task_id, record.clone(), notice.clone())
+            {
+                RunStopBegun::Unchanged if index == 0 => return false,
+                RunStopBegun::Unchanged => {}
+                RunStopBegun::WrapUp(id) => {
+                    let within = request
+                        .wrap_up
+                        .as_ref()
+                        .map_or(Duration::ZERO, |w| w.within);
+                    self.time_run_wrap_up(task_id, id, within);
+                }
+                RunStopBegun::Cancelled => {}
+            }
+            if index == 0 {
+                log::info!(
+                    "Workflow '{}': stopping agent run {task_id} alone ({}, {intent}){}: {}",
+                    context.workflow_name,
+                    request.kind,
+                    request
+                        .wrap_up
+                        .as_ref()
+                        .map_or_else(String::new, |wrap_up| format!(
+                            " within {:?}",
+                            wrap_up.within
+                        )),
+                    request.reason
+                );
+            }
+        }
+        // Saved at once while agents run, so that a resume keeps the
+        // host's intent for the run.
+        context.save_live_checkpoint_soon("the stop of an agent run");
+        true
+    }
+
+    /// Cancels run `task_id` for its stop `id` when the stop's wrap-up of
+    /// `within` is over, unless the run ends (or is cancelled) first.
+    fn time_run_wrap_up(&self, task_id: uuid::Uuid, id: uuid::Uuid, within: Duration) {
+        // Ended already: nothing to time.
+        let Some(mut cancel) = self.control.run_cancel(task_id) else {
+            return;
+        };
+        let runtime = tokio::runtime::Handle::try_current()
+            .ok()
+            .or_else(|| self.runtime.clone());
+        let Some(runtime) = runtime else {
+            log::warn!(
+                "Agent run stop: no Tokio runtime to time the wrap-up, so run {task_id} is stopped at once."
+            );
+            self.control.cancel_run(task_id, Some(id));
+            return;
+        };
+        let control = self.control.clone();
+        runtime.spawn(async move {
+            let start = tokio::time::Instant::now();
+            // A wrap-up too long to represent lasts as long as possible.
+            let deadline = start
+                .checked_add(within)
+                .unwrap_or_else(|| start + Duration::from_secs(30 * 365 * 86_400));
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    control.cancel_run(task_id, Some(id));
+                }
+                // Cancelled sooner, or ended (its entry, and the sender, are gone).
+                _ = cancel.changed() => {}
+            }
+        });
     }
 
     /// Whether a graceful stop's wrap-up is under way: the run is stopping,

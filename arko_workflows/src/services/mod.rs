@@ -19,6 +19,7 @@ use crate::persistence::PersistenceManager;
 use crate::policy::{AgentPause, AgentResume};
 use crate::workflow::engine::{Recovery, WorkflowEngine, is_orphaned, recorded_result};
 use crate::workflow::result::{AgentResult, AgentRunStatus};
+use crate::workflow::stop::StopRecord;
 
 pub const RUN_WORKFLOW_AGENT_TOOL_NAME: &str = "run_workflow_agent";
 
@@ -411,6 +412,9 @@ impl WorkflowServices {
         if context.registry.is_running(run_id) {
             return refuse("it is running".to_string());
         }
+        if run.stopped_by.as_ref().is_some_and(StopRecord::is_retired) {
+            return refuse("the workflow's host retired it".to_string());
+        }
         let engine = WorkflowEngine::from_shared(self.client.clone(), self.persistence.clone());
         match run.status {
             AgentRunStatus::Interrupted => {
@@ -488,6 +492,15 @@ impl WorkflowServices {
                 "is paused after an error"
             }
             AgentRunStatus::WaitingForInput => "is waiting for an answer to its questions",
+            // Stopped alone by the host: it says whether it may go on.
+            AgentRunStatus::Cancelled | AgentRunStatus::Completed
+                if run
+                    .stopped_by
+                    .as_ref()
+                    .is_some_and(|stop| stop.intent.is_some()) =>
+            {
+                return Some(self.stopped_alone_note(caller, run));
+            }
             // Reopened when the caller is restarted after the stop.
             AgentRunStatus::Cancelled
                 if run.stopped_by.is_some() && !crate::workflow::engine::is_superseded(run) =>
@@ -503,15 +516,53 @@ impl WorkflowServices {
             _ => return None,
         };
         let (id, agent) = (run.agent_run_id, &run.agent_name);
-        let how = if self.is_allowed(caller) && self.is_target_allowed(caller, agent) {
+        Some(format!(
+            "Agent run {id} of agent '{agent}' {state}. {}",
+            self.how_to_resume(caller, run)
+        ))
+    }
+
+    /// What a caller is told about agent run `run`, which the workflow's
+    /// host stopped alone (`Workflow::stop_run`): why, and whether it can
+    /// be resumed (not when the host retired it).
+    fn stopped_alone_note(&self, caller: &str, run: &AgentResult) -> String {
+        let (id, agent) = (run.agent_run_id, &run.agent_name);
+        let Some(stop) = &run.stopped_by else {
+            return String::new();
+        };
+        let reason = stop.reason.trim().trim_end_matches('.');
+        let why = if reason.is_empty() {
+            String::new()
+        } else {
+            format!(" ({reason})")
+        };
+        let state = if run.status == AgentRunStatus::Completed {
+            format!(
+                "was stopped by the workflow's host{why} before it finished: its summary is a progress report that no completion verifier reviewed"
+            )
+        } else {
+            format!("was stopped by the workflow's host{why} and did not finish")
+        };
+        let how = if stop.is_retired() {
+            "The host retired it, so it can't be resumed.".to_string()
+        } else {
+            self.how_to_resume(caller, run)
+        };
+        format!("Agent run {id} of agent '{agent}' {state}. {how}")
+    }
+
+    /// How `caller` can resume agent run `run`, or that the host recovers
+    /// it when the caller may not run its agent.
+    fn how_to_resume(&self, caller: &str, run: &AgentResult) -> String {
+        let (id, agent) = (run.agent_run_id, &run.agent_name);
+        if self.is_allowed(caller) && self.is_target_allowed(caller, agent) {
             format!(
                 "You can resume it instead of starting over: call {RUN_WORKFLOW_AGENT_TOOL_NAME} with agent \"{agent}\", resume_run \"{id}\" and a prompt telling it what happened and what to do next; it continues its own task."
             )
         } else {
             "You may not run that agent, so it stays unfinished for the workflow's host to recover."
                 .to_string()
-        };
-        Some(format!("Agent run {id} of agent '{agent}' {state}. {how}"))
+        }
     }
 
     /// The workflow the services serve.
@@ -655,6 +706,18 @@ impl Tool for RunWorkflowAgentTool {
                 })?),
                 None => None,
             };
+        // A run being stopped alone wraps up: it starts no agent runs.
+        if !context.recovering
+            && self
+                .services
+                .context
+                .upgrade()
+                .is_some_and(|workflow| workflow.run_control.is_run_stopping(context.task_id))
+        {
+            return Err(ToolError::ExecutionFailed(
+                "Your run is being stopped, so it can't start or resume agent runs. Save your progress and call complete_task.".to_string(),
+            ));
+        }
         // The agent runs inside this call, which its task records.
         let parent = context.tool_call_id.map(|tool_call_id| TaskParent {
             task_id: context.task_id,

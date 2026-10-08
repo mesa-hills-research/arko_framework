@@ -135,15 +135,21 @@ impl AgentResult {
 
     /// The stop that ended this run, when a stop the host asked for ended
     /// it: the run was cancelled by
-    /// [`Workflow::stop`](crate::Workflow::stop) or
-    /// [`Workflow::cancel`](crate::Workflow::cancel) (status `Cancelled`,
-    /// including a run aborted after the grace period), or it completed
-    /// after its stop's wrap-up notice told it to finish (status
-    /// `Completed`). A stopped run is blameless: its outcome says nothing
-    /// about the agent's work, so don't count it as a failure (or a
-    /// success); [`Workflow::stopped_runs`](crate::Workflow::stopped_runs)
-    /// lists it for a restart after resuming. `None` for every other run, a
-    /// run a hook's abort ended, and runs recorded by an older version.
+    /// [`Workflow::stop`](crate::Workflow::stop),
+    /// [`Workflow::cancel`](crate::Workflow::cancel) or its own stop
+    /// ([`Workflow::stop_run`](crate::Workflow::stop_run)) (status
+    /// `Cancelled`, including a run aborted after the grace period), or it
+    /// completed after its stop's wrap-up notice told it to finish (status
+    /// `Completed`). A run stopped alone carries its stop also when it was
+    /// interrupted in its wrap-up (status `Interrupted`, such as a run the
+    /// process ended), and its record's
+    /// [`intent`](crate::workflow::stop::StopRecord::intent) says what the
+    /// host means to do with it. A stopped run is blameless: its outcome
+    /// says nothing about the agent's work, so don't count it as a failure
+    /// (or a success); [`Workflow::stopped_runs`](crate::Workflow::stopped_runs)
+    /// lists it for a restart unless the host retired it. `None` for every
+    /// other run, a run a hook's abort ended, and runs recorded by an older
+    /// version.
     pub fn stopped_by(&self) -> Option<&crate::workflow::stop::StopRecord> {
         self.stopped_by.as_ref()
     }

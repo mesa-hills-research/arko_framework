@@ -815,7 +815,9 @@ async fn answer_recovery_pause(
 /// the agent.
 ///
 /// A `batch_stop` (fail-fast in `run_agents_parallel`) that is set stops the
-/// agent too: the loop returns `AgentCancelled` with its reason.
+/// agent too: the loop returns `AgentCancelled` with its reason. So does the
+/// run's own stop ([`Workflow::stop_run`](super::Workflow::stop_run)) once
+/// it cancels the run: the loop returns `AgentStopped`.
 ///
 /// `paused` is the cause (and error kind) of the error-recovery pause the
 /// agent starts in (a resumed or recovered run): a runtime reports an error
@@ -845,26 +847,31 @@ pub(crate) async fn drive_event_loop(
         paused: paused.map(|(cause, _)| cause),
         ..RecoveryState::default()
     };
-    let Some(mut batch_stop) = batch_stop else {
-        return drive_events(&drive, event_rx, cmd_tx, &mut recovery).await;
-    };
-    let stopped = tokio::select! {
+    let run_stop = ctx.run_control.run_cancel(agent_run_id);
+    tokio::select! {
         biased;
-        stopped = batch_stop.wait_for(Option::is_some) => {
-            stopped.map(|reason| reason.clone().unwrap_or_default())
-        }
-        result = drive_events(&drive, event_rx, cmd_tx, &mut recovery) => {
-            return result;
-        }
-    };
-    match stopped {
-        Ok(reason) => Err(WorkflowError::AgentCancelled {
+        reason = stop_set(batch_stop) => Err(WorkflowError::AgentCancelled {
             agent: agent_name.to_string(),
             reason,
         }),
-        // The call that could stop it is gone: drive on, where it was.
-        Err(_) => drive_events(&drive, event_rx, cmd_tx, &mut recovery).await,
+        reason = stop_set(run_stop) => Err(WorkflowError::AgentStopped {
+            agent: agent_name.to_string(),
+            task_id: agent_run_id,
+            reason,
+        }),
+        result = drive_events(&drive, event_rx, cmd_tx, &mut recovery) => result,
     }
+}
+
+/// Resolves with the reason once `stop` is set; never when there is none,
+/// or when what could set it is gone (the run drives on, where it was).
+async fn stop_set(stop: Option<tokio::sync::watch::Receiver<Option<String>>>) -> String {
+    if let Some(mut stop) = stop
+        && let Ok(reason) = stop.wait_for(Option::is_some).await
+    {
+        return reason.clone().unwrap_or_default();
+    }
+    std::future::pending().await
 }
 
 /// The run a driver drives.
@@ -1269,6 +1276,12 @@ pub(crate) fn is_pause(error: &WorkflowError) -> bool {
             | WorkflowError::AgentPaused { .. }
             | WorkflowError::VerifierFailed { .. }
     )
+}
+
+/// Whether `error` says the host stopped the run alone
+/// ([`WorkflowError::AgentStopped`]): not a failure.
+pub(crate) fn is_run_stop(error: &WorkflowError) -> bool {
+    matches!(error, WorkflowError::AgentStopped { .. })
 }
 
 /// How a run starts.
@@ -2007,8 +2020,9 @@ fn run_status(state: &TaskState) -> AgentRunStatus {
 fn stop_reason(ctx: &SharedContext, drive_result: &Result<(), WorkflowError>) -> String {
     match (ctx.run_control.cancellation(), drive_result) {
         (Some(cancellation), _) => cancellation.cause.agent_reason(),
-        // A stop the workflow already worded (fail-fast).
-        (None, Err(WorkflowError::AgentCancelled { reason, .. })) => reason.clone(),
+        // A stop the workflow already worded (fail-fast, or the run's own).
+        (None, Err(WorkflowError::AgentCancelled { reason, .. }))
+        | (None, Err(WorkflowError::AgentStopped { reason, .. })) => reason.clone(),
         (None, Err(error)) => format!("Stopped by the workflow: {error}"),
         (None, Ok(())) => "Stopped by the workflow.".to_string(),
     }
@@ -2599,7 +2613,7 @@ impl WorkflowEngine {
                 review,
             }))
             .with_host_decisions(host_decisions.clone())
-            .with_stop_signal(ctx.run_control.tools_signal())
+            .with_stop_signal(ctx.run_control.begin_run(agent_run_id, review))
             .with_handover_hook(Arc::new(WorkflowHandover {
                 context: ctx.clone(),
                 agent_name: agent_name.to_string(),
@@ -2634,6 +2648,7 @@ impl WorkflowEngine {
             &pending_message_ids,
         );
         ctx.run_control.register(agent_run_id, &cmd_tx);
+        ctx.control_stops.start(ctx);
         StartedRun {
             agent_name: agent_name.to_string(),
             agent_run_id,
@@ -2863,6 +2878,7 @@ impl WorkflowEngine {
                 if ctx_clone.parallel.fail_fast
                     && let Err(error) = &result
                     && !is_pause(error)
+                    && !is_run_stop(error)
                     && trigger.set(index).is_ok()
                 {
                     stop.send_replace(Some(format!(
@@ -2882,12 +2898,14 @@ impl WorkflowEngine {
             match handle.await {
                 Ok(Ok(result)) => results.push(result),
                 Ok(Err(error)) => {
-                    // An agent that paused is not a failure: its recorded
-                    // result, to be continued, is returned with the others.
+                    // An agent that paused, or that the host stopped alone,
+                    // is not a failure: its recorded result is returned
+                    // with the others.
                     let paused = match &error {
                         WorkflowError::UserInputRequired { task_id, .. }
                         | WorkflowError::AgentPaused { task_id, .. }
-                        | WorkflowError::VerifierFailed { task_id, .. } => ctx
+                        | WorkflowError::VerifierFailed { task_id, .. }
+                        | WorkflowError::AgentStopped { task_id, .. } => ctx
                             .agent_results
                             .read()
                             .iter()
@@ -3619,13 +3637,16 @@ struct WorkflowExecutionMiddleware {
 }
 
 impl WorkflowExecutionMiddleware {
-    /// Once the run is stopped, every tool call cancels its agent.
-    fn stop_decision(&self) -> Option<ToolExecutionDecision> {
-        self.context.run_control.cancellation().map(|cancellation| {
-            ToolExecutionDecision::CancelTask {
-                reason: cancellation.cause.agent_reason(),
-            }
-        })
+    /// Once the run is stopped, or the agent run `task_id`'s own stop
+    /// cancels it, every tool call cancels its agent.
+    fn stop_decision(&self, task_id: uuid::Uuid) -> Option<ToolExecutionDecision> {
+        let reason = self
+            .context
+            .run_control
+            .cancellation()
+            .map(|cancellation| cancellation.cause.agent_reason())
+            .or_else(|| self.context.run_control.run_cancel_reason(task_id))?;
+        Some(ToolExecutionDecision::CancelTask { reason })
     }
 
     fn applicable_completion_verifiers(&self) -> impl Iterator<Item = &CompletionVerifierConfig> {
@@ -3990,7 +4011,7 @@ impl WorkflowExecutionMiddleware {
         execution: &ToolExecutionContext<'_>,
         call: &ToolCallContext<'_>,
     ) -> Result<ToolExecutionDecision, ToolError> {
-        if let Some(decision) = self.stop_decision() {
+        if let Some(decision) = self.stop_decision(execution.task_id) {
             return Ok(decision);
         }
         let approval_reason = self
@@ -4021,7 +4042,7 @@ impl WorkflowExecutionMiddleware {
             // The call doesn't run, and the whole run stops.
             HookResult::Abort(reason) => {
                 let error = abort_run(&self.context, &HookPoint::PreToolExecution, reason);
-                return Ok(self.stop_decision().unwrap_or_else(|| {
+                return Ok(self.stop_decision(execution.task_id).unwrap_or_else(|| {
                     ToolExecutionDecision::CancelTask {
                         reason: error.to_string(),
                     }
@@ -4065,12 +4086,12 @@ impl WorkflowExecutionMiddleware {
                 .await
             {
                 // A verifier stopped with the run decides nothing.
-                return Ok(self.stop_decision().unwrap_or(decision));
+                return Ok(self.stop_decision(execution.task_id).unwrap_or(decision));
             }
         }
 
         Ok(self
-            .stop_decision()
+            .stop_decision(execution.task_id)
             .unwrap_or(ToolExecutionDecision::Continue))
     }
 }

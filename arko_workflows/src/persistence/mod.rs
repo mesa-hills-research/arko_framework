@@ -778,7 +778,9 @@ impl PersistenceManager {
                     error: Some(RUNNING_AT_CHECKPOINT.to_string()),
                     task_file: file,
                     usage_charged: Some(run.usage_charged),
-                    stopped_by: None,
+                    // A stop of the run alone under way: a resume keeps the
+                    // host's intent for it.
+                    stopped_by: ctx.run_control.run_stop_record(*id),
                 });
             }
             for result in results.iter() {

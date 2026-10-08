@@ -12,6 +12,12 @@
 //! doesn't count them as failures. After resuming from the checkpoint,
 //! [`Workflow::stopped_runs`](crate::Workflow::stopped_runs) lists them and
 //! [`Workflow::restart`](crate::Workflow::restart) relaunches each one.
+//!
+//! [`Workflow::stop_run`](crate::Workflow::stop_run) and
+//! [`Workflow::stop_agent`](crate::Workflow::stop_agent) stop one run, or
+//! one agent's runs, the same way while the rest of the workflow runs on,
+//! with a [`RunStopIntent`]: a retired run is never relaunched, and one to
+//! relaunch is listed by `stopped_runs` at once.
 
 use std::time::Duration;
 
@@ -145,6 +151,38 @@ impl StopRequest {
     }
 }
 
+/// What the host means to do with a run it stops alone
+/// ([`Workflow::stop_run`](crate::Workflow::stop_run)), saved with the stop
+/// ([`StopRecord::intent`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStopIntent {
+    /// The run is done for good: the agent is removed, or another run
+    /// replaces it. [`Workflow::stopped_runs`](crate::Workflow::stopped_runs)
+    /// never lists it, [`Workflow::restart`](crate::Workflow::restart)
+    /// refuses it, and a delegated run's caller can't resume it.
+    Retire,
+    /// The host wants the run back: `stopped_runs` lists it, while the
+    /// workflow runs and after a resume, for `restart`.
+    Relaunch,
+}
+
+impl RunStopIntent {
+    /// The intent's name, as saved: `retire` or `relaunch`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Retire => "retire",
+            Self::Relaunch => "relaunch",
+        }
+    }
+}
+
+impl std::fmt::Display for RunStopIntent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// The stop that ended an agent run; see [`AgentResult::stopped_by`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StopRecord {
@@ -152,9 +190,33 @@ pub struct StopRecord {
     pub reason: String,
     /// When the stop began (the start of its wrap-up, if it had one).
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// `Some` when the host stopped this run alone
+    /// ([`Workflow::stop_run`](crate::Workflow::stop_run)), with what it
+    /// means to do with it. `None` for a stop of the whole workflow, and in
+    /// records saved before runs could be stopped alone. Omitted from JSON
+    /// when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<RunStopIntent>,
 }
 
 impl StopRecord {
+    /// Whether the host stopped the run for good
+    /// ([`RunStopIntent::Retire`]).
+    pub fn is_retired(&self) -> bool {
+        self.intent == Some(RunStopIntent::Retire)
+    }
+
+    /// The reason recorded on a run its own stop cancels, and given to its
+    /// tools: `Run stopped (operator): replacing it.`
+    pub(crate) fn run_reason(&self) -> String {
+        let reason = self.reason.trim().trim_end_matches('.');
+        if reason.is_empty() {
+            format!("Run stopped ({}).", self.kind)
+        } else {
+            format!("Run stopped ({}): {reason}.", self.kind)
+        }
+    }
+
     /// The record of `cause`, a stop the host asked for: a
     /// [`Workflow::stop`](crate::Workflow::stop), or a
     /// [`cancel`](crate::Workflow::cancel) (recorded as an operator's stop
@@ -168,11 +230,13 @@ impl StopRecord {
                 kind: *kind,
                 reason: reason.clone(),
                 timestamp,
+                intent: None,
             }),
             CancelCause::Requested => Some(Self {
                 kind: StopKind::Operator,
                 reason: cause.agent_reason(),
                 timestamp,
+                intent: None,
             }),
             CancelCause::AbortedByHook { .. } => None,
         }
@@ -188,6 +252,22 @@ impl StopRecord {
 /// > a summary of where you stopped and what is left, so the work can be
 /// > picked up from there.
 pub fn wrap_up_notice(reason: &str, within: Duration) -> String {
+    notice("The workflow is stopping", reason, within)
+}
+
+/// The default notice a run gets when the host stops it alone
+/// ([`Workflow::stop_run`](crate::Workflow::stop_run)) with a wrap-up:
+///
+/// > Your run is being stopped: replacing it with another model. You have
+/// > about 600 seconds before you are stopped. Save your progress where
+/// > your instructions say to keep it, and don't start new long work. Then
+/// > call complete_task with a summary of where you stopped and what is
+/// > left, so the work can be picked up from there.
+pub fn run_wrap_up_notice(reason: &str, within: Duration) -> String {
+    notice("Your run is being stopped", reason, within)
+}
+
+fn notice(stopping: &str, reason: &str, within: Duration) -> String {
     let reason = reason.trim().trim_end_matches('.');
     let why = if reason.is_empty() {
         String::new()
@@ -195,7 +275,7 @@ pub fn wrap_up_notice(reason: &str, within: Duration) -> String {
         format!(": {reason}")
     };
     format!(
-        "The workflow is stopping{why}. You have about {} before you are stopped. Save your progress where your instructions say to keep it, and don't start new long work. Then call complete_task with a summary of where you stopped and what is left, so the work can be picked up from there.",
+        "{stopping}{why}. You have about {} before you are stopped. Save your progress where your instructions say to keep it, and don't start new long work. Then call complete_task with a summary of where you stopped and what is left, so the work can be picked up from there.",
         describe_seconds(within)
     )
 }
@@ -215,11 +295,11 @@ pub enum Restart {
     /// `Interrupted`): [`recover_agent`](crate::Workflow::recover_agent)
     /// continues it where its task was saved, without a message.
     Recover,
-    /// The stop cancelled the run:
+    /// A stop cancelled the run:
     /// [`reopen_agent`](crate::Workflow::reopen_agent) continues it, with
     /// the restart's note.
     Reopen,
-    /// The run completed in the stop's wrap-up:
+    /// The run completed in a stop's wrap-up:
     /// [`continue_agent`](crate::Workflow::continue_agent) continues it,
     /// telling it it was restarted, with the restart's note.
     Continue,
@@ -247,9 +327,18 @@ pub(crate) fn continued_message(result: &AgentResult, note: &str) -> String {
             }
         })
         .unwrap_or_default();
-    let message = format!(
-        "The workflow was stopped{stop} while you worked, so you finished early, and it has now restarted. Continue your task from where you stopped, and call complete_task when it is done."
-    );
+    let message = if result
+        .stopped_by()
+        .is_some_and(|stop| stop.intent.is_some())
+    {
+        format!(
+            "Your run was stopped{stop} while you worked, so you finished early, and it has now been restarted. Continue your task from where you stopped, and call complete_task when it is done."
+        )
+    } else {
+        format!(
+            "The workflow was stopped{stop} while you worked, so you finished early, and it has now restarted. Continue your task from where you stopped, and call complete_task when it is done."
+        )
+    };
     let note = note.trim();
     if note.is_empty() {
         message
@@ -405,5 +494,13 @@ mod tests {
             "The workflow is stopping. You have about 1 second before you are stopped."
         ));
         assert_eq!(serde_json::to_value(StopKind::Drain).unwrap(), "drain");
+        assert_eq!(
+            run_wrap_up_notice("replacing it with another model.", Duration::from_secs(600)),
+            "Your run is being stopped: replacing it with another model. You have about 600 seconds before you are stopped. Save your progress where your instructions say to keep it, and don't start new long work. Then call complete_task with a summary of where you stopped and what is left, so the work can be picked up from there."
+        );
+        assert_eq!(
+            serde_json::to_value(RunStopIntent::Relaunch).unwrap(),
+            "relaunch"
+        );
     }
 }
