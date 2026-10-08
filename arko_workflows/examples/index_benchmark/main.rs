@@ -817,6 +817,9 @@ async fn run_command(args: RunArgs) -> BenchResult<()> {
     let task_repos: std::collections::BTreeSet<String> =
         task_set.iter().map(|task| task.repo.clone()).collect();
     let variants = variants::for_arms(&layout, &arms, &prepared, &task_repos)?;
+    if !args.grade_only {
+        variants::check_embedding_key(&variants, &task_repos)?;
+    }
     // Arm C, and variants based on it, search with arm C's dense index.
     if arms.contains(&Arm::C) || variants.values().any(|variant| variant.spec.dense_tool()) {
         let missing: Vec<&str> = task_set

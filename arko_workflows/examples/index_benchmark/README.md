@@ -257,7 +257,7 @@ flags alone, and the index directory stays across rebuilds, so its embedding cac
 the vectors already paid for. After `prepare` checks out another commit, run
 `prepare-variants` again: `run` refuses a variant whose index is of another commit than
 the checkout. Variants that embed need `VOYAGE_API_KEY` in the benchmark's environment
-for `prepare-variants` and for `run`. In
+for `prepare-variants` and for `run`, which refuses to start without it. In
 their shells, `arko_index search2` goes through
 a service in the benchmark process that runs the CLI with the key, the way arm C's
 `arko_index_dense` does. `--max-embed-tokens 0` in a variant's flags counts the tokens a

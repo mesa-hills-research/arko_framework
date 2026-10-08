@@ -575,6 +575,58 @@ pub fn for_arms(
     Ok(out)
 }
 
+/// Refuses variants whose searches embed their queries with Voyage when
+/// `VOYAGE_API_KEY` is unset, as arm C does: without it every `search2` of
+/// theirs would fail.
+pub fn check_embedding_key(
+    variants: &BTreeMap<String, PreparedVariant>,
+    task_repos: &std::collections::BTreeSet<String>,
+) -> BenchResult<()> {
+    let key_set = std::env::var_os("VOYAGE_API_KEY")
+        .is_some_and(|key| !key.to_string_lossy().trim().is_empty());
+    match voyage_variant(variants, task_repos)? {
+        Some((name, id)) if !key_set => Err(format!(
+            "variant {name}'s index of {id} embeds with Voyage: its searches need VOYAGE_API_KEY (or prepare-variants --mock-embeddings for a dry run)"
+        )
+        .into()),
+        _ => Ok(()),
+    }
+}
+
+/// The first variant, and repository, whose index of a task repository embeds
+/// with Voyage.
+fn voyage_variant(
+    variants: &BTreeMap<String, PreparedVariant>,
+    task_repos: &std::collections::BTreeSet<String>,
+) -> BenchResult<Option<(String, String)>> {
+    for (name, variant) in variants {
+        for (id, index) in &variant.repos {
+            if index.dense
+                && task_repos.contains(id)
+                && embedding_provider(&index.dir)?.as_deref() == Some("voyage")
+            {
+                return Ok(Some((name.clone(), id.clone())));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The embedding provider of an index's current generation (`voyage`, `hash`),
+/// or `None` when it has no embeddings.
+fn embedding_provider(dir: &Path) -> BenchResult<Option<String>> {
+    let generation = std::fs::read_to_string(dir.join("CURRENT2"))
+        .map_err(|error| format!("{}: {error}", dir.join("CURRENT2").display()))?;
+    let path = dir.join(generation.trim()).join("dense.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("{}: {error}", path.display()).into()),
+    };
+    let info: serde_json::Value = serde_json::from_slice(&bytes)?;
+    Ok(info["embedder"]["provider"].as_str().map(str::to_string))
+}
+
 /// The `arko_index` a variant arm's shell runs: the CLI itself, or a script
 /// that adds the variant's `search2` flags, or one that sends `search2` to the
 /// run's search service (when the index embeds).
@@ -1099,6 +1151,54 @@ mod tests {
             "def"
         );
         set_writable(&layout.out, true);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn voyage_indexes_are_found_from_their_generation() {
+        let dir = crate::test_dir("embedding-provider");
+        let index = |name: &str, provider: Option<&str>| {
+            let state = dir.join(name);
+            std::fs::create_dir_all(state.join("index2-1")).unwrap();
+            std::fs::write(state.join("CURRENT2"), "index2-1\n").unwrap();
+            if let Some(provider) = provider {
+                std::fs::write(
+                    state.join("index2-1/dense.json"),
+                    format!(r#"{{"embedder": {{"provider": "{provider}", "model": "m"}}}}"#),
+                )
+                .unwrap();
+            }
+            VariantIndex {
+                dir: state,
+                commit: String::new(),
+                flags: Vec::new(),
+                cli_sha256: String::new(),
+                dense: provider.is_some(),
+                build_ms: 0,
+                summary: String::new(),
+            }
+        };
+        assert_eq!(
+            embedding_provider(&index("lexical", None).dir).unwrap(),
+            None
+        );
+        let variant = |index: VariantIndex| PreparedVariant {
+            spec: spec("v", &[], &[]),
+            mock_embeddings: false,
+            repos: BTreeMap::from([("demo".to_string(), index)]),
+        };
+        let demo = std::collections::BTreeSet::from(["demo".to_string()]);
+        let hash = BTreeMap::from([("hash".to_string(), variant(index("hash", Some("hash"))))]);
+        assert_eq!(voyage_variant(&hash, &demo).unwrap(), None);
+        let voyage = BTreeMap::from([(
+            "voyage".to_string(),
+            variant(index("voyage", Some("voyage"))),
+        )]);
+        assert_eq!(
+            voyage_variant(&voyage, &demo).unwrap(),
+            Some(("voyage".to_string(), "demo".to_string()))
+        );
+        assert_eq!(voyage_variant(&voyage, &Default::default()).unwrap(), None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
