@@ -335,21 +335,8 @@ impl AgentLoop {
                 self.reject_announced_calls(native_stream_call_ids, INTERRUPTED_CALL)
                     .await?;
                 self.stop_requested = true;
-                let reason = "Command channel disconnected during LLM streaming.".to_string();
-                self.task.set_state(TaskState::Interrupted {
-                    reason: reason.clone(),
-                });
-                self.emit_event(AgentEvent::TaskStateChanged(
-                    self.task.current_state.clone(),
-                ))
-                .await?;
-                self.emit_event(AgentEvent::ErrorEncountered {
-                    error_message: reason,
-                    requires_approval_to_retry: false,
-                    tool_call_id: None,
-                    error_kind: None,
-                })
-                .await?;
+                self.interrupt("Command channel disconnected during LLM streaming.".to_string())
+                    .await?;
                 return Ok(true);
             }
         }

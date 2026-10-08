@@ -84,20 +84,7 @@ impl AgentLoop {
                     );
                     let reason = "Command channel disconnected.".to_string();
                     log::error!("Task {}: {}", self.task.id, reason);
-                    self.task.set_state(TaskState::Interrupted {
-                        reason: reason.clone(),
-                    });
-                    self.emit_event(AgentEvent::TaskStateChanged(
-                        self.task.current_state.clone(),
-                    ))
-                    .await?;
-                    self.emit_event(AgentEvent::ErrorEncountered {
-                        error_message: reason,
-                        requires_approval_to_retry: false,
-                        tool_call_id: None,
-                        error_kind: None,
-                    })
-                    .await?;
+                    self.interrupt(reason).await?;
                     self.stop_requested = true;
                     return Ok(true);
                 }
@@ -342,6 +329,13 @@ impl AgentLoop {
         log::error!("Task {}: {}", self.task.id, reason);
         self.settle_interrupted_wait(call_reason, HELD_CALL_NOT_RUN)
             .await?;
+        self.interrupt(reason).await?;
+        Ok(Flow::Exit)
+    }
+
+    /// Interrupts the task for `reason` (its host stopped, or a wait for a
+    /// command timed out): `TaskStateChanged`, then `ErrorEncountered`.
+    pub(super) async fn interrupt(&mut self, reason: String) -> Result<(), ArkoAgentsError> {
         self.task.set_state(TaskState::Interrupted {
             reason: reason.clone(),
         });
@@ -355,7 +349,6 @@ impl AgentLoop {
             tool_call_id: None,
             error_kind: None,
         })
-        .await?;
-        Ok(Flow::Exit)
+        .await
     }
 }
