@@ -945,6 +945,26 @@ impl AgentLoop {
         Ok(())
     }
 
+    /// The end of a wait's native decisions: the approved calls run with
+    /// the held ones and every result, `decided` included, is added (see
+    /// [`run_decided_native_calls`](Self::run_decided_native_calls)), the
+    /// task leaves the approval state `waited_in` matches, the batch ends
+    /// (pausing on its tool errors), and the turn's results go into the
+    /// conversation if they are due.
+    pub(super) async fn finish_native_decisions(
+        &mut self,
+        approved: Vec<NativeRun>,
+        decided: Vec<(usize, ai::ToolResult)>,
+        waited_in: fn(&TaskState) -> bool,
+    ) -> Result<(), ArkoAgentsError> {
+        self.run_decided_native_calls(approved, decided).await?;
+        if waited_in(&self.task.current_state) {
+            self.task.set_state(TaskState::InProgress);
+        }
+        self.end_tool_batch().await?;
+        self.flush_native_results_if_due().await
+    }
+
     /// An approved native call to run, or `Err` when this run doesn't offer
     /// its tool (a call saved awaiting approval), which is answered like any
     /// unavailable tool, even with caller output.

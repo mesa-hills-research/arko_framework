@@ -130,15 +130,10 @@ impl AgentLoop {
                     Err(()) => results.push((index, self.unavailable_native_tool(&ai_call).await?)),
                 }
             }
-            self.run_decided_native_calls(approved, results).await?;
-            if matches!(
-                self.task.current_state,
-                TaskState::AwaitingToolApproval { .. }
-            ) {
-                self.task.set_state(TaskState::InProgress);
-            }
-            self.end_tool_batch().await?;
-            self.flush_native_results_if_due().await?;
+            self.finish_native_decisions(approved, results, |state| {
+                matches!(state, TaskState::AwaitingToolApproval { .. })
+            })
+            .await?;
             native_handled = true;
         } else {
             let start = self.task.pending_text_tool_results.len();
@@ -204,15 +199,10 @@ impl AgentLoop {
             // Calls held for this one run now.
             self.begin_tool_batch();
             self.task.set_state(TaskState::InProgress);
-            self.run_decided_native_calls(Vec::new(), results).await?;
-            if matches!(
-                self.task.current_state,
-                TaskState::AwaitingToolApproval { .. }
-            ) {
-                self.task.set_state(TaskState::InProgress);
-            }
-            self.end_tool_batch().await?;
-            self.flush_native_results_if_due().await?;
+            self.finish_native_decisions(Vec::new(), results, |state| {
+                matches!(state, TaskState::AwaitingToolApproval { .. })
+            })
+            .await?;
             native_handled = true;
         } else {
             let pb =
@@ -347,15 +337,10 @@ impl AgentLoop {
                 }
             }
         }
-        self.run_decided_native_calls(approved, results).await?;
-        if matches!(
-            self.task.current_state,
-            TaskState::AwaitingBatchToolApproval { .. }
-        ) {
-            self.task.set_state(TaskState::InProgress);
-        }
-        self.end_tool_batch().await?;
-        self.flush_native_results_if_due().await?;
+        self.finish_native_decisions(approved, results, |state| {
+            matches!(state, TaskState::AwaitingBatchToolApproval { .. })
+        })
+        .await?;
         let native_handled = true;
         Ok(FollowUp {
             native_handled,
