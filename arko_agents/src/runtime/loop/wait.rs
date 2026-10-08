@@ -170,8 +170,9 @@ impl AgentLoop {
                     .user_command_timeout_seconds
                     .unwrap_or(0);
                 let reason = format!(
-                    "Timeout ({}s) waiting for user command in state {:?}.",
-                    seconds, self.task.current_state
+                    "Timeout ({}s) waiting for user command in state {}.",
+                    seconds,
+                    state_name(&self.task.current_state)
                 );
                 self.interrupt_wait(reason, &approval_timed_out_call(seconds))
                     .await

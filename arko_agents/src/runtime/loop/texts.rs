@@ -101,6 +101,23 @@ pub(super) fn stopped_call_reason(stop: ToolsStopped, state: &TaskState) -> &'st
     }
 }
 
+/// The name of a task's state, without its details (a timeout's reason
+/// names the state the task waited in).
+pub(super) fn state_name(state: &TaskState) -> &'static str {
+    match state {
+        TaskState::Pending => "Pending",
+        TaskState::InProgress => "InProgress",
+        TaskState::AwaitingToolApproval { .. } => "AwaitingToolApproval",
+        TaskState::AwaitingBatchToolApproval { .. } => "AwaitingBatchToolApproval",
+        TaskState::AwaitingUserResponse { .. } => "AwaitingUserResponse",
+        TaskState::AwaitingErrorRecoveryApproval { .. } => "AwaitingErrorRecoveryApproval",
+        TaskState::Interrupted { .. } => "Interrupted",
+        TaskState::Completed { .. } => "Completed",
+        TaskState::Failed { .. } => "Failed",
+        TaskState::Cancelled { .. } => "Cancelled",
+    }
+}
+
 /// When `user_command_timeout_seconds` ran out during the wait.
 pub(super) fn approval_timed_out_call(seconds: u64) -> String {
     format!(

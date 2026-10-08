@@ -96,10 +96,14 @@ async fn injected_context_does_not_extend_the_wait() {
         std::future::pending::<()>().await;
     });
     let task = agent.run().await.unwrap();
-    assert!(
-        matches!(task.current_state, TaskState::Interrupted { .. }),
-        "{:?}",
-        task.current_state
+    // The reason names the state the task waited in.
+    assert_eq!(
+        task.current_state,
+        TaskState::Interrupted {
+            reason: format!(
+                "Timeout ({TIMEOUT}s) waiting for user command in state AwaitingErrorRecoveryApproval."
+            ),
+        }
     );
     assert_eq!(
         start.elapsed(),
