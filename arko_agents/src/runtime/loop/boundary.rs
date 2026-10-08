@@ -115,8 +115,7 @@ impl AgentLoop {
             return Ok(());
         }
         let content = self.task.pending_context_injections.join("\n\n");
-        let prompt_builder =
-            PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None);
+        let prompt_builder = self.prompts();
         let next_message_number = self.task.user_message_count + 1;
         // The message just before this one (tool results, say) already
         // carried this turn's environment details.
@@ -258,7 +257,7 @@ impl AgentLoop {
     /// on an error) as the next user message, with the environment details
     /// and reminder due with it.
     pub(super) fn add_runtime_message(&mut self, message: &str) -> Result<(), ArkoAgentsError> {
-        let pb = PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None);
+        let pb = self.prompts();
         let next_msg_num = self.task.user_message_count + 1;
         let augmented_message = pb.augment_user_message_with_env_details_and_reminder(
             &self.task,

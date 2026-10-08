@@ -318,6 +318,12 @@ impl AgentLoop {
         self.snapshots.report(&self.task, durable).await;
     }
 
+    /// A prompt builder for the runtime's messages to the model (without
+    /// the tool definitions, which only the system prompt lists).
+    fn prompts(&self) -> PromptBuilder<'_> {
+        PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None)
+    }
+
     fn is_native_mode(&self) -> bool {
         self.task.agent_config.tool_config.tool_calling_mode == ToolCallingMode::Native
     }

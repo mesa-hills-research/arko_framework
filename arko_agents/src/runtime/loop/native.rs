@@ -415,8 +415,11 @@ impl AgentLoop {
             return Ok(());
         }
         self.limit_tool_results().await?;
-        let text = PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None)
-            .text_beside_tool_results(&self.task, extra_text, self.task.user_message_count + 1)?;
+        let text = self.prompts().text_beside_tool_results(
+            &self.task,
+            extra_text,
+            self.task.user_message_count + 1,
+        )?;
         self.task.add_pending_tool_results(text.as_deref());
         self.mark_details_sent();
         Ok(())

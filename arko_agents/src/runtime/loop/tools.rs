@@ -587,8 +587,7 @@ impl AgentLoop {
         let error_message_for_event = format!("Tool '{}' execution failed: {}", tool_name, error);
         log::warn!("Task {}: {}", self.task.id, error_message_for_event);
 
-        let prompt_builder_for_error_msg =
-            PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None);
+        let prompt_builder_for_error_msg = self.prompts();
         let error_message_for_llm = prompt_builder_for_error_msg
             .format_tool_execution_error_as_user_message(tool_name, &error.to_string());
 

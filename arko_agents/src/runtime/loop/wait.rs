@@ -300,8 +300,7 @@ impl AgentLoop {
 
         if matches!(self.task.current_state, TaskState::InProgress) && !native_handled {
             if !next_user_message_from_command.is_empty() {
-                let pb =
-                    PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None);
+                let pb = self.prompts();
                 let next_msg_num = self.task.user_message_count + 1;
                 let augmented_msg = pb.augment_user_message_with_env_details_and_reminder(
                     &self.task,

@@ -205,8 +205,7 @@ impl AgentLoop {
             .await?;
             native_handled = true;
         } else {
-            let pb =
-                PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None);
+            let pb = self.prompts();
             next_user_message_from_command =
                 pb.format_tool_rejection_as_user_message(&tool_name, (*reason).as_deref());
             self.task.set_state(TaskState::InProgress);
@@ -385,12 +384,7 @@ impl AgentLoop {
                         reason: (*reason).clone(),
                     })
                     .await?;
-                    let pb = PromptBuilder::new(
-                        &self.task.agent_config,
-                        vec![],
-                        &self.parsing_config,
-                        None,
-                    );
+                    let pb = self.prompts();
                     self.record_text_result(pb.format_tool_rejection_as_user_message(
                         &pending_call_info.tool_name,
                         (*reason).as_deref(),
@@ -404,12 +398,7 @@ impl AgentLoop {
                         reason: Some(NO_DECISION.to_string()),
                     })
                     .await?;
-                    let pb = PromptBuilder::new(
-                        &self.task.agent_config,
-                        vec![],
-                        &self.parsing_config,
-                        None,
-                    );
+                    let pb = self.prompts();
                     self.record_text_result(pb.format_tool_rejection_as_user_message(
                         &pending_call_info.tool_name,
                         Some(NO_DECISION_TEXT_CALL),
@@ -445,8 +434,7 @@ impl AgentLoop {
         match *cmd {
             UserCommand::SubmitUserResponse { ref response } => {
                 log::info!("Task {}: User response received.", self.task.id);
-                let pb =
-                    PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None);
+                let pb = self.prompts();
                 let formatted = pb.format_user_response_as_user_message(questions, response);
                 self.task.set_state(TaskState::InProgress);
 

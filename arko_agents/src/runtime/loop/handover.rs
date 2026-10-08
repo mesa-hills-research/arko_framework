@@ -138,8 +138,7 @@ impl AgentLoop {
             replaced_messages,
             report: report.clone(),
         });
-        let prompt_builder =
-            PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None);
+        let prompt_builder = self.prompts();
         let first_message =
             prompt_builder.format_initial_task_prompt(&self.task, &seed.message(&report))?;
         self.task.conversation.add_user_message(&first_message);

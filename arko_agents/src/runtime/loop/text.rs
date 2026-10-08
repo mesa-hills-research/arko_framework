@@ -383,13 +383,10 @@ impl AgentLoop {
                 reason: Some(HANDOVER_REPORT_DUE.to_string()),
             })
             .await?;
-            self.record_text_result(
-                PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None)
-                    .format_tool_execution_error_as_user_message(
-                        &parsed_tool_call_ref.name,
-                        HANDOVER_REPORT_DUE,
-                    ),
-            )
+            self.record_text_result(self.prompts().format_tool_execution_error_as_user_message(
+                &parsed_tool_call_ref.name,
+                HANDOVER_REPORT_DUE,
+            ))
             .await;
             return Ok(TextCall::Handled);
         }
@@ -515,8 +512,7 @@ impl AgentLoop {
             && !self.task.current_state.is_terminal()
             && !self.task.current_state.is_awaiting_approval()
         {
-            let pb =
-                PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None);
+            let pb = self.prompts();
             let next_msg_num = self.task.user_message_count + 1;
             let augmented_user_message = pb.augment_user_message_with_env_details_and_reminder(
                 &self.task,
@@ -606,7 +602,7 @@ impl AgentLoop {
         };
 
         let format_error = |this: &Self, message: &str| {
-            PromptBuilder::new(&this.task.agent_config, vec![], &this.parsing_config, None)
+            this.prompts()
                 .format_tool_execution_error_as_user_message(tool_name, message)
         };
         let mut run = self.tool_run(
@@ -658,7 +654,7 @@ impl AgentLoop {
         message_to_agent_on_approval: Option<String>,
     ) -> Result<String, ArkoAgentsError> {
         let format_error = |this: &Self, message: &str| {
-            PromptBuilder::new(&this.task.agent_config, vec![], &this.parsing_config, None)
+            this.prompts()
                 .format_tool_execution_error_as_user_message(tool_name, message)
         };
         match outcome {
@@ -696,12 +692,11 @@ impl AgentLoop {
                 let formatted = if is_error {
                     format_error(self, &effective)
                 } else {
-                    PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None)
-                        .format_tool_result_as_user_message(
-                            tool_name,
-                            &effective,
-                            message_to_agent_on_approval.as_deref(),
-                        )
+                    self.prompts().format_tool_result_as_user_message(
+                        tool_name,
+                        &effective,
+                        message_to_agent_on_approval.as_deref(),
+                    )
                 };
                 self.queue_tool_images(tool_name, tool_call_id, output.images);
                 self.pause_for_middleware_error(tool_call_id, tool_name, reason)
@@ -783,13 +778,11 @@ impl AgentLoop {
         }
         self.emit_tool_result_events(tool_call_id, tool_name, &raw, &effective, intercepted)
             .await?;
-        let formatted =
-            PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None)
-                .format_tool_result_as_user_message(
-                    tool_name,
-                    &effective,
-                    message_to_agent_on_approval.as_deref(),
-                );
+        let formatted = self.prompts().format_tool_result_as_user_message(
+            tool_name,
+            &effective,
+            message_to_agent_on_approval.as_deref(),
+        );
         self.queue_tool_images(tool_name, tool_call_id, output.images);
         if tool_name == COMPLETE_TASK_TOOL_NAME {
             self.task.set_state(TaskState::Completed { summary: raw });

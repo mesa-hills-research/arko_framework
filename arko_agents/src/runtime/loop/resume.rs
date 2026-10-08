@@ -295,11 +295,10 @@ impl AgentLoop {
                     })
                     .await?;
                     self.call_settled(entry.tool_call_id);
-                    PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None)
-                        .format_tool_execution_error_as_user_message(
-                            &entry.tool_name,
-                            RESTARTED_CALL,
-                        )
+                    self.prompts().format_tool_execution_error_as_user_message(
+                        &entry.tool_name,
+                        RESTARTED_CALL,
+                    )
                 }
             };
             self.record_text_result(result).await;
@@ -364,13 +363,13 @@ impl AgentLoop {
             self.task.pending_text_tool_results.clear();
         } else if !self.task.current_state.is_awaiting_approval() {
             let results = self.task.with_pending_text_tool_results(String::new());
-            let message =
-                PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None)
-                    .augment_user_message_with_env_details_and_reminder(
-                        &self.task,
-                        &results,
-                        self.task.user_message_count + 1,
-                    )?;
+            let message = self
+                .prompts()
+                .augment_user_message_with_env_details_and_reminder(
+                    &self.task,
+                    &results,
+                    self.task.user_message_count + 1,
+                )?;
             self.add_text_tool_results_to_conversation(&message);
             self.mark_details_sent();
             self.task.increment_user_message_count();
