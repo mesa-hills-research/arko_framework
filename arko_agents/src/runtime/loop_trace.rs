@@ -527,4 +527,19 @@ mod tests {
         assert!(shortened.ends_with(&format!("<401 chars, {:016x}>", fnv1a(long.as_bytes()))));
         assert_eq!(normalizer.string(&long, None), long);
     }
+
+    /// The sizes a change to the loop watches: the run future, which
+    /// `tokio::spawn` boxes once, and the loop. Run with `--ignored
+    /// --nocapture`, in debug and release builds.
+    #[test]
+    #[ignore = "a measurement"]
+    fn loop_sizes() {
+        let (agent, _events, _commands) = super::super::retry_tests::harness();
+        let agent_loop = std::mem::size_of_val(&agent);
+        let run = agent.run();
+        println!(
+            "loop sizes: run future {} bytes, AgentLoop {agent_loop} bytes",
+            std::mem::size_of_val(&run)
+        );
+    }
 }
