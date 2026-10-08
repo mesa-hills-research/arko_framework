@@ -84,7 +84,7 @@ pub(crate) fn embed_spool(
     let mut exhausted = false;
     let mut totals = RunTotals::default();
     let count = |texts: &[([u8; 32], String)]| -> Result<Vec<u64>, Error> {
-        let refs: Vec<&str> = texts.iter().map(|(_, t)| t.as_str()).collect();
+        let refs: Vec<&str> = texts.iter().map(|(_, t)| sendable(t)).collect();
         let counts = embedder.count_tokens(&refs)?;
         if counts.len() != refs.len() {
             return Err(format!(
@@ -156,7 +156,7 @@ pub(crate) fn embed_spool(
             }
         }
         let batch: Vec<_> = queue.drain(..n).collect();
-        let texts: Vec<&str> = batch.iter().map(|(_, t, _)| t.as_str()).collect();
+        let texts: Vec<&str> = batch.iter().map(|(_, t, _)| sendable(t)).collect();
         let embedded = embedder.embed(&texts, InputKind::Document)?;
         if embedded.vectors.len() != batch.len() {
             return Err(format!(
@@ -220,4 +220,31 @@ pub(crate) fn embed_spool(
         }
     }
     Ok(totals)
+}
+
+/// What is sent for a text: providers such as Voyage reject empty inputs, and a
+/// chunk's text can be empty or blank (an empty file with `--embed-text source`),
+/// so a blank text is embedded as a fixed placeholder. Its cache key stays the
+/// text's own hash.
+fn sendable(text: &str) -> &str {
+    if text.trim().is_empty() {
+        EMPTY_TEXT
+    } else {
+        text
+    }
+}
+
+/// The placeholder [`sendable`] sends for a blank text.
+const EMPTY_TEXT: &str = "(empty)";
+
+#[cfg(test)]
+mod sendable_tests {
+    use super::*;
+
+    #[test]
+    fn blank_texts_are_sent_as_a_placeholder() {
+        assert_eq!(sendable(""), EMPTY_TEXT);
+        assert_eq!(sendable(" \n\t"), EMPTY_TEXT);
+        assert_eq!(sendable("fn main() {}"), "fn main() {}");
+    }
 }
