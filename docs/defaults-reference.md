@@ -20,7 +20,7 @@ Defaults that change what an agent sees of its tool results, in arko's own runti
 
 ChatGPT sign-ins: one account unless `LLMClient::with_chatgpt_accounts` installs an ordered
 list. The list fails over only when the backend refuses an account (a usage limit, or
-credits or quota run out; credits keep an account serving), checks the accounts above the
+credits or quota run out, while credits keep an account serving), checks the accounts above the
 serving one at most every 5 minutes, and never runs in the background. See
 [Client and credentials](reference-map.md#client-and-credentials-arko_ai).
 
@@ -39,32 +39,34 @@ Defaults of arko_index (see [Defaults (arko_index)](reference-map.md#defaults-ar
 
 - Every regular file under the root is indexed, hidden and gitignored files included.
   Ignore files are read only with `FileRules::respect_ignore` (`--respect-ignore`), and
-  never above the root. Built in: `.git` and `CACHEDIR.TAG` directories and the tool's
-  state directories are skipped.
-- Binary, non-UTF-8 and unreadable files are skipped and listed in the report; a walk
-  never stops for them.
-- Chunking, indexing and watching use every available CPU (`ARKO_INDEX_THREADS`
-  overrides), with identical output at any thread count.
+  never above the root. Built in: `.git` directories and files, `CACHEDIR.TAG` directories
+  and the tool's state directories are skipped.
+- Binary, non-UTF-8 and unreadable files are skipped and listed in the report, and the
+  walk goes on.
+- Chunking, `index2` builds and the inotify watcher (`watch2`) use every available CPU
+  (`ARKO_INDEX_THREADS` overrides), with identical output at any thread count. The JSON
+  index (`search::index`) and the polling watcher use one thread.
 - Dense (embedding) search is opt-in: an index is lexical unless a build sets
   `BuildOptions::dense` (CLI `index2 --embed MODEL`). The library makes no network
-  calls and reads no credentials; the examples embed with Voyage through arko_ai
+  calls and reads no credentials. The examples embed with Voyage through arko_ai
   (`VOYAGE_API_KEY`). Once chosen, the model is saved with the index
-  (`STATE_DIR/dense.json`) and later builds follow it; embeddings are cached by model
-  and text, so a rebuild embeds only changed chunks. The embedded text is the path, the
+  (`STATE_DIR/dense.json`), and the CLI's later `index2` builds follow it (a library
+  caller passes `DenseBuild::from_config` with `DenseConfig::load`). Embeddings are
+  cached by model and text, so a rebuild embeds only changed chunks. The embedded text is the path, the
   scope and the source (`EmbedText::PathScopeSource`, CLI `--embed-text`).
 - No token cap by default (`DenseBuild::max_tokens`, `--max-embed-tokens`): set one
   for unattended builds. At the cap a build stops embedding, still publishes, and
   reports what is left. Builds and searches report the tokens billed.
-- Searches return ten results. The library's `SearchRequest` is lexical by default;
-  the CLI's `search2` is hybrid when the index has embeddings. Hybrid fusion is
+- Searches return ten results. The library's `SearchRequest` is lexical by default,
+  and the CLI's `search2` is hybrid when the index has embeddings. Hybrid fusion is
   reciprocal rank fusion (k = 60, equal weights) over 50 candidates per side.
   Vectors are stored as f32 (`Quantization::Int8` opt-in).
 - Chunks carry a context header (`scope`: enclosing definitions or Markdown headings),
-  chunk JSON format 2; boundaries and IDs are unchanged. Lexical search indexes a
+  added in chunk JSON format 2 without changing boundaries or IDs. Lexical search indexes a
   chunk's path and source, and its scope only with `BuildOptions::lexical_scope`
   (`index2 --lexical-scope`).
-- 50 languages are parsed and chunked along their structure; anything else is split by
-  the bounded fallback. A Markdown file's front matter is file metadata (chunk format 3
+- 50 languages are parsed and chunked along their structure, and anything else is split
+  by the bounded fallback. A Markdown file's front matter is file metadata (chunk format 3
   records it), and its title, without the description, roots every chunk's scope
   (`Options::front_matter_description` adds the description). See
   [arko_index languages](arko_index-languages.md).
