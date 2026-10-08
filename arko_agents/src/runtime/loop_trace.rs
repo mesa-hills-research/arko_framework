@@ -4,9 +4,8 @@
 //! and the task at each snapshot, for changes to the loop that must keep its
 //! behaviour.
 //!
-//! A loop is traced when its test is: a test that calls [`record`] (the
-//! golden scenarios of `golden_tests.rs`), or every test when one of these
-//! variables is set:
+//! A loop is traced when its test is: a test that calls [`record`], or
+//! every test when one of these variables is set:
 //!
 //! - `ARKO_LOOP_TRACE_DIR=<dir>`: each test's trace goes to
 //!   `<dir>/<test>.trace`, appended line by line (clear the folder first).
@@ -21,10 +20,11 @@
 //! task=<hash>`, where the hash covers the whole task except its agent
 //! configuration (and its model, named by id). Normalizing sorts JSON keys,
 //! replaces UUIDs with `id0`, `id1`, … in the order a test's trace first
-//! shows them, masks wall-clock times, the time to a usage-limit reset and
-//! the awaiting state a command timeout prints with `{:?}` (its maps print
-//! in a different order each run), and shortens strings over
-//! [`LONG_STRING`] characters to their head and a hash.
+//! shows them, masks wall-clock times, the time to a usage-limit reset, the
+//! durations a test on the real clock measures (a test that pauses tokio's
+//! clock keeps them) and the awaiting state a command timeout prints with
+//! `{:?}` (its maps print in a different order each run), and shortens
+//! strings over [`LONG_STRING`] characters to their head and a hash.
 //!
 //! The test is the thread the loop is created on: libtest runs each test on
 //! a thread named after it, and the loop's tests use tokio's current-thread
@@ -65,6 +65,22 @@ static TIMEOUT_STATE: LazyLock<Regex> =
 /// Object keys whose values are wall-clock times.
 fn is_time_key(key: &str) -> bool {
     key.ends_with("_unix_ms") || key == "start_time" || key == "end_time"
+}
+
+/// Object keys whose values are durations measured on tokio's clock: the
+/// same each run when the test pauses the clock, and not otherwise.
+fn is_duration_key(key: &str) -> bool {
+    key == "elapsed_ms" || key == "retry_after_ms"
+}
+
+/// Whether tokio's clock is paused (`start_paused`, or `tokio::time::pause`):
+/// it then stands still between the runtime's turns, while the real clock
+/// moves on.
+fn clock_paused() -> bool {
+    let paused_at = tokio::time::Instant::now();
+    let real = std::time::Instant::now();
+    while std::time::Instant::now() == real {}
+    tokio::time::Instant::now() == paused_at
 }
 
 fn env_set(name: &str) -> bool {
@@ -172,12 +188,14 @@ impl TestTrace {
     fn event(&self, event: &AgentEvent) {
         let value = serde_json::to_value(event).expect("an event serializes");
         let mut state = self.state.lock().unwrap();
+        state.real_time = !clock_paused();
         let line = format!("E {}", state.value(value, longest()));
         self.push(&mut state, line);
     }
 
     fn snapshot(&self, task: &Task, durable: bool) {
         let mut state = self.state.lock().unwrap();
+        state.real_time = !clock_paused();
         let current_state = serde_json::to_value(&task.current_state).expect("a state serializes");
         let current_state = state.value(current_state, longest());
         let digest = state.value(task_digest(task), None).to_string();
@@ -219,7 +237,7 @@ impl TestTrace {
 }
 
 /// A test name as a file name.
-pub(super) fn file_name(test: &str) -> String {
+fn file_name(test: &str) -> String {
     test.replace("::", ".")
 }
 
@@ -279,8 +297,12 @@ pub(super) fn fnv1a(bytes: &[u8]) -> u64 {
 /// A test's normalizing state, and its lines.
 #[derive(Default)]
 struct Normalizer {
-    /// UUIDs (lowercase) by label, in the order first seen.
+    /// The label of each UUID seen (lowercase), given in the order first
+    /// seen.
     labels: HashMap<String, String>,
+    /// The test runs on the real clock: durations measured on it are
+    /// masked.
+    real_time: bool,
     literals: Vec<(String, String)>,
     lines: Vec<String>,
 }
@@ -315,7 +337,8 @@ impl Normalizer {
         entries.sort_by(|(a, ..), (b, ..)| a.cmp(b));
         let mut normalized = Vec::with_capacity(entries.len());
         for (_, key, value) in entries {
-            let value = if is_time_key(&key) && !value.is_null() {
+            let masked = is_time_key(&key) || (self.real_time && is_duration_key(&key));
+            let value = if masked && !value.is_null() {
                 Value::String("<time>".into())
             } else {
                 self.value(value, longest)
@@ -465,6 +488,33 @@ mod tests {
                 .iter()
                 .any(|line| line.starts_with(r#"E {"ToolResult":{"output":"done""#)),
             "{lines:#?}"
+        );
+    }
+
+    /// Durations measured on tokio's clock are kept when the test pauses
+    /// it, and masked on the real clock.
+    #[tokio::test(start_paused = true)]
+    async fn durations_are_kept_on_a_paused_clock() {
+        assert!(clock_paused());
+        let mut normalizer = Normalizer::default();
+        let value = serde_json::json!({"elapsed_ms": 13, "retry_after_ms": 250});
+        assert_eq!(
+            normalizer.value(value, None),
+            serde_json::json!({"elapsed_ms": 13, "retry_after_ms": 250})
+        );
+    }
+
+    #[tokio::test]
+    async fn durations_are_masked_on_the_real_clock() {
+        assert!(!clock_paused());
+        let mut normalizer = Normalizer {
+            real_time: true,
+            ..Default::default()
+        };
+        let value = serde_json::json!({"elapsed_ms": 13, "retry_after_ms": null});
+        assert_eq!(
+            normalizer.value(value, None),
+            serde_json::json!({"elapsed_ms": "<time>", "retry_after_ms": null})
         );
     }
 
