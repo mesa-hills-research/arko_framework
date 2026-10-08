@@ -699,8 +699,7 @@ file's header and the [retrieval evaluation](arko_index-verification.md#retrieva
 
 Parsing uses [mhr_tree_sitter](https://github.com/mesa-hills-research/mhr_tree_sitter)
 (a Git dependency pinned to commit d56f609 in `Cargo.toml`), a pure, safe Rust port of
-tree-sitter 0.25.10 and 54 grammars, made by an AI agent swarm and differentially tested
-against the C library, so the library needs no C compiler. Its libraries keep
+tree-sitter 0.25.10 and 54 grammars, so the library needs no C compiler. Its libraries keep
 tree-sitter's names (`tree_sitter`, `tree_sitter_rust`, ...). The port pins the grammar
 versions: an upgrade changes chunk boundaries and IDs. The grammars of the original nine
 languages are the versions this crate used with the C library: tree-sitter-rust 0.24.2,
