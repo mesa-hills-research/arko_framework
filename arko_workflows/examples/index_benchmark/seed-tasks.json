@@ -1,0 +1,750 @@
+[
+ {
+  "id": "arko-seed-D1",
+  "repo": "arko",
+  "kind": "definition",
+  "question": "Where is the `RetryThenInformAgent` variant of `LLMErrorPolicy` defined?",
+  "key": {
+   "answer": "It is the `RetryThenInformAgent { max_attempts }` variant of `LLMErrorPolicy`, at arko_agents/src/agent_config.rs:771.",
+   "items": [
+    {
+     "id": "L1",
+     "kind": "location",
+     "text": "the `RetryThenInformAgent { max_attempts }` variant of `LLMErrorPolicy`",
+     "location": {
+      "path": "arko_agents/src/agent_config.rs",
+      "start_line": 771,
+      "end_line": 771
+     }
+    }
+   ],
+   "distractors": [
+    {
+     "id": "X1",
+     "kind": "location",
+     "text": "the `RetryThenInformAgent { max_attempts }` variant of `InterceptionFailurePolicy`",
+     "location": {
+      "path": "arko_agents/src/tool/interceptor.rs",
+      "start_line": 54,
+      "end_line": 56
+     }
+    }
+   ]
+  },
+  "origin": {
+   "source": "seed",
+   "reference": "breadth-depth-arko.json depth D1"
+  },
+  "difficulty": "medium"
+ },
+ {
+  "id": "arko-seed-D2",
+  "repo": "arko",
+  "kind": "definition",
+  "question": "Where is the `RetryThenInformAgent` variant of `InterceptionFailurePolicy` defined?",
+  "key": {
+   "answer": "It is the `RetryThenInformAgent { max_attempts }` variant of `InterceptionFailurePolicy`, at arko_agents/src/tool/interceptor.rs:54-56.",
+   "items": [
+    {
+     "id": "L1",
+     "kind": "location",
+     "text": "the `RetryThenInformAgent { max_attempts }` variant of `InterceptionFailurePolicy`",
+     "location": {
+      "path": "arko_agents/src/tool/interceptor.rs",
+      "start_line": 54,
+      "end_line": 56
+     }
+    }
+   ],
+   "distractors": [
+    {
+     "id": "X1",
+     "kind": "location",
+     "text": "the `RetryThenInformAgent { max_attempts }` variant of `LLMErrorPolicy`",
+     "location": {
+      "path": "arko_agents/src/agent_config.rs",
+      "start_line": 771,
+      "end_line": 771
+     }
+    }
+   ]
+  },
+  "origin": {
+   "source": "seed",
+   "reference": "breadth-depth-arko.json depth D2"
+  },
+  "difficulty": "medium"
+ },
+ {
+  "id": "arko-seed-D3",
+  "repo": "arko",
+  "kind": "definition",
+  "question": "Where is the `Pause` variant of `BudgetExceededPolicy` defined?",
+  "key": {
+   "answer": "It is the `Pause` variant of `BudgetExceededPolicy` (the default), at arko_workflows/src/budget/mod.rs:41-56.",
+   "items": [
+    {
+     "id": "L1",
+     "kind": "location",
+     "text": "the `Pause` variant of `BudgetExceededPolicy` (the default)",
+     "location": {
+      "path": "arko_workflows/src/budget/mod.rs",
+      "start_line": 41,
+      "end_line": 56
+     }
+    }
+   ],
+   "distractors": [
+    {
+     "id": "X1",
+     "kind": "location",
+     "text": "the `Pause` variant of `UsageLimitPolicy` (the default)",
+     "location": {
+      "path": "arko_agents/src/agent_config.rs",
+      "start_line": 899,
+      "end_line": 903
+     }
+    },
+    {
+     "id": "X2",
+     "kind": "location",
+     "text": "the `Pause` variant of `PlanUsageAction` (the default)",
+     "location": {
+      "path": "arko_agents/src/agent_config.rs",
+      "start_line": 1122,
+      "end_line": 1126
+     }
+    }
+   ]
+  },
+  "origin": {
+   "source": "seed",
+   "reference": "breadth-depth-arko.json depth D3"
+  },
+  "difficulty": "medium"
+ },
+ {
+  "id": "arko-seed-D4",
+  "repo": "arko",
+  "kind": "definition",
+  "question": "Where is the `Pause` variant of `UsageLimitPolicy` defined?",
+  "key": {
+   "answer": "It is the `Pause` variant of `UsageLimitPolicy` (the default), at arko_agents/src/agent_config.rs:899-903.",
+   "items": [
+    {
+     "id": "L1",
+     "kind": "location",
+     "text": "the `Pause` variant of `UsageLimitPolicy` (the default)",
+     "location": {
+      "path": "arko_agents/src/agent_config.rs",
+      "start_line": 899,
+      "end_line": 903
+     }
+    }
+   ],
+   "distractors": [
+    {
+     "id": "X1",
+     "kind": "location",
+     "text": "the `Pause` variant of `BudgetExceededPolicy` (the default)",
+     "location": {
+      "path": "arko_workflows/src/budget/mod.rs",
+      "start_line": 41,
+      "end_line": 56
+     }
+    },
+    {
+     "id": "X2",
+     "kind": "location",
+     "text": "the `Pause` variant of `PlanUsageAction` (the default)",
+     "location": {
+      "path": "arko_agents/src/agent_config.rs",
+      "start_line": 1122,
+      "end_line": 1126
+     }
+    }
+   ]
+  },
+  "origin": {
+   "source": "seed",
+   "reference": "breadth-depth-arko.json depth D4"
+  },
+  "difficulty": "medium"
+ },
+ {
+  "id": "arko-seed-D5",
+  "repo": "arko",
+  "kind": "definition",
+  "question": "Where is the `Pause` variant of `PlanUsageAction` defined?",
+  "key": {
+   "answer": "It is the `Pause` variant of `PlanUsageAction` (the default), at arko_agents/src/agent_config.rs:1122-1126.",
+   "items": [
+    {
+     "id": "L1",
+     "kind": "location",
+     "text": "the `Pause` variant of `PlanUsageAction` (the default)",
+     "location": {
+      "path": "arko_agents/src/agent_config.rs",
+      "start_line": 1122,
+      "end_line": 1126
+     }
+    }
+   ],
+   "distractors": [
+    {
+     "id": "X1",
+     "kind": "location",
+     "text": "the `Pause` variant of `UsageLimitPolicy` (the default)",
+     "location": {
+      "path": "arko_agents/src/agent_config.rs",
+      "start_line": 899,
+      "end_line": 903
+     }
+    },
+    {
+     "id": "X2",
+     "kind": "location",
+     "text": "the `Pause` variant of `BudgetExceededPolicy` (the default)",
+     "location": {
+      "path": "arko_workflows/src/budget/mod.rs",
+      "start_line": 41,
+      "end_line": 56
+     }
+    }
+   ]
+  },
+  "origin": {
+   "source": "seed",
+   "reference": "breadth-depth-arko.json depth D5"
+  },
+  "difficulty": "medium"
+ },
+ {
+  "id": "arko-seed-D6",
+  "repo": "arko",
+  "kind": "definition",
+  "question": "Where is the `Cancelled` variant of `TaskState` defined?",
+  "key": {
+   "answer": "It is the `Cancelled { reason }` variant of `TaskState`, at arko_agents/src/task/mod.rs:198-204.",
+   "items": [
+    {
+     "id": "L1",
+     "kind": "location",
+     "text": "the `Cancelled { reason }` variant of `TaskState`",
+     "location": {
+      "path": "arko_agents/src/task/mod.rs",
+      "start_line": 198,
+      "end_line": 204
+     }
+    }
+   ],
+   "distractors": [
+    {
+     "id": "X1",
+     "kind": "location",
+     "text": "the `Cancelled` variant of `AgentRunStatus`",
+     "location": {
+      "path": "arko_workflows/src/workflow/result.rs",
+      "start_line": 21,
+      "end_line": 23
+     }
+    },
+    {
+     "id": "X2",
+     "kind": "location",
+     "text": "the `Cancelled` variant of the private serde helper `TaskStateRepr`, not `TaskState`",
+     "location": {
+      "path": "arko_agents/src/task/mod.rs",
+      "start_line": 247,
+      "end_line": 249
+     }
+    }
+   ]
+  },
+  "origin": {
+   "source": "seed",
+   "reference": "breadth-depth-arko.json depth D6"
+  },
+  "difficulty": "medium"
+ },
+ {
+  "id": "arko-seed-D7",
+  "repo": "arko",
+  "kind": "definition",
+  "question": "Where is the `Cancelled` variant of `AgentRunStatus` defined?",
+  "key": {
+   "answer": "It is the `Cancelled` variant of `AgentRunStatus`, at arko_workflows/src/workflow/result.rs:21-23.",
+   "items": [
+    {
+     "id": "L1",
+     "kind": "location",
+     "text": "the `Cancelled` variant of `AgentRunStatus`",
+     "location": {
+      "path": "arko_workflows/src/workflow/result.rs",
+      "start_line": 21,
+      "end_line": 23
+     }
+    }
+   ],
+   "distractors": [
+    {
+     "id": "X1",
+     "kind": "location",
+     "text": "the `Cancelled { reason }` variant of `TaskState`",
+     "location": {
+      "path": "arko_agents/src/task/mod.rs",
+      "start_line": 198,
+      "end_line": 204
+     }
+    }
+   ]
+  },
+  "origin": {
+   "source": "seed",
+   "reference": "breadth-depth-arko.json depth D7"
+  },
+  "difficulty": "medium"
+ },
+ {
+  "id": "arko-seed-D8",
+  "repo": "arko",
+  "kind": "definition",
+  "question": "Where is the `UsageLimit` variant of `ErrorRecoveryCause` defined?",
+  "key": {
+   "answer": "It is the `UsageLimit { resets_at_unix_ms }` variant of `ErrorRecoveryCause`, at arko_agents/src/task/mod.rs:96-98.",
+   "items": [
+    {
+     "id": "L1",
+     "kind": "location",
+     "text": "the `UsageLimit { resets_at_unix_ms }` variant of `ErrorRecoveryCause`",
+     "location": {
+      "path": "arko_agents/src/task/mod.rs",
+      "start_line": 96,
+      "end_line": 98
+     }
+    }
+   ],
+   "distractors": [
+    {
+     "id": "X1",
+     "kind": "location",
+     "text": "the `UsageLimit { until }` variant of `WaitReason`",
+     "location": {
+      "path": "arko_workflows/src/messaging/registry.rs",
+      "start_line": 42,
+      "end_line": 43
+     }
+    }
+   ]
+  },
+  "origin": {
+   "source": "seed",
+   "reference": "breadth-depth-arko.json depth D8"
+  },
+  "difficulty": "medium"
+ },
+ {
+  "id": "arko-seed-D9",
+  "repo": "arko",
+  "kind": "definition",
+  "question": "Where is the `UsageLimit` variant of `WaitReason` defined?",
+  "key": {
+   "answer": "It is the `UsageLimit { until }` variant of `WaitReason`, at arko_workflows/src/messaging/registry.rs:42-43.",
+   "items": [
+    {
+     "id": "L1",
+     "kind": "location",
+     "text": "the `UsageLimit { until }` variant of `WaitReason`",
+     "location": {
+      "path": "arko_workflows/src/messaging/registry.rs",
+      "start_line": 42,
+      "end_line": 43
+     }
+    }
+   ],
+   "distractors": [
+    {
+     "id": "X1",
+     "kind": "location",
+     "text": "the `UsageLimit { resets_at_unix_ms }` variant of `ErrorRecoveryCause`",
+     "location": {
+      "path": "arko_agents/src/task/mod.rs",
+      "start_line": 96,
+      "end_line": 98
+     }
+    }
+   ]
+  },
+  "origin": {
+   "source": "seed",
+   "reference": "breadth-depth-arko.json depth D9"
+  },
+  "difficulty": "medium"
+ },
+ {
+  "id": "arko-seed-H1",
+  "repo": "arko",
+  "kind": "definition",
+  "question": "When the model provider rejects a request because it is over the model's input limit, where is the code that shortens the largest tool result added since the last answered request and sends the request again?",
+  "key": {
+   "answer": "`AgentLoop::recover_from_overflow` in arko_agents/src/runtime/loop.rs handles the provider's context-overflow error: it finds the largest tool result added since the latest answered request, shortens it with `result_budget::shorten` (a preview first; one already shortened keeps only its notice), emits `ToolResultShortened` with reason `OverflowRecovery`, and sends the request again, at most twice in a row.",
+   "items": [
+    {
+     "id": "L1",
+     "kind": "location",
+     "text": "`AgentLoop::recover_from_overflow`: picks the largest tool result added since the latest answered request, shortens it (to a preview, or to its notice alone if it was shortened before) and resends, at most `MAX_OVERFLOW_RECOVERIES` (2) times in a row",
+     "location": {
+      "path": "arko_agents/src/runtime/loop.rs",
+      "start_line": 2209,
+      "end_line": 2356
+     }
+    }
+   ],
+   "distractors": [
+    {
+     "id": "X1",
+     "kind": "location",
+     "text": "`AgentLoop::limit_tool_results`, the overflow guard that shortens results before a request is sent, not after a rejection",
+     "location": {
+      "path": "arko_agents/src/runtime/loop.rs",
+      "start_line": 2092,
+      "end_line": 2208
+     }
+    }
+   ]
+  },
+  "origin": {
+   "source": "seed",
+   "reference": "behaviour-arko.json H1"
+  },
+  "difficulty": "medium"
+ },
+ {
+  "id": "arko-seed-H2",
+  "repo": "arko",
+  "kind": "definition",
+  "question": "When a workflow is stopped gracefully with a wrap-up, each agent is told to save its progress and call `complete_task` before it is stopped. Where is the default text of that notice produced?",
+  "key": {
+   "answer": "`wrap_up_notice` in arko_workflows/src/workflow/stop.rs builds the default notice (\"The workflow is stopping: ... You have about N before you are stopped. Save your progress ... Then call complete_task ...\"); `StopRequest::wrap_up_message` replaces it.",
+   "items": [
+    {
+     "id": "L1",
+     "kind": "location",
+     "text": "`wrap_up_notice(reason, within)`, which formats the default notice",
+     "location": {
+      "path": "arko_workflows/src/workflow/stop.rs",
+      "start_line": 182,
+      "end_line": 202
+     }
+    }
+   ],
+   "distractors": []
+  },
+  "origin": {
+   "source": "seed",
+   "reference": "behaviour-arko.json H2"
+  },
+  "difficulty": "medium"
+ },
+ {
+  "id": "arko-seed-H3",
+  "repo": "arko",
+  "kind": "definition",
+  "question": "Where does the ChatGPT OAuth client keep track of refresh tokens that are already spent, so that a reused refresh token is never sent again?",
+  "key": {
+   "answer": "arko_ai/src/providers/openai/spent_tokens.rs keeps a process-wide set (`SPENT`) of SHA-256 digests of spent refresh tokens; `record` adds the token a refresh replaced (or one the server refused for good) and `is_spent` is checked before any refresh request is sent and before stored credentials are adopted.",
+   "items": [
+    {
+     "id": "L1",
+     "kind": "location",
+     "text": "the `spent_tokens` module: the process-wide `SPENT` set of SHA-256 digests with `record` and `is_spent`",
+     "location": {
+      "path": "arko_ai/src/providers/openai/spent_tokens.rs",
+      "start_line": 1,
+      "end_line": 115
+     }
+    }
+   ],
+   "distractors": []
+  },
+  "origin": {
+   "source": "seed",
+   "reference": "behaviour-arko.json H3"
+  },
+  "difficulty": "medium"
+ },
+ {
+  "id": "arko-seed-H4",
+  "repo": "arko",
+  "kind": "definition",
+  "question": "How does another process post an operator note to a running workflow? Where is the function that writes such a note into the workflow's control folder?",
+  "key": {
+   "answer": "`post_note` in arko_workflows/src/notes/control.rs appends the note as one JSON `ControlNote` line to `<run dir>/control/`'s notes file under an exclusive lock; the workflow reads new lines at its agents' turn boundaries.",
+   "items": [
+    {
+     "id": "L1",
+     "kind": "location",
+     "text": "`post_note`, which appends a `ControlNote` line to the control folder's notes file under its lock",
+     "location": {
+      "path": "arko_workflows/src/notes/control.rs",
+      "start_line": 62,
+      "end_line": 105
+     }
+    }
+   ],
+   "distractors": []
+  },
+  "origin": {
+   "source": "seed",
+   "reference": "behaviour-arko.json H4"
+  },
+  "difficulty": "medium"
+ },
+ {
+  "id": "arko-seed-H5",
+  "repo": "arko",
+  "kind": "definition",
+  "question": "Where is the function that splits a shell command line into commands, in the shell's dialect, for the terminal command guard?",
+  "key": {
+   "answer": "`lex` in arko_agents/src/terminal/guard/lex.rs splits the source into `Command`s, dispatching on the dialect to `posix`, `cmd` or `powershell`; the guard calls it from arko_agents/src/terminal/guard/mod.rs.",
+   "items": [
+    {
+     "id": "L1",
+     "kind": "location",
+     "text": "`lex(dialect, source)`, which dispatches to the POSIX, cmd and PowerShell lexers",
+     "location": {
+      "path": "arko_agents/src/terminal/guard/lex.rs",
+      "start_line": 410,
+      "end_line": 417
+     }
+    }
+   ],
+   "distractors": []
+  },
+  "origin": {
+   "source": "seed",
+   "reference": "behaviour-arko.json H5"
+  },
+  "difficulty": "medium"
+ },
+ {
+  "id": "arko-seed-H6",
+  "repo": "arko",
+  "kind": "definition",
+  "question": "Which setting makes a workflow hold agents that go over budget before their next model request until the budget is raised, instead of cancelling them, and where is it defined?",
+  "key": {
+   "answer": "`BudgetExceededPolicy::Pause` (the default) in arko_workflows/src/budget/mod.rs, set with `WorkflowBuilder::budget_exceeded_policy`; `Cancel` cancels instead.",
+   "items": [
+    {
+     "id": "L1",
+     "kind": "location",
+     "text": "`BudgetExceededPolicy` and its default variant `Pause`",
+     "location": {
+      "path": "arko_workflows/src/budget/mod.rs",
+      "start_line": 34,
+      "end_line": 63
+     }
+    }
+   ],
+   "distractors": []
+  },
+  "origin": {
+   "source": "seed",
+   "reference": "behaviour-arko.json H6"
+  },
+  "difficulty": "medium"
+ },
+ {
+  "id": "arko-seed-B1",
+  "repo": "arko",
+  "kind": "callers",
+  "question": "In the forge example workflow, which function decides an agent's conversation-handover threshold for its model, and where is it called?",
+  "scope": "the forge example (arko_workflows/examples/forge), non-test code",
+  "key": {
+   "answer": "`handover_at` (forge/main.rs) caps the wanted threshold at 3/4 of the ChatGPT OAuth input limit for OpenAI models; `main` calls it for the architect and for each deliberation agent.",
+   "items": [
+    {
+     "id": "L1",
+     "kind": "location",
+     "text": "the definition of `handover_at(model, wanted)`",
+     "location": {
+      "path": "arko_workflows/examples/forge/main.rs",
+      "start_line": 1348,
+      "end_line": 1356
+     }
+    },
+    {
+     "id": "L2",
+     "kind": "location",
+     "text": "the call in `main` setting the architect's handover",
+     "location": {
+      "path": "arko_workflows/examples/forge/main.rs",
+      "start_line": 552,
+      "end_line": 552
+     }
+    },
+    {
+     "id": "L3",
+     "kind": "location",
+     "text": "the call in `main` setting each deliberation agent's handover (capped at 200,000 tokens)",
+     "location": {
+      "path": "arko_workflows/examples/forge/main.rs",
+      "start_line": 599,
+      "end_line": 599
+     }
+    }
+   ],
+   "distractors": []
+  },
+  "origin": {
+   "source": "seed",
+   "reference": "breadth-depth-arko.json breadth B1"
+  },
+  "difficulty": "medium"
+ },
+ {
+  "id": "arko-seed-B2",
+  "repo": "arko",
+  "kind": "callers",
+  "question": "Which non-test code calls `Workflow::add_manual_cost` (the method of `Workflow`, not `BudgetManager::add_manual_cost`)?",
+  "scope": "non-test Rust code in the repository",
+  "key": {
+   "answer": "Only the Python binding `PyWorkflow::add_manual_cost` (arko_workflows/src/python/mod.rs) calls it; distillation and the forge's trial runs call `BudgetManager::add_manual_cost` instead.",
+   "items": [
+    {
+     "id": "L1",
+     "kind": "location",
+     "text": "the call in `PyWorkflow::add_manual_cost`, the Python binding",
+     "location": {
+      "path": "arko_workflows/src/python/mod.rs",
+      "start_line": 687,
+      "end_line": 687
+     }
+    }
+   ],
+   "distractors": [
+    {
+     "id": "X1",
+     "kind": "location",
+     "text": "`BudgetManager::add_manual_cost`, a different method",
+     "location": {
+      "path": "arko_workflows/src/budget/mod.rs",
+      "start_line": 405,
+      "end_line": 427
+     }
+    },
+    {
+     "id": "X2",
+     "kind": "location",
+     "text": "a call of `BudgetManager::add_manual_cost` in distillation",
+     "location": {
+      "path": "arko_workflows/src/distillation/mod.rs",
+      "start_line": 1024,
+      "end_line": 1099
+     }
+    },
+    {
+     "id": "X3",
+     "kind": "location",
+     "text": "a call of `BudgetManager::add_manual_cost` in the forge's trial run",
+     "location": {
+      "path": "arko_workflows/examples/forge/tools.rs",
+      "start_line": 273,
+      "end_line": 273
+     }
+    }
+   ]
+  },
+  "origin": {
+   "source": "seed",
+   "reference": "breadth-depth-arko.json breadth B2"
+  },
+  "difficulty": "medium"
+ },
+ {
+  "id": "arko-seed-B3",
+  "repo": "arko",
+  "kind": "callers",
+  "question": "Where is the function that gives a model's input-token limit for an authentication path (capped for ChatGPT OAuth) defined, and which non-test code calls it?",
+  "scope": "non-test code",
+  "key": {
+   "answer": "`effective_max_input_tokens` (arko_ai/src/input_limit.rs) caps OpenAI models at `CHATGPT_OAUTH_MAX_INPUT_TOKENS` on ChatGPT OAuth; it is called by `LLMClient::max_input_tokens` and by the OpenAI provider when it records a call's usage.",
+   "items": [
+    {
+     "id": "L1",
+     "kind": "location",
+     "text": "the definition of `effective_max_input_tokens`",
+     "location": {
+      "path": "arko_ai/src/input_limit.rs",
+      "start_line": 10,
+      "end_line": 27
+     }
+    },
+    {
+     "id": "L2",
+     "kind": "location",
+     "text": "the call in `LLMClient::max_input_tokens`",
+     "location": {
+      "path": "arko_ai/src/client.rs",
+      "start_line": 474,
+      "end_line": 474
+     }
+    },
+    {
+     "id": "L3",
+     "kind": "location",
+     "text": "the call in `OpenAIClient::generation_response`, for the call's usage record",
+     "location": {
+      "path": "arko_ai/src/providers/openai.rs",
+      "start_line": 1749,
+      "end_line": 1749
+     }
+    }
+   ],
+   "distractors": []
+  },
+  "origin": {
+   "source": "seed",
+   "reference": "breadth-depth-arko.json breadth B3"
+  },
+  "difficulty": "medium"
+ },
+ {
+  "id": "arko-seed-B4",
+  "repo": "arko",
+  "kind": "callers",
+  "question": "Where is `CodexAuthFile::load_default` defined, and which non-test code calls it?",
+  "scope": "non-test code",
+  "key": {
+   "answer": "`CodexAuthFile::load_default` (arko_ai/src/codex_auth.rs) loads `$CODEX_HOME/auth.json` or `~/.codex/auth.json`; its only non-test caller is the forge example's `client` function.",
+   "items": [
+    {
+     "id": "L1",
+     "kind": "location",
+     "text": "the definition of `CodexAuthFile::load_default`",
+     "location": {
+      "path": "arko_ai/src/codex_auth.rs",
+      "start_line": 121,
+      "end_line": 128
+     }
+    },
+    {
+     "id": "L2",
+     "kind": "location",
+     "text": "the call in the forge example's `client` function",
+     "location": {
+      "path": "arko_workflows/examples/forge/main.rs",
+      "start_line": 1387,
+      "end_line": 1387
+     }
+    }
+   ],
+   "distractors": []
+  },
+  "origin": {
+   "source": "seed",
+   "reference": "breadth-depth-arko.json breadth B4"
+  },
+  "difficulty": "medium"
+ }
+]

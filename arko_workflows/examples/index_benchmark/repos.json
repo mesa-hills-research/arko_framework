@@ -1,0 +1,58 @@
+[
+  {
+    "id": "arko",
+    "url": "https://github.com/mesa-hills-research/arko_framework.git",
+    "rev": "8f8569ab6b3a45f3c9546e131fa7e831bc1ffbbf",
+    "commit": "8f8569ab6b3a45f3c9546e131fa7e831bc1ffbbf",
+    "language": "rust",
+    "description": "arko, a Rust framework for LLM agents and workflows (private repository; pass --source arko=PATH)"
+  },
+  {
+    "id": "redis",
+    "url": "https://github.com/redis/redis.git",
+    "rev": "7.2.5",
+    "commit": "f60370ce28b946c1146dcea77c9c399d39601aaa",
+    "language": "c",
+    "description": "Redis, the in-memory data store"
+  },
+  {
+    "id": "leveldb",
+    "url": "https://github.com/google/leveldb.git",
+    "rev": "1.23",
+    "commit": "99b3c03b3284f5886f9ef9a4ef703d57373e61be",
+    "language": "cpp",
+    "description": "LevelDB, Google's key-value storage library"
+  },
+  {
+    "id": "caddy",
+    "url": "https://github.com/caddyserver/caddy.git",
+    "rev": "v2.8.4",
+    "commit": "7088605cc11c52c2777ab613dfc5c2a9816006e4",
+    "language": "go",
+    "description": "Caddy, the web server"
+  },
+  {
+    "id": "jsoup",
+    "url": "https://github.com/jhy/jsoup.git",
+    "rev": "jsoup-1.18.1",
+    "commit": "19e8539fbfae80432fc4d8e9b562a39f786f547e",
+    "language": "java",
+    "description": "jsoup, the Java HTML parser"
+  },
+  {
+    "id": "scrapy",
+    "url": "https://github.com/scrapy/scrapy.git",
+    "rev": "2.11.2",
+    "commit": "e8cb5a03b382b98f2c8945355076390f708b918d",
+    "language": "python",
+    "description": "Scrapy, the Python web-crawling framework"
+  },
+  {
+    "id": "vite",
+    "url": "https://github.com/vitejs/vite.git",
+    "rev": "v5.4.10",
+    "commit": "5f52bc8b9e4090cdcaf3f704278db30dafc825cc",
+    "language": "typescript",
+    "description": "Vite, the frontend build tool (a pnpm monorepo)"
+  }
+]
