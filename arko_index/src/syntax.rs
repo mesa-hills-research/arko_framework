@@ -17,9 +17,25 @@ thread_local! { static PARSERS: RefCell<HashMap<&'static str, Parser>> = RefCell
 pub(crate) fn language(path: &Path) -> &'static str {
     crate::languages::detect_path(path).name
 }
-fn parse(lang: &'static str, text: &str) -> Result<Option<tree_sitter::Tree>, Error> {
+/// Test hooks: a text that starts with one of these fails to parse like a grammar bug,
+/// with a panic or with no tree within the budget.
+#[cfg(test)]
+pub(crate) const TEST_PANIC: &str = "arko-index-test: parser panic\n";
+#[cfg(test)]
+pub(crate) const TEST_STOP: &str = "arko-index-test: parser stop\n";
+/// A parse: the tree, or none when the language has no grammar, a line is too long or
+/// the work budget ran out (the file is then split as text). `failure` says why the
+/// parser itself failed, a grammar bug that also leaves no tree.
+struct Parsed {
+    tree: Option<tree_sitter::Tree>,
+    failure: Option<String>,
+}
+fn parse(lang: &'static str, text: &str) -> Result<Parsed, Error> {
     let Some(grammar) = crate::languages::grammar(lang) else {
-        return Ok(None);
+        return Ok(Parsed {
+            tree: None,
+            failure: None,
+        });
     };
     PARSERS.with(|parsers| {
         let mut parsers = parsers.borrow_mut();
@@ -33,17 +49,45 @@ fn parse(lang: &'static str, text: &str) -> Result<Option<tree_sitter::Tree>, Er
         // Deterministic work guard instead of a machine-speed dependent time deadline.
         let mut calls = 0usize;
         let budget = (1000 + text.len() / 32).min(50_000);
-        let mut progress = |_: &tree_sitter::ParseState| {
-            calls += 1;
-            calls > budget
-        };
-        let tree = parser.parse_with_options(
-            &mut |i, _| &text.as_bytes()[i..],
-            None,
-            Some(ParseOptions::new().progress_callback(&mut progress)),
-        );
-        parser.reset();
-        Ok(tree)
+        let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(test)]
+            {
+                if text.starts_with(TEST_PANIC) {
+                    panic!("a grammar bug (test)");
+                }
+                if text.starts_with(TEST_STOP) {
+                    return None;
+                }
+            }
+            let mut progress = |_: &tree_sitter::ParseState| {
+                calls += 1;
+                calls > budget
+            };
+            parser.parse_with_options(
+                &mut |i, _| &text.as_bytes()[i..],
+                None,
+                Some(ParseOptions::new().progress_callback(&mut progress)),
+            )
+        }));
+        match parsed {
+            Ok(tree) => {
+                parser.reset();
+                // No tree within the budget: the runtime stopped a lexer or scanner that
+                // kept advancing at the end of the input.
+                let failure = (tree.is_none() && calls <= budget)
+                    .then(|| "stopped (a scanner never returned)".to_owned());
+                Ok(Parsed { tree, failure })
+            }
+            Err(payload) => {
+                // A grammar bug. The parser's state is unknown: this thread makes a new one.
+                parsers.remove(lang);
+                let message = crate::par::panic_message(&*payload);
+                Ok(Parsed {
+                    tree: None,
+                    failure: Some(format!("panicked ({message})")),
+                })
+            }
+        }
     })
 }
 #[derive(Clone, Debug)]
@@ -841,7 +885,30 @@ fn error_mass(root: Node) -> usize {
     mass
 }
 
+/// A Markdown file's metadata region: its front matter (and MDX's import/export lines
+/// after it). The file's chunks cover the text after it.
+pub(crate) fn metadata_region(path: &Path, text: &str) -> Option<crate::front_matter::Region> {
+    if !crate::headers::is_markdown(path) {
+        return None;
+    }
+    let mdx = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("mdx"));
+    crate::front_matter::region(text, mdx)
+}
+
 pub(crate) fn chunk(path: &Path, text: &str, options: &Options) -> Result<FileChunks, Error> {
+    chunk_noted(path, text, options).map(|(chunks, _)| chunks)
+}
+
+/// [`chunk`], and a warning for the walk's report when the file's parser failed (a
+/// grammar bug: it panicked, or the runtime stopped a scanner that never returned) and
+/// the file was split as plain text.
+pub(crate) fn chunk_noted(
+    path: &Path,
+    text: &str,
+    options: &Options,
+) -> Result<(FileChunks, Option<String>), Error> {
     if options.max_bytes < 4 {
         return Err("max_bytes must be at least 4 (one UTF-8 scalar)".into());
     }
@@ -857,33 +924,25 @@ pub(crate) fn chunk(path: &Path, text: &str, options: &Options) -> Result<FileCh
     let language = detected.name;
     let parser_language = detected.parser;
     let markdown = crate::headers::is_markdown(path);
-    // A Markdown file's front matter (and MDX's import/export lines after it) is file
-    // metadata: the chunks cover the text after it.
-    let region = if markdown {
-        let mdx = path
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("mdx"));
-        crate::front_matter::region(text, mdx)
-    } else {
-        None
-    };
+    let region = metadata_region(path, text);
     let base = region.as_ref().map_or(0, |r| r.end);
     let body = &text[base..];
     let mut parts = Vec::new();
     // Very long single lines are deliberately bounded fallback units, including
     // malformed strings and generated/minified source. They never enter unbounded parsing.
     let giant_line = body.split('\n').any(|line| line.len() > 65_536);
-    let tree = if giant_line {
-        None
+    let (tree, failure) = if giant_line {
+        (None, None)
     } else {
-        parse(parser_language, body)?
+        let parsed = parse(parser_language, body)?;
+        (parsed.tree, parsed.failure)
     };
     let tree = if matches!(parser_language, "c" | "cpp")
         && tree.as_ref().is_some_and(|t| t.root_node().has_error())
     {
         let normalized = crate::normalize::annotations(body);
         if normalized != body {
-            let recovered = parse(parser_language, &normalized)?;
+            let recovered = parse(parser_language, &normalized)?.tree;
             if recovered.as_ref().is_some_and(|t| {
                 error_mass(t.root_node()) < error_mass(tree.as_ref().unwrap().root_node())
             }) {
@@ -991,5 +1050,62 @@ pub(crate) fn chunk(path: &Path, text: &str, options: &Options) -> Result<FileCh
             scope: crate::headers::bounded(p.scope),
         });
     }
-    Ok(FileChunks { metadata, chunks })
+    let note = failure
+        .map(|f| format!("{path_s}: the {parser_language} parser {f}, chunked as plain text"));
+    Ok((FileChunks { metadata, chunks }, note))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bench_v1::FileRules;
+
+    #[test]
+    fn a_failed_parser_falls_back_to_text_with_a_note() {
+        for (marker, failure) in [
+            (TEST_PANIC, "panicked (a grammar bug (test))"),
+            (TEST_STOP, "stopped (a scanner never returned)"),
+        ] {
+            let text = format!("{marker}fn main() {{}}\n");
+            let (file, note) =
+                chunk_noted(Path::new("src/main.rs"), &text, &Options::default()).unwrap();
+            let expected = format!("src/main.rs: the rust parser {failure}, chunked as plain text");
+            assert_eq!(note, Some(expected));
+            assert_eq!(file.chunks.len(), 1);
+            assert_eq!(
+                (file.chunks[0].end_byte, &*file.chunks[0].kind),
+                (text.len(), "text")
+            );
+            // The thread parses again (with a new parser after a panic).
+            let (file, note) = chunk_noted(
+                Path::new("src/main.rs"),
+                "fn main() {}\n",
+                &Options::default(),
+            )
+            .unwrap();
+            assert_eq!((note, &*file.chunks[0].kind), (None, "function_item"));
+        }
+    }
+
+    #[test]
+    fn walks_report_a_failed_parser() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("bad.md"), format!("{TEST_PANIC}# Notes\n")).unwrap();
+        std::fs::write(root.path().join("good.rs"), "fn main() {}\n").unwrap();
+        let warning =
+            "bad.md: the markdown parser panicked (a grammar bug (test)), chunked as plain text";
+        let rules = FileRules::default();
+        let (chunks, report) =
+            crate::bench_v1::chunk_dir_with(root.path(), &Options::default(), &rules).unwrap();
+        assert_eq!((chunks.len(), report.files), (2, 2));
+        assert_eq!(report.warnings, [warning]);
+        let state = tempfile::tempdir().unwrap();
+        let settings = crate::index2::BuildOptions::default();
+        let stats = crate::index2::build(root.path(), state.path(), &Options::default(), &settings)
+            .unwrap();
+        assert_eq!(
+            (stats.docs, &*stats.report.warnings),
+            (2, &[warning.to_owned()][..])
+        );
+    }
 }

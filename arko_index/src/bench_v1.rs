@@ -220,17 +220,18 @@ where
         crate::par::window_bytes(threads),
         |i| weights.get(i).copied().unwrap_or(1),
         |item| match crate::files::read_listed(item, false) {
-            Read::Text(path, file) => Ok(Ok(map(chunk_str_with_metadata(
-                Path::new(&path),
-                &file.text,
-                options,
-            )?)?)),
+            Read::Text(path, file) => {
+                let (chunks, note) =
+                    crate::syntax::chunk_noted(Path::new(&path), &file.text, options)?;
+                Ok(Ok((map(chunks)?, note)))
+            }
             Read::Skip(s) => Ok(Err(Some(s))),
             Read::Gone => Ok(Err(None)),
         },
         |r| match r {
-            Ok(rendered) => {
+            Ok((rendered, note)) => {
                 report.files += 1;
+                report.warnings.extend(note);
                 sink(rendered)
             }
             Err(skip) => {

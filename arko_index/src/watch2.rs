@@ -30,7 +30,7 @@
 //!   `.gitignore`/`.ignore` event or a change of `.git/info/exclude` (each `.git/info`
 //!   directory gets a watch for that file only) run a full reconciliation.
 use crate::{
-    bench_v1::{Chunk, Delta, Error, Options, chunk_str},
+    bench_v1::{Chunk, Delta, Error, Options},
     files,
     files::{FileRules, Report, SkipReason, Skipped},
     par,
@@ -573,6 +573,9 @@ pub struct Watcher2 {
     pending_full: bool,
     /// `report` changed since `report.json` was written.
     report_dirty: bool,
+    /// The report's warnings for files whose parser failed (they were split as text),
+    /// by path: kept while the file is unchanged, in this process.
+    parse_warnings: BTreeMap<String, String>,
     _lock: File,
     pub stats: BTreeMap<&'static str, f64>,
 }
@@ -631,6 +634,10 @@ fn release_memory() {
 /// One candidate's outcome: `None` if it vanished or is not text; otherwise its new
 /// record, with the encoded chunks if its content hash changed.
 type Update = Option<(FileRec, Option<Vec<u8>>)>;
+
+/// A candidate's index, [`Update`] and report entry if it was skipped, and, when it was
+/// chunked, its parse warning (`Some(None)`: none).
+type CandidateRead = (usize, Update, Option<Skipped>, Option<Option<String>>);
 
 impl Watcher2 {
     pub fn open(root: &Path, state_dir: &Path, options: &Options) -> Result<Self, Error> {
@@ -787,6 +794,7 @@ impl Watcher2 {
             rules_changed,
             pending_full: false,
             report_dirty: false,
+            parse_warnings: BTreeMap::new(),
             _lock: lock,
             stats: BTreeMap::new(),
         };
@@ -1109,6 +1117,8 @@ impl Watcher2 {
         let t = Instant::now();
         let options = self.options.clone();
         let store = &mut self.store;
+        let old_warnings: BTreeSet<String> = self.parse_warnings.values().cloned().collect();
+        let parse_warnings = &mut self.parse_warnings;
         let mut changes: BTreeMap<String, (Option<FileRec>, bool)> = BTreeMap::new();
         let mut read_skips: Vec<Skipped> = Vec::new();
         let weights: Vec<usize> = candidates
@@ -1122,7 +1132,7 @@ impl Watcher2 {
             self.threads,
             par::window_bytes(self.threads),
             |i| weights[i],
-            |&i| -> Result<(usize, Update, Option<Skipped>), Error> {
+            |&i| -> Result<CandidateRead, Error> {
                 let (p, meta) = &cands[i];
                 let hashed_at = now_ns();
                 let item = files::Listed {
@@ -1131,8 +1141,8 @@ impl Watcher2 {
                 };
                 let data = match files::read_listed(&item, false) {
                     files::Read::Text(_, data) => data,
-                    files::Read::Skip(s) => return Ok((i, None, Some(s))),
-                    files::Read::Gone => return Ok((i, None, None)),
+                    files::Read::Skip(s) => return Ok((i, None, Some(s), None)),
+                    files::Read::Gone => return Ok((i, None, None, None)),
                 };
                 let hash = Hash32(Sha256::digest(data.text.as_bytes()).into());
                 // Metadata after the read: a write racing the read changes ctime, so the
@@ -1146,9 +1156,11 @@ impl Watcher2 {
                         hashed_at,
                         ..*old
                     };
-                    return Ok((i, Some((rec, None)), None));
+                    return Ok((i, Some((rec, None)), None, None));
                 }
-                let chunks = chunk_str(Path::new(p), &data.text, &options)?;
+                let (chunks, warning) =
+                    crate::syntax::chunk_noted(Path::new(p), &data.text, &options)?;
+                let chunks = chunks.chunks;
                 let mut entry = Vec::new();
                 encode_entry(&chunks, &data.text, &mut entry)?;
                 let rec = FileRec {
@@ -1157,11 +1169,20 @@ impl Watcher2 {
                     hash,
                     rec: Loc::default(),
                 };
-                Ok((i, Some((rec, Some(entry))), None))
+                Ok((i, Some((rec, Some(entry))), None, Some(warning)))
             },
-            |(i, update, skip)| {
+            |(i, update, skip, warning)| {
                 read_skips.extend(skip);
                 let p = &cands[i].0;
+                match (update.is_some(), warning) {
+                    (_, Some(Some(w))) => {
+                        parse_warnings.insert(p.clone(), w);
+                    }
+                    (false, _) | (true, Some(None)) => {
+                        parse_warnings.remove(p);
+                    }
+                    (true, None) => {}
+                }
                 let old = files_ref.get(p).map_or(Loc::default(), |r| r.rec);
                 let change = match update {
                     None => (None, old.1 > 0),
@@ -1188,6 +1209,7 @@ impl Watcher2 {
         let present: BTreeSet<&String> = scope_present.iter().collect();
         for p in &scope_known {
             if !present.contains(p) {
+                self.parse_warnings.remove(p);
                 let old = self.snap.files.get(p).map_or(Loc::default(), |r| r.rec);
                 changes.insert(p.clone(), (None, old.1 > 0));
             }
@@ -1230,6 +1252,9 @@ impl Watcher2 {
                 let mut report = walk_report;
                 report.skipped.extend(read_skips);
                 report.files = files;
+                report
+                    .warnings
+                    .extend(self.parse_warnings.values().cloned());
                 report.finish();
                 if report != self.report {
                     self.report = report;
@@ -1258,6 +1283,14 @@ impl Watcher2 {
                 new.dedup();
                 gone.sort();
                 self.report_dirty |= new != gone || self.report.files != files;
+                let warnings: BTreeSet<String> = self.parse_warnings.values().cloned().collect();
+                if warnings != old_warnings {
+                    self.report.warnings.retain(|w| !old_warnings.contains(w));
+                    self.report
+                        .warnings
+                        .extend(self.parse_warnings.values().cloned());
+                    self.report_dirty = true;
+                }
                 self.report.skipped.extend(new);
                 self.report.files = files;
                 self.report.finish();
@@ -1520,6 +1553,36 @@ mod tests {
         let mut w = Watcher2::open(r, state.path(), &options).unwrap();
         assert_eq!(drain(&mut w, &mut model, idle), 0);
         drop(w);
+        assert_eq!(model, fresh(r));
+    }
+
+    #[test]
+    fn a_failed_parser_is_a_report_warning_while_the_file_is_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let r = root.path();
+        std::fs::create_dir(r.join("docs")).unwrap();
+        let bad = format!("{}# Notes\n", crate::syntax::TEST_PANIC);
+        std::fs::write(r.join("docs/bad.md"), &bad).unwrap();
+        std::fs::write(r.join("good.rs"), "fn main() {}\n").unwrap();
+        let warning = "docs/bad.md: the markdown parser panicked (a grammar bug (test)), chunked as plain text";
+        let idle = Duration::from_millis(400);
+        let mut model = Map::new();
+        let mut w = Watcher2::open(r, state.path(), &Options::default()).unwrap();
+        drain(&mut w, &mut model, idle);
+        assert_eq!(w.report().warnings, [warning]);
+        std::fs::write(r.join("good.rs"), "fn main() { changed(); }\n").unwrap();
+        drain(&mut w, &mut model, idle);
+        assert_eq!(w.report().warnings, [warning]);
+        std::fs::write(r.join("docs/bad.md"), "# Notes\n").unwrap();
+        drain(&mut w, &mut model, idle);
+        assert!(w.report().warnings.is_empty());
+        std::fs::write(r.join("docs/bad.md"), &bad).unwrap();
+        drain(&mut w, &mut model, idle);
+        assert_eq!(w.report().warnings, [warning]);
+        std::fs::remove_file(r.join("docs/bad.md")).unwrap();
+        drain(&mut w, &mut model, idle);
+        assert!(w.report().warnings.is_empty());
         assert_eq!(model, fresh(r));
     }
 

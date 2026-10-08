@@ -93,7 +93,7 @@ where
 /// input order. A worker claims the next item only while the claimed-but-unemitted
 /// items weigh at most `budget` (or nothing is outstanding, so an item heavier than
 /// the budget still runs, alone). The head item is always claimable eventually, so
-/// the pipeline cannot deadlock.
+/// the pipeline cannot deadlock. A panic in `f` or `sink` becomes that item's error.
 pub fn ordered_map_weighted<T, R, W, F, S>(
     items: &[T],
     threads: usize,
@@ -112,7 +112,8 @@ where
     let threads = threads.max(1).min(items.len().max(1));
     if threads == 1 {
         for item in items {
-            sink(f(item)?)?;
+            let r = unwound(|| f(item))?;
+            unwound(|| sink(r))?;
         }
         return Ok(());
     }
@@ -146,7 +147,7 @@ where
                         c.next += 1;
                         c.next - 1
                     };
-                    if tx.send((idx, f(&items[idx]))).is_err() {
+                    if tx.send((idx, unwound(|| f(&items[idx])))).is_err() {
                         return;
                     }
                 }
@@ -158,7 +159,7 @@ where
         'recv: for (idx, r) in rx.iter() {
             pending.insert(idx, r);
             while let Some(r) = pending.remove(&head) {
-                let step = r.and_then(&mut sink);
+                let step = r.and_then(|r| unwound(|| sink(r)));
                 {
                     let mut c = claim.lock().unwrap();
                     c.outstanding -= weight(head);
@@ -177,4 +178,60 @@ where
         // Dropping the receiver makes any still-running worker stop at its next send.
     });
     outcome
+}
+
+/// Runs `f`, turning a panic into an error, so a lost item can never stall the
+/// in-order pipeline (its successors would wait for it forever).
+fn unwound<R>(f: impl FnOnce() -> Result<R, Error>) -> Result<R, Error> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .unwrap_or_else(|payload| Err(format!("panicked: {}", panic_message(&*payload)).into()))
+}
+
+/// The message of a panic's payload (`panic!` with a literal or a format string).
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("no message")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panic_ends_the_walk_with_an_error() {
+        let items: Vec<usize> = (0..200).collect();
+        for threads in [1, 4] {
+            // A budget of a few items: the workers wait for the panicked head item.
+            let result = ordered_map_weighted(
+                &items,
+                threads,
+                4,
+                |_| 1,
+                |&i| {
+                    assert!(i != 3, "item {i}");
+                    Ok(i)
+                },
+                |_| Ok(()),
+            );
+            assert_eq!(result.unwrap_err().to_string(), "panicked: item 3");
+            let mut emitted = 0;
+            let result = ordered_map_weighted(
+                &items,
+                threads,
+                4,
+                |_| 1,
+                |&i| Ok(i),
+                |i| {
+                    assert!(i != 5, "sink {i}");
+                    emitted += 1;
+                    Ok(())
+                },
+            );
+            assert_eq!(result.unwrap_err().to_string(), "panicked: sink 5");
+            assert_eq!(emitted, 5);
+        }
+    }
 }

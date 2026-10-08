@@ -1,5 +1,5 @@
 use crate::{
-    bench_v1::{Chunk, Delta, Error, Options, chunk_str},
+    bench_v1::{Chunk, Delta, Error, Options},
     files::{FileData, FileRules, Report, read_dir, write_report},
 };
 use fs2::FileExt;
@@ -76,6 +76,9 @@ struct CachedFile {
     // S-ba66f1e3 caches exact chunk byte hashes together with the parsed chunks.
     // Reuse only after hashing the entire file, never by size/mtime.
     fingerprints: Vec<String>,
+    // The report's warning when the file's parser failed and it was split as text
+    // (kept in memory only).
+    warning: Option<String>,
 }
 impl CachedFile {
     fn matches(&self, path: &str, file: &FileData) -> bool {
@@ -102,7 +105,8 @@ impl CachedFile {
             let (p, h) = v.get();
             v.set((p + 1, h));
         });
-        let chunks = chunk_str(Path::new(path), &file.text, options)?;
+        let (chunks, warning) = crate::syntax::chunk_noted(Path::new(path), &file.text, options)?;
+        let chunks = chunks.chunks;
         #[cfg(test)]
         CHUNK_WORK.with(|v| {
             let (p, h) = v.get();
@@ -116,6 +120,7 @@ impl CachedFile {
             hash: file.hash.clone(),
             chunks,
             fingerprints,
+            warning,
         })
     }
 }
@@ -322,14 +327,23 @@ impl Watcher {
     pub fn rules_changed(&self) -> bool {
         self.rules_changed
     }
-    fn set_report(&mut self, report: Report) -> Result<(), Error> {
+    /// Sets the report: the walk's `report` and the parse warnings of the cached files.
+    fn set_report(&mut self, mut report: Report) -> Result<(), Error> {
+        report.warnings.extend(self.parse_warnings());
         if report != self.report {
             write_report(&self.dir, &report)?;
             self.report = report;
         }
         Ok(())
     }
+    fn parse_warnings(&self) -> Vec<String> {
+        self.cache
+            .values()
+            .filter_map(|e| e.warning.clone())
+            .collect()
+    }
     fn reconcile(&mut self, inventory: BTreeMap<String, FileData>) -> Result<(), Error> {
+        let old_warnings = self.parse_warnings();
         let mut cache = BTreeMap::new();
         let mut chunks = Vec::new();
         let mut fingerprints = HashMap::new();
@@ -412,6 +426,11 @@ impl Watcher {
             self.state = state;
         }
         self.cache = cache;
+        if self.parse_warnings() != old_warnings {
+            let mut report = self.report.clone();
+            report.warnings.retain(|w| !old_warnings.contains(w));
+            self.set_report(report)?;
+        }
         Ok(())
     }
     fn fingerprint(inventory: &BTreeMap<String, FileData>) -> Vec<(String, String)> {
@@ -611,6 +630,33 @@ mod cache_tests {
         let mut w = Watcher::open(root.path(), state.path(), &Options::default()).unwrap();
         assert_eq!(work(), (0, 0));
         assert!(w.next_change(Duration::ZERO).unwrap().is_none());
+    }
+    #[test]
+    fn a_failed_parser_is_a_report_warning_while_the_file_is_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let bad = format!("{}# Notes\n", crate::syntax::TEST_PANIC);
+        std::fs::write(r.join("bad.md"), &bad).unwrap();
+        std::fs::write(r.join("good.rs"), "fn main() {}\n").unwrap();
+        let warning =
+            "bad.md: the markdown parser panicked (a grammar bug (test)), chunked as plain text";
+        let mut w = Watcher::open(r, state.path(), &Options::default()).unwrap();
+        assert_eq!(w.report().warnings, [warning]);
+        let d = w.next_change(Duration::ZERO).unwrap().unwrap();
+        w.ack(d.sequence).unwrap();
+        std::fs::write(r.join("good.rs"), "fn main() { changed(); }\n").unwrap();
+        w.next_change(Duration::from_secs(1)).unwrap().unwrap();
+        assert_eq!(w.report().warnings, [warning]);
+        std::fs::write(r.join("bad.md"), "# Notes\n").unwrap();
+        w.next_change(Duration::from_secs(1)).unwrap().unwrap();
+        assert!(w.report().warnings.is_empty());
+        std::fs::write(r.join("bad.md"), &bad).unwrap();
+        w.next_change(Duration::from_secs(1)).unwrap().unwrap();
+        assert_eq!(w.report().warnings, [warning]);
+        std::fs::remove_file(r.join("bad.md")).unwrap();
+        w.next_change(Duration::from_secs(1)).unwrap().unwrap();
+        assert!(w.report().warnings.is_empty());
     }
     #[test]
     fn one_file_edit_does_not_rehash_other_files_chunks() {

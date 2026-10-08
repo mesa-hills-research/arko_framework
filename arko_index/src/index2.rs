@@ -22,7 +22,7 @@
 //! to a sorted run file; runs cover increasing doc ranges and are merged by term.
 //! Texts to embed are spooled to disk; the vector store is written as it is filled.
 use crate::{
-    bench_v1::{Chunk, Error, Options, chunk_str},
+    bench_v1::{Chunk, Error, Options},
     dense::{
         DenseBuild, DenseConfig, DenseIndexInfo, EmbedStats, EmbedText, RENDER_VERSION,
         cache::Cache, render_with, run, text_hash,
@@ -185,6 +185,8 @@ struct FileDocs {
     hashes: Vec<[u8; 32]>,
     /// ...and the rendered text of each chunk the cache does not hold.
     missing: Vec<([u8; 32], String)>,
+    /// The report's warning when the file's parser failed and it was split as text.
+    warning: Option<String>,
 }
 
 fn shard_of(term: &[u8], shards: usize) -> usize {
@@ -221,6 +223,7 @@ fn file_docs(
         shards: vec![Vec::new(); shards],
         hashes: Vec::new(),
         missing: Vec::new(),
+        warning: None,
     };
     let (path, file) = match files::read_listed(item, false) {
         files::Read::Text(path, file) => (path, file),
@@ -233,7 +236,9 @@ fn file_docs(
             return Ok(out);
         }
     };
-    let chunks = chunk_str(Path::new(&path), &file.text, options)?;
+    let (chunks, warning) = crate::syntax::chunk_noted(Path::new(&path), &file.text, options)?;
+    let chunks = chunks.chunks;
+    out.warning = warning;
     if chunks.is_empty() {
         return Ok(out);
     }
@@ -545,6 +550,7 @@ pub fn build(
                     }
                     None => report.files += 1,
                 }
+                report.warnings.extend(f.warning);
                 let base = next_doc;
                 let mut start = 0u64;
                 for (&end, &len) in f.ends.iter().zip(&f.lens) {
