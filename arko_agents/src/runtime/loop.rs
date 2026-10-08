@@ -4146,6 +4146,818 @@ impl AgentLoop {
         Ok(())
     }
 
+    /// The wait for a command, with its deadline (the opt-in command
+    /// timeout, set when the wait starts; none while the host decides the
+    /// run's waits), then the command, or the end of the wait without one.
+    async fn wait_for_command(&mut self) -> Result<Flow, ArkoAgentsError> {
+        let deadline = match self.command_wait {
+            CommandWait::Until(deadline) => deadline,
+            CommandWait::HostDeciding => None,
+            // A wait that starts while the host decides the run's
+            // waits is not timed, even if that changes.
+            CommandWait::NotStarted if self.host_decisions.get() => {
+                self.command_wait = CommandWait::HostDeciding;
+                None
+            }
+            CommandWait::NotStarted => {
+                let deadline = self
+                    .task
+                    .agent_config
+                    .user_command_timeout_seconds
+                    .and_then(|seconds| {
+                        tokio::time::Instant::now().checked_add(Duration::from_secs(seconds))
+                    });
+                self.command_wait = CommandWait::Until(deadline);
+                deadline
+            }
+        };
+        // Not timed while the host decides the run's waits.
+        let deadline = deadline.filter(|_| !self.host_decisions.get());
+        let command_future = self.command_receiver.recv();
+        let command_result = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, command_future).await,
+            None => Ok(command_future.await),
+        };
+        match command_result {
+            Ok(Some(cmd)) => self.apply_command(cmd).await,
+            Ok(None) => {
+                let reason = "Command channel disconnected during approval state.".to_string();
+                self.interrupt_wait(reason, HOST_STOPPED_CALL).await
+            }
+            // The host took over the run's decisions during the
+            // wait: it isn't timed any more.
+            Err(_) if self.host_decisions.get() => Ok(Flow::NextPass),
+            Err(_timeout_err) => {
+                let seconds = self
+                    .task
+                    .agent_config
+                    .user_command_timeout_seconds
+                    .unwrap_or(0);
+                let reason = format!(
+                    "Timeout ({}s) waiting for user command in state {:?}.",
+                    seconds, self.task.current_state
+                );
+                self.interrupt_wait(reason, &approval_timed_out_call(seconds))
+                    .await
+            }
+        }
+    }
+
+    /// A command that arrived during the wait. Context, `HostDeciding` and
+    /// handover requests are taken without ending it; any other command
+    /// is applied to the state the task waits in.
+    async fn apply_command(&mut self, cmd: UserCommand) -> Result<Flow, ArkoAgentsError> {
+        // Neither ends the wait or moves its deadline.
+        if let UserCommand::InjectContext { ref content } = cmd {
+            self.queue_context_injection(content.clone());
+            return Ok(Flow::NextPass);
+        }
+        if let UserCommand::HostDeciding = cmd {
+            self.command_wait = CommandWait::HostDeciding;
+            return Ok(Flow::NextPass);
+        }
+        if let UserCommand::RequestHandover = cmd {
+            self.note_handover_request();
+            return Ok(Flow::NextPass);
+        }
+        let mut next_user_message_from_command = String::new();
+        let mut next_message_is_runtime = false;
+        let mut native_handled = false;
+        let original_state_before_command_processing = self.task.current_state.clone();
+
+        match self.task.current_state.clone() {
+            TaskState::AwaitingToolApproval {
+                tool_call_id,
+                tool_name,
+                parameters,
+                ..
+            } => match cmd {
+                UserCommand::ApproveToolUse {
+                    tool_call_id: cmd_tool_id,
+                    ref custom_tool_output,
+                    ref message_to_agent,
+                } => {
+                    if cmd_tool_id != tool_call_id {
+                        log::warn!(
+                            "Task {}: Received ApproveToolUse for unexpected tool_call_id. Ignoring.",
+                            self.task.id
+                        );
+                        return Ok(Flow::NextPass);
+                    }
+
+                    self.begin_tool_batch();
+                    // Decided: a snapshot taken while the
+                    // call runs no longer waits for it.
+                    self.task.set_state(TaskState::InProgress);
+                    if self.is_native_mode() {
+                        let mut approved = Vec::new();
+                        let mut results = Vec::new();
+                        if let Some(ai_call) =
+                            self.task.pending_native_tool_calls.remove(&tool_call_id)
+                        {
+                            let index = self.turn_position(&ai_call);
+                            match self.approved_native_run(
+                                index,
+                                &ai_call,
+                                tool_call_id,
+                                &tool_name,
+                                parameters,
+                                custom_tool_output.clone(),
+                                message_to_agent.clone(),
+                            ) {
+                                Ok(run) => approved.push(run),
+                                Err(()) => results
+                                    .push((index, self.unavailable_native_tool(&ai_call).await?)),
+                            }
+                        }
+                        self.run_decided_native_calls(approved, results).await?;
+                        if matches!(
+                            self.task.current_state,
+                            TaskState::AwaitingToolApproval { .. }
+                        ) {
+                            self.task.set_state(TaskState::InProgress);
+                        }
+                        self.end_tool_batch().await?;
+                        if self.native_results_are_due() {
+                            self.flush_native_results_to_conversation(None).await?;
+                        }
+                        native_handled = true;
+                    } else {
+                        let start = self.task.pending_text_tool_results.len();
+                        match self
+                            .execute_tool_and_handle_result(
+                                &tool_name,
+                                parameters,
+                                tool_call_id,
+                                custom_tool_output.clone(),
+                                message_to_agent.clone(),
+                            )
+                            .await
+                        {
+                            Ok(msg_part) => self.record_text_result(msg_part).await,
+                            Err(e) => {
+                                log::error!(
+                                    "Task {}: Error during approved tool execution: {}",
+                                    self.task.id,
+                                    e
+                                );
+                            }
+                        }
+                        next_user_message_from_command =
+                            self.take_text_results(start).join("\n\n---\n\n");
+                        if matches!(self.task.current_state, TaskState::AwaitingToolApproval { tool_call_id: current_id, .. } if current_id == tool_call_id)
+                        {
+                            self.task.set_state(TaskState::InProgress);
+                        }
+                        self.end_tool_batch().await?;
+                    }
+                }
+                UserCommand::RejectToolUse {
+                    tool_call_id: cmd_tool_id,
+                    ref reason,
+                } => {
+                    if cmd_tool_id != tool_call_id {
+                        log::warn!(
+                            "Task {}: Received RejectToolUse for unexpected tool_call_id. Ignoring.",
+                            self.task.id
+                        );
+                        self.emit_event(AgentEvent::TaskStateChanged(
+                            self.task.current_state.clone(),
+                        ))
+                        .await?;
+                        return Ok(Flow::NextPass);
+                    }
+                    self.emit_event(AgentEvent::ToolRejected {
+                        tool_call_id,
+                        tool_name: tool_name.clone(),
+                        reason: (*reason).clone(),
+                    })
+                    .await?;
+
+                    if self.is_native_mode() {
+                        let mut results = Vec::new();
+                        if let Some(ai_call) =
+                            self.task.pending_native_tool_calls.remove(&tool_call_id)
+                        {
+                            let reason_str = reason.as_deref().unwrap_or("Rejected by user");
+                            results.push((
+                                self.turn_position(&ai_call),
+                                ai::ToolResult::error_from_tool_call(&ai_call, reason_str),
+                            ));
+                        }
+                        // Calls held for this one run now.
+                        self.begin_tool_batch();
+                        self.task.set_state(TaskState::InProgress);
+                        self.run_decided_native_calls(Vec::new(), results).await?;
+                        if matches!(
+                            self.task.current_state,
+                            TaskState::AwaitingToolApproval { .. }
+                        ) {
+                            self.task.set_state(TaskState::InProgress);
+                        }
+                        self.end_tool_batch().await?;
+                        if self.native_results_are_due() {
+                            self.flush_native_results_to_conversation(None).await?;
+                        }
+                        native_handled = true;
+                    } else {
+                        let pb = PromptBuilder::new(
+                            &self.task.agent_config,
+                            vec![],
+                            &self.parsing_config,
+                            None,
+                        );
+                        next_user_message_from_command = pb.format_tool_rejection_as_user_message(
+                            &tool_name,
+                            (*reason).as_deref(),
+                        );
+                        self.task.set_state(TaskState::InProgress);
+                    }
+                }
+                UserCommand::CancelTask => {}
+                UserCommand::SuspendTask => {}
+                _ => {
+                    log::warn!(
+                        "Task {}: Received inappropriate command while AwaitingToolApproval. Ignoring.",
+                        self.task.id
+                    );
+                    self.emit_event(AgentEvent::TaskStateChanged(
+                        self.task.current_state.clone(),
+                    ))
+                    .await?;
+                    return Ok(Flow::NextPass);
+                }
+            },
+            TaskState::AwaitingBatchToolApproval {
+                batch_id,
+                ref pending_calls,
+            } => {
+                if let UserCommand::SubmitBatchToolApprovals {
+                    batch_id: cmd_batch_id,
+                    ref decisions,
+                } = cmd
+                {
+                    if cmd_batch_id != batch_id {
+                        log::warn!(
+                            "Task {}: Received SubmitBatchToolApprovals for unexpected batch_id. Ignoring.",
+                            self.task.id
+                        );
+                        return Ok(Flow::NextPass);
+                    }
+
+                    self.begin_tool_batch();
+                    // Decided: a snapshot taken while the
+                    // calls run no longer waits for them.
+                    self.task.set_state(TaskState::InProgress);
+                    if self.is_native_mode() {
+                        // Rejections are answered at once;
+                        // the approved calls then run like a
+                        // turn's (parallel-safe ones at the
+                        // same time), in the batch's order.
+                        let mut results = Vec::new();
+                        let mut approved = Vec::new();
+                        for pending_call_info in pending_calls {
+                            let Some(ai_call) = self
+                                .task
+                                .pending_native_tool_calls
+                                .remove(&pending_call_info.tool_call_id)
+                            else {
+                                continue;
+                            };
+                            let index = self.turn_position(&ai_call);
+                            match decisions.get(&pending_call_info.tool_call_id) {
+                                Some(ToolApprovalDecision::Approve {
+                                    custom_tool_output,
+                                    message_to_agent,
+                                }) => match self.approved_native_run(
+                                    index,
+                                    &ai_call,
+                                    pending_call_info.tool_call_id,
+                                    &pending_call_info.tool_name,
+                                    pending_call_info.parameters.clone(),
+                                    custom_tool_output.clone(),
+                                    message_to_agent.clone(),
+                                ) {
+                                    Ok(run) => approved.push(run),
+                                    Err(()) => results.push((
+                                        index,
+                                        self.unavailable_native_tool(&ai_call).await?,
+                                    )),
+                                },
+                                Some(ToolApprovalDecision::Reject { reason }) => {
+                                    self.emit_event(AgentEvent::ToolRejected {
+                                        tool_call_id: pending_call_info.tool_call_id,
+                                        tool_name: pending_call_info.tool_name.clone(),
+                                        reason: (*reason).clone(),
+                                    })
+                                    .await?;
+                                    let reason_str =
+                                        reason.as_deref().unwrap_or("Rejected by user");
+                                    results.push((
+                                        index,
+                                        ai::ToolResult::error_from_tool_call(&ai_call, reason_str),
+                                    ));
+                                }
+                                None => {
+                                    self.emit_event(AgentEvent::ToolRejected {
+                                        tool_call_id: pending_call_info.tool_call_id,
+                                        tool_name: pending_call_info.tool_name.clone(),
+                                        reason: Some("No decision provided".to_string()),
+                                    })
+                                    .await?;
+                                    results.push((
+                                        index,
+                                        ai::ToolResult::error_from_tool_call(
+                                            &ai_call,
+                                            "No decision provided, implicitly rejected",
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                        self.run_decided_native_calls(approved, results).await?;
+                        if matches!(
+                            self.task.current_state,
+                            TaskState::AwaitingBatchToolApproval { .. }
+                        ) {
+                            self.task.set_state(TaskState::InProgress);
+                        }
+                        self.end_tool_batch().await?;
+                        if self.native_results_are_due() {
+                            self.flush_native_results_to_conversation(None).await?;
+                        }
+                        native_handled = true;
+                    } else {
+                        let start = self.task.pending_text_tool_results.len();
+                        for pending_call_info in pending_calls {
+                            match decisions.get(&pending_call_info.tool_call_id) {
+                                Some(ToolApprovalDecision::Approve {
+                                    custom_tool_output,
+                                    message_to_agent,
+                                }) => {
+                                    match self
+                                        .execute_tool_and_handle_result(
+                                            &pending_call_info.tool_name,
+                                            pending_call_info.parameters.clone(),
+                                            pending_call_info.tool_call_id,
+                                            custom_tool_output.clone(),
+                                            message_to_agent.clone(),
+                                        )
+                                        .await
+                                    {
+                                        Ok(msg_part) => self.record_text_result(msg_part).await,
+                                        Err(e) => log::error!(
+                                            "Task {}: Error during approved batched tool execution: {}",
+                                            self.task.id,
+                                            e
+                                        ),
+                                    }
+                                }
+                                Some(ToolApprovalDecision::Reject { reason }) => {
+                                    self.emit_event(AgentEvent::ToolRejected {
+                                        tool_call_id: pending_call_info.tool_call_id,
+                                        tool_name: pending_call_info.tool_name.clone(),
+                                        reason: (*reason).clone(),
+                                    })
+                                    .await?;
+                                    let pb = PromptBuilder::new(
+                                        &self.task.agent_config,
+                                        vec![],
+                                        &self.parsing_config,
+                                        None,
+                                    );
+                                    self.record_text_result(
+                                        pb.format_tool_rejection_as_user_message(
+                                            &pending_call_info.tool_name,
+                                            (*reason).as_deref(),
+                                        ),
+                                    )
+                                    .await;
+                                }
+                                None => {
+                                    self.emit_event(AgentEvent::ToolRejected {
+                                        tool_call_id: pending_call_info.tool_call_id,
+                                        tool_name: pending_call_info.tool_name.clone(),
+                                        reason: Some("No decision provided".to_string()),
+                                    })
+                                    .await?;
+                                    let pb = PromptBuilder::new(
+                                        &self.task.agent_config,
+                                        vec![],
+                                        &self.parsing_config,
+                                        None,
+                                    );
+                                    self.record_text_result(
+                                        pb.format_tool_rejection_as_user_message(
+                                            &pending_call_info.tool_name,
+                                            Some("Implicitly rejected: No decision provided."),
+                                        ),
+                                    )
+                                    .await;
+                                }
+                            }
+                            // A call that changed the state (asked
+                            // the user, completed or ended the
+                            // task) ends the batch.
+                            if !matches!(self.task.current_state, TaskState::InProgress)
+                                || self.stop_requested
+                            {
+                                break;
+                            }
+                        }
+                        next_user_message_from_command =
+                            self.take_text_results(start).join("\n\n---\n\n");
+                        self.end_tool_batch().await?;
+                    }
+                } else if matches!(cmd, UserCommand::CancelTask | UserCommand::SuspendTask) {
+                } else {
+                    log::warn!(
+                        "Task {}: Received inappropriate command while AwaitingBatchToolApproval. Ignoring.",
+                        self.task.id
+                    );
+                    self.emit_event(AgentEvent::TaskStateChanged(
+                        self.task.current_state.clone(),
+                    ))
+                    .await?;
+                    return Ok(Flow::NextPass);
+                }
+            }
+            TaskState::AwaitingUserResponse { ref questions } => match cmd {
+                UserCommand::SubmitUserResponse { ref response } => {
+                    log::info!("Task {}: User response received.", self.task.id);
+                    let pb = PromptBuilder::new(
+                        &self.task.agent_config,
+                        vec![],
+                        &self.parsing_config,
+                        None,
+                    );
+                    let formatted = pb.format_user_response_as_user_message(questions, response);
+                    self.task.set_state(TaskState::InProgress);
+
+                    if self.is_native_mode() {
+                        self.flush_native_results_to_conversation(Some(&formatted))
+                            .await?;
+                        native_handled = true;
+                    } else {
+                        next_user_message_from_command = formatted;
+                    }
+                }
+                UserCommand::CancelTask => {}
+                UserCommand::SuspendTask => {}
+                _ => {
+                    log::warn!(
+                        "Task {}: Received inappropriate command while AwaitingUserResponse. Ignoring.",
+                        self.task.id
+                    );
+                    self.emit_event(AgentEvent::TaskStateChanged(
+                        self.task.current_state.clone(),
+                    ))
+                    .await?;
+                    return Ok(Flow::NextPass);
+                }
+            },
+            TaskState::AwaitingErrorRecoveryApproval {
+                ref error_message,
+                ref cause,
+                error_kind,
+            } => {
+                match cmd {
+                    UserCommand::ContinueAfterError { ref note } => {
+                        log::info!(
+                            "Task {}: Continuing after an error-recovery pause.",
+                            self.task.id
+                        );
+                        self.task.monitor_pause = false;
+                        let note = note.as_deref().filter(|text| !text.is_empty());
+                        if self.is_native_mode() {
+                            // Calls an older version left
+                            // without results get them now.
+                            self.answer_open_native_calls(UNREACHED_CALL, UNREACHED_CALL)
+                                .await?;
+                        }
+                        if self.fallback_resend() {
+                            // The fallback answers exactly the
+                            // refused input: a note waits, as
+                            // context, until it has answered.
+                            if let Some(note) = note {
+                                self.queue_context_injection(note.to_string());
+                            }
+                            native_handled = true;
+                        } else if self.is_native_mode()
+                            && !self.task.pending_native_tool_results.is_empty()
+                        {
+                            self.flush_native_results_to_conversation(note).await?;
+                            if note.is_some() {
+                                // The note beside the results is the runtime's.
+                                self.task.mark_last_message_runtime_text();
+                            }
+                            native_handled = true;
+                        } else if let Some(note) = note {
+                            next_user_message_from_command = note.to_string();
+                            next_message_is_runtime = true;
+                        } else if self.is_native_mode()
+                            || self.task.pending_text_tool_results.is_empty()
+                        {
+                            // The failed request is sent again
+                            // as it was.
+                            native_handled = true;
+                        }
+                        // Otherwise the output-based results the
+                        // pause left waiting are the next message.
+                        self.task.refused_input = None;
+                        self.task.set_state(TaskState::InProgress);
+                        self.reset_llm_recovery();
+                    }
+                    UserCommand::ApproveErrorRecovery {
+                        message: ref user_msg_on_recovery,
+                    } => {
+                        log::info!("Task {}: Error recovery approved by user.", self.task.id);
+                        let monitor_pause = std::mem::take(&mut self.task.monitor_pause);
+                        if self.fallback_resend() {
+                            // The fallback answers exactly the
+                            // refused input: no error note, and
+                            // the host's message waits, as
+                            // context, until it has answered.
+                            if self.is_native_mode() {
+                                // Calls an older version left
+                                // without results get them now.
+                                self.answer_open_native_calls(UNREACHED_CALL, UNREACHED_CALL)
+                                    .await?;
+                            }
+                            if let Some(text) = user_msg_on_recovery
+                                .as_deref()
+                                .filter(|text| !text.is_empty())
+                            {
+                                self.queue_context_injection(text.to_string());
+                            }
+                            native_handled = true;
+                        } else if monitor_pause {
+                            // A monitor paused the task, not a
+                            // model error: nothing to report to
+                            // the model beyond the host's note.
+                            match user_msg_on_recovery
+                                .as_deref()
+                                .filter(|text| !text.is_empty())
+                            {
+                                Some(text) => next_user_message_from_command = text.to_string(),
+                                None => native_handled = true,
+                            }
+                        } else {
+                            let mut recovery_prompt = format!(
+                                "The previous attempt resulted in an error: {}. The user has approved to continue.",
+                                error_message
+                            );
+                            if let Some(user_input) = user_msg_on_recovery
+                                && !(*user_input).is_empty()
+                            {
+                                recovery_prompt
+                                    .push_str("\nUser provided additional context for recovery:\n");
+                                recovery_prompt.push_str(user_input);
+                            }
+
+                            if self.is_native_mode() {
+                                // Calls an older version left
+                                // without results get them now.
+                                self.answer_open_native_calls(UNREACHED_CALL, UNREACHED_CALL)
+                                    .await?;
+                            }
+                            if self.is_native_mode()
+                                && !self.task.pending_native_tool_results.is_empty()
+                            {
+                                self.flush_native_results_to_conversation(Some(&recovery_prompt))
+                                    .await?;
+                                // The note beside the results is the runtime's.
+                                self.task.mark_last_message_runtime_text();
+                                native_handled = true;
+                            } else {
+                                next_user_message_from_command = recovery_prompt;
+                                next_message_is_runtime = true;
+                            }
+                        }
+                        // Continuing without a change leaves no refused
+                        // input to resolve.
+                        self.task.refused_input = None;
+                        self.task.set_state(TaskState::InProgress);
+                        self.reset_llm_recovery();
+                    }
+                    UserCommand::ResolveRefusal { ref changes } => {
+                        match self.task.resolve_refusal(changes.clone()) {
+                            Ok(()) => {
+                                log::info!(
+                                    "Task {}: Refused input changed; continuing.",
+                                    self.task.id
+                                );
+                                self.task.monitor_pause = false;
+                                self.task.fallback_for = None;
+                                self.task.set_state(TaskState::InProgress);
+                                self.reset_llm_recovery();
+                                // Tools observed the old input:
+                                // they see the changed history
+                                // from the start again.
+                                self.tool_context_cursor = usize::MAX;
+                                // The changed input is sent as it is.
+                                native_handled = true;
+                            }
+                            Err(error) => {
+                                self.emit_event(AgentEvent::ErrorEncountered {
+                                    error_message: format!(
+                                        "Could not resolve the refusal: {error}"
+                                    ),
+                                    requires_approval_to_retry: true,
+                                    tool_call_id: None,
+                                    error_kind: None,
+                                })
+                                .await?;
+                                return Ok(Flow::NextPass);
+                            }
+                        }
+                    }
+                    UserCommand::RejectErrorRecovery { ref message } => {
+                        log::info!("Task {}: Error recovery rejected by user.", self.task.id);
+                        // The failed task still records the
+                        // results its last turn holds.
+                        self.settle_interrupted_wait(UNREACHED_CALL, UNREACHED_CALL)
+                            .await?;
+                        // The host's reason, when it gives one.
+                        let reason = match message.as_deref().filter(|message| !message.is_empty())
+                        {
+                            Some(message) => message.to_string(),
+                            None => format!(
+                                "Error recovery rejected by user for error: {}",
+                                error_message
+                            ),
+                        };
+                        // The pause's cause stays with the
+                        // failure.
+                        self.task.set_state(TaskState::Failed {
+                            reason,
+                            cause: Some(cause.clone()),
+                            error_kind,
+                        });
+                    }
+                    UserCommand::CancelTask => {}
+                    UserCommand::SuspendTask => {}
+                    _ => {
+                        log::warn!(
+                            "Task {}: Received inappropriate command while AwaitingErrorRecoveryApproval. Ignoring.",
+                            self.task.id
+                        );
+                        self.emit_event(AgentEvent::TaskStateChanged(
+                            self.task.current_state.clone(),
+                        ))
+                        .await?;
+                        return Ok(Flow::NextPass);
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.after_decision(
+            &cmd,
+            original_state_before_command_processing,
+            next_user_message_from_command,
+            next_message_is_runtime,
+            native_handled,
+        )
+        .await
+    }
+
+    /// After a command the wait didn't ignore: the wait ends, a
+    /// cancellation or suspension takes effect, a changed state is
+    /// reported, and a task that goes on gets the command's message (or
+    /// a request to continue) unless the decision needs none.
+    async fn after_decision(
+        &mut self,
+        cmd: &UserCommand,
+        original_state_before_command_processing: TaskState,
+        mut next_user_message_from_command: String,
+        mut next_message_is_runtime: bool,
+        native_handled: bool,
+    ) -> Result<Flow, ArkoAgentsError> {
+        // A command the wait didn't ignore (those continue
+        // above) ends it; a later wait gets its own deadline.
+        self.command_wait = CommandWait::NotStarted;
+
+        if let UserCommand::CancelTask = cmd {
+            log::info!("Task {}: Cancelled by user command.", self.task.id);
+            // The calls it waited on are answered as not run.
+            self.settle_interrupted_wait(TASK_CANCELLED_CALL, TASK_CANCELLED_CALL)
+                .await?;
+            self.task.set_state(TaskState::Cancelled {
+                reason: CANCELLED_BY_USER.to_string(),
+            });
+        }
+
+        if let UserCommand::SuspendTask = cmd {
+            self.emit_event(AgentEvent::TaskStateChanged(
+                self.task.current_state.clone(),
+            ))
+            .await?;
+            return Ok(Flow::Exit);
+        }
+
+        if self.task.current_state != original_state_before_command_processing
+            && !self.state_reported()
+        {
+            self.emit_event(AgentEvent::TaskStateChanged(
+                self.task.current_state.clone(),
+            ))
+            .await?;
+        }
+
+        if self.task.current_state.is_terminal() {
+            return Ok(Flow::Exit);
+        }
+
+        // Output-based results of a command that leaves the
+        // task waiting (a pause on a tool error) wait with it;
+        // the message that ends a wait carries them first.
+        if !self.is_native_mode() && !native_handled {
+            if self.task.current_state.is_awaiting_approval() {
+                if !next_user_message_from_command.is_empty() {
+                    self.task
+                        .pending_text_tool_results
+                        .push(std::mem::take(&mut next_user_message_from_command));
+                }
+            } else if !self.task.pending_text_tool_results.is_empty() {
+                next_user_message_from_command = self
+                    .task
+                    .with_pending_text_tool_results(next_user_message_from_command);
+                next_message_is_runtime = false;
+            }
+        }
+
+        if matches!(self.task.current_state, TaskState::InProgress) && !native_handled {
+            if !next_user_message_from_command.is_empty() {
+                let pb =
+                    PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None);
+                let next_msg_num = self.task.user_message_count + 1;
+                let augmented_msg = pb.augment_user_message_with_env_details_and_reminder(
+                    &self.task,
+                    &next_user_message_from_command,
+                    next_msg_num,
+                )?;
+                self.add_text_tool_results_to_conversation(&augmented_msg);
+                self.mark_details_sent();
+                if next_message_is_runtime {
+                    self.task.mark_last_message_runtime();
+                }
+                self.task.increment_user_message_count();
+                self.reset_llm_recovery();
+            } else {
+                let pb =
+                    PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None);
+                let generic_prompt = "Please continue with the task based on the previous actions.";
+                let next_msg_num = self.task.user_message_count + 1;
+                let augmented_generic_prompt = pb
+                    .augment_user_message_with_env_details_and_reminder(
+                        &self.task,
+                        generic_prompt,
+                        next_msg_num,
+                    )?;
+                self.task
+                    .conversation
+                    .add_user_message(&augmented_generic_prompt);
+                self.task.mark_last_message_runtime();
+                self.task.increment_user_message_count();
+                self.reset_llm_recovery();
+            }
+        }
+
+        if self.task.current_state.is_awaiting_approval() {
+            return Ok(Flow::NextPass);
+        }
+        Ok(Flow::Proceed)
+    }
+
+    /// A wait that ended without a command (a closed command channel, or
+    /// the command timeout): the calls it waited on are answered with
+    /// `call_reason`, and the task is interrupted.
+    async fn interrupt_wait(
+        &mut self,
+        reason: String,
+        call_reason: &str,
+    ) -> Result<Flow, ArkoAgentsError> {
+        log::error!("Task {}: {}", self.task.id, reason);
+        self.settle_interrupted_wait(call_reason, HELD_CALL_NOT_RUN)
+            .await?;
+        self.task.set_state(TaskState::Interrupted {
+            reason: reason.clone(),
+        });
+        self.emit_event(AgentEvent::TaskStateChanged(
+            self.task.current_state.clone(),
+        ))
+        .await?;
+        self.emit_event(AgentEvent::ErrorEncountered {
+            error_message: reason,
+            requires_approval_to_retry: false,
+            tool_call_id: None,
+            error_kind: None,
+        })
+        .await?;
+        Ok(Flow::Exit)
+    }
+
     /// Runs the agent loop to completion.
     pub async fn run(mut self) -> Result<Task, ArkoAgentsError> {
         self.check_config()?;
@@ -4157,865 +4969,7 @@ impl AgentLoop {
             step!(self.pass_start().await?);
 
             if self.task.current_state.is_awaiting_approval() {
-                let deadline = match self.command_wait {
-                    CommandWait::Until(deadline) => deadline,
-                    CommandWait::HostDeciding => None,
-                    // A wait that starts while the host decides the run's
-                    // waits is not timed, even if that changes.
-                    CommandWait::NotStarted if self.host_decisions.get() => {
-                        self.command_wait = CommandWait::HostDeciding;
-                        None
-                    }
-                    CommandWait::NotStarted => {
-                        let deadline = self
-                            .task
-                            .agent_config
-                            .user_command_timeout_seconds
-                            .and_then(|seconds| {
-                                tokio::time::Instant::now()
-                                    .checked_add(Duration::from_secs(seconds))
-                            });
-                        self.command_wait = CommandWait::Until(deadline);
-                        deadline
-                    }
-                };
-                // Not timed while the host decides the run's waits.
-                let deadline = deadline.filter(|_| !self.host_decisions.get());
-                let command_future = self.command_receiver.recv();
-                let command_result = match deadline {
-                    Some(deadline) => tokio::time::timeout_at(deadline, command_future).await,
-                    None => Ok(command_future.await),
-                };
-
-                match command_result {
-                    Ok(Some(cmd)) => {
-                        // Neither ends the wait or moves its deadline.
-                        if let UserCommand::InjectContext { ref content } = cmd {
-                            self.queue_context_injection(content.clone());
-                            continue 'main_loop;
-                        }
-                        if let UserCommand::HostDeciding = cmd {
-                            self.command_wait = CommandWait::HostDeciding;
-                            continue 'main_loop;
-                        }
-                        if let UserCommand::RequestHandover = cmd {
-                            self.note_handover_request();
-                            continue 'main_loop;
-                        }
-                        let mut next_user_message_from_command = String::new();
-                        let mut next_message_is_runtime = false;
-                        let mut native_handled = false;
-                        let original_state_before_command_processing =
-                            self.task.current_state.clone();
-
-                        match self.task.current_state.clone() {
-                            TaskState::AwaitingToolApproval {
-                                tool_call_id,
-                                tool_name,
-                                parameters,
-                                ..
-                            } => match cmd {
-                                UserCommand::ApproveToolUse {
-                                    tool_call_id: cmd_tool_id,
-                                    ref custom_tool_output,
-                                    ref message_to_agent,
-                                } => {
-                                    if cmd_tool_id != tool_call_id {
-                                        log::warn!(
-                                            "Task {}: Received ApproveToolUse for unexpected tool_call_id. Ignoring.",
-                                            self.task.id
-                                        );
-                                        continue 'main_loop;
-                                    }
-
-                                    self.begin_tool_batch();
-                                    // Decided: a snapshot taken while the
-                                    // call runs no longer waits for it.
-                                    self.task.set_state(TaskState::InProgress);
-                                    if self.is_native_mode() {
-                                        let mut approved = Vec::new();
-                                        let mut results = Vec::new();
-                                        if let Some(ai_call) = self
-                                            .task
-                                            .pending_native_tool_calls
-                                            .remove(&tool_call_id)
-                                        {
-                                            let index = self.turn_position(&ai_call);
-                                            match self.approved_native_run(
-                                                index,
-                                                &ai_call,
-                                                tool_call_id,
-                                                &tool_name,
-                                                parameters,
-                                                custom_tool_output.clone(),
-                                                message_to_agent.clone(),
-                                            ) {
-                                                Ok(run) => approved.push(run),
-                                                Err(()) => results.push((
-                                                    index,
-                                                    self.unavailable_native_tool(&ai_call).await?,
-                                                )),
-                                            }
-                                        }
-                                        self.run_decided_native_calls(approved, results).await?;
-                                        if matches!(
-                                            self.task.current_state,
-                                            TaskState::AwaitingToolApproval { .. }
-                                        ) {
-                                            self.task.set_state(TaskState::InProgress);
-                                        }
-                                        self.end_tool_batch().await?;
-                                        if self.native_results_are_due() {
-                                            self.flush_native_results_to_conversation(None).await?;
-                                        }
-                                        native_handled = true;
-                                    } else {
-                                        let start = self.task.pending_text_tool_results.len();
-                                        match self
-                                            .execute_tool_and_handle_result(
-                                                &tool_name,
-                                                parameters,
-                                                tool_call_id,
-                                                custom_tool_output.clone(),
-                                                message_to_agent.clone(),
-                                            )
-                                            .await
-                                        {
-                                            Ok(msg_part) => self.record_text_result(msg_part).await,
-                                            Err(e) => {
-                                                log::error!(
-                                                    "Task {}: Error during approved tool execution: {}",
-                                                    self.task.id,
-                                                    e
-                                                );
-                                            }
-                                        }
-                                        next_user_message_from_command =
-                                            self.take_text_results(start).join("\n\n---\n\n");
-                                        if matches!(self.task.current_state, TaskState::AwaitingToolApproval { tool_call_id: current_id, .. } if current_id == tool_call_id)
-                                        {
-                                            self.task.set_state(TaskState::InProgress);
-                                        }
-                                        self.end_tool_batch().await?;
-                                    }
-                                }
-                                UserCommand::RejectToolUse {
-                                    tool_call_id: cmd_tool_id,
-                                    ref reason,
-                                } => {
-                                    if cmd_tool_id != tool_call_id {
-                                        log::warn!(
-                                            "Task {}: Received RejectToolUse for unexpected tool_call_id. Ignoring.",
-                                            self.task.id
-                                        );
-                                        self.emit_event(AgentEvent::TaskStateChanged(
-                                            self.task.current_state.clone(),
-                                        ))
-                                        .await?;
-                                        continue 'main_loop;
-                                    }
-                                    self.emit_event(AgentEvent::ToolRejected {
-                                        tool_call_id,
-                                        tool_name: tool_name.clone(),
-                                        reason: (*reason).clone(),
-                                    })
-                                    .await?;
-
-                                    if self.is_native_mode() {
-                                        let mut results = Vec::new();
-                                        if let Some(ai_call) = self
-                                            .task
-                                            .pending_native_tool_calls
-                                            .remove(&tool_call_id)
-                                        {
-                                            let reason_str =
-                                                reason.as_deref().unwrap_or("Rejected by user");
-                                            results.push((
-                                                self.turn_position(&ai_call),
-                                                ai::ToolResult::error_from_tool_call(
-                                                    &ai_call, reason_str,
-                                                ),
-                                            ));
-                                        }
-                                        // Calls held for this one run now.
-                                        self.begin_tool_batch();
-                                        self.task.set_state(TaskState::InProgress);
-                                        self.run_decided_native_calls(Vec::new(), results).await?;
-                                        if matches!(
-                                            self.task.current_state,
-                                            TaskState::AwaitingToolApproval { .. }
-                                        ) {
-                                            self.task.set_state(TaskState::InProgress);
-                                        }
-                                        self.end_tool_batch().await?;
-                                        if self.native_results_are_due() {
-                                            self.flush_native_results_to_conversation(None).await?;
-                                        }
-                                        native_handled = true;
-                                    } else {
-                                        let pb = PromptBuilder::new(
-                                            &self.task.agent_config,
-                                            vec![],
-                                            &self.parsing_config,
-                                            None,
-                                        );
-                                        next_user_message_from_command = pb
-                                            .format_tool_rejection_as_user_message(
-                                                &tool_name,
-                                                (*reason).as_deref(),
-                                            );
-                                        self.task.set_state(TaskState::InProgress);
-                                    }
-                                }
-                                UserCommand::CancelTask => {}
-                                UserCommand::SuspendTask => {}
-                                _ => {
-                                    log::warn!(
-                                        "Task {}: Received inappropriate command while AwaitingToolApproval. Ignoring.",
-                                        self.task.id
-                                    );
-                                    self.emit_event(AgentEvent::TaskStateChanged(
-                                        self.task.current_state.clone(),
-                                    ))
-                                    .await?;
-                                    continue 'main_loop;
-                                }
-                            },
-                            TaskState::AwaitingBatchToolApproval {
-                                batch_id,
-                                ref pending_calls,
-                            } => {
-                                if let UserCommand::SubmitBatchToolApprovals {
-                                    batch_id: cmd_batch_id,
-                                    ref decisions,
-                                } = cmd
-                                {
-                                    if cmd_batch_id != batch_id {
-                                        log::warn!(
-                                            "Task {}: Received SubmitBatchToolApprovals for unexpected batch_id. Ignoring.",
-                                            self.task.id
-                                        );
-                                        continue 'main_loop;
-                                    }
-
-                                    self.begin_tool_batch();
-                                    // Decided: a snapshot taken while the
-                                    // calls run no longer waits for them.
-                                    self.task.set_state(TaskState::InProgress);
-                                    if self.is_native_mode() {
-                                        // Rejections are answered at once;
-                                        // the approved calls then run like a
-                                        // turn's (parallel-safe ones at the
-                                        // same time), in the batch's order.
-                                        let mut results = Vec::new();
-                                        let mut approved = Vec::new();
-                                        for pending_call_info in pending_calls {
-                                            let Some(ai_call) = self
-                                                .task
-                                                .pending_native_tool_calls
-                                                .remove(&pending_call_info.tool_call_id)
-                                            else {
-                                                continue;
-                                            };
-                                            let index = self.turn_position(&ai_call);
-                                            match decisions.get(&pending_call_info.tool_call_id) {
-                                                Some(ToolApprovalDecision::Approve {
-                                                    custom_tool_output,
-                                                    message_to_agent,
-                                                }) => match self.approved_native_run(
-                                                    index,
-                                                    &ai_call,
-                                                    pending_call_info.tool_call_id,
-                                                    &pending_call_info.tool_name,
-                                                    pending_call_info.parameters.clone(),
-                                                    custom_tool_output.clone(),
-                                                    message_to_agent.clone(),
-                                                ) {
-                                                    Ok(run) => approved.push(run),
-                                                    Err(()) => results.push((
-                                                        index,
-                                                        self.unavailable_native_tool(&ai_call)
-                                                            .await?,
-                                                    )),
-                                                },
-                                                Some(ToolApprovalDecision::Reject { reason }) => {
-                                                    self.emit_event(AgentEvent::ToolRejected {
-                                                        tool_call_id: pending_call_info
-                                                            .tool_call_id,
-                                                        tool_name: pending_call_info
-                                                            .tool_name
-                                                            .clone(),
-                                                        reason: (*reason).clone(),
-                                                    })
-                                                    .await?;
-                                                    let reason_str = reason
-                                                        .as_deref()
-                                                        .unwrap_or("Rejected by user");
-                                                    results.push((
-                                                        index,
-                                                        ai::ToolResult::error_from_tool_call(
-                                                            &ai_call, reason_str,
-                                                        ),
-                                                    ));
-                                                }
-                                                None => {
-                                                    self.emit_event(AgentEvent::ToolRejected {
-                                                        tool_call_id: pending_call_info
-                                                            .tool_call_id,
-                                                        tool_name: pending_call_info
-                                                            .tool_name
-                                                            .clone(),
-                                                        reason: Some(
-                                                            "No decision provided".to_string(),
-                                                        ),
-                                                    })
-                                                    .await?;
-                                                    results.push((
-                                                        index,
-                                                        ai::ToolResult::error_from_tool_call(
-                                                            &ai_call,
-                                                            "No decision provided, implicitly rejected",
-                                                        ),
-                                                    ));
-                                                }
-                                            }
-                                        }
-                                        self.run_decided_native_calls(approved, results).await?;
-                                        if matches!(
-                                            self.task.current_state,
-                                            TaskState::AwaitingBatchToolApproval { .. }
-                                        ) {
-                                            self.task.set_state(TaskState::InProgress);
-                                        }
-                                        self.end_tool_batch().await?;
-                                        if self.native_results_are_due() {
-                                            self.flush_native_results_to_conversation(None).await?;
-                                        }
-                                        native_handled = true;
-                                    } else {
-                                        let start = self.task.pending_text_tool_results.len();
-                                        for pending_call_info in pending_calls {
-                                            match decisions.get(&pending_call_info.tool_call_id) {
-                                                Some(ToolApprovalDecision::Approve {
-                                                    custom_tool_output,
-                                                    message_to_agent,
-                                                }) => {
-                                                    match self
-                                                        .execute_tool_and_handle_result(
-                                                            &pending_call_info.tool_name,
-                                                            pending_call_info.parameters.clone(),
-                                                            pending_call_info.tool_call_id,
-                                                            custom_tool_output.clone(),
-                                                            message_to_agent.clone(),
-                                                        )
-                                                        .await
-                                                    {
-                                                        Ok(msg_part) => {
-                                                            self.record_text_result(msg_part).await
-                                                        }
-                                                        Err(e) => log::error!(
-                                                            "Task {}: Error during approved batched tool execution: {}",
-                                                            self.task.id,
-                                                            e
-                                                        ),
-                                                    }
-                                                }
-                                                Some(ToolApprovalDecision::Reject { reason }) => {
-                                                    self.emit_event(AgentEvent::ToolRejected {
-                                                        tool_call_id: pending_call_info
-                                                            .tool_call_id,
-                                                        tool_name: pending_call_info
-                                                            .tool_name
-                                                            .clone(),
-                                                        reason: (*reason).clone(),
-                                                    })
-                                                    .await?;
-                                                    let pb = PromptBuilder::new(
-                                                        &self.task.agent_config,
-                                                        vec![],
-                                                        &self.parsing_config,
-                                                        None,
-                                                    );
-                                                    self.record_text_result(
-                                                        pb.format_tool_rejection_as_user_message(
-                                                            &pending_call_info.tool_name,
-                                                            (*reason).as_deref(),
-                                                        ),
-                                                    )
-                                                    .await;
-                                                }
-                                                None => {
-                                                    self.emit_event(AgentEvent::ToolRejected {
-                                                        tool_call_id: pending_call_info
-                                                            .tool_call_id,
-                                                        tool_name: pending_call_info
-                                                            .tool_name
-                                                            .clone(),
-                                                        reason: Some(
-                                                            "No decision provided".to_string(),
-                                                        ),
-                                                    })
-                                                    .await?;
-                                                    let pb = PromptBuilder::new(
-                                                        &self.task.agent_config,
-                                                        vec![],
-                                                        &self.parsing_config,
-                                                        None,
-                                                    );
-                                                    self.record_text_result(pb.format_tool_rejection_as_user_message(&pending_call_info.tool_name, Some("Implicitly rejected: No decision provided."))).await;
-                                                }
-                                            }
-                                            // A call that changed the state (asked
-                                            // the user, completed or ended the
-                                            // task) ends the batch.
-                                            if !matches!(
-                                                self.task.current_state,
-                                                TaskState::InProgress
-                                            ) || self.stop_requested
-                                            {
-                                                break;
-                                            }
-                                        }
-                                        next_user_message_from_command =
-                                            self.take_text_results(start).join("\n\n---\n\n");
-                                        self.end_tool_batch().await?;
-                                    }
-                                } else if matches!(
-                                    cmd,
-                                    UserCommand::CancelTask | UserCommand::SuspendTask
-                                ) {
-                                } else {
-                                    log::warn!(
-                                        "Task {}: Received inappropriate command while AwaitingBatchToolApproval. Ignoring.",
-                                        self.task.id
-                                    );
-                                    self.emit_event(AgentEvent::TaskStateChanged(
-                                        self.task.current_state.clone(),
-                                    ))
-                                    .await?;
-                                    continue 'main_loop;
-                                }
-                            }
-                            TaskState::AwaitingUserResponse { ref questions } => match cmd {
-                                UserCommand::SubmitUserResponse { ref response } => {
-                                    log::info!("Task {}: User response received.", self.task.id);
-                                    let pb = PromptBuilder::new(
-                                        &self.task.agent_config,
-                                        vec![],
-                                        &self.parsing_config,
-                                        None,
-                                    );
-                                    let formatted = pb
-                                        .format_user_response_as_user_message(questions, response);
-                                    self.task.set_state(TaskState::InProgress);
-
-                                    if self.is_native_mode() {
-                                        self.flush_native_results_to_conversation(Some(&formatted))
-                                            .await?;
-                                        native_handled = true;
-                                    } else {
-                                        next_user_message_from_command = formatted;
-                                    }
-                                }
-                                UserCommand::CancelTask => {}
-                                UserCommand::SuspendTask => {}
-                                _ => {
-                                    log::warn!(
-                                        "Task {}: Received inappropriate command while AwaitingUserResponse. Ignoring.",
-                                        self.task.id
-                                    );
-                                    self.emit_event(AgentEvent::TaskStateChanged(
-                                        self.task.current_state.clone(),
-                                    ))
-                                    .await?;
-                                    continue 'main_loop;
-                                }
-                            },
-                            TaskState::AwaitingErrorRecoveryApproval {
-                                ref error_message,
-                                ref cause,
-                                error_kind,
-                            } => {
-                                match cmd {
-                                    UserCommand::ContinueAfterError { ref note } => {
-                                        log::info!(
-                                            "Task {}: Continuing after an error-recovery pause.",
-                                            self.task.id
-                                        );
-                                        self.task.monitor_pause = false;
-                                        let note = note.as_deref().filter(|text| !text.is_empty());
-                                        if self.is_native_mode() {
-                                            // Calls an older version left
-                                            // without results get them now.
-                                            self.answer_open_native_calls(
-                                                UNREACHED_CALL,
-                                                UNREACHED_CALL,
-                                            )
-                                            .await?;
-                                        }
-                                        if self.fallback_resend() {
-                                            // The fallback answers exactly the
-                                            // refused input: a note waits, as
-                                            // context, until it has answered.
-                                            if let Some(note) = note {
-                                                self.queue_context_injection(note.to_string());
-                                            }
-                                            native_handled = true;
-                                        } else if self.is_native_mode()
-                                            && !self.task.pending_native_tool_results.is_empty()
-                                        {
-                                            self.flush_native_results_to_conversation(note).await?;
-                                            if note.is_some() {
-                                                // The note beside the results is the runtime's.
-                                                self.task.mark_last_message_runtime_text();
-                                            }
-                                            native_handled = true;
-                                        } else if let Some(note) = note {
-                                            next_user_message_from_command = note.to_string();
-                                            next_message_is_runtime = true;
-                                        } else if self.is_native_mode()
-                                            || self.task.pending_text_tool_results.is_empty()
-                                        {
-                                            // The failed request is sent again
-                                            // as it was.
-                                            native_handled = true;
-                                        }
-                                        // Otherwise the output-based results the
-                                        // pause left waiting are the next message.
-                                        self.task.refused_input = None;
-                                        self.task.set_state(TaskState::InProgress);
-                                        self.reset_llm_recovery();
-                                    }
-                                    UserCommand::ApproveErrorRecovery {
-                                        message: ref user_msg_on_recovery,
-                                    } => {
-                                        log::info!(
-                                            "Task {}: Error recovery approved by user.",
-                                            self.task.id
-                                        );
-                                        let monitor_pause =
-                                            std::mem::take(&mut self.task.monitor_pause);
-                                        if self.fallback_resend() {
-                                            // The fallback answers exactly the
-                                            // refused input: no error note, and
-                                            // the host's message waits, as
-                                            // context, until it has answered.
-                                            if self.is_native_mode() {
-                                                // Calls an older version left
-                                                // without results get them now.
-                                                self.answer_open_native_calls(
-                                                    UNREACHED_CALL,
-                                                    UNREACHED_CALL,
-                                                )
-                                                .await?;
-                                            }
-                                            if let Some(text) = user_msg_on_recovery
-                                                .as_deref()
-                                                .filter(|text| !text.is_empty())
-                                            {
-                                                self.queue_context_injection(text.to_string());
-                                            }
-                                            native_handled = true;
-                                        } else if monitor_pause {
-                                            // A monitor paused the task, not a
-                                            // model error: nothing to report to
-                                            // the model beyond the host's note.
-                                            match user_msg_on_recovery
-                                                .as_deref()
-                                                .filter(|text| !text.is_empty())
-                                            {
-                                                Some(text) => {
-                                                    next_user_message_from_command =
-                                                        text.to_string()
-                                                }
-                                                None => native_handled = true,
-                                            }
-                                        } else {
-                                            let mut recovery_prompt = format!(
-                                                "The previous attempt resulted in an error: {}. The user has approved to continue.",
-                                                error_message
-                                            );
-                                            if let Some(user_input) = user_msg_on_recovery
-                                                && !(*user_input).is_empty()
-                                            {
-                                                recovery_prompt.push_str("\nUser provided additional context for recovery:\n");
-                                                recovery_prompt.push_str(user_input);
-                                            }
-
-                                            if self.is_native_mode() {
-                                                // Calls an older version left
-                                                // without results get them now.
-                                                self.answer_open_native_calls(
-                                                    UNREACHED_CALL,
-                                                    UNREACHED_CALL,
-                                                )
-                                                .await?;
-                                            }
-                                            if self.is_native_mode()
-                                                && !self.task.pending_native_tool_results.is_empty()
-                                            {
-                                                self.flush_native_results_to_conversation(Some(
-                                                    &recovery_prompt,
-                                                ))
-                                                .await?;
-                                                // The note beside the results is the runtime's.
-                                                self.task.mark_last_message_runtime_text();
-                                                native_handled = true;
-                                            } else {
-                                                next_user_message_from_command = recovery_prompt;
-                                                next_message_is_runtime = true;
-                                            }
-                                        }
-                                        // Continuing without a change leaves no refused
-                                        // input to resolve.
-                                        self.task.refused_input = None;
-                                        self.task.set_state(TaskState::InProgress);
-                                        self.reset_llm_recovery();
-                                    }
-                                    UserCommand::ResolveRefusal { ref changes } => {
-                                        match self.task.resolve_refusal(changes.clone()) {
-                                            Ok(()) => {
-                                                log::info!(
-                                                    "Task {}: Refused input changed; continuing.",
-                                                    self.task.id
-                                                );
-                                                self.task.monitor_pause = false;
-                                                self.task.fallback_for = None;
-                                                self.task.set_state(TaskState::InProgress);
-                                                self.reset_llm_recovery();
-                                                // Tools observed the old input:
-                                                // they see the changed history
-                                                // from the start again.
-                                                self.tool_context_cursor = usize::MAX;
-                                                // The changed input is sent as it is.
-                                                native_handled = true;
-                                            }
-                                            Err(error) => {
-                                                self.emit_event(AgentEvent::ErrorEncountered {
-                                                    error_message: format!(
-                                                        "Could not resolve the refusal: {error}"
-                                                    ),
-                                                    requires_approval_to_retry: true,
-                                                    tool_call_id: None,
-                                                    error_kind: None,
-                                                })
-                                                .await?;
-                                                continue 'main_loop;
-                                            }
-                                        }
-                                    }
-                                    UserCommand::RejectErrorRecovery { ref message } => {
-                                        log::info!(
-                                            "Task {}: Error recovery rejected by user.",
-                                            self.task.id
-                                        );
-                                        // The failed task still records the
-                                        // results its last turn holds.
-                                        self.settle_interrupted_wait(
-                                            UNREACHED_CALL,
-                                            UNREACHED_CALL,
-                                        )
-                                        .await?;
-                                        // The host's reason, when it gives one.
-                                        let reason = match message
-                                            .as_deref()
-                                            .filter(|message| !message.is_empty())
-                                        {
-                                            Some(message) => message.to_string(),
-                                            None => format!(
-                                                "Error recovery rejected by user for error: {}",
-                                                error_message
-                                            ),
-                                        };
-                                        // The pause's cause stays with the
-                                        // failure.
-                                        self.task.set_state(TaskState::Failed {
-                                            reason,
-                                            cause: Some(cause.clone()),
-                                            error_kind,
-                                        });
-                                    }
-                                    UserCommand::CancelTask => {}
-                                    UserCommand::SuspendTask => {}
-                                    _ => {
-                                        log::warn!(
-                                            "Task {}: Received inappropriate command while AwaitingErrorRecoveryApproval. Ignoring.",
-                                            self.task.id
-                                        );
-                                        self.emit_event(AgentEvent::TaskStateChanged(
-                                            self.task.current_state.clone(),
-                                        ))
-                                        .await?;
-                                        continue 'main_loop;
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                        // A command the wait didn't ignore (those continue
-                        // above) ends it; a later wait gets its own deadline.
-                        self.command_wait = CommandWait::NotStarted;
-
-                        if let UserCommand::CancelTask = cmd {
-                            log::info!("Task {}: Cancelled by user command.", self.task.id);
-                            // The calls it waited on are answered as not run.
-                            self.settle_interrupted_wait(TASK_CANCELLED_CALL, TASK_CANCELLED_CALL)
-                                .await?;
-                            self.task.set_state(TaskState::Cancelled {
-                                reason: CANCELLED_BY_USER.to_string(),
-                            });
-                        }
-
-                        if let UserCommand::SuspendTask = cmd {
-                            self.emit_event(AgentEvent::TaskStateChanged(
-                                self.task.current_state.clone(),
-                            ))
-                            .await?;
-                            break 'main_loop;
-                        }
-
-                        if self.task.current_state != original_state_before_command_processing
-                            && !self.state_reported()
-                        {
-                            self.emit_event(AgentEvent::TaskStateChanged(
-                                self.task.current_state.clone(),
-                            ))
-                            .await?;
-                        }
-
-                        if self.task.current_state.is_terminal() {
-                            break 'main_loop;
-                        }
-
-                        // Output-based results of a command that leaves the
-                        // task waiting (a pause on a tool error) wait with it;
-                        // the message that ends a wait carries them first.
-                        if !self.is_native_mode() && !native_handled {
-                            if self.task.current_state.is_awaiting_approval() {
-                                if !next_user_message_from_command.is_empty() {
-                                    self.task
-                                        .pending_text_tool_results
-                                        .push(std::mem::take(&mut next_user_message_from_command));
-                                }
-                            } else if !self.task.pending_text_tool_results.is_empty() {
-                                next_user_message_from_command = self
-                                    .task
-                                    .with_pending_text_tool_results(next_user_message_from_command);
-                                next_message_is_runtime = false;
-                            }
-                        }
-
-                        if matches!(self.task.current_state, TaskState::InProgress)
-                            && !native_handled
-                        {
-                            if !next_user_message_from_command.is_empty() {
-                                let pb = PromptBuilder::new(
-                                    &self.task.agent_config,
-                                    vec![],
-                                    &self.parsing_config,
-                                    None,
-                                );
-                                let next_msg_num = self.task.user_message_count + 1;
-                                let augmented_msg = pb
-                                    .augment_user_message_with_env_details_and_reminder(
-                                        &self.task,
-                                        &next_user_message_from_command,
-                                        next_msg_num,
-                                    )?;
-                                self.add_text_tool_results_to_conversation(&augmented_msg);
-                                self.mark_details_sent();
-                                if next_message_is_runtime {
-                                    self.task.mark_last_message_runtime();
-                                }
-                                self.task.increment_user_message_count();
-                                self.reset_llm_recovery();
-                            } else {
-                                let pb = PromptBuilder::new(
-                                    &self.task.agent_config,
-                                    vec![],
-                                    &self.parsing_config,
-                                    None,
-                                );
-                                let generic_prompt =
-                                    "Please continue with the task based on the previous actions.";
-                                let next_msg_num = self.task.user_message_count + 1;
-                                let augmented_generic_prompt = pb
-                                    .augment_user_message_with_env_details_and_reminder(
-                                        &self.task,
-                                        generic_prompt,
-                                        next_msg_num,
-                                    )?;
-                                self.task
-                                    .conversation
-                                    .add_user_message(&augmented_generic_prompt);
-                                self.task.mark_last_message_runtime();
-                                self.task.increment_user_message_count();
-                                self.reset_llm_recovery();
-                            }
-                        }
-
-                        if self.task.current_state.is_awaiting_approval() {
-                            continue 'main_loop;
-                        }
-                    }
-                    Ok(None) => {
-                        let reason =
-                            "Command channel disconnected during approval state.".to_string();
-                        log::error!("Task {}: {}", self.task.id, reason);
-                        self.settle_interrupted_wait(HOST_STOPPED_CALL, HELD_CALL_NOT_RUN)
-                            .await?;
-                        self.task.set_state(TaskState::Interrupted {
-                            reason: reason.clone(),
-                        });
-                        self.emit_event(AgentEvent::TaskStateChanged(
-                            self.task.current_state.clone(),
-                        ))
-                        .await?;
-                        self.emit_event(AgentEvent::ErrorEncountered {
-                            error_message: reason,
-                            requires_approval_to_retry: false,
-                            tool_call_id: None,
-                            error_kind: None,
-                        })
-                        .await?;
-                        break 'main_loop;
-                    }
-                    // The host took over the run's decisions during the
-                    // wait: it isn't timed any more.
-                    Err(_) if self.host_decisions.get() => continue 'main_loop,
-                    Err(_timeout_err) => {
-                        let seconds = self
-                            .task
-                            .agent_config
-                            .user_command_timeout_seconds
-                            .unwrap_or(0);
-                        let reason = format!(
-                            "Timeout ({}s) waiting for user command in state {:?}.",
-                            seconds, self.task.current_state
-                        );
-                        log::error!("Task {}: {}", self.task.id, reason);
-                        self.settle_interrupted_wait(
-                            &approval_timed_out_call(seconds),
-                            HELD_CALL_NOT_RUN,
-                        )
-                        .await?;
-                        self.task.set_state(TaskState::Interrupted {
-                            reason: reason.clone(),
-                        });
-                        self.emit_event(AgentEvent::TaskStateChanged(
-                            self.task.current_state.clone(),
-                        ))
-                        .await?;
-                        self.emit_event(AgentEvent::ErrorEncountered {
-                            error_message: reason,
-                            requires_approval_to_retry: false,
-                            tool_call_id: None,
-                            error_kind: None,
-                        })
-                        .await?;
-                        break 'main_loop;
-                    }
-                }
+                step!(self.wait_for_command().await?);
             }
             step!(self.turn_boundary().await?);
 
