@@ -49,6 +49,7 @@ mod overflow;
 use overflow::*;
 mod handover;
 mod monitors;
+use monitors::*;
 mod refusal;
 use refusal::*;
 mod recovery;
@@ -116,11 +117,8 @@ pub struct AgentLoop {
     /// The request in flight (or last made) went to the fallback model
     /// ([`Task::fallback_for`]).
     current_request_is_fallback: bool,
-    /// Cache monitor state: a low-efficiency warning is out, a pause
-    /// episode is active, and the pause to apply before the next request.
-    cache_warned: bool,
-    cache_pause_episode: bool,
-    cache_pause_pending: Option<String>,
+    /// The cache monitor's warning and pause; see [`CacheMonitorState`].
+    cache_monitor: CacheMonitorState,
     stop_requested: bool,
     /// A batch of tool calls is running; see [`begin_tool_batch`](Self::begin_tool_batch).
     deferring_tool_errors: bool,
@@ -246,9 +244,7 @@ impl AgentLoop {
             last_reasoning_emit_time: now,
             recovery: RecoveryState::default(),
             current_request_is_fallback: false,
-            cache_warned: false,
-            cache_pause_episode: false,
-            cache_pause_pending: None,
+            cache_monitor: CacheMonitorState::default(),
             stop_requested: false,
             deferring_tool_errors: false,
             failed_on_tool_error: false,

@@ -244,7 +244,7 @@ impl AgentLoop {
         if !self.apply_plan_usage_threshold().await? {
             return Ok(Flow::NextPass);
         }
-        if let Some(message) = self.cache_pause_pending.take() {
+        if let Some(message) = self.cache_monitor.pause_pending.take() {
             self.finish_monitor_pause(message).await?;
             return Ok(Flow::NextPass);
         }

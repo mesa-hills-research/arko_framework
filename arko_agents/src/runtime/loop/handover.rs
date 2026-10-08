@@ -152,9 +152,7 @@ impl AgentLoop {
         self.file_tree_baseline = None;
         self.file_tree_error = None;
         self.details_sent_with = None;
-        self.cache_warned = false;
-        self.cache_pause_episode = false;
-        self.cache_pause_pending = None;
+        self.cache_monitor = CacheMonitorState::default();
         self.handover_skip_warned = false;
         self.reset_llm_recovery();
 

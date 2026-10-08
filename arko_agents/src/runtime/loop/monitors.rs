@@ -4,6 +4,15 @@
 
 use super::*;
 
+/// The cache monitor's state in a run: a low-efficiency warning is out, a
+/// pause episode is active, and the pause to apply before the next request.
+#[derive(Default)]
+pub(super) struct CacheMonitorState {
+    pub(super) warned: bool,
+    pub(super) pause_episode: bool,
+    pub(super) pause_pending: Option<String>,
+}
+
 impl AgentLoop {
     /// The opt-in cache monitor ([`MonitoringConfig::cache`](crate::agent_config::MonitoringConfig::cache)),
     /// after a call's usage is recorded.
@@ -42,8 +51,8 @@ impl AgentLoop {
         let low =
             |threshold: Option<f64>| threshold.filter(|threshold| efficiency.rolling < *threshold);
         match low(config.warn_below) {
-            Some(threshold) if !self.cache_warned => {
-                self.cache_warned = true;
+            Some(threshold) if !self.cache_monitor.warned => {
+                self.cache_monitor.warned = true;
                 self.emit_event(AgentEvent::CacheEfficiencyLow {
                     rolling_efficiency: efficiency.rolling,
                     threshold,
@@ -52,12 +61,12 @@ impl AgentLoop {
                 .await?;
             }
             Some(_) => {}
-            None => self.cache_warned = false,
+            None => self.cache_monitor.warned = false,
         }
         match low(config.pause_below) {
-            Some(threshold) if !self.cache_pause_episode => {
-                self.cache_pause_episode = true;
-                self.cache_pause_pending = Some(format!(
+            Some(threshold) if !self.cache_monitor.pause_episode => {
+                self.cache_monitor.pause_episode = true;
+                self.cache_monitor.pause_pending = Some(format!(
                     "Prompt cache efficiency fell to {:.1}% over the last {} calls (threshold {:.1}%).",
                     efficiency.rolling * 100.0,
                     efficiency.calls,
@@ -71,7 +80,7 @@ impl AgentLoop {
                 .await?;
             }
             Some(_) => {}
-            None => self.cache_pause_episode = false,
+            None => self.cache_monitor.pause_episode = false,
         }
         Ok(())
     }
