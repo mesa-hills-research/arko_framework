@@ -318,21 +318,9 @@ impl AgentLoop {
                 self.task.increment_user_message_count();
                 self.reset_llm_recovery();
             } else {
-                let pb =
-                    PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None);
-                let generic_prompt = "Please continue with the task based on the previous actions.";
-                let next_msg_num = self.task.user_message_count + 1;
-                let augmented_generic_prompt = pb
-                    .augment_user_message_with_env_details_and_reminder(
-                        &self.task,
-                        generic_prompt,
-                        next_msg_num,
-                    )?;
-                self.task
-                    .conversation
-                    .add_user_message(&augmented_generic_prompt);
-                self.task.mark_last_message_runtime();
-                self.task.increment_user_message_count();
+                self.add_runtime_message(
+                    "Please continue with the task based on the previous actions.",
+                )?;
                 self.reset_llm_recovery();
             }
         }

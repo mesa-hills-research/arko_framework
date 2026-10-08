@@ -254,10 +254,10 @@ impl AgentLoop {
         Ok(Flow::Proceed)
     }
 
-    pub(super) fn append_error_recovery_user_message(
-        &mut self,
-        message: &str,
-    ) -> Result<(), ArkoAgentsError> {
+    /// Adds a message of the runtime's own (a request to continue, a note
+    /// on an error) as the next user message, with the environment details
+    /// and reminder due with it.
+    pub(super) fn add_runtime_message(&mut self, message: &str) -> Result<(), ArkoAgentsError> {
         let pb = PromptBuilder::new(&self.task.agent_config, vec![], &self.parsing_config, None);
         let next_msg_num = self.task.user_message_count + 1;
         let augmented_message = pb.augment_user_message_with_env_details_and_reminder(
@@ -286,9 +286,7 @@ impl AgentLoop {
                     message.role == ai::Role::Assistant && message.tool_calls.is_empty()
                 });
         if ends_on_assistant_text {
-            self.append_error_recovery_user_message(
-                "Continue the task from where your previous response ended.",
-            )?;
+            self.add_runtime_message("Continue the task from where your previous response ended.")?;
         }
         Ok(())
     }

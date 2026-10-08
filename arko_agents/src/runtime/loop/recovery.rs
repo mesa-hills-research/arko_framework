@@ -508,7 +508,7 @@ impl AgentLoop {
         })
         .await?;
         if let Some(note) = &note {
-            self.append_error_recovery_user_message(note)?;
+            self.add_runtime_message(note)?;
             // Asked again at once, with no budget deadline to meet.
             return Ok(());
         }
