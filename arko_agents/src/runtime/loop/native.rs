@@ -189,17 +189,14 @@ impl AgentLoop {
         if !unreached.is_empty() {
             let not_run = self.not_run_after_stop();
             for native in unreached {
-                self.emit_event(AgentEvent::ToolRejected {
-                    tool_call_id: native.run.tool_call_id,
-                    tool_name: native.call.name.clone(),
-                    reason: Some(not_run.clone()),
-                })
-                .await?;
-                results.record(
-                    &mut self.task,
+                self.answer_not_run(
+                    results,
                     native.index,
-                    ai::ToolResult::error_from_tool_call(&native.call, &not_run),
-                );
+                    &native.call,
+                    native.run.tool_call_id,
+                    &not_run,
+                )
+                .await?;
                 // A recovered call that doesn't run again.
                 self.call_settled(native.run.tool_call_id);
             }
@@ -251,17 +248,8 @@ impl AgentLoop {
             self.stop_after_calls(stop).await?;
             let reason = stopped_call_reason(stop, &self.task.current_state);
             for (index, call, id) in stopped {
-                self.emit_event(AgentEvent::ToolRejected {
-                    tool_call_id: id,
-                    tool_name: call.name.clone(),
-                    reason: Some(reason.to_string()),
-                })
-                .await?;
-                results.record(
-                    &mut self.task,
-                    index,
-                    ai::ToolResult::error_from_tool_call(&call, reason),
-                );
+                self.answer_not_run(results, index, &call, id, reason)
+                    .await?;
                 self.call_settled(id);
             }
         }
@@ -773,31 +761,20 @@ impl AgentLoop {
                     .pending_native_tool_calls
                     .remove(&pending.tool_call_id)
                 {
-                    self.emit_event(AgentEvent::ToolRejected {
-                        tool_call_id: pending.tool_call_id,
-                        tool_name: pending.tool_name,
-                        reason: Some(not_run.clone()),
-                    })
-                    .await?;
-                    results.record(
-                        &mut self.task,
-                        index,
-                        ai::ToolResult::error_from_tool_call(&call, &not_run),
-                    );
+                    // `call` is the call `pending` describes (same name).
+                    self.answer_not_run(results, index, &call, pending.tool_call_id, &not_run)
+                        .await?;
                 }
             }
             for native in held.drain(..) {
-                self.emit_event(AgentEvent::ToolRejected {
-                    tool_call_id: native.run.tool_call_id,
-                    tool_name: native.call.name.clone(),
-                    reason: Some(not_run.clone()),
-                })
-                .await?;
-                results.record(
-                    &mut self.task,
+                self.answer_not_run(
+                    results,
                     native.index,
-                    ai::ToolResult::error_from_tool_call(&native.call, &not_run),
-                );
+                    &native.call,
+                    native.run.tool_call_id,
+                    &not_run,
+                )
+                .await?;
             }
         }
         if matches!(self.task.current_state, TaskState::InProgress) && !self.stop_requested {
@@ -841,6 +818,30 @@ impl AgentLoop {
                 .await?;
             }
         }
+        Ok(())
+    }
+
+    /// Answers a native call that doesn't run (`reason` says why): it is
+    /// reported rejected, and its error result recorded at `index`.
+    async fn answer_not_run(
+        &mut self,
+        results: &mut NativeResults,
+        index: usize,
+        call: &ai::ToolCall,
+        tool_call_id: Uuid,
+        reason: &str,
+    ) -> Result<(), ArkoAgentsError> {
+        self.emit_event(AgentEvent::ToolRejected {
+            tool_call_id,
+            tool_name: call.name.clone(),
+            reason: Some(reason.to_string()),
+        })
+        .await?;
+        results.record(
+            &mut self.task,
+            index,
+            ai::ToolResult::error_from_tool_call(call, reason),
+        );
         Ok(())
     }
 
