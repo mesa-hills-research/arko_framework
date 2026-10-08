@@ -14,7 +14,7 @@ use super::tool_call_tests::{complete, config, native_call, text_turn, turn};
 use super::*;
 use crate::agent_config::{
     BuiltInEnvironmentDetail, CacheMonitorConfig, EnvironmentDetailPlacement, MonitoringConfig,
-    PerToolConfigOverride, PlanUsageThreshold,
+    PerToolConfigOverride, PlanUsageThreshold, ReminderInjectionFrequency, UserReminder,
 };
 use crate::task::{RefusalResolution, RunningToolCall};
 use crate::tool::{ToolError, ToolParameterDefinition, ToolParameterType, ToolTypeDetails};
@@ -124,9 +124,10 @@ impl Golden {
 }
 
 /// A tool whose calls answer at once, `<name> ran <what>`, unless `what`
-/// asks otherwise: `fail` fails, `big` answers 400,000 bytes, `hang` runs
-/// until the call is dropped, and `wait` runs until the task's stop signal
-/// fires. A `Resume` tool's recovered call answers `<name> resumed <what>`.
+/// asks otherwise: `fail` fails, `big` answers 400,000 bytes, `image`
+/// answers with an image after its text, `hang` runs until the call is
+/// dropped, and `wait` runs until the task's stop signal fires. A `Resume`
+/// tool's recovered call answers `<name> resumed <what>`.
 #[derive(Debug, Clone)]
 struct Step {
     name: &'static str,
@@ -193,6 +194,23 @@ impl Tool for Step {
 
     fn recovery_mode(&self) -> ToolRecovery {
         self.recovery
+    }
+
+    async fn execute_with_output(
+        &self,
+        context: &TaskContext<'_>,
+        params: HashMap<String, Value>,
+    ) -> Result<ToolOutput, ToolError> {
+        if params.get("what").and_then(Value::as_str) == Some("image") {
+            return Ok(ToolOutput {
+                text: format!("{} looked at picture.png", self.name),
+                images: vec![ToolImage {
+                    description: "picture.png, 2 × 2".into(),
+                    image: ai::Image::new_base64("cGl4ZWxz", "image/png"),
+                }],
+            });
+        }
+        self.execute(context, params).await.map(ToolOutput::text)
     }
 
     async fn execute(
@@ -1543,5 +1561,140 @@ async fn an_output_based_batch_of_a_tool_that_cannot_be_batched() {
     );
     let task = drive(agent, events, commands, no_commands).await;
     golden.run_ended(&task);
+    golden.check();
+}
+
+/// Output-based results messages: the first carries the tool's image after
+/// its text, and each gets the reminder due with its number (every second
+/// user message after the task prompt: the third message has it, the
+/// second doesn't).
+#[tokio::test(start_paused = true)]
+async fn output_based_results_carry_the_images_and_the_reminder_due() {
+    let mut golden = Golden::start("output_based_results_carry_the_images_and_the_reminder_due");
+    let mut config = golden_config(ToolCallingMode::OutputBased, &["step"]);
+    config.user_reminder = Some(UserReminder {
+        content: "Check the plan.".into(),
+        frequency: ReminderInjectionFrequency::EveryNUserMessages(2),
+    });
+    let (mut agent, events, commands) =
+        golden_loop(new_task(config), vec![Step::new("step")], true);
+    script(
+        &mut agent,
+        [
+            text_turn("<step>\n<what>image</what>\n</step>"),
+            text_turn("<step>\n<what>two</what>\n</step>"),
+            text_turn("<complete_task>\n<summary>done</summary>\n</complete_task>"),
+        ],
+    );
+    let task = drive(agent, events, commands, no_commands).await;
+    golden.run_ended(&task);
+    golden.check();
+}
+
+/// Paths under the path-safety policy: with `AutoApprove`, a path outside
+/// the workspace runs without approval in both modes; a path that can't be
+/// judged (it holds a NUL) is an output-based call's tool error.
+#[tokio::test(start_paused = true)]
+async fn paths_outside_the_workspace_auto_approved_and_one_that_cannot_be_judged() {
+    let mut golden =
+        Golden::start("paths_outside_the_workspace_auto_approved_and_one_that_cannot_be_judged");
+    for mode in [ToolCallingMode::Native, ToolCallingMode::OutputBased] {
+        let native = matches!(mode, ToolCallingMode::Native);
+        let mut config = golden_config(mode, &["step"]);
+        config.tool_config.default_out_of_workspace_path_policy = PathSafetyPolicy::AutoApprove;
+        let (mut agent, events, commands) =
+            golden_loop(new_task(config), vec![Step::new("step")], true);
+        if native {
+            script(
+                &mut agent,
+                [
+                    turn(vec![native_call(
+                        "s",
+                        "step",
+                        serde_json::json!({ "what": "outside", "path": "../outside.txt" }),
+                    )]),
+                    complete(),
+                ],
+            );
+        } else {
+            script(
+                &mut agent,
+                [
+                    text_turn("<step>\n<what>outside</what>\n<path>../outside.txt</path>\n</step>"),
+                    text_turn("<step>\n<what>invalid</what>\n<path>bad\0name.txt</path>\n</step>"),
+                    text_turn("<complete_task>\n<summary>done</summary>\n</complete_task>"),
+                ],
+            );
+        }
+        let task = drive(agent, events, commands, no_commands).await;
+        golden.run_ended(&task);
+    }
+    golden.check();
+}
+
+/// Output-based turns the loop can't use: one without a tool call, and one
+/// whose batch mixes tools (it can't be read). Each gets a note, and the
+/// task goes on to complete.
+#[tokio::test(start_paused = true)]
+async fn output_based_turns_without_a_usable_call_get_a_note_and_go_on() {
+    let mut golden = Golden::start("output_based_turns_without_a_usable_call_get_a_note_and_go_on");
+    let config = golden_config(ToolCallingMode::OutputBased, &["step", "check"]);
+    let (mut agent, events, commands) = golden_loop(
+        new_task(config),
+        vec![
+            Step::new("step").parallel_safe(),
+            Step::new("check").parallel_safe(),
+        ],
+        true,
+    );
+    script(
+        &mut agent,
+        [
+            text_turn("I will look at the files first."),
+            text_turn(
+                "<batched_tool_call>\n<step>\n<what>a</what>\n</step>\n<check>\n<what>b</what>\n</check>\n</batched_tool_call>",
+            ),
+            text_turn("<complete_task>\n<summary>done</summary>\n</complete_task>"),
+        ],
+    );
+    let task = drive(agent, events, commands, no_commands).await;
+    golden.run_ended(&task);
+    golden.check();
+}
+
+/// An approved `complete_task`, in both modes: the task completes, reported
+/// once, right after the call's result.
+#[tokio::test(start_paused = true)]
+async fn an_approved_complete_task_reports_the_completion_once() {
+    let mut golden = Golden::start("an_approved_complete_task_reports_the_completion_once");
+    for mode in [ToolCallingMode::Native, ToolCallingMode::OutputBased] {
+        let native = matches!(mode, ToolCallingMode::Native);
+        let mut config = golden_config(mode, &["step"]);
+        needs_approval(&mut config, COMPLETE_TASK_TOOL_NAME);
+        let (mut agent, events, commands) =
+            golden_loop(new_task(config), vec![Step::new("step")], true);
+        if native {
+            script(&mut agent, [complete()]);
+        } else {
+            script(
+                &mut agent,
+                [text_turn(
+                    "<complete_task>\n<summary>done</summary>\n</complete_task>",
+                )],
+            );
+        }
+        let task = drive(agent, events, commands, |event| match event {
+            AgentEvent::ToolCallAwaitingApproval { tool_call_id, .. } => {
+                vec![UserCommand::ApproveToolUse {
+                    tool_call_id: *tool_call_id,
+                    custom_tool_output: None,
+                    message_to_agent: None,
+                }]
+            }
+            _ => Vec::new(),
+        })
+        .await;
+        golden.run_ended(&task);
+    }
     golden.check();
 }
