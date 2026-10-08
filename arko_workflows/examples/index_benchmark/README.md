@@ -242,7 +242,7 @@ search, the read of its first hit and an outline, in about 15 lines.
 
 ```sh
 V=arko_workflows/examples/index_benchmark/variant-arms.json
-# Builds every variant's index of every prepared repository (beside a running `generate`)
+# Builds every variant's index of every prepared repository, beside a running `generate` or run of other arms
 VOYAGE_API_KEY=... $B prepare-variants --out $OUT --variants $V
 $B prepare-variants --out $OUT --variants $V --names lex,lex-scope --only redis
 # Runs them with the built-in arms

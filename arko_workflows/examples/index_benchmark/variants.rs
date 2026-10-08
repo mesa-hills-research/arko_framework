@@ -278,11 +278,23 @@ pub fn prepare(options: PrepareVariants<'_>) -> BenchResult<BTreeMap<String, Pre
     if let Some(pid) = crate::ledger::DirLock::holder(&layout.out.join("prepare")) {
         return Err(format!("`prepare` is running (pid {pid}); wait for it").into());
     }
+    // A running run that uses one of these variants reads its indexes: wait for it.
+    // Runs of other arms (a baseline of A and B, say) go on beside the builds.
     if let Ok(runs) = std::fs::read_dir(layout.out.join("runs")) {
         for run in runs.flatten() {
-            if let Some(pid) = crate::ledger::DirLock::holder(&run.path()) {
+            let Some(pid) = crate::ledger::DirLock::holder(&run.path()) else {
+                continue;
+            };
+            let uses_these =
+                crate::runner::RunManifest::load(&run.path()).map_or(true, |manifest| {
+                    options
+                        .specs
+                        .iter()
+                        .any(|spec| manifest.variants.contains_key(&spec.name))
+                });
+            if uses_these {
                 return Err(format!(
-                    "{} is in use by process {pid}: a run may be reading these indexes; wait for it, or stop it",
+                    "{} is in use by process {pid} and may read these variants' indexes; wait for it, or stop it",
                     run.path().display()
                 )
                 .into());
