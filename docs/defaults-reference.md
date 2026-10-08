@@ -60,7 +60,12 @@ Defaults of arko_index (see [Defaults (arko_index)](reference-map.md#defaults-ar
 - Searches return ten results. The library's `SearchRequest` is lexical by default,
   and the CLI's `search2` is hybrid when the index has embeddings. Hybrid fusion is
   reciprocal rank fusion (k = 60, equal weights) over 50 candidates per side.
-  Vectors are stored as f32 (`Quantization::Int8` opt-in).
+- Dense search scans every vector's int8 codes (1 byte per dimension, held in memory)
+  and rescores the best candidates with the full-precision vectors, so scores are
+  exact (`Quantization::Int8`, `VectorIndex::Flat`). F32 codes (`--quantize f32`,
+  exact, 4 bytes per dimension) and Vamana graphs (`--vector-index graph`, for very
+  large indexes) are opt-in. A build updates the vector store in place: only changed
+  chunks' vectors are added and removed.
 - Chunks carry a context header (`scope`: enclosing definitions or Markdown headings),
   added in chunk JSON format 2 without changing boundaries or IDs. Lexical search indexes a
   chunk's path and source, and its scope only with `BuildOptions::lexical_scope`

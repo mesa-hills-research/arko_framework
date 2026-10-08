@@ -18,7 +18,7 @@ environment variables, the defaults and the on-disk state.
 | `arko_index::search` | The first index format (one JSON file): `index`, `index_with`, `search`, `outline`. | `arko_index/src/search.rs` |
 | `arko_index::index2` | The disk-resident index: `index`, `index_with`, `build`, `BuildOptions`, `search`, `dense_info`, `BuildStats`. | `arko_index/src/index2.rs` |
 | `arko_index::dense` | Embeddings: `Embedder`, `ModelDescriptor`, `EmbedLimits`, `Embedding`, `InputKind`, `HashEmbedder`, `embed_query`, `render`, `render_with`, `EmbedText`, `RENDER_VERSION`, `DenseConfig`, `DenseBuild`, `EmbedProgress`, `EmbedStats`, `DenseIndexInfo`. | `arko_index/src/dense/` |
-| `arko_index::vector` | Vector storage: `VectorStore`, `BruteForceStore`, `Quantization`, `Filter`, `VectorMeta`, `VectorHit`. | `arko_index/src/vector.rs` |
+| `arko_index::vector` | Vector storage: `VectorStore`, `MhrStore`, `StoreConfig`, `Quantization`, `VectorIndex`, `Filter`, `VectorId`, `VectorMeta`, `VectorRecord`, `VectorHit`. | `arko_index/src/vector.rs` |
 | `arko_index::hybrid` | Lexical, dense and hybrid search: `search`, `SearchRequest`, `Mode`, `Fusion`, `fuse`, `Fused`, `SearchHit`, `SearchResults`. | `arko_index/src/hybrid.rs` |
 | `arko_index::watch2` | Linux only: `Watcher2`, the inotify watcher. | `arko_index/src/watch2.rs` |
 | crate root | `FileRules`, `Report`, `SkipReason`, `Skipped`, `threads()`, and on Unix `bench_scan`, `bench_scan_with`. | `arko_index/src/lib.rs`, `arko_index/src/files.rs`, `arko_index/src/par.rs`, `arko_index/src/scan.rs` |
@@ -354,7 +354,7 @@ entries), `excluded_by_pattern`, `not_included`, `ignored_by_gitignore`,
 | `index2::index[_with](root, state_dir, options, threads, mem_budget, [rules])` | Builds a new generation with postings memory bounded by `mem_budget` bytes, lexical only. Returns `BuildStats { docs, terms, runs, report, dense }`. |
 | `index2::build(root, state_dir, options, &BuildOptions)` | The same with `BuildOptions { threads, mem_budget, rules, lexical_scope, dense }` (`#[non_exhaustive]`, `Default`, `with_*`). `lexical_scope` (default `false`) also indexes the words of each chunk's scope for lexical search. With `dense: Some(DenseBuild)` the chunks are embedded too (below). |
 | `index2::search(state_dir, query)` | Reads only the query terms' postings of the current generation. Same results as `search::search` on the same tree (unless the index was built with `lexical_scope`). |
-| `index2::dense_info(state_dir)` | The current generation's `DenseIndexInfo` (model, render version, embedded text, quantization, chunks, chunks with vectors), or `None`. Like `hybrid::search`, it starts over when a build switches generations during the read, so the CLI's `search2` picks its default mode from the current generation. |
+| `index2::dense_info(state_dir)` | The current generation's `DenseIndexInfo` (format version, model, render version, embedded text, quantization, vector index, vector store directory, chunks, chunks with vectors, and `store_config()`), or `None`. Like `hybrid::search`, it starts over when a build switches generations during the read, so the CLI's `search2` picks its default mode from the current generation. |
 
 `search` and `search2` score with BM25 (k1 = 1.2, b = 0.75) over lowercase words plus
 identifier components (snake_case parts and camelCase humps), so `retryPolicy` matches
@@ -398,7 +398,7 @@ source (`dense::EmbedText`, saved in `dense.json`).
 
 **The model is chosen per index and saved.** A build with embeddings writes
 `STATE_DIR/dense.json` (`dense::DenseConfig`): provider, model, dimensions,
-input-type use, render version, vector quantization, the token cap and the embedded text.
+input-type use, render version, vector codes and index, the token cap and the embedded text.
 The CLI's later builds follow it when no `--embed` is given (a library caller passes
 `DenseBuild::from_config` with `DenseConfig::load`), so a rebuild after a watcher reported
 changes uses the same model unasked. `--no-embed` (or `DenseConfig::remove`) turns
@@ -429,14 +429,32 @@ those. `--max-embed-tokens 0` sends nothing and reports the full count. A search
 search, or when the caller passes a vector it embedded with `dense::embed_query`), for
 callers that charge queries to a budget.
 
-**Vectors** are stored per generation, published with it by the same atomic
-`CURRENT2` switch, behind `vector::VectorStore` (insert, delete, top-k search with an
-optional path-prefix or language filter, persist, open). `vector::BruteForceStore` is
-exact: every search reads all vectors, in 1 MB blocks, so memory stays at about 12
-bytes per vector; scores are cosine similarities; equal scores order by document id.
-`--quantize int8` (`Quantization::Int8`) adds an 8-bit copy that a search scans first,
-a quarter of the bytes, then rescores the best `4 × k` (at least 40) exactly. An
-approximate store can replace it behind the same trait.
+**Vectors** are kept by [mhr_vector](https://github.com/mesa-hills-research/mhr_vector),
+a pure, safe Rust vector store, in `STATE_DIR/vectors-<digest>/`, one store per model and
+settings (`vector::StoreConfig::dir_name`). A build updates it in place. A chunk's vector
+id is a digest of its path, its embedded text's hash and its rank among the file's chunks
+with the same text, so an unchanged chunk keeps its vector whatever its document id, and
+a rebuild adds the vectors of new and edited chunks, removes those of chunks that are
+gone, and leaves the rest (`EmbedStats::vectors_added`, `vectors_removed`). Each update
+commits atomically, and a crash keeps the last commit. A dense search scans the int8
+codes of every vector (1 byte per dimension, held in memory) and rescores each
+segment's best `max(4 × k, 40)` candidates with the full-precision vectors on disk, so
+scores are exact cosine similarities (measurements below). `--quantize f32`
+(`Quantization::F32`) keeps exact f32 codes instead, at 4 bytes per dimension.
+`--vector-index graph` (`VectorIndex::Graph`) adds a Vamana graph to each segment of
+20,000 vectors or more, which answers in about a millisecond at some cost in recall and
+build time, for very large indexes or high query rates. Equal similarities order by
+vector id.
+
+A build adds the new vectors before it publishes its generation and removes the old
+ones after, so the store holds every vector of the generation a reader has open. A
+build that fails before publishing (and removes its generation) leaves only additions.
+A search skips vectors its generation lacks, fetching as many more as the store holds
+beyond the generation's, and starts over when a build switched generations under it.
+The next build removes the extra vectors. Stores of other models or settings are
+removed after a switch, and a build replaces a store it cannot use (damaged, or in a
+format this version cannot read) with a new one, taking the vectors from the embedding
+cache.
 
 **Hybrid fusion.** `hybrid::search` takes the best 50 chunks (`candidates`) from each
 side and fuses the rankings with reciprocal rank fusion by default: a chunk scores
@@ -445,7 +463,8 @@ so a chunk both sides rank well comes first and neither score scale matters.
 `Fusion::Linear` (`--fusion linear --lexical-weight W`) instead adds `W` times the
 min-max normalized BM25 score and `1 − W` times the normalized similarity. Ties order
 by document id. Path-prefix and language filters (`--path-prefix`, `--language`)
-apply to both sides.
+apply to both sides. A path prefix names a folder or a file and matches whole path
+components: `src/net` finds `src/net/retry.rs` and `src/net`, but not `src/network.rs`.
 
 | Item | What it does |
 |---|---|
@@ -456,12 +475,15 @@ apply to both sides.
 | `dense::render(chunk, chunk_text)`, `RENDER_VERSION` | The embedded text, version 1: `path`, `\n`, the scope and `\n` when there is one, the source trimmed. |
 | `dense::render_with(chunk, chunk_text, EmbedText)`, `EmbedText` | The embedded text with the parts `EmbedText` names: `Source` (the trimmed source alone), `PathSource` (path line and source) or `PathScopeSource` (the default, `render`'s text). `as_str` and `FromStr` use `source`, `path-source`, `path-scope-source`. |
 | `dense::embed_query(embedder, query)` | The query's vector and billed tokens, for `SearchRequest::query_vector`. |
-| `dense::DenseConfig` | The per-index settings in `STATE_DIR/dense.json`: `version` (1), `embedder` (a `ModelDescriptor`), `render_version`, `quantization`, `max_tokens_per_run`, `embed_text` (`PathScopeSource` when absent), with `new`, `with_*`, `load(state_dir)`, `read(path)`, `save(state_dir)`, `remove(state_dir)`. Saved by every build with embeddings. |
-| `dense::DenseBuild` | One build's embedding: `embedder`, `quantization` (`F32`), `max_tokens` (`None`), `embed_text` (`PathScopeSource`), `progress` (called after each request with `EmbedProgress { texts, total, tokens, requests }`), with `new`, `from_config`, `with_*`. |
-| `dense::EmbedStats` | `BuildStats::dense`: `embedder`, `render_version`, `embed_text`, `docs`, `embedded_docs`, `texts` (distinct), `cached`, `new`, `requests`, `tokens` (billed), `max_tokens`, `cap_reached`, `not_embedded`, `not_embedded_tokens` (counted), `too_long`, `cache_records`. |
-| `vector::VectorStore` | `dimensions`, `len`, `is_empty`, `insert(id, vector, VectorMeta { path, language })` (replaces), `delete(id)`, `search(query, k, &Filter) -> Vec<VectorHit { id, score }>` (cosine; best first, then id ascending), `persist`, `open(dir)`. |
-| `vector::BruteForceStore::create(dir, dimensions, Quantization)` | The exact store; `Quantization::Int8` adds an 8-bit copy scanned first, with the best `max(4k, 40)` rescored exactly. |
-| `vector::Filter` | `path_prefix` (a string prefix of the relative path), `language` (the chunk's `language`); `with_path_prefix`, `with_language`, `matches`, `is_empty`. |
+| `dense::DenseConfig` | The per-index settings in `STATE_DIR/dense.json`: `version` (1), `embedder` (a `ModelDescriptor`), `render_version`, `quantization`, `vector_index` (`Flat` when absent), `max_tokens_per_run`, `embed_text` (`PathScopeSource` when absent), with `new`, `with_*`, `load(state_dir)`, `read(path)`, `save(state_dir)`, `remove(state_dir)`. Saved by every build with embeddings. |
+| `dense::DenseBuild` | One build's embedding: `embedder`, `quantization` (`Int8`), `vector_index` (`Flat`), `max_tokens` (`None`), `embed_text` (`PathScopeSource`), `progress` (called after each request with `EmbedProgress { texts, total, tokens, requests }`), with `new`, `from_config`, `with_*`. |
+| `dense::EmbedStats` | `BuildStats::dense`: `embedder`, `render_version`, `embed_text`, `docs`, `embedded_docs`, `texts` (distinct), `cached`, `new`, `requests`, `tokens` (billed), `max_tokens`, `cap_reached`, `not_embedded`, `not_embedded_tokens` (counted), `too_long`, `cache_records`, `vectors_added`, `vectors_removed` (the vector store's update), `store_created`. |
+| `vector::VectorStore` | `dimensions`, `len`, `is_empty`, `upsert(&[VectorRecord { id, vector, meta: VectorMeta { path, language } }])` (replaces, a batch all or nothing), `delete(&[id])`, `ids()` (ascending), `search(query, k, &Filter) -> Vec<VectorHit { id, score }>` (cosine, best first, then id ascending), `persist` (atomic). Ids are `VectorId` (`u128`). |
+| `vector::MhrStore` | The store, on mhr_vector: `create(dir, &StoreConfig)`, `open_for(dir, &StoreConfig)` (for writing, an error for another model or settings), `open(dir)` (read-only, the last persisted state), `matches(&StoreConfig)`, `compact()`. One writer per directory, any number of readers. A search returns at most 1,000 hits (mhr_vector's limit). |
+| `vector::StoreConfig` | `model` (a `ModelDescriptor`), `text_format` (how the texts were rendered), `quantization`, `index`, with `new`, `with_quantization`, `with_index`, `dir_name()` (`vectors-` and 16 hex digits of a digest of the model and settings). |
+| `vector::Quantization` | The codes kept in memory: `Int8` (default, 1 byte per dimension, each segment's best `max(4k, 40)` candidates rescored with the full-precision vectors) or `F32` (exact). |
+| `vector::VectorIndex` | `Flat` (default, a scan of every code) or `Graph` (a Vamana graph on each segment of 20,000 vectors or more, searched approximately). |
+| `vector::Filter` | `path_prefix` (a folder or file, matched by whole path components: `src/net` matches `src/net/retry.rs`, not `src/network.rs`), `language` (the chunk's `language`), with `with_path_prefix`, `with_language`, `matches`, `is_empty`. |
 | `hybrid::search(state_dir, &SearchRequest, Option<&dyn Embedder>)` | One generation, read consistently. Returns `SearchResults { hits, mode, query_tokens, dense }`. A search that loses a race with a build's switch starts over on the new generation, embedding the query once. |
 | `hybrid::SearchRequest::new(query)` | `mode` (`Lexical`), `limit` (10), `candidates` (50, hybrid), `fusion` (RRF), `filter` (none), `query_vector` (none), with `with_*`. |
 | `hybrid::SearchHit` | The chunk (flattened in JSON), `header`, `score` (BM25, cosine or fused), `lexical_rank`, `dense_rank` (1-based). |
@@ -470,7 +492,50 @@ apply to both sides.
 
 Dense and hybrid modes need the generation to have embeddings and an embedder whose
 descriptor equals the generation's (or a `query_vector`), and filters apply to both
-sides.
+sides. The dense side returns at most 1,000 candidates (mhr_vector's `MAX_K`), so
+hybrid `candidates` above 1,000 are capped there.
+
+## Vector store measurements
+
+Measured through `vector::MhrStore` on one thread with a warm page cache, on a VMware
+VM with 6 cores of an Intel i9-13980HX (AVX2) and 22 GB of RAM. Each store was built
+from vectors in memory (upserts in batches of 1,024, then `compact` and `persist`, as a
+build does for a new store), reopened read-only, and searched for the top 10 with no
+filter. Recall@10 is against an exact f64 cosine ranking of every vector. Latencies
+are the medians over three runs of 1,000 queries (300 for f32 codes and for the
+synthetic set). Memory is the resident memory the open store added, disk is the
+store's directory.
+
+| Vectors (1,024 dimensions) | Store | Build | Disk | Memory | Open | Median | p99 | Recall@10 |
+|---|---|---|---|---|---|---|---|---|
+| 34,601 documentation chunks (voyage-4) | int8, flat (default) | 1.5 s | 172 MB | 38 MB | 0.02 s | 2.8 ms | 3.8 ms | 1.000 |
+| | f32, flat | 0.8 s | 138 MB | 139 MB | 0.1 s | 18.5 ms | 21.9 ms | 1.000 |
+| | int8, graph | 16 s | 180 MB | 46 MB | 0.04 s | 0.4 ms | 1.0 ms | 0.999 |
+| 199,999 code chunks (voyage-code-4) | int8, flat (default) | 6–37 s | 987 MB | 207 MB | 0.12 s | 17.1 ms | 20.5 ms | 1.000 |
+| | f32, flat | 5.5–28 s | 791 MB | 793 MB | 0.58 s | 98.2 ms | 101.7 ms | 1.000 |
+| | int8, graph | 189 s | 1,035 MB | 256 MB | 0.23 s | 1.5 ms | 2.9 ms | 0.973 |
+| 1,000,000 synthetic | int8, flat (default) | 145 s | 4,933 MB | 1,033 MB | 0.62 s | 75.9 ms | 91.0 ms | 1.000 |
+
+The recall of the Voyage sets is over 2,000 queries each (doc-comment sentences for
+code, the Cloudflare evaluation questions and page headings for documentation), that
+of the synthetic set over 500. The sets are mhr_vector's `docs-voyage4-200k` and
+`code-voyagecode4-200k` (described in its `docs/datasets.md`) and its clustered
+generator (1,000 clusters, spread 0.35, seed 1). Builds write the whole store and
+are bound by the disk, which other work on the VM shared: a range spans repeated
+runs. The synthetic build includes generating the vectors.
+
+Int8 rescoring depth, recall@10 over the same 2,000 queries of each set (the default
+is `max(4k, 40)`, so 40 at k = 10):
+
+| Candidates rescored per segment | 10 | 20 | 32 | 40 | 64 | 100 |
+|---|---|---|---|---|---|---|
+| Documentation chunks | 0.99665 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| Code chunks | 0.9954 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+
+Updating the 199,999-vector store as a build does (open it for writing, upsert 1,000
+vectors, delete 1,000, persist) took 0.11 s to open (it loads the codes), 5 ms to
+apply and 16 ms to persist. A search runs on one thread, and a one-off search (the
+CLI's `search2`) pays the open time first.
 
 ## Watchers
 
@@ -532,7 +597,7 @@ processing and deduplicate by sequence: delivery is at-least-once across crashes
 |---|---|
 | `chunk ROOT` (directory or file) | Every chunk of a directory (or of one file) as one JSON line, in path order, and a `FileMetadata` line before a Markdown file's chunks when it has front matter. |
 | `outline ROOT` | The same partition as `path:start-end<TAB>kind<TAB>symbol_path` lines. A metadata region is `path:start-end<TAB>metadata<TAB>title`. |
-| `index2 ROOT STATE_DIR` | Builds the disk-resident BM25 index (with `--embed`, also embeddings). stderr gets `indexed N chunks, T terms, R runs` and the report summary, and with embeddings also a progress line per request and the token summary. Flags below. Without `--embed`, `--embed-config` or `--no-embed`, the saved `dense.json` applies. |
+| `index2 ROOT STATE_DIR` | Builds the disk-resident BM25 index (with `--embed`, also embeddings). stderr gets `indexed N chunks, T terms, R runs` and the report summary, and with embeddings also a progress line per request, the token summary and the vector store's update. Flags below. Without `--embed`, `--embed-config` or `--no-embed`, the saved `dense.json` applies. |
 | `search2 STATE_DIR QUERY...` | The best hits, up to `--limit` (10), as JSON lines: the chunk's fields plus `header`, `score`, `lexical_rank`, `dense_rank`. `--text` prints one line per hit, `rank. header  [mode score; ranks]`. A lexical search reads only the postings of the query's terms. Dense and hybrid print the query's tokens on stderr. Flags below. |
 | `index ROOT STATE_DIR` | The first index format: one JSON file that a search loads whole. stderr gets `indexed N chunks` and the report summary. |
 | `search STATE_DIR QUERY...` | Up to ten chunk JSON lines from `index`'s file (the words are joined with spaces). Same tokens, scores and ranking as a lexical `search2` of an `index2` built without `--lexical-scope`. |
@@ -567,7 +632,8 @@ peak memory.
 | `--dimensions N` | Vector dimensions (voyage-code-4: 256, 512, 1024 by default, 2048). |
 | `--embed-text source\|path-source\|path-scope-source` | What each chunk's embedded text holds besides its source (default `path-scope-source`). Saved in `dense.json`. |
 | `--embed-config FILE` | Take the settings from a file in the format of `dense.json`. `--dimensions` applies after it, checked against the file's model. With `--embed` it is an error (`--embed and --embed-config both choose the model: give one`). |
-| `--quantize f32\|int8` | Vector storage (default `f32`). |
+| `--quantize f32\|int8` | Vector codes held in memory: `int8` (default) or `f32`, exact at 4 bytes per dimension. Saved in `dense.json`. |
+| `--vector-index flat\|graph` | How dense search finds candidates: `flat` (default) or `graph`, which adds Vamana graphs for very large indexes. Saved in `dense.json`. |
 | `--max-embed-tokens N\|none` | The per-build token cap (default none). |
 | `--no-embed` | Build lexically and remove `dense.json` (the cache stays). |
 | `--lexical-scope` | Also index the words of each chunk's scope for lexical search (`BuildOptions::lexical_scope`, this build only). |
@@ -584,6 +650,7 @@ indexed 7018 chunks, 16000 terms, 6 runs
 arko_index: embeddings: hash/hash-v1 (256 dimensions); 7018 chunks, 7018 distinct texts: 0 from the cache, 1916 embedded now in 8 requests, 299997 tokens
 arko_index: stopped at the token cap (300000): 5102 texts (784381 counted tokens) not embedded; their chunks are found by lexical search only. Rerun with a higher --max-embed-tokens (or none) to finish; embedded texts come from the cache
 arko_index: 1916 of 7018 chunks have vectors; the cache holds 1916 vectors for this model
+arko_index: vector store (new): 1916 vectors added, 0 removed
 ```
 
 A rerun with `--max-embed-tokens none` then reported `1916 from the cache, 5102
@@ -595,7 +662,7 @@ embedded now`.
 | `--mode lexical\|dense\|hybrid` | Default: `hybrid` when the index has embeddings, else `lexical`. |
 | `--limit N`, `--candidates N` | Results (10) and hybrid candidates per side (50). |
 | `--fusion rrf\|linear`, `--rrf-k K`, `--lexical-weight W`, `--dense-weight W` | Fusion (RRF, k 60, weights 1, linear weight 0.5). |
-| `--path-prefix P`, `--language L` | Filters. |
+| `--path-prefix P`, `--language L` | Filters. A path prefix is a folder or a file, matched by whole components. |
 | `--text` | One line per hit: rank, header, mode, score and ranks. |
 
 ```text
@@ -638,6 +705,9 @@ at the end of the input (2^20 times in one token), a guard the C library lacks.
 [arko_index verification](arko_index-verification.md#the-pure-rust-parser)
 has the checks of the switch.
 
+Dense search stores its vectors with [mhr_vector](https://github.com/mesa-hills-research/mhr_vector),
+also pure, safe Rust.
+
 arko_index has no cargo features. The examples use arko_ai for Voyage, a dev-dependency
 whose dependencies need a C compiler, so building the tests and examples needs one.
 
@@ -660,7 +730,8 @@ whose dependencies need a C compiler, so building the tests and examples needs o
 | Embedding model (CLI `--embed`) | None until chosen, then the saved `dense.json`. The CLI's Voyage models default to the model's dimensions (voyage-code-4: 1,024) with input types on |
 | Token cap (`DenseBuild::max_tokens`, `DenseConfig::max_tokens_per_run`) | `None`: no cap |
 | Embedded text (`DenseBuild::embed_text`, `DenseConfig::embed_text`, CLI `--embed-text`) | `PathScopeSource`: the path, the scope, then the source |
-| Vector storage (`Quantization`) | `F32`; `Int8` rescores `max(4k, 40)` candidates |
+| Vector codes (`Quantization`, CLI `--quantize`) | `Int8`, with each segment's best `max(4k, 40)` candidates rescored at full precision, and `F32` is exact |
+| Vector search (`VectorIndex`, CLI `--vector-index`) | `Flat` scans every code, and `Graph` adds Vamana graphs |
 | Search mode (`SearchRequest::mode`) | `Lexical`, and the CLI's `search2` uses hybrid when the index has embeddings |
 | Hybrid candidates (`SearchRequest::candidates`) | 50 per side |
 | Fusion (`Fusion::default`) | Reciprocal rank fusion, k = 60, both weights 1 (`Linear`: lexical weight 0.5 in the CLI) |
@@ -677,8 +748,8 @@ directory that holds it) and `report.json` (the last walk's report).
 | Writer | Files |
 |---|---|
 | `search::index` | `index.json` (version 1), `.index.lock` |
-| `index2::index`, `index2::build` | `CURRENT2` (the name of the current generation), `.index.lock`, `index2-<stamp>-<pid>/` with `meta.json` (version 2, with `dense`: whether the generation has embeddings, `false` when absent), `lens.dat`, `docs.off`, `docs.dat`, `terms.dat`, `terms.idx`, `post.dat`, `files.dat` (each file's first document and path, for filters), and with embeddings also `dense.json` (`DenseIndexInfo`, version 1) and `dense/` (`slots.dat` with ids, paths, languages, int8 scales and a SHA-256 checksum; `vectors.f32`; `vectors.i8` with int8). Older generations are removed after a switch. |
-| `index2::build` with embeddings | `dense.json` (`DenseConfig`, version 1: the model and settings the CLI's later builds follow) and `embed-cache/<model key>/` (`cache.json` with the full descriptor and the epoch, `keys.<epoch>` with 32-byte text hashes, `vectors.<epoch>` with the vectors as returned, appended and fsynced per request). |
+| `index2::index`, `index2::build` | `CURRENT2` (the name of the current generation), `.index.lock`, `index2-<stamp>-<pid>/` with `meta.json` (version 2, with `dense`: whether the generation has embeddings, `false` when absent), `lens.dat`, `docs.off`, `docs.dat`, `terms.dat`, `terms.idx`, `post.dat`, `files.dat` (each file's first document and path, for filters), and with embeddings also `dense.json` (`DenseIndexInfo`, version 2, naming the vector store) and `vkeys.dat` (per document with a vector, by vector id: the 128-bit id big-endian, then the document as u32). Older generations are removed after a switch. |
+| `index2::build` with embeddings | `vectors-<digest>/`, the vector store (mhr_vector's files: `CURRENT`, manifests, segments, tombstones, `LOCK`), updated in place by each build and shared by the generations. Also `dense.json` (`DenseConfig`, version 1: the model and settings the CLI's later builds follow) and `embed-cache/<model key>/` (`cache.json` with the full descriptor and the epoch, `keys.<epoch>` with 32-byte text hashes, `vectors.<epoch>` with the vectors as returned, appended and fsynced per request). |
 | `open_watch` | `watch.json` (version 1: snapshot, fingerprints, sequence, acknowledgement, pending deltas, rules, and the engine-qualified parse cache) |
 | `Watcher2` | `watch2.snap` (version 3), `watch2.recs.N`, `watch2.wal` |
 
@@ -697,8 +768,12 @@ with `Options::front_matter_description`, and with the mhr_tree_sitter commit (t
 to d56f609 rebuilds the watchers' cached chunks once). An index2 generation from before
 this version loads and searches lexically, and filters need its `files.dat` (rebuild to
 filter). Saved files with embeddings carry versions (`dense.json` 1, the generation's
-`dense.json` 1, `slots.dat` 1, `cache.json` 1) and new fields get serde defaults. The
-SQLite databases of the earlier, model-chunked arko_index are not readable by this crate.
+`dense.json` 2, `cache.json` 1, and mhr_vector's own format versions) and new fields get
+serde defaults. A generation whose vectors an earlier version stored (its `dense.json`
+is version 1) searches lexically, and dense search asks for a rebuild, which takes the
+vectors from the embedding cache. A build replaces a vector store it cannot use
+(damaged, or in a format this version cannot read) with a new one. The SQLite
+databases of the earlier, model-chunked arko_index are not readable by this crate.
 
 ## Platforms
 
@@ -714,12 +789,12 @@ identity checks and measurements behind these docs were made on Linux.
   filesystem I/O), and `watch2` is the incremental alternative on Linux.
 * `search` loads the entire JSON index, and `search2` reads only the query terms'
   postings.
-* Dense search is opt-in and costs tokens to build and per query. Its vector store is
-  exact: a search reads every vector (about 29 MB for 7,000 chunks at 1,024
-  dimensions, a quarter of that with `int8`), which suits repositories, not corpora of
-  millions of chunks; an approximate store can replace it behind `VectorStore`.
-  Embedding holds about 100 bytes per chunk in memory (text hashes and the cache
-  index); texts to embed are spooled to disk.
+* Dense search is opt-in and costs tokens to build and per query. A search holds every
+  vector's int8 codes in memory (1 KB per chunk at 1,024 dimensions) and scans them
+  all on one thread, so its time grows with the index: `--vector-index graph` is the
+  alternative for millions of chunks. A one-off search (the CLI's `search2`) also
+  loads the codes first. Embedding holds about 100 bytes per chunk in memory (text
+  hashes and the cache index), and texts to embed are spooled to disk.
 * C/C++ recovery is heuristic, not a C preprocessor. Tiny merged definitions can lose
   retrieval concentration.
 * The first `watch2` delta of a large tree is one JSON line holding every chunk.

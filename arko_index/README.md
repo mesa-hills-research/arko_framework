@@ -10,7 +10,11 @@ watching run entirely on your machine.
 
 Dense (embedding) and hybrid search are opt-in. They embed through a `dense::Embedder` the
 caller supplies (the CLI uses Voyage through arko_ai), and the library itself never makes a
-network call.
+network call. The vectors live in [mhr_vector](https://github.com/mesa-hills-research/mhr_vector),
+a pure-Rust store that each build updates in place. A search scans int8 codes held in
+memory and rescores the best candidates at full precision: on 199,999 code chunks it took
+17 ms per query and returned the exact top ten
+([measurements](../docs/arko_index-reference.md#vector-store-measurements)).
 
 It is built for coding agents and the tools around them. A result names an exact byte and
 line range of the source, the same tree and options always give the same chunks and IDs,
@@ -42,7 +46,7 @@ arko_index = { path = "../arko_index" }
 
 The library needs no C compiler: it parses with
 [mhr_tree_sitter](https://github.com/mesa-hills-research/mhr_tree_sitter), a pure-Rust port
-of tree-sitter. Its examples use arko_ai for Voyage, a dev-dependency whose dependencies need
+of tree-sitter, and stores vectors with mhr_vector, also pure Rust. Its examples use arko_ai for Voyage, a dev-dependency whose dependencies need
 one, so building the tests and examples does too. Linux is the primary platform. macOS has
 everything but `watch2`, and Windows compiles (see [Platforms](../docs/arko_index-reference.md#platforms)).
 
@@ -66,6 +70,7 @@ $CLI index2 --embed voyage-code-4 --max-embed-tokens 5000000 ./repo ./index-stat
 $CLI index2 ./repo ./index-state           # later builds reuse the saved model and cache
 $CLI search2 --text ./index-state 'where is the input limit applied'   # hybrid
 $CLI search2 --mode lexical --language rust ./index-state 'RetryPolicy'
+$CLI search2 --path-prefix src/net ./index-state 'retry'   # one folder (whole path components)
 ```
 
 In Rust:
