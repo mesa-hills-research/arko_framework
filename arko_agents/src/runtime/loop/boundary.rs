@@ -216,6 +216,13 @@ impl AgentLoop {
             return Ok(Flow::Exit);
         }
 
+        // No path brings the task here in another state (a task that ended
+        // or waits leaves the pass before): the check below is a guard.
+        debug_assert!(
+            matches!(self.task.current_state, TaskState::InProgress),
+            "a turn boundary in state {:?}",
+            self.task.current_state
+        );
         if !matches!(self.task.current_state, TaskState::InProgress) {
             if self.task.current_state.is_terminal() {
                 return Ok(Flow::Exit);

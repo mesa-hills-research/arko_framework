@@ -104,22 +104,22 @@ impl AgentLoop {
                 }
 
                 if tool_call_groups.len() > 1 {
-                    let error_msg = "Error: Only one tool call or one batch of the same tool can be used per turn.".to_string();
-                    if !next_user_message_str_accumulated.is_empty() {
-                        next_user_message_str_accumulated.push_str("\n\n");
-                    }
-                    next_user_message_str_accumulated.push_str(&error_msg);
+                    // The turn's message is still empty.
+                    debug_assert!(next_user_message_str_accumulated.is_empty());
+                    next_user_message_str_accumulated.push_str(
+                        "Error: Only one tool call or one batch of the same tool can be used per turn.",
+                    );
                 } else if tool_call_groups.is_empty() {
                     if self.handover_report_due() {
                         self.take_handover_report(plain_text_from_assembler.clone())
                             .await?;
                         return Ok(self.end_of_pass());
                     }
-                    if !self.task.current_state.is_terminal() {
-                        self.handle_model_output_failure(NO_TEXT_TOOL_CALL.to_string())
-                            .await?;
-                        return Ok(self.end_of_pass());
-                    }
+                    // The stream left the task in progress.
+                    debug_assert!(!self.task.current_state.is_terminal());
+                    self.handle_model_output_failure(NO_TEXT_TOOL_CALL.to_string())
+                        .await?;
+                    return Ok(self.end_of_pass());
                 } else {
                     let current_group = tool_call_groups.remove(0);
                     self.handle_text_group(
@@ -330,9 +330,8 @@ impl AgentLoop {
                                 "Error: Tool '{}' cannot be used in a batch.",
                                 first_tool_name_in_batch
                             );
-                            if !next_user_message_str_accumulated.is_empty() {
-                                next_user_message_str_accumulated.push_str("\n\n");
-                            }
+                            // The turn's message is still empty.
+                            debug_assert!(next_user_message_str_accumulated.is_empty());
                             next_user_message_str_accumulated.push_str(&err_msg);
                             Vec::new()
                         } else {

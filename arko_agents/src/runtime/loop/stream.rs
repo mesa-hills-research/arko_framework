@@ -158,10 +158,12 @@ impl AgentLoop {
         // task; no recovery budget cuts it off (only arko_ai's opt-in
         // stream idle timeout can).
         loop {
+            // The final response ends the loop as it arrives.
+            debug_assert!(final_generation_response.is_none());
             tokio::select! {
                 biased;
                 maybe_cmd = self.command_receiver.recv() => {
-                    if self.on_stream_command(maybe_cmd, &current_assistant_response_text_for_conv, &final_generation_response, &mut native_stream_call_ids).await? {
+                    if self.on_stream_command(maybe_cmd, &current_assistant_response_text_for_conv, &mut native_stream_call_ids).await? {
                         had_stream_error = true;
                         break;
                     }
@@ -219,10 +221,10 @@ impl AgentLoop {
                             }
                             // Without a final response no announced call runs.
                             self.reject_announced_calls(&mut native_stream_call_ids, FAILED_STREAM_CALL).await?;
-                            if !current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
+                            if !current_assistant_response_text_for_conv.is_empty() {
                                 self.task.conversation.add_assistant_message(&current_assistant_response_text_for_conv);
                             }
-                            if current_assistant_response_text_for_conv.is_empty() && final_generation_response.is_none() {
+                            if current_assistant_response_text_for_conv.is_empty() {
                                 self.handle_llm_error(ai::Error::StreamTruncated("the response stream ended with no output".to_string()), None).await?;
                                 had_stream_error = true;
                             }
@@ -254,10 +256,7 @@ impl AgentLoop {
         self.flush_throttled_reasoning().await?;
         self.flush_throttled_text().await?;
 
-        if had_stream_error
-            || self.task.current_state.is_terminal()
-            || !matches!(self.task.current_state, TaskState::InProgress)
-        {
+        if had_stream_error || !matches!(self.task.current_state, TaskState::InProgress) {
             return Ok(ModelTurn::Ended(self.end_of_pass()));
         }
         Ok(ModelTurn::Streamed(StreamedTurn {
@@ -276,14 +275,12 @@ impl AgentLoop {
         &mut self,
         maybe_cmd: Option<UserCommand>,
         current_assistant_response_text_for_conv: &str,
-        final_generation_response: &Option<ai::GenerationResponse>,
         native_stream_call_ids: &mut HashMap<usize, (Uuid, String)>,
     ) -> Result<bool, ArkoAgentsError> {
         match maybe_cmd.map(|command| self.absorb_command(command)) {
             Some(Some(UserCommand::CancelTask)) => {
                 self.keep_partial_output(
                     current_assistant_response_text_for_conv,
-                    final_generation_response,
                     native_stream_call_ids,
                 )
                 .await?;
@@ -299,7 +296,6 @@ impl AgentLoop {
             Some(Some(UserCommand::SuspendTask)) => {
                 self.keep_partial_output(
                     current_assistant_response_text_for_conv,
-                    final_generation_response,
                     native_stream_call_ids,
                 )
                 .await?;
@@ -314,7 +310,6 @@ impl AgentLoop {
             None => {
                 self.keep_partial_output(
                     current_assistant_response_text_for_conv,
-                    final_generation_response,
                     native_stream_call_ids,
                 )
                 .await?;
@@ -327,16 +322,15 @@ impl AgentLoop {
         Ok(false)
     }
 
-    /// A stream the host stopped: the text it delivered is kept as the
-    /// turn (unless a final response holds it), and the calls it announced
-    /// are rejected.
+    /// A stream the host stopped (before its final response): the text it
+    /// delivered is kept as the turn, and the calls it announced are
+    /// rejected.
     async fn keep_partial_output(
         &mut self,
         text: &str,
-        final_generation_response: &Option<ai::GenerationResponse>,
         native_stream_call_ids: &mut HashMap<usize, (Uuid, String)>,
     ) -> Result<(), ArkoAgentsError> {
-        if !text.is_empty() && final_generation_response.is_none() {
+        if !text.is_empty() {
             self.task.conversation.add_assistant_message(text);
         }
         self.reject_announced_calls(native_stream_call_ids, INTERRUPTED_CALL)
