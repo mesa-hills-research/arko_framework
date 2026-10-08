@@ -442,8 +442,9 @@ impl AgentLoop {
         if let AgentEvent::TaskStateChanged(state) = &event {
             *self.last_reported_state.lock().unwrap() = Some(state.clone());
         }
-        if self.event_sender.send(event.clone()).await.is_err() {
-            let err_msg = format!("Failed to send AgentEvent: {:?}", event);
+        // A failed send hands the event back, for the error.
+        if let Err(error) = self.event_sender.send(event).await {
+            let err_msg = format!("Failed to send AgentEvent: {:?}", error.0);
             log::error!("{}", err_msg);
             return Err(ArkoAgentsError::ChannelSend(err_msg));
         }
