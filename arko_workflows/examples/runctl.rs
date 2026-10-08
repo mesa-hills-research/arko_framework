@@ -1,10 +1,13 @@
-//! runctl: post a note to a workflow run from another process, or show the
-//! run's status. Works with any arko workflow: RUN_DIR is its persistence
+//! runctl: post a note to a workflow run from another process, stop one
+//! agent's runs while the rest of the workflow runs on, or show the run's
+//! status. Works with any arko workflow: RUN_DIR is its persistence
 //! directory (`PersistenceConfig::new(RUN_DIR)`).
 //!
 //! Usage:
 //!   cargo run -p arko_workflows --example runctl -- note RUN_DIR "Prefer the orbit method."
 //!   cargo run -p arko_workflows --example runctl -- note RUN_DIR --file note.md --to searcher,strategist --once
+//!   cargo run -p arko_workflows --example runctl -- stop RUN_DIR --agent worker-12 --reason "moving it to Opus 5.5"
+//!   cargo run -p arko_workflows --example runctl -- stop RUN_DIR --run 5f0c…-… --wrap-up 120 --relaunch
 //!   cargo run -p arko_workflows --example runctl -- status RUN_DIR
 //!
 //! `note` needs a workflow built with `WorkflowBuilder::control_folder()`: it
@@ -12,20 +15,27 @@
 //! lock, never the run's, so it works while the run is live and while it is
 //! stopped. The workflow posts the note at its agents' next turn boundaries,
 //! or when it resumes, as `Workflow::post_note` does; a note naming an
-//! unknown agent is skipped there with a warning in its log. `status` reads
-//! the run's latest checkpoint; it needs no control folder.
+//! unknown agent is skipped there with a warning in its log. `stop` appends
+//! a request to `RUN_DIR/control/stops.jsonl` the same way; the running
+//! workflow reads it within a second and stops the runs it names as
+//! `Workflow::stop_run` does: each is told to save its work and finish
+//! within the wrap-up (600 seconds unless `--wrap-up` or `--now`), then
+//! cancelled. The runs are retired unless `--relaunch`. A request written
+//! while the workflow isn't running is never applied. `status` reads the
+//! run's latest checkpoint; it needs no control folder.
 //!
 //! Makes no model requests and needs no credentials.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use arko_workflows::RunStopIntent;
 use arko_workflows::notes::{Note, NoteAudience, NoteKind, NoteSource, control};
 use arko_workflows::persistence::PersistenceManager;
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(about = "Post a note to an arko workflow run, or show its status")]
+#[command(about = "Post a note to an arko workflow run, stop agent runs, or show its status")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -60,6 +70,32 @@ enum Command {
         /// Label the note as the workflow's own.
         #[arg(long)]
         from_host: bool,
+    },
+    /// Stop an agent's running runs (or one run) while the rest of the
+    /// workflow runs on (the workflow must read a control folder).
+    Stop {
+        /// The run directory: the workflow's persistence directory.
+        run_dir: PathBuf,
+        /// Every running run of this agent (its registration name).
+        #[arg(long, required_unless_present = "run", conflicts_with = "run")]
+        agent: Option<String>,
+        /// One agent run, by its ID.
+        #[arg(long)]
+        run: Option<uuid::Uuid>,
+        /// Seconds the runs get to save their work and finish before they
+        /// are cancelled.
+        #[arg(long, default_value_t = 600, conflicts_with = "now")]
+        wrap_up: u64,
+        /// Cancel the runs at once, without a wrap-up.
+        #[arg(long)]
+        now: bool,
+        /// Why, as the runs are told.
+        #[arg(long, default_value = "")]
+        reason: String,
+        /// Keep the runs to restart later (`Workflow::stopped_runs`)
+        /// instead of retiring them.
+        #[arg(long)]
+        relaunch: bool,
     },
     /// Show the run's status from its latest checkpoint.
     Status {
@@ -105,6 +141,28 @@ async fn main() -> ExitCode {
                 post(&run_dir, &note)
             })
         }
+        Command::Stop {
+            run_dir,
+            agent,
+            run,
+            wrap_up,
+            now,
+            reason,
+            relaunch,
+        } => {
+            let mut stop = match (run, agent) {
+                (Some(run), _) => control::ControlStop::run(run, reason),
+                (None, Some(agent)) => control::ControlStop::agent(agent, reason),
+                (None, None) => unreachable!("clap requires --agent or --run"),
+            };
+            if !now {
+                stop = stop.wrap_up(std::time::Duration::from_secs(wrap_up));
+            }
+            if relaunch {
+                stop = stop.intent(RunStopIntent::Relaunch);
+            }
+            request_stop(&run_dir, &stop)
+        }
         Command::Status { run_dir } => status(&run_dir).await,
     };
     match result {
@@ -122,6 +180,16 @@ fn post(run_dir: &Path, note: &Note) -> Result<(), String> {
         "Note {} written to {}. The workflow posts it at its agents' next turn boundaries, or when it resumes.",
         written.id.map(|id| id.to_string()).unwrap_or_default(),
         control::folder(run_dir).join(control::NOTES_FILE).display()
+    );
+    Ok(())
+}
+
+fn request_stop(run_dir: &Path, stop: &control::ControlStop) -> Result<(), String> {
+    let written = control::request_stop(run_dir, stop).map_err(|error| error.to_string())?;
+    println!(
+        "Stop request {} written to {}. The running workflow reads it within a second; a request written while it isn't running is never applied.",
+        written.id.map(|id| id.to_string()).unwrap_or_default(),
+        control::folder(run_dir).join(control::STOPS_FILE).display()
     );
     Ok(())
 }
@@ -170,6 +238,7 @@ async fn status(run_dir: &Path) -> Result<(), String> {
                 result.agent_run_id,
                 result.status.clone(),
                 result.error.clone(),
+                result.stopped_by.as_ref().and_then(|stop| stop.intent),
             )
         })
         .chain(state.agent_runs.iter().map(|record| {
@@ -178,17 +247,23 @@ async fn status(run_dir: &Path) -> Result<(), String> {
                 record.agent_run_id,
                 record.status.clone(),
                 record.error.clone(),
+                record.stopped_by.as_ref().and_then(|stop| stop.intent),
             )
         }))
         .collect::<Vec<_>>();
     runs.sort_by(|a, b| a.0.cmp(&b.0));
     println!("Agent runs: {}", runs.len());
-    for (agent, id, status, error) in &runs {
+    for (agent, id, status, error, intent) in &runs {
+        let intent = match intent {
+            Some(RunStopIntent::Retire) => " (stopped alone: retired)",
+            Some(RunStopIntent::Relaunch) => " (stopped alone: to relaunch)",
+            _ => "",
+        };
         let error = error
             .as_deref()
             .and_then(|error| error.lines().next())
             .map_or_else(String::new, |line| format!(": {}", cut(line, 120)));
-        println!("  {agent} ({id}): {status:?}{error}");
+        println!("  {agent} ({id}): {status:?}{intent}{error}");
     }
 
     let posted = state
