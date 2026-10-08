@@ -9,7 +9,7 @@ mod support;
 
 use arko_index::{
     bench_v1::*,
-    dense::{DenseBuild, DenseConfig, EmbedProgress, EmbedStats},
+    dense::{DenseBuild, DenseConfig, EmbedProgress, EmbedStats, EmbedText},
     hybrid::{Fusion, Mode, SearchRequest},
     search,
     vector::{Filter, Quantization},
@@ -38,13 +38,16 @@ struct Walk {
     front_matter_description: bool,
 }
 const RULE_FLAGS: &str = "[--respect-ignore] [--exclude PATTERN]... [--include PATTERN]... [--report FILE] [--front-matter-description]";
-const EMBED_FLAGS: &str = "[--embed MODEL] [--dimensions N] [--embed-config FILE] [--quantize f32|int8] [--max-embed-tokens N|none] [--no-embed]";
+const EMBED_FLAGS: &str = "[--lexical-scope] [--embed MODEL] [--dimensions N] [--embed-text source|path-source|path-scope-source] [--embed-config FILE] [--quantize f32|int8] [--max-embed-tokens N|none] [--no-embed]";
 const SEARCH_FLAGS: &str = "[--mode lexical|dense|hybrid] [--limit N] [--candidates N] [--fusion rrf|linear] [--rrf-k K] [--lexical-weight W] [--dense-weight W] [--path-prefix P] [--language L] [--text]";
 
 /// Every command's flags; a command accepts the groups it passes to `parse_flags`.
 struct Flags {
     walk: Walk,
+    /// `--lexical-scope`: index2 also indexes each chunk's scope for lexical search.
+    lexical_scope: bool,
     embed: Option<String>,
+    embed_text: Option<EmbedText>,
     dimensions: Option<usize>,
     embed_config: Option<PathBuf>,
     quantize: Option<Quantization>,
@@ -80,7 +83,9 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
             report: None,
             front_matter_description: false,
         },
+        lexical_scope: false,
         embed: None,
+        embed_text: None,
         dimensions: None,
         embed_config: None,
         quantize: None,
@@ -127,8 +132,8 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
             | "--include"
             | "--report"
             | "--front-matter-description" => accepts.walk,
-            "--embed" | "--dimensions" | "--embed-config" | "--quantize" | "--max-embed-tokens"
-            | "--no-embed" => accepts.embed,
+            "--lexical-scope" | "--embed" | "--dimensions" | "--embed-text" | "--embed-config"
+            | "--quantize" | "--max-embed-tokens" | "--no-embed" => accepts.embed,
             "--mode" | "--limit" | "--candidates" | "--fusion" | "--rrf-k" | "--lexical-weight"
             | "--dense-weight" | "--path-prefix" | "--language" | "--text" => accepts.search,
             _ => false,
@@ -151,6 +156,10 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
                     f.no_embed = true;
                     continue;
                 }
+                "--lexical-scope" => {
+                    f.lexical_scope = true;
+                    continue;
+                }
                 "--text" => {
                     f.text = true;
                     continue;
@@ -168,6 +177,7 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
             "--report" => f.walk.report = Some(PathBuf::from(value)),
             "--embed" => f.embed = Some(value),
             "--dimensions" => f.dimensions = Some(number(flag, &value)?),
+            "--embed-text" => f.embed_text = Some(value.parse()?),
             "--embed-config" => f.embed_config = Some(PathBuf::from(value)),
             "--quantize" => {
                 f.quantize = Some(match value.as_str() {
@@ -224,7 +234,8 @@ fn rules_changed_note() {
 
 /// The embedding settings of an `index2` run: `--no-embed` (lexical, and forget the
 /// saved settings), `--embed-config FILE`, `--embed MODEL`, else the index's saved
-/// `dense.json`; then `--dimensions`, `--quantize` and `--max-embed-tokens`.
+/// `dense.json`; then `--dimensions`, `--embed-text`, `--quantize` and
+/// `--max-embed-tokens`.
 fn dense_config(state: &Path, f: &Flags) -> Result<Option<DenseConfig>, Error> {
     if f.no_embed {
         if f.embed.is_some() || f.embed_config.is_some() {
@@ -240,11 +251,13 @@ fn dense_config(state: &Path, f: &Flags) -> Result<Option<DenseConfig>, Error> {
         DenseConfig::read(path)?
     } else if let Some(spec) = &f.embed {
         let embedder = support::descriptor_for(spec, f.dimensions)?;
-        // A new model keeps the saved quantization and cap unless they are given.
+        // A new model keeps the saved quantization, cap and embedded text unless they
+        // are given.
         match saved {
             Some(saved) => DenseConfig::new(embedder)
                 .with_quantization(saved.quantization)
-                .with_max_tokens_per_run(saved.max_tokens_per_run),
+                .with_max_tokens_per_run(saved.max_tokens_per_run)
+                .with_embed_text(saved.embed_text),
             None => DenseConfig::new(embedder),
         }
     } else if let Some(mut saved) = saved {
@@ -254,13 +267,20 @@ fn dense_config(state: &Path, f: &Flags) -> Result<Option<DenseConfig>, Error> {
         }
         saved
     } else {
-        if f.dimensions.is_some() || f.quantize.is_some() || f.max_embed_tokens.is_some() {
+        if f.dimensions.is_some()
+            || f.embed_text.is_some()
+            || f.quantize.is_some()
+            || f.max_embed_tokens.is_some()
+        {
             return Err("this index has no saved embedding model: choose one with --embed".into());
         }
         return Ok(None);
     };
     if let Some(q) = f.quantize {
         config = config.with_quantization(q);
+    }
+    if let Some(embed_text) = f.embed_text {
+        config = config.with_embed_text(embed_text);
     }
     if let Some(cap) = f.max_embed_tokens {
         config = config.with_max_tokens_per_run(cap);
@@ -543,11 +563,13 @@ fn run() -> Result<(), Error> {
             let mut settings = arko_index::index2::BuildOptions::default()
                 .with_threads(arko_index::threads())
                 .with_mem_budget(budget_mb << 20)
-                .with_rules(walk.rules.clone());
+                .with_rules(walk.rules.clone())
+                .with_lexical_scope(flags.lexical_scope);
             if let (Some(config), Some(embedder)) = (&config, &embedder) {
                 eprintln!(
-                    "arko_index: embedding with {}{}",
+                    "arko_index: embedding with {}, text {}{}",
                     config.embedder.display(),
+                    config.embed_text.as_str(),
                     match config.max_tokens_per_run {
                         Some(cap) => format!(", at most {cap} tokens"),
                         None => String::new(),

@@ -4,8 +4,8 @@
 use arko_index::{
     bench_v1::{Chunk, Error, Options, chunk_dir, chunk_str},
     dense::{
-        DenseBuild, DenseConfig, EmbedLimits, Embedder, Embedding, HashEmbedder, InputKind,
-        ModelDescriptor, RENDER_VERSION, render,
+        DenseBuild, DenseConfig, EmbedLimits, EmbedText, Embedder, Embedding, HashEmbedder,
+        InputKind, ModelDescriptor, RENDER_VERSION, render, render_with,
     },
     hybrid::{self, Fusion, Mode, SearchRequest},
     index2::{self, BuildOptions, BuildStats},
@@ -860,4 +860,112 @@ fn render_format_version_one() {
     );
     let top = chunk_str(Path::new("a.txt"), "  plain text  \n", &Options::default()).unwrap();
     assert_eq!(render(&top[0], "  plain text  \n"), "a.txt\nplain text");
+}
+
+#[test]
+fn embedded_text_choices_render_and_are_saved() {
+    let source = "impl Foo for Bar {\n    fn baz(&self) {}\n}\n";
+    let chunks = chunk_str(Path::new("src/lib.rs"), source, &Options::default()).unwrap();
+    let c = chunks.iter().find(|c| !c.scope.is_empty()).unwrap();
+    let text = &source[c.start_byte..c.end_byte];
+    let body = text.trim();
+    assert_eq!(render_with(c, text, EmbedText::Source), body);
+    assert_eq!(
+        render_with(c, text, EmbedText::PathSource),
+        format!("src/lib.rs\n{body}")
+    );
+    assert_eq!(
+        render_with(c, text, EmbedText::PathScopeSource),
+        render(c, text)
+    );
+    assert_eq!(EmbedText::default(), EmbedText::PathScopeSource);
+    for choice in [
+        EmbedText::Source,
+        EmbedText::PathSource,
+        EmbedText::PathScopeSource,
+    ] {
+        assert_eq!(choice.as_str().parse::<EmbedText>().unwrap(), choice);
+    }
+    assert!("path".parse::<EmbedText>().is_err());
+
+    // A build embeds the chosen text, and the index's config and generation say so.
+    let root = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    corpus(root.path());
+    let e = TestEmbedder::new("model-a", 32);
+    let settings = BuildOptions::default()
+        .with_threads(1)
+        .with_dense(DenseBuild::new(&e).with_embed_text(EmbedText::Source));
+    let s = index2::build(root.path(), state.path(), &Options::default(), &settings).unwrap();
+    assert_eq!(s.dense.unwrap().embed_text, EmbedText::Source);
+    let sources: BTreeSet<String> = chunk_dir(root.path(), &Options::default())
+        .unwrap()
+        .iter()
+        .map(|c| {
+            let text = fs::read_to_string(root.path().join(&c.path)).unwrap();
+            text[c.start_byte..c.end_byte].trim().to_string()
+        })
+        .collect();
+    assert_eq!(e.embedded().into_iter().collect::<BTreeSet<_>>(), sources);
+    let config = DenseConfig::load(state.path()).unwrap().unwrap();
+    assert_eq!(config.embed_text, EmbedText::Source);
+    let info = index2::dense_info(state.path()).unwrap().unwrap();
+    assert_eq!(info.embed_text, EmbedText::Source);
+    // A config saved without the field (before it existed) means the default.
+    let file = state.path().join(DenseConfig::FILE);
+    let mut json: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    json.as_object_mut().unwrap().remove("embed_text");
+    fs::write(&file, serde_json::to_vec(&json).unwrap()).unwrap();
+    let config = DenseConfig::load(state.path()).unwrap().unwrap();
+    assert_eq!(config.embed_text, EmbedText::PathScopeSource);
+
+    // The default text is another text for every chunk with a path: all embedded anew.
+    e.reset();
+    let s = build_with(root.path(), state.path(), Some(&e), None, 1).unwrap();
+    assert_eq!(s.dense.unwrap().embed_text, EmbedText::PathScopeSource);
+    assert_eq!(
+        e.embedded().into_iter().collect::<BTreeSet<_>>(),
+        rendered(root.path())
+    );
+}
+
+#[test]
+fn lexical_scope_indexes_the_scope_words() {
+    let root = tempfile::tempdir().unwrap();
+    corpus(root.path());
+    write(
+        root.path(),
+        "docs/handbook.md",
+        "---\ntitle: Zanzibar handbook\ndescription: Quokka onboarding notes\n---\n\n## Setup\n\nInstall the tools first.\n",
+    );
+    let paths = |state: &Path, query: &str| -> Vec<String> {
+        index2::search(state, query)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.path)
+            .collect()
+    };
+    let build = |lexical_scope: bool, options: &Options| {
+        let state = tempfile::tempdir().unwrap();
+        let settings = BuildOptions::default()
+            .with_threads(1)
+            .with_lexical_scope(lexical_scope);
+        index2::build(root.path(), state.path(), options, &settings).unwrap();
+        state
+    };
+    // The title is the front matter's, outside every chunk: only the scope holds it.
+    let plain = build(false, &Options::default());
+    assert!(paths(plain.path(), "zanzibar").is_empty());
+    let scoped = build(true, &Options::default());
+    assert_eq!(paths(scoped.path(), "zanzibar"), ["docs/handbook.md"]);
+    assert!(paths(scoped.path(), "quokka").is_empty());
+    // The description joins the scope with `front_matter_description`.
+    let described = build(
+        true,
+        &Options {
+            front_matter_description: true,
+            ..Options::default()
+        },
+    );
+    assert_eq!(paths(described.path(), "quokka"), ["docs/handbook.md"]);
 }

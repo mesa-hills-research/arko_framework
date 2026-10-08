@@ -1,6 +1,8 @@
 //! Scaling prototype: a disk-resident inverted index that scores exactly like
 //! `search::search` (same tokens, same BM25 expression, same tie-break) but reads
 //! only the postings of the query terms instead of deserializing every document.
+//! [`BuildOptions::lexical_scope`] (off by default) also indexes each chunk's scope,
+//! which `search::index` does not.
 //!
 //! Layout of one generation directory `index2-<stamp>` (published atomically by
 //! rewriting `CURRENT2`, so readers keep the previous generation until the switch):
@@ -22,8 +24,8 @@
 use crate::{
     bench_v1::{Chunk, Error, Options, chunk_str},
     dense::{
-        DenseBuild, DenseConfig, DenseIndexInfo, EmbedStats, RENDER_VERSION, cache::Cache, render,
-        run, text_hash,
+        DenseBuild, DenseConfig, DenseIndexInfo, EmbedStats, EmbedText, RENDER_VERSION,
+        cache::Cache, render_with, run, text_hash,
     },
     files,
     files::{FileRules, Report},
@@ -194,12 +196,21 @@ fn shard_of(term: &[u8], shards: usize) -> usize {
     (h.finish() % shards as u64) as usize
 }
 
+/// What a document holds besides its source: the scope's terms for lexical search,
+/// and the parts of the embedded text.
+#[derive(Clone, Copy)]
+struct DocText {
+    lexical_scope: bool,
+    embed_text: EmbedText,
+}
+
 /// Reads, chunks and tokenizes one file (runs on a worker thread).
 fn file_docs(
     item: &files::Listed,
     options: &Options,
     shards: usize,
     cache: Option<&Cache>,
+    doc_text: DocText,
 ) -> Result<FileDocs, Error> {
     let mut out = FileDocs {
         skip: None,
@@ -227,7 +238,8 @@ fn file_docs(
         return Ok(out);
     }
     // A document's text is "path\npath-relative source"; '\n' separates words, so its
-    // terms are the path's terms plus the source's terms.
+    // terms are the path's terms plus the source's terms (plus, with `lexical_scope`,
+    // the scope's terms).
     let path_lower = path.to_ascii_lowercase();
     let mut path_counts = Counts::default();
     let path_total = tokenize::count(&path, &path_lower, &mut path_counts);
@@ -241,6 +253,12 @@ fn file_docs(
             *counts.entry(Cow::Borrowed(t.as_ref())).or_insert(0) += n;
         }
         len += path_total;
+        if doc_text.lexical_scope {
+            for t in tokens(&chunk.scope) {
+                *counts.entry(Cow::Owned(t)).or_insert(0) += 1;
+                len += 1;
+            }
+        }
         for (t, &tf) in &counts {
             let t = t.as_bytes();
             let buf = &mut out.shards[shard_of(t, shards)];
@@ -253,7 +271,7 @@ fn file_docs(
         serde_json::to_writer(&mut out.json, chunk)?;
         out.ends.push(out.json.len() as u64);
         if let Some(cache) = cache {
-            let text = render(chunk, &file.text[s..e]);
+            let text = render_with(chunk, &file.text[s..e], doc_text.embed_text);
             let hash = text_hash(&text);
             out.hashes.push(hash);
             if !cache.contains(&hash) {
@@ -308,7 +326,7 @@ pub struct BuildStats {
 }
 
 /// Settings of [`build`]. `Default`: [`threads()`](crate::threads), a 256 MB postings
-/// budget, the default [`FileRules`], no embeddings.
+/// budget, the default [`FileRules`], no scope terms, no embeddings.
 #[non_exhaustive]
 pub struct BuildOptions<'a> {
     /// Worker threads for chunking and accumulating postings.
@@ -316,6 +334,10 @@ pub struct BuildOptions<'a> {
     /// Bytes of postings held in memory before spilling a sorted run.
     pub mem_budget: usize,
     pub rules: FileRules,
+    /// Also index the words of each chunk's scope (`impl RetryPolicy › fn backoff`,
+    /// a Markdown heading chain) for lexical search, beside its path and source.
+    /// Off by default.
+    pub lexical_scope: bool,
     /// Embed the chunks too (dense search). `None`: lexical only. Opt-in: embedding
     /// calls the embedder's provider, which may bill for it.
     pub dense: Option<DenseBuild<'a>>,
@@ -326,6 +348,7 @@ impl Default for BuildOptions<'_> {
             threads: crate::threads(),
             mem_budget: 256 << 20,
             rules: FileRules::default(),
+            lexical_scope: false,
             dense: None,
         }
     }
@@ -341,6 +364,10 @@ impl<'a> BuildOptions<'a> {
     }
     pub fn with_rules(mut self, rules: FileRules) -> Self {
         self.rules = rules;
+        self
+    }
+    pub fn with_lexical_scope(mut self, lexical_scope: bool) -> Self {
+        self.lexical_scope = lexical_scope;
         self
     }
     pub fn with_dense(mut self, dense: DenseBuild<'a>) -> Self {
@@ -383,6 +410,7 @@ pub fn index_with(
             threads,
             mem_budget,
             rules: rules.clone(),
+            lexical_scope: false,
             dense: None,
         },
     )
@@ -401,6 +429,10 @@ pub fn build(
 ) -> Result<BuildStats, Error> {
     let (threads, mem_budget, rules) = (settings.threads, settings.mem_budget, &settings.rules);
     let dense = settings.dense.as_ref();
+    let doc_text = DocText {
+        lexical_scope: settings.lexical_scope,
+        embed_text: dense.map_or(EmbedText::default(), |d| d.embed_text),
+    };
     rules.validate()?;
     let root = root.canonicalize()?;
     if !root.is_dir() {
@@ -504,7 +536,7 @@ pub fn build(
             threads,
             par::window_bytes(threads),
             |i| weights.get(i).copied().unwrap_or(1),
-            |item| file_docs(item, options, shards, cache.as_ref()),
+            |item| file_docs(item, options, shards, cache.as_ref(), doc_text),
             |f| {
                 match f.skip {
                     Some(skip) => {
@@ -705,6 +737,7 @@ pub fn build(
             version: 1,
             embedder: descriptor.clone(),
             render_version: RENDER_VERSION,
+            embed_text: d.embed_text,
             quantization: d.quantization,
             docs: n,
             embedded,
@@ -716,6 +749,7 @@ pub fn build(
         dense_stats = Some(EmbedStats {
             embedder: descriptor,
             render_version: RENDER_VERSION,
+            embed_text: d.embed_text,
             docs: n,
             embedded_docs: embedded,
             texts: seen.len() as u64,
@@ -764,6 +798,7 @@ pub fn build(
         DenseConfig::new(d.embedder.descriptor())
             .with_quantization(d.quantization)
             .with_max_tokens_per_run(d.max_tokens)
+            .with_embed_text(d.embed_text)
             .save(&state_dir)?;
         cache.compact_if_sparse(&seen)?;
         if let Some(stats) = &mut dense_stats {

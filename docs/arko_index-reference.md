@@ -100,9 +100,9 @@ precedence.
 | `search::search(state_dir, query)` | Loads `index.json`; returns up to ten chunks, best first. |
 | `search::outline(chunks)` | Groups chunks by path for a human-readable outline. |
 | `index2::index[_with](root, state_dir, options, threads, mem_budget, [rules])` | Builds a new generation with postings memory bounded by `mem_budget` bytes, lexical only; returns `BuildStats { docs, terms, runs, report, dense }`. |
-| `index2::build(root, state_dir, options, &BuildOptions)` | The same with `BuildOptions { threads, mem_budget, rules, dense }` (`#[non_exhaustive]`; `Default`, `with_*`). With `dense: Some(DenseBuild)` the chunks are embedded too (below). |
-| `index2::search(state_dir, query)` | Reads only the query terms' postings of the current generation; same results as `search::search` on the same tree. |
-| `index2::dense_info(state_dir)` | The current generation's `DenseIndexInfo` (model, render version, quantization, chunks, chunks with vectors), or `None`. |
+| `index2::build(root, state_dir, options, &BuildOptions)` | The same with `BuildOptions { threads, mem_budget, rules, lexical_scope, dense }` (`#[non_exhaustive]`; `Default`, `with_*`). `lexical_scope` (default `false`) also indexes the words of each chunk's scope for lexical search. With `dense: Some(DenseBuild)` the chunks are embedded too (below). |
+| `index2::search(state_dir, query)` | Reads only the query terms' postings of the current generation; same results as `search::search` on the same tree (unless the index was built with `lexical_scope`). |
+| `index2::dense_info(state_dir)` | The current generation's `DenseIndexInfo` (model, render version, embedded text, quantization, chunks, chunks with vectors), or `None`. |
 
 Scoring: BM25 with k1 = 1.2 and b = 0.75 over lowercase words plus identifier parts
 (snake_case and camelCase components); ties by path, then start byte.
@@ -116,10 +116,11 @@ Scoring: BM25 with k1 = 1.2 and b = 0.75 over lowercase words plus identifier pa
 | `dense::EmbedLimits::new(max_items, max_request_tokens, max_input_tokens)` | Batching limits. A text over a limit is not embedded (`EmbedStats::too_long`). |
 | `dense::HashEmbedder::new(dimensions)` | Offline, deterministic feature hashing of the lexical terms (provider `hash`, model `hash-v1`); for tests and examples, not semantic. |
 | `dense::render(chunk, chunk_text)`, `RENDER_VERSION` | The embedded text, version 1: `path`, `\n`, the scope and `\n` when there is one, the source trimmed. |
+| `dense::render_with(chunk, chunk_text, EmbedText)`, `EmbedText` | The embedded text with the parts `EmbedText` names: `Source` (the trimmed source alone), `PathSource` (path line and source) or `PathScopeSource` (the default, `render`'s text). `as_str` and `FromStr` use `source`, `path-source`, `path-scope-source`. |
 | `dense::embed_query(embedder, query)` | The query's vector and billed tokens, for `SearchRequest::query_vector`. |
-| `dense::DenseConfig` | The per-index settings in `STATE_DIR/dense.json`: `version` (1), `embedder` (a `ModelDescriptor`), `render_version`, `quantization`, `max_tokens_per_run`; `new`, `with_*`, `load(state_dir)`, `read(path)`, `save(state_dir)`, `remove(state_dir)`. Saved by every build with embeddings. |
-| `dense::DenseBuild` | One build's embedding: `embedder`, `quantization` (`F32`), `max_tokens` (`None`), `progress` (called after each request with `EmbedProgress { texts, total, tokens, requests }`); `new`, `from_config`, `with_*`. |
-| `dense::EmbedStats` | `BuildStats::dense`: `embedder`, `render_version`, `docs`, `embedded_docs`, `texts` (distinct), `cached`, `new`, `requests`, `tokens` (billed), `max_tokens`, `cap_reached`, `not_embedded`, `not_embedded_tokens` (counted), `too_long`, `cache_records`. |
+| `dense::DenseConfig` | The per-index settings in `STATE_DIR/dense.json`: `version` (1), `embedder` (a `ModelDescriptor`), `render_version`, `quantization`, `max_tokens_per_run`, `embed_text` (`PathScopeSource` when absent); `new`, `with_*`, `load(state_dir)`, `read(path)`, `save(state_dir)`, `remove(state_dir)`. Saved by every build with embeddings. |
+| `dense::DenseBuild` | One build's embedding: `embedder`, `quantization` (`F32`), `max_tokens` (`None`), `embed_text` (`PathScopeSource`), `progress` (called after each request with `EmbedProgress { texts, total, tokens, requests }`); `new`, `from_config`, `with_*`. |
+| `dense::EmbedStats` | `BuildStats::dense`: `embedder`, `render_version`, `embed_text`, `docs`, `embedded_docs`, `texts` (distinct), `cached`, `new`, `requests`, `tokens` (billed), `max_tokens`, `cap_reached`, `not_embedded`, `not_embedded_tokens` (counted), `too_long`, `cache_records`. |
 | `vector::VectorStore` | `dimensions`, `len`, `is_empty`, `insert(id, vector, VectorMeta { path, language })` (replaces), `delete(id)`, `search(query, k, &Filter) -> Vec<VectorHit { id, score }>` (cosine; best first, then id ascending), `persist`, `open(dir)`. |
 | `vector::BruteForceStore::create(dir, dimensions, Quantization)` | The exact store; `Quantization::Int8` adds an 8-bit copy scanned first, with the best `max(4k, 40)` rescored exactly. |
 | `vector::Filter` | `path_prefix` (a string prefix of the relative path), `language` (the chunk's `language`); `with_path_prefix`, `with_language`, `matches`, `is_empty`. |
@@ -155,7 +156,7 @@ for the cache, the cap and the accounting.
 | `outline ROOT` | `path:start-end<TAB>kind<TAB>symbol_path` lines; a metadata region is `path:start-end<TAB>metadata<TAB>title`. |
 | `index ROOT STATE_DIR` | stderr `indexed N chunks` and the report summary. |
 | `search STATE_DIR QUERY...` | Up to ten chunk JSON lines (the words are joined with spaces). |
-| `index2 ROOT STATE_DIR` | stderr `indexed N chunks, T terms, R runs` and the report summary; with embeddings also a progress line per request and the token summary. Flags: `--embed MODEL` (`voyage-code-4`, `voyage:MODEL`, `hash`), `--dimensions N`, `--embed-config FILE`, `--quantize f32\|int8`, `--max-embed-tokens N\|none`, `--no-embed`; without them, the saved `dense.json` applies. |
+| `index2 ROOT STATE_DIR` | stderr `indexed N chunks, T terms, R runs` and the report summary; with embeddings also a progress line per request and the token summary. Flags: `--lexical-scope` (`BuildOptions::lexical_scope`, this build only), `--embed MODEL` (`voyage-code-4`, `voyage:MODEL`, `hash`), `--dimensions N`, `--embed-text source\|path-source\|path-scope-source`, `--embed-config FILE`, `--quantize f32\|int8`, `--max-embed-tokens N\|none`, `--no-embed`; without them, the saved `dense.json` applies. |
 | `search2 STATE_DIR QUERY...` | Up to `--limit` (10) JSON lines: the chunk's fields plus `header`, `score`, `lexical_rank`, `dense_rank`; `--text` prints `rank. header  [mode score; ranks]`. `--mode lexical\|dense\|hybrid` (default hybrid when the index has embeddings, else lexical), `--candidates N`, `--fusion rrf\|linear`, `--rrf-k K`, `--lexical-weight W`, `--dense-weight W`, `--path-prefix P`, `--language L`. Dense and hybrid print the query's tokens on stderr. |
 | `watch ROOT STATE_DIR` | Delta JSON lines, each acknowledged after it is flushed; stops on SIGINT or SIGTERM. |
 | `watch2 ROOT STATE_DIR` | Linux. As `watch`; stderr also gets a JSON line with file count and timings at start and per delta. |
@@ -198,6 +199,7 @@ the grammar versions: an upgrade changes chunk boundaries and IDs. See
 |---|---|
 | `Options::max_bytes` | 4,096 source bytes; the rendered cap is 24,000 bytes |
 | `Options::front_matter_description` | `false`: a Markdown scope's root is the front matter's title alone (or the first `# H1`) |
+| `BuildOptions::lexical_scope` (CLI `index2 --lexical-scope`) | `false`: lexical search indexes each chunk's path and source, not its scope |
 | `FileRules::respect_ignore` | `false`: ignore files are not read; gitignored files are indexed |
 | `FileRules::exclude`, `include` | Empty |
 | Built-in exclusions | `.git` directories and files, `CACHEDIR.TAG` directories (not the root), state directories |
@@ -209,6 +211,7 @@ the grammar versions: an upgrade changes chunk boundaries and IDs. See
 | Embeddings (`BuildOptions::dense`) | `None`: indexes are lexical; dense is opt-in per index |
 | Embedding model (CLI `--embed`) | None until chosen; then the saved `dense.json`. The CLI's Voyage models default to the model's dimensions (voyage-code-4: 1,024) with input types on |
 | Token cap (`DenseBuild::max_tokens`, `DenseConfig::max_tokens_per_run`) | `None`: no cap |
+| Embedded text (`DenseBuild::embed_text`, `DenseConfig::embed_text`, CLI `--embed-text`) | `PathScopeSource`: the path, the scope, then the source |
 | Vector storage (`Quantization`) | `F32`; `Int8` rescores `max(4k, 40)` candidates |
 | Search mode (`SearchRequest::mode`) | `Lexical`; the CLI's `search2` uses hybrid when the index has embeddings |
 | Hybrid candidates (`SearchRequest::candidates`) | 50 per side |

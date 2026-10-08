@@ -21,9 +21,9 @@ use std::path::Path;
 /// rendered text, so a new version re-embeds every chunk.
 pub const RENDER_VERSION: u32 = 1;
 
-/// The text embedded for a chunk (render version 1): the path, the scope on its own
-/// line when there is one, then the chunk's source with leading and trailing
-/// whitespace removed:
+/// The text embedded for a chunk (render version 1) with the default
+/// [`EmbedText::PathScopeSource`]: the path, the scope on its own line when there is
+/// one, then the chunk's source with leading and trailing whitespace removed:
 ///
 /// ```text
 /// src/net/retry.rs
@@ -35,16 +35,66 @@ pub const RENDER_VERSION: u32 = 1;
 /// leaves this text, and so its cached embedding, unchanged. `chunk_text` is the
 /// chunk's source (`file[start_byte..end_byte]`).
 pub fn render(chunk: &Chunk, chunk_text: &str) -> String {
+    render_with(chunk, chunk_text, EmbedText::default())
+}
+
+/// [`render`] with the parts `embed_text` chooses: [`EmbedText::Source`] is the
+/// trimmed source alone, [`EmbedText::PathSource`] the path line and the source.
+pub fn render_with(chunk: &Chunk, chunk_text: &str, embed_text: EmbedText) -> String {
     let body = chunk_text.trim();
     let mut out = String::with_capacity(chunk.path.len() + chunk.scope.len() + body.len() + 2);
-    out.push_str(&chunk.path);
-    out.push('\n');
-    if !chunk.scope.is_empty() {
+    if embed_text != EmbedText::Source {
+        out.push_str(&chunk.path);
+        out.push('\n');
+    }
+    if embed_text == EmbedText::PathScopeSource && !chunk.scope.is_empty() {
         out.push_str(&chunk.scope);
         out.push('\n');
     }
     out.push_str(body);
     out
+}
+
+/// What the embedded text of a chunk holds besides its source ([`render_with`]).
+/// Saved with the index ([`DenseConfig::embed_text`]). Embeddings are cached by the
+/// hash of the rendered text, so each choice has its own cached vectors.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EmbedText {
+    /// The chunk's source only.
+    Source,
+    /// The path on its own line, then the source.
+    PathSource,
+    /// The path, the scope on its own line when there is one, then the source.
+    #[default]
+    PathScopeSource,
+}
+impl EmbedText {
+    /// The name the CLI and `dense.json` use: `source`, `path-source` or
+    /// `path-scope-source`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EmbedText::Source => "source",
+            EmbedText::PathSource => "path-source",
+            EmbedText::PathScopeSource => "path-scope-source",
+        }
+    }
+}
+impl std::str::FromStr for EmbedText {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self, Error> {
+        Ok(match s {
+            "source" => EmbedText::Source,
+            "path-source" => EmbedText::PathSource,
+            "path-scope-source" => EmbedText::PathScopeSource,
+            _ => {
+                return Err(format!(
+                    "embedded text {s:?}: use source, path-source or path-scope-source"
+                )
+                .into());
+            }
+        })
+    }
 }
 
 /// The cache key of a rendered text: its SHA-256.
@@ -255,6 +305,10 @@ pub struct DenseConfig {
     /// The token cap of each build (`None`: no cap).
     #[serde(default)]
     pub max_tokens_per_run: Option<u64>,
+    /// What each chunk's embedded text holds besides its source (default: the path
+    /// and the scope).
+    #[serde(default)]
+    pub embed_text: EmbedText,
 }
 fn one() -> u32 {
     1
@@ -273,6 +327,7 @@ impl DenseConfig {
             render_version: RENDER_VERSION,
             quantization: Quantization::default(),
             max_tokens_per_run: None,
+            embed_text: EmbedText::default(),
         }
     }
     pub fn with_quantization(mut self, quantization: Quantization) -> Self {
@@ -281,6 +336,10 @@ impl DenseConfig {
     }
     pub fn with_max_tokens_per_run(mut self, cap: Option<u64>) -> Self {
         self.max_tokens_per_run = cap;
+        self
+    }
+    pub fn with_embed_text(mut self, embed_text: EmbedText) -> Self {
+        self.embed_text = embed_text;
         self
     }
     /// The saved config, or `None` when the index has none (lexical only).
@@ -334,6 +393,8 @@ pub struct DenseBuild<'a> {
     /// Stop embedding before a request would bring this run's tokens over the cap.
     /// `None`: no cap.
     pub max_tokens: Option<u64>,
+    /// What each chunk's embedded text holds besides its source.
+    pub embed_text: EmbedText,
     /// Called after each embedding request.
     pub progress: Option<&'a dyn Fn(&EmbedProgress)>,
 }
@@ -343,15 +404,18 @@ impl<'a> DenseBuild<'a> {
             embedder,
             quantization: Quantization::default(),
             max_tokens: None,
+            embed_text: EmbedText::default(),
             progress: None,
         }
     }
-    /// The settings of a saved config (quantization and cap) for this embedder.
+    /// The settings of a saved config (quantization, cap and embedded text) for this
+    /// embedder.
     pub fn from_config(embedder: &'a dyn Embedder, config: &DenseConfig) -> Self {
         Self {
             embedder,
             quantization: config.quantization,
             max_tokens: config.max_tokens_per_run,
+            embed_text: config.embed_text,
             progress: None,
         }
     }
@@ -361,6 +425,10 @@ impl<'a> DenseBuild<'a> {
     }
     pub fn with_max_tokens(mut self, cap: Option<u64>) -> Self {
         self.max_tokens = cap;
+        self
+    }
+    pub fn with_embed_text(mut self, embed_text: EmbedText) -> Self {
+        self.embed_text = embed_text;
         self
     }
     pub fn with_progress(mut self, progress: &'a dyn Fn(&EmbedProgress)) -> Self {
@@ -388,6 +456,7 @@ pub struct EmbedProgress {
 pub struct EmbedStats {
     pub embedder: ModelDescriptor,
     pub render_version: u32,
+    pub embed_text: EmbedText,
     /// Chunks in the index.
     pub docs: u64,
     /// Chunks with a vector (the others are found by lexical search only).
@@ -422,6 +491,8 @@ pub struct DenseIndexInfo {
     pub version: u32,
     pub embedder: ModelDescriptor,
     pub render_version: u32,
+    #[serde(default)]
+    pub embed_text: EmbedText,
     pub quantization: Quantization,
     /// Chunks in the generation.
     pub docs: u64,

@@ -50,7 +50,8 @@ Defaults of arko_index (see [Defaults (arko_index)](reference-map.md#defaults-ar
   calls and reads no credentials; the examples embed with Voyage through arko_ai
   (`VOYAGE_API_KEY`). Once chosen, the model is saved with the index
   (`STATE_DIR/dense.json`) and later builds follow it; embeddings are cached by model
-  and text, so a rebuild embeds only changed chunks.
+  and text, so a rebuild embeds only changed chunks. The embedded text is the path, the
+  scope and the source (`EmbedText::PathScopeSource`, CLI `--embed-text`).
 - No token cap by default (`DenseBuild::max_tokens`, `--max-embed-tokens`): set one
   for unattended builds. At the cap a build stops embedding, still publishes, and
   reports what is left. Builds and searches report the tokens billed.
@@ -59,7 +60,9 @@ Defaults of arko_index (see [Defaults (arko_index)](reference-map.md#defaults-ar
   reciprocal rank fusion (k = 60, equal weights) over 50 candidates per side.
   Vectors are stored as f32 (`Quantization::Int8` opt-in).
 - Chunks carry a context header (`scope`: enclosing definitions or Markdown headings),
-  chunk JSON format 2; boundaries and IDs are unchanged.
+  chunk JSON format 2; boundaries and IDs are unchanged. Lexical search indexes a
+  chunk's path and source, and its scope only with `BuildOptions::lexical_scope`
+  (`index2 --lexical-scope`).
 - 50 languages are parsed and chunked along their structure; anything else is split by
   the bounded fallback. A Markdown file's front matter is file metadata (chunk format 3
   records it), and its title, without the description, roots every chunk's scope

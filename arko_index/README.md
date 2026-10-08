@@ -399,7 +399,8 @@ backoff.
 **What is embedded** (render version 1, `dense::render`): the path, the scope on its
 own line when there is one, then the chunk's source without leading and trailing
 whitespace. Line numbers are left out, so an edit above a chunk does not change its
-text.
+text. `--embed-text source` embeds the source alone and `path-source` the path and the
+source (`dense::EmbedText`, saved in `dense.json`).
 
 **The model is chosen per index and saved.** A build with embeddings writes
 `STATE_DIR/dense.json` (`dense::DenseConfig`): provider, model, dimensions,
@@ -458,10 +459,12 @@ apply to both sides.
 |---|---|
 | `--embed MODEL` | Embed with `MODEL`: a Voyage model (`voyage-code-4`), `voyage:MODEL`, or `hash` (offline, for trying things out). Saved in `dense.json`. Needs `VOYAGE_API_KEY` for Voyage. |
 | `--dimensions N` | Vector dimensions (voyage-code-4: 256, 512, 1024 by default, 2048). |
+| `--embed-text source\|path-source\|path-scope-source` | What each chunk's embedded text holds besides its source (default `path-scope-source`). Saved in `dense.json`. |
 | `--embed-config FILE` | Take the settings from a file in the format of `dense.json`. |
 | `--quantize f32\|int8` | Vector storage (default `f32`). |
 | `--max-embed-tokens N\|none` | The per-build token cap (default none). |
 | `--no-embed` | Build lexically and remove `dense.json` (the cache stays). |
+| `--lexical-scope` | Also index the words of each chunk's scope for lexical search (this build only). |
 
 Without these flags, `index2` follows the saved `dense.json` if there is one. It
 prints progress per request and a summary on stderr; for example, with the offline
