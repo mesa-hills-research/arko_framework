@@ -814,7 +814,11 @@ async fn run_command(args: RunArgs) -> BenchResult<()> {
         )
         .into());
     }
-    if arms.contains(&Arm::C) {
+    let task_repos: std::collections::BTreeSet<String> =
+        task_set.iter().map(|task| task.repo.clone()).collect();
+    let variants = variants::for_arms(&layout, &arms, &task_repos)?;
+    // Arm C, and variants based on it, search with arm C's dense index.
+    if arms.contains(&Arm::C) || variants.values().any(|variant| variant.spec.dense_tool()) {
         let missing: Vec<&str> = task_set
             .iter()
             .filter(|task| {
@@ -834,9 +838,6 @@ async fn run_command(args: RunArgs) -> BenchResult<()> {
             .into());
         }
     }
-    let task_repos: std::collections::BTreeSet<String> =
-        task_set.iter().map(|task| task.repo.clone()).collect();
-    let variants = variants::for_arms(&layout, &arms, &task_repos)?;
     let _lock =
         ledger::DirLock::acquire(&layout.run_dir(&args.name), &format!("run {}", args.name))?;
     if let Some(pid) = ledger::DirLock::holder(&layout.out.join("prepare")) {

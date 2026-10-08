@@ -1,10 +1,11 @@
-//! Variant arms: arms with arm B's tools whose index was built, or whose search
-//! results render, with other arko_index options, for A/B tests of those options on
-//! the same tasks and solvers.
+//! Variant arms: arms with arm B's tools whose index was built, whose search
+//! results render, or whose tool section reads, another way, for A/B tests of
+//! arko_index options and prompts on the same tasks and solvers.
 //!
 //! A variants file defines them; `prepare-variants` builds one index per variant
-//! and repository (`indexes/<repo>@<variant>/`) and records them in
-//! `variants.json`; `run --arms B,NAME,...` runs them. In a variant arm,
+//! and repository (`indexes/<repo>@<variant>/`), or reuses another arm's index
+//! (`base`), and records them in `variants.json`; `run --arms B,NAME,...` runs
+//! them. In a variant arm,
 //! `arko_index` is the CLI itself, or a script that adds the variant's
 //! `search2` flags. When the index embeds, `search2` goes through a service in
 //! the benchmark process that runs the CLI with the embedding key, so the key
@@ -34,6 +35,12 @@ pub struct VariantSpec {
     /// What the variant tests, for the report.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    /// Another arm whose index (and tools) this one uses instead of building
+    /// its own: `B`, `C` (B's index and arm C's `arko_index_dense`), or a variant
+    /// with an index of its own. `index` stays empty then. For example
+    /// `{"name": "B-guided", "base": "B", "prompt": "guided"}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
     /// `arko_index index2` flags for the variant's index, such as
     /// `["--lexical-scope"]` or `["--embed", "voyage-code-4", "--embed-text",
     /// "source"]`. Empty: the default index (arm B's, built by this CLI).
@@ -43,9 +50,9 @@ pub struct VariantSpec {
     /// `["--text"]` or `["--mode", "lexical"]`.
     #[serde(default)]
     pub search: Vec<String>,
-    /// The solver's tool paragraph: `index` (arm B's) or `hybrid` (arm B's,
-    /// saying that search2 also ranks by meaning). Default: `hybrid` when the
-    /// index embeds, else `index`.
+    /// The solver's tool section: `standard` (the default: arm B's, its hybrid
+    /// version when the index embeds, arm C's with `base` C) or `guided` (which
+    /// tool to use when, with worked examples: `prompts::TOOLS_GUIDED`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     /// A tool paragraph of your own instead (`{rg}` becomes the note on
@@ -63,20 +70,36 @@ impl VariantSpec {
             .any(|flag| ["--embed", "--embed-config"].contains(&flag_name(flag)))
     }
 
-    /// The solver's tool paragraph (before `{rg}` is replaced).
-    pub fn tools_paragraph(&self) -> BenchResult<String> {
+    /// Whether the arm has arm C's `arko_index_dense` (`base` C).
+    pub fn dense_tool(&self) -> bool {
+        self.base.as_deref() == Some("C")
+    }
+
+    /// The prompt's name: `standard`, `guided`, or `own text` (`tools_text`).
+    pub fn prompt_name(&self) -> &str {
+        if self.tools_text.is_some() {
+            "own text"
+        } else {
+            self.prompt.as_deref().unwrap_or("standard")
+        }
+    }
+
+    /// The solver's tool section (before `{rg}` is replaced), for an index that
+    /// embeds (`hybrid`) or not.
+    pub fn tools_paragraph(&self, hybrid: bool) -> BenchResult<String> {
+        use crate::prompts;
         if let Some(text) = &self.tools_text {
             return Ok(text.clone());
         }
-        let prompt =
-            self.prompt
-                .as_deref()
-                .unwrap_or(if self.embeds() { "hybrid" } else { "index" });
-        match prompt {
-            "index" => Ok(crate::prompts::TOOLS_INDEX.to_string()),
-            "hybrid" => Ok(crate::prompts::TOOLS_INDEX_HYBRID.to_string()),
-            other => Err(format!(
-                "variant {}: prompt {other:?}: index or hybrid (or give tools_text)",
+        match (self.prompt_name(), hybrid, self.dense_tool()) {
+            ("standard", _, true) => {
+                Ok(format!("{}{}", prompts::TOOLS_INDEX, prompts::TOOLS_DENSE))
+            }
+            ("standard", true, false) => Ok(prompts::TOOLS_INDEX_HYBRID.to_string()),
+            ("standard", false, false) => Ok(prompts::TOOLS_INDEX.to_string()),
+            ("guided", hybrid, dense) => Ok(prompts::guided_tools(hybrid, dense)),
+            (other, ..) => Err(format!(
+                "variant {}: prompt {other:?}: standard or guided (or give tools_text)",
                 self.name
             )
             .into()),
@@ -106,7 +129,22 @@ impl VariantSpec {
                 return Err(format!("variant {}: search flags can't hold --", self.name).into());
             }
         }
-        self.tools_paragraph()?;
+        if let Some(base) = &self.base {
+            if !self.index.is_empty() {
+                return Err(format!(
+                    "variant {}: a variant with a base uses its base's index: leave out `index`",
+                    self.name
+                )
+                .into());
+            }
+            let builtin = matches!(Arm::parse(base)?, Arm::A | Arm::B | Arm::C);
+            if base == &self.name || base == "A" || (builtin && base != "B" && base != "C") {
+                return Err(
+                    format!("variant {}: base {base:?}: B, C or a variant", self.name).into(),
+                );
+            }
+        }
+        self.tools_paragraph(self.embeds())?;
         Ok(())
     }
 
@@ -151,6 +189,18 @@ pub fn parse_specs(text: &str) -> BenchResult<Vec<VariantSpec>> {
             return Err(format!("variant {} is defined twice", spec.name).into());
         }
     }
+    for spec in &specs {
+        if let Some(base) = &spec.base
+            && let Some(target) = specs.iter().find(|other| &other.name == base)
+            && target.base.is_some()
+        {
+            return Err(format!(
+                "variant {}: base {base} has a base itself; name the variant with the index",
+                spec.name
+            )
+            .into());
+        }
+    }
     Ok(specs)
 }
 
@@ -185,6 +235,11 @@ impl PreparedVariant {
     /// Whether its indexes have embeddings (any of them).
     pub fn dense(&self) -> bool {
         self.repos.values().any(|index| index.dense)
+    }
+
+    /// The solver's tool section (before `{rg}` is replaced).
+    pub fn tools_paragraph(&self) -> BenchResult<String> {
+        self.spec.tools_paragraph(self.dense())
     }
 }
 
@@ -236,7 +291,10 @@ pub fn prepare(options: PrepareVariants<'_>) -> BenchResult<BTreeMap<String, Pre
     }
     let cli_sha = crate::repos::sha256_file(&options.index_cli)?;
     let mut prepared = load_prepared(layout)?;
-    for spec in &options.specs {
+    // Variants with an index of their own first, then those that reuse one.
+    let (own, based): (Vec<&VariantSpec>, Vec<&VariantSpec>) =
+        options.specs.iter().partition(|spec| spec.base.is_none());
+    for spec in own {
         let flags = spec.build_flags(options.mock_embeddings);
         let mut variant = match prepared.get(&spec.name) {
             Some(existing) if existing.spec == *spec => existing.clone(),
@@ -272,6 +330,56 @@ pub fn prepare(options: PrepareVariants<'_>) -> BenchResult<BTreeMap<String, Pre
             prepared.insert(spec.name.clone(), variant.clone());
             save_prepared(layout, &prepared)?;
         }
+        prepared.insert(spec.name.clone(), variant);
+        save_prepared(layout, &prepared)?;
+    }
+    for spec in based {
+        let base = spec.base.as_deref().unwrap_or_default();
+        let mut repos = BTreeMap::new();
+        for (id, repo) in options.repos {
+            let index = match base {
+                "B" | "C" => {
+                    if base == "C" && repo.dense.is_none() {
+                        return Err(format!(
+                            "variant {}: arm C's dense index of {id} is missing; run `prepare --dense`",
+                            spec.name
+                        )
+                        .into());
+                    }
+                    VariantIndex {
+                        dir: repo.index.clone(),
+                        commit: repo.commit.clone(),
+                        flags: Vec::new(),
+                        cli_sha256: repo.index_cli_sha256.clone(),
+                        dense: false,
+                        build_ms: repo.index_build_ms,
+                        summary: format!("arm {base}'s index"),
+                    }
+                }
+                variant => prepared
+                    .get(variant)
+                    .and_then(|prepared| prepared.repos.get(id))
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!(
+                            "variant {}: base {variant} has no index of {id}; prepare {variant} first",
+                            spec.name
+                        )
+                    })?,
+            };
+            repos.insert(id.clone(), index);
+        }
+        eprintln!("{}: uses {base}'s indexes", spec.name);
+        let mut variant = prepared
+            .get(&spec.name)
+            .filter(|existing| existing.spec == *spec)
+            .cloned()
+            .unwrap_or(PreparedVariant {
+                spec: spec.clone(),
+                mock_embeddings: options.mock_embeddings,
+                repos: BTreeMap::new(),
+            });
+        variant.repos.extend(repos);
         prepared.insert(spec.name.clone(), variant);
         save_prepared(layout, &prepared)?;
     }
@@ -602,6 +710,7 @@ mod tests {
         VariantSpec {
             name: name.into(),
             description: String::new(),
+            base: None,
             index: index.iter().map(|flag| flag.to_string()).collect(),
             search: search.iter().map(|flag| flag.to_string()).collect(),
             prompt: None,
@@ -614,7 +723,7 @@ mod tests {
         let lexical = spec("scope", &["--lexical-scope"], &[]);
         assert!(!lexical.embeds());
         assert_eq!(
-            lexical.tools_paragraph().unwrap(),
+            lexical.tools_paragraph(false).unwrap(),
             crate::prompts::TOOLS_INDEX
         );
         assert_eq!(lexical.build_flags(true), ["--lexical-scope"]);
@@ -625,7 +734,7 @@ mod tests {
         );
         assert!(dense.embeds());
         assert_eq!(
-            dense.tools_paragraph().unwrap(),
+            dense.tools_paragraph(true).unwrap(),
             crate::prompts::TOOLS_INDEX_HYBRID
         );
         assert_eq!(
@@ -642,6 +751,53 @@ mod tests {
         let mut bad_prompt = spec("p", &[], &[]);
         bad_prompt.prompt = Some("other".into());
         assert!(bad_prompt.validate().is_err());
+        // Prompt variants over another arm's index.
+        let based = |base: &str, prompt: &str| VariantSpec {
+            base: Some(base.into()),
+            prompt: Some(prompt.into()),
+            ..spec("g", &[], &[])
+        };
+        assert!(based("B", "guided").validate().is_ok());
+        assert!(based("hyb-scope", "guided").validate().is_ok());
+        assert!(based("A", "guided").validate().is_err());
+        assert!(based("b", "guided").validate().is_err());
+        assert!(based("g", "guided").validate().is_err());
+        let with_index = VariantSpec {
+            index: vec!["--lexical-scope".into()],
+            ..based("B", "guided")
+        };
+        assert!(with_index.validate().is_err());
+        let guided_b = based("B", "guided").tools_paragraph(false).unwrap();
+        assert_eq!(guided_b, crate::prompts::guided_tools(false, false));
+        assert!(guided_b.contains("arko_index search2") && !guided_b.contains("arko_index_dense"));
+        assert!(guided_b.contains("\"lexical_rank\":1") && guided_b.contains("{rg}"));
+        for placeholder in ["{ranking}", "{ranks}", "{dense_use}", "{dense_example}"] {
+            assert!(!guided_b.contains(placeholder), "{placeholder}");
+        }
+        let guided_c = based("C", "guided").tools_paragraph(false).unwrap();
+        assert!(guided_c.contains("$ arko_index_dense '"), "{guided_c}");
+        let standard_c = based("C", "standard").tools_paragraph(false).unwrap();
+        assert_eq!(
+            standard_c,
+            format!(
+                "{}{}",
+                crate::prompts::TOOLS_INDEX,
+                crate::prompts::TOOLS_DENSE
+            )
+        );
+        assert!(
+            based("hyb-scope", "guided")
+                .tools_paragraph(true)
+                .unwrap()
+                .contains("dense_rank")
+        );
+        // A base can't have a base itself.
+        assert!(
+            parse_specs(
+                r#"[{"name": "x", "base": "B"}, {"name": "y", "base": "x", "prompt": "guided"}]"#
+            )
+            .is_err()
+        );
         let dir = crate::test_dir("variants-file");
         let path = dir.join("variants.json");
         std::fs::write(
@@ -668,10 +824,21 @@ mod tests {
                 "hyb-src",
                 "hyb-path",
                 "hyb-scope",
-                "hyb-scope-desc"
+                "hyb-scope-desc",
+                "B-guided",
+                "C-guided",
+                "lex-guided",
+                "hyb-scope-guided"
             ]
         );
         assert_eq!(specs.iter().filter(|spec| spec.embeds()).count(), 4);
+        assert_eq!(
+            specs
+                .iter()
+                .filter(|spec| spec.prompt_name() == "guided")
+                .count(),
+            4
+        );
     }
 
     #[test]

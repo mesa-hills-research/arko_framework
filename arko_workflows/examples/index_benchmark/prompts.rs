@@ -74,6 +74,64 @@ pub const TOOLS_DENSE: &str = r#"
   (embeddings) and prints the 10 best in the same JSON format, so it finds code that does what
   you describe even when it uses other words."#;
 
+/// The guided tool section (a variant's `"prompt": "guided"`): which tool to use when,
+/// with worked examples. `{rg}` is the note on ripgrep, filled like the other
+/// sections; [`guided_tools`] fills the rest: `{ranking}` and `{ranks}` say how
+/// `search2` ranks (lexically, or hybrid when the index embeds), `{dense_use}` and
+/// `{dense_example}` add arm C's `arko_index_dense`.
+pub const TOOLS_GUIDED: &str = r#"The usual command-line tools are installed{rg}, and also
+`arko_index`, a code search engine with a prebuilt index of this checkout. Which tool to use:
+- `arko_index search2 "$ARKO_INDEX_STATE" '...'` first for "where is X handled", "how does Y
+  work" and "what would changing Z affect": it ranks code chunks (functions, methods, types)
+  {ranking}, so plain words give candidate locations fast.
+- `rg -n` (or `grep -rn`) for exact identifiers and for complete lists of call sites.
+- `arko_index outline PATH` for the table of contents of a file or directory.{dense_use}
+For example:
+$ arko_index search2 "$ARKO_INDEX_STATE" 'delay before retrying a failed request'
+{"id":"…","path":"src/net/retry.rs","start_byte":1204,"end_byte":1873,"start_line":40,"end_line":58,"language":"rust","symbol_path":"RetryPolicy::backoff","kind":"function_item","token_estimate":190,"scope":"impl RetryPolicy › fn backoff","header":"src/net/retry.rs:40-58 · impl RetryPolicy › fn backoff",{ranks}}
+(up to 10 such lines, best first: locations, not code), then read the chunk:
+$ sed -n 40,58p src/net/retry.rs
+$ arko_index outline src/net
+retry.rs:12-38	struct_item	RetryPolicy
+retry.rs:40-58	function_item	RetryPolicy::backoff{dense_example}"#;
+
+/// `{ranking}` of [`TOOLS_GUIDED`] for a lexical index.
+pub const GUIDED_RANKING_LEXICAL: &str = "by BM25 over words and snake_case/camelCase parts";
+/// `{ranking}` of [`TOOLS_GUIDED`] when the index embeds (hybrid search).
+pub const GUIDED_RANKING_HYBRID: &str = "by words (BM25) and by meaning (embeddings)";
+
+/// `{dense_use}` of [`TOOLS_GUIDED`] in arm C (dense search).
+pub const GUIDED_DENSE_USE: &str = r#"
+- `arko_index_dense 'what the code does'` ranks the same chunks by meaning (embeddings) only:
+  for code you can describe but not name."#;
+/// `{dense_example}` of [`TOOLS_GUIDED`] in arm C.
+pub const GUIDED_DENSE_EXAMPLE: &str = r#"
+$ arko_index_dense 'wait longer after each failed attempt'
+{"end_line":58,"kind":"function_item","language":"rust","path":"src/net/retry.rs","score":0.612,"start_line":40,"symbol_path":"RetryPolicy::backoff"}"#;
+
+/// The guided tool section, `{rg}` still to fill: hybrid when the index embeds, with
+/// `arko_index_dense` when the arm has it.
+pub fn guided_tools(hybrid: bool, dense_tool: bool) -> String {
+    let (ranking, ranks) = if hybrid {
+        (
+            GUIDED_RANKING_HYBRID,
+            r#""score":0.0325,"lexical_rank":2,"dense_rank":1"#,
+        )
+    } else {
+        (GUIDED_RANKING_LEXICAL, r#""score":12.31,"lexical_rank":1"#)
+    };
+    let (dense_use, dense_example) = if dense_tool {
+        (GUIDED_DENSE_USE, GUIDED_DENSE_EXAMPLE)
+    } else {
+        ("", "")
+    };
+    TOOLS_GUIDED
+        .replace("{ranking}", ranking)
+        .replace("{ranks}", ranks)
+        .replace("{dense_use}", dense_use)
+        .replace("{dense_example}", dense_example)
+}
+
 /// The answer guidance for each kind of question.
 pub fn kind_guidance(kind: &str) -> &'static str {
     match kind {

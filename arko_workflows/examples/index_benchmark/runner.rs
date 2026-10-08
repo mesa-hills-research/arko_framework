@@ -1036,7 +1036,12 @@ pub async fn run(inputs: RunInputs) -> BenchResult<String> {
         &settings.model,
         settings.shell.timeout.as_secs() + 60,
     )?;
-    let dense_service = if settings.arms.contains(&Arm::C) && !settings.grade_only {
+    let dense_tool = settings.arms.contains(&Arm::C)
+        || settings
+            .variants
+            .values()
+            .any(|variant| variant.spec.dense_tool());
+    let dense_service = if dense_tool && !settings.grade_only {
         Some(crate::dense::DenseService::start(&run_dir, &prepared, settings.mock).await?)
     } else {
         None
@@ -1319,7 +1324,6 @@ pub fn solver_instructions(
         Arm::Variant(name) => variants
             .get(name)
             .ok_or_else(|| format!("arm {name} is not a prepared variant"))?
-            .spec
             .tools_paragraph()?
             .replace("{rg}", rg),
     };
@@ -1392,8 +1396,10 @@ pub fn arm_environment(
     services: ArmServices<'_>,
 ) -> ShellEnvironment {
     let mut vars = vec![("TMPDIR".to_string(), scratch.as_os_str().to_owned())];
+    let mut dense_tool = arm == Arm::C;
     if let Arm::Variant(name) = arm {
         let variant = services.variants.and_then(|variants| variants.get(name));
+        dense_tool = variant.is_some_and(|variant| variant.spec.dense_tool());
         if let Some(index) = variant.and_then(|variant| variant.repos.get(&repo.spec.id)) {
             vars.push((
                 "ARKO_INDEX_STATE".to_string(),
@@ -1414,7 +1420,7 @@ pub fn arm_environment(
             repo.index.as_os_str().to_owned(),
         ));
     }
-    if arm == Arm::C {
+    if dense_tool {
         if let Some(socket) = services.dense_socket {
             vars.push((
                 crate::dense::SOCKET_VARIABLE.to_string(),
@@ -1926,10 +1932,15 @@ mod tests {
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // Two variants: one with the CLI as it is, one that adds search flags.
+        // Variants: one with the CLI as it is, one that adds search flags, and
+        // one with arm C's tools (base C).
         let variant = |name: &str, search: &[&str]| crate::variants::PreparedVariant {
-            spec: serde_json::from_value(serde_json::json!({ "name": name, "search": search }))
-                .unwrap(),
+            spec: serde_json::from_value(serde_json::json!({
+                "name": name,
+                "search": search,
+                "base": (name == "cbase").then_some("C"),
+            }))
+            .unwrap(),
             mock_embeddings: false,
             repos: BTreeMap::from([(
                 "demo".to_string(),
@@ -1947,10 +1958,12 @@ mod tests {
         let variants = BTreeMap::from([
             ("plain".to_string(), variant("plain", &[])),
             ("text".to_string(), variant("text", &["--text"])),
+            ("cbase".to_string(), variant("cbase", &[])),
         ]);
         let (plain, text) = (Arm::parse("plain").unwrap(), Arm::parse("text").unwrap());
+        let cbase = Arm::parse("cbase").unwrap();
         let mut arms = Arm::ALL.to_vec();
-        arms.extend([plain, text]);
+        arms.extend([plain, text, cbase]);
         crate::repos::setup_arm_bins(&layout, &arms, &cli, &variants).unwrap();
         let repo = PreparedRepo {
             spec: crate::repos::RepoSpec {
@@ -2028,6 +2041,16 @@ mod tests {
         assert!(flags.contains("search2 '--text' \"$@\""), "{flags}");
         let t_dense = run(&layout, &repo, &dir, text, "arko_index_dense query").await;
         assert!(t_dense.starts_with("exit code: 127"), "{t_dense}");
+        let c_base = run(
+            &layout,
+            &repo,
+            &dir,
+            cbase,
+            "command -v arko_index_dense; echo \"repo=$ARKO_DENSE_REPO\"",
+        )
+        .await;
+        assert!(c_base.starts_with("exit code: 0"), "{c_base}");
+        assert!(c_base.contains("repo=demo"), "{c_base}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

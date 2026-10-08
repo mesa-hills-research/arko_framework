@@ -33,5 +33,29 @@
     "name": "hyb-scope-desc",
     "description": "(c) as hyb-scope, with Markdown scopes rooted at title and front-matter description",
     "index": ["--embed", "voyage-code-4", "--embed-text", "path-scope-source", "--front-matter-description"]
+  },
+  {
+    "name": "B-guided",
+    "description": "arm B with the guided tool section: when to use which tool, worked examples",
+    "base": "B",
+    "prompt": "guided"
+  },
+  {
+    "name": "C-guided",
+    "description": "arm C with the guided tool section, arko_index_dense included",
+    "base": "C",
+    "prompt": "guided"
+  },
+  {
+    "name": "lex-guided",
+    "description": "lex with the guided tool section",
+    "base": "lex",
+    "prompt": "guided"
+  },
+  {
+    "name": "hyb-scope-guided",
+    "description": "hyb-scope with the guided tool section",
+    "base": "hyb-scope",
+    "prompt": "guided"
   }
 ]

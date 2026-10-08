@@ -511,10 +511,21 @@ pub fn setup_arm_bins(
     for &arm in arms {
         let dir = layout.bin_dir(arm);
         std::fs::create_dir_all(&dir)?;
+        let variant = match arm {
+            crate::Arm::Variant(name) => Some(
+                variants
+                    .get(name)
+                    .ok_or_else(|| format!("arm {name} is not a prepared variant"))?,
+            ),
+            _ => None,
+        };
+        // Arm C, and variants based on it, have arm C's dense search.
+        let dense_tool =
+            arm == crate::Arm::C || variant.is_some_and(|variant| variant.spec.dense_tool());
         let stubs: &[&str] = match arm {
             crate::Arm::A => &INDEX_PROGRAMS,
-            crate::Arm::B | crate::Arm::Variant(_) => &INDEX_PROGRAMS[1..],
-            crate::Arm::C => &INDEX_PROGRAMS[1..2],
+            _ if dense_tool => &INDEX_PROGRAMS[1..2],
+            _ => &INDEX_PROGRAMS[1..],
         };
         for name in stubs {
             ensure_script(&dir.join(name), &stub(name))?;
@@ -522,25 +533,22 @@ pub fn setup_arm_bins(
         if arm == crate::Arm::A {
             continue;
         }
-        if let crate::Arm::Variant(name) = arm {
-            let variant = variants
-                .get(name)
-                .ok_or_else(|| format!("arm {name} is not a prepared variant"))?;
-            let link = dir.join("arko_index");
-            match crate::variants::arko_index_program(variant, name, index_cli)? {
-                Some(script) => {
-                    // A symbolic link from an earlier definition is replaced.
-                    if std::fs::symlink_metadata(&link).is_ok_and(|meta| meta.is_symlink()) {
-                        std::fs::remove_file(&link)?;
-                    }
-                    ensure_script(&link, &script)?;
+        let link = dir.join("arko_index");
+        let script = match variant {
+            Some(variant) => crate::variants::arko_index_program(variant, arm.name(), index_cli)?,
+            None => None,
+        };
+        match script {
+            Some(script) => {
+                // A symbolic link from an earlier definition is replaced.
+                if std::fs::symlink_metadata(&link).is_ok_and(|meta| meta.is_symlink()) {
+                    std::fs::remove_file(&link)?;
                 }
-                None => ensure_link(index_cli, &link)?,
+                ensure_script(&link, &script)?;
             }
-            continue;
+            None => ensure_link(index_cli, &link)?,
         }
-        ensure_link(index_cli, &dir.join("arko_index"))?;
-        if arm == crate::Arm::C {
+        if dense_tool {
             let exe = std::env::current_exe()?;
             ensure_script(
                 &dir.join("arko_index_dense"),

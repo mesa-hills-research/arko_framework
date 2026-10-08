@@ -208,10 +208,11 @@ $B run --out $OUT/dry --mock --name dry --arms A,B,C
 
 ## Variant arms
 
-Variant arms compare arko_index options on the same tasks with the same solvers. Each one
-has arm B's tools over its own index, built with other `index2` flags, and can add
-`search2` flags to every search. A variants file defines them, and `variant-arms.json` here
-defines the first set:
+Variant arms compare arko_index options and prompts on the same tasks with the same
+solvers. Each one has arm B's tools over its own index, built with other `index2` flags, or
+over another arm's index (`base`). It can add `search2` flags to every search and describe
+the tools another way. A variants file defines them, and `variant-arms.json` here defines
+the first set:
 
 | Arm | What changes |
 |---|---|
@@ -220,6 +221,7 @@ defines the first set:
 | `lex-scope-desc` | As `lex-scope`, with Markdown scopes rooted at the front matter's title and description |
 | `hyb-src`, `hyb-path`, `hyb-scope` | Hybrid search, the embedding seeing the source, path and source, or path, scope and source |
 | `hyb-scope-desc` | As `hyb-scope`, with Markdown scopes rooted at title and description |
+| `B-guided`, `C-guided`, `lex-guided`, `hyb-scope-guided` | That arm's index and tools with the guided tool section |
 
 A variant's fields:
 
@@ -228,9 +230,15 @@ A variant's fields:
 | `name` | The arm's name in `--arms`, records and reports: letters, digits, `-` and `_` |
 | `description` | For the report |
 | `index` | `index2` flags, such as `["--lexical-scope"]` or `["--embed", "voyage-code-4", "--embed-text", "source"]` |
+| `base` | Another arm whose index and tools to use instead of building one: `B`, `C` (with `arko_index_dense`), or a variant with an index of its own |
 | `search` | `search2` flags put before the solver's own, such as `["--text"]` or `["--mode", "lexical"]` |
-| `prompt` | The tools paragraph: `index` (arm B's) or `hybrid` (says search2 also ranks by meaning). Default: `hybrid` when the index embeds |
-| `tools_text` | A tools paragraph of your own, for search flags whose output the standard ones don't describe |
+| `prompt` | The tool section: `standard` (arm B's, its hybrid version when the index embeds, arm C's with base C) or `guided` |
+| `tools_text` | A tool section of your own, for search flags whose output the standard ones don't describe |
+
+The guided tool section (`TOOLS_GUIDED` in `prompts.rs`) says which tool fits which
+question (`search2` first for "where is X handled" and "how does Y work", `rg -n` for exact
+identifiers and complete call-site lists, `outline` for a table of contents) and shows a
+search, the read of its first hit and an outline, in about 15 lines.
 
 ```sh
 V=arko_workflows/examples/index_benchmark/variant-arms.json

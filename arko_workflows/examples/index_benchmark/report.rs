@@ -823,7 +823,7 @@ pub fn render(report: &Report) -> String {
     if !run.variants.is_empty() {
         let _ = writeln!(
             text,
-            "Variant arms (arm B's tools over another index, or other search flags):\n\n| arm | index2 flags | search2 flags | tools | description |\n|---|---|---|---|---|"
+            "Variant arms (arm B's tools over another index, with other search flags, or with another tool section):\n\n| arm | index | index2 flags | search2 flags | tool section | description |\n|---|---|---|---|---|---|"
         );
         for (name, variant) in &run.variants {
             let flags = variant
@@ -831,22 +831,18 @@ pub fn render(report: &Report) -> String {
                 .values()
                 .next()
                 .map_or(variant.spec.index.join(" "), |index| index.flags.join(" "));
-            let tools = if variant.spec.tools_text.is_some() {
-                "own text".to_string()
-            } else {
-                variant.spec.prompt.clone().unwrap_or_else(|| {
-                    if variant.spec.embeds() {
-                        "hybrid".into()
-                    } else {
-                        "index".into()
-                    }
-                })
-            };
             let _ = writeln!(
                 text,
-                "| {name} | `{}` | `{}` | {tools} | {} |",
+                "| {name} | {} | `{}` | `{}` | {}{} | {} |",
+                variant
+                    .spec
+                    .base
+                    .as_deref()
+                    .map_or("own".to_string(), |base| format!("{base}'s")),
                 flags,
                 variant.spec.search.join(" "),
+                variant.spec.prompt_name(),
+                if variant.dense() { " (hybrid)" } else { "" },
                 variant.spec.description.replace('|', "\\|"),
             );
         }
