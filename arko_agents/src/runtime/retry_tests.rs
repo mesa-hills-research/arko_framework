@@ -79,7 +79,7 @@ async fn capacity_wait_survives_hours_without_prompt_growth_or_a_request_deadlin
         assert!(matches!(agent.task.current_state, TaskState::InProgress));
     }
     assert!(started.elapsed() > Duration::from_secs(3600));
-    assert_eq!(agent.capacity_retry_attempts, 20);
+    assert_eq!(agent.recovery.capacity_retry_attempts, 20);
     assert_eq!(agent.task.conversation.messages.len(), original_messages);
     assert!(agent.recovery_deadline().is_none());
     let result = agent
@@ -205,7 +205,7 @@ async fn capacity_wait_does_not_disable_permanent_errors_or_other_retry_limits()
             TaskState::AwaitingErrorRecoveryApproval { .. }
         ));
         // The capacity request counted toward neither ordinary limit.
-        assert_eq!(agent.indefinite_interactions, 1);
+        assert_eq!(agent.recovery.indefinite_interactions, 1);
         assert!(agent.ordinary_attempts() <= 2);
     }
     let (mut agent, _events, _commands) = harness();
@@ -254,7 +254,7 @@ async fn temporary_failure_recovers_in_the_same_task_and_honors_server_delay() {
         Some("recovered")
     );
     assert_eq!(agent.task.id, id);
-    assert_eq!(agent.llm_interaction_attempts, 2);
+    assert_eq!(agent.recovery.llm_interaction_attempts, 2);
     let mut scheduled = 0;
     while let Ok(event) = events.try_recv() {
         match event {
@@ -501,10 +501,10 @@ async fn peer_context_does_not_reset_recovery_limits() {
         .run_llm_attempt::<()>(async { Err(provider_failure(503, None)) })
         .await
         .unwrap();
-    let started = agent.recovery_started;
+    let started = agent.recovery.recovery_started;
     agent.flush_context_injections().unwrap();
-    assert_eq!(agent.recovery_started, started);
-    assert_eq!(agent.llm_interaction_attempts, 1);
+    assert_eq!(agent.recovery.recovery_started, started);
+    assert_eq!(agent.recovery.llm_interaction_attempts, 1);
     agent
         .run_llm_attempt::<()>(async { Err(provider_failure(503, None)) })
         .await
@@ -686,7 +686,7 @@ async fn refresh_failure_consumes_the_shared_budget_before_model_request() {
     }
     assert_eq!(started.elapsed(), Duration::from_secs(2));
     assert_eq!(model_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(agent.llm_interaction_attempts, 2);
+    assert_eq!(agent.recovery.llm_interaction_attempts, 2);
 }
 
 pub(super) fn complete_response() -> ai::StreamEvent {
@@ -1436,7 +1436,7 @@ async fn a_note_retry_goes_ahead_when_the_elapsed_budget_is_spent() {
     let budget = agent.task.agent_config.llm_retry_config.max_elapsed_ms;
     // Earlier failures used more than the budget before the request was
     // accepted (the clock stops while a response runs).
-    agent.paused_recovery_elapsed = Some(Duration::from_millis(budget + 60_000));
+    agent.recovery.paused_recovery_elapsed = Some(Duration::from_millis(budget + 60_000));
     let scripted = agent.scripted_responses.get_mut().unwrap();
     // Text, then the stream ends without its final response.
     scripted.push_back(Ok(futures::stream::iter([Ok(ai::StreamEvent::TextChunk(

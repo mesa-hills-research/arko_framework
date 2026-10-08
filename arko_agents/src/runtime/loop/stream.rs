@@ -404,8 +404,8 @@ impl AgentLoop {
         // its elapsed budget no longer runs (a response
         // the runtime can't use still counts as an
         // attempt).
-        self.recovery_started = None;
-        self.paused_recovery_elapsed = None;
+        self.recovery.recovery_started = None;
+        self.recovery.paused_recovery_elapsed = None;
         self.task
             .conversation
             .add_assistant_message_from_response(generation_response.clone());

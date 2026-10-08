@@ -111,21 +111,11 @@ pub struct AgentLoop {
     last_text_emit_time: Instant,
     last_reasoning_emit_time: Instant,
 
-    llm_interaction_attempts: u32,
-    recovery_started: Option<tokio::time::Instant>,
-    capacity_recovery_started: Option<tokio::time::Instant>,
-    capacity_retry_attempts: u32,
-    /// Requests in this recovery episode that ended in a wait that doesn't
-    /// count against the ordinary limits (capacity, rate limits).
-    indefinite_interactions: u32,
-    /// Ordinary recovery time used before its clock was paused for such a
-    /// wait.
-    paused_recovery_elapsed: Option<Duration>,
+    /// The recovery episode from failed model requests.
+    recovery: RecoveryState,
     /// The request in flight (or last made) went to the fallback model
     /// ([`Task::fallback_for`]).
     current_request_is_fallback: bool,
-    /// Time spent in this recovery episode waiting out rate limits.
-    rate_limit_waited: Duration,
     /// Cache monitor state: a low-efficiency warning is out, a pause
     /// episode is active, and the pause to apply before the next request.
     cache_warned: bool,
@@ -254,14 +244,8 @@ impl AgentLoop {
             reasoning_buffer: String::new(),
             last_text_emit_time: now,
             last_reasoning_emit_time: now,
-            llm_interaction_attempts: 0,
-            recovery_started: None,
-            capacity_recovery_started: None,
-            capacity_retry_attempts: 0,
-            indefinite_interactions: 0,
-            paused_recovery_elapsed: None,
+            recovery: RecoveryState::default(),
             current_request_is_fallback: false,
-            rate_limit_waited: Duration::ZERO,
             cache_warned: false,
             cache_pause_episode: false,
             cache_pause_pending: None,

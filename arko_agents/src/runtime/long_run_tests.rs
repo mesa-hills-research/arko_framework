@@ -640,5 +640,5 @@ async fn a_rate_limit_wait_cut_short_counts_the_time_waited() {
         .unwrap();
     sender.await.unwrap();
     assert!(agent.stop_requested);
-    assert_eq!(agent.rate_limit_waited, Duration::from_secs(10));
+    assert_eq!(agent.recovery.rate_limit_waited, Duration::from_secs(10));
 }

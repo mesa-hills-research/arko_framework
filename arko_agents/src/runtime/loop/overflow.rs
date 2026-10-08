@@ -404,7 +404,8 @@ impl AgentLoop {
         }
         self.overflow_recoveries += 1;
         // Sent again at once; not an ordinary recovery attempt.
-        self.indefinite_interactions = self.indefinite_interactions.saturating_add(1);
+        self.recovery.indefinite_interactions =
+            self.recovery.indefinite_interactions.saturating_add(1);
         log::warn!(
             "Task {}: the request was over the model's input limit; the result of {tool_name} was shortened and the request is sent again ({}/{MAX_OVERFLOW_RECOVERIES}).",
             self.task.id,

@@ -9,6 +9,25 @@ use super::*;
 const USAGE_LIMIT_RESET_MARGIN: Duration = Duration::from_secs(1);
 const USAGE_LIMIT_RESET_JITTER: Duration = Duration::from_secs(30);
 
+/// A recovery episode from failed model requests: its attempts and
+/// clocks, kept until a decision or a usable turn resets them (see
+/// [`AgentLoop::reset_llm_recovery`]).
+#[derive(Default)]
+pub(super) struct RecoveryState {
+    pub(super) llm_interaction_attempts: u32,
+    pub(super) recovery_started: Option<tokio::time::Instant>,
+    pub(super) capacity_recovery_started: Option<tokio::time::Instant>,
+    pub(super) capacity_retry_attempts: u32,
+    /// Requests in this recovery episode that ended in a wait that doesn't
+    /// count against the ordinary limits (capacity, rate limits).
+    pub(super) indefinite_interactions: u32,
+    /// Ordinary recovery time used before its clock was paused for such a
+    /// wait.
+    pub(super) paused_recovery_elapsed: Option<Duration>,
+    /// Time spent in this recovery episode waiting out rate limits.
+    pub(super) rate_limit_waited: Duration,
+}
+
 /// How recovery from a failed model request waits.
 enum RecoveryWait {
     /// Bounded by the error policy's attempts and the elapsed budget; a
@@ -182,29 +201,25 @@ async fn wait_for_recovery_deadline(deadline: Option<tokio::time::Instant>) {
 
 impl AgentLoop {
     pub(super) fn reset_llm_recovery(&mut self) {
-        self.llm_interaction_attempts = 0;
-        self.recovery_started = None;
-        self.capacity_recovery_started = None;
-        self.capacity_retry_attempts = 0;
-        self.indefinite_interactions = 0;
-        self.paused_recovery_elapsed = None;
-        self.rate_limit_waited = Duration::ZERO;
+        self.recovery = RecoveryState::default();
     }
 
     /// Ordinary recovery attempts in this episode: requests made, less those
     /// that ended in a wait that doesn't count against the ordinary limits.
     pub(super) fn ordinary_attempts(&self) -> u32 {
-        self.llm_interaction_attempts
-            .saturating_sub(self.indefinite_interactions)
+        self.recovery
+            .llm_interaction_attempts
+            .saturating_sub(self.recovery.indefinite_interactions)
             .max(1)
     }
 
     /// Stops the ordinary elapsed-recovery clock (and its deadline) while an
     /// indefinite wait lasts; see [`resume_ordinary_recovery_clock`](Self::resume_ordinary_recovery_clock).
     pub(super) fn pause_ordinary_recovery_clock(&mut self) {
-        if let Some(started) = self.recovery_started.take() {
-            self.paused_recovery_elapsed = Some(
-                self.paused_recovery_elapsed
+        if let Some(started) = self.recovery.recovery_started.take() {
+            self.recovery.paused_recovery_elapsed = Some(
+                self.recovery
+                    .paused_recovery_elapsed
                     .unwrap_or_default()
                     .saturating_add(started.elapsed()),
             );
@@ -214,16 +229,16 @@ impl AgentLoop {
     /// Restarts a paused ordinary recovery clock with the time it had
     /// already used.
     fn resume_ordinary_recovery_clock(&mut self) {
-        if self.recovery_started.is_none()
-            && let Some(used) = self.paused_recovery_elapsed.take()
+        if self.recovery.recovery_started.is_none()
+            && let Some(used) = self.recovery.paused_recovery_elapsed.take()
         {
             let now = tokio::time::Instant::now();
-            self.recovery_started = Some(now.checked_sub(used).unwrap_or(now));
+            self.recovery.recovery_started = Some(now.checked_sub(used).unwrap_or(now));
         }
     }
 
     pub(super) fn recovery_deadline(&self) -> Option<tokio::time::Instant> {
-        self.recovery_started.map(|start| {
+        self.recovery.recovery_started.map(|start| {
             start + Duration::from_millis(self.task.agent_config.llm_retry_config.max_elapsed_ms)
         })
     }
@@ -300,7 +315,7 @@ impl AgentLoop {
             // kept the task waiting this long in all (with or without
             // delays), are treated as a usage limit.
             let too_long = error.retry_after().is_some_and(|hint| hint > max_wait)
-                || (error.is_rate_limit() && self.rate_limit_waited >= max_wait);
+                || (error.is_rate_limit() && self.recovery.rate_limit_waited >= max_wait);
             if !too_long {
                 return RecoveryWait::RateLimit(rate_limit.clone());
             }
@@ -385,12 +400,15 @@ impl AgentLoop {
             // elapsed clock stops while they last, and the requests they
             // make are not counted as its attempts.
             self.pause_ordinary_recovery_clock();
-            self.indefinite_interactions = self.indefinite_interactions.saturating_add(1);
+            self.recovery.indefinite_interactions =
+                self.recovery.indefinite_interactions.saturating_add(1);
             let started = *self
+                .recovery
                 .capacity_recovery_started
                 .get_or_insert_with(tokio::time::Instant::now);
-            self.capacity_retry_attempts = self.capacity_retry_attempts.saturating_add(1);
-            (self.capacity_retry_attempts, started)
+            self.recovery.capacity_retry_attempts =
+                self.recovery.capacity_retry_attempts.saturating_add(1);
+            (self.recovery.capacity_retry_attempts, started)
         } else {
             // A response the runtime can't use isn't an outage: the elapsed
             // budget stays as it was (paused while the response ran).
@@ -398,10 +416,12 @@ impl AgentLoop {
                 self.resume_ordinary_recovery_clock();
             }
             let started = if model_output {
-                self.recovery_started
+                self.recovery
+                    .recovery_started
                     .unwrap_or_else(tokio::time::Instant::now)
             } else {
                 *self
+                    .recovery
                     .recovery_started
                     .get_or_insert_with(tokio::time::Instant::now)
             };
@@ -516,7 +536,8 @@ impl AgentLoop {
         let waited = self.wait_before_retry(retry_at, tool_call_id).await;
         if counts_toward_budget {
             // The time actually waited: a command may have cut it short.
-            self.rate_limit_waited = self
+            self.recovery.rate_limit_waited = self
+                .recovery
                 .rate_limit_waited
                 .saturating_add(waiting_since.elapsed());
         }
@@ -563,7 +584,8 @@ impl AgentLoop {
         // Like the other unchanged retries, the wait doesn't count against
         // ordinary recovery.
         self.pause_ordinary_recovery_clock();
-        self.indefinite_interactions = self.indefinite_interactions.saturating_add(1);
+        self.recovery.indefinite_interactions =
+            self.recovery.indefinite_interactions.saturating_add(1);
         self.emit_event(AgentEvent::UsageLimitReached {
             resets_at_unix_ms,
             waiting_until_unix_ms: Some(now_ms.saturating_add(duration_millis(delay))),

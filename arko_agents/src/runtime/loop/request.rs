@@ -127,7 +127,8 @@ impl AgentLoop {
         &mut self,
         operation: impl std::future::Future<Output = Result<T, ai::Error>>,
     ) -> Result<Option<T>, ArkoAgentsError> {
-        self.llm_interaction_attempts = self.llm_interaction_attempts.saturating_add(1);
+        self.recovery.llm_interaction_attempts =
+            self.recovery.llm_interaction_attempts.saturating_add(1);
         tokio::pin!(operation);
         loop {
             tokio::select! {
