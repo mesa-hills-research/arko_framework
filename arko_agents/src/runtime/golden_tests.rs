@@ -13,7 +13,8 @@ use super::retry_tests::{model_refusal, refused_response};
 use super::tool_call_tests::{complete, config, native_call, text_turn, turn};
 use super::*;
 use crate::agent_config::{
-    CacheMonitorConfig, MonitoringConfig, PerToolConfigOverride, PlanUsageThreshold,
+    BuiltInEnvironmentDetail, CacheMonitorConfig, EnvironmentDetailPlacement, MonitoringConfig,
+    PerToolConfigOverride, PlanUsageThreshold,
 };
 use crate::task::{RefusalResolution, RunningToolCall};
 use crate::tool::{ToolError, ToolParameterDefinition, ToolParameterType, ToolTypeDetails};
@@ -1308,6 +1309,216 @@ async fn tools_observe_the_conversation_after_a_held_request() {
         }
     })
     .await;
+    golden.run_ended(&task);
+    golden.check();
+}
+
+/// An approval with a command queued right behind it, for a call whose
+/// error then pauses the task (`ToolErrorPolicy::PauseAndAwaitApproval`):
+/// the queued command is the pause's. Native, `CancelTask` ends the pause
+/// and the task, the failed call's result recorded; output-based,
+/// `ContinueAfterError` with a note continues the task with the call's
+/// result and the note.
+#[tokio::test(start_paused = true)]
+async fn a_command_queued_behind_an_approval_answers_the_pause_after_it() {
+    let mut golden =
+        Golden::start("a_command_queued_behind_an_approval_answers_the_pause_after_it");
+    let paused_config = |mode| {
+        let mut config = golden_config(mode, &["gate"]);
+        needs_approval(&mut config, "gate");
+        config.error_recovery_config.on_tool_execution_error =
+            ToolErrorPolicy::PauseAndAwaitApproval;
+        config
+    };
+    let approve_then = |queued: fn() -> UserCommand| {
+        move |event: &AgentEvent| match event {
+            AgentEvent::ToolCallAwaitingApproval { tool_call_id, .. } => vec![
+                UserCommand::ApproveToolUse {
+                    tool_call_id: *tool_call_id,
+                    custom_tool_output: None,
+                    message_to_agent: None,
+                },
+                queued(),
+            ],
+            _ => Vec::new(),
+        }
+    };
+
+    let (mut agent, events, commands) = golden_loop(
+        new_task(paused_config(ToolCallingMode::Native)),
+        vec![Step::new("gate")],
+        true,
+    );
+    script(
+        &mut agent,
+        [turn(vec![step_call("g", "gate", "fail")]), complete()],
+    );
+    let task = drive(
+        agent,
+        events,
+        commands,
+        approve_then(|| UserCommand::CancelTask),
+    )
+    .await;
+    golden.run_ended(&task);
+
+    let (mut agent, events, commands) = golden_loop(
+        new_task(paused_config(ToolCallingMode::OutputBased)),
+        vec![Step::new("gate")],
+        true,
+    );
+    script(
+        &mut agent,
+        [
+            text_turn("<gate>\n<what>fail</what>\n</gate>"),
+            text_turn("<complete_task>\n<summary>done</summary>\n</complete_task>"),
+        ],
+    );
+    let task = drive(
+        agent,
+        events,
+        commands,
+        approve_then(|| UserCommand::ContinueAfterError {
+            note: Some("Go on without the gate.".into()),
+        }),
+    )
+    .await;
+    golden.run_ended(&task);
+    golden.check();
+}
+
+/// `SuspendTask` right behind an approval: the approved call runs in the
+/// wait and is stopped, the turn boundary sees the stop, and the next pass
+/// reports the state and saves the task before the loop stops. The task
+/// then runs again to completion.
+#[tokio::test(start_paused = true)]
+async fn a_suspension_while_an_approved_call_runs() {
+    let mut golden = Golden::start("a_suspension_while_an_approved_call_runs");
+    let mut config = golden_config(ToolCallingMode::Native, &["gate"]);
+    needs_approval(&mut config, "gate");
+    let (mut agent, events, commands) =
+        golden_loop(new_task(config), vec![Step::new("gate")], true);
+    script(&mut agent, [turn(vec![step_call("g", "gate", "hang")])]);
+    let task = drive(agent, events, commands, |event| match event {
+        AgentEvent::ToolCallAwaitingApproval { tool_call_id, .. } => vec![
+            UserCommand::ApproveToolUse {
+                tool_call_id: *tool_call_id,
+                custom_tool_output: None,
+                message_to_agent: None,
+            },
+            UserCommand::SuspendTask,
+        ],
+        _ => Vec::new(),
+    })
+    .await;
+    golden.run_ended(&task);
+
+    let (mut agent, events, commands) = golden_loop(reloaded(&task), vec![Step::new("gate")], true);
+    script(&mut agent, [complete()]);
+    let task = drive(agent, events, commands, no_commands).await;
+    golden.run_ended(&task);
+    golden.check();
+}
+
+/// The host's context at the second turn boundary (after the first turn's
+/// results), once.
+struct AtTheSecondBoundary(std::sync::atomic::AtomicUsize);
+
+impl crate::runtime::TurnContextSource for AtTheSecondBoundary {
+    fn turn_context(&self, _task_id: Uuid) -> Option<String> {
+        (self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1)
+            .then(|| "Sent at the second turn boundary.".to_string())
+    }
+}
+
+/// The environment details go once into each turn's user messages (the
+/// working directory, with each user message here): context added right
+/// after a turn's results message comes without them. The results message
+/// of an output-based approval (context sent with the approval), of an
+/// output-based turn and of a native turn (context from the host at the
+/// boundary after them), and of an output-based task saved while its call
+/// ran, run again (context sent before the run).
+#[tokio::test(start_paused = true)]
+async fn context_after_a_results_message_comes_without_the_details_again() {
+    let mut golden =
+        Golden::start("context_after_a_results_message_comes_without_the_details_again");
+    let detailed_config = |mode| {
+        let mut config = golden_config(mode, &["gate", "step"]);
+        needs_approval(&mut config, "gate");
+        config.environment_details_config.current_working_directory = BuiltInEnvironmentDetail {
+            include: true,
+            placement: EnvironmentDetailPlacement::EachUserMessage,
+            depth: None,
+        };
+        config
+    };
+    let tools = || vec![Step::new("gate"), Step::new("step")];
+    let context = |text: &str| UserCommand::InjectContext {
+        content: text.into(),
+    };
+    let complete_text = || text_turn("<complete_task>\n<summary>done</summary>\n</complete_task>");
+
+    let (mut agent, events, commands) = golden_loop(
+        new_task(detailed_config(ToolCallingMode::OutputBased)),
+        tools(),
+        true,
+    );
+    script(
+        &mut agent,
+        [
+            text_turn("<gate>\n<what>one</what>\n</gate>"),
+            complete_text(),
+        ],
+    );
+    let task = drive(agent, events, commands, |event| match event {
+        AgentEvent::ToolCallAwaitingApproval { tool_call_id, .. } => vec![
+            UserCommand::ApproveToolUse {
+                tool_call_id: *tool_call_id,
+                custom_tool_output: None,
+                message_to_agent: None,
+            },
+            context("Sent with the approval."),
+        ],
+        _ => Vec::new(),
+    })
+    .await;
+    golden.run_ended(&task);
+
+    for mode in [ToolCallingMode::OutputBased, ToolCallingMode::Native] {
+        let native = matches!(mode, ToolCallingMode::Native);
+        let (mut agent, events, commands) =
+            golden_loop(new_task(detailed_config(mode)), tools(), true);
+        if native {
+            script(
+                &mut agent,
+                [turn(vec![step_call("s", "step", "two")]), complete()],
+            );
+        } else {
+            script(
+                &mut agent,
+                [
+                    text_turn("<step>\n<what>two</what>\n</step>"),
+                    complete_text(),
+                ],
+            );
+        }
+        agent.turn_context = Some(Arc::new(AtTheSecondBoundary(Default::default())));
+        let task = drive(agent, events, commands, no_commands).await;
+        golden.run_ended(&task);
+    }
+
+    let mut task = new_task(detailed_config(ToolCallingMode::OutputBased));
+    task.conversation.system_message = Some("The system prompt.".into());
+    task.conversation.add_user_message("Do the task");
+    task.user_message_count = 1;
+    task.conversation
+        .add_assistant_message("<step>\n<what>three</what>\n</step>");
+    task.running_tool_calls = vec![running(None, "step", "three")];
+    task.set_state(TaskState::InProgress);
+    let (mut agent, events, commands) = golden_loop(reloaded(&task), tools(), true);
+    commands.try_send(context("Sent before the run.")).unwrap();
+    script(&mut agent, [complete_text()]);
+    let task = drive(agent, events, commands, no_commands).await;
     golden.run_ended(&task);
     golden.check();
 }
