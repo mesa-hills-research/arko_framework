@@ -350,6 +350,17 @@ fn token_cap_stops_cleanly_and_a_rerun_finishes() {
     assert_eq!(e.embedded().len() as u64, d.new);
 }
 
+/// The generation directories in a state directory.
+fn generations(state: &Path) -> Vec<String> {
+    fs::read_dir(state)
+        .unwrap()
+        .filter_map(|e| {
+            let name = e.unwrap().file_name().to_string_lossy().into_owned();
+            name.starts_with("index2-").then_some(name)
+        })
+        .collect()
+}
+
 #[test]
 fn failed_embedding_keeps_the_published_generation_and_the_paid_vectors() {
     let root = tempfile::tempdir().unwrap();
@@ -369,6 +380,8 @@ fn failed_embedding_keeps_the_published_generation_and_the_paid_vectors() {
         fs::read_to_string(state.path().join("CURRENT2")).unwrap(),
         before
     );
+    // The failed build removed its unpublished generation.
+    assert_eq!(generations(state.path()), [before.trim().to_owned()]);
     assert_eq!(index2::search(state.path(), "journal").unwrap(), lexical);
     assert!(index2::dense_info(state.path()).unwrap().is_none());
     assert!(DenseConfig::load(state.path()).unwrap().is_none());
@@ -387,14 +400,7 @@ fn failed_embedding_keeps_the_published_generation_and_the_paid_vectors() {
     // The switch published the new generation and removed the old ones.
     let after = fs::read_to_string(state.path().join("CURRENT2")).unwrap();
     assert_ne!(after, before);
-    let generations: Vec<_> = fs::read_dir(state.path())
-        .unwrap()
-        .filter_map(|e| {
-            let name = e.unwrap().file_name().to_string_lossy().into_owned();
-            name.starts_with("index2-").then_some(name)
-        })
-        .collect();
-    assert_eq!(generations, [after.trim().to_owned()]);
+    assert_eq!(generations(state.path()), [after.trim().to_owned()]);
     // No build leftovers in the generation.
     let g = generation(state.path());
     assert!(!g.join("vhash.tmp").exists() && !g.join("embed-spool.tmp").exists());

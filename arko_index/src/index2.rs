@@ -61,6 +61,24 @@ struct Meta {
     dense: bool,
 }
 
+/// Removes a generation directory unless `CURRENT2` names it: a build that fails before
+/// publishing leaves nothing behind (the embedding cache keeps every vector paid for).
+struct Unpublished {
+    state_dir: PathBuf,
+    generation: Option<String>,
+}
+impl Drop for Unpublished {
+    fn drop(&mut self) {
+        if let Some(generation) = &self.generation {
+            let current = std::fs::read_to_string(self.state_dir.join("CURRENT2"));
+            if current.is_ok_and(|c| c.trim() == generation) {
+                return;
+            }
+            let _ = std::fs::remove_dir_all(self.state_dir.join(generation));
+        }
+    }
+}
+
 fn put_varint(out: &mut Vec<u8>, mut v: u64) {
     while v >= 0x80 {
         out.push((v as u8) | 0x80);
@@ -472,6 +490,10 @@ pub fn build(
     let generation = format!("index2-{stamp}-{}", std::process::id());
     let dir = state_dir.join(&generation);
     std::fs::create_dir(&dir)?;
+    let mut unpublished = Unpublished {
+        state_dir: state_dir.clone(),
+        generation: Some(generation.clone()),
+    };
     let w = |name: &str| -> Result<BufWriter<File>, Error> {
         Ok(BufWriter::with_capacity(
             1 << 20,
@@ -787,6 +809,7 @@ pub fn build(
     atomic_write(&dir, "meta.json", &serde_json::to_vec(&meta)?)?;
     crate::files::sync_dir(&state_dir)?;
     atomic_write(&state_dir, "CURRENT2", generation.as_bytes())?;
+    unpublished.generation = None;
     phases.push(("merge_publish_s", clock.elapsed().as_secs_f64()));
     if std::env::var_os("ARKO_INDEX_STATS").is_some() {
         // Cumulative seconds since the start of the build, per phase end.
