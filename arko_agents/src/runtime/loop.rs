@@ -63,6 +63,122 @@ enum RecoveryWait {
     UsageLimit,
 }
 
+/// The attempts recovery from a failed request makes under `policy`.
+fn recovery_max_attempts(policy: LLMErrorPolicy, model_output: bool) -> u32 {
+    match policy {
+        LLMErrorPolicy::RetryThenInformAgent { max_attempts }
+        | LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts } => max_attempts.max(1),
+        // Responses the runtime can't use are asked again at once and
+        // outside the elapsed budget, so they need an attempt limit.
+        LLMErrorPolicy::InformAgentAndContinue if model_output => {
+            MODEL_OUTPUT_ATTEMPTS_WITHOUT_LIMIT
+        }
+        LLMErrorPolicy::InformAgentAndContinue => u32::MAX,
+        LLMErrorPolicy::PauseAndAwaitApproval => 1,
+    }
+}
+
+/// What a failed request's recovery reports: the error, the attempt,
+/// and how it waits.
+fn recovery_message(
+    wait: &RecoveryWait,
+    attempt: u32,
+    max_attempts: u32,
+    error: &ai::Error,
+    note: &Option<String>,
+    fallback: bool,
+) -> String {
+    let message = match wait {
+        RecoveryWait::Capacity(_) => format!(
+            "LLM capacity error (attempt {attempt}; waiting until service recovers): {error}"
+        ),
+        RecoveryWait::RateLimit(_) => {
+            let kind = if error.is_capacity_error() {
+                "capacity error"
+            } else {
+                "rate limit"
+            };
+            format!("LLM {kind} (attempt {attempt}; retrying when the provider allows): {error}")
+        }
+        RecoveryWait::Ordinary | RecoveryWait::UsageLimit => match note {
+            Some(note) => {
+                format!("Model response not usable (attempt {attempt}/{max_attempts}): {note}")
+            }
+            None => format!("LLM error (attempt {attempt}/{max_attempts}): {error}"),
+        },
+    };
+    if fallback {
+        format!(
+            "The refusal fallback model's request failed; it still has the refused input to answer. {message}"
+        )
+    } else {
+        message
+    }
+}
+
+/// Why recovery stops at this attempt, with the pause's cause: an error
+/// that retrying can't fix, or the attempts used up (not for a wait that
+/// doesn't count them).
+fn recovery_stop(
+    error: &ai::Error,
+    indefinite: bool,
+    attempt: u32,
+    max_attempts: u32,
+    model_output: bool,
+) -> Option<(&'static str, ErrorRecoveryCause)> {
+    if !error.is_retryable() {
+        Some((
+            "Failure requires a request, credential, or configuration change",
+            if matches!(error, ai::Error::Refusal(_)) {
+                ErrorRecoveryCause::Refusal
+            } else {
+                ErrorRecoveryCause::NonRetryable
+            },
+        ))
+    } else if !indefinite && attempt >= max_attempts {
+        Some((
+            "Retry attempt limit exhausted",
+            if model_output {
+                ErrorRecoveryCause::UnusableResponses
+            } else {
+                ErrorRecoveryCause::RetriesExhausted {
+                    retry_after_ms: error.retry_after().map(duration_millis),
+                }
+            },
+        ))
+    } else {
+        None
+    }
+}
+
+/// The delay before the next attempt: none for a response the runtime
+/// can't use, otherwise the backoff (from the provider's delay when it
+/// gives one).
+fn retry_delay_for(
+    wait: &RecoveryWait,
+    config: &crate::agent_config::LLMRetryConfig,
+    attempt: u32,
+    error: &ai::Error,
+    model_output: bool,
+) -> Duration {
+    // A rate limit's own delay is followed as given (plus jitter) rather
+    // than grown by backoff; backoff applies when there is none.
+    let backoff_attempt = match wait {
+        RecoveryWait::RateLimit(_) if error.retry_after().is_some() => 1,
+        _ => attempt,
+    };
+    if model_output {
+        Duration::ZERO
+    } else {
+        super::retry::retry_delay(
+            config,
+            backoff_attempt,
+            error.retry_after(),
+            ai::retry::random_sample(),
+        )
+    }
+}
+
 fn unix_millis_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -6199,6 +6315,45 @@ impl AgentLoop {
             .await
     }
 
+    /// The attempt a failed request is in its recovery, and when that
+    /// recovery started. A wait that doesn't count against ordinary
+    /// recovery (capacity, rate limits) stops its elapsed clock and counts
+    /// on its own; otherwise the clock resumes (not for a response the
+    /// runtime can't use, which isn't an outage).
+    fn recovery_attempt(
+        &mut self,
+        indefinite: bool,
+        model_output: bool,
+    ) -> (u32, tokio::time::Instant) {
+        if indefinite {
+            // These waits neither consume nor reset ordinary recovery: its
+            // elapsed clock stops while they last, and the requests they
+            // make are not counted as its attempts.
+            self.pause_ordinary_recovery_clock();
+            self.indefinite_interactions = self.indefinite_interactions.saturating_add(1);
+            let started = *self
+                .capacity_recovery_started
+                .get_or_insert_with(tokio::time::Instant::now);
+            self.capacity_retry_attempts = self.capacity_retry_attempts.saturating_add(1);
+            (self.capacity_retry_attempts, started)
+        } else {
+            // A response the runtime can't use isn't an outage: the elapsed
+            // budget stays as it was (paused while the response ran).
+            if !model_output {
+                self.resume_ordinary_recovery_clock();
+            }
+            let started = if model_output {
+                self.recovery_started
+                    .unwrap_or_else(tokio::time::Instant::now)
+            } else {
+                *self
+                    .recovery_started
+                    .get_or_insert_with(tokio::time::Instant::now)
+            };
+            (self.ordinary_attempts(), started)
+        }
+    }
+
     async fn recover(
         &mut self,
         error: ai::Error,
@@ -6227,33 +6382,7 @@ impl AgentLoop {
         }
         let indefinite = !matches!(wait, RecoveryWait::Ordinary);
         let model_output = note.is_some();
-        let (attempt, started) = if indefinite {
-            // These waits neither consume nor reset ordinary recovery: its
-            // elapsed clock stops while they last, and the requests they
-            // make are not counted as its attempts.
-            self.pause_ordinary_recovery_clock();
-            self.indefinite_interactions = self.indefinite_interactions.saturating_add(1);
-            let started = *self
-                .capacity_recovery_started
-                .get_or_insert_with(tokio::time::Instant::now);
-            self.capacity_retry_attempts = self.capacity_retry_attempts.saturating_add(1);
-            (self.capacity_retry_attempts, started)
-        } else {
-            // A response the runtime can't use isn't an outage: the elapsed
-            // budget stays as it was (paused while the response ran).
-            if !model_output {
-                self.resume_ordinary_recovery_clock();
-            }
-            let started = if model_output {
-                self.recovery_started
-                    .unwrap_or_else(tokio::time::Instant::now)
-            } else {
-                *self
-                    .recovery_started
-                    .get_or_insert_with(tokio::time::Instant::now)
-            };
-            (self.ordinary_attempts(), started)
-        };
+        let (attempt, started) = self.recovery_attempt(indefinite, model_output);
         match &wait {
             RecoveryWait::Capacity(capacity) => {
                 config.initial_delay_ms = capacity.initial_delay_ms;
@@ -6266,70 +6395,9 @@ impl AgentLoop {
             RecoveryWait::Ordinary | RecoveryWait::UsageLimit => {}
         }
         let elapsed = started.elapsed();
-        let max_attempts = match policy {
-            LLMErrorPolicy::RetryThenInformAgent { max_attempts }
-            | LLMErrorPolicy::RetryThenPauseAndAwaitApproval { max_attempts } => {
-                max_attempts.max(1)
-            }
-            // Responses the runtime can't use are asked again at once and
-            // outside the elapsed budget, so they need an attempt limit.
-            LLMErrorPolicy::InformAgentAndContinue if model_output => {
-                MODEL_OUTPUT_ATTEMPTS_WITHOUT_LIMIT
-            }
-            LLMErrorPolicy::InformAgentAndContinue => u32::MAX,
-            LLMErrorPolicy::PauseAndAwaitApproval => 1,
-        };
-        let message = match &wait {
-            RecoveryWait::Capacity(_) => format!(
-                "LLM capacity error (attempt {attempt}; waiting until service recovers): {error}"
-            ),
-            RecoveryWait::RateLimit(_) => {
-                let kind = if error.is_capacity_error() {
-                    "capacity error"
-                } else {
-                    "rate limit"
-                };
-                format!(
-                    "LLM {kind} (attempt {attempt}; retrying when the provider allows): {error}"
-                )
-            }
-            RecoveryWait::Ordinary | RecoveryWait::UsageLimit => match &note {
-                Some(note) => {
-                    format!("Model response not usable (attempt {attempt}/{max_attempts}): {note}")
-                }
-                None => format!("LLM error (attempt {attempt}/{max_attempts}): {error}"),
-            },
-        };
-        let message = if fallback {
-            format!(
-                "The refusal fallback model's request failed; it still has the refused input to answer. {message}"
-            )
-        } else {
-            message
-        };
-        let stop = if !error.is_retryable() {
-            Some((
-                "Failure requires a request, credential, or configuration change",
-                if matches!(error, ai::Error::Refusal(_)) {
-                    ErrorRecoveryCause::Refusal
-                } else {
-                    ErrorRecoveryCause::NonRetryable
-                },
-            ))
-        } else if !indefinite && attempt >= max_attempts {
-            Some((
-                "Retry attempt limit exhausted",
-                if model_output {
-                    ErrorRecoveryCause::UnusableResponses
-                } else {
-                    ErrorRecoveryCause::RetriesExhausted {
-                        retry_after_ms: error.retry_after().map(duration_millis),
-                    }
-                },
-            ))
-        } else {
-            None
-        };
+        let max_attempts = recovery_max_attempts(policy, model_output);
+        let message = recovery_message(&wait, attempt, max_attempts, &error, &note, fallback);
+        let stop = recovery_stop(&error, indefinite, attempt, max_attempts, model_output);
         if let Some((reason, cause)) = stop {
             return self
                 .finish_llm_recovery(
@@ -6340,22 +6408,7 @@ impl AgentLoop {
                 )
                 .await;
         }
-        // A rate limit's own delay is followed as given (plus jitter) rather
-        // than grown by backoff; backoff applies when there is none.
-        let backoff_attempt = match wait {
-            RecoveryWait::RateLimit(_) if error.retry_after().is_some() => 1,
-            _ => attempt,
-        };
-        let delay = if model_output {
-            Duration::ZERO
-        } else {
-            super::retry::retry_delay(
-                &config,
-                backoff_attempt,
-                error.retry_after(),
-                ai::retry::random_sample(),
-            )
-        };
+        let delay = retry_delay_for(&wait, &config, attempt, &error, model_output);
         if !indefinite
             && !model_output
             && elapsed.saturating_add(delay) >= Duration::from_millis(config.max_elapsed_ms)
