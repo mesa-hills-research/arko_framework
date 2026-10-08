@@ -7,6 +7,9 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 /// Events emitted by the agent runtime during task execution.
+// Events are built once and sent through channels, so the size of the largest
+// variant costs little, and boxing it would change the public variants.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AgentEvent {
     /// The task state has changed.
