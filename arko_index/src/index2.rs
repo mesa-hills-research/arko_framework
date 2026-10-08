@@ -16,16 +16,21 @@
 //!   files.dat  per file with chunks: u32 LE first doc, u32 LE path length, path
 //!              (for path and language filters)
 //! With embeddings ([`BuildOptions::dense`]) also:
-//!   dense.json the generation's embedding model and coverage ([`DenseIndexInfo`])
-//!   dense/     the vector store ([`BruteForceStore`]), vector ids = doc ids
+//!   dense.json the generation's embedding model, coverage and vector store
+//!              ([`DenseIndexInfo`])
+//!   vkeys.dat  per doc with a vector, sorted by vector id: u128 BE id, u32 LE doc
+//! The vectors themselves are in a store beside the generations,
+//! `STATE_DIR/vectors-<digest of model and settings>/` ([`MhrStore`]), which every
+//! build updates in place: a doc's vector id is a digest of its path and its embedded
+//! text, so an unchanged chunk keeps its vector, whatever its doc id.
 //! Build memory is bounded: postings accumulate up to `mem_budget` bytes, then spill
 //! to a sorted run file; runs cover increasing doc ranges and are merged by term.
-//! Texts to embed are spooled to disk; the vector store is written as it is filled.
+//! Texts to embed are spooled to disk.
 use crate::{
     bench_v1::{Chunk, Error, Options},
     dense::{
         DenseBuild, DenseConfig, DenseIndexInfo, EmbedStats, EmbedText, RENDER_VERSION,
-        cache::Cache, render_with, run, text_hash,
+        cache::Cache, render_with, run, text_format, text_hash,
     },
     files,
     files::{FileRules, Report},
@@ -33,13 +38,16 @@ use crate::{
     par,
     search::tokens,
     tokenize::{self, Counts, FxHasher, FxMap},
-    vector::{BruteForceStore, Filter, VectorMeta, VectorStore},
+    vector::{
+        self, Filter, MhrStore, StoreConfig, VectorId, VectorMeta, VectorRecord, VectorStore,
+    },
 };
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     borrow::Cow,
-    collections::{BTreeSet, BinaryHeap, HashSet},
+    collections::{BTreeSet, BinaryHeap, HashMap, HashSet},
     fs::{File, OpenOptions},
     hash::Hasher,
     io::{BufReader, BufWriter, Read, Write},
@@ -55,7 +63,7 @@ struct Meta {
     total: u64,
     average_bits: u64,
     terms: u64,
-    /// The generation has embeddings (`dense.json` and `dense/`). Absent before this
+    /// The generation has embeddings (`dense.json` and `vkeys.dat`). Absent before this
     /// was recorded.
     #[serde(default)]
     dense: bool,
@@ -729,8 +737,10 @@ pub fn build(
     for p in &runs {
         std::fs::remove_file(p)?;
     }
-    // Embeddings: embed what the cache lacks, then store every doc's vector.
+    // Embeddings: embed what the cache lacks, then bring the vector store up to date.
     let mut dense_stats = None;
+    // The store's directory name, the store, and the vectors to remove after the switch.
+    let mut store_update: Option<(String, MhrStore, Vec<VectorId>)> = None;
     if let (Some(d), Some(cache), Some(mut vhash), Some(spool)) =
         (dense, cache.as_mut(), vhash.take(), spool.take())
     {
@@ -747,30 +757,64 @@ pub fn build(
             d.progress,
         )?;
         phases.push(("embedded_s", clock.elapsed().as_secs_f64()));
-        let mut store =
-            BruteForceStore::create(&dir.join("dense"), descriptor.dimensions, d.quantization)?;
-        let mut hashes = BufReader::with_capacity(1 << 20, File::open(dir.join("vhash.tmp"))?);
-        let (mut vector, mut hash, mut file, mut embedded) = (Vec::new(), [0u8; 32], 0, 0u64);
-        for doc in 0..next_doc {
-            hashes.read_exact(&mut hash)?;
-            while file + 1 < file_table.len() && file_table[file + 1].0 <= doc {
-                file += 1;
+        let hashes = File::open(dir.join("vhash.tmp"))?;
+        let keys = vector_keys(&hashes, next_doc, &file_table, cache)?;
+        write_vector_keys(&dir, &keys)?;
+        let config = StoreConfig::new(
+            descriptor.clone(),
+            text_format(RENDER_VERSION, d.embed_text),
+        )
+        .with_quantization(d.quantization)
+        .with_index(d.vector_index);
+        let name = config.dir_name()?;
+        let (mut store, created) = vector::open_or_create(&state_dir.join(&name), &config)?;
+        let (added, removed) = diff_ids(&keys, &store.ids()?);
+        // The new vectors go in now, the vectors of chunks that are gone after the
+        // switch: until then readers may still open the current generation, so the
+        // store holds the vectors of both. A build that fails before the switch (its
+        // generation then removed) leaves only additions, which searches skip and the
+        // next build removes.
+        let (mut vector, mut hash) = (Vec::new(), [0u8; 32]);
+        for batch in added.chunks(UPSERT_BATCH) {
+            let mut vectors = Vec::with_capacity(batch.len());
+            for &(_, doc) in batch {
+                read_exact_at(&hashes, &mut hash, u64::from(doc) * 32)?;
+                if !cache.get(&hash, &mut vector)? {
+                    return Err("an embedding left the cache during the build".into());
+                }
+                vectors.push(std::mem::take(&mut vector));
             }
-            if cache.get(&hash, &mut vector)? {
-                let path = &file_table[file].1;
-                let language = crate::syntax::language(Path::new(path));
-                store.insert(u64::from(doc), &vector, VectorMeta { path, language })?;
-                embedded += 1;
-            }
+            let records: Vec<VectorRecord<'_>> = batch
+                .iter()
+                .zip(&vectors)
+                .map(|(&(id, doc), v)| {
+                    let path = file_path(&file_table, doc);
+                    VectorRecord {
+                        id,
+                        vector: v,
+                        meta: VectorMeta {
+                            path,
+                            language: crate::syntax::language(Path::new(path)),
+                        },
+                    }
+                })
+                .collect();
+            store.upsert(&records)?;
         }
-        drop(hashes);
+        if created {
+            store.compact()?;
+        }
         store.persist()?;
+        drop(hashes);
+        let embedded = keys.len() as u64;
         let info = DenseIndexInfo {
-            version: 1,
+            version: DenseIndexInfo::VERSION,
             embedder: descriptor.clone(),
             render_version: RENDER_VERSION,
             embed_text: d.embed_text,
             quantization: d.quantization,
+            vector_index: d.vector_index,
+            store: name.clone(),
             docs: n,
             embedded,
         };
@@ -778,6 +822,9 @@ pub fn build(
         std::fs::remove_file(dir.join("vhash.tmp"))?;
         std::fs::remove_file(&spool_path)?;
         phases.push(("vectors_stored_s", clock.elapsed().as_secs_f64()));
+        let vectors_added = added.len() as u64;
+        let vectors_removed = removed.len() as u64;
+        store_update = Some((name, store, removed));
         dense_stats = Some(EmbedStats {
             embedder: descriptor,
             render_version: RENDER_VERSION,
@@ -795,6 +842,9 @@ pub fn build(
             not_embedded_tokens: totals.not_embedded_tokens,
             too_long: totals.too_long,
             cache_records: 0,
+            vectors_added,
+            vectors_removed,
+            store_created: created,
         });
     }
     let average = if n > 0 { total as f64 / n as f64 } else { 1.0 };
@@ -827,10 +877,31 @@ pub fn build(
             std::fs::remove_dir_all(e.path())?;
         }
     }
+    // The vectors of chunks that are gone, and stores of other models or settings
+    // (or of no generation, after a lexical build).
+    let store_name = match store_update {
+        Some((name, mut store, removed)) => {
+            for batch in removed.chunks(UPSERT_BATCH) {
+                store.delete(batch)?;
+            }
+            store.persist()?;
+            Some(name)
+        }
+        None => None,
+    };
+    for e in std::fs::read_dir(&state_dir)? {
+        let e = e?;
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("vectors-") && store_name.as_deref() != Some(&*name) {
+            std::fs::remove_dir_all(e.path())?;
+        }
+    }
     files::write_report(&state_dir, &report)?;
     if let (Some(d), Some(cache)) = (dense, cache.as_mut()) {
         DenseConfig::new(d.embedder.descriptor())
             .with_quantization(d.quantization)
+            .with_vector_index(d.vector_index)
             .with_max_tokens_per_run(d.max_tokens)
             .with_embed_text(d.embed_text)
             .save(&state_dir)?;
@@ -846,6 +917,103 @@ pub fn build(
         report,
         dense: dense_stats,
     })
+}
+
+/// Vectors per store upsert or delete call.
+const UPSERT_BATCH: usize = 1024;
+/// Bytes per `vkeys.dat` entry: a u128 vector id (big-endian, so byte order is id
+/// order) and a u32 doc.
+const VKEY_BYTES: usize = 20;
+
+/// A doc's vector id: a digest of its path, its embedded text's hash, and how many
+/// docs of the file have the same text before it. A chunk keeps its id, so its
+/// vector, while its path and text stay the same, whatever its doc id.
+fn vector_id(path: &str, hash: &[u8; 32], occurrence: u32) -> VectorId {
+    let mut h = Sha256::new();
+    h.update((path.len() as u64).to_le_bytes());
+    h.update(path.as_bytes());
+    h.update(hash);
+    h.update(occurrence.to_le_bytes());
+    u128::from_be_bytes(h.finalize()[..16].try_into().unwrap())
+}
+
+/// The path of the file holding `doc`, from the (first doc, path) table.
+fn file_path(files: &[(u32, String)], doc: u32) -> &str {
+    let i = files.partition_point(|(first, _)| *first <= doc);
+    &files[i - 1].1
+}
+
+/// (vector id, doc) of every doc whose text has a vector in the cache, by id.
+/// `hashes` holds each doc's text hash, in doc order.
+fn vector_keys(
+    hashes: &File,
+    docs: u32,
+    files: &[(u32, String)],
+    cache: &Cache,
+) -> Result<Vec<(VectorId, u32)>, Error> {
+    let mut r = BufReader::with_capacity(1 << 20, hashes);
+    let mut keys = Vec::new();
+    let mut seen: HashMap<[u8; 32], u32> = HashMap::new();
+    let (mut file, mut hash) = (0, [0u8; 32]);
+    for doc in 0..docs {
+        r.read_exact(&mut hash)?;
+        while file + 1 < files.len() && files[file + 1].0 <= doc {
+            file += 1;
+            seen.clear();
+        }
+        if cache.contains(&hash) {
+            let n = seen.entry(hash).or_insert(0);
+            keys.push((vector_id(&files[file].1, &hash, *n), doc));
+            *n += 1;
+        }
+    }
+    keys.sort_unstable();
+    if keys.windows(2).any(|w| w[0].0 == w[1].0) {
+        return Err("two chunks have the same vector id".into());
+    }
+    Ok(keys)
+}
+
+fn write_vector_keys(dir: &Path, keys: &[(VectorId, u32)]) -> Result<(), Error> {
+    let mut out = BufWriter::with_capacity(1 << 20, File::create(dir.join("vkeys.dat"))?);
+    for (id, doc) in keys {
+        out.write_all(&id.to_be_bytes())?;
+        out.write_all(&doc.to_le_bytes())?;
+    }
+    out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
+    Ok(())
+}
+
+/// What a store holding `stored` (ascending) needs to hold `keys` (by id): the keys
+/// to add, and the ids to remove.
+fn diff_ids(
+    keys: &[(VectorId, u32)],
+    stored: &[VectorId],
+) -> (Vec<(VectorId, u32)>, Vec<VectorId>) {
+    let (mut added, mut removed) = (Vec::new(), Vec::new());
+    let (mut i, mut j) = (0, 0);
+    while i < keys.len() || j < stored.len() {
+        match (keys.get(i), stored.get(j)) {
+            (Some(k), Some(s)) if k.0 == *s => {
+                i += 1;
+                j += 1;
+            }
+            (Some(k), Some(s)) if k.0 < *s => {
+                added.push(*k);
+                i += 1;
+            }
+            (Some(k), None) => {
+                added.push(*k);
+                i += 1;
+            }
+            (_, Some(s)) => {
+                removed.push(*s);
+                j += 1;
+            }
+            (None, None) => unreachable!(),
+        }
+    }
+    (added, removed)
 }
 
 /// The sparse term index (`terms.idx`) without a `String` per entry: the raw bytes
@@ -993,6 +1161,7 @@ fn read_files(dir: &Path) -> Result<Vec<(u32, String)>, Error> {
 /// read goes to the generation `CURRENT2` named when it was opened, so lexical and
 /// dense results of one search come from the same build.
 pub(crate) struct Generation {
+    state_dir: PathBuf,
     dir: PathBuf,
     meta: Meta,
 }
@@ -1004,7 +1173,11 @@ impl Generation {
         if meta.version != 2 {
             return Err("unsupported index version".into());
         }
-        Ok(Self { dir, meta })
+        Ok(Self {
+            state_dir: state_dir.to_path_buf(),
+            dir,
+            meta,
+        })
     }
 
     /// The embeddings of this generation, if it has them.
@@ -1018,8 +1191,54 @@ impl Generation {
         }
     }
 
-    pub(crate) fn open_store(&self) -> Result<BruteForceStore, Error> {
-        BruteForceStore::open(&self.dir.join("dense"))
+    /// The vector store of this generation's embeddings, read-only. It holds every
+    /// vector of the generation, and can hold others: those a build in progress (or an
+    /// interrupted one) added for its own generation.
+    pub(crate) fn open_store(&self, info: &DenseIndexInfo) -> Result<MhrStore, Error> {
+        if info.version != DenseIndexInfo::VERSION {
+            return Err(format!(
+                "this index's vectors were stored by an earlier version of arko_index (format {}): rebuild the index (index2) to search it densely",
+                info.version
+            )
+            .into());
+        }
+        if !info.store.starts_with("vectors-") || info.store.contains(['/', '\\']) {
+            return Err(format!("bad vector store name {:?}", info.store).into());
+        }
+        let dir = self.state_dir.join(&info.store);
+        let store = MhrStore::open(&dir)?;
+        if !store.matches(&info.store_config()) {
+            return Err(format!(
+                "the vector store {} does not hold this index's model and settings ({}): rebuild the index",
+                dir.display(),
+                info.embedder.display()
+            )
+            .into());
+        }
+        Ok(store)
+    }
+
+    /// The doc of each vector id (`None` for an id this generation lacks).
+    pub(crate) fn docs_of(&self, ids: &[VectorId]) -> Result<Vec<Option<u32>>, Error> {
+        let file = File::open(self.dir.join("vkeys.dat"))?;
+        let n = file.metadata()?.len() / VKEY_BYTES as u64;
+        let mut entry = [0u8; VKEY_BYTES];
+        ids.iter()
+            .map(|&id| {
+                let (mut lo, mut hi) = (0, n);
+                while lo < hi {
+                    let mid = (lo + hi) / 2;
+                    read_exact_at(&file, &mut entry, mid * VKEY_BYTES as u64)?;
+                    let at = u128::from_be_bytes(entry[..16].try_into().unwrap());
+                    match at.cmp(&id) {
+                        std::cmp::Ordering::Less => lo = mid + 1,
+                        std::cmp::Ordering::Greater => hi = mid,
+                        std::cmp::Ordering::Equal => return Ok(Some(read_u32(&entry, 16))),
+                    }
+                }
+                Ok(None)
+            })
+            .collect()
     }
 
     /// The best `k` docs for `query` by BM25 among those whose file passes `filter`.

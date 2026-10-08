@@ -1,5 +1,5 @@
-//! Positional reads and writes and atomic replacement, shared by the index files,
-//! the vector store and the embedding cache.
+//! Positional reads and writes and atomic replacement, shared by the index files and
+//! the embedding cache.
 use crate::bench_v1::Error;
 use std::{fs::File, io::Write, path::Path};
 
@@ -90,24 +90,11 @@ impl<'a> Cursor<'a> {
         self.at = end;
         Ok(b)
     }
-    pub fn u8(&mut self) -> Result<u8, Error> {
-        Ok(self.bytes(1)?[0])
-    }
     pub fn u32(&mut self) -> Result<u32, Error> {
         Ok(u32::from_le_bytes(self.bytes(4)?.try_into()?))
-    }
-    pub fn u64(&mut self) -> Result<u64, Error> {
-        Ok(u64::from_le_bytes(self.bytes(8)?.try_into()?))
-    }
-    pub fn f32(&mut self) -> Result<f32, Error> {
-        Ok(f32::from_le_bytes(self.bytes(4)?.try_into()?))
     }
     pub fn string(&mut self) -> Result<String, Error> {
         let n = self.u32()? as usize;
         Ok(String::from_utf8(self.bytes(n)?.to_vec())?)
     }
-}
-pub(crate) fn put_string(out: &mut Vec<u8>, s: &str) {
-    out.extend_from_slice(&(s.len() as u32).to_le_bytes());
-    out.extend_from_slice(s.as_bytes());
 }

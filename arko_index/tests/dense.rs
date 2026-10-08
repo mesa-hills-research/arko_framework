@@ -1,6 +1,7 @@
 //! Dense and hybrid search with a deterministic mock embedder (no network): the
-//! embedding cache, the token cap, persistence and the atomic switch, watcher-driven
-//! rebuilds, filters, headers, and chunk identities.
+//! embedding cache, the token cap, persistence and the atomic switch, the vector
+//! store's incremental updates and recovery, watcher-driven rebuilds, filters, headers,
+//! and chunk identities.
 use arko_index::{
     bench_v1::{Chunk, Error, Options, chunk_dir, chunk_str},
     dense::{
@@ -9,7 +10,7 @@ use arko_index::{
     },
     hybrid::{self, Fusion, Mode, SearchRequest},
     index2::{self, BuildOptions, BuildStats},
-    vector::{Filter, Quantization},
+    vector::{Filter, MhrStore, Quantization, VectorMeta, VectorRecord, VectorStore},
 };
 use std::{
     collections::BTreeSet,
@@ -150,9 +151,28 @@ fn generation(state: &Path) -> std::path::PathBuf {
 /// The bytes of a generation's dense files.
 fn dense_files(state: &Path) -> Vec<(String, Vec<u8>)> {
     let g = generation(state);
-    ["dense.json", "dense/slots.dat", "dense/vectors.f32"]
+    ["dense.json", "vkeys.dat"]
         .iter()
         .map(|f| (f.to_string(), fs::read(g.join(f)).unwrap()))
+        .collect()
+}
+
+/// The vector store directories in a state directory.
+fn stores(state: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(state)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("vectors-"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Each hit's chunk ID and score.
+fn ranked(r: &hybrid::SearchResults) -> Vec<(String, f64)> {
+    r.hits
+        .iter()
+        .map(|h| (h.chunk.id.clone(), h.score))
         .collect()
 }
 
@@ -189,17 +209,22 @@ fn cache_reuses_unchanged_texts_and_reembeds_on_model_change() {
     assert_eq!(a.embedded().len(), all.len(), "no text embedded twice");
     assert!(d.requests >= (all.len() as u64).div_ceil(4));
     assert!(d.tokens > 0 && !d.cap_reached);
+    assert!(d.store_created);
+    assert_eq!((d.vectors_added, d.vectors_removed), (s.docs, 0));
     let first = dense_files(state.path());
+    let store_a = stores(state.path());
+    assert_eq!(store_a.len(), 1);
 
     // The config is saved with the index.
     let config = DenseConfig::load(state.path()).unwrap().unwrap();
     assert_eq!(config.embedder, a.descriptor());
     assert_eq!(config.render_version, RENDER_VERSION);
     assert!(config.embedder.input_types);
-    assert_eq!(config.quantization, Quantization::F32);
+    assert_eq!(config.quantization, Quantization::Int8);
     assert_eq!(config.max_tokens_per_run, None);
 
-    // Unchanged tree, other thread count: nothing embedded, identical vector files.
+    // Unchanged tree, other thread count: nothing embedded, the store unchanged,
+    // identical vector ids.
     a.reset();
     let d = build_with(root.path(), state.path(), Some(&a), None, 4)
         .unwrap()
@@ -208,7 +233,10 @@ fn cache_reuses_unchanged_texts_and_reembeds_on_model_change() {
     assert_eq!((d.new, d.requests, d.tokens), (0, 0, 0));
     assert_eq!(d.cached, all.len() as u64);
     assert!(a.embedded().is_empty());
+    assert_eq!((d.vectors_added, d.vectors_removed), (0, 0));
+    assert!(!d.store_created);
     assert_eq!(dense_files(state.path()), first);
+    assert_eq!(stores(state.path()), store_a);
 
     // Lines shift above every chunk of a file (blank lines on top): the rendered texts
     // (path, scope, trimmed source) are unchanged, so nothing is embedded.
@@ -242,6 +270,9 @@ fn cache_reuses_unchanged_texts_and_reembeds_on_model_change() {
         .unwrap();
     assert_eq!(a.embedded().into_iter().collect::<BTreeSet<_>>(), changed);
     assert_eq!((d.new, d.cached), (1, now.len() as u64 - 1));
+    // The store is updated in place: the edited chunk's vector replaced.
+    assert_eq!((d.vectors_added, d.vectors_removed), (1, 1));
+    assert_eq!(stores(state.path()), store_a);
 
     // Another model: everything again, with that model; its config replaces the old.
     let b = TestEmbedder::new("model-b", 32);
@@ -254,6 +285,10 @@ fn cache_reuses_unchanged_texts_and_reembeds_on_model_change() {
         DenseConfig::load(state.path()).unwrap().unwrap().embedder,
         b.descriptor()
     );
+    // Its own vector store; the other model's is removed.
+    assert!(d.store_created);
+    let store_b = stores(state.path());
+    assert!(store_b.len() == 1 && store_b != store_a);
     // Other dimensions are another model too.
     let a64 = TestEmbedder::new("model-a", 64);
     let d = build_with(root.path(), state.path(), Some(&a64), None, 1)
@@ -269,12 +304,14 @@ fn cache_reuses_unchanged_texts_and_reembeds_on_model_change() {
         .unwrap();
     assert_eq!(d.new, 0);
     assert!(a.embedded().is_empty());
+    assert_eq!(stores(state.path()), store_a);
 
     // A lexical-only build leaves the saved config alone and drops the vectors.
     let s = build_with(root.path(), state.path(), None, None, 1).unwrap();
     assert!(s.dense.is_none());
     assert!(DenseConfig::load(state.path()).unwrap().is_some());
     assert!(index2::dense_info(state.path()).unwrap().is_none());
+    assert!(stores(state.path()).is_empty());
     assert!(DenseConfig::remove(state.path()).unwrap());
     assert!(DenseConfig::load(state.path()).unwrap().is_none());
 }
@@ -699,6 +736,120 @@ fn a_watcher_delta_reembeds_only_its_new_chunks() {
     assert_eq!(
         e.embedded(),
         [render(added, &source[added.start_byte..added.end_byte])]
+    );
+}
+
+/// A build adds the vectors of new texts before it publishes its generation and
+/// removes those of texts that are gone after, so a build interrupted between the two
+/// leaves vectors the current generation lacks: searches skip them, and the next build
+/// removes them.
+#[test]
+fn an_interrupted_build_leaves_searches_exact_and_the_next_build_cleans_up() {
+    let root = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    corpus(root.path());
+    let e = TestEmbedder::new("model-a", 32);
+    build_with(root.path(), state.path(), Some(&e), None, 1).unwrap();
+    let info = index2::dense_info(state.path()).unwrap().unwrap();
+    let search = |mode: Mode| {
+        let request = SearchRequest::new("exponential backoff journal entry")
+            .with_mode(mode)
+            .with_limit(5)
+            .with_candidates(5);
+        ranked(&hybrid::search(state.path(), &request, Some(&e)).unwrap())
+    };
+    let before = (search(Mode::Dense), search(Mode::Hybrid));
+    assert_eq!(before.0.len(), 5);
+
+    // What an interrupted build's upserts leave: vectors under ids this generation
+    // lacks, at least as similar to the query as its own.
+    let dir = state.path().join(&info.store);
+    let mut store = MhrStore::open_for(&dir, &info.store_config()).unwrap();
+    let (query, _) =
+        arko_index::dense::embed_query(&e, "exponential backoff journal entry").unwrap();
+    let vectors: Vec<Vec<f32>> = (0..40)
+        .map(|i| query.iter().map(|x| x + 0.001 * i as f32).collect())
+        .collect();
+    let records: Vec<VectorRecord<'_>> = vectors
+        .iter()
+        .enumerate()
+        .map(|(i, v)| VectorRecord {
+            id: u128::MAX - i as u128,
+            vector: v,
+            meta: VectorMeta {
+                path: "src/net/retry.rs",
+                language: "rust",
+            },
+        })
+        .collect();
+    store.upsert(&records).unwrap();
+    store.persist().unwrap();
+    drop(store);
+    assert_eq!((search(Mode::Dense), search(Mode::Hybrid)), before);
+
+    // The next build removes them and adds nothing.
+    let d = build_with(root.path(), state.path(), Some(&e), None, 1)
+        .unwrap()
+        .dense
+        .unwrap();
+    assert_eq!((d.vectors_added, d.vectors_removed), (0, 40));
+    assert_eq!((search(Mode::Dense), search(Mode::Hybrid)), before);
+    assert_eq!(
+        MhrStore::open(&dir).unwrap().len() as u64,
+        index2::dense_info(state.path()).unwrap().unwrap().embedded
+    );
+}
+
+/// Vectors stored by an earlier version (a generation's `dense.json` of format 1), or
+/// a damaged store, fail dense search with a clear error; lexical search still works,
+/// and the next build stores the vectors again from the cache.
+#[test]
+fn old_or_damaged_vectors_fail_clearly_and_a_build_recovers() {
+    let root = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    corpus(root.path());
+    let e = TestEmbedder::new("model-a", 32);
+    build_with(root.path(), state.path(), Some(&e), None, 1).unwrap();
+    let dense = SearchRequest::new("journal entry").with_mode(Mode::Dense);
+    let good = ranked(&hybrid::search(state.path(), &dense, Some(&e)).unwrap());
+
+    // A generation written by the earlier format: its own vectors in `dense/`.
+    let g = generation(state.path());
+    let mut old: serde_json::Value =
+        serde_json::from_slice(&fs::read(g.join("dense.json")).unwrap()).unwrap();
+    old["version"] = 1.into();
+    let old = old.as_object_mut().unwrap();
+    old.remove("store");
+    old.remove("vector_index");
+    fs::write(g.join("dense.json"), serde_json::to_vec(&old).unwrap()).unwrap();
+    let err = hybrid::search(state.path(), &dense, Some(&e)).unwrap_err();
+    assert!(err.to_string().contains("earlier version"), "{err}");
+    assert!(!index2::search(state.path(), "journal").unwrap().is_empty());
+    e.reset();
+    let d = build_with(root.path(), state.path(), Some(&e), None, 1)
+        .unwrap()
+        .dense
+        .unwrap();
+    assert_eq!(d.new, 0, "vectors come from the cache");
+    assert_eq!(
+        ranked(&hybrid::search(state.path(), &dense, Some(&e)).unwrap()),
+        good
+    );
+
+    // A damaged store.
+    let info = index2::dense_info(state.path()).unwrap().unwrap();
+    fs::write(state.path().join(&info.store).join("CURRENT"), b"damaged").unwrap();
+    assert!(hybrid::search(state.path(), &dense, Some(&e)).is_err());
+    assert!(!index2::search(state.path(), "journal").unwrap().is_empty());
+    let d = build_with(root.path(), state.path(), Some(&e), None, 1)
+        .unwrap()
+        .dense
+        .unwrap();
+    assert!(d.store_created && d.new == 0);
+    assert_eq!(d.vectors_added, d.embedded_docs);
+    assert_eq!(
+        ranked(&hybrid::search(state.path(), &dense, Some(&e)).unwrap()),
+        good
     );
 }
 

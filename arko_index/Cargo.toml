@@ -68,6 +68,8 @@ mhr_tree_sitter_yaml = { git = "https://github.com/mesa-hills-research/mhr_tree_
 mhr_tree_sitter_zig = { git = "https://github.com/mesa-hills-research/mhr_tree_sitter", rev = "d56f6093f18f4212af2ea96588d5ee2318001450" }
 fs2 = "0.4"
 libc = "0.2"
+# The vector store behind dense search: pure Rust, safe Rust.
+mhr_vector = { path = "../../../../mhr-work/mhr_vector-changes/crates/mhr_vector" }
 
 [dev-dependencies]
 tempfile.workspace = true

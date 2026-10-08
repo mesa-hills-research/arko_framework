@@ -18,9 +18,9 @@
 //! lexical result), `--dimensions N` (the model's default), `--max-embed-tokens N`
 //! (2,500,000), `--fusion rrf|linear`, `--rrf-k K`, `--lexical-weight W`,
 //! `--dense-weight W`, `--candidates N` (hybrid tuning: a rerun on the same state costs
-//! only the queries' tokens), `--int8`, `--dry-run` (build with a cap of 0 tokens in a
-//! scratch state and print what embedding would take; needs no key, only the
-//! tokenizer download).
+//! only the queries' tokens), `--f32` (f32 vector codes instead of int8), `--dry-run`
+//! (build with a cap of 0 tokens in a scratch state and print what embedding would
+//! take; needs no key, only the tokenizer download).
 //!
 //! The default corpus (7.7 MB, 265 files, 7,018 chunks) took 1,735,222 billed tokens
 //! without headers (path and source only, 2026-10-04). With the headers, `--dry-run`
@@ -133,7 +133,7 @@ fn parse_args() -> Result<Args, Error> {
         cap: 2_500_000,
         fusion: Fusion::default(),
         candidates: 50,
-        quantization: Quantization::F32,
+        quantization: Quantization::default(),
         dry_run: false,
     };
     let (mut method, mut rrf_k, mut lexical_weight, mut dense_weight) =
@@ -153,11 +153,11 @@ fn parse_args() -> Result<Args, Error> {
             "--lexical-weight" => lexical_weight = Some(value()?.parse()?),
             "--dense-weight" => dense_weight = Some(value()?.parse()?),
             "--candidates" => a.candidates = value()?.parse()?,
-            "--int8" => a.quantization = Quantization::Int8,
+            "--f32" => a.quantization = Quantization::F32,
             "--dry-run" => a.dry_run = true,
             "--help" | "-h" => {
                 eprintln!(
-                    "usage: dense_live_check [--corpus DIR] [--eval-dir DIR] [--state DIR] [--model MODEL] [--dimensions N] [--max-embed-tokens N] [--fusion rrf|linear] [--rrf-k K] [--lexical-weight W] [--dense-weight W] [--candidates N] [--int8] [--dry-run]"
+                    "usage: dense_live_check [--corpus DIR] [--eval-dir DIR] [--state DIR] [--model MODEL] [--dimensions N] [--max-embed-tokens N] [--fusion rrf|linear] [--rrf-k K] [--lexical-weight W] [--dense-weight W] [--candidates N] [--f32] [--dry-run]"
                 );
                 std::process::exit(0);
             }

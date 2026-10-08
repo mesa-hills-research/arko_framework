@@ -12,7 +12,12 @@
 pub(crate) mod cache;
 pub(crate) mod run;
 
-use crate::{bench_v1::Chunk, bench_v1::Error, fsio::atomic_write, vector::Quantization};
+use crate::{
+    bench_v1::Chunk,
+    bench_v1::Error,
+    fsio::atomic_write,
+    vector::{Quantization, StoreConfig, VectorIndex},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -100,6 +105,12 @@ impl std::str::FromStr for EmbedText {
 /// The cache key of a rendered text: its SHA-256.
 pub(crate) fn text_hash(text: &str) -> [u8; 32] {
     Sha256::digest(text.as_bytes()).into()
+}
+
+/// Names how chunks were rendered for embedding (part of a vector store's model):
+/// `arko_index/render-1/path-scope-source`.
+pub(crate) fn text_format(render_version: u32, embed_text: EmbedText) -> String {
+    format!("arko_index/render-{render_version}/{}", embed_text.as_str())
 }
 
 /// Whether a text is embedded as a document (a chunk) or as a search query. Some
@@ -302,6 +313,9 @@ pub struct DenseConfig {
     pub render_version: u32,
     #[serde(default)]
     pub quantization: Quantization,
+    /// How dense search finds candidates (default: a flat scan).
+    #[serde(default)]
+    pub vector_index: VectorIndex,
     /// The token cap of each build (`None`: no cap).
     #[serde(default)]
     pub max_tokens_per_run: Option<u64>,
@@ -326,12 +340,17 @@ impl DenseConfig {
             embedder,
             render_version: RENDER_VERSION,
             quantization: Quantization::default(),
+            vector_index: VectorIndex::default(),
             max_tokens_per_run: None,
             embed_text: EmbedText::default(),
         }
     }
     pub fn with_quantization(mut self, quantization: Quantization) -> Self {
         self.quantization = quantization;
+        self
+    }
+    pub fn with_vector_index(mut self, vector_index: VectorIndex) -> Self {
+        self.vector_index = vector_index;
         self
     }
     pub fn with_max_tokens_per_run(mut self, cap: Option<u64>) -> Self {
@@ -390,6 +409,7 @@ impl DenseConfig {
 pub struct DenseBuild<'a> {
     pub embedder: &'a dyn Embedder,
     pub quantization: Quantization,
+    pub vector_index: VectorIndex,
     /// Stop embedding before a request would bring this run's tokens over the cap.
     /// `None`: no cap.
     pub max_tokens: Option<u64>,
@@ -403,17 +423,19 @@ impl<'a> DenseBuild<'a> {
         Self {
             embedder,
             quantization: Quantization::default(),
+            vector_index: VectorIndex::default(),
             max_tokens: None,
             embed_text: EmbedText::default(),
             progress: None,
         }
     }
-    /// The settings of a saved config (quantization, cap and embedded text) for this
-    /// embedder.
+    /// The settings of a saved config (quantization, vector index, cap and embedded
+    /// text) for this embedder.
     pub fn from_config(embedder: &'a dyn Embedder, config: &DenseConfig) -> Self {
         Self {
             embedder,
             quantization: config.quantization,
+            vector_index: config.vector_index,
             max_tokens: config.max_tokens_per_run,
             embed_text: config.embed_text,
             progress: None,
@@ -421,6 +443,10 @@ impl<'a> DenseBuild<'a> {
     }
     pub fn with_quantization(mut self, quantization: Quantization) -> Self {
         self.quantization = quantization;
+        self
+    }
+    pub fn with_vector_index(mut self, vector_index: VectorIndex) -> Self {
+        self.vector_index = vector_index;
         self
     }
     pub fn with_max_tokens(mut self, cap: Option<u64>) -> Self {
@@ -482,26 +508,53 @@ pub struct EmbedStats {
     pub too_long: u64,
     /// Vectors in the model's cache after the build (after compaction, if any).
     pub cache_records: u64,
+    /// Vectors this build added to the vector store, and removed from it: the chunks
+    /// whose embedded text or path changed (all of them when the store is new).
+    pub vectors_added: u64,
+    pub vectors_removed: u64,
+    /// Whether this build created the vector store: the first build with this model
+    /// and these settings, or the store was unusable (damaged, or another format).
+    pub store_created: bool,
 }
 
 /// What a generation's embeddings are (`dense.json` in the generation directory).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct DenseIndexInfo {
+    /// The format version: 2. Generations of version 1 (earlier arko_index versions)
+    /// kept their own vectors, and are searched lexically only.
     pub version: u32,
     pub embedder: ModelDescriptor,
     pub render_version: u32,
     #[serde(default)]
     pub embed_text: EmbedText,
     pub quantization: Quantization,
+    #[serde(default)]
+    pub vector_index: VectorIndex,
+    /// The vector store's directory in the state directory (`vectors-...`).
+    #[serde(default)]
+    pub store: String,
     /// Chunks in the generation.
     pub docs: u64,
     /// Chunks with a vector.
     pub embedded: u64,
 }
 impl DenseIndexInfo {
+    /// The format version this crate writes and searches.
+    pub const VERSION: u32 = 2;
+
     /// Whether every chunk has a vector.
     pub fn complete(&self) -> bool {
         self.embedded == self.docs
+    }
+
+    /// The model and settings of the generation's vector store.
+    pub fn store_config(&self) -> StoreConfig {
+        StoreConfig::new(
+            self.embedder.clone(),
+            text_format(self.render_version, self.embed_text),
+        )
+        .with_quantization(self.quantization)
+        .with_index(self.vector_index)
     }
 }

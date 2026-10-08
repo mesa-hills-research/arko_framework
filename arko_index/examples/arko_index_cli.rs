@@ -13,7 +13,7 @@ use arko_index::{
     dense::{DenseBuild, DenseConfig, EmbedProgress, EmbedStats, EmbedText},
     hybrid::{Fusion, Mode, SearchRequest},
     search,
-    vector::{Filter, Quantization},
+    vector::{Filter, Quantization, VectorIndex},
 };
 use std::{
     io::{self, Write},
@@ -39,7 +39,7 @@ struct Walk {
     front_matter_description: bool,
 }
 const RULE_FLAGS: &str = "[--respect-ignore] [--exclude PATTERN]... [--include PATTERN]... [--report FILE] [--front-matter-description]";
-const EMBED_FLAGS: &str = "[--lexical-scope] [--embed MODEL] [--dimensions N] [--embed-text source|path-source|path-scope-source] [--embed-config FILE] [--quantize f32|int8] [--max-embed-tokens N|none] [--no-embed]";
+const EMBED_FLAGS: &str = "[--lexical-scope] [--embed MODEL] [--dimensions N] [--embed-text source|path-source|path-scope-source] [--embed-config FILE] [--quantize f32|int8] [--vector-index flat|graph] [--max-embed-tokens N|none] [--no-embed]";
 const SEARCH_FLAGS: &str = "[--mode lexical|dense|hybrid] [--limit N] [--candidates N] [--fusion rrf|linear] [--rrf-k K] [--lexical-weight W] [--dense-weight W] [--path-prefix P] [--language L] [--text]";
 
 /// Every command's flags; a command accepts the groups it passes to `parse_flags`.
@@ -52,6 +52,7 @@ struct Flags {
     dimensions: Option<usize>,
     embed_config: Option<PathBuf>,
     quantize: Option<Quantization>,
+    vector_index: Option<VectorIndex>,
     /// `Some(None)`: `--max-embed-tokens none`.
     max_embed_tokens: Option<Option<u64>>,
     no_embed: bool,
@@ -90,6 +91,7 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
         dimensions: None,
         embed_config: None,
         quantize: None,
+        vector_index: None,
         max_embed_tokens: None,
         no_embed: false,
         mode: None,
@@ -134,7 +136,9 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
             | "--report"
             | "--front-matter-description" => accepts.walk,
             "--lexical-scope" | "--embed" | "--dimensions" | "--embed-text" | "--embed-config"
-            | "--quantize" | "--max-embed-tokens" | "--no-embed" => accepts.embed,
+            | "--quantize" | "--vector-index" | "--max-embed-tokens" | "--no-embed" => {
+                accepts.embed
+            }
             "--mode" | "--limit" | "--candidates" | "--fusion" | "--rrf-k" | "--lexical-weight"
             | "--dense-weight" | "--path-prefix" | "--language" | "--text" => accepts.search,
             _ => false,
@@ -185,6 +189,17 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
                     "f32" => Quantization::F32,
                     "int8" => Quantization::Int8,
                     _ => return Err(format!("--quantize takes f32 or int8, not {value:?}").into()),
+                })
+            }
+            "--vector-index" => {
+                f.vector_index = Some(match value.as_str() {
+                    "flat" => VectorIndex::Flat,
+                    "graph" => VectorIndex::Graph,
+                    _ => {
+                        return Err(
+                            format!("--vector-index takes flat or graph, not {value:?}").into()
+                        );
+                    }
                 })
             }
             "--max-embed-tokens" => {
@@ -248,8 +263,8 @@ fn rules_changed_note() {
 
 /// The embedding settings of an `index2` run: `--no-embed` (lexical, and forget the
 /// saved settings), or one of `--embed-config FILE` and `--embed MODEL`, else the
-/// index's saved `dense.json`; then `--dimensions`, `--embed-text`, `--quantize` and
-/// `--max-embed-tokens`.
+/// index's saved `dense.json`; then `--dimensions`, `--embed-text`, `--quantize`,
+/// `--vector-index` and `--max-embed-tokens`.
 fn dense_config(state: &Path, f: &Flags) -> Result<Option<DenseConfig>, Error> {
     if f.no_embed {
         if f.embed.is_some() || f.embed_config.is_some() {
@@ -275,11 +290,12 @@ fn dense_config(state: &Path, f: &Flags) -> Result<Option<DenseConfig>, Error> {
         config
     } else if let Some(spec) = &f.embed {
         let embedder = support::descriptor_for(spec, f.dimensions)?;
-        // A new model keeps the saved quantization, cap and embedded text unless they
-        // are given.
+        // A new model keeps the saved quantization, vector index, cap and embedded text
+        // unless they are given.
         match saved {
             Some(saved) => DenseConfig::new(embedder)
                 .with_quantization(saved.quantization)
+                .with_vector_index(saved.vector_index)
                 .with_max_tokens_per_run(saved.max_tokens_per_run)
                 .with_embed_text(saved.embed_text),
             None => DenseConfig::new(embedder),
@@ -294,6 +310,7 @@ fn dense_config(state: &Path, f: &Flags) -> Result<Option<DenseConfig>, Error> {
         if f.dimensions.is_some()
             || f.embed_text.is_some()
             || f.quantize.is_some()
+            || f.vector_index.is_some()
             || f.max_embed_tokens.is_some()
         {
             return Err("this index has no saved embedding model: choose one with --embed".into());
@@ -302,6 +319,9 @@ fn dense_config(state: &Path, f: &Flags) -> Result<Option<DenseConfig>, Error> {
     };
     if let Some(q) = f.quantize {
         config = config.with_quantization(q);
+    }
+    if let Some(index) = f.vector_index {
+        config = config.with_vector_index(index);
     }
     if let Some(embed_text) = f.embed_text {
         config = config.with_embed_text(embed_text);
@@ -341,6 +361,12 @@ fn print_embed_stats(s: &EmbedStats) {
     eprintln!(
         "arko_index: {} of {} chunks have vectors; the cache holds {} vectors for this model",
         s.embedded_docs, s.docs, s.cache_records
+    );
+    eprintln!(
+        "arko_index: vector store{}: {} vectors added, {} removed",
+        if s.store_created { " (new)" } else { "" },
+        s.vectors_added,
+        s.vectors_removed
     );
 }
 

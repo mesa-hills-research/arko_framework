@@ -13,8 +13,8 @@
 //!   candidates (all 1 when they are equal), a missing chunk counts 0, and the score
 //!   is `w · lexical + (1 − w) · dense`.
 //!
-//! Equal scores are ordered by document id, which follows (path, start byte): results
-//! are deterministic.
+//! Equal BM25 and fused scores are ordered by document id, which follows (path, start
+//! byte), and equal similarities by vector id: results are deterministic.
 use crate::{
     bench_v1::{Chunk, Error},
     dense::{DenseIndexInfo, Embedder, ModelDescriptor, embed_query},
@@ -277,26 +277,26 @@ pub fn search(
     request: &SearchRequest,
     embedder: Option<&dyn Embedder>,
 ) -> Result<SearchResults, Error> {
-    // A build may publish a new generation and remove the one being read; then the
-    // search starts over on the new one. The query is embedded (and billed) once.
+    // A build may publish a new generation and remove the one being read, or the
+    // vectors of its chunks that are gone; then the search starts over on the new
+    // generation. The query is embedded (and billed) once.
     let mut embedded: Option<(ModelDescriptor, Vec<f32>)> = None;
     let mut query_tokens = 0;
     let current = || std::fs::read_to_string(state_dir.join("CURRENT2")).ok();
     for attempt in 0.. {
         let before = current();
-        match search_once(
+        let result = search_once(
             state_dir,
             request,
             embedder,
             &mut embedded,
             &mut query_tokens,
-        ) {
-            Err(e)
-                if attempt < 2
-                    && e.downcast_ref::<std::io::Error>()
-                        .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
-                    && current() != before => {}
-            result => return result,
+        );
+        let retry = attempt < 2
+            && (result.is_err() || request.mode != Mode::Lexical)
+            && current() != before;
+        if !retry {
+            return result;
         }
     }
     unreachable!()
@@ -344,16 +344,22 @@ fn search_once(
                     v
                 }
             };
-            let store = generation.open_store()?;
+            let store = generation.open_store(info)?;
             let depth = if request.mode == Mode::Dense {
                 limit
             } else {
                 request.candidates.max(limit)
             };
-            let dense: Vec<(u64, f64)> = store
-                .search(&vector, depth, &request.filter)?
-                .into_iter()
-                .map(|h| (h.id, f64::from(h.score)))
+            // Vectors of another generation in the store (see `open_store`) are
+            // skipped: fetch enough to keep `depth` of this one's.
+            let others = store.len().saturating_sub(info.embedded as usize);
+            let hits = store.search(&vector, depth.saturating_add(others), &request.filter)?;
+            let ids: Vec<_> = hits.iter().map(|h| h.id).collect();
+            let dense: Vec<(u64, f64)> = hits
+                .iter()
+                .zip(generation.docs_of(&ids)?)
+                .filter_map(|(h, doc)| Some((u64::from(doc?), f64::from(h.score))))
+                .take(depth)
                 .collect();
             if request.mode == Mode::Dense {
                 dense
