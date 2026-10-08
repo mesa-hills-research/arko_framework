@@ -9,8 +9,8 @@ or, in Markdown, the document's title and heading chain. Chunking, lexical searc
 watching run entirely on your machine.
 
 Dense (embedding) and hybrid search are opt-in. They embed through a `dense::Embedder` the
-caller supplies (the CLI uses Voyage through arko_ai), and the library itself never makes a
-network call. Lexical search works as soon as a build has chunked the tree, and dense
+caller supplies (the CLI uses Voyage through arko_ai) or with a code-embedding model run on
+the CPU ([local models](#local-models)), and the library itself never makes a network call. Lexical search works as soon as a build has chunked the tree, and dense
 results fill in while the chunks are embedded, however long a slow model takes. The vectors
 live in [Caprock](https://github.com/mesa-hills-research/caprock), a pure-Rust store
 updated in place as they arrive. A search scans int8 codes held in memory and rescores the
@@ -75,6 +75,8 @@ $CLI index2 ./repo ./index-state           # later builds reuse the saved model 
 $CLI search2 --text ./index-state 'where is the input limit applied'   # hybrid
 $CLI search2 --mode lexical --language rust ./index-state 'RetryPolicy'
 $CLI search2 --path-prefix src/net ./index-state 'retry'   # one folder (whole path components)
+# Dense search with a local model: no key, nothing billed (build with --features local-embed)
+$CLI index2 --embed local ./repo ./index-state
 ```
 
 In Rust:
@@ -110,6 +112,17 @@ docs/guide.md:14-21 · Guide › ## Install › ### Linux
 Headers are metadata: they never change chunk boundaries or IDs. Each language's labels are
 in [arko_index languages](../docs/arko_index-languages.md), and the limits and formats in
 [Context headers](../docs/arko_index-reference.md#context-headers).
+
+## Local models
+
+With the `local-embed` feature, `dense::local::LocalEmbedder` runs a code-embedding model on
+the CPU, in pure Rust, so dense search needs no key and costs nothing per token.
+`--embed local` picks nomic-ai/CodeRankEmbed (137M parameters, MIT). The first build
+downloads its pinned files (548 MB) into the Hugging Face cache. On the retrieval questions
+above it finds what voyage-code-4 finds. Embedding is the cost: the 7,438 chunks of this
+repository took 330 s on 40 threads of an EPYC 9354P, once, since the cache keeps the
+vectors. [arko_index local embeddings](../docs/arko_index-local-embeddings.md) has the
+models, the measurements and the evaluation.
 
 ## Watchers
 
@@ -150,6 +163,8 @@ has the details.
   rules of each language, and Markdown front matter.
 - [arko_index verification](../docs/arko_index-verification.md): the tests and validation
   tools, the checks of the parser switch, and the retrieval evaluation.
+- [arko_index local embeddings](../docs/arko_index-local-embeddings.md): the local models,
+  how they run, their speed and their retrieval quality.
 
 ## Origin
 

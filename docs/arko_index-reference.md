@@ -4,7 +4,8 @@ arko_index partitions source trees into syntax-aware chunks with tree-sitter, bu
 offline BM25 indexes over them, optionally embeds the chunks for dense and hybrid
 search, and keeps chunk snapshots current with durable watchers. The library makes no
 network calls and depends on no other arko crate: embeddings come from a caller's
-`dense::Embedder` (its examples adapt arko_ai's Voyage client, a dev-dependency). The
+`dense::Embedder` (its examples adapt arko_ai's Voyage client, a dev-dependency), or
+from a model run on the CPU with the `local-embed` feature. The
 [crate README](../arko_index/README.md) is the overview. This page describes the
 behaviour (which files are indexed, how boundaries and IDs are chosen, context headers,
 dense and hybrid search, the watchers' durability) and lists the API, the CLI, the
@@ -18,6 +19,7 @@ environment variables, the defaults and the on-disk state.
 | `arko_index::search` | The first index format (one JSON file): `index`, `index_with`, `search`, `outline`. | `arko_index/src/search.rs` |
 | `arko_index::index2` | The disk-resident index: `index`, `index_with`, `build`, `BuildOptions`, `search`, `dense_info`, `BuildStats`, and its embedding: `embed`, `status`, `IndexStatus`. | `arko_index/src/index2.rs` |
 | `arko_index::dense` | Embeddings: `Embedder`, `ModelDescriptor`, `EmbedLimits`, `Embedding`, `InputKind`, `HashEmbedder`, `embed_query`, `render`, `render_with`, `EmbedText`, `RENDER_VERSION`, `DenseConfig`, `DenseBuild`, `EmbedProgress`, `EmbedStats`, `EmbedState`, `DenseIndexInfo`. | `arko_index/src/dense/` |
+| `arko_index::dense::local` | Feature `local-embed`: `LocalEmbedder`, `LocalModel`, `ModelFile`, `Architecture`, `Pooling`, `MODELS`, `DEFAULT_MODEL`, `CODE_RANK_EMBED`, `JINA_CODE_V2`, `DEFAULT_BATCH_TOKENS`, `find`. | `arko_index/src/dense/local/` |
 | `arko_index::vector` | Vector storage: `VectorStore`, `CaprockStore`, `StoreConfig`, `Quantization`, `VectorIndex`, `Filter`, `VectorId`, `VectorMeta`, `VectorRecord`, `VectorHit`. | `arko_index/src/vector.rs` |
 | `arko_index::hybrid` | Lexical, dense and hybrid search: `search`, `SearchRequest`, `Mode`, `Fusion`, `fuse`, `Fused`, `SearchHit`, `SearchResults`. | `arko_index/src/hybrid.rs` |
 | `arko_index::watch2` | Linux only: `Watcher2`, the inotify watcher. | `arko_index/src/watch2.rs` |
@@ -490,6 +492,8 @@ components: `src/net` finds `src/net/retry.rs` and `src/net`, but not `src/netwo
 | `dense::DenseConfig` | The per-index settings in `STATE_DIR/dense.json`: `version` (1), `embedder` (a `ModelDescriptor`), `render_version`, `quantization`, `vector_index` (`Flat` when absent), `max_tokens_per_run`, `embed_text` (`PathScopeSource` when absent), with `new`, `with_*`, `load(state_dir)`, `read(path)`, `save(state_dir)`, `remove(state_dir)`. Saved by every build with embeddings. |
 | `dense::DenseBuild` | One build's or run's embedding: `embedder`, `quantization` (`Int8`), `vector_index` (`Flat`), `max_tokens` (`None`), `embed_text` (`PathScopeSource`), `progress` (called after each request with `EmbedProgress { texts, total, tokens, requests, embedded_docs, docs }`), `embed_later` (`false`: `build` embeds before it returns), `stop` (`None`: a `StopSignal` that, once stopped, makes the run stop after its current request), with `new`, `from_config`, `with_*`. `index2::embed` uses the embedder, the cap, `progress` and `stop`, and takes the other settings from the generation. |
 | `dense::EmbedStats` | `BuildStats::dense` and `index2::embed`'s result: `embedder`, `render_version`, `embed_text`, `docs`, `embedded_docs`, `texts` (distinct), `cached`, `new`, `requests`, `tokens` (billed), `max_tokens`, `cap_reached`, `not_embedded`, `not_embedded_tokens` (counted), `too_long`, `cache_records`, `vectors_added`, `vectors_removed` (the vector store's update), `store_created`, `superseded` (a newer generation was published), `stopped`. A build with `embed_later` reports what it published: `embedded_docs` chunks with a vector already, and `texts - cached` texts to embed. |
+| `dense::local::LocalEmbedder::load(model, dir)` | Feature `local-embed`. Loads a `LocalModel` from `dir` (`config.json`, `tokenizer.json`, `model.safetensors`), each file checked by size and SHA-256. `with_threads(n)` (default `threads()`), `with_batch_tokens(n)` (tokens per forward pass, 8,192), `model()`, `threads()`. Implements `Embedder`: 256 texts and 8,192 tokens per request, texts truncated at the model's `max_tokens`, query and document prefixes, unit vectors, `tokens` = tokens processed. |
+| `dense::local::LocalModel` | A pinned model: `name`, `repo`, `revision` (a commit), `dimensions`, `max_tokens`, `query_prefix`, `document_prefix`, `licence`, `architecture` (`JinaBert`, `NomicBert`), `pooling` (`Mean`, `Cls`), `files`, with `descriptor()` (provider `local`, the repository as model, the commit as revision, input types when the prefixes differ), `for_descriptor`, `download_size`. `MODELS` lists `CODE_RANK_EMBED` (the `DEFAULT_MODEL`) and `JINA_CODE_V2`, and `find(name)` matches a name or repository. |
 | `dense::StopSignal` | Asks a run to stop after its current request: `new`, `stop(reason)` (the first reason is kept, and it returns whether this call stopped it), `is_stopped`, `reason`. Shared between threads. |
 | `dense::EmbedState` | How far a generation's embedding has come (`DenseIndexInfo::state`): `Embedding`, `Complete` (the default, and what a generation written before runs existed reads as), `CapReached`. |
 | `vector::VectorStore` | `dimensions`, `len`, `is_empty`, `upsert(&[VectorRecord { id, vector, meta: VectorMeta { path, language } }])` (replaces, a batch all or nothing), `delete(&[id])`, `ids()` (ascending), `search(query, k, &Filter) -> Vec<VectorHit { id, score }>` (cosine, best first, then id ascending), `persist` (atomic). Ids are `VectorId` (`u128`). |
@@ -737,8 +741,8 @@ peak memory.
 
 | `index2` flag | Effect |
 |---|---|
-| `--embed MODEL` | Embed with `MODEL`: a Voyage model (`voyage-code-4`), `voyage:MODEL`, or `hash` (offline, for trying things out). Saved in `dense.json`. Needs `VOYAGE_API_KEY` for Voyage. |
-| `--dimensions N` | Vector dimensions (voyage-code-4: 256, 512, 1024 by default, 2048). |
+| `--embed MODEL` | Embed with `MODEL`: a Voyage model (`voyage-code-4`), `voyage:MODEL`, `local` or `local:NAME` (a [local model](arko_index-local-embeddings.md), with `--features local-embed`), or `hash` (offline, for trying things out). Saved in `dense.json`. Needs `VOYAGE_API_KEY` for Voyage. |
+| `--dimensions N` | Vector dimensions (voyage-code-4: 256, 512, 1024 by default, 2048. Local models: 768 only). |
 | `--embed-text source\|path-source\|path-scope-source` | What each chunk's embedded text holds besides its source (default `path-scope-source`). Saved in `dense.json`. |
 | `--embed-config FILE` | Take the settings from a file in the format of `dense.json`. `--dimensions` applies after it, checked against the file's model. With `--embed` it is an error (`--embed and --embed-config both choose the model: give one`). |
 | `--quantize f32\|int8` | Vector codes held in memory: `int8` (default) or `f32`, exact at 4 bytes per dimension. Saved in `dense.json`. |
@@ -801,8 +805,12 @@ arko_index: query embedded with hash/hash-v1 (256 dimensions): 7 tokens
 
 `dense_live_check` is a second example: it builds an index with Voyage embeddings of
 a small corpus and runs the retrieval evaluation in the three modes, printing ranks,
-scores and tokens (`--dry-run` only counts tokens). It spends Voyage tokens. See the
-file's header and the [retrieval evaluation](arko_index-verification.md#retrieval-evaluation).
+scores and tokens (`--dry-run` only counts tokens). It spends Voyage tokens, unless
+`--model local` runs a local model. See the file's header and the
+[retrieval evaluation](arko_index-verification.md#retrieval-evaluation).
+`local_embed_bench` (feature `local-embed`) measures a local model's throughput on a
+tree at chosen thread counts and, with `--index STATE`, the size of an index built
+with it.
 
 ## Environment variables
 
@@ -813,6 +821,7 @@ file's header and the [retrieval evaluation](arko_index-verification.md#retrieva
 | `ARKO_INDEX_INDEX_MEM_MB` | 256 | CLI only: `index2`'s postings memory budget before spilling to runs. |
 | `ARKO_INDEX_STATS` | Unset | When set, `index2` prints per-phase timings to stderr. |
 | `MALLOC_MMAP_THRESHOLD_` | Unset: the CLI sets 1 MB | glibc's own variable. When it is set, the CLI leaves the threshold to glibc. |
+| `HF_HOME` | `~/.cache/huggingface` | Examples only (through hf-hub): local models are downloaded into `$HF_HOME/hub`. |
 | `VOYAGE_API_KEY` | Unset | Examples only (through arko_ai's `EmbeddingClient::from_env`): the key for embedding with Voyage. The library reads no credentials. |
 | `ARKO_INDEX_OWNER_PID` | Unset | CLI only: the owner of an embedding run when no `--owner-pid` is given (`0`: none). |
 | `ARKO_INDEX_HASH_DELAY_MS` | 0 | Examples only: the offline `hash` embedder waits this long per request, to try background embedding at the pace of a real model. |
@@ -836,8 +845,12 @@ has the checks of the switch.
 Dense search stores its vectors with [Caprock](https://github.com/mesa-hills-research/caprock) (a Git dependency pinned to
 commit 5ec18cc in `Cargo.toml`), also pure, safe Rust.
 
-arko_index has no cargo features. The examples use arko_ai for Voyage, a dev-dependency
-whose dependencies need a C compiler, so building the tests and examples needs one.
+The `local-embed` feature (off by default) adds `dense::local`, embedding models run on
+the CPU, with gemm, rayon, tokenizers (fancy-regex engine) and libm, all pure Rust, so
+the library still needs no C compiler. See
+[arko_index local embeddings](arko_index-local-embeddings.md). The examples use arko_ai
+for Voyage, a dev-dependency whose dependencies need a C compiler, so building the tests
+and examples needs one.
 
 ## Defaults
 
@@ -868,6 +881,8 @@ whose dependencies need a C compiler, so building the tests and examples needs o
 | Filters (`Filter::default`) | None |
 | Render version (`RENDER_VERSION`) | 1: path, scope, trimmed source |
 | Embedding cache compaction | When the model's cache holds more than twice the index's distinct texts plus 1,024 records |
+| Local model (CLI `--embed local`) | `nomic-ai/CodeRankEmbed` at commit `3c4b608`, 768 dimensions |
+| Local embedder (`LocalEmbedder`) | `threads()` workers, 8,192 tokens per forward pass, 256 texts per request, truncation at 8,192 tokens |
 | Voyage adapter (examples) | 1,000 texts and 320,000 tokens per request for voyage-code-4, and 4 retries of transient failures |
 
 ## On-disk state
@@ -880,6 +895,7 @@ directory that holds it) and `report.json` (the last walk's report).
 | `search::index` | `index.json` (version 1), `.index.lock` |
 | `index2::index`, `index2::build` | `CURRENT2` (the name of the current generation), `.index.lock`, `.embed.lock`, `index2-<stamp>-<pid>/` with `meta.json` (version 2, with `dense`: whether the generation has embeddings, `false` when absent), `lens.dat`, `docs.off`, `docs.dat`, `terms.dat`, `terms.idx`, `post.dat`, `files.dat` (each file's first document and path, for filters), and with embeddings also `dense.json` (`DenseIndexInfo`, version 2, naming the vector store, with the coverage when published), `vkeys.dat` (per document, by vector id: the 128-bit id big-endian, then the document as u32), `vhash.dat` (per document, in order: its embedded text's 32-byte hash) and `embed.spool` (the texts the cache lacked, removed when every one is embedded). Older generations are removed after a switch, or by a later build when one cannot be removed then. |
 | `index2::build` with embeddings, `index2::embed` | `vectors-<digest>/`, the vector store (Caprock's files: `CURRENT`, manifests, segments, tombstones, `LOCK`), updated in place by embedding runs and shared by the generations. Also `dense.json` (`DenseConfig`, version 1: the model and settings the CLI's later builds follow), `embed-cache/<model key>/` (`cache.json` with the full descriptor and the epoch, `keys.<epoch>` with 32-byte text hashes, `vectors.<epoch>` with the vectors as returned, appended and fsynced per request), and `embed-progress.json` (version 1: the generation the latest run embeds, its `state`, `EmbedProgress` and the reason it was stopped, replaced after each commit of the store). The CLI's background run writes `embed.log`. |
+| The examples' local models | Hugging Face cache, outside the state: `$HF_HOME/hub/models--<org>--<name>/` with `snapshots/<commit>/` (the files) and `blobs/`. |
 | `open_watch` | `watch.json` (version 1: snapshot, fingerprints, sequence, acknowledgement, pending deltas, rules, and the engine-qualified parse cache) |
 | `Watcher2` | `watch2.snap` (version 3), `watch2.recs.N`, `watch2.wal` |
 
