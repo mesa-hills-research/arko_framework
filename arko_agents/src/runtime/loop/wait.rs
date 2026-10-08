@@ -300,19 +300,10 @@ impl AgentLoop {
 
         if matches!(self.task.current_state, TaskState::InProgress) && !native_handled {
             if !next_user_message_from_command.is_empty() {
-                let pb = self.prompts();
-                let next_msg_num = self.task.user_message_count + 1;
-                let augmented_msg = pb.augment_user_message_with_env_details_and_reminder(
-                    &self.task,
-                    &next_user_message_from_command,
-                    next_msg_num,
-                )?;
-                self.add_text_tool_results_to_conversation(&augmented_msg);
-                self.mark_details_sent();
+                self.add_results_message(&next_user_message_from_command)?;
                 if next_message_is_runtime {
                     self.task.mark_last_message_runtime();
                 }
-                self.task.increment_user_message_count();
                 self.reset_llm_recovery();
             } else {
                 self.add_runtime_message(CONTINUE_AFTER_DECISION)?;

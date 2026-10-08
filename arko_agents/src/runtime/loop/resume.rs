@@ -363,16 +363,7 @@ impl AgentLoop {
             self.task.pending_text_tool_results.clear();
         } else if !self.task.current_state.is_awaiting_approval() {
             let results = self.task.with_pending_text_tool_results(String::new());
-            let message = self
-                .prompts()
-                .augment_user_message_with_env_details_and_reminder(
-                    &self.task,
-                    &results,
-                    self.task.user_message_count + 1,
-                )?;
-            self.add_text_tool_results_to_conversation(&message);
-            self.mark_details_sent();
-            self.task.increment_user_message_count();
+            self.add_results_message(&results)?;
         }
         Ok(())
     }

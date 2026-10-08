@@ -55,6 +55,23 @@ impl AgentLoop {
         self.task.take_tool_image_content()
     }
 
+    /// Adds output-based results (or an answer, or a note) as the next
+    /// user message, with the environment details and reminder due with it
+    /// and the tool images waiting for it.
+    pub(super) fn add_results_message(&mut self, text: &str) -> Result<(), ArkoAgentsError> {
+        let message = self
+            .prompts()
+            .augment_user_message_with_env_details_and_reminder(
+                &self.task,
+                text,
+                self.task.user_message_count + 1,
+            )?;
+        self.add_text_tool_results_to_conversation(&message);
+        self.mark_details_sent();
+        self.task.increment_user_message_count();
+        Ok(())
+    }
+
     pub(super) fn add_text_tool_results_to_conversation(&mut self, text: &str) {
         let mut content = vec![ai::Content::Text(text.to_string())];
         content.extend(self.take_tool_image_content());
@@ -507,16 +524,7 @@ impl AgentLoop {
             && !self.task.current_state.is_terminal()
             && !self.task.current_state.is_awaiting_approval()
         {
-            let pb = self.prompts();
-            let next_msg_num = self.task.user_message_count + 1;
-            let augmented_user_message = pb.augment_user_message_with_env_details_and_reminder(
-                &self.task,
-                &next_user_message_str_accumulated,
-                next_msg_num,
-            )?;
-            self.add_text_tool_results_to_conversation(&augmented_user_message);
-            self.mark_details_sent();
-            self.task.increment_user_message_count();
+            self.add_results_message(&next_user_message_str_accumulated)?;
         } else if next_user_message_str_accumulated.is_empty()
             && !self.task.current_state.is_terminal()
             && !self.task.current_state.is_awaiting_approval()
