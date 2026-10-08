@@ -324,6 +324,9 @@ fn search_once(
             let info = info.as_ref().ok_or(
                 "this index has no embeddings: build it with embeddings (index2 --embed) or search lexically",
             )?;
+            // Before the query is embedded (and billed): the format, the model and
+            // settings, and that the store holds the generation's vectors.
+            let store = generation.open_store(info)?;
             let vector = match (&request.query_vector, &*embedded) {
                 (Some(v), _) => v.clone(),
                 (None, Some((model, v))) if *model == info.embedder => v.clone(),
@@ -344,7 +347,6 @@ fn search_once(
                     v
                 }
             };
-            let store = generation.open_store(info)?;
             let depth = if request.mode == Mode::Dense {
                 limit
             } else {

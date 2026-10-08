@@ -800,9 +800,10 @@ fn an_interrupted_build_leaves_searches_exact_and_the_next_build_cleans_up() {
     );
 }
 
-/// Vectors stored by an earlier version (a generation's `dense.json` of format 1), or
-/// a damaged store, fail dense search with a clear error; lexical search still works,
-/// and the next build stores the vectors again from the cache.
+/// Vectors stored by an earlier version (a generation's `dense.json` of format 1), a
+/// damaged store, one missing a file, or an empty replacement (a repair that stopped)
+/// fail dense search with a clear error; lexical search still works, and the next
+/// build stores the vectors again from the cache.
 #[test]
 fn old_or_damaged_vectors_fail_clearly_and_a_build_recovers() {
     let root = tempfile::tempdir().unwrap();
@@ -823,6 +824,9 @@ fn old_or_damaged_vectors_fail_clearly_and_a_build_recovers() {
     old.remove("vector_index");
     fs::write(g.join("dense.json"), serde_json::to_vec(&old).unwrap()).unwrap();
     let err = hybrid::search(state.path(), &dense, Some(&e)).unwrap_err();
+    assert!(err.to_string().contains("earlier version"), "{err}");
+    // The format is checked before the query is embedded (no embedder needed).
+    let err = hybrid::search(state.path(), &dense, None).unwrap_err();
     assert!(err.to_string().contains("earlier version"), "{err}");
     assert!(!index2::search(state.path(), "journal").unwrap().is_empty());
     e.reset();
@@ -847,6 +851,57 @@ fn old_or_damaged_vectors_fail_clearly_and_a_build_recovers() {
         .unwrap();
     assert!(d.store_created && d.new == 0);
     assert_eq!(d.vectors_added, d.embedded_docs);
+    assert_eq!(
+        ranked(&hybrid::search(state.path(), &dense, Some(&e)).unwrap()),
+        good
+    );
+
+    // A store missing a file its manifest names (what a removal stopped halfway leaves).
+    let store = state.path().join(&info.store);
+    let segment = fs::read_dir(&store)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.file_name().unwrap().to_string_lossy().starts_with("seg-"))
+        .expect("a segment file");
+    fs::remove_file(segment).unwrap();
+    let err = hybrid::search(state.path(), &dense, Some(&e)).unwrap_err();
+    assert!(err.to_string().contains("rebuild"), "{err}");
+    let d = build_with(root.path(), state.path(), Some(&e), None, 1)
+        .unwrap()
+        .dense
+        .unwrap();
+    assert!(d.store_created && d.new == 0);
+    assert_eq!(
+        ranked(&hybrid::search(state.path(), &dense, Some(&e)).unwrap()),
+        good
+    );
+
+    // An empty replacement under the same name (a build replacing the store stopped
+    // before filling it): an error, not a search that finds nothing.
+    fs::remove_dir_all(&store).unwrap();
+    MhrStore::create(&store, &info.store_config())
+        .unwrap()
+        .persist()
+        .unwrap();
+    let err = hybrid::search(state.path(), &dense, Some(&e)).unwrap_err();
+    assert!(err.to_string().contains("rebuild"), "{err}");
+    // Found before the query is embedded.
+    let err = hybrid::search(state.path(), &dense, None).unwrap_err();
+    assert!(err.to_string().contains("rebuild"), "{err}");
+    let hybrid_err = hybrid::search(
+        state.path(),
+        &SearchRequest::new("journal entry").with_mode(Mode::Hybrid),
+        Some(&e),
+    );
+    assert!(hybrid_err.is_err());
+    // A leftover of an interrupted removal goes with the next build.
+    fs::create_dir(state.path().join("vectors-removed-1-2-3")).unwrap();
+    let d = build_with(root.path(), state.path(), Some(&e), None, 1)
+        .unwrap()
+        .dense
+        .unwrap();
+    assert!(!d.store_created && d.vectors_added == d.embedded_docs);
+    assert_eq!(stores(state.path()), std::slice::from_ref(&info.store));
     assert_eq!(
         ranked(&hybrid::search(state.path(), &dense, Some(&e)).unwrap()),
         good

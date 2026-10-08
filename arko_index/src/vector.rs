@@ -365,8 +365,8 @@ fn check_config(stored: &IndexConfig, expected: &IndexConfig, dir: &Path) -> Res
 
 /// Opens the store in `dir` for writing with `config`, creating it when there is
 /// none. A store that cannot be used (another model or settings, a format this
-/// version cannot read, damage) is replaced by an empty one. Returns whether the store
-/// is new.
+/// version cannot read, damage or a missing file) is replaced by an empty one. Returns
+/// whether the store is new.
 pub(crate) fn open_or_create(dir: &Path, config: &StoreConfig) -> Result<(MhrStore, bool), Error> {
     let expected = config.index_config()?;
     match mhr_vector::Writer::open(dir, store_options()) {
@@ -380,6 +380,10 @@ pub(crate) fn open_or_create(dir: &Path, config: &StoreConfig) -> Result<(MhrSto
             | mhr_vector::Error::UnsupportedFormat { .. }
             | mhr_vector::Error::InvalidConfig(_),
         ) => {}
+        // A file its manifest names is missing (a removal stopped halfway, say). The
+        // writer lock rules out another writer's cleanup, so the store is damaged.
+        Err(mhr_vector::Error::Io { ref source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
     match std::fs::remove_dir_all(dir) {

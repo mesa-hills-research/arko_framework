@@ -454,8 +454,8 @@ pub fn index_with(
 /// Builds a new generation and publishes it. With [`BuildOptions::dense`] the chunks
 /// are also embedded: texts the state's embedding cache holds for the embedder's
 /// model are reused, the others are embedded (stopping cleanly at the token cap), the
-/// vectors are stored with the generation, and the settings are saved as the index's
-/// [`DenseConfig`]. Without it, a saved config is left as it is.
+/// vector store of the model and settings is brought up to date, and the settings are
+/// saved as the index's [`DenseConfig`]. Without it, a saved config is left as it is.
 pub fn build(
     root: &Path,
     state_dir: &Path,
@@ -877,6 +877,16 @@ pub fn build(
             std::fs::remove_dir_all(e.path())?;
         }
     }
+    // The settings go first: a build stopped while it removes the previous settings'
+    // store comes back to the new settings' store, not to the half-removed one.
+    if let Some(d) = dense {
+        DenseConfig::new(d.embedder.descriptor())
+            .with_quantization(d.quantization)
+            .with_vector_index(d.vector_index)
+            .with_max_tokens_per_run(d.max_tokens)
+            .with_embed_text(d.embed_text)
+            .save(&state_dir)?;
+    }
     // The vectors of chunks that are gone, and stores of other models or settings
     // (or of no generation, after a lexical build).
     let store_name = match store_update {
@@ -889,22 +899,9 @@ pub fn build(
         }
         None => None,
     };
-    for e in std::fs::read_dir(&state_dir)? {
-        let e = e?;
-        let name = e.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("vectors-") && store_name.as_deref() != Some(&*name) {
-            std::fs::remove_dir_all(e.path())?;
-        }
-    }
+    remove_other_stores(&state_dir, store_name.as_deref())?;
     files::write_report(&state_dir, &report)?;
-    if let (Some(d), Some(cache)) = (dense, cache.as_mut()) {
-        DenseConfig::new(d.embedder.descriptor())
-            .with_quantization(d.quantization)
-            .with_vector_index(d.vector_index)
-            .with_max_tokens_per_run(d.max_tokens)
-            .with_embed_text(d.embed_text)
-            .save(&state_dir)?;
+    if let Some(cache) = cache.as_mut() {
         cache.compact_if_sparse(&seen)?;
         if let Some(stats) = &mut dense_stats {
             stats.cache_records = cache.records();
@@ -921,6 +918,35 @@ pub fn build(
 
 /// Vectors per store upsert or delete call.
 const UPSERT_BATCH: usize = 1024;
+
+/// Removes every vector store directory but `keep`. Each is first renamed to a name no
+/// settings produce (`vectors-removed-...`), so a removal that stops halfway never
+/// leaves part of a store under a name a build would open; the next build removes it.
+fn remove_other_stores(state_dir: &Path, keep: Option<&str>) -> Result<(), Error> {
+    let mut names = Vec::new();
+    for e in std::fs::read_dir(state_dir)? {
+        let name = e?.file_name().to_string_lossy().into_owned();
+        if name.starts_with("vectors-") && keep != Some(name.as_str()) {
+            names.push(name);
+        }
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    for (i, name) in names.into_iter().enumerate() {
+        let mut dir = state_dir.join(&name);
+        if !name.starts_with("vectors-removed-") {
+            let removed = state_dir.join(format!(
+                "vectors-removed-{stamp}-{}-{i}",
+                std::process::id()
+            ));
+            std::fs::rename(&dir, &removed)?;
+            dir = removed;
+        }
+        std::fs::remove_dir_all(dir)?;
+    }
+    Ok(())
+}
 /// Bytes per `vkeys.dat` entry: a u128 vector id (big-endian, so byte order is id
 /// order) and a u32 doc.
 const VKEY_BYTES: usize = 20;
@@ -1014,6 +1040,18 @@ fn diff_ids(
         }
     }
     (added, removed)
+}
+
+/// An error for a generation whose vectors an earlier version stored.
+fn check_dense_format(info: &DenseIndexInfo) -> Result<(), Error> {
+    if info.version == DenseIndexInfo::VERSION {
+        return Ok(());
+    }
+    Err(format!(
+        "this index's vectors were stored by an earlier version of arko_index (format {}): rebuild the index (index2) to search it densely, or search lexically",
+        info.version
+    )
+    .into())
 }
 
 /// The sparse term index (`terms.idx`) without a `String` per entry: the raw bytes
@@ -1195,13 +1233,7 @@ impl Generation {
     /// vector of the generation, and can hold others: those a build in progress (or an
     /// interrupted one) added for its own generation.
     pub(crate) fn open_store(&self, info: &DenseIndexInfo) -> Result<MhrStore, Error> {
-        if info.version != DenseIndexInfo::VERSION {
-            return Err(format!(
-                "this index's vectors were stored by an earlier version of arko_index (format {}): rebuild the index (index2) to search it densely",
-                info.version
-            )
-            .into());
-        }
+        check_dense_format(info)?;
         if !info.store.starts_with("vectors-") || info.store.contains(['/', '\\']) {
             return Err(format!("bad vector store name {:?}", info.store).into());
         }
@@ -1214,6 +1246,19 @@ impl Generation {
                 "the vector store {} does not hold this index's model and settings ({}): rebuild the index",
                 dir.display(),
                 info.embedder.display()
+            )
+            .into());
+        }
+        // A replacement store (a build repairing an unusable one) is empty until the
+        // build fills it, and stays so when that build stops: refuse it rather than
+        // find nothing. A build that removed vectors of this generation has switched
+        // generations, and the search starts over on the new one.
+        if (store.len() as u64) < info.embedded {
+            return Err(format!(
+                "the vector store {} holds {} of this index's {} vectors (a build is replacing it, or one stopped while it did): rebuild the index",
+                dir.display(),
+                store.len(),
+                info.embedded
             )
             .into());
         }
