@@ -1029,11 +1029,13 @@ impl Model {
         }
     }
 
-    /// Same prices as Sonnet 5. Adaptive thinking is on by default (default effort
-    /// `high`, levels recalibrated from Sonnet 5); `thinking.type: "disabled"`,
-    /// manual budgets, non-default sampling parameters, prefill and forced tool
-    /// choice are rejected. No fast mode.
+    /// Same prices as Sonnet 5 except cache reads, which cost $0.10 (0.05x input)
+    /// since 2026-10-07, half the earlier $0.20. Adaptive thinking is on by default
+    /// (default effort `high`, levels recalibrated from Sonnet 5); `thinking.type:
+    /// "disabled"`, manual budgets, non-default sampling parameters, prefill and
+    /// forced tool choice are rejected. No fast mode.
     /// https://platform.claude.com/docs/en/about-claude/pricing
+    /// https://www.anthropic.com/claude-haiku-5-5
     pub fn anthropic_claude_sonnet_5_5() -> Self {
         Self {
             provider: Provider::Anthropic,
@@ -1047,7 +1049,7 @@ impl Model {
             pricing: ModelPricing {
                 input_cost_per_million: 2.00,
                 output_cost_per_million: 10.00,
-                cached_input_cost_per_million: Some(0.20),
+                cached_input_cost_per_million: Some(0.10),
                 cache_write_cost_per_million: Some(2.50),
                 cache_write_1h_cost_per_million: Some(4.00),
                 residency: vec![ResidencyPricing::new("us", 1.1)],
@@ -2545,6 +2547,24 @@ mod tests {
                     "{id} 1h writes"
                 );
             }
+        }
+    }
+
+    /// Cache reads cost 0.025x input on Fable 5.1, 0.05x on Opus 5.5 and
+    /// Sonnet 5.5, and 0.1x on every other Claude model.
+    /// https://platform.claude.com/docs/en/about-claude/pricing#prompt-caching
+    #[test]
+    fn claude_cache_reads_follow_the_documented_multipliers() {
+        for model in Model::list(Provider::Anthropic) {
+            let pricing = &model.pricing;
+            let expected = match model.id.as_str() {
+                "claude-fable-5-1" => 0.025,
+                "claude-opus-5-5" | "claude-sonnet-5-5" => 0.05,
+                _ => 0.1,
+            };
+            let ratio =
+                pricing.cached_input_cost_per_million.unwrap() / pricing.input_cost_per_million;
+            assert!((ratio - expected).abs() < 1e-9, "{}: {ratio}", model.id);
         }
     }
 
