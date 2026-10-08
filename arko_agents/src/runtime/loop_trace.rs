@@ -347,6 +347,9 @@ struct Normalizer {
     /// The test runs on the real clock: durations measured on it are
     /// masked.
     real_time: bool,
+    /// Normalizing map entries that nothing tells apart (see
+    /// [`object`](Self::object)): UUIDs not labelled yet stay `<uuid>`.
+    unlabelled: bool,
     literals: Vec<(String, String)>,
     lines: Vec<String>,
 }
@@ -370,6 +373,9 @@ impl Normalizer {
     /// An object with its keys sorted. Its entries are normalized in an
     /// order that doesn't depend on UUIDs not labelled yet (a map keyed by
     /// call ids, say), so that labels are given in the same order each run.
+    /// Entries that nothing tells apart (keyed by such UUIDs, with the same
+    /// value) come in any order: their UUIDs stay unlabelled, and their
+    /// keys are numbered (`<uuid>#0`, `<uuid>#1`).
     fn object(&mut self, map: Map<String, Value>, longest: Option<usize>) -> Map<String, Value> {
         let mut entries: Vec<((String, String), String, Value)> = map
             .into_iter()
@@ -379,15 +385,29 @@ impl Normalizer {
             })
             .collect();
         entries.sort_by(|(a, ..), (b, ..)| a.cmp(b));
+        let orders: Vec<(String, String)> =
+            entries.iter().map(|(order, ..)| order.clone()).collect();
         let mut normalized = Vec::with_capacity(entries.len());
-        for (_, key, value) in entries {
+        let mut tie = 0;
+        for (index, (order, key, value)) in entries.into_iter().enumerate() {
+            let after_same = index > 0 && orders[index - 1] == order;
+            let tied = after_same || orders.get(index + 1) == Some(&order);
+            tie = if after_same { tie + 1 } else { 0 };
+            let unlabelled = self.unlabelled;
+            self.unlabelled = unlabelled || tied;
             let masked = is_time_key(&key) || (self.real_time && is_duration_key(&key));
             let value = if masked && !value.is_null() {
                 Value::String("<time>".into())
             } else {
                 self.value(value, longest)
             };
-            normalized.push((self.string(&key, None), value));
+            let key = if tied {
+                format!("{}#{tie}", order.0)
+            } else {
+                self.string(&key, None)
+            };
+            self.unlabelled = unlabelled;
+            normalized.push((key, value));
         }
         normalized.sort_by(|(a, _), (b, _)| a.cmp(b));
         normalized.into_iter().collect()
@@ -418,11 +438,19 @@ impl Normalizer {
 
     fn string(&mut self, text: &str, longest: Option<usize>) -> String {
         let text = self.masked(text);
+        let unlabelled = self.unlabelled;
         let labels = &mut self.labels;
         let text = UUID.replace_all(&text, |found: &regex::Captures<'_>| {
+            let uuid = found[0].to_ascii_lowercase();
+            if unlabelled {
+                return labels
+                    .get(&uuid)
+                    .cloned()
+                    .unwrap_or_else(|| "<uuid>".into());
+            }
             let next = labels.len();
             labels
-                .entry(found[0].to_ascii_lowercase())
+                .entry(uuid)
                 .or_insert_with(|| format!("id{next}"))
                 .clone()
         });
@@ -473,6 +501,36 @@ mod tests {
                 value,
                 serde_json::json!({"id0": {"name": false}, "id1": {"name": true}})
             );
+        }
+    }
+
+    /// Entries that nothing tells apart, keyed by new UUIDs, give the same
+    /// output in any order, and label none of their UUIDs.
+    #[test]
+    fn entries_nothing_tells_apart_stay_unlabelled() {
+        let (a, b) = (
+            "6f1c1a2e-1111-4aaa-8bbb-000000000001",
+            "0f1c1a2e-2222-4aaa-8bbb-000000000002",
+        );
+        let (x, y) = (
+            "1f1c1a2e-3333-4aaa-8bbb-000000000003",
+            "2f1c1a2e-4444-4aaa-8bbb-000000000004",
+        );
+        for entries in [[(a, x), (b, y)], [(b, y), (a, x)]] {
+            let mut normalizer = Normalizer::default();
+            let mut map = Map::new();
+            for (key, call) in entries {
+                map.insert(key.into(), serde_json::json!({ "call": call, "n": 1 }));
+            }
+            let value = normalizer.value(Value::Object(map), Some(LONG_STRING));
+            assert_eq!(
+                value,
+                serde_json::json!({
+                    "<uuid>#0": {"call": "<uuid>", "n": 1},
+                    "<uuid>#1": {"call": "<uuid>", "n": 1},
+                })
+            );
+            assert!(normalizer.labels.is_empty());
         }
     }
 
