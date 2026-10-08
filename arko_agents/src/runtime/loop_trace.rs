@@ -16,9 +16,11 @@
 //! `ARKO_LOOP_TRACE_FULL=1` keeps long strings whole and prints each
 //! snapshot's task in full instead of its hash, to find what differs.
 //!
-//! A line is `E <event>` (the event as JSON) or `S <counts> state=<state>
+//! A line is `E <event>` (the event as JSON), `S <counts> state=<state>
 //! task=<hash>`, where the hash covers the whole task except its agent
-//! configuration (and its model, named by id). Normalizing sorts JSON keys,
+//! configuration (and its model, named by id), or `R msgs=<count>
+//! model=<id> request=<hash>` for each model request, the hash covering the
+//! conversation and generation settings sent. Normalizing sorts JSON keys,
 //! replaces UUIDs with `id0`, `id1`, … in the order a test's trace first
 //! shows them, masks wall-clock times, the time to a usage-limit reset, the
 //! durations a test on the real clock measures (a test that pauses tokio's
@@ -32,6 +34,7 @@
 
 use crate::runtime::event::AgentEvent;
 use crate::task::Task;
+use arko_ai as ai;
 use regex::Regex;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -57,10 +60,10 @@ static DATETIME: LazyLock<Regex> = LazyLock::new(|| {
 /// A usage-limit reset, given relative to the wall clock.
 static RESETS_IN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"resets in about (\d+[dhms] ?)+").unwrap());
-/// The awaiting state a command timeout prints with `{:?}`: its maps print
-/// in a different order each run.
+/// The fields of the awaiting state a command timeout prints with `{:?}`:
+/// its maps print in a different order each run. The state's name stays.
 static TIMEOUT_STATE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?s)(waiting for user command in state ).*").unwrap());
+    LazyLock::new(|| Regex::new(r"(?s)(waiting for user command in state \w+) \{.*\}\.").unwrap());
 
 /// Object keys whose values are wall-clock times.
 fn is_time_key(key: &str) -> bool {
@@ -133,6 +136,12 @@ impl LoopTrace {
     pub(super) fn snapshot(&self, task: &Task, durable: bool) {
         if let Some(trace) = &self.0 {
             trace.snapshot(task, durable);
+        }
+    }
+
+    pub(super) fn request(&self, conversation: &ai::Conversation, config: &ai::GenerationConfig) {
+        if let Some(trace) = &self.0 {
+            trace.request(conversation, config);
         }
     }
 }
@@ -214,6 +223,32 @@ impl TestTrace {
             task.running_tool_calls.len(),
             task.pending_context_injections.len(),
             task.handovers.len(),
+        );
+        self.push(&mut state, line);
+    }
+
+    /// A model request as the loop makes it: the conversation's message
+    /// count and model, and a hash of the conversation and generation
+    /// settings sent (the model named by id).
+    fn request(&self, conversation: &ai::Conversation, config: &ai::GenerationConfig) {
+        let mut state = self.state.lock().unwrap();
+        state.real_time = !clock_paused();
+        let mut sent = serde_json::to_value(conversation).expect("a conversation serializes");
+        if let Some(sent) = sent.as_object_mut() {
+            sent.insert("model".into(), Value::String(conversation.model.id.clone()));
+        }
+        let config = serde_json::to_value(config).expect("a configuration serializes");
+        let request = serde_json::json!({ "config": config, "conversation": sent });
+        let request = state.value(request, None).to_string();
+        let request = if full() {
+            request
+        } else {
+            format!("{:016x}", fnv1a(request.as_bytes()))
+        };
+        let line = format!(
+            "R msgs={} model={} request={request}",
+            conversation.messages.len(),
+            conversation.model.id
         );
         self.push(&mut state, line);
     }
@@ -384,7 +419,7 @@ impl Normalizer {
         });
         let text = DATETIME.replace_all(&text, "<datetime>");
         let text = RESETS_IN.replace_all(&text, "resets in about <duration>");
-        let text = TIMEOUT_STATE.replace_all(&text, "${1}<state>.");
+        let text = TIMEOUT_STATE.replace_all(&text, "${1} {…}.");
         let characters = text.chars().count();
         if longest.is_none_or(|longest| characters <= longest) {
             return text.into_owned();
@@ -441,14 +476,16 @@ mod tests {
             "start_time": 1_789_000_000,
             "text": "at 2026-10-07T12:00:00.123456+00:00, resets in about 3h 12m. Usage",
             "reason": "Timeout (5s) waiting for user command in state AwaitingToolApproval { a: {\"x\": 1} }.",
+            "unit": "Timeout (5s) waiting for user command in state InProgress.",
         });
         assert_eq!(
             normalizer.value(value, Some(LONG_STRING)),
             serde_json::json!({
-                "reason": "Timeout (5s) waiting for user command in state <state>.",
+                "reason": "Timeout (5s) waiting for user command in state AwaitingToolApproval {…}.",
                 "resets_at_unix_ms": "<time>",
                 "start_time": "<time>",
                 "text": "at <datetime>, resets in about <duration>. Usage",
+                "unit": "Timeout (5s) waiting for user command in state InProgress.",
                 "waiting_until_unix_ms": null,
             })
         );
@@ -479,7 +516,7 @@ mod tests {
         ));
         let lines = trace.lines();
         let kinds: String = lines.iter().map(|line| &line[..1]).collect();
-        assert_eq!(kinds, "ESEESESEESSE", "{lines:#?}");
+        assert_eq!(kinds, "ESREESESEESSE", "{lines:#?}");
         assert_eq!(lines[0], r#"E {"TaskStateChanged":"InProgress"}"#);
         assert!(lines[1].starts_with("S durable=0 msgs=1 native_results=0 "));
         assert_eq!(lines.last().unwrap(), r#"E "TaskStreamEnd""#);

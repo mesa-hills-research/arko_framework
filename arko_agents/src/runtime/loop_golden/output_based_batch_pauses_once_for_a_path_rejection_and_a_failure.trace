@@ -1,5 +1,6 @@
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=886e1221e1a329b4
+R msgs=1 model=gpt-5.6-luna request=1763525905becbd2
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=d16ff203b7b0f55a
@@ -27,6 +28,7 @@ E {"TaskStateChanged":{"AwaitingErrorRecoveryApproval":{"cause":"tool_error","er
 E {"ErrorEncountered":{"error_message":"Tool 'check' execution failed: The path for parameter 'path' must be within the workspace '/arko-golden-workspace'.\nTool 'check' execution failed: Execution failed: check could not do it","requires_approval_to_retry":true,"tool_call_id":null}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"tool_error","error_message":"Tool 'check' execution failed: The path for parameter 'path' must be within the workspace '/arko-golden-workspace'.\nTool 'check' execution failed: Execution failed: check could not do it"}} task=4246fd7e74439883
 E {"TaskStateChanged":"InProgress"}
+R msgs=3 model=gpt-5.6-luna request=bffa57341ca0921a
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=99b91ca0ad58a060

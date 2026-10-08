@@ -2857,6 +2857,8 @@ impl AgentLoop {
     async fn model_turn(&mut self) -> Result<ModelTurn, ArkoAgentsError> {
         let llm_client = Arc::clone(&self.llm_client);
         let (conversation, gen_config) = self.next_request();
+        #[cfg(test)]
+        self.trace.request(&conversation, &gen_config);
         // What this request's usage is compared with, to estimate the
         // next one (not for the refusal fallback's model).
         self.sent_request = (!self.current_request_is_fallback).then(|| RequestMark {

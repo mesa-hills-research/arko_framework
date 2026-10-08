@@ -1,5 +1,6 @@
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
+R msgs=1 model=gpt-5.6-luna request=b5c44a4af91fa165
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"refused","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 E {"RefusalReceived":{"explanation":"I can't help with that.","source":"model"}}
@@ -10,6 +11,7 @@ S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 inje
 E {"ErrorEncountered":{"error_message":"Could not resolve the refusal: Invalid Task State Transition: Message 7 is not part of the refused input.","requires_approval_to_retry":true,"tool_call_id":null}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"refusal","error_kind":"refusal","error_message":"Failure requires a request, credential, or configuration change. LLM error (attempt 1/10): Model refused the request: refused by model: I can't help with that."}} task=d3337cdd2a28d6ca
 E {"TaskStateChanged":"InProgress"}
+R msgs=1 model=gpt-5.6-luna request=2cb79c7e62109ba4
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=0e7b5465010a5020

@@ -8,6 +8,7 @@ E {"ToolResult":{"output":"resumer resumed child","tool_call_id":"id5","tool_nam
 S durable=0 msgs=2 native_results=4 native_calls=1 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=bedd7cc56880e94c
 E {"ToolRejected":{"reason":"The turn ended before this call ran; it was not run.","tool_call_id":"id3","tool_name":"gate"}}
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=7371d5b512d228db
+R msgs=3 model=gpt-5.6-luna request=56619b1a3a49a097
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=c221a7ab5af13e65
@@ -29,6 +30,7 @@ S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=1 inje
 E {"ToolResult":{"output":"reader ran r","tool_call_id":"id9","tool_name":"reader"}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state="InProgress" task=bc2b157edaa2f88c
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=98d38aa83959040a
+R msgs=3 model=gpt-5.6-luna request=c2506e99b89a87de
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=1930128eb7fdf8f7

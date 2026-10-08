@@ -1,5 +1,6 @@
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
+R msgs=1 model=gpt-5.6-luna request=b5c44a4af91fa165
 E {"AssistantResponseChunk":"Starting the step"}
 E {"ToolCallInitiated":{"tool_call_id":"id2","tool_name":"step"}}
 E {"ToolRejected":{"reason":"The model's response was interrupted before this call finished; it was not run.","tool_call_id":"id2","tool_name":"step"}}
@@ -11,6 +12,7 @@ M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role"
 M {"content":[{"Text":"Starting the step"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=5a6d937287fecacf
+R msgs=1 model=gpt-5.6-luna request=7fedeb2e50015402
 E {"AssistantResponseChunk":"Starting the step"}
 E {"ToolCallInitiated":{"tool_call_id":"id5","tool_name":"step"}}
 E {"ToolRejected":{"reason":"The model's response was interrupted before this call finished; it was not run.","tool_call_id":"id5","tool_name":"step"}}
