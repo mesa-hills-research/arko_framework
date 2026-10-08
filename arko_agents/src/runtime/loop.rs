@@ -5132,7 +5132,7 @@ impl AgentLoop {
         self.check_config()?;
         self.start().await?;
 
-        'main_loop: loop {
+        loop {
             // Every turn boundary, pause and wait passes here.
             self.report_task(false).await;
             step!(self.pass_start().await?);
@@ -5157,7 +5157,7 @@ impl AgentLoop {
             }
 
             if self.task.current_state.is_terminal() {
-                break 'main_loop;
+                break;
             }
         }
 
