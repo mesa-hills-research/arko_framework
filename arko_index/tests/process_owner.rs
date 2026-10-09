@@ -62,7 +62,11 @@ fn a_detached_process_has_its_own_session_and_none_of_the_callers_descriptors() 
     );
     let listing = |detached: bool| {
         let mut command = Command::new("sh");
-        command.arg("-c").arg("ls /dev/fd; ps -o sid= -p $$");
+        // macOS's ps has no session column. A new session also makes the shell the
+        // leader of its own process group, which both systems' ps can show.
+        command
+            .arg("-c")
+            .arg("ls /dev/fd; echo $$; ps -o pgid= -p $$");
         if detached {
             process::detach(&mut command);
         }
@@ -72,7 +76,17 @@ fn a_detached_process_has_its_own_session_and_none_of_the_callers_descriptors() 
     assert!(inherited.lines().any(|l| l.trim() == "57"), "{inherited}");
     let detached = listing(true);
     assert!(!detached.lines().any(|l| l.trim() == "57"), "{detached}");
-    let session = |out: &str| out.lines().last().unwrap().trim().to_owned();
-    assert_ne!(session(&inherited), session(&detached));
+    // (the shell's pid, its process group)
+    let group = |out: &str| {
+        let lines: Vec<&str> = out.lines().map(str::trim).collect();
+        (
+            lines[lines.len() - 2].to_owned(),
+            lines[lines.len() - 1].to_owned(),
+        )
+    };
+    let (pid, pgid) = group(&inherited);
+    assert_ne!(pid, pgid, "{inherited}");
+    let (pid, pgid) = group(&detached);
+    assert_eq!(pid, pgid, "{detached}");
     unsafe { libc::close(fd) };
 }
