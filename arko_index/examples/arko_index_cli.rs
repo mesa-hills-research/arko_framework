@@ -41,7 +41,7 @@ struct Walk {
 const RULE_FLAGS: &str = "[--respect-ignore] [--exclude PATTERN]... [--include PATTERN]... [--report FILE] [--front-matter-description]";
 const EMBED_FLAGS: &str = "[--lexical-scope] [--embed MODEL] [--dimensions N] [--embed-text source|path-source|path-scope-source] [--embed-config FILE] [--quantize f32|int8] [--vector-index flat|graph] [--max-embed-tokens N|none] [--no-embed] [--wait-embeddings]";
 const RUN_FLAGS: &str = "[--max-embed-tokens N|none]";
-const WATCH_FLAGS: &str = "[--index INDEX_STATE_DIR]";
+const WATCH_FLAGS: &str = "[--index INDEX_STATE_DIR] [--lexical-scope]";
 const SEARCH_FLAGS: &str = "[--mode lexical|dense|hybrid] [--limit N] [--candidates N] [--fusion rrf|linear] [--rrf-k K] [--lexical-weight W] [--dense-weight W] [--path-prefix P] [--language L] [--text]";
 
 /// Every command's flags; a command accepts the groups it passes to `parse_flags`.
@@ -149,9 +149,10 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
             | "--include"
             | "--report"
             | "--front-matter-description" => accepts.walk,
-            "--lexical-scope" | "--embed" | "--dimensions" | "--embed-text" | "--embed-config"
-            | "--quantize" | "--vector-index" | "--no-embed" | "--wait-embeddings" => accepts.embed,
+            "--embed" | "--dimensions" | "--embed-text" | "--embed-config" | "--quantize"
+            | "--vector-index" | "--no-embed" | "--wait-embeddings" => accepts.embed,
             "--max-embed-tokens" => accepts.embed || accepts.run,
+            "--lexical-scope" => accepts.embed || accepts.watch,
             "--index" => accepts.watch,
             "--mode" | "--limit" | "--candidates" | "--fusion" | "--rrf-k" | "--lexical-weight"
             | "--dense-weight" | "--path-prefix" | "--language" | "--text" => accepts.search,
@@ -673,7 +674,8 @@ impl Keeper<'_> {
             .transpose()?;
         let mut settings = arko_index::index2::BuildOptions::default()
             .with_mem_budget(index_mem_budget())
-            .with_rules(self.flags.walk.rules.clone());
+            .with_rules(self.flags.walk.rules.clone())
+            .with_lexical_scope(self.flags.lexical_scope);
         if let (Some(config), Some(embedder)) = (&config, &embedder) {
             settings = settings.with_dense(
                 DenseBuild::from_config(embedder.as_ref(), config).with_embed_later(true),
@@ -743,7 +745,11 @@ fn keep_index(
             });
         }
         let result = watch(&mut keeper);
-        // Closes the channel: the embedding thread ends after its current run.
+        if let Err(e) = &result {
+            // The run in progress stops after its current request.
+            stop.stop(format!("the watcher stopped on an error: {e}"));
+        }
+        // Closes the channel: the embedding thread ends once its run stops or ends.
         drop(keeper);
         result
     })
