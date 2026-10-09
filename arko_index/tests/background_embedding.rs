@@ -5,7 +5,7 @@
 //! embedder behind a gate the test opens one request at a time) stands in for a model
 //! that takes minutes or hours.
 use arko_index::{
-    bench_v1::{Chunk, Error, Options, chunk_dir, open_watch},
+    bench_v1::{Chunk, Error, Options, chunk_dir},
     dense::{
         DenseBuild, EmbedLimits, EmbedState, Embedder, Embedding, HashEmbedder, InputKind,
         ModelDescriptor, embed_query, render,
@@ -643,7 +643,9 @@ fn watcher_driven_rebuilds_while_a_run_is_embedding() {
     corpus(root.path());
     let e = SlowEmbedder::new();
     build_lexical_first(root.path(), state.path(), &e);
-    let mut watcher = open_watch(root.path(), watch_state.path(), &Options::default()).unwrap();
+    let mut watcher =
+        arko_index::bench_v1::open_watch(root.path(), watch_state.path(), &Options::default())
+            .unwrap();
     let initial = watcher.next_change(Duration::ZERO).unwrap().unwrap();
     watcher.ack(initial.sequence).unwrap();
 
