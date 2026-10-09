@@ -11,15 +11,21 @@ overview, this page the details.
 ```sh
 cargo build --release -p arko_index --features local-embed --example arko_index_cli
 CLI=target/release/examples/arko_index_cli
-$CLI index2 --embed local ./repo ./index-state        # CodeRankEmbed, the default
-$CLI index2 --embed local:jina-embeddings-v2-base-code ./repo ./index-state
+$CLI index2 --embed local ./repo ./index-state        # CodeRankEmbed in int8, the default
+$CLI status ./index-state                             # the vectors fill in the background
 $CLI search2 --text ./index-state 'where is the input limit applied'
+$CLI index2 --embed local:f32 ./repo ./index-state    # the same model in f32
+$CLI index2 --embed local:jina-embeddings-v2-base-code ./repo ./index-state
 ```
 
-The first build downloads the model's files into the Hugging Face cache (`$HF_HOME/hub`,
-by default `~/.cache/huggingface/hub`), at the pinned commit. Later builds and
-searches load them from there. The choice is saved in the index's `dense.json` like a
-Voyage model, with the commit as the revision:
+`--embed local[:NAME][:PRECISION]` names the model and the arithmetic it runs in:
+`int8` (the default) or `f32`, described under [Precision](#precision). As with Voyage,
+`index2` returns once lexical search is ready, and a background `embed` process loads
+the model and fills in the vectors. The first build downloads the model's files into
+the Hugging Face cache (`$HF_HOME/hub`, by default `~/.cache/huggingface/hub`), at the
+pinned commit. Later builds and searches load them from there. The choice is saved in
+the index's `dense.json` like a Voyage model, with the commit as the revision, followed
+by `+int8` in int8:
 
 ```json
 "embedder": {
@@ -27,18 +33,22 @@ Voyage model, with the commit as the revision:
   "model": "nomic-ai/CodeRankEmbed",
   "dimensions": 768,
   "input_types": true,
-  "revision": "3c4b60807d71f79b43f3c4363786d9493691f8b1"
+  "revision": "3c4b60807d71f79b43f3c4363786d9493691f8b1+int8"
 }
 ```
 
-The descriptor is the embedding cache key, so vectors of another model or revision
-never mix. A search embeds the query with the model the index names.
+The descriptor is the embedding cache key, so vectors of another model, revision or
+precision never mix, and the background run and every search load the model in the
+precision the index names. The `quantization` setting beside it is separate: it is how
+the vector store keeps the vectors.
 
-In a program: `LocalEmbedder::load(&local::CODE_RANK_EMBED, dir)` reads
-`config.json`, `tokenizer.json` and `model.safetensors` from `dir` after checking each
-file's size and SHA-256 against `LocalModel::files`. The library leaves fetching to the
-caller. `examples/support/local.rs` does it with hf-hub in about 50 lines and can move
-unchanged into a host crate.
+In a program: `LocalEmbedder::load(&local::CODE_RANK_EMBED, dir)` loads the model in
+int8, and `LocalEmbedder::load_with_precision(&local::CODE_RANK_EMBED, dir,
+Precision::F32)` in f32. Both read `config.json`, `tokenizer.json` and
+`model.safetensors` from `dir` after checking each file's size and SHA-256 against
+`LocalModel::files`. The library leaves fetching to the caller.
+`examples/support/local.rs` does it with hf-hub in about 50 lines and can move unchanged
+into a host crate.
 
 ## Models
 
@@ -59,26 +69,59 @@ Qwen3-Embedding-0.6B scores higher on MTEB code tasks but has four times the
 parameters, so it would embed about four times slower on the CPU. Adding it means a
 decoder implementation (grouped-query attention, RMSNorm, last-token pooling).
 
+## Precision
+
+The linear layers after attention, the output projection and the two feed-forward
+layers, hold most of a model's weights and do most of its work. In int8, the default,
+they run on integers:
+
+- Both sides of each product are first rotated by a Hadamard matrix, in blocks of 256
+  values. The rotation is orthogonal, so the products stay the same, and it spreads the
+  few very large activations these models produce over their block, so they no longer
+  set the quantization step of every other value.
+- Weights are quantized per output channel at load, to 7 bits, and activations per
+  token at run time, to 8 bits. The products are summed exactly in 32-bit integers, then
+  scaled back to f32.
+- The query, key and value projection stays in f32, as do attention, the embeddings,
+  layer norms, pooling and normalization. The softmax magnifies errors in queries and
+  keys: in int8, that projection alone moves the vectors more than the other three
+  layers together.
+
+On x86 CPUs with AVX2 the kernel multiplies bytes with `vpmaddubsw`, chosen at run time.
+Elsewhere it is plain Rust that the compiler vectorizes for the target, and on ARM CPUs
+with the dot product extension, Apple Silicon among them, its inner loop becomes `sdot`
+instructions. Both compute the same integer sums. Weights take 7 bits because
+`vpmaddubsw` adds pairs of byte products into 16 bits with saturation, and pairs of
+8-bit activations times 7-bit weights stay within the 16-bit range.
+
+Int8 embeds about 1.4 times as fast as f32 and keeps 0.3 GB less in memory. Its
+vectors stay within a cosine similarity of 0.998 of the f32 ones, and on the arko
+evaluation it finds what f32 finds ([measurements](#measurements)). `local:f32` runs
+the model as it was trained.
+
 ## How it runs
 
 - **Tokens.** The model's own `tokenizer.json`, through the `tokenizers` crate with the
-  pure-Rust fancy-regex engine. Texts longer than 8,192 tokens are truncated, so every
-  chunk gets a vector (arko_index's chunks stay far below that).
+  pure-Rust fancy-regex engine. Every chunk is embedded whole: only texts longer than
+  the model's 8,192 tokens are truncated, and arko_index's chunks stay far below that.
 - **Batches.** A build sends up to 256 texts and 8,192 tokens per request. The texts of
   a request run through the encoder packed back to back, without padding: the linear
-  layers run once over all tokens, attention runs per text, head and block of 64 query
-  rows.
-- **Arithmetic.** f32 matrices multiplied by `gemm`, which picks AVX-512, AVX2 or NEON
-  kernels at run time. Weights stored in f16 are widened on load.
+  layers run once over all tokens, attention runs per text, head and block of 128
+  query rows.
+- **Arithmetic.** The int8 layers as above. f32 matrices are multiplied by `gemm`,
+  which picks AVX-512, AVX2 or NEON kernels at run time. Weights stored in f16 are
+  widened on load. The softmax and SiLU take a polynomial exponential that vectorizes.
 - **Threads.** A dedicated rayon pool of `threads()` workers (`ARKO_INDEX_THREADS`),
-  or `LocalEmbedder::with_threads`.
+  or `LocalEmbedder::with_threads`. Loading quantizes the weights on the same pool, in
+  about 0.7 s for CodeRankEmbed, checksums included.
 - **Output.** Mean or `[CLS]` pooling as the model was trained, then unit length.
   `tokens` in the build's statistics counts the tokens processed. Nothing is billed, and
   a `--max-embed-tokens` cap still applies as a work limit.
-- **Memory.** About 1 GB while embedding: the f32 weights (550 MB for CodeRankEmbed) and
-  about 12 KB per token of the batch in flight.
+- **Memory.** While embedding with CodeRankEmbed, about 0.45 GB in int8 and 0.75 GB in
+  f32: the weights, and about 12 KB per token of the batch in flight. Loading peaks at
+  1.0 GB in int8 and 1.2 GB in f32, with the model file in memory.
 
-The feature adds gemm, rayon, tokenizers and libm, all pure Rust:
+The feature adds gemm, pulp, rayon, tokenizers and libm, all pure Rust:
 `cargo tree -p arko_index --features local-embed -e normal,build --target all -i cc`
 prints nothing.
 
@@ -87,52 +130,86 @@ prints nothing.
 `tests/local_embed.rs` (ignored, it downloads both models) embeds eight texts with
 each model, among them the Jina model card's example and a 2,400-token text, and
 compares them with vectors from the models' own PyTorch code
-(`scripts/local_embed_reference.py`, transformers 4.56 with `trust_remote_code`). Every
-component and every pairwise similarity agrees within 2·10⁻⁴, token counts are
-identical, and the Jina model card's similarity of 0.7282 comes out the same.
+(`scripts/local_embed_reference.py`, transformers 4.56 with `trust_remote_code`). In
+f32 every component and every pairwise similarity agrees within 2·10⁻⁴, token counts
+are identical, and the Jina model card's similarity of 0.7282 comes out the same. In
+int8 each text's vector has a cosine similarity above 0.997 with its f32 vector, and
+the pairwise similarities stay within 0.015 of PyTorch's.
 
 The offline unit tests build tiny random models of both architectures and check the
 packed, threaded forward pass against a direct transcription of the PyTorch code, and
-that batching, thread count and order leave every vector unchanged.
+that batching, thread count and order leave every vector unchanged, in both
+precisions. The int8 kernels are checked against a plain loop over the whole range of
+levels.
 
 ## Measurements
 
-On 2026-10-08, on an AMD EPYC 9354P (Zen 4, AVX-512) where the build account may use 40
-of the 64 hardware threads, on 28 physical cores, with other jobs running (load
-average 13 to 29). CodeRankEmbed, on the arko repository (7,438 chunks, 303 tokens per
-chunk on average):
+### Speed
 
-| Threads | Chunks/s | Tokens/s |
-|---|---|---|
-| 1 | 1.3 | 368 |
-| 4 | 4.8 | 1,400 |
-| 8 | 9.2 | 2,691 |
-| 16 | 16.7 | 5,042 |
-| 40 | 22.3 | 6,753 |
+On 6 cores of an Intel Core i9-13980HX, a laptop chip, in a virtual machine that gives
+it AVX2. CodeRankEmbed embedded 150 chunks sampled evenly from the arko evaluation
+snapshot, 327 tokens per chunk on average, each chunk whole. The better of two runs:
 
-A full `index2` build with embeddings took 330 s at 40 threads. The index state is
-50.3 MB: 23.0 MB of vectors (768 × 4 bytes per chunk), 23.1 MB of embedding cache and
-4.2 MB of lexical index. Loading the model with its checksums takes 0.95 s, and a
-query embeds in about 30 ms. AVX-512 kernels made the 16-thread run 54% faster than
-AVX2.
+| Threads | f32 chunks/s | f32 tokens/s | int8 chunks/s | int8 tokens/s | int8 / f32 |
+|---|---|---|---|---|---|
+| 1 | 1.31 | 428 | 1.83 | 596 | 1.39 |
+| 2 | 2.38 | 777 | 3.37 | 1,100 | 1.42 |
+| 4 | 4.07 | 1,329 | 5.66 | 1,849 | 1.39 |
+| 6 | 5.55 | 1,815 | 7.64 | 2,496 | 1.38 |
+
+The whole snapshot, 7,521 chunks and 2.35 million tokens, took 982 s in int8 and
+1,384 s in f32 at 6 threads. The Jina model ran 7.8 chunks/s in int8 and 6.0 in f32. A
+query embeds in about 20 ms. Memory is under [How it runs](#how-it-runs).
+
+### Int8 against f32
+
+Over 3,000 chunks of the snapshot, the cosine similarity of each chunk's int8 and f32
+vectors:
+
+| Model | Lowest | 1st percentile | Median | Mean |
+|---|---|---|---|---|
+| CodeRankEmbed | 0.9982 | 0.9984 | 0.9989 | 0.9989 |
+| jina-embeddings-v2-base-code (600 chunks) | 0.9989 | 0.9990 | 0.9993 | 0.9993 |
 
 Retrieval on the arko evaluation snapshot (7,521 chunks, 19 questions with known
-answers, `dense_live_check`), all three models on the same chunks:
+answers, `dense_live_check`), in both precisions:
 
-| Model | Mode | Depth | Definitions | Callers | Behaviour | Embedding time |
-|---|---|---|---|---|---|---|
-| none | lexical | 4/9 | 4/4 | 4/7 | 3/6 | |
-| voyage-code-4 | dense | 9/9 | 4/4 | 2/7 | 4/6 | 34 s (1.8M tokens billed) |
-| voyage-code-4 | hybrid | 8/9 | 4/4 | 2/7 | 4/6 | |
-| CodeRankEmbed | dense | 9/9 | 4/4 | 2/7 | 5/6 | 409 s |
-| CodeRankEmbed | hybrid | 9/9 | 4/4 | 2/7 | 4/6 | |
-| jina-embeddings-v2-base-code | dense | 5/9 | 4/4 | 2/7 | 2/6 | 333 s |
-| jina-embeddings-v2-base-code | hybrid | 7/9 | 4/4 | 2/7 | 3/6 | |
+| Model | Mode | Depth | Definitions | Callers | Behaviour |
+|---|---|---|---|---|---|
+| none | lexical | 4/9 | 4/4 | 4/7 | 3/6 |
+| CodeRankEmbed, f32 | dense | 9/9 | 4/4 | 2/7 | 5/6 |
+| CodeRankEmbed, f32 | hybrid | 9/9 | 4/4 | 2/7 | 4/6 |
+| CodeRankEmbed, int8 | dense | 9/9 | 4/4 | 2/7 | 5/6 |
+| CodeRankEmbed, int8 | hybrid | 9/9 | 4/4 | 2/7 | 4/6 |
+
+The two precisions found the same answers. Their top ten results shared 9.7 chunks on
+average in dense mode and 9.8 in hybrid mode (9 or 10 for every question), with the
+same first result for 18 of the 19 questions in both.
+
+### Against voyage-code-4
+
+The same evaluation with voyage-code-4 and the Jina model, the local models in f32:
+
+| Model | Mode | Depth | Definitions | Callers | Behaviour |
+|---|---|---|---|---|---|
+| voyage-code-4 | dense | 9/9 | 4/4 | 2/7 | 4/6 |
+| voyage-code-4 | hybrid | 8/9 | 4/4 | 2/7 | 4/6 |
+| CodeRankEmbed | dense | 9/9 | 4/4 | 2/7 | 5/6 |
+| CodeRankEmbed | hybrid | 9/9 | 4/4 | 2/7 | 4/6 |
+| jina-embeddings-v2-base-code | dense | 5/9 | 4/4 | 2/7 | 2/6 |
+| jina-embeddings-v2-base-code | hybrid | 7/9 | 4/4 | 2/7 | 3/6 |
 
 The top ten results differ more than the found answers do. Against voyage-code-4,
 CodeRankEmbed's dense top 10 shared 4.3 chunks on average (2 to 7) and the same first
 result for 9 of 19 questions. Hybrid shared 6.5 (4 to 8) and the same first result for
 12. Jina shared 3.7 dense and 6.1 hybrid, and the same first result for 3 and 4.
+
+### On a server
+
+On 40 threads of an AMD EPYC 9354P (Zen 4, AVX-512) shared with other jobs, CodeRankEmbed
+in f32 embedded the 7,438 chunks of the arko repository in 330 s, 22 chunks/s. The
+index state took 50.3 MB: 23.0 MB of vectors, 23.1 MB of embedding cache and 4.2 MB of
+lexical index. AVX-512 made the f32 matrix products 54% faster than AVX2 there.
 
 ## Making dense search the default
 
@@ -140,13 +217,9 @@ Dense search can turn on by default once these hold:
 
 1. **The host builds with `local-embed`** and a first use downloads 548 MB, which needs
    a notice and an opt-out (`--no-embed` exists).
-2. **Embedding runs behind the lexical index.** A build now embeds before it
-   publishes, so a first build of a large repository waits on the CPU (Kubernetes,
-   259k chunks, would take hours). The lexical generation should publish first and
-   vectors follow in the background. The cache already keeps every finished request,
-   and hybrid search already treats chunks without vectors as lexical only.
-3. **A thread budget.** Embedding takes every CPU by default. A background embedder
+2. **A thread budget.** Embedding takes every CPU by default. A background embedder
    should use a share of them, at low priority, so the machine stays usable.
-4. **Measurements on laptops**, Apple Silicon (NEON kernels) included, since the numbers
-   above come from a server.
-5. **Memory.** Keeping the weights in f16 would halve the 550 MB, at some speed cost.
+3. **Measurements on Apple Silicon**, where the int8 kernel runs on `sdot`.
+4. **VNNI.** On x86 CPUs with VNNI (`vpdpbusd`: Intel since Ice Lake and Alder Lake,
+   AMD since Zen 4) an int8 kernel could do in one instruction what AVX2 does in three,
+   and take 8-bit weights.

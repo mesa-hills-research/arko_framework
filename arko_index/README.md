@@ -117,12 +117,15 @@ in [arko_index languages](../docs/arko_index-languages.md), and the limits and f
 
 With the `local-embed` feature, `dense::local::LocalEmbedder` runs a code-embedding model on
 the CPU, in pure Rust, so dense search needs no key and costs nothing per token.
-`--embed local` picks nomic-ai/CodeRankEmbed (137M parameters, MIT). The first build
-downloads its pinned files (548 MB) into the Hugging Face cache. On the retrieval questions
-above it finds what voyage-code-4 finds. Embedding is the cost: the 7,438 chunks of this
-repository took 330 s on 40 threads of an EPYC 9354P, once, since the cache keeps the
-vectors. [arko_index local embeddings](../docs/arko_index-local-embeddings.md) has the
-models, the measurements and the evaluation.
+`--embed local` picks nomic-ai/CodeRankEmbed (137M parameters, MIT) and runs most of its
+arithmetic in int8: about 1.4 times as fast as f32 (`local:f32`), with vectors within a
+cosine similarity of 0.998 of the f32 ones. The first build downloads the pinned
+files (548 MB) into the Hugging Face cache. On the retrieval questions above it finds what
+voyage-code-4 finds. On 6 cores of a laptop's i9-13980HX it embeds about 7.6 chunks a
+second, so the 7,521 chunks of this repository's evaluation snapshot took about 16 minutes,
+once: the cache keeps the vectors, and lexical search works while they fill in.
+[arko_index local embeddings](../docs/arko_index-local-embeddings.md) has the models, the
+measurements and the evaluation.
 
 ## Watchers
 
