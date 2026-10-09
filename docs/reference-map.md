@@ -1698,7 +1698,7 @@ Guides: [arko_index README](../arko_index/README.md) · [arko_index reference](a
 | `bench_v1::open_watch[_with]`, `Watcher` | The polling watcher (any platform): `next_change`, `ack`, `snapshot`, `flush`, `report`, `rules_changed`. | `arko_index/src/watch.rs` | [Watchers](arko_index-reference.md#watchers) |
 | `watch2::Watcher2` | Linux: inotify plus metadata reconciliation, a record store and a write-ahead journal, with `open[_with]`, `next_change`, `next_change_to`, `ack`, `report`, `rules_changed`, `file_count`, `stats`. | `arko_index/src/watch2.rs` | [Watchers](arko_index-reference.md#watchers) |
 | `bench_scan[_with]` | Unix: prints timings of the scan primitives. | `arko_index/src/scan.rs` | [Command line](arko_index-reference.md#command-line) |
-| Parsing | mhr_tree_sitter, a pure-Rust port of tree-sitter 0.25.10, and its grammar crates (no C compiler needed). The build script records their locked versions for the watchers' engine digest. | `arko_index/src/syntax.rs`, `arko_index/build.rs` | [Parsing](arko_index-reference.md#parsing) |
+| Parsing | Mesquite, a pure-Rust port of tree-sitter 0.25.10, and its grammar crates (no C compiler needed). The build script records their locked versions for the watchers' engine digest. | `arko_index/src/syntax.rs`, `arko_index/build.rs` | [Parsing](arko_index-reference.md#parsing) |
 
 ### Defaults (arko_index)
 

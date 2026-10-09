@@ -6,7 +6,7 @@ Usage: gen_language_rules.py GRAMMAR_META [OUT]
 
 GRAMMAR_META holds one folder per grammar key, with the grammar's `node-types.json` and
 its `queries/` folder (a copy of the grammar repository's files at the version
-mhr_tree_sitter ports). OUT defaults to arko_index/src/rules/tags.rs next to this script.
+Mesquite ports). OUT defaults to arko_index/src/rules/tags.rs next to this script.
 
 For every `@definition.<category>` capture in tags.scm, the node pattern it captures
 gives a (kind, category) pair; alternations (`[ (a) (b) ] @definition.x`) give one pair

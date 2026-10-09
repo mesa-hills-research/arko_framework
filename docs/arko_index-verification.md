@@ -27,7 +27,7 @@ each language are described in [arko_index languages](arko_index-languages.md#ch
 
 ## The pure-Rust parser
 
-arko_index parses with [mhr_tree_sitter](https://github.com/mesa-hills-research/mhr_tree_sitter),
+arko_index parses with [Mesquite](https://github.com/mesa-hills-research/mesquite),
 a pure, safe Rust port of tree-sitter 0.25.10 and 54 grammars (see
 [Parsing](arko_index-reference.md#parsing)).
 

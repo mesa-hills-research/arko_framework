@@ -45,8 +45,8 @@ arko_index = { path = "../arko_index" }
 ```
 
 The library needs no C compiler: it parses with
-[mhr_tree_sitter](https://github.com/mesa-hills-research/mhr_tree_sitter), a pure-Rust port
-of tree-sitter, and stores vectors with Caprock, also pure Rust. Its examples use arko_ai
+[Mesquite](https://github.com/mesa-hills-research/mesquite), a pure-Rust port of
+tree-sitter, and stores vectors with Caprock, also pure Rust. Its examples use arko_ai
 for Voyage, a dev-dependency whose dependencies need one, so building the tests and examples
 does too. Linux is the primary platform. macOS has
 everything but `watch2`, and Windows compiles (see [Platforms](../docs/arko_index-reference.md#platforms)).
@@ -130,8 +130,8 @@ and every language's rules.
 
 ## Parsing
 
-Parsing uses [mhr_tree_sitter](https://github.com/mesa-hills-research/mhr_tree_sitter), a
-pure, safe Rust port of tree-sitter 0.25.10 and 54 grammars. When this crate moved to it
+Parsing uses [Mesquite](https://github.com/mesa-hills-research/mesquite), a pure, safe
+Rust port of tree-sitter 0.25.10 and 54 grammars. When this crate moved to it
 from the C library, its `chunk` output stayed byte-identical on eight trees: 237,312 files,
 18.9 GB of text and 6.5 million chunks. [Verification](../docs/arko_index-verification.md)
 has the details.

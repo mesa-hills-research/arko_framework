@@ -1,11 +1,11 @@
 # arko_index languages
 
-arko_index parses every file language that [mhr_tree_sitter](arko_index-reference.md#parsing)
+arko_index parses every file language that [Mesquite](arko_index-reference.md#parsing)
 has a grammar for and chunks it along that grammar's structure. This page lists which
 files go to which grammar, how the rules tables work, what each language's rules are,
 how Markdown's front matter is handled, and how the rules are checked.
 
-Fifty-two grammars parse files. The port's other two have no file type of their own:
+Fifty-two grammars parse files. Mesquite's other two have no file type of their own:
 `markdown_inline` (Markdown's inline syntax, which chunk boundaries never need) and
 `php_only` (PHP without the surrounding HTML, while `.php` files are parsed with `php`).
 

@@ -1,4 +1,4 @@
-//! Build script: records the locked tree-sitter crates (`mhr_tree_sitter` and its
+//! Build script: records the locked tree-sitter crates (`mesquite` and its
 //! grammar crates) for the watcher's engine id (`src/watch.rs`), so a grammar upgrade
 //! invalidates cached partitions.
 use std::{
@@ -27,7 +27,7 @@ fn engine_lock(manifest_dir: &Path, out_dir: &Path) {
         println!("cargo:rerun-if-changed={}", path.display());
         let text = fs::read_to_string(path).unwrap_or_default();
         for entry in text.split("[[package]]").skip(1) {
-            if entry.trim_start().starts_with("name = \"mhr_tree_sitter") {
+            if entry.trim_start().starts_with("name = \"mesquite") {
                 entries.push_str("[[package]]");
                 entries.push_str(entry.trim_end());
                 entries.push('\n');

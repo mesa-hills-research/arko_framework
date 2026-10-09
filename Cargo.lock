@@ -184,56 +184,56 @@ dependencies = [
  "fs2",
  "ignore",
  "libc",
- "mhr_tree_sitter",
- "mhr_tree_sitter_bash",
- "mhr_tree_sitter_c",
- "mhr_tree_sitter_c_sharp",
- "mhr_tree_sitter_cmake",
- "mhr_tree_sitter_cpp",
- "mhr_tree_sitter_css",
- "mhr_tree_sitter_cuda",
- "mhr_tree_sitter_dart",
- "mhr_tree_sitter_elixir",
- "mhr_tree_sitter_elm",
- "mhr_tree_sitter_embedded_template",
- "mhr_tree_sitter_erlang",
- "mhr_tree_sitter_fortran",
- "mhr_tree_sitter_fsharp",
- "mhr_tree_sitter_glsl",
- "mhr_tree_sitter_go",
- "mhr_tree_sitter_haskell",
- "mhr_tree_sitter_hcl",
- "mhr_tree_sitter_html",
- "mhr_tree_sitter_java",
- "mhr_tree_sitter_javascript",
- "mhr_tree_sitter_json",
- "mhr_tree_sitter_julia",
- "mhr_tree_sitter_kotlin",
- "mhr_tree_sitter_lua",
- "mhr_tree_sitter_make",
- "mhr_tree_sitter_markdown",
- "mhr_tree_sitter_objc",
- "mhr_tree_sitter_ocaml",
- "mhr_tree_sitter_odin",
- "mhr_tree_sitter_perl",
- "mhr_tree_sitter_php",
- "mhr_tree_sitter_powershell",
- "mhr_tree_sitter_proto",
- "mhr_tree_sitter_python",
- "mhr_tree_sitter_r",
- "mhr_tree_sitter_ruby",
- "mhr_tree_sitter_rust",
- "mhr_tree_sitter_scala",
- "mhr_tree_sitter_solidity",
- "mhr_tree_sitter_sql",
- "mhr_tree_sitter_svelte",
- "mhr_tree_sitter_swift",
- "mhr_tree_sitter_toml",
- "mhr_tree_sitter_typescript",
- "mhr_tree_sitter_verilog",
- "mhr_tree_sitter_xml",
- "mhr_tree_sitter_yaml",
- "mhr_tree_sitter_zig",
+ "mesquite",
+ "mesquite_bash",
+ "mesquite_c",
+ "mesquite_c_sharp",
+ "mesquite_cmake",
+ "mesquite_cpp",
+ "mesquite_css",
+ "mesquite_cuda",
+ "mesquite_dart",
+ "mesquite_elixir",
+ "mesquite_elm",
+ "mesquite_embedded_template",
+ "mesquite_erlang",
+ "mesquite_fortran",
+ "mesquite_fsharp",
+ "mesquite_glsl",
+ "mesquite_go",
+ "mesquite_haskell",
+ "mesquite_hcl",
+ "mesquite_html",
+ "mesquite_java",
+ "mesquite_javascript",
+ "mesquite_json",
+ "mesquite_julia",
+ "mesquite_kotlin",
+ "mesquite_lua",
+ "mesquite_make",
+ "mesquite_markdown",
+ "mesquite_objc",
+ "mesquite_ocaml",
+ "mesquite_odin",
+ "mesquite_perl",
+ "mesquite_php",
+ "mesquite_powershell",
+ "mesquite_proto",
+ "mesquite_python",
+ "mesquite_r",
+ "mesquite_ruby",
+ "mesquite_rust",
+ "mesquite_scala",
+ "mesquite_solidity",
+ "mesquite_sql",
+ "mesquite_svelte",
+ "mesquite_swift",
+ "mesquite_toml",
+ "mesquite_typescript",
+ "mesquite_verilog",
+ "mesquite_xml",
+ "mesquite_yaml",
+ "mesquite_zig",
  "serde",
  "serde_json",
  "sha2",
@@ -1610,455 +1610,455 @@ dependencies = [
 ]
 
 [[package]]
-name = "mhr_tree_sitter"
+name = "mesquite"
 version = "0.25.10"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
  "regex",
  "streaming-iterator",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_bash"
+name = "mesquite_bash"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_c"
+name = "mesquite_c"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_c_sharp"
+name = "mesquite_c_sharp"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_cmake"
+name = "mesquite_cmake"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_cpp"
+name = "mesquite_cpp"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_css"
+name = "mesquite_css"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_cuda"
+name = "mesquite_cuda"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_dart"
+name = "mesquite_dart"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_dtd"
+name = "mesquite_dtd"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_elixir"
+name = "mesquite_elixir"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_elm"
+name = "mesquite_elm"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_embedded_template"
+name = "mesquite_embedded_template"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_erlang"
+name = "mesquite_erlang"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_fortran"
+name = "mesquite_fortran"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_fsharp"
+name = "mesquite_fsharp"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_glsl"
+name = "mesquite_glsl"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_go"
+name = "mesquite_go"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_haskell"
+name = "mesquite_haskell"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_hcl"
+name = "mesquite_hcl"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_html"
+name = "mesquite_html"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_java"
+name = "mesquite_java"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_javascript"
+name = "mesquite_javascript"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_json"
+name = "mesquite_json"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_julia"
+name = "mesquite_julia"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_kotlin"
+name = "mesquite_kotlin"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_language"
+name = "mesquite_language"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 
 [[package]]
-name = "mhr_tree_sitter_lua"
+name = "mesquite_lua"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_make"
+name = "mesquite_make"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_markdown"
+name = "mesquite_markdown"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
- "mhr_tree_sitter_markdown_inline",
+ "mesquite_language",
+ "mesquite_markdown_inline",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_markdown_inline"
+name = "mesquite_markdown_inline"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_objc"
+name = "mesquite_objc"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_ocaml"
+name = "mesquite_ocaml"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
- "mhr_tree_sitter_ocaml_interface",
+ "mesquite_language",
+ "mesquite_ocaml_interface",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_ocaml_interface"
+name = "mesquite_ocaml_interface"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_odin"
+name = "mesquite_odin"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_perl"
+name = "mesquite_perl"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_php"
+name = "mesquite_php"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
- "mhr_tree_sitter_php_only",
+ "mesquite_language",
+ "mesquite_php_only",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_php_only"
+name = "mesquite_php_only"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_powershell"
+name = "mesquite_powershell"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_proto"
+name = "mesquite_proto"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_python"
+name = "mesquite_python"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_r"
+name = "mesquite_r"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_ruby"
+name = "mesquite_ruby"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_rust"
+name = "mesquite_rust"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_scala"
+name = "mesquite_scala"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_solidity"
+name = "mesquite_solidity"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_sql"
+name = "mesquite_sql"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_svelte"
+name = "mesquite_svelte"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_swift"
+name = "mesquite_swift"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_toml"
+name = "mesquite_toml"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_tsx"
+name = "mesquite_tsx"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_typescript"
+name = "mesquite_typescript"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
- "mhr_tree_sitter_tsx",
+ "mesquite_language",
+ "mesquite_tsx",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_verilog"
+name = "mesquite_verilog"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_xml"
+name = "mesquite_xml"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_dtd",
- "mhr_tree_sitter_language",
+ "mesquite_dtd",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_yaml"
+name = "mesquite_yaml"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
-name = "mhr_tree_sitter_zig"
+name = "mesquite_zig"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mhr_tree_sitter?rev=d56f6093f18f4212af2ea96588d5ee2318001450#d56f6093f18f4212af2ea96588d5ee2318001450"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
 dependencies = [
- "mhr_tree_sitter_language",
+ "mesquite_language",
 ]
 
 [[package]]
