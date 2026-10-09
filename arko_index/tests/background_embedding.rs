@@ -813,3 +813,152 @@ fn the_cli_embeds_in_the_background_and_reports_progress() {
     let (_, stderr) = run(&["embed", state_arg]);
     assert!(stderr.contains("0 embedded now in 0 requests"), "{stderr}");
 }
+
+/// A tree of `n` files of one small function each: one text per file, so the hash
+/// embedder needs several requests of 256 texts.
+#[cfg(unix)]
+fn many_files(root: &Path, n: usize) {
+    for i in 0..n {
+        write(
+            root,
+            &format!("src/m{i}.rs"),
+            &format!("pub fn handler_{i}(x: u32) -> u32 {{\n    x.wrapping_mul({i})\n}}\n"),
+        );
+    }
+}
+
+/// Waits until the background process that `index2` reported on `stderr` has exited.
+#[cfg(unix)]
+fn wait_for_background_run(stderr: &str) {
+    let at = stderr
+        .find("(process ")
+        .expect("index2 started a background run")
+        + "(process ".len();
+    let pid: libc::pid_t = stderr[at..]
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    wait_until(|| unsafe { libc::kill(pid, 0) } != 0);
+}
+
+/// The CLI's `status` of `state`, as JSON.
+#[cfg(unix)]
+fn cli_status(state: &Path) -> serde_json::Value {
+    let out = std::process::Command::new(cli())
+        .arg("status")
+        .arg(state)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+/// The background run belongs to an owner process: when the owner ends, the run stops
+/// after its current request, keeps what it embedded, and a later `embed` continues
+/// without paying for it again.
+#[cfg(unix)]
+#[test]
+fn a_background_run_stops_when_its_owner_ends() {
+    use std::process::Command;
+    let root = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    many_files(root.path(), 1000);
+    let mut owner = Command::new("sleep").arg("120").spawn().unwrap();
+    let out = Command::new(cli())
+        .env("ARKO_INDEX_HASH_DELAY_MS", "1000")
+        .env_remove("ARKO_INDEX_OWNER_PID")
+        .args(["index2", "--embed", "hash", "--owner-pid"])
+        .arg(owner.id().to_string())
+        .arg(root.path())
+        .arg(state.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(&format!("until process {} ends", owner.id())),
+        "{stderr}"
+    );
+    wait_until(|| cli_status(state.path())["progress"]["requests"].as_u64() >= Some(1));
+    owner.kill().unwrap();
+    owner.wait().unwrap();
+    let ended = Instant::now();
+    wait_for_background_run(&stderr);
+    // At most the request in flight, a request taking 1 s, and the check every second.
+    assert!(
+        ended.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        ended.elapsed()
+    );
+    let s = cli_status(state.path());
+    assert_eq!(s["dense"]["state"], "embedding");
+    let paid = s["progress"]["texts"].as_u64().unwrap();
+    assert!((256..1000).contains(&paid), "{s}");
+    assert!(s["stopped"].as_str().unwrap().contains("ended"), "{s}");
+    let log = fs::read_to_string(state.path().join("embed.log")).unwrap();
+    assert!(
+        log.contains("ended: stopping after the current request"),
+        "{log}"
+    );
+
+    // A later run continues from the cache.
+    let out = Command::new(cli())
+        .env_remove("ARKO_INDEX_OWNER_PID")
+        .arg("embed")
+        .arg(state.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "{paid} from the cache, {} embedded now",
+            1000 - paid
+        )),
+        "{stderr}"
+    );
+    let s = cli_status(state.path());
+    assert_eq!(s["dense"]["state"], "complete");
+    assert!(s.get("stopped").is_none(), "{s}");
+}
+
+/// `ARKO_INDEX_OWNER_PID` names the owner when no `--owner-pid` is given, and
+/// `--owner-pid 0` gives the run no owner: it goes on to the end.
+#[cfg(unix)]
+#[test]
+fn the_owner_comes_from_the_flag_then_the_environment() {
+    use std::process::Command;
+    let root = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    corpus(root.path());
+    let mut gone = Command::new("true").spawn().unwrap();
+    gone.wait().unwrap();
+    let index2 = |owner: Option<&str>| {
+        let mut command = Command::new(cli());
+        command
+            .env("ARKO_INDEX_OWNER_PID", gone.id().to_string())
+            .args(["index2", "--embed", "hash"]);
+        if let Some(owner) = owner {
+            command.args(["--owner-pid", owner]);
+        }
+        let out = command.arg(root.path()).arg(state.path()).output().unwrap();
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert!(out.status.success(), "{stderr}");
+        wait_for_background_run(&stderr);
+        cli_status(state.path())
+    };
+    // The owner is gone before the run starts: nothing is embedded.
+    let s = index2(None);
+    assert_eq!(s["dense"]["state"], "embedding");
+    assert_eq!(s["dense"]["embedded"], 0);
+    assert!(
+        s["stopped"].as_str().unwrap().contains("no longer running"),
+        "{s}"
+    );
+    // No owner: the run completes.
+    let s = index2(Some("0"));
+    assert_eq!(s["dense"]["state"], "complete");
+    assert_eq!(s["dense"]["embedded"], s["docs"]);
+}

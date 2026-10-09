@@ -24,6 +24,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use support::process::{self, Owner};
 fn write_json<T: serde::Serialize>(value: &T) -> Result<(), Error> {
     let mut out = io::stdout().lock();
     serde_json::to_writer(&mut out, value)?;
@@ -39,8 +40,8 @@ struct Walk {
     front_matter_description: bool,
 }
 const RULE_FLAGS: &str = "[--respect-ignore] [--exclude PATTERN]... [--include PATTERN]... [--report FILE] [--front-matter-description]";
-const EMBED_FLAGS: &str = "[--lexical-scope] [--embed MODEL] [--dimensions N] [--embed-text source|path-source|path-scope-source] [--embed-config FILE] [--quantize f32|int8] [--vector-index flat|graph] [--max-embed-tokens N|none] [--no-embed] [--wait-embeddings]";
-const RUN_FLAGS: &str = "[--max-embed-tokens N|none]";
+const EMBED_FLAGS: &str = "[--lexical-scope] [--embed MODEL] [--dimensions N] [--embed-text source|path-source|path-scope-source] [--embed-config FILE] [--quantize f32|int8] [--vector-index flat|graph] [--max-embed-tokens N|none] [--no-embed] [--wait-embeddings] [--owner-pid PID]";
+const RUN_FLAGS: &str = "[--max-embed-tokens N|none] [--owner-pid PID]";
 const WATCH_FLAGS: &str = "[--index INDEX_STATE_DIR] [--lexical-scope]";
 const SEARCH_FLAGS: &str = "[--mode lexical|dense|hybrid] [--limit N] [--candidates N] [--fusion rrf|linear] [--rrf-k K] [--lexical-weight W] [--dense-weight W] [--path-prefix P] [--language L] [--text]";
 
@@ -62,6 +63,8 @@ struct Flags {
     wait_embeddings: bool,
     /// `watch`/`watch2 --index DIR`: keep that index2 state current.
     index: Option<PathBuf>,
+    /// `--owner-pid PID`: the process an embedding run belongs to (0: none).
+    owner_pid: Option<u32>,
     mode: Option<Mode>,
     limit: Option<usize>,
     candidates: Option<usize>,
@@ -106,6 +109,7 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
         no_embed: false,
         wait_embeddings: false,
         index: None,
+        owner_pid: None,
         mode: None,
         limit: None,
         candidates: None,
@@ -151,7 +155,7 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
             | "--front-matter-description" => accepts.walk,
             "--embed" | "--dimensions" | "--embed-text" | "--embed-config" | "--quantize"
             | "--vector-index" | "--no-embed" | "--wait-embeddings" => accepts.embed,
-            "--max-embed-tokens" => accepts.embed || accepts.run,
+            "--max-embed-tokens" | "--owner-pid" => accepts.embed || accepts.run,
             "--lexical-scope" => accepts.embed || accepts.watch,
             "--index" => accepts.watch,
             "--mode" | "--limit" | "--candidates" | "--fusion" | "--rrf-k" | "--lexical-weight"
@@ -204,6 +208,7 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
             "--embed-text" => f.embed_text = Some(value.parse()?),
             "--embed-config" => f.embed_config = Some(PathBuf::from(value)),
             "--index" => f.index = Some(PathBuf::from(value)),
+            "--owner-pid" => f.owner_pid = Some(number(flag, &value)?),
             "--quantize" => {
                 f.quantize = Some(match value.as_str() {
                     "f32" => Quantization::F32,
@@ -275,6 +280,57 @@ fn stop_on_signal() -> Result<Arc<StopSignal>, Error> {
         }
     })?;
     Ok(stop)
+}
+
+/// The owner an embedding run in this process gets from `--owner-pid` or
+/// `ARKO_INDEX_OWNER_PID`, when one is given (0: none).
+fn explicit_owner(f: &Flags) -> Result<Option<u32>, Error> {
+    if let Some(pid) = f.owner_pid {
+        return Ok(Some(pid));
+    }
+    match std::env::var("ARKO_INDEX_OWNER_PID") {
+        Ok(v) if !v.trim().is_empty() => Ok(Some(number("ARKO_INDEX_OWNER_PID", v.trim())?)),
+        _ => Ok(None),
+    }
+}
+
+/// How long a run whose owner ended may finish its current request before the process
+/// leaves it. Everything committed before it is kept.
+const OWNER_GRACE: Duration = Duration::from_secs(30);
+
+/// Stops `stop` when the owner process `pid` ends (0: no owner), checking every second,
+/// and leaves the process if the run hasn't stopped after `OWNER_GRACE`.
+fn stop_with_owner(pid: u32, stop: &Arc<StopSignal>) {
+    if pid == 0 {
+        return;
+    }
+    let Some(owner) = Owner::watch(pid) else {
+        let reason = format!("the program that started it (process {pid}) was no longer running");
+        eprintln!("arko_index: {reason}: not embedding");
+        stop.stop(reason);
+        return;
+    };
+    let stop = stop.clone();
+    std::thread::spawn(move || {
+        while owner.alive() {
+            if stop.is_stopped() {
+                return;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        let reason = format!(
+            "the program that started it (process {}) ended",
+            owner.pid()
+        );
+        eprintln!("arko_index: {reason}: stopping after the current request");
+        stop.stop(reason);
+        std::thread::sleep(OWNER_GRACE);
+        eprintln!(
+            "arko_index: the current request is still running after {} s: leaving it; the next run continues from what was saved",
+            OWNER_GRACE.as_secs()
+        );
+        std::process::exit(0);
+    });
 }
 fn rules_changed_note() {
     eprintln!(
@@ -411,22 +467,28 @@ fn progress_line(p: &EmbedProgress) -> String {
 }
 
 /// Why the dense coverage is partial, for the notices of `search2` and `status`.
-fn coverage_note(state: EmbedState, running: bool) -> &'static str {
-    match (state, running) {
-        (EmbedState::Embedding, true) => "embedding continues in the background",
-        (EmbedState::Embedding, false) => {
-            "the embedding stopped before it finished: `embed STATE_DIR` or the next index2 continues it"
-        }
+fn coverage_note(state: EmbedState, status: &IndexStatus) -> String {
+    match (state, status.embedding) {
+        (EmbedState::Embedding, true) => "embedding continues in the background".into(),
+        (EmbedState::Embedding, false) => format!(
+            "the embedding stopped before it finished{}. `embed STATE_DIR` or the next index2 continues it",
+            status
+                .stopped
+                .as_ref()
+                .map(|why| format!(" because {why}"))
+                .unwrap_or_default()
+        ),
         (EmbedState::CapReached, _) => {
-            "the last run stopped at its token cap: `embed --max-embed-tokens N|none STATE_DIR` continues"
+            "the last run stopped at its token cap: `embed --max-embed-tokens N|none STATE_DIR` continues".into()
         }
-        (EmbedState::Complete, _) => "the others are over the model's input limit",
+        (EmbedState::Complete, _) => "the others are over the model's input limit".into(),
     }
 }
 
-/// Embeds what the current generation lacks, in this process, printing progress; the
-/// first SIGINT or SIGTERM stops it after its current request.
-fn embed_now(state: &Path, max_tokens: Option<Option<u64>>) -> Result<(), Error> {
+/// Embeds what the current generation lacks, in this process, printing progress. The
+/// first SIGINT or SIGTERM stops it after its current request, and so does the end of
+/// the owner process `owner` (0: none).
+fn embed_now(state: &Path, max_tokens: Option<Option<u64>>, owner: u32) -> Result<(), Error> {
     let info = arko_index::index2::dense_info(state)?
         .ok_or("this index has no embeddings: build it with them (index2 --embed MODEL)")?;
     let embedder = support::embedder_for(&info.embedder)?;
@@ -438,6 +500,7 @@ fn embed_now(state: &Path, max_tokens: Option<Option<u64>>) -> Result<(), Error>
         eprintln!("arko_index: waiting for the embedding run in progress to finish or stop");
     }
     let stop = stop_on_signal()?;
+    stop_with_owner(owner, &stop);
     let progress = |p: &EmbedProgress| eprintln!("arko_index: {}", progress_line(p));
     let stats = arko_index::index2::embed(
         state,
@@ -451,42 +514,27 @@ fn embed_now(state: &Path, max_tokens: Option<Option<u64>>) -> Result<(), Error>
 }
 
 /// Starts `embed STATE_DIR` as a detached process of this executable, its output in
-/// `STATE_DIR/embed.log`. Returns its process id.
-fn embed_in_background(state: &Path) -> Result<u32, Error> {
+/// `STATE_DIR/embed.log`, belonging to the owner process `owner` (0: none). Returns its
+/// process id.
+fn embed_in_background(state: &Path, owner: u32) -> Result<u32, Error> {
     let state = state.canonicalize()?;
-    // A new file: a run still writing the previous one keeps its own.
+    // A new file: a run still writing the previous one keeps its own (where the file
+    // can't be removed, it is truncated).
     let log = state.join(EMBED_LOG);
-    match std::fs::remove_file(&log) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
-        _ => {}
-    }
+    let _ = std::fs::remove_file(&log);
     let log = std::fs::File::create(log)?;
     let mut command = std::process::Command::new(std::env::current_exe()?);
     command
         .arg("embed")
+        .arg("--owner-pid")
+        .arg(owner.to_string())
         .arg("--")
         .arg(&state)
+        .current_dir(&state)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(log);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // A session of its own: closing the terminal does not stop it.
-        unsafe {
-            command.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    }
+    process::detach(&mut command);
     Ok(command.spawn()?.id())
 }
 
@@ -512,7 +560,7 @@ fn print_status(status: &IndexStatus) -> Result<(), Error> {
                 if info.complete() {
                     String::new()
                 } else {
-                    format!(" ({})", coverage_note(info.state, status.embedding))
+                    format!(" ({})", coverage_note(info.state, status))
                 }
             );
             if let Some(p) = &status.progress {
@@ -616,12 +664,12 @@ fn search2(state: &Path, query: &str, f: &Flags) -> Result<(), Error> {
             );
         }
         if !info.complete() {
-            let running = arko_index::index2::status(state)?.embedding;
+            let status = arko_index::index2::status(state)?;
             eprintln!(
                 "arko_index: dense: {} of {} chunks embedded ({}); the others are found by lexical search only",
                 info.embedded,
                 info.docs,
-                coverage_note(info.state, running)
+                coverage_note(info.state, &status)
             );
         }
     }
@@ -953,19 +1001,31 @@ fn run() -> Result<(), Error> {
                     d.texts,
                     d.cached
                 );
+                let owner = explicit_owner(&flags)?;
                 if flags.wait_embeddings {
-                    embed_now(state, None)?;
+                    embed_now(state, None, owner.unwrap_or(0))?;
                 } else {
-                    let pid = embed_in_background(state)?;
+                    // The run belongs to the program that ran this command.
+                    let owner = owner.unwrap_or_else(|| process::default_owner().unwrap_or(0));
+                    let pid = embed_in_background(state, owner)?;
                     eprintln!(
-                        "arko_index: embedding in the background (process {pid}); `status {}` shows the progress, {} the run's output",
+                        "arko_index: embedding in the background (process {pid}{}); `status {}` shows the progress, {} the run's output",
+                        if owner == 0 {
+                            String::new()
+                        } else {
+                            format!(", until process {owner} ends")
+                        },
                         state.display(),
                         state.join(EMBED_LOG).display()
                     );
                 }
             }
         }
-        Some("embed") if args.len() == 2 => embed_now(Path::new(&args[1]), flags.max_embed_tokens)?,
+        Some("embed") if args.len() == 2 => embed_now(
+            Path::new(&args[1]),
+            flags.max_embed_tokens,
+            explicit_owner(&flags)?.unwrap_or(0),
+        )?,
         Some("status") if args.len() == 2 => {
             print_status(&arko_index::index2::status(Path::new(&args[1]))?)?
         }
