@@ -10,10 +10,12 @@ watching run entirely on your machine.
 
 Dense (embedding) and hybrid search are opt-in. They embed through a `dense::Embedder` the
 caller supplies (the CLI uses Voyage through arko_ai), and the library itself never makes a
-network call. The vectors live in [Caprock](https://github.com/mesa-hills-research/caprock),
-a pure-Rust store that each build updates in place. A search scans int8 codes held in
-memory and rescores the best candidates at full precision: on 199,999 code chunks it took
-13.5 ms per query and returned the exact top ten
+network call. Lexical search works as soon as a build has chunked the tree, and dense
+results fill in while the chunks are embedded, however long a slow model takes. The vectors
+live in [Caprock](https://github.com/mesa-hills-research/caprock), a pure-Rust store
+updated in place as they arrive. A search scans int8 codes held in memory and rescores the
+best candidates at full precision: on 199,999 code chunks it took 13.5 ms per query and
+returned the exact top ten
 ([measurements](../docs/arko_index-reference.md#vector-store-measurements)).
 
 It is built for coding agents and the tools around them. A result names an exact byte and
@@ -68,6 +70,7 @@ $CLI chunk --respect-ignore --exclude 'vendor/' --report skipped.json ./repo
 # Dense and hybrid search (opt-in, spends Voyage tokens)
 export VOYAGE_API_KEY=...
 $CLI index2 --embed voyage-code-4 --max-embed-tokens 5000000 ./repo ./index-state
+$CLI status ./index-state                  # embedding goes on in the background: progress
 $CLI index2 ./repo ./index-state           # later builds reuse the saved model and cache
 $CLI search2 --text ./index-state 'where is the input limit applied'   # hybrid
 $CLI search2 --mode lexical --language rust ./index-state 'RetryPolicy'

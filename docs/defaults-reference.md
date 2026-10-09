@@ -60,9 +60,16 @@ Defaults of arko_index (see [Defaults (arko_index)](reference-map.md#defaults-ar
   caller passes `DenseBuild::from_config` with `DenseConfig::load`). Embeddings are
   cached by model and text, so a rebuild embeds only changed chunks. The embedded text is the path, the
   scope and the source (`EmbedText::PathScopeSource`, CLI `--embed-text`).
+- A build publishes its generation for lexical search before it embeds. The library's
+  `index2::build` then embeds before it returns (`DenseBuild::embed_later` leaves it to
+  `index2::embed`), and the CLI's `index2` returns at once and embeds in a background
+  process (`--wait-embeddings` waits). Dense and hybrid search use the vectors stored so
+  far and report the coverage. A newer generation takes over from a run in progress,
+  and what a run embedded comes from the cache in the next one.
 - No token cap by default (`DenseBuild::max_tokens`, `--max-embed-tokens`): set one
-  for unattended builds. At the cap a build stops embedding, still publishes, and
-  reports what is left. Builds and searches report the tokens billed.
+  for unattended builds. The cap applies to each embedding run. At the cap a run stops,
+  the generation stays searchable, and the run reports what is left. Runs and searches
+  report the tokens billed.
 - Searches return ten results. The library's `SearchRequest` is lexical by default,
   and the CLI's `search2` is hybrid when the index has embeddings. Hybrid fusion is
   reciprocal rank fusion (k = 60, equal weights) over 50 candidates per side.
@@ -70,8 +77,8 @@ Defaults of arko_index (see [Defaults (arko_index)](reference-map.md#defaults-ar
   and rescores the best candidates with the full-precision vectors, so scores are
   exact (`Quantization::Int8`, `VectorIndex::Flat`). F32 codes (`--quantize f32`,
   exact, 4 bytes per dimension) and Vamana graphs (`--vector-index graph`, for very
-  large indexes) are opt-in. A build updates the vector store in place: only changed
-  chunks' vectors are added and removed.
+  large indexes) are opt-in. Embedding runs update the vector store in place: only
+  changed chunks' vectors are added and removed.
 - Chunks carry a context header (`scope`: enclosing definitions or Markdown headings),
   added in chunk JSON format 2 without changing boundaries or IDs. Lexical search indexes a
   chunk's path and source, and its scope only with `BuildOptions::lexical_scope`
