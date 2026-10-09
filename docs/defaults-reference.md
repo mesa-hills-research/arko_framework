@@ -63,8 +63,10 @@ Defaults of arko_index (see [Defaults (arko_index)](reference-map.md#defaults-ar
 - A build publishes its generation for lexical search before it embeds. The library's
   `index2::build` then embeds before it returns (`DenseBuild::embed_later` leaves it to
   `index2::embed`), and the CLI's `index2` returns at once and embeds in a background
-  process (`--wait-embeddings` waits). Dense and hybrid search use the vectors stored so
-  far and report the coverage. A newer generation takes over from a run in progress,
+  process (`--wait-embeddings` waits). That process ends, after its current request, when
+  the program that ran `index2` ends: its session leader on Unix, its parent on Windows
+  (`--owner-pid PID` names another owner, `0` none). Dense and hybrid search use the
+  vectors stored so far and report the coverage. A newer generation takes over from a run in progress,
   and what a run embedded comes from the cache in the next one.
 - No token cap by default (`DenseBuild::max_tokens`, `--max-embed-tokens`): set one
   for unattended builds. The cap applies to each embedding run. At the cap a run stops,

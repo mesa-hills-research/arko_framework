@@ -356,7 +356,7 @@ entries), `excluded_by_pattern`, `not_included`, `ignored_by_gitignore`,
 | `index2::embed(state_dir, &DenseBuild)` | An embedding run: embeds what the current generation lacks and stores the vectors request by request, with the generation's model and settings. Returns its `EmbedStats`. |
 | `index2::search(state_dir, query)` | Reads only the query terms' postings of the current generation. Same results as `search::search` on the same tree (unless the index was built with `lexical_scope`). |
 | `index2::dense_info(state_dir)` | The current generation's `DenseIndexInfo` (format version, model, render version, embedded text, quantization, vector index, vector store directory, chunks, chunks with vectors so far, `state`, and `store_config()`), or `None`. Like `hybrid::search`, it starts over when a build switches generations during the read, so the CLI's `search2` picks its default mode from the current generation. |
-| `index2::status(state_dir)` | `IndexStatus { generation, docs, dense, embedding, progress }`: the current generation, its chunks, its `DenseIndexInfo`, whether an embedding run is working now, and the latest run's `EmbedProgress` on this generation. |
+| `index2::status(state_dir)` | `IndexStatus { generation, docs, dense, embedding, progress, stopped }`: the current generation, its chunks, its `DenseIndexInfo`, whether an embedding run is working now, the latest run's `EmbedProgress` on this generation, and why that run was stopped, when its stop signal ended it. |
 
 `search` and `search2` score with BM25 (k1 = 1.2, b = 0.75) over lowercase words plus
 identifier components (snake_case parts and camelCase humps), so `retryPolicy` matches
@@ -488,8 +488,9 @@ components: `src/net` finds `src/net/retry.rs` and `src/net`, but not `src/netwo
 | `dense::render_with(chunk, chunk_text, EmbedText)`, `EmbedText` | The embedded text with the parts `EmbedText` names: `Source` (the trimmed source alone), `PathSource` (path line and source) or `PathScopeSource` (the default, `render`'s text). `as_str` and `FromStr` use `source`, `path-source`, `path-scope-source`. |
 | `dense::embed_query(embedder, query)` | The query's vector and billed tokens, for `SearchRequest::query_vector`. |
 | `dense::DenseConfig` | The per-index settings in `STATE_DIR/dense.json`: `version` (1), `embedder` (a `ModelDescriptor`), `render_version`, `quantization`, `vector_index` (`Flat` when absent), `max_tokens_per_run`, `embed_text` (`PathScopeSource` when absent), with `new`, `with_*`, `load(state_dir)`, `read(path)`, `save(state_dir)`, `remove(state_dir)`. Saved by every build with embeddings. |
-| `dense::DenseBuild` | One build's or run's embedding: `embedder`, `quantization` (`Int8`), `vector_index` (`Flat`), `max_tokens` (`None`), `embed_text` (`PathScopeSource`), `progress` (called after each request with `EmbedProgress { texts, total, tokens, requests, embedded_docs, docs }`), `embed_later` (`false`: `build` embeds before it returns), `stop` (`None`: when the flag is set, the run stops after its current request), with `new`, `from_config`, `with_*`. `index2::embed` uses the embedder, the cap, `progress` and `stop`, and takes the other settings from the generation. |
+| `dense::DenseBuild` | One build's or run's embedding: `embedder`, `quantization` (`Int8`), `vector_index` (`Flat`), `max_tokens` (`None`), `embed_text` (`PathScopeSource`), `progress` (called after each request with `EmbedProgress { texts, total, tokens, requests, embedded_docs, docs }`), `embed_later` (`false`: `build` embeds before it returns), `stop` (`None`: a `StopSignal` that, once stopped, makes the run stop after its current request), with `new`, `from_config`, `with_*`. `index2::embed` uses the embedder, the cap, `progress` and `stop`, and takes the other settings from the generation. |
 | `dense::EmbedStats` | `BuildStats::dense` and `index2::embed`'s result: `embedder`, `render_version`, `embed_text`, `docs`, `embedded_docs`, `texts` (distinct), `cached`, `new`, `requests`, `tokens` (billed), `max_tokens`, `cap_reached`, `not_embedded`, `not_embedded_tokens` (counted), `too_long`, `cache_records`, `vectors_added`, `vectors_removed` (the vector store's update), `store_created`, `superseded` (a newer generation was published), `stopped`. A build with `embed_later` reports what it published: `embedded_docs` chunks with a vector already, and `texts - cached` texts to embed. |
+| `dense::StopSignal` | Asks a run to stop after its current request: `new`, `stop(reason)` (the first reason is kept, and it returns whether this call stopped it), `is_stopped`, `reason`. Shared between threads. |
 | `dense::EmbedState` | How far a generation's embedding has come (`DenseIndexInfo::state`): `Embedding`, `Complete` (the default, and what a generation written before runs existed reads as), `CapReached`. |
 | `vector::VectorStore` | `dimensions`, `len`, `is_empty`, `upsert(&[VectorRecord { id, vector, meta: VectorMeta { path, language } }])` (replaces, a batch all or nothing), `delete(&[id])`, `ids()` (ascending), `search(query, k, &Filter) -> Vec<VectorHit { id, score }>` (cosine, best first, then id ascending), `persist` (atomic). Ids are `VectorId` (`u128`). |
 | `vector::CaprockStore` | The store, on Caprock: `create(dir, &StoreConfig)`, `open_for(dir, &StoreConfig)` (for writing, an error for another model or settings), `open(dir)` (read-only, the last persisted state), `matches(&StoreConfig)`, `compact()`. One writer per directory, any number of readers. A search returns at most 1,000 hits (Caprock's limit). |
@@ -528,9 +529,11 @@ current generation:
    `STATE_DIR/embed-progress.json`.
 
 A run ends when every chunk has a vector (texts over the model's input limit stay
-without one), at its token cap, when `DenseBuild::stop` is set (`EmbedStats::stopped`), on
-an error, or when a newer generation is published (`EmbedStats::superseded`), which it
-checks after every request. What it embedded stays in the cache, so the next run, for
+without one), at its token cap, when its `DenseBuild::stop` signal (`dense::StopSignal`)
+is stopped (`EmbedStats::stopped`, with the reason recorded for `index2::status`), on an
+error, or when a newer generation is published (`EmbedStats::superseded`). It checks the
+last two after every request and while it adds vectors from the cache, and a run that
+finds its generation removed by a newer build before it has read it is superseded too. What it embedded stays in the cache, so the next run, for
 the newer generation or after a crash, a stop or an error, embeds only the texts left and
 pays for none twice. One run works at a time, under `STATE_DIR/.embed.lock`: a run waits
 for the one in progress to end, which a newer generation makes it do after its current
@@ -539,8 +542,10 @@ embeddings, which removes the vector stores once a run in progress has stopped.
 
 When the run of `index2::build` fails (the provider is down, say), `build` returns the
 error, and the generation it published stays searchable with the vectors stored so far.
-A host that rebuilds as a watcher reports changes calls `index2::embed` again whenever a
-run returns `superseded`, as the CLI's watchers do with `--index`.
+A host that rebuilds as a watcher reports changes starts a run after each rebuild, since
+a generation published after a run's last check, or after it returned, doesn't supersede
+it, and starts another whenever a run returns `superseded`. The CLI's watchers do both
+with `--index`.
 
 **Searching during a run.** Dense and hybrid search use the vectors stored so far, with
 exact scores, and find the other chunks by lexical search only. `--mode dense` searches
@@ -661,9 +666,9 @@ processing and deduplicate by sequence: delivery is at-least-once across crashes
 |---|---|
 | `chunk ROOT` (directory or file) | Every chunk of a directory (or of one file) as one JSON line, in path order, and a `FileMetadata` line before a Markdown file's chunks when it has front matter. |
 | `outline ROOT` | The same partition as `path:start-end<TAB>kind<TAB>symbol_path` lines. A metadata region is `path:start-end<TAB>metadata<TAB>title`. |
-| `index2 ROOT STATE_DIR` | Builds and publishes the disk-resident BM25 index. stderr gets `indexed N chunks, T terms, R runs` and the report summary. With embeddings (`--embed`, or the saved `dense.json` when no `--embed`, `--embed-config` or `--no-embed` is given), it then says how many chunks have vectors and how many texts are left to embed, starts `embed STATE_DIR` as a detached process of the same executable (its output in `STATE_DIR/embed.log`), and returns: lexical search works at once, and dense coverage fills in. `--wait-embeddings` embeds in this process instead, printing a progress line per request, the token summary and the vector store's update, and returns when the run ends. Flags below. |
-| `embed STATE_DIR` | An embedding run in this process: embeds what the current generation lacks, with the model saved with the index, printing a progress line per request and the summary. `--max-embed-tokens N\|none` replaces the saved cap for this run. SIGINT or SIGTERM stops it after the current request (a second signal at once). It waits for a run in progress to end first. |
-| `status STATE_DIR` | One JSON line, `index2::status`: the current generation, its chunks, its embeddings with their coverage and `state`, whether a run is embedding (`embedding`), and the latest run's progress. stderr gets a summary. |
+| `index2 ROOT STATE_DIR` | Builds and publishes the disk-resident BM25 index. stderr gets `indexed N chunks, T terms, R runs` and the report summary. With embeddings (`--embed`, or the saved `dense.json` when no `--embed`, `--embed-config` or `--no-embed` is given), it then says how many chunks have vectors and how many texts are left to embed, starts `embed STATE_DIR` as a detached process of the same executable (its output in `STATE_DIR/embed.log`), and returns: lexical search works at once, and dense coverage fills in. The background run ends with the program that ran `index2` ([The background run](#the-background-run)). `--wait-embeddings` embeds in this process instead, printing a progress line per request, the token summary and the vector store's update, and returns when the run ends. Flags below. |
+| `embed STATE_DIR` | An embedding run in this process: embeds what the current generation lacks, with the model saved with the index, printing a progress line per request and the summary. `--max-embed-tokens N\|none` replaces the saved cap for this run. SIGINT or SIGTERM stops it after the current request (a second signal at once), and so does the end of the process `--owner-pid PID` (or `ARKO_INDEX_OWNER_PID`) names. It waits for a run in progress to end first. |
+| `status STATE_DIR` | One JSON line, `index2::status`: the current generation, its chunks, its embeddings with their coverage and `state`, whether a run is embedding (`embedding`), the latest run's progress, and why it was stopped (`stopped`), when it was. stderr gets a summary. |
 | `search2 STATE_DIR QUERY...` | The best hits, up to `--limit` (10), as JSON lines: the chunk's fields plus `header`, `score`, `lexical_rank`, `dense_rank`. `--text` prints one line per hit, `rank. header  [mode score; ranks]`. A lexical search reads only the postings of the query's terms. Dense and hybrid print the query's tokens on stderr, and the coverage while some chunks have no vector. Flags below. |
 | `index ROOT STATE_DIR` | The first index format: one JSON file that a search loads whole. stderr gets `indexed N chunks` and the report summary. |
 | `search STATE_DIR QUERY...` | Up to ten chunk JSON lines from `index`'s file (the words are joined with spaces). Same tokens, scores and ranking as a lexical `search2` of an `index2` built without `--lexical-scope`. |
@@ -680,13 +685,41 @@ selection flags: `--respect-ignore`, `--exclude PATTERN`, `--include PATTERN`
 
 `watch` and `watch2` take `--index INDEX_STATE_DIR`: they then also keep that index2
 state current. When a poll finds the tree quiet after deltas, they rebuild it with their
-file selection flags and the embedding model saved there (choose one with
-`index2 --embed` first), and a thread of the watcher embeds each new generation, a run
-after each rebuild, continuing a run a rebuild superseded. stderr gets a line per rebuild,
+file selection flags, `--lexical-scope` when given (pass it when the index was built
+with it), and the embedding model saved there (choose one with `index2 --embed` first),
+and a thread of the watcher embeds each new generation, a run after each rebuild,
+continuing a run a rebuild superseded. stderr gets a line per rebuild,
 `arko_index: index rebuilt: N chunks; dense: E have vectors, T distinct texts to embed`,
 and a progress line per embedding request. On a start with an existing index the thread
-continues its embedding, and a new index is built at the first quiet poll. A signal stops
-the embedding after its current request.
+continues its embedding, and a new index is built at the first quiet poll. A signal, or
+an error that ends the watcher, stops the embedding after its current request.
+
+### The background run
+
+The `embed` process that `index2` starts belongs to an owner: the program that ran
+`index2`. On Unix that is the leader of `index2`'s session (the terminal's shell, or the
+harness that started the session), so the `sh -c` that tools and harnesses often run a
+command through, which exits with `index2`, doesn't end it. When the session leader is
+init or `index2` itself, it is `index2`'s parent. On Windows it is the parent process.
+`--owner-pid PID` on `index2` (or `ARKO_INDEX_OWNER_PID`) names another owner, and
+`--owner-pid 0` none: the run then goes on to the end. `embed` and
+`index2 --wait-embeddings` have no owner unless one is given.
+
+The run checks its owner every second. When the owner has ended, the run stops after
+its current request, as on a signal, and logs the reason to `embed.log`, and `status`
+reports it. If that request is still running 30 s later, the process exits without it.
+What earlier requests embedded is in the cache and the store either way, and the next
+run continues from it. An owner is recognized by its process id and start time on Linux
+and macOS (other Unix systems check the id only), so a process that later gets the same
+id isn't taken for it, and on Windows by a handle held to it.
+
+The process runs in a session of its own (on Windows, detached in a new process group),
+in the state directory, with its standard input and output on `/dev/null` and its errors
+in `embed.log`. On Unix every other descriptor it would inherit from `index2` is closed
+when it starts, so a lock or pipe the caller passed to `index2` is released when `index2`
+exits. On Windows `index2`'s standard handles aren't inherited, so a caller reading
+`index2`'s output sees it end, but other inheritable handles `index2` received from its
+caller still pass to the run until it ends.
 
 The stdout of `chunk`, `search`, `search2` (without `--text`), `watch` and `watch2`
 carries only JSON lines, and diagnostics, token counts included, go to stderr. Errors
@@ -713,6 +746,7 @@ peak memory.
 | `--max-embed-tokens N\|none` | The token cap of each embedding run (default none). Saved in `dense.json`. |
 | `--no-embed` | Build lexically and remove `dense.json` (the cache stays). |
 | `--wait-embeddings` | Embed in this process after publishing, and return when the run ends (by default a background process embeds). |
+| `--owner-pid PID` | The process the embedding belongs to: the run stops when it ends. Default for the background run: `ARKO_INDEX_OWNER_PID`, else the session leader (Unix) or the parent (Windows). `0`: no owner. |
 | `--lexical-scope` | Also index the words of each chunk's scope for lexical search (`BuildOptions::lexical_scope`, this build only). |
 
 Without these flags, `index2` follows the saved `dense.json` if there is one. For
@@ -780,6 +814,8 @@ file's header and the [retrieval evaluation](arko_index-verification.md#retrieva
 | `ARKO_INDEX_STATS` | Unset | When set, `index2` prints per-phase timings to stderr. |
 | `MALLOC_MMAP_THRESHOLD_` | Unset: the CLI sets 1 MB | glibc's own variable. When it is set, the CLI leaves the threshold to glibc. |
 | `VOYAGE_API_KEY` | Unset | Examples only (through arko_ai's `EmbeddingClient::from_env`): the key for embedding with Voyage. The library reads no credentials. |
+| `ARKO_INDEX_OWNER_PID` | Unset | CLI only: the owner of an embedding run when no `--owner-pid` is given (`0`: none). |
+| `ARKO_INDEX_HASH_DELAY_MS` | 0 | Examples only: the offline `hash` embedder waits this long per request, to try background embedding at the pace of a real model. |
 
 ## Parsing
 
@@ -820,6 +856,7 @@ whose dependencies need a C compiler, so building the tests and examples needs o
 | Threads | All available CPUs (chunking, `index2`, `watch2`) |
 | Embeddings (`BuildOptions::dense`) | `None`: indexes are lexical, and dense is opt-in per index |
 | When a build embeds (`DenseBuild::embed_later`) | `false`: `build` publishes the generation, then runs the embedding before it returns. The CLI's `index2` returns once lexical search is ready and embeds in a background process (`--wait-embeddings` waits) |
+| Owner of the CLI's background run (`--owner-pid`) | `ARKO_INDEX_OWNER_PID`, else the session leader (Unix) or the parent (Windows) of `index2`: the run stops when it ends |
 | Embedding model (CLI `--embed`) | None until chosen, then the saved `dense.json`. The CLI's Voyage models default to the model's dimensions (voyage-code-4: 1,024) with input types on |
 | Token cap (`DenseBuild::max_tokens`, `DenseConfig::max_tokens_per_run`) | `None`: no cap. A cap applies to each embedding run |
 | Embedded text (`DenseBuild::embed_text`, `DenseConfig::embed_text`, CLI `--embed-text`) | `PathScopeSource`: the path, the scope, then the source |
@@ -841,8 +878,8 @@ directory that holds it) and `report.json` (the last walk's report).
 | Writer | Files |
 |---|---|
 | `search::index` | `index.json` (version 1), `.index.lock` |
-| `index2::index`, `index2::build` | `CURRENT2` (the name of the current generation), `.index.lock`, `index2-<stamp>-<pid>/` with `meta.json` (version 2, with `dense`: whether the generation has embeddings, `false` when absent), `lens.dat`, `docs.off`, `docs.dat`, `terms.dat`, `terms.idx`, `post.dat`, `files.dat` (each file's first document and path, for filters), and with embeddings also `dense.json` (`DenseIndexInfo`, version 2, naming the vector store, with the coverage when published), `vkeys.dat` (per document, by vector id: the 128-bit id big-endian, then the document as u32), `vhash.dat` (per document, in order: its embedded text's 32-byte hash) and `embed.spool` (the texts the cache lacked, removed when every one is embedded). Older generations are removed after a switch, or by a later build when one cannot be removed then. |
-| `index2::build` with embeddings, `index2::embed` | `vectors-<digest>/`, the vector store (Caprock's files: `CURRENT`, manifests, segments, tombstones, `LOCK`), updated in place by embedding runs and shared by the generations. Also `dense.json` (`DenseConfig`, version 1: the model and settings the CLI's later builds follow), `embed-cache/<model key>/` (`cache.json` with the full descriptor and the epoch, `keys.<epoch>` with 32-byte text hashes, `vectors.<epoch>` with the vectors as returned, appended and fsynced per request), `embed-progress.json` (version 1: the generation the latest run embeds, its `state` and `EmbedProgress`, replaced after each commit of the store) and `.embed.lock`. The CLI's background run writes `embed.log`. |
+| `index2::index`, `index2::build` | `CURRENT2` (the name of the current generation), `.index.lock`, `.embed.lock`, `index2-<stamp>-<pid>/` with `meta.json` (version 2, with `dense`: whether the generation has embeddings, `false` when absent), `lens.dat`, `docs.off`, `docs.dat`, `terms.dat`, `terms.idx`, `post.dat`, `files.dat` (each file's first document and path, for filters), and with embeddings also `dense.json` (`DenseIndexInfo`, version 2, naming the vector store, with the coverage when published), `vkeys.dat` (per document, by vector id: the 128-bit id big-endian, then the document as u32), `vhash.dat` (per document, in order: its embedded text's 32-byte hash) and `embed.spool` (the texts the cache lacked, removed when every one is embedded). Older generations are removed after a switch, or by a later build when one cannot be removed then. |
+| `index2::build` with embeddings, `index2::embed` | `vectors-<digest>/`, the vector store (Caprock's files: `CURRENT`, manifests, segments, tombstones, `LOCK`), updated in place by embedding runs and shared by the generations. Also `dense.json` (`DenseConfig`, version 1: the model and settings the CLI's later builds follow), `embed-cache/<model key>/` (`cache.json` with the full descriptor and the epoch, `keys.<epoch>` with 32-byte text hashes, `vectors.<epoch>` with the vectors as returned, appended and fsynced per request), and `embed-progress.json` (version 1: the generation the latest run embeds, its `state`, `EmbedProgress` and the reason it was stopped, replaced after each commit of the store). The CLI's background run writes `embed.log`. |
 | `open_watch` | `watch.json` (version 1: snapshot, fingerprints, sequence, acknowledgement, pending deltas, rules, and the engine-qualified parse cache) |
 | `Watcher2` | `watch2.snap` (version 3), `watch2.recs.N`, `watch2.wal` |
 
