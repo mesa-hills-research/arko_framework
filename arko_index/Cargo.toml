@@ -73,16 +73,18 @@ libc = "0.2"
 caprock = { git = "https://github.com/mesa-hills-research/caprock", rev = "5ec18cc45672156ad7ff6ba1bbca6983cf3160a0" }
 
 # The `local-embed` feature: embedding models run on the CPU (`dense::local`), all pure
-# Rust. gemm multiplies the matrices, rayon spreads the work over threads, tokenizers
+# Rust. gemm multiplies the f32 matrices, rayon spreads the work over threads, tokenizers
 # (with the fancy-regex engine instead of the C Oniguruma one) splits text into tokens.
 gemm = { version = "0.19", default-features = false, features = ["std", "rayon", "x86-v4"], optional = true }
+# Safe SIMD with run-time dispatch for the int8 kernels (gemm and Caprock use it too).
+pulp = { version = "0.22", optional = true }
 rayon = { version = "1.10", optional = true }
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"], optional = true }
 libm = { version = "0.2", optional = true }
 
 [features]
 # Local embedding models (`dense::local`), off by default.
-local-embed = ["dep:gemm", "dep:rayon", "dep:tokenizers", "dep:libm"]
+local-embed = ["dep:gemm", "dep:pulp", "dep:rayon", "dep:tokenizers", "dep:libm"]
 
 [[example]]
 name = "local_embed_bench"

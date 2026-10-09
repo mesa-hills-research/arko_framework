@@ -476,7 +476,7 @@ fn matches_a_direct_transcription_of_both_architectures() {
     for t in [&JINA, &NOMIC] {
         let dir = tempfile::tempdir().unwrap();
         let (model, w) = tiny_model(t, dir.path(), "", 4096);
-        let e = LocalEmbedder::load(model, dir.path())
+        let e = LocalEmbedder::load_with_precision(model, dir.path(), Precision::F32)
             .unwrap()
             .with_threads(3)
             .unwrap();
@@ -494,21 +494,50 @@ fn matches_a_direct_transcription_of_both_architectures() {
     }
 }
 
+/// Cosine similarity of two unit vectors.
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(a, b)| a * b).sum()
+}
+
+#[test]
+fn int8_vectors_stay_close_to_f32() {
+    for t in [&JINA, &NOMIC] {
+        let dir = tempfile::tempdir().unwrap();
+        let (model, w) = tiny_model(t, dir.path(), "", 4096);
+        let e = LocalEmbedder::load(model, dir.path()).unwrap();
+        assert_eq!(e.precision(), Precision::Int8);
+        assert_eq!(e.descriptor(), model.descriptor(Precision::Int8));
+        let texts = texts();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let got = e.embed(&refs, InputKind::Document).unwrap();
+        let ids = e.encode(&refs, InputKind::Document).unwrap();
+        for (v, ids) in got.vectors.iter().zip(&ids) {
+            let want = reference(t, &w, ids);
+            let sim = cosine(v, &want);
+            assert!(sim > 0.995, "{:?}: {sim}", t.arch);
+            assert!((cosine(v, v) - 1.0).abs() < 1e-5);
+        }
+    }
+}
+
 #[test]
 fn batching_threads_and_order_leave_vectors_unchanged() {
-    for t in [&JINA, &NOMIC] {
+    for (t, precision) in [&JINA, &NOMIC]
+        .into_iter()
+        .flat_map(|t| Precision::ALL.map(|p| (t, p)))
+    {
         let dir = tempfile::tempdir().unwrap();
         let (model, _) = tiny_model(t, dir.path(), "", 4096);
         let texts = texts();
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-        let one = LocalEmbedder::load(model, dir.path())
+        let one = LocalEmbedder::load_with_precision(model, dir.path(), precision)
             .unwrap()
             .with_threads(1)
             .unwrap();
         let all = one.embed(&refs, InputKind::Document).unwrap().vectors;
         for threads in [2, 5] {
             // Small batches: forward passes of at most 40 tokens.
-            let e = LocalEmbedder::load(model, dir.path())
+            let e = LocalEmbedder::load_with_precision(model, dir.path(), precision)
                 .unwrap()
                 .with_threads(threads)
                 .unwrap()
@@ -532,9 +561,9 @@ fn batching_threads_and_order_leave_vectors_unchanged() {
 fn queries_take_the_prefix_and_long_texts_are_truncated() {
     let dir = tempfile::tempdir().unwrap();
     let (model, w) = tiny_model(&NOMIC, dir.path(), "search for : ", 32);
-    let e = LocalEmbedder::load(model, dir.path()).unwrap();
-    assert!(model.descriptor().input_types);
-    assert_eq!(e.descriptor(), model.descriptor());
+    let e = LocalEmbedder::load_with_precision(model, dir.path(), Precision::F32).unwrap();
+    assert!(model.descriptor(Precision::F32).input_types);
+    assert_eq!(e.descriptor(), model.descriptor(Precision::F32));
     let q = e.embed(&["w20 w21"], InputKind::Query).unwrap();
     let d = e.embed(&["w20 w21"], InputKind::Document).unwrap();
     assert_eq!((q.tokens, d.tokens), (7, 4));
@@ -570,13 +599,13 @@ fn damaged_or_missing_files_are_refused() {
     let last = bytes.len() - 1;
     bytes[last] ^= 1;
     std::fs::write(&path, &bytes).unwrap();
-    let err = LocalEmbedder::load(model, dir.path())
+    let err = LocalEmbedder::load_with_precision(model, dir.path(), Precision::F32)
         .err()
         .unwrap()
         .to_string();
     assert!(err.contains("SHA-256"), "{err}");
     std::fs::remove_file(dir.path().join("tokenizer.json")).unwrap();
-    assert!(LocalEmbedder::load(model, dir.path()).is_err());
+    assert!(LocalEmbedder::load_with_precision(model, dir.path(), Precision::F32).is_err());
 }
 
 #[test]
@@ -585,7 +614,12 @@ fn the_catalog_names_pinned_models() {
     for m in MODELS {
         assert_eq!(find(m.name), Some(m));
         assert_eq!(find(&m.repo.to_uppercase()), Some(m));
-        assert_eq!(LocalModel::for_descriptor(&m.descriptor()).unwrap(), m);
+        for p in Precision::ALL {
+            assert_eq!(
+                LocalModel::for_descriptor(&m.descriptor(p)).unwrap(),
+                (m, p)
+            );
+        }
         assert_eq!(m.revision.len(), 40);
         let names: Vec<&str> = m.files.iter().map(|f| f.name).collect();
         assert_eq!(
@@ -594,13 +628,25 @@ fn the_catalog_names_pinned_models() {
         );
         assert!(m.files.iter().all(|f| f.sha256.len() == 64));
     }
-    let d = CODE_RANK_EMBED.descriptor();
+    let d = CODE_RANK_EMBED.descriptor(Precision::F32);
     assert_eq!(
         (d.provider.as_str(), d.model.as_str()),
         ("local", "nomic-ai/CodeRankEmbed")
     );
     assert!(d.input_types);
-    assert!(!JINA_CODE_V2.descriptor().input_types);
+    assert!(!JINA_CODE_V2.descriptor(Precision::Int8).input_types);
     assert!(LocalModel::for_descriptor(&d.clone().with_revision("other")).is_err());
+    // The precision is part of the vectors' identity: f32 keeps the bare commit.
+    let int8 = CODE_RANK_EMBED.descriptor(Precision::Int8);
+    assert_eq!(d.revision.as_deref(), Some(CODE_RANK_EMBED.revision));
+    assert_eq!(
+        int8.revision,
+        Some(format!("{}+int8", CODE_RANK_EMBED.revision))
+    );
+    assert_ne!(d.key(), int8.key());
+    assert_eq!(Precision::default(), Precision::Int8);
+    assert_eq!("F32".parse::<Precision>().unwrap(), Precision::F32);
+    assert_eq!("int8".parse::<Precision>().unwrap(), Precision::Int8);
+    assert!("f16".parse::<Precision>().is_err());
     assert!(find("voyage-code-4").is_none());
 }

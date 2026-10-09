@@ -2,8 +2,11 @@
 //!
 //! A batch is packed: every text's tokens follow the previous text's, with no padding,
 //! so the linear layers run once over all tokens of the batch and attention runs per
-//! text, head and block of query rows. Matrix products use `gemm`; every other step is
-//! spread over the thread pool the caller runs this in.
+//! text, head and block of query rows. The linear layers run in int8
+//! ([`int8`](super::int8)) or in `f32` with `gemm`, attention in `f32` with `gemm`.
+//! Every other step is spread over the thread pool the caller runs this in.
+use super::Precision;
+use super::int8::Int8Linear;
 use super::safetensors::Tensors;
 use crate::bench_v1::Error;
 use gemm::{Parallelism, gemm};
@@ -149,7 +152,12 @@ impl Norm {
 }
 
 /// `y = x Wᵀ + b` with `W` stored `[out, in]`, as PyTorch stores it.
-struct Linear {
+enum Linear {
+    F32(F32Linear),
+    Int8(Int8Linear),
+}
+
+struct F32Linear {
     w: Vec<f32>,
     b: Option<Vec<f32>>,
     out: usize,
@@ -164,6 +172,7 @@ impl Linear {
         out: usize,
         inp: usize,
         bias: bool,
+        precision: Precision,
     ) -> Result<Self, Error> {
         let mut w = Vec::with_capacity(names.len() * out * inp);
         let mut b = Vec::with_capacity(names.len() * out);
@@ -173,15 +182,28 @@ impl Linear {
                 b.extend(t.get(&format!("{name}.bias"), &[out])?);
             }
         }
-        Ok(Self {
-            w,
-            b: bias.then_some(b),
-            out: names.len() * out,
-            inp,
+        let out = names.len() * out;
+        Ok(match precision {
+            Precision::F32 => Linear::F32(F32Linear {
+                w,
+                b: bias.then_some(b),
+                out,
+                inp,
+            }),
+            Precision::Int8 => Linear::Int8(Int8Linear::new(&w, bias.then_some(&b[..]), out, inp)),
         })
     }
 
     /// `y[rows, out] = x[rows, in] Wᵀ + b`.
+    fn forward(&self, x: &[f32], y: &mut [f32]) {
+        match self {
+            Linear::F32(l) => l.forward(x, y),
+            Linear::Int8(l) => l.forward(x, y),
+        }
+    }
+}
+
+impl F32Linear {
     fn forward(&self, x: &[f32], y: &mut [f32]) {
         let rows = x.len() / self.inp;
         debug_assert_eq!(y.len(), rows * self.out);
@@ -258,10 +280,15 @@ unsafe impl Send for SharedMut {}
 unsafe impl Sync for SharedMut {}
 
 /// Query rows per attention task.
-const QUERY_BLOCK: usize = 64;
+const QUERY_BLOCK: usize = 128;
 
 impl Encoder {
-    pub(crate) fn load(cfg: Config, t: &Tensors) -> Result<Self, Error> {
+    /// Loads the weights, with the linear layers after attention in `precision`. The
+    /// query, key and value projection always runs in `f32`: the softmax magnifies
+    /// errors in queries and keys, and in int8 it alone would take CodeRankEmbed's
+    /// vectors to a cosine similarity of about 0.987 with the `f32` ones, where the
+    /// other three layers together stay above 0.998.
+    pub(crate) fn load(cfg: Config, t: &Tensors, precision: Precision) -> Result<Self, Error> {
         let (h, i) = (cfg.hidden, cfg.intermediate);
         // Some checkpoints keep the `bert.` prefix of the pretraining model.
         let pre = if t.contains("bert.embeddings.word_embeddings.weight") {
@@ -299,6 +326,7 @@ impl Encoder {
                             h,
                             h,
                             true,
+                            Precision::F32,
                         )?,
                         q_norm: Some(Norm::load(
                             t,
@@ -310,15 +338,36 @@ impl Encoder {
                             &format!("{p}attention.self.layer_norm_k"),
                             h,
                         )?),
-                        out: Linear::load(t, &names(&p, &["attention.output.dense"]), h, h, true)?,
+                        out: Linear::load(
+                            t,
+                            &names(&p, &["attention.output.dense"]),
+                            h,
+                            h,
+                            true,
+                            precision,
+                        )?,
                         attn_norm: Some(Norm::load(
                             t,
                             &format!("{p}attention.output.LayerNorm"),
                             h,
                         )?),
                         norm1: Norm::load(t, &format!("{p}layer_norm_1"), h)?,
-                        up: Linear::load(t, &names(&p, &["mlp.up_gated_layer"]), 2 * i, h, false)?,
-                        down: Linear::load(t, &names(&p, &["mlp.down_layer"]), h, i, true)?,
+                        up: Linear::load(
+                            t,
+                            &names(&p, &["mlp.up_gated_layer"]),
+                            2 * i,
+                            h,
+                            false,
+                            precision,
+                        )?,
+                        down: Linear::load(
+                            t,
+                            &names(&p, &["mlp.down_layer"]),
+                            h,
+                            i,
+                            true,
+                            precision,
+                        )?,
                         norm2: Norm::load(t, &format!("{p}layer_norm_2"), h)?,
                     });
                 }
@@ -328,10 +377,24 @@ impl Encoder {
                 for l in 0..cfg.layers {
                     let p = format!("{pre}encoder.layers.{l}.");
                     layers.push(Layer {
-                        qkv: Linear::load(t, &names(&p, &["attn.Wqkv"]), 3 * h, h, cfg.qkv_bias)?,
+                        qkv: Linear::load(
+                            t,
+                            &names(&p, &["attn.Wqkv"]),
+                            3 * h,
+                            h,
+                            cfg.qkv_bias,
+                            Precision::F32,
+                        )?,
                         q_norm: None,
                         k_norm: None,
-                        out: Linear::load(t, &names(&p, &["attn.out_proj"]), h, h, cfg.qkv_bias)?,
+                        out: Linear::load(
+                            t,
+                            &names(&p, &["attn.out_proj"]),
+                            h,
+                            h,
+                            cfg.qkv_bias,
+                            precision,
+                        )?,
                         attn_norm: None,
                         norm1: Norm::load(t, &format!("{p}norm1"), h)?,
                         // fc11 is the value, fc12 the gate: fc11(x) · silu(fc12(x)).
@@ -341,8 +404,16 @@ impl Encoder {
                             i,
                             h,
                             cfg.fc1_bias,
+                            precision,
                         )?,
-                        down: Linear::load(t, &names(&p, &["mlp.fc2"]), h, i, cfg.fc2_bias)?,
+                        down: Linear::load(
+                            t,
+                            &names(&p, &["mlp.fc2"]),
+                            h,
+                            i,
+                            cfg.fc2_bias,
+                            precision,
+                        )?,
                         norm2: Norm::load(t, &format!("{p}norm2"), h)?,
                     });
                 }
@@ -440,8 +511,12 @@ impl Encoder {
                 .zip(up.par_chunks(2 * i))
                 .for_each(|(o, u)| {
                     let (value, gate) = u.split_at(i);
-                    for ((o, v), g) in o.iter_mut().zip(value).zip(gate) {
-                        *o = v * if gelu { gelu_erf(*g) } else { silu(*g) };
+                    // One loop per activation, so the SiLU loop vectorizes.
+                    let pairs = o.iter_mut().zip(value).zip(gate);
+                    if gelu {
+                        pairs.for_each(|((o, v), g)| *o = v * gelu_erf(*g));
+                    } else {
+                        pairs.for_each(|((o, v), g)| *o = v * silu(*g));
                     }
                 });
             layer.down.forward(&act, &mut tmp);
@@ -597,15 +672,37 @@ fn add_norm(x: &mut [f32], y: &[f32], norm: &Norm, h: usize, eps: f32) {
 
 fn softmax(row: &mut [f32]) {
     let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let mut sum = 0.0;
     for v in row.iter_mut() {
-        *v = (*v - max).exp();
-        sum += *v;
+        *v = exp(*v - max);
     }
-    let inv = 1.0 / sum;
+    let inv = 1.0 / row.iter().sum::<f32>();
     for v in row.iter_mut() {
         *v *= inv;
     }
+}
+
+/// `e^x` within two units in the last place, in plain arithmetic that the compiler
+/// vectorizes (the standard library's `exp` is a call per value). Below -87, where
+/// `e^x` leaves the normal floats, it returns zero, and above 88.3 about 2.1e38.
+#[inline(always)]
+fn exp(x: f32) -> f32 {
+    let tiny = x < -87.0;
+    let x = x.clamp(-87.0, 88.3);
+    // x = n ln 2 + r with |r| ≤ ln 2 / 2, then e^x = 2^n e^r. Adding 1.5 × 2^23 rounds
+    // x / ln 2 to the integer n, held in the low bits of the sum.
+    const ROUND: f32 = 12_582_912.0;
+    let t = x * std::f32::consts::LOG2_E + ROUND;
+    let n = t - ROUND;
+    let r = x - n * 0.693_359_4 - n * -2.121_944_4e-4;
+    let mut p = 1.987_569_1e-4;
+    p = p * r + 1.398_199_9e-3;
+    p = p * r + 8.333_452e-3;
+    p = p * r + 4.166_579_6e-2;
+    p = p * r + 0.166_666_65;
+    p = p * r + 0.5;
+    let e = p * r * r + r + 1.0;
+    let two_n = f32::from_bits(((t.to_bits() as i32 - ROUND.to_bits() as i32 + 127) as u32) << 23);
+    if tiny { 0.0 } else { e * two_n }
 }
 
 /// GELU with the exact error function (PyTorch's default).
@@ -614,7 +711,7 @@ fn gelu_erf(x: f32) -> f32 {
 }
 
 fn silu(x: f32) -> f32 {
-    x / (1.0 + (-x).exp())
+    x / (1.0 + exp(-x))
 }
 
 /// ALiBi head slopes (Press et al.), as Jina computes them: a geometric sequence for
@@ -668,6 +765,22 @@ pub(crate) mod tests {
             assert!((a - b).abs() < 1e-7, "{s:?}");
         }
         assert_eq!(alibi_slopes(8)[0], 0.5);
+    }
+
+    #[test]
+    fn exp_is_within_two_ulps() {
+        let mut x = -86.9f32;
+        while x < 88.3 {
+            let (got, want) = (exp(x), (x as f64).exp());
+            assert!(
+                ((got as f64 - want) / want).abs() < 2.5e-7,
+                "{x}: {got} vs {want}"
+            );
+            x += 0.0137;
+        }
+        assert_eq!(exp(0.0), 1.0);
+        assert_eq!(exp(-88.0), 0.0);
+        assert!(exp(1e4).is_finite() && exp(1e4) > 2e38);
     }
 
     #[test]

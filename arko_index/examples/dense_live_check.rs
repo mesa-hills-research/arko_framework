@@ -23,8 +23,9 @@
 //! take; needs no key, only the tokenizer download), `--top FILE` (write every
 //! question's top 10 per mode as JSON lines, to compare models; `-` prints them last),
 //! `--voyage-key-stdin` (read the key from standard input instead of the environment).
-//! `--model local` or `local:MODEL` runs a local model (`--features local-embed`): no
-//! key, no tokens billed.
+//! `--model local`, `local:MODEL`, `local:PRECISION` or `local:MODEL:PRECISION` runs a
+//! local model (`--features local-embed`, in int8 by default or f32): no key, no tokens
+//! billed.
 //!
 //! The default corpus (7.7 MB, 265 files, 7,018 chunks) took 1,735,222 billed tokens
 //! without headers (path and source only, 2026-10-04). With the headers, `--dry-run`

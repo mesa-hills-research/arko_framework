@@ -6,7 +6,7 @@
 //! can take it unchanged, as with `voyage.rs`.
 use arko_index::{
     bench_v1::Error,
-    dense::local::{LocalEmbedder, LocalModel},
+    dense::local::{LocalEmbedder, LocalModel, Precision},
 };
 use hf_hub::{Cache, Repo, RepoType, api::sync::ApiBuilder};
 use std::path::PathBuf;
@@ -49,8 +49,8 @@ pub fn model_dir(model: &LocalModel) -> Result<PathBuf, Error> {
     dir.ok_or_else(|| format!("{} lists no files", model.repo).into())
 }
 
-/// `model`, loaded from the cache (downloaded first if need be), with
+/// `model` in `precision`, loaded from the cache (downloaded first if need be), with
 /// `ARKO_INDEX_THREADS` threads (default: every CPU this process may use).
-pub fn embedder(model: &'static LocalModel) -> Result<LocalEmbedder, Error> {
-    LocalEmbedder::load(model, &model_dir(model)?)
+pub fn embedder(model: &'static LocalModel, precision: Precision) -> Result<LocalEmbedder, Error> {
+    LocalEmbedder::load_with_precision(model, &model_dir(model)?, precision)
 }

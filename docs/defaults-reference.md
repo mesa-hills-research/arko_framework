@@ -56,8 +56,8 @@ Defaults of arko_index (see [Defaults (arko_index)](reference-map.md#defaults-ar
   `BuildOptions::dense` (CLI `index2 --embed MODEL`). The library makes no network
   calls and reads no credentials. The examples embed with Voyage through arko_ai
   (`VOYAGE_API_KEY`), or with a local model on the CPU (feature `local-embed`, off by
-  default: `--embed local` picks nomic-ai/CodeRankEmbed and downloads it into the
-  Hugging Face cache on first use). Once chosen, the model is saved with the index
+  default: `--embed local` picks nomic-ai/CodeRankEmbed, runs it in int8 (`local:f32`
+  for full precision) and downloads it into the Hugging Face cache on first use). Once chosen, the model is saved with the index
   (`STATE_DIR/dense.json`), and the CLI's later `index2` builds follow it (a library
   caller passes `DenseBuild::from_config` with `DenseConfig::load`). Embeddings are
   cached by model and text, so a rebuild embeds only changed chunks. The embedded text is the path, the

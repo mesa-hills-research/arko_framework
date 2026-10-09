@@ -10,9 +10,10 @@
 //!
 //! A batch of texts is tokenized with the model's own tokenizer (truncated at
 //! [`LocalModel::max_tokens`]), run through the encoder packed together without
-//! padding, pooled ([`Pooling`]) and normalized to unit length. Work is spread over a
-//! dedicated thread pool ([`LocalEmbedder::with_threads`]; by default
-//! [`threads`](crate::threads)).
+//! padding, pooled ([`Pooling`]) and normalized to unit length. The linear layers run
+//! in int8 by default ([`Precision`]). Work is spread over a dedicated thread pool
+//! ([`LocalEmbedder::with_threads`]; by default [`threads`](crate::threads)).
+mod int8;
 mod model;
 mod safetensors;
 
@@ -126,6 +127,63 @@ pub const JINA_CODE_V2: LocalModel = LocalModel {
     ],
 };
 
+/// The arithmetic of a local model's linear layers after attention (its output
+/// projection and feed-forward layers), which hold most of its weights and work. The
+/// query, key and value projection, attention, embeddings, layer norms, pooling and
+/// normalization run in `f32` either way. The precision is part of the vectors'
+/// identity ([`LocalModel::descriptor`]), so an index never mixes vectors of both.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Precision {
+    /// Integers in bytes: weights rotated by a block Hadamard matrix and quantized per
+    /// output channel to 7 bits at load, activations rotated the same way and
+    /// quantized per token to 8 bits at run time, products summed exactly in 32-bit
+    /// integers.
+    #[default]
+    Int8,
+    /// 32-bit floats, as the model was trained.
+    F32,
+}
+
+impl Precision {
+    /// Every precision, the default first.
+    pub const ALL: [Precision; 2] = [Precision::Int8, Precision::F32];
+
+    /// `int8` or `f32`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Precision::Int8 => "int8",
+            Precision::F32 => "f32",
+        }
+    }
+
+    /// The suffix of the descriptor's revision: none for `f32`, the weights as
+    /// published.
+    fn suffix(self) -> &'static str {
+        match self {
+            Precision::Int8 => "+int8",
+            Precision::F32 => "",
+        }
+    }
+}
+
+impl std::fmt::Display for Precision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Precision {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Error> {
+        Precision::ALL
+            .into_iter()
+            .find(|p| p.as_str().eq_ignore_ascii_case(s))
+            .ok_or_else(|| format!("unknown precision {s:?}: use int8 or f32").into())
+    }
+}
+
 /// The models the local embedder runs; the first is [`DEFAULT_MODEL`].
 pub const MODELS: &[LocalModel] = &[CODE_RANK_EMBED, JINA_CODE_V2];
 
@@ -141,30 +199,36 @@ pub fn find(name: &str) -> Option<&'static LocalModel> {
 
 impl LocalModel {
     /// Provider `local`, the repository as the model, the pinned commit as the
-    /// revision, and input types when queries and documents get different prefixes.
-    pub fn descriptor(&self) -> ModelDescriptor {
+    /// revision (followed by `+int8` for [`Precision::Int8`]), and input types when
+    /// queries and documents get different prefixes.
+    pub fn descriptor(&self, precision: Precision) -> ModelDescriptor {
         ModelDescriptor::new("local", self.repo, self.dimensions)
             .with_input_types(self.query_prefix != self.document_prefix)
-            .with_revision(self.revision)
+            .with_revision(format!("{}{}", self.revision, precision.suffix()))
     }
 
-    /// The model that produces the vectors `descriptor` names.
-    pub fn for_descriptor(descriptor: &ModelDescriptor) -> Result<&'static LocalModel, Error> {
+    /// The model and precision that produce the vectors `descriptor` names.
+    pub fn for_descriptor(
+        descriptor: &ModelDescriptor,
+    ) -> Result<(&'static LocalModel, Precision), Error> {
         let model = MODELS
             .iter()
             .find(|m| descriptor.provider == "local" && m.repo == descriptor.model)
             .ok_or_else(|| format!("no local model makes {}", descriptor.display()))?;
-        if &model.descriptor() != descriptor {
-            return Err(format!(
-                "{} was embedded with another revision or settings of {} ({:?}); this build runs revision {}",
-                descriptor.display(),
-                model.repo,
-                descriptor.revision,
-                model.revision
-            )
-            .into());
-        }
-        Ok(model)
+        Precision::ALL
+            .into_iter()
+            .find(|&p| &model.descriptor(p) == descriptor)
+            .map(|p| (model, p))
+            .ok_or_else(|| {
+                format!(
+                    "{} was embedded with another revision or settings of {} ({:?}); this build runs revision {}",
+                    descriptor.display(),
+                    model.repo,
+                    descriptor.revision,
+                    model.revision
+                )
+                .into()
+            })
     }
 
     /// The total size of the model's files.
@@ -182,6 +246,7 @@ pub const DEFAULT_BATCH_TOKENS: usize = 8192;
 /// Runs a [`LocalModel`] on the CPU. See the [module docs](self).
 pub struct LocalEmbedder {
     model: &'static LocalModel,
+    precision: Precision,
     encoder: Encoder,
     tokenizer: Tokenizer,
     pool: rayon::ThreadPool,
@@ -191,8 +256,18 @@ pub struct LocalEmbedder {
 
 impl LocalEmbedder {
     /// Loads `model` from the files in `dir` (named as in [`LocalModel::files`]),
-    /// after checking each one's size and SHA-256.
+    /// after checking each one's size and SHA-256, to run in the default
+    /// [`Precision`] (int8).
     pub fn load(model: &'static LocalModel, dir: &Path) -> Result<Self, Error> {
+        Self::load_with_precision(model, dir, Precision::default())
+    }
+
+    /// [`load`](Self::load) with the linear layers in `precision`.
+    pub fn load_with_precision(
+        model: &'static LocalModel,
+        dir: &Path,
+        precision: Precision,
+    ) -> Result<Self, Error> {
         let read = |name: &str| -> Result<Vec<u8>, Error> {
             let file = model
                 .files
@@ -220,14 +295,21 @@ impl LocalEmbedder {
         let tokenizer = Tokenizer::from_bytes(read("tokenizer.json")?)
             .map_err(|e| format!("{}: tokenizer.json: {e}", model.repo))?;
         let tensors = Tensors::parse(read("model.safetensors")?)?;
-        let encoder = Encoder::load(config, &tensors)?;
-        Self::new(model, encoder, tokenizer)
+        // Quantizing the weights runs on the embedder's threads.
+        let threads = crate::threads();
+        let pool = pool(threads)?;
+        let encoder = pool.install(|| Encoder::load(config, &tensors, precision))?;
+        drop(tensors);
+        Self::new(model, precision, encoder, tokenizer, pool, threads)
     }
 
     fn new(
         model: &'static LocalModel,
+        precision: Precision,
         encoder: Encoder,
         mut tokenizer: Tokenizer,
+        pool: rayon::ThreadPool,
+        threads: usize,
     ) -> Result<Self, Error> {
         if encoder.hidden() != model.dimensions {
             return Err(format!(
@@ -245,12 +327,12 @@ impl LocalEmbedder {
                 ..TruncationParams::default()
             }))
             .map_err(|e| format!("{}: truncation: {e}", model.repo))?;
-        let threads = crate::threads();
         Ok(Self {
             model,
+            precision,
             encoder,
             tokenizer,
-            pool: pool(threads)?,
+            pool,
             threads,
             batch_tokens: DEFAULT_BATCH_TOKENS,
         })
@@ -273,6 +355,10 @@ impl LocalEmbedder {
 
     pub fn model(&self) -> &'static LocalModel {
         self.model
+    }
+
+    pub fn precision(&self) -> Precision {
+        self.precision
     }
 
     pub fn threads(&self) -> usize {
@@ -342,7 +428,7 @@ fn pool(threads: usize) -> Result<rayon::ThreadPool, Error> {
 
 impl Embedder for LocalEmbedder {
     fn descriptor(&self) -> ModelDescriptor {
-        self.model.descriptor()
+        self.model.descriptor(self.precision)
     }
 
     /// Up to 256 texts per call, at least the model's own limit of tokens per call;

@@ -18,9 +18,10 @@ use arko_index::{
 pub const HASH_DIMENSIONS: usize = 256;
 
 /// The model an `--embed` value names: `voyage-code-4` (a bare Voyage model name),
-/// `voyage:MODEL`, `local` or `local:MODEL` (a model run on this machine; needs
-/// `--features local-embed`), or `hash` / `hash:hash-v1` (offline; for trying things
-/// out without a key). `dimensions` overrides the model's default.
+/// `voyage:MODEL`, `local`, `local:MODEL`, `local:PRECISION` or
+/// `local:MODEL:PRECISION` (a model run on this machine, in `int8` by default or
+/// `f32`; needs `--features local-embed`), or `hash` / `hash:hash-v1` (offline; for
+/// trying things out without a key). `dimensions` overrides the model's default.
 pub fn descriptor_for(spec: &str, dimensions: Option<usize>) -> Result<ModelDescriptor, Error> {
     let (provider, model) = match spec.split_once(':') {
         Some((p, m)) => (p, m),
@@ -29,7 +30,7 @@ pub fn descriptor_for(spec: &str, dimensions: Option<usize>) -> Result<ModelDesc
         None if spec.starts_with("voyage") => ("voyage", spec),
         None => {
             return Err(format!(
-                "unknown embedding model {spec:?}: use a Voyage model (voyage-code-4), voyage:MODEL, local, local:MODEL or hash"
+                "unknown embedding model {spec:?}: use a Voyage model (voyage-code-4), voyage:MODEL, local, local:MODEL[:PRECISION] or hash"
             )
             .into());
         }
@@ -57,10 +58,18 @@ pub fn descriptor_for(spec: &str, dimensions: Option<usize>) -> Result<ModelDesc
     }
 }
 
-/// A local model by name or repository (`""`: the default model).
+/// A local model by name or repository (`""`: the default model), optionally
+/// followed by `:int8` or `:f32` (or a precision alone).
 #[cfg(feature = "local-embed")]
-fn local_descriptor(model: &str, dimensions: Option<usize>) -> Result<ModelDescriptor, Error> {
-    use arko_index::dense::local;
+fn local_descriptor(spec: &str, dimensions: Option<usize>) -> Result<ModelDescriptor, Error> {
+    use arko_index::dense::local::{self, Precision};
+    let (model, precision) = match spec.rsplit_once(':') {
+        Some((model, precision)) => (model, precision.parse()?),
+        None => match spec.parse::<Precision>() {
+            Ok(precision) => ("", precision),
+            Err(_) => (spec, Precision::default()),
+        },
+    };
     let m = if model.is_empty() {
         local::DEFAULT_MODEL
     } else {
@@ -75,7 +84,7 @@ fn local_descriptor(model: &str, dimensions: Option<usize>) -> Result<ModelDescr
     if let Some(d) = dimensions.filter(|&d| d != m.dimensions) {
         return Err(format!("{} has {} dimensions, not {d}", m.name, m.dimensions).into());
     }
-    Ok(m.descriptor())
+    Ok(m.descriptor(precision))
 }
 
 #[cfg(not(feature = "local-embed"))]
@@ -96,9 +105,11 @@ pub fn embedder_for(descriptor: &ModelDescriptor) -> Result<Box<dyn Embedder>, E
         )?),
         "hash" => Box::new(PacedHash::new(descriptor.dimensions)),
         #[cfg(feature = "local-embed")]
-        "local" => Box::new(local::embedder(
-            arko_index::dense::local::LocalModel::for_descriptor(descriptor)?,
-        )?),
+        "local" => {
+            let (model, precision) =
+                arko_index::dense::local::LocalModel::for_descriptor(descriptor)?;
+            Box::new(local::embedder(model, precision)?)
+        }
         #[cfg(not(feature = "local-embed"))]
         "local" => return Err(NO_LOCAL.into()),
         p => return Err(format!("unknown embedding provider {p:?}").into()),
