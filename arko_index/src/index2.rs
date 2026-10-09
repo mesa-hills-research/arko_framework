@@ -1013,8 +1013,26 @@ fn embed_run(
         stats.superseded = true;
         return Ok(stats);
     }
-    let generation = Generation::open_at(state_dir, &name)?;
-    let info = generation.stored_dense_info()?.ok_or(
+    let superseded = || current_generation(state_dir).ok().as_deref() != Some(name.as_str());
+    // A build may publish a newer generation and remove this one before the run has
+    // read it: the run is superseded, not failed.
+    let read = || -> Result<_, Error> {
+        let generation = Generation::open_at(state_dir, &name)?;
+        let Some(info) = generation.stored_dense_info()? else {
+            return Ok((generation, None));
+        };
+        let dir = &generation.dir;
+        let files = (read_hashes(dir)?, read_vector_keys(dir)?, read_files(dir)?);
+        Ok((generation, Some((info, files))))
+    };
+    let (generation, read) = match read() {
+        Err(_) if superseded() => {
+            stats.superseded = true;
+            return Ok(stats);
+        }
+        read => read?,
+    };
+    let (info, (hashes, keys, files)) = read.ok_or(
         "the index's current generation has no embeddings: build it with them (index2 --embed)",
     )?;
     check_dense_format(&info)?;
@@ -1029,9 +1047,6 @@ fn embed_run(
     stats.embed_text = info.embed_text;
     stats.docs = info.docs;
     let dir = &generation.dir;
-    let hashes = read_hashes(dir)?;
-    let keys = read_vector_keys(dir)?;
-    let files = read_files(dir)?;
     if hashes.len() as u64 != info.docs || keys.len() as u64 != info.docs {
         return Err(
             "the generation's vector keys do not match its chunks: rebuild the index".into(),
@@ -1041,7 +1056,6 @@ fn embed_run(
     stats.texts = live.len() as u64;
     let mut cache = Cache::open(state_dir, &descriptor)?;
     stats.cached = live.iter().filter(|h| cache.contains(h)).count() as u64;
-    let superseded = || current_generation(state_dir).ok().as_deref() != Some(name.as_str());
 
     // The vectors of chunks the generation lacks go first (the generation is current,
     // so no reader needs them), and stores of other models or settings. A newer
