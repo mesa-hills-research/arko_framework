@@ -250,7 +250,8 @@ $B prepare-variants --out $OUT --variants $V --names lex,lex-scope --only redis
 VOYAGE_API_KEY=... $B run --out $OUT --codex-home ~/.codex --name variants --arms B,lex,lex-scope,hyb-scope
 ```
 
-`prepare-variants` builds `indexes/<id>@<name>/` with `arko_index_cli index2 FLAGS`, and
+`prepare-variants` builds `indexes/<id>@<name>/` with `arko_index_cli index2 FLAGS`
+(adding `--wait-embeddings` when they embed, so the index is complete when it is built), and
 rebuilds one only when its flags, the CLI or the commit changed (`--force` rebuilds all).
 A new description, search flags or tool section rebuild nothing. Each build follows its
 flags alone, and the index directory stays across rebuilds, so its embedding cache keeps

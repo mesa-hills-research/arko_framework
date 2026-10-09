@@ -449,9 +449,17 @@ fn build(
         flags.join(" ")
     );
     let started = Instant::now();
-    let output = std::process::Command::new(cli)
-        .arg("index2")
-        .args(flags)
+    let mut command = std::process::Command::new(cli);
+    command.arg("index2").args(flags);
+    // With embeddings, the CLI embeds in the background once lexical search is ready
+    // unless told to wait: the index is complete before it is made read-only.
+    if flags
+        .iter()
+        .any(|flag| matches!(flag_name(flag), "--embed" | "--embed-config"))
+    {
+        command.arg("--wait-embeddings");
+    }
+    let output = command
         .arg("--")
         .arg(&repo.checkout)
         .arg(dir)
