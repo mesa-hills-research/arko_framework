@@ -8,7 +8,9 @@
 //! tests and examples); the `arko_index_cli` example adapts arko_ai's Voyage client.
 //! An index is built with embeddings by [`index2::build`](crate::index2::build) with
 //! [`BuildOptions::dense`](crate::index2::BuildOptions::dense) set, and searched by
-//! [`hybrid::search`](crate::hybrid::search).
+//! [`hybrid::search`](crate::hybrid::search). A build publishes its generation for
+//! lexical search before it embeds, and [`index2::embed`](crate::index2::embed) adds the
+//! vectors a generation lacks, so dense coverage fills in while the index is in use.
 pub(crate) mod cache;
 pub(crate) mod run;
 
@@ -20,7 +22,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::{path::Path, sync::atomic::AtomicBool};
 
 /// The version of [`render`]'s output. Embeddings are cached by the hash of the
 /// rendered text, so a new version re-embeds every chunk.
@@ -404,7 +406,9 @@ impl DenseConfig {
     }
 }
 
-/// Embedding settings of one build ([`BuildOptions::dense`](crate::index2::BuildOptions::dense)).
+/// Embedding settings of one build ([`BuildOptions::dense`](crate::index2::BuildOptions::dense))
+/// or one embedding run ([`index2::embed`](crate::index2::embed), which takes the
+/// quantization, vector index and embedded text from the generation it embeds).
 #[non_exhaustive]
 pub struct DenseBuild<'a> {
     pub embedder: &'a dyn Embedder,
@@ -417,6 +421,13 @@ pub struct DenseBuild<'a> {
     pub embed_text: EmbedText,
     /// Called after each embedding request.
     pub progress: Option<&'a dyn Fn(&EmbedProgress)>,
+    /// Return from [`index2::build`](crate::index2::build) once the generation is
+    /// published, leaving the embedding to [`index2::embed`](crate::index2::embed).
+    /// `false` (the default): the build embeds after publishing, before it returns.
+    pub embed_later: bool,
+    /// When set, the run stops after its current request. The vectors paid for are
+    /// kept, and a later run continues.
+    pub stop: Option<&'a AtomicBool>,
 }
 impl<'a> DenseBuild<'a> {
     pub fn new(embedder: &'a dyn Embedder) -> Self {
@@ -427,18 +438,19 @@ impl<'a> DenseBuild<'a> {
             max_tokens: None,
             embed_text: EmbedText::default(),
             progress: None,
+            embed_later: false,
+            stop: None,
         }
     }
     /// The settings of a saved config (quantization, vector index, cap and embedded
     /// text) for this embedder.
     pub fn from_config(embedder: &'a dyn Embedder, config: &DenseConfig) -> Self {
         Self {
-            embedder,
-            quantization: config.quantization,
-            vector_index: config.vector_index,
             max_tokens: config.max_tokens_per_run,
-            embed_text: config.embed_text,
-            progress: None,
+            ..Self::new(embedder)
+                .with_quantization(config.quantization)
+                .with_vector_index(config.vector_index)
+                .with_embed_text(config.embed_text)
         }
     }
     pub fn with_quantization(mut self, quantization: Quantization) -> Self {
@@ -461,10 +473,18 @@ impl<'a> DenseBuild<'a> {
         self.progress = Some(progress);
         self
     }
+    pub fn with_embed_later(mut self, embed_later: bool) -> Self {
+        self.embed_later = embed_later;
+        self
+    }
+    pub fn with_stop(mut self, stop: &'a AtomicBool) -> Self {
+        self.stop = Some(stop);
+        self
+    }
 }
 
 /// Progress of an embedding run, after each request.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct EmbedProgress {
     /// Texts embedded so far by this run.
@@ -474,9 +494,18 @@ pub struct EmbedProgress {
     /// Tokens billed so far by this run.
     pub tokens: u64,
     pub requests: u64,
+    /// Chunks of the generation with a vector in the store now.
+    #[serde(default)]
+    pub embedded_docs: u64,
+    /// Chunks in the generation.
+    #[serde(default)]
+    pub docs: u64,
 }
 
-/// What an index build's embedding did ([`BuildStats::dense`](crate::index2::BuildStats::dense)).
+/// What an index build's embedding did ([`BuildStats::dense`](crate::index2::BuildStats::dense)),
+/// or one embedding run ([`index2::embed`](crate::index2::embed)). A build with
+/// [`DenseBuild::embed_later`] reports the generation it published: its chunks, those
+/// with a vector already, and its texts, of which `texts - cached` are left to embed.
 #[derive(Clone, Debug, Serialize)]
 #[non_exhaustive]
 pub struct EmbedStats {
@@ -515,6 +544,67 @@ pub struct EmbedStats {
     /// Whether this build created the vector store: the first build with this model
     /// and these settings, or the store was unusable (damaged, or another format).
     pub store_created: bool,
+    /// The run stopped because a newer generation was published: the run for that
+    /// generation takes over, with what this one embedded in the cache.
+    pub superseded: bool,
+    /// The run stopped when [`DenseBuild::stop`] was set. A later run continues.
+    pub stopped: bool,
+}
+impl EmbedStats {
+    pub(crate) fn new(
+        embedder: ModelDescriptor,
+        embed_text: EmbedText,
+        max_tokens: Option<u64>,
+    ) -> Self {
+        Self {
+            embedder,
+            render_version: RENDER_VERSION,
+            embed_text,
+            docs: 0,
+            embedded_docs: 0,
+            texts: 0,
+            cached: 0,
+            new: 0,
+            requests: 0,
+            tokens: 0,
+            max_tokens,
+            cap_reached: false,
+            not_embedded: 0,
+            not_embedded_tokens: 0,
+            too_long: 0,
+            cache_records: 0,
+            vectors_added: 0,
+            vectors_removed: 0,
+            store_created: false,
+            superseded: false,
+            stopped: false,
+        }
+    }
+}
+
+/// How far the embedding of a generation has come ([`DenseIndexInfo::state`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EmbedState {
+    /// Vectors are still being added: a run is embedding the generation, or one
+    /// stopped before it finished and [`index2::embed`](crate::index2::embed) continues.
+    Embedding,
+    /// Every chunk that can have a vector has one. Texts over the model's input limit
+    /// have none.
+    #[default]
+    Complete,
+    /// A run stopped at its token cap. A run with a higher cap, or none, continues.
+    CapReached,
+}
+impl EmbedState {
+    /// `embedding`, `complete` or `cap-reached`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EmbedState::Embedding => "embedding",
+            EmbedState::Complete => "complete",
+            EmbedState::CapReached => "cap-reached",
+        }
+    }
 }
 
 /// What a generation's embeddings are (`dense.json` in the generation directory).
@@ -536,8 +626,13 @@ pub struct DenseIndexInfo {
     pub store: String,
     /// Chunks in the generation.
     pub docs: u64,
-    /// Chunks with a vector.
+    /// Chunks with a vector in the store, at least: it grows while the generation is
+    /// embedded.
     pub embedded: u64,
+    /// How far the embedding has come. Generations whose `dense.json` lacks it were
+    /// embedded before they were published: `Complete`.
+    #[serde(default)]
+    pub state: EmbedState,
 }
 impl DenseIndexInfo {
     /// The format version this crate writes and searches.

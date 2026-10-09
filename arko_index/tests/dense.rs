@@ -1,12 +1,13 @@
 //! Dense and hybrid search with a deterministic mock embedder (no network): the
 //! embedding cache, the token cap, persistence and the atomic switch, the vector
 //! store's incremental updates and recovery, watcher-driven rebuilds, filters, headers,
-//! and chunk identities.
+//! and chunk identities. Builds here embed before they return; embedding while the
+//! index is in use is in `background_embedding.rs`.
 use arko_index::{
     bench_v1::{Chunk, Error, Options, chunk_dir, chunk_str},
     dense::{
-        DenseBuild, DenseConfig, EmbedLimits, EmbedText, Embedder, Embedding, HashEmbedder,
-        InputKind, ModelDescriptor, RENDER_VERSION, render, render_with,
+        DenseBuild, DenseConfig, DenseIndexInfo, EmbedLimits, EmbedState, EmbedText, Embedder,
+        Embedding, HashEmbedder, InputKind, ModelDescriptor, RENDER_VERSION, render, render_with,
     },
     hybrid::{self, Fusion, Mode, SearchRequest},
     index2::{self, BuildOptions, BuildStats},
@@ -148,13 +149,12 @@ fn generation(state: &Path) -> std::path::PathBuf {
     state.join(fs::read_to_string(state.join("CURRENT2")).unwrap().trim())
 }
 
-/// The bytes of a generation's dense files.
-fn dense_files(state: &Path) -> Vec<(String, Vec<u8>)> {
-    let g = generation(state);
-    ["dense.json", "vkeys.dat"]
-        .iter()
-        .map(|f| (f.to_string(), fs::read(g.join(f)).unwrap()))
-        .collect()
+/// The current generation's vector keys (bytes) and embeddings, with their coverage.
+fn dense_files(state: &Path) -> (Vec<u8>, DenseIndexInfo) {
+    (
+        fs::read(generation(state).join("vkeys.dat")).unwrap(),
+        index2::dense_info(state).unwrap().unwrap(),
+    )
 }
 
 /// The vector store directories in a state directory.
@@ -398,8 +398,12 @@ fn generations(state: &Path) -> Vec<String> {
         .collect()
 }
 
+/// A build publishes its generation before it embeds. When embedding then fails (here
+/// the provider, from its third request on), the build returns the error, and the
+/// generation stays: lexical search works, dense search finds the chunks embedded before
+/// the failure, and the vectors paid for are kept. The next run embeds only the rest.
 #[test]
-fn failed_embedding_keeps_the_published_generation_and_the_paid_vectors() {
+fn a_failed_embedding_keeps_the_published_generation_and_the_paid_vectors() {
     let root = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
     corpus(root.path());
@@ -409,38 +413,56 @@ fn failed_embedding_keeps_the_published_generation_and_the_paid_vectors() {
     let before = fs::read_to_string(state.path().join("CURRENT2")).unwrap();
     let lexical = index2::search(state.path(), "journal").unwrap();
 
-    // The provider fails on the third request: the build fails, nothing is published.
     let mut e = TestEmbedder::new("model-a", 32);
     e.fail_from_request = Some(2);
-    assert!(build_with(root.path(), state.path(), Some(&e), None, 1).is_err());
-    assert_eq!(
-        fs::read_to_string(state.path().join("CURRENT2")).unwrap(),
-        before
+    let Err(err) = build_with(root.path(), state.path(), Some(&e), None, 1) else {
+        panic!("the embedding failed");
+    };
+    assert!(
+        err.to_string().contains("simulated provider outage"),
+        "{err}"
     );
-    // The failed build removed its unpublished generation.
-    assert_eq!(generations(state.path()), [before.trim().to_owned()]);
-    assert_eq!(index2::search(state.path(), "journal").unwrap(), lexical);
-    assert!(index2::dense_info(state.path()).unwrap().is_none());
-    assert!(DenseConfig::load(state.path()).unwrap().is_none());
-    let paid = e.embedded().len();
-    assert_eq!(paid, 8, "two requests of four texts succeeded");
-
-    // The next build embeds only what the failed one did not.
-    e.fail_from_request = None;
-    e.reset();
-    let d = build_with(root.path(), state.path(), Some(&e), None, 1)
-        .unwrap()
-        .dense
-        .unwrap();
-    assert_eq!(d.cached, paid as u64);
-    assert_eq!(d.new, (all.len() - paid) as u64);
-    // The switch published the new generation and removed the old ones.
+    assert!(err.to_string().contains("published"), "{err}");
     let after = fs::read_to_string(state.path().join("CURRENT2")).unwrap();
     assert_ne!(after, before);
     assert_eq!(generations(state.path()), [after.trim().to_owned()]);
-    // No build leftovers in the generation.
+    assert_eq!(index2::search(state.path(), "journal").unwrap(), lexical);
+    assert!(DenseConfig::load(state.path()).unwrap().is_some());
+    let paid = e.embedded().len();
+    assert_eq!(paid, 8, "two requests of four texts succeeded");
+    let info = index2::dense_info(state.path()).unwrap().unwrap();
+    assert_eq!(info.state, EmbedState::Embedding);
+    assert!(info.embedded >= paid as u64 && info.embedded < info.docs);
+    // Dense search finds exactly the chunks with a vector.
+    let searcher = TestEmbedder::new("model-a", 32);
+    let r = hybrid::search(
+        state.path(),
+        &SearchRequest::new("journal entry")
+            .with_mode(Mode::Dense)
+            .with_limit(100),
+        Some(&searcher),
+    )
+    .unwrap();
+    assert_eq!(r.hits.len() as u64, info.embedded);
+    assert_eq!(r.dense.unwrap().embedded, info.embedded);
+
+    // The next run embeds only what the failed one did not.
+    e.fail_from_request = None;
+    e.reset();
+    let d = index2::embed(state.path(), &DenseBuild::new(&e)).unwrap();
+    assert_eq!(d.cached, paid as u64);
+    assert_eq!(d.new, (all.len() - paid) as u64);
+    assert_eq!(d.embedded_docs, d.docs);
+    assert!(!d.superseded && !d.stopped);
+    let info = index2::dense_info(state.path()).unwrap().unwrap();
+    assert_eq!(
+        (info.state, info.embedded),
+        (EmbedState::Complete, info.docs)
+    );
+    // The spooled texts go once every one is embedded.
     let g = generation(state.path());
-    assert!(!g.join("vhash.tmp").exists() && !g.join("embed-spool.tmp").exists());
+    assert!(!g.join("embed.spool").exists());
+    assert!(g.join("vhash.dat").exists() && g.join("vkeys.dat").exists());
 }
 
 #[test]

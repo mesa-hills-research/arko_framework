@@ -13,10 +13,13 @@
 //! ```
 //!
 //! Records are appended (vectors first, both fsynced) after every request, so tokens
-//! spent are never lost when a build stops. On open, a torn tail (a crash between
+//! spent are never lost when a run stops. On open, a torn tail (a crash between
 //! the two appends) is cut to the records both files hold. Compaction writes the live
 //! records to the next epoch's files and switches `cache.json` atomically.
-//! Only an index build uses the cache, under the index's writer lock.
+//! An embedding run writes the cache under the state's embedding lock. A build reads
+//! which texts it holds ([`cached_hashes`]) without writing anything, and compacts it
+//! after publishing, holding the index writer lock (no other build reads it) and the
+//! embedding lock (no run writes it).
 use super::ModelDescriptor;
 use crate::{
     bench_v1::Error,
@@ -47,6 +50,44 @@ pub(crate) struct Cache {
     records: u64,
     keys: File,
     vectors: File,
+}
+
+/// The text hashes the cache of `descriptor` holds, read without writing anything (a
+/// run may be appending meanwhile: the records both files hold so far). Empty when
+/// there is no cache for the model.
+pub(crate) fn cached_hashes(
+    state_dir: &Path,
+    descriptor: &ModelDescriptor,
+) -> Result<HashSet<[u8; 32]>, Error> {
+    let dir = state_dir.join(CACHE_DIR).join(descriptor.key());
+    let meta: CacheMeta = match std::fs::read(dir.join("cache.json")) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(e) => return Err(e.into()),
+    };
+    if meta.version != 1 || &meta.descriptor != descriptor {
+        // Cache::open explains it when a run opens the cache.
+        return Ok(HashSet::new());
+    }
+    let open = |name: String| match File::open(dir.join(name)) {
+        Ok(f) => Ok(Some(f)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    };
+    let (Some(keys), Some(vectors)) = (
+        open(format!("keys.{}", meta.epoch))?,
+        open(format!("vectors.{}", meta.epoch))?,
+    ) else {
+        return Ok(HashSet::new());
+    };
+    let row = (descriptor.dimensions.max(1) * 4) as u64;
+    let records = (keys.metadata()?.len() / 32).min(vectors.metadata()?.len() / row);
+    let mut raw = vec![0u8; (records * 32) as usize];
+    read_exact_at(&keys, &mut raw, 0)?;
+    Ok(raw
+        .chunks_exact(32)
+        .map(|k| k.try_into().unwrap())
+        .collect())
 }
 
 fn open_rw(path: &Path) -> Result<File, Error> {

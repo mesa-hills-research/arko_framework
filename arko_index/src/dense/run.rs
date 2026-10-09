@@ -1,9 +1,10 @@
-//! One build's embedding run. While the tree is chunked, texts missing from the cache
-//! are spooled to a file in the new generation (so memory stays bounded); then they
-//! are embedded in requests within the embedder's limits, stopping before a request
-//! would take the run over its token cap, and every request's vectors are appended to
-//! the cache at once.
-use super::{EmbedProgress, Embedder, InputKind, cache::Cache};
+//! One embedding run's requests. While the tree is chunked, texts missing from the
+//! cache are spooled to a file in the new generation (so memory stays bounded); a run
+//! then embeds the ones it still needs in requests within the embedder's limits,
+//! stopping before a request would take the run over its token cap. Every request's
+//! vectors are appended to the cache at once and handed to the caller, which stores
+//! them and decides whether the run goes on.
+use super::{Embedder, InputKind, cache::Cache};
 use crate::bench_v1::Error;
 use std::{
     collections::VecDeque,
@@ -34,8 +35,12 @@ impl Spool {
         self.count += 1;
         Ok(())
     }
-    pub(crate) fn finish(mut self) -> Result<(PathBuf, u64), Error> {
-        self.out.flush()?;
+    /// Flushes the spool and makes it durable: a run may embed it after a restart.
+    pub(crate) fn finish(self) -> Result<(PathBuf, u64), Error> {
+        self.out
+            .into_inner()
+            .map_err(|e| e.into_error())?
+            .sync_all()?;
         Ok((self.path, self.count))
     }
 }
@@ -68,14 +73,27 @@ pub(crate) struct RunTotals {
     pub too_long: u64,
 }
 
-/// Embeds the spooled texts into the cache.
+/// What the caller of [`embed_spool`] wants after a request.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Flow {
+    Continue,
+    Stop,
+}
+
+/// A request's records: each text's hash and its vector.
+pub(crate) type Records = [([u8; 32], Vec<f32>)];
+
+/// Embeds the spooled texts that `wanted` accepts and the cache lacks into the cache,
+/// calling `after` with each request's records (already in the cache) and the run's
+/// totals so far. `after` returning [`Flow::Stop`] ends the run after that request.
+/// At the cap, the texts left are counted (no request is sent).
 pub(crate) fn embed_spool(
     path: &Path,
-    total: u64,
+    wanted: &dyn Fn(&[u8; 32]) -> bool,
     cache: &mut Cache,
     embedder: &dyn Embedder,
     cap: Option<u64>,
-    progress: Option<&dyn Fn(&EmbedProgress)>,
+    after: &mut dyn FnMut(&Records, &RunTotals) -> Result<Flow, Error>,
 ) -> Result<RunTotals, Error> {
     let limits = embedder.limits();
     let mut reader = SpoolReader(BufReader::with_capacity(1 << 20, File::open(path)?));
@@ -99,13 +117,11 @@ pub(crate) fn embed_spool(
     loop {
         if !exhausted && queue.len() < limits.max_items {
             let mut fresh = Vec::new();
-            while queue.len() + fresh.len() < limits.max_items {
+            while !exhausted && queue.len() + fresh.len() < limits.max_items {
                 match reader.next()? {
-                    Some(item) => fresh.push(item),
-                    None => {
-                        exhausted = true;
-                        break;
-                    }
+                    Some((h, t)) if wanted(&h) && !cache.contains(&h) => fresh.push((h, t)),
+                    Some(_) => {}
+                    None => exhausted = true,
                 }
             }
             if !fresh.is_empty() {
@@ -186,13 +202,8 @@ pub(crate) fn embed_spool(
         };
         totals.requests += 1;
         totals.new += batch.len() as u64;
-        if let Some(progress) = progress {
-            progress(&EmbedProgress {
-                texts: totals.new,
-                total,
-                tokens: totals.tokens,
-                requests: totals.requests,
-            });
+        if after(&records, &totals)? == Flow::Stop {
+            return Ok(totals);
         }
     }
     if totals.cap_reached {
@@ -202,20 +213,21 @@ pub(crate) fn embed_spool(
             totals.not_embedded += 1;
             totals.not_embedded_tokens += n;
         }
-        loop {
+        let mut more = true;
+        while more {
             let mut rest = Vec::new();
-            while rest.len() < limits.max_items {
+            while more && rest.len() < limits.max_items {
                 match reader.next()? {
-                    Some(item) => rest.push(item),
-                    None => break,
+                    Some((h, t)) if wanted(&h) && !cache.contains(&h) => rest.push((h, t)),
+                    Some(_) => {}
+                    None => more = false,
                 }
             }
-            if rest.is_empty() {
-                break;
-            }
-            for n in count(&rest)? {
-                totals.not_embedded += 1;
-                totals.not_embedded_tokens += n;
+            if !rest.is_empty() {
+                for n in count(&rest)? {
+                    totals.not_embedded += 1;
+                    totals.not_embedded_tokens += n;
+                }
             }
         }
     }

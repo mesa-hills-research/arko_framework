@@ -18,7 +18,7 @@
 use crate::{
     bench_v1::{Chunk, Error},
     dense::{DenseIndexInfo, Embedder, ModelDescriptor, embed_query},
-    index2::Generation,
+    index2::{Generation, check_dense_format},
     vector::{Filter, VectorStore},
 };
 use serde::{Deserialize, Serialize};
@@ -265,13 +265,17 @@ pub struct SearchResults {
     /// Tokens billed to embed the query (0 for lexical search or a supplied vector).
     /// The future arko tool charges these to the calling agent.
     pub query_tokens: u64,
-    /// The index's embeddings (model and coverage), when it has them.
+    /// The index's embeddings (model and coverage), when it has them. While the
+    /// generation is embedded, `embedded` of its `docs` chunks have a vector and the
+    /// others are found by lexical search only.
     pub dense: Option<DenseIndexInfo>,
 }
 
 /// Searches the current generation of an index2 state directory. Dense and hybrid
 /// modes need embeddings in the index and an `embedder` with the index's model (or
-/// [`SearchRequest::query_vector`]).
+/// [`SearchRequest::query_vector`]). While the generation is still being embedded they
+/// search the vectors stored so far, with exact scores, and
+/// [`SearchResults::dense`] tells how many chunks have one.
 pub fn search(
     state_dir: &Path,
     request: &SearchRequest,
@@ -324,45 +328,59 @@ fn search_once(
             let info = info.as_ref().ok_or(
                 "this index has no embeddings: build it with embeddings (index2 --embed) or search lexically",
             )?;
-            // Before the query is embedded (and billed): the format, the model and
-            // settings, and that the store holds the generation's vectors.
-            let store = generation.open_store(info)?;
-            let vector = match (&request.query_vector, &*embedded) {
-                (Some(v), _) => v.clone(),
-                (None, Some((model, v))) if *model == info.embedder => v.clone(),
-                (None, _) => {
-                    let embedder = embedder.ok_or("dense search needs an embedder")?;
-                    let have = embedder.descriptor();
-                    if have != info.embedder {
-                        return Err(format!(
-                            "the index was embedded with {}, not {}",
-                            info.embedder.display(),
-                            have.display()
-                        )
-                        .into());
-                    }
-                    let (v, tokens) = embed_query(embedder, &request.query)?;
-                    *query_tokens += tokens;
-                    *embedded = Some((have, v.clone()));
-                    v
+            let check_model = |have: &ModelDescriptor| -> Result<(), Error> {
+                if *have != info.embedder {
+                    return Err(format!(
+                        "the index was embedded with {}, not {}",
+                        info.embedder.display(),
+                        have.display()
+                    )
+                    .into());
                 }
+                Ok(())
             };
             let depth = if request.mode == Mode::Dense {
                 limit
             } else {
                 request.candidates.max(limit)
             };
-            // Vectors of another generation in the store (see `open_store`) are
-            // skipped: fetch enough to keep `depth` of this one's.
-            let others = store.len().saturating_sub(info.embedded as usize);
-            let hits = store.search(&vector, depth.saturating_add(others), &request.filter)?;
-            let ids: Vec<_> = hits.iter().map(|h| h.id).collect();
-            let dense: Vec<(u64, f64)> = hits
-                .iter()
-                .zip(generation.docs_of(&ids)?)
-                .filter_map(|(h, doc)| Some((u64::from(doc?), f64::from(h.score))))
-                .take(depth)
-                .collect();
+            // While a generation is embedded, its chunks without a vector are found by
+            // lexical search only (`info` says how many have one). Before the first
+            // vector is stored, the dense side is empty and the query is not embedded.
+            let dense: Vec<(u64, f64)> = if info.embedded == 0 {
+                check_dense_format(info)?;
+                if let (None, Some(embedder)) = (&request.query_vector, embedder) {
+                    check_model(&embedder.descriptor())?;
+                }
+                Vec::new()
+            } else {
+                // Before the query is embedded (and billed): the format, the model and
+                // settings, and that the store holds the generation's vectors.
+                let store = generation.open_store(info)?;
+                let vector = match (&request.query_vector, &*embedded) {
+                    (Some(v), _) => v.clone(),
+                    (None, Some((model, v))) if *model == info.embedder => v.clone(),
+                    (None, _) => {
+                        let embedder = embedder.ok_or("dense search needs an embedder")?;
+                        let have = embedder.descriptor();
+                        check_model(&have)?;
+                        let (v, tokens) = embed_query(embedder, &request.query)?;
+                        *query_tokens += tokens;
+                        *embedded = Some((have, v.clone()));
+                        v
+                    }
+                };
+                // Vectors the generation lacks (see `open_store`) are skipped: fetch
+                // enough to keep `depth` of its own.
+                let others = store.len().saturating_sub(info.embedded as usize);
+                let hits = store.search(&vector, depth.saturating_add(others), &request.filter)?;
+                let ids: Vec<_> = hits.iter().map(|h| h.id).collect();
+                hits.iter()
+                    .zip(generation.docs_of(&ids)?)
+                    .filter_map(|(h, doc)| Some((u64::from(doc?), f64::from(h.score))))
+                    .take(depth)
+                    .collect()
+            };
             if request.mode == Mode::Dense {
                 dense
                     .into_iter()
