@@ -718,3 +718,92 @@ fn watcher_driven_rebuilds_while_a_run_is_embedding() {
     assert_eq!(r.hits[0].chunk, chunk);
     assert!((r.hits[0].score - 1.0).abs() < 1e-5);
 }
+
+/// The `arko_index_cli` example, which `cargo test` builds before the tests.
+#[cfg(unix)]
+fn cli() -> std::path::PathBuf {
+    let exe = std::env::current_exe().unwrap();
+    let profile_dir = exe.parent().and_then(Path::parent).unwrap();
+    let cli = profile_dir.join("examples").join("arko_index_cli");
+    assert!(
+        cli.is_file(),
+        "{} is missing: run the whole suite (`cargo test -p arko_index`) or build it first",
+        cli.display()
+    );
+    cli
+}
+
+/// The CLI's `index2` returns once lexical search is ready, a background process
+/// embeds, `status` follows it, and `--wait-embeddings` and `embed` run in the
+/// foreground.
+#[cfg(unix)]
+#[test]
+fn the_cli_embeds_in_the_background_and_reports_progress() {
+    use std::process::Command;
+    let root = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    corpus(root.path());
+    let run = |args: &[&str]| {
+        let out = Command::new(cli()).args(args).output().unwrap();
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert!(out.status.success(), "{args:?}: {stderr}");
+        (String::from_utf8(out.stdout).unwrap(), stderr)
+    };
+    let (root_arg, state_arg) = (
+        root.path().to_str().unwrap(),
+        state.path().to_str().unwrap(),
+    );
+    let status =
+        || -> serde_json::Value { serde_json::from_str(&run(&["status", state_arg]).0).unwrap() };
+
+    let (_, stderr) = run(&[
+        "index2",
+        "--embed",
+        "hash",
+        "--dimensions",
+        "64",
+        root_arg,
+        state_arg,
+    ]);
+    assert!(stderr.contains("lexical search is ready"), "{stderr}");
+    assert!(stderr.contains("embedding in the background"), "{stderr}");
+    let (hits, _) = run(&[
+        "search2", "--mode", "lexical", state_arg, "journal", "entry",
+    ]);
+    assert!(hits.contains("src/store/journal.rs"), "{hits}");
+    wait_until(|| {
+        let s = status();
+        s["dense"]["state"] == "complete" && s["embedding"] == false
+    });
+    let s = status();
+    assert_eq!(s["dense"]["embedded"], s["docs"]);
+    assert_eq!(s["progress"]["embedded_docs"], s["docs"]);
+    let log = fs::read_to_string(state.path().join("embed.log")).unwrap();
+    assert!(
+        log.contains("embeddings: hash/hash-v1 (64 dimensions)"),
+        "{log}"
+    );
+    let (hits, stderr) = run(&["search2", state_arg, "retry", "backoff"]);
+    assert!(!hits.is_empty());
+    assert!(
+        !stderr.contains("dense:"),
+        "complete coverage: no notice\n{stderr}"
+    );
+
+    // An edit, rebuilt with --wait-embeddings: one new text, embedded before it returns.
+    let path = root.path().join("src/store/journal.rs");
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        text.replace("entry.to_owned()", "entry.trim().to_owned()"),
+    )
+    .unwrap();
+    let (_, stderr) = run(&["index2", "--wait-embeddings", root_arg, state_arg]);
+    assert!(stderr.contains("1 embedded now"), "{stderr}");
+    assert!(stderr.contains("1 vectors added, 1 removed"), "{stderr}");
+    let s = status();
+    assert!(s["dense"]["state"] == "complete" && s["embedding"] == false);
+    // Nothing left for a foreground run.
+    let (_, stderr) = run(&["embed", state_arg]);
+    assert!(stderr.contains("0 embedded now in 0 requests"), "{stderr}");
+}

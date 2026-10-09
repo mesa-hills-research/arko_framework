@@ -1,6 +1,6 @@
 //! Command-line interface to arko_index: `chunk`, `outline`, `index`/`search`,
-//! `index2`/`search2` (lexical, dense or hybrid), `watch`, `watch2` (Linux) and
-//! `bench-scan` (Unix). Run
+//! `index2`/`search2` (lexical, dense or hybrid), `embed` and `status`, `watch`,
+//! `watch2` (Linux) and `bench-scan` (Unix). Run
 //! `cargo run --release -p arko_index --example arko_index_cli -- --help`; the
 //! `docs/arko_index-reference.md` describes the commands, the file selection flags and
 //! the protocol.
@@ -10,8 +10,9 @@ mod support;
 
 use arko_index::{
     bench_v1::*,
-    dense::{DenseBuild, DenseConfig, EmbedProgress, EmbedStats, EmbedText},
+    dense::{DenseBuild, DenseConfig, EmbedProgress, EmbedState, EmbedStats, EmbedText},
     hybrid::{Fusion, Mode, SearchRequest},
+    index2::IndexStatus,
     search,
     vector::{Filter, Quantization, VectorIndex},
 };
@@ -39,7 +40,9 @@ struct Walk {
     front_matter_description: bool,
 }
 const RULE_FLAGS: &str = "[--respect-ignore] [--exclude PATTERN]... [--include PATTERN]... [--report FILE] [--front-matter-description]";
-const EMBED_FLAGS: &str = "[--lexical-scope] [--embed MODEL] [--dimensions N] [--embed-text source|path-source|path-scope-source] [--embed-config FILE] [--quantize f32|int8] [--vector-index flat|graph] [--max-embed-tokens N|none] [--no-embed]";
+const EMBED_FLAGS: &str = "[--lexical-scope] [--embed MODEL] [--dimensions N] [--embed-text source|path-source|path-scope-source] [--embed-config FILE] [--quantize f32|int8] [--vector-index flat|graph] [--max-embed-tokens N|none] [--no-embed] [--wait-embeddings]";
+const RUN_FLAGS: &str = "[--max-embed-tokens N|none]";
+const WATCH_FLAGS: &str = "[--index INDEX_STATE_DIR]";
 const SEARCH_FLAGS: &str = "[--mode lexical|dense|hybrid] [--limit N] [--candidates N] [--fusion rrf|linear] [--rrf-k K] [--lexical-weight W] [--dense-weight W] [--path-prefix P] [--language L] [--text]";
 
 /// Every command's flags; a command accepts the groups it passes to `parse_flags`.
@@ -56,6 +59,10 @@ struct Flags {
     /// `Some(None)`: `--max-embed-tokens none`.
     max_embed_tokens: Option<Option<u64>>,
     no_embed: bool,
+    /// `index2 --wait-embeddings`: embed in this process before returning.
+    wait_embeddings: bool,
+    /// `watch`/`watch2 --index DIR`: keep that index2 state current.
+    index: Option<PathBuf>,
     mode: Option<Mode>,
     limit: Option<usize>,
     candidates: Option<usize>,
@@ -71,6 +78,10 @@ struct Accepts {
     walk: bool,
     embed: bool,
     search: bool,
+    /// `embed`: the run's cap.
+    run: bool,
+    /// `watch`, `watch2`: `--index`.
+    watch: bool,
 }
 fn number<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T, Error> {
     value
@@ -94,6 +105,8 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
         vector_index: None,
         max_embed_tokens: None,
         no_embed: false,
+        wait_embeddings: false,
+        index: None,
         mode: None,
         limit: None,
         candidates: None,
@@ -108,6 +121,8 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
         (accepts.walk, RULE_FLAGS),
         (accepts.embed, EMBED_FLAGS),
         (accepts.search, SEARCH_FLAGS),
+        (accepts.run, RUN_FLAGS),
+        (accepts.watch, WATCH_FLAGS),
     ]
     .into_iter()
     .filter_map(|(on, list)| on.then_some(list))
@@ -136,9 +151,9 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
             | "--report"
             | "--front-matter-description" => accepts.walk,
             "--lexical-scope" | "--embed" | "--dimensions" | "--embed-text" | "--embed-config"
-            | "--quantize" | "--vector-index" | "--max-embed-tokens" | "--no-embed" => {
-                accepts.embed
-            }
+            | "--quantize" | "--vector-index" | "--no-embed" | "--wait-embeddings" => accepts.embed,
+            "--max-embed-tokens" => accepts.embed || accepts.run,
+            "--index" => accepts.watch,
             "--mode" | "--limit" | "--candidates" | "--fusion" | "--rrf-k" | "--lexical-weight"
             | "--dense-weight" | "--path-prefix" | "--language" | "--text" => accepts.search,
             _ => false,
@@ -159,6 +174,10 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
                 }
                 "--no-embed" => {
                     f.no_embed = true;
+                    continue;
+                }
+                "--wait-embeddings" => {
+                    f.wait_embeddings = true;
                     continue;
                 }
                 "--lexical-scope" => {
@@ -184,6 +203,7 @@ fn parse_flags(args: &[String], accepts: Accepts) -> Result<(Flags, Vec<String>)
             "--dimensions" => f.dimensions = Some(number(flag, &value)?),
             "--embed-text" => f.embed_text = Some(value.parse()?),
             "--embed-config" => f.embed_config = Some(PathBuf::from(value)),
+            "--index" => f.index = Some(PathBuf::from(value)),
             "--quantize" => {
                 f.quantize = Some(match value.as_str() {
                     "f32" => Quantization::F32,
@@ -242,18 +262,19 @@ fn write_report_file(walk: &Walk, report: &Report) -> Result<(), Error> {
     }
     Ok(())
 }
-/// SIGINT and SIGTERM: the first stops the watcher after its current batch, a second
-/// exits at once (status 130).
+/// SIGINT and SIGTERM: the first sets the returned flag (a watcher stops after its
+/// current batch, an embedding run after its current request), a second exits at once
+/// (status 130).
 fn stop_on_signal() -> Result<Arc<AtomicBool>, Error> {
-    let running = Arc::new(AtomicBool::new(true));
-    let flag = running.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
     ctrlc::set_handler(move || {
-        if !flag.swap(false, Ordering::SeqCst) {
+        if flag.swap(true, Ordering::SeqCst) {
             eprintln!("arko_index: stopped by a second signal");
             std::process::exit(130);
         }
     })?;
-    Ok(running)
+    Ok(stop)
 }
 fn rules_changed_note() {
     eprintln!(
@@ -344,9 +365,19 @@ fn print_embed_stats(s: &EmbedStats) {
         s.requests,
         s.tokens
     );
+    if s.superseded {
+        eprintln!(
+            "arko_index: a newer build was published, and its embedding run continues from the cache"
+        );
+    }
+    if s.stopped {
+        eprintln!(
+            "arko_index: stopped; `embed STATE_DIR` (or the next index2) continues, with the texts embedded so far from the cache"
+        );
+    }
     if s.cap_reached {
         eprintln!(
-            "arko_index: stopped at the token cap ({}): {} texts ({} counted tokens) not embedded; their chunks are found by lexical search only. Rerun with a higher --max-embed-tokens (or none) to finish; embedded texts come from the cache",
+            "arko_index: stopped at the token cap ({}): {} texts ({} counted tokens) not embedded; their chunks are found by lexical search only. Run `embed STATE_DIR` with a higher --max-embed-tokens (or none) to finish; embedded texts come from the cache",
             s.max_tokens.unwrap_or(0),
             s.not_embedded - s.too_long,
             s.not_embedded_tokens
@@ -368,6 +399,132 @@ fn print_embed_stats(s: &EmbedStats) {
         s.vectors_added,
         s.vectors_removed
     );
+}
+
+/// One stderr line on the embedding progress of a run: after each request, and in
+/// `status`.
+fn progress_line(p: &EmbedProgress) -> String {
+    format!(
+        "embedded {}/{} texts, {} tokens, {} requests; {} of {} chunks have vectors",
+        p.texts, p.total, p.tokens, p.requests, p.embedded_docs, p.docs
+    )
+}
+
+/// Why the dense coverage is partial, for the notices of `search2` and `status`.
+fn coverage_note(state: EmbedState, running: bool) -> &'static str {
+    match (state, running) {
+        (EmbedState::Embedding, true) => "embedding continues in the background",
+        (EmbedState::Embedding, false) => {
+            "the embedding stopped before it finished: `embed STATE_DIR` or the next index2 continues it"
+        }
+        (EmbedState::CapReached, _) => {
+            "the last run stopped at its token cap: `embed --max-embed-tokens N|none STATE_DIR` continues"
+        }
+        (EmbedState::Complete, _) => "the others are over the model's input limit",
+    }
+}
+
+/// Embeds what the current generation lacks, in this process, printing progress; the
+/// first SIGINT or SIGTERM stops it after its current request.
+fn embed_now(state: &Path, max_tokens: Option<Option<u64>>) -> Result<(), Error> {
+    let info = arko_index::index2::dense_info(state)?
+        .ok_or("this index has no embeddings: build it with them (index2 --embed MODEL)")?;
+    let embedder = support::embedder_for(&info.embedder)?;
+    let cap = match max_tokens {
+        Some(cap) => cap,
+        None => DenseConfig::load(state)?.and_then(|c| c.max_tokens_per_run),
+    };
+    if arko_index::index2::status(state)?.embedding {
+        eprintln!("arko_index: waiting for the embedding run in progress to finish or stop");
+    }
+    let stop = stop_on_signal()?;
+    let progress = |p: &EmbedProgress| eprintln!("arko_index: {}", progress_line(p));
+    let stats = arko_index::index2::embed(
+        state,
+        &DenseBuild::new(embedder.as_ref())
+            .with_max_tokens(cap)
+            .with_progress(&progress)
+            .with_stop(&stop),
+    )?;
+    print_embed_stats(&stats);
+    Ok(())
+}
+
+/// Starts `embed STATE_DIR` as a detached process of this executable, its output in
+/// `STATE_DIR/embed.log`. Returns its process id.
+fn embed_in_background(state: &Path) -> Result<u32, Error> {
+    let state = state.canonicalize()?;
+    // A new file: a run still writing the previous one keeps its own.
+    let log = state.join(EMBED_LOG);
+    match std::fs::remove_file(&log) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
+    }
+    let log = std::fs::File::create(log)?;
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    command
+        .arg("embed")
+        .arg("--")
+        .arg(&state)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(log);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // A session of its own: closing the terminal does not stop it.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    Ok(command.spawn()?.id())
+}
+
+/// The log of the background embedding run that `index2` starts.
+const EMBED_LOG: &str = "embed.log";
+
+/// `status`: one JSON line on stdout, a summary on stderr.
+fn print_status(status: &IndexStatus) -> Result<(), Error> {
+    write_json(status)?;
+    match &status.dense {
+        None => eprintln!(
+            "arko_index: {}: {} chunks, lexical search only",
+            status.generation, status.docs
+        ),
+        Some(info) => {
+            eprintln!(
+                "arko_index: {}: {} chunks; dense ({}): {} of {} chunks have vectors{}",
+                status.generation,
+                status.docs,
+                info.embedder.display(),
+                info.embedded,
+                info.docs,
+                if info.complete() {
+                    String::new()
+                } else {
+                    format!(" ({})", coverage_note(info.state, status.embedding))
+                }
+            );
+            if let Some(p) = &status.progress {
+                eprintln!(
+                    "arko_index: {} run: {}",
+                    if status.embedding { "this" } else { "the last" },
+                    progress_line(p)
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `search2`: the request from the flags; the default mode is hybrid when the index
@@ -451,29 +608,180 @@ fn search2(state: &Path, query: &str, f: &Flags) -> Result<(), Error> {
     if mode != Mode::Lexical
         && let Some(info) = &results.dense
     {
-        eprintln!(
-            "arko_index: query embedded with {}: {} tokens",
-            info.embedder.display(),
-            results.query_tokens
-        );
-        if !info.complete() {
+        if info.embedded > 0 {
             eprintln!(
-                "arko_index: {} of {} chunks have vectors (the build stopped at its token cap); the others are found by lexical search only",
-                info.embedded, info.docs
+                "arko_index: query embedded with {}: {} tokens",
+                info.embedder.display(),
+                results.query_tokens
+            );
+        }
+        if !info.complete() {
+            let running = arko_index::index2::status(state)?.embedding;
+            eprintln!(
+                "arko_index: dense: {} of {} chunks embedded ({}); the others are found by lexical search only",
+                info.embedded,
+                info.docs,
+                coverage_note(info.state, running)
             );
         }
     }
     Ok(())
 }
 
+/// `index2`'s postings memory budget: `ARKO_INDEX_INDEX_MEM_MB`, else 256 MB.
+fn index_mem_budget() -> usize {
+    std::env::var("ARKO_INDEX_INDEX_MEM_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(256)
+        << 20
+}
+
+/// The watchers' `--index INDEX_STATE_DIR`: that index2 state is rebuilt when the tree
+/// is quiet after deltas (with the embedding model saved there, if any), and a thread
+/// of this process embeds what each generation lacks.
+struct Keeper<'a> {
+    root: &'a Path,
+    index: Option<&'a Path>,
+    flags: &'a Flags,
+    options: &'a Options,
+    dirty: bool,
+    wake: Option<std::sync::mpsc::Sender<()>>,
+}
+impl Keeper<'_> {
+    /// The watcher delivered a delta.
+    fn changed(&mut self) {
+        self.dirty = self.index.is_some();
+    }
+    /// A poll found the tree quiet: rebuild the index if it changed. A failed rebuild is
+    /// reported, and the next delta tries again.
+    fn quiet(&mut self) {
+        if let Err(e) = self.rebuild() {
+            eprintln!("arko_index: index rebuild: {e}");
+        }
+    }
+    fn rebuild(&mut self) -> Result<(), Error> {
+        let Some(index) = self.index else {
+            return Ok(());
+        };
+        if !std::mem::take(&mut self.dirty) {
+            return Ok(());
+        }
+        let config = DenseConfig::load(index)?;
+        let embedder = config
+            .as_ref()
+            .map(|c| support::embedder_for(&c.embedder))
+            .transpose()?;
+        let mut settings = arko_index::index2::BuildOptions::default()
+            .with_mem_budget(index_mem_budget())
+            .with_rules(self.flags.walk.rules.clone());
+        if let (Some(config), Some(embedder)) = (&config, &embedder) {
+            settings = settings.with_dense(
+                DenseBuild::from_config(embedder.as_ref(), config).with_embed_later(true),
+            );
+        }
+        let s = arko_index::index2::build(self.root, index, self.options, &settings)?;
+        match &s.dense {
+            Some(d) => eprintln!(
+                "arko_index: index rebuilt: {} chunks; dense: {} have vectors, {} distinct texts to embed",
+                s.docs,
+                d.embedded_docs,
+                d.texts - d.cached
+            ),
+            None => eprintln!("arko_index: index rebuilt: {} chunks", s.docs),
+        }
+        if let Some(wake) = &self.wake {
+            let _ = wake.send(());
+        }
+        Ok(())
+    }
+}
+
+/// Runs a watcher loop with `--index`, when given: the embedding thread runs beside it,
+/// and stops after its current request when the watcher stops.
+fn keep_index(
+    root: &Path,
+    flags: &Flags,
+    options: &Options,
+    stop: &AtomicBool,
+    watch: impl FnOnce(&mut Keeper<'_>) -> Result<(), Error>,
+) -> Result<(), Error> {
+    let index = flags.index.as_deref();
+    std::thread::scope(|scope| {
+        let mut keeper = Keeper {
+            root,
+            index,
+            flags,
+            options,
+            dirty: false,
+            wake: None,
+        };
+        if let Some(index) = index {
+            let (wake, woken) = std::sync::mpsc::channel::<()>();
+            // An index that exists resumes its embedding now; a new one is built when
+            // the tree is first quiet.
+            if arko_index::index2::status(index).is_ok() {
+                let _ = wake.send(());
+            } else {
+                keeper.dirty = true;
+            }
+            keeper.wake = Some(wake);
+            scope.spawn(move || {
+                while woken.recv().is_ok() {
+                    while woken.try_recv().is_ok() {}
+                    while !stop.load(Ordering::SeqCst) {
+                        match embed_for_watcher(index, stop) {
+                            // A newer generation: embed it too.
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(e) => {
+                                eprintln!("arko_index: embedding: {e}");
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        let result = watch(&mut keeper);
+        // Closes the channel: the embedding thread ends after its current run.
+        drop(keeper);
+        result
+    })
+}
+
+/// One embedding run of `--index`, with progress lines on stderr. Whether a newer
+/// generation superseded it.
+fn embed_for_watcher(index: &Path, stop: &AtomicBool) -> Result<bool, Error> {
+    let Some(info) = arko_index::index2::dense_info(index)? else {
+        return Ok(false);
+    };
+    let embedder = support::embedder_for(&info.embedder)?;
+    let cap = DenseConfig::load(index)?.and_then(|c| c.max_tokens_per_run);
+    let progress = |p: &EmbedProgress| eprintln!("arko_index: {}", progress_line(p));
+    let s = arko_index::index2::embed(
+        index,
+        &DenseBuild::new(embedder.as_ref())
+            .with_max_tokens(cap)
+            .with_progress(&progress)
+            .with_stop(stop),
+    )?;
+    if s.requests > 0 || s.vectors_added > 0 || s.vectors_removed > 0 || s.cap_reached {
+        print_embed_stats(&s);
+    }
+    Ok(s.superseded)
+}
+
 fn run() -> Result<(), Error> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let usage = format!(
         "usage: arko_index_cli chunk ROOT | index ROOT STATE_DIR | search STATE_DIR QUERY | watch ROOT STATE_DIR | outline ROOT\n\
-         \x20      (also index2, search2, watch2, bench-scan)\n\
+         \x20      (also index2, search2, embed, status, watch2, bench-scan)\n\
          commands that walk a tree accept: {RULE_FLAGS}\n\
          index2 ROOT STATE_DIR also accepts: {EMBED_FLAGS}\n\
-         search2 STATE_DIR QUERY... accepts: {SEARCH_FLAGS}"
+         search2 STATE_DIR QUERY... accepts: {SEARCH_FLAGS}\n\
+         embed STATE_DIR accepts: {RUN_FLAGS}; status STATE_DIR\n\
+         watch and watch2 also accept: {WATCH_FLAGS}"
     );
     let command = args.first().map(String::as_str);
     let walks = matches!(
@@ -484,8 +792,10 @@ fn run() -> Result<(), Error> {
         walk: walks,
         embed: command == Some("index2"),
         search: command == Some("search2"),
+        run: command == Some("embed"),
+        watch: matches!(command, Some("watch" | "watch2")),
     };
-    let (flags, args) = if accepts.walk || accepts.search {
+    let (flags, args) = if accepts.walk || accepts.search || accepts.run {
         let (flags, mut rest) = parse_flags(&args[1..], accepts)?;
         rest.insert(0, args[0].clone());
         (flags, rest)
@@ -586,10 +896,6 @@ fn run() -> Result<(), Error> {
             report(walk, &r)?;
         }
         Some("index2") if args.len() == 3 => {
-            let budget_mb = std::env::var("ARKO_INDEX_INDEX_MEM_MB")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(256);
             let state = Path::new(&args[2]);
             std::fs::create_dir_all(state)?;
             let config = dense_config(state, &flags)?;
@@ -604,15 +910,9 @@ fn run() -> Result<(), Error> {
                     })
                 })
                 .transpose()?;
-            let progress = |p: &EmbedProgress| {
-                eprintln!(
-                    "arko_index: embedded {}/{} texts, {} tokens, {} requests",
-                    p.texts, p.total, p.tokens, p.requests
-                );
-            };
             let mut settings = arko_index::index2::BuildOptions::default()
                 .with_threads(arko_index::threads())
-                .with_mem_budget(budget_mb << 20)
+                .with_mem_budget(index_mem_budget())
                 .with_rules(walk.rules.clone())
                 .with_lexical_scope(flags.lexical_scope);
             if let (Some(config), Some(embedder)) = (&config, &embedder) {
@@ -621,30 +921,55 @@ fn run() -> Result<(), Error> {
                     config.embedder.display(),
                     config.embed_text.as_str(),
                     match config.max_tokens_per_run {
-                        Some(cap) => format!(", at most {cap} tokens"),
+                        Some(cap) => format!(", at most {cap} tokens per run"),
                         None => String::new(),
                     }
                 );
+                // The generation is published for lexical search first; the embedding
+                // follows, in this process or in the background.
                 settings = settings.with_dense(
-                    DenseBuild::from_config(embedder.as_ref(), config).with_progress(&progress),
+                    DenseBuild::from_config(embedder.as_ref(), config).with_embed_later(true),
                 );
+            } else if flags.wait_embeddings {
+                return Err("--wait-embeddings: this index has no embedding model (choose one with --embed)".into());
             }
             let s = arko_index::index2::build(Path::new(&args[1]), state, &options, &settings)?;
             eprintln!(
                 "indexed {} chunks, {} terms, {} runs",
                 s.docs, s.terms, s.runs
             );
-            if let Some(dense) = &s.dense {
-                print_embed_stats(dense);
-            }
             report(walk, &s.report)?;
+            if let Some(d) = &s.dense {
+                eprintln!(
+                    "arko_index: lexical search is ready; dense: {} of {} chunks have vectors, {} of {} distinct texts to embed ({} in the cache)",
+                    d.embedded_docs,
+                    d.docs,
+                    d.texts - d.cached,
+                    d.texts,
+                    d.cached
+                );
+                if flags.wait_embeddings {
+                    embed_now(state, None)?;
+                } else {
+                    let pid = embed_in_background(state)?;
+                    eprintln!(
+                        "arko_index: embedding in the background (process {pid}); `status {}` shows the progress, {} the run's output",
+                        state.display(),
+                        state.join(EMBED_LOG).display()
+                    );
+                }
+            }
+        }
+        Some("embed") if args.len() == 2 => embed_now(Path::new(&args[1]), flags.max_embed_tokens)?,
+        Some("status") if args.len() == 2 => {
+            print_status(&arko_index::index2::status(Path::new(&args[1]))?)?
         }
         Some("search2") if args.len() >= 3 => {
             search2(Path::new(&args[1]), &args[2..].join(" "), &flags)?;
         }
         #[cfg(target_os = "linux")]
         Some("watch2") if args.len() == 3 => {
-            let running = stop_on_signal()?;
+            let stop = stop_on_signal()?;
             let mut watcher = arko_index::watch2::Watcher2::open_with(
                 Path::new(&args[1]),
                 Path::new(&args[2]),
@@ -663,21 +988,30 @@ fn run() -> Result<(), Error> {
             // Each delta is streamed from the record store as one complete, flushed
             // line before it is acknowledged (the same bytes as `write_json`).
             let mut out = io::BufWriter::with_capacity(1 << 20, io::stdout().lock());
-            while running.load(Ordering::SeqCst) {
-                if let Some(seq) = watcher.next_change_to(Duration::from_millis(250), &mut out)? {
-                    out.flush()?;
-                    watcher.ack(seq)?;
-                    eprintln!(
-                        "{}",
-                        serde_json::json!({"seq": seq, "stats": watcher.stats})
-                    );
+            let root = Path::new(&args[1]);
+            keep_index(root, &flags, &options, &stop, |keeper| {
+                while !stop.load(Ordering::SeqCst) {
+                    if let Some(seq) =
+                        watcher.next_change_to(Duration::from_millis(250), &mut out)?
+                    {
+                        out.flush()?;
+                        watcher.ack(seq)?;
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({"seq": seq, "stats": watcher.stats})
+                        );
+                        keeper.changed();
+                    } else {
+                        keeper.quiet();
+                    }
+                    // Skipped entries changed: one summary line (the list is in report.json).
+                    if watcher.report().counts != shown.counts {
+                        shown = watcher.report().clone();
+                        eprintln!("arko_index: {}", shown.summary());
+                    }
                 }
-                // Skipped entries changed: one summary line (the list is in report.json).
-                if watcher.report().counts != shown.counts {
-                    shown = watcher.report().clone();
-                    eprintln!("arko_index: {}", shown.summary());
-                }
-            }
+                Ok(())
+            })?;
         }
         #[cfg(unix)]
         Some("bench-scan") if args.len() == 2 => {
@@ -689,7 +1023,7 @@ fn run() -> Result<(), Error> {
             }
         }
         Some("watch") if args.len() == 3 => {
-            let running = stop_on_signal()?;
+            let stop = stop_on_signal()?;
             let root = Path::new(&args[1]);
             let state = Path::new(&args[2]);
             let mut watcher = open_watch_with(root, state, &options, &walk.rules)?;
@@ -698,19 +1032,26 @@ fn run() -> Result<(), Error> {
             }
             report(walk, watcher.report())?;
             let mut shown = watcher.report().clone();
-            while running.load(Ordering::SeqCst) {
-                if let Some(d) = watcher.next_change(Duration::from_millis(250))? {
-                    write_json(&d)?;
-                    // The CLI acknowledges after a complete, flushed line. Library consumers can
-                    // instead ack after processing and deduplicate by durable sequence.
-                    watcher.ack(d.sequence)?;
+            keep_index(root, &flags, &options, &stop, |keeper| {
+                while !stop.load(Ordering::SeqCst) {
+                    if let Some(d) = watcher.next_change(Duration::from_millis(250))? {
+                        write_json(&d)?;
+                        // The CLI acknowledges after a complete, flushed line. Library
+                        // consumers can instead ack after processing and deduplicate by
+                        // durable sequence.
+                        watcher.ack(d.sequence)?;
+                        keeper.changed();
+                    } else {
+                        keeper.quiet();
+                    }
+                    // Skipped entries changed: one summary line (the list is in report.json).
+                    if watcher.report().counts != shown.counts {
+                        shown = watcher.report().clone();
+                        eprintln!("arko_index: {}", shown.summary());
+                    }
                 }
-                // Skipped entries changed: one summary line (the list is in report.json).
-                if watcher.report().counts != shown.counts {
-                    shown = watcher.report().clone();
-                    eprintln!("arko_index: {}", shown.summary());
-                }
-            }
+                Ok(())
+            })?;
             watcher.flush()?;
         }
         #[cfg(not(target_os = "linux"))]
