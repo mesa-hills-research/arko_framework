@@ -8,7 +8,7 @@ use arko_index::{
     bench_v1::{Chunk, Error, Options, chunk_dir},
     dense::{
         DenseBuild, EmbedLimits, EmbedState, Embedder, Embedding, HashEmbedder, InputKind,
-        ModelDescriptor, embed_query, render,
+        ModelDescriptor, StopSignal, embed_query, render,
     },
     hybrid::{self, Mode, SearchRequest, SearchResults},
     index2::{self, BuildOptions, BuildStats},
@@ -20,7 +20,7 @@ use std::{
     path::Path,
     sync::{
         Condvar, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -585,20 +585,24 @@ fn a_stopped_run_continues_and_a_lexical_build_waits_for_a_run_to_yield() {
     build_lexical_first(root.path(), state.path(), &e);
 
     // A stop request ends the run after its current request.
-    let stop = AtomicBool::new(false);
+    let stop = StopSignal::new();
     std::thread::scope(|scope| {
         let run =
             scope.spawn(|| index2::embed(state.path(), &DenseBuild::new(&e).with_stop(&stop)));
         e.wait_for_request(1);
-        stop.store(true, Ordering::SeqCst);
+        assert!(stop.stop("asked to stop"));
+        assert!(!stop.stop("asked again"));
         e.allow(1);
         let s = run.join().unwrap().unwrap();
         assert!(s.stopped && !s.superseded);
         assert_eq!(s.requests, 1);
     });
-    let info = index2::dense_info(state.path()).unwrap().unwrap();
+    let status = index2::status(state.path()).unwrap();
+    let info = status.dense.unwrap();
     assert_eq!(info.state, EmbedState::Embedding);
     assert!(info.embedded > 0 && info.embedded < info.docs);
+    assert_eq!(status.stopped.as_deref(), Some("asked to stop"));
+    assert!(!status.embedding);
 
     // A lexical build during a run publishes at once and removes the vectors once the
     // run, superseded, has stopped writing them.

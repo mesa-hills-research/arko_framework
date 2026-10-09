@@ -83,20 +83,21 @@ pub(crate) enum Flow {
 /// A request's records: each text's hash and its vector.
 pub(crate) type Records = [([u8; 32], Vec<f32>)];
 
-/// Embeds the spooled texts that `wanted` accepts and the cache lacks into the cache,
+/// Embeds the texts of `spool` that `wanted` accepts and the cache lacks into the cache,
 /// calling `after` with each request's records (already in the cache) and the run's
 /// totals so far. `after` returning [`Flow::Stop`] ends the run after that request.
-/// At the cap, the texts left are counted (no request is sent).
+/// At the cap, the texts left are counted (no request is sent), unless `stopped`.
 pub(crate) fn embed_spool(
-    path: &Path,
+    spool: File,
     wanted: &dyn Fn(&[u8; 32]) -> bool,
+    stopped: &dyn Fn() -> bool,
     cache: &mut Cache,
     embedder: &dyn Embedder,
     cap: Option<u64>,
     after: &mut dyn FnMut(&Records, &RunTotals) -> Result<Flow, Error>,
 ) -> Result<RunTotals, Error> {
     let limits = embedder.limits();
-    let mut reader = SpoolReader(BufReader::with_capacity(1 << 20, File::open(path)?));
+    let mut reader = SpoolReader(BufReader::with_capacity(1 << 20, spool));
     // (hash, text, counted tokens), in spool order.
     let mut queue: VecDeque<([u8; 32], String, u64)> = VecDeque::new();
     let mut exhausted = false;
@@ -214,7 +215,7 @@ pub(crate) fn embed_spool(
             totals.not_embedded_tokens += n;
         }
         let mut more = true;
-        while more {
+        while more && !stopped() {
             let mut rest = Vec::new();
             while more && rest.len() < limits.max_items {
                 match reader.next()? {

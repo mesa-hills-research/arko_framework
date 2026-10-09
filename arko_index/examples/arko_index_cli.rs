@@ -10,7 +10,9 @@ mod support;
 
 use arko_index::{
     bench_v1::*,
-    dense::{DenseBuild, DenseConfig, EmbedProgress, EmbedState, EmbedStats, EmbedText},
+    dense::{
+        DenseBuild, DenseConfig, EmbedProgress, EmbedState, EmbedStats, EmbedText, StopSignal,
+    },
     hybrid::{Fusion, Mode, SearchRequest},
     index2::IndexStatus,
     search,
@@ -19,10 +21,7 @@ use arko_index::{
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     time::Duration,
 };
 fn write_json<T: serde::Serialize>(value: &T) -> Result<(), Error> {
@@ -262,14 +261,14 @@ fn write_report_file(walk: &Walk, report: &Report) -> Result<(), Error> {
     }
     Ok(())
 }
-/// SIGINT and SIGTERM: the first sets the returned flag (a watcher stops after its
+/// SIGINT and SIGTERM: the first stops the returned signal (a watcher stops after its
 /// current batch, an embedding run after its current request), a second exits at once
 /// (status 130).
-fn stop_on_signal() -> Result<Arc<AtomicBool>, Error> {
-    let stop = Arc::new(AtomicBool::new(false));
-    let flag = stop.clone();
+fn stop_on_signal() -> Result<Arc<StopSignal>, Error> {
+    let stop = Arc::new(StopSignal::new());
+    let signal = stop.clone();
     ctrlc::set_handler(move || {
-        if flag.swap(true, Ordering::SeqCst) {
+        if !signal.stop("it was stopped by a signal") {
             eprintln!("arko_index: stopped by a second signal");
             std::process::exit(130);
         }
@@ -703,7 +702,7 @@ fn keep_index(
     root: &Path,
     flags: &Flags,
     options: &Options,
-    stop: &AtomicBool,
+    stop: &StopSignal,
     watch: impl FnOnce(&mut Keeper<'_>) -> Result<(), Error>,
 ) -> Result<(), Error> {
     let index = flags.index.as_deref();
@@ -729,7 +728,7 @@ fn keep_index(
             scope.spawn(move || {
                 while woken.recv().is_ok() {
                     while woken.try_recv().is_ok() {}
-                    while !stop.load(Ordering::SeqCst) {
+                    while !stop.is_stopped() {
                         match embed_for_watcher(index, stop) {
                             // A newer generation: embed it too.
                             Ok(true) => {}
@@ -752,7 +751,7 @@ fn keep_index(
 
 /// One embedding run of `--index`, with progress lines on stderr. Whether a newer
 /// generation superseded it.
-fn embed_for_watcher(index: &Path, stop: &AtomicBool) -> Result<bool, Error> {
+fn embed_for_watcher(index: &Path, stop: &StopSignal) -> Result<bool, Error> {
     let Some(info) = arko_index::index2::dense_info(index)? else {
         return Ok(false);
     };
@@ -990,7 +989,7 @@ fn run() -> Result<(), Error> {
             let mut out = io::BufWriter::with_capacity(1 << 20, io::stdout().lock());
             let root = Path::new(&args[1]);
             keep_index(root, &flags, &options, &stop, |keeper| {
-                while !stop.load(Ordering::SeqCst) {
+                while !stop.is_stopped() {
                     if let Some(seq) =
                         watcher.next_change_to(Duration::from_millis(250), &mut out)?
                     {
@@ -1033,7 +1032,7 @@ fn run() -> Result<(), Error> {
             report(walk, watcher.report())?;
             let mut shown = watcher.report().clone();
             keep_index(root, &flags, &options, &stop, |keeper| {
-                while !stop.load(Ordering::SeqCst) {
+                while !stop.is_stopped() {
                     if let Some(d) = watcher.next_change(Duration::from_millis(250))? {
                         write_json(&d)?;
                         // The CLI acknowledges after a complete, flushed line. Library

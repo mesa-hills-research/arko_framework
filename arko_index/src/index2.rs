@@ -39,7 +39,7 @@ use crate::{
     bench_v1::{Chunk, Error, Options},
     dense::{
         DenseBuild, DenseConfig, DenseIndexInfo, EmbedProgress, EmbedState, EmbedStats, EmbedText,
-        RENDER_VERSION,
+        RENDER_VERSION, StopSignal,
         cache::{Cache, cached_hashes},
         render_with,
         run::{self, Flow},
@@ -917,13 +917,16 @@ fn current_generation(state_dir: &Path) -> Result<String, Error> {
         .to_owned())
 }
 
-/// `embed-progress.json`: the latest run's generation, its state and figures.
+/// `embed-progress.json`: the latest run's generation, its state and figures, and why
+/// it was stopped, when its stop signal ended it.
 #[derive(Serialize, Deserialize)]
 struct RunRecord {
     version: u32,
     generation: String,
     state: EmbedState,
     progress: EmbedProgress,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stopped: Option<String>,
 }
 
 fn read_progress(state_dir: &Path) -> Option<RunRecord> {
@@ -938,12 +941,14 @@ fn write_progress(
     generation: &str,
     state: EmbedState,
     progress: &EmbedProgress,
+    stopped: Option<String>,
 ) -> Result<(), Error> {
     let record = RunRecord {
         version: 1,
         generation: generation.to_owned(),
         state,
         progress: progress.clone(),
+        stopped,
     };
     atomic_write(state_dir, PROGRESS, &serde_json::to_vec(&record)?)
 }
@@ -1100,10 +1105,15 @@ fn embed_run(
     } else {
         EmbedState::Embedding
     };
-    write_progress(state_dir, &name, working, &progress)?;
+    write_progress(state_dir, &name, working, &progress, None)?;
     let (mut was_superseded, mut stopped) = (false, false);
+    let stop_requested = || d.stop.is_some_and(|s| s.is_stopped());
     let mut vector = Vec::new();
     for part in refill.chunks(REFILL_COMMIT) {
+        if stop_requested() {
+            stopped = true;
+            break;
+        }
         if superseded() {
             was_superseded = true;
             break;
@@ -1127,27 +1137,30 @@ fn embed_run(
         embedded += part.len() as u64;
         stats.vectors_added += part.len() as u64;
         progress.embedded_docs = embedded;
-        write_progress(state_dir, &name, working, &progress)?;
+        write_progress(state_dir, &name, working, &progress, None)?;
     }
 
     // The texts no cache holds, embedded request by request from the spool.
     let mut totals = run::RunTotals::default();
-    let stop_requested = || {
-        d.stop
-            .is_some_and(|s| s.load(std::sync::atomic::Ordering::SeqCst))
-    };
-    if !by_hash.is_empty() && !was_superseded {
+    if !by_hash.is_empty() && !was_superseded && !stopped {
+        let spool = match File::open(dir.join(SPOOL)) {
+            Ok(spool) => Some(spool),
+            // Gone with the generation: superseded. Gone otherwise: its texts are
+            // counted as left below.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
         if stop_requested() {
             stopped = true;
         } else if superseded() {
             was_superseded = true;
-        } else {
+        } else if let Some(spool) = spool {
             let wanted: HashSet<[u8; 32]> = by_hash.keys().copied().collect();
-            let spool = dir.join(SPOOL);
-            if spool.exists() {
+            {
                 totals = run::embed_spool(
-                    &spool,
+                    spool,
                     &|h| wanted.contains(h),
+                    &stop_requested,
                     &mut cache,
                     d.embedder,
                     d.max_tokens,
@@ -1172,7 +1185,7 @@ fn embed_run(
                         progress.tokens = totals.tokens;
                         progress.requests = totals.requests;
                         progress.embedded_docs = embedded;
-                        write_progress(state_dir, &name, EmbedState::Embedding, &progress)?;
+                        write_progress(state_dir, &name, EmbedState::Embedding, &progress, None)?;
                         if let Some(callback) = d.progress {
                             callback(&progress);
                         }
@@ -1215,7 +1228,12 @@ fn embed_run(
     }
     drop(store);
     stats.embedded_docs = embedded;
-    write_progress(state_dir, &name, state, &progress)?;
+    let reason = stopped.then(|| {
+        d.stop
+            .and_then(StopSignal::reason)
+            .unwrap_or_else(|| "stopped".into())
+    });
+    write_progress(state_dir, &name, state, &progress, reason)?;
     if state == EmbedState::Complete && !superseded() {
         let _ = std::fs::remove_file(dir.join(SPOOL));
     }
@@ -1802,19 +1820,23 @@ pub struct IndexStatus {
     /// The figures of the latest embedding run on this generation (texts embedded and
     /// to embed, tokens billed, requests), when one has run.
     pub progress: Option<EmbedProgress>,
+    /// Why the latest run on this generation was stopped before it finished, when its
+    /// stop signal ended it (the reason given to [`StopSignal::stop`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<String>,
 }
 
 /// The current generation, its embedding coverage, and whether a run is embedding it.
 pub fn status(state_dir: &Path) -> Result<IndexStatus, Error> {
     read_current(state_dir, |g| {
+        let run = read_progress(state_dir).filter(|r| r.generation == g.name);
         Ok(IndexStatus {
             generation: g.name.clone(),
             docs: g.meta.docs,
             dense: g.dense_info()?,
             embedding: embedding_active(state_dir),
-            progress: read_progress(state_dir)
-                .filter(|r| r.generation == g.name)
-                .map(|r| r.progress),
+            stopped: run.as_ref().and_then(|r| r.stopped.clone()),
+            progress: run.map(|r| r.progress),
         })
     })
 }

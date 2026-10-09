@@ -22,7 +22,13 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{path::Path, sync::atomic::AtomicBool};
+use std::{
+    path::Path,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 /// The version of [`render`]'s output. Embeddings are cached by the hash of the
 /// rendered text, so a new version re-embeds every chunk.
@@ -425,9 +431,9 @@ pub struct DenseBuild<'a> {
     /// published, leaving the embedding to [`index2::embed`](crate::index2::embed).
     /// `false` (the default): the build embeds after publishing, before it returns.
     pub embed_later: bool,
-    /// When set, the run stops after its current request. The vectors paid for are
-    /// kept, and a later run continues.
-    pub stop: Option<&'a AtomicBool>,
+    /// When it is stopped, the run stops after its current request and records the
+    /// reason. The vectors paid for are kept, and a later run continues.
+    pub stop: Option<&'a StopSignal>,
 }
 impl<'a> DenseBuild<'a> {
     pub fn new(embedder: &'a dyn Embedder) -> Self {
@@ -477,9 +483,44 @@ impl<'a> DenseBuild<'a> {
         self.embed_later = embed_later;
         self
     }
-    pub fn with_stop(mut self, stop: &'a AtomicBool) -> Self {
+    pub fn with_stop(mut self, stop: &'a StopSignal) -> Self {
         self.stop = Some(stop);
         self
+    }
+}
+
+/// Asks an embedding run to stop after its current request ([`DenseBuild::stop`]), with
+/// a reason the run records for [`index2::status`](crate::index2::status). Shared
+/// between threads: a signal handler, or a thread watching the program that started
+/// the run.
+#[derive(Debug, Default)]
+pub struct StopSignal {
+    stopped: AtomicBool,
+    reason: Mutex<Option<String>>,
+}
+impl StopSignal {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Asks for the stop. Returns `false` when it was already asked for, whose reason is
+    /// kept.
+    pub fn stop(&self, reason: impl Into<String>) -> bool {
+        let mut kept = self.reason.lock().unwrap_or_else(|e| e.into_inner());
+        if self.stopped.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        *kept = Some(reason.into());
+        true
+    }
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+    /// Why the stop was asked for.
+    pub fn reason(&self) -> Option<String> {
+        self.reason
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -547,7 +588,7 @@ pub struct EmbedStats {
     /// The run stopped because a newer generation was published: the run for that
     /// generation takes over, with what this one embedded in the cache.
     pub superseded: bool,
-    /// The run stopped when [`DenseBuild::stop`] was set. A later run continues.
+    /// The run stopped when [`DenseBuild::stop`] was stopped. A later run continues.
     pub stopped: bool,
 }
 impl EmbedStats {
