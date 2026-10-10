@@ -1,0 +1,87 @@
+schema {
+  query: Query
+  mutation: Mutation
+  subscription: Subscription
+}
+
+"""
+An ISO 8601 date and time.
+"""
+scalar DateTime
+
+directive @auth(requires: Role = ADMIN) on OBJECT | FIELD_DEFINITION
+
+enum Role {
+  ADMIN
+  CUSTOMER
+}
+
+interface Node {
+  id: ID!
+}
+
+"A customer's order."
+type Order implements Node @auth(requires: CUSTOMER) {
+  id: ID!
+  placedAt: DateTime!
+  lines(first: Int = 20, after: String): [OrderLine!]!
+  total: Float!
+}
+
+type OrderLine {
+  sku: String!
+  quantity: Int!
+}
+
+union SearchResult = Order | OrderLine
+
+input NewOrderLine {
+  sku: String!
+  quantity: Int = 1
+}
+
+type Query {
+  order(id: ID!): Order
+  search(text: String!): [SearchResult!]!
+}
+
+type Mutation {
+  placeOrder(lines: [NewOrderLine!]!): Order
+}
+
+type Subscription {
+  orderPlaced: Order
+}
+
+extend type Order {
+  notes: String
+}
+
+# The fields every order view shows.
+fragment OrderFields on Order {
+  id
+  placedAt
+  total
+}
+
+query GetOrder($id: ID!) {
+  order(id: $id) {
+    ...OrderFields
+    lines {
+      sku
+      quantity
+    }
+  }
+}
+
+mutation PlaceOrder($lines: [NewOrderLine!]!) {
+  placeOrder(lines: $lines) {
+    ...OrderFields
+  }
+}
+
+subscription OnOrderPlaced {
+  orderPlaced {
+    id
+  }
+}

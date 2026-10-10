@@ -15,12 +15,14 @@ const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data");
 
 /// One sample per grammar (and per file name rule), with the `language` its chunks get.
 const SAMPLES: &[(&str, &str)] = &[
+    ("sample.astro", "astro"),
     ("sample.sh", "bash"),
     ("sample.cs", "c_sharp"),
     ("CMakeLists.txt", "cmake"),
     ("sample.css", "css"),
     ("sample.cu", "cuda"),
     ("sample.dart", "dart"),
+    ("sample.diff", "diff"),
     ("sample.dtd", "dtd"),
     ("sample.ex", "elixir"),
     ("sample.elm", "elm"),
@@ -29,6 +31,7 @@ const SAMPLES: &[(&str, &str)] = &[
     ("sample.f90", "fortran"),
     ("sample.fs", "fsharp"),
     ("sample.frag", "glsl"),
+    ("sample.graphql", "graphql"),
     ("sample.hs", "haskell"),
     ("sample.tf", "hcl"),
     ("sample.html", "html"),
@@ -482,6 +485,16 @@ fn rules_give_each_sample_its_structure() {
             "namespace kernels › function add",
         ),
         ("sample.dart", "enum Shape", "enum Shape"),
+        (
+            "sample.diff",
+            "self.totals.clear()",
+            "diff --git a/src/orders.rs b/src/orders.rs",
+        ),
+        (
+            "sample.diff",
+            "Binary files",
+            "diff --git a/assets/logo.png b/assets/logo.png",
+        ),
         ("sample.dart", "sx += p.x", "extension PointList"),
         ("sample.ex", "Enum.sum()", "defmodule Shop.Cart › def total"),
         ("sample.ex", "@spec add", "defmodule Shop.Cart › def add"),
@@ -498,6 +511,20 @@ fn rules_give_each_sample_its_structure() {
             "namespace Shop › type Pricing",
         ),
         ("sample.frag", "reflect(-l, n)", "function specular"),
+        ("sample.graphql", "subscription: Subscription", "schema"),
+        ("sample.graphql", "FIELD_DEFINITION", "directive @auth"),
+        ("sample.graphql", "A customer's order", "type Order"),
+        ("sample.graphql", "ADMIN\n", "enum Role"),
+        ("sample.graphql", "Order | OrderLine", "union SearchResult"),
+        ("sample.graphql", "quantity: Int = 1", "input NewOrderLine"),
+        ("sample.graphql", "notes: String", "extend type Order"),
+        ("sample.graphql", "every order view", "fragment OrderFields"),
+        ("sample.graphql", "order(id: $id)", "query GetOrder"),
+        (
+            "sample.graphql",
+            "placeOrder(lines: $lines)",
+            "mutation PlaceOrder",
+        ),
         ("sample.hs", "step (a : s) Dup", "step"),
         ("sample.hs", "pretty Mul", "instance Pretty Instr"),
         ("sample.tf", "required_providers", "terraform"),
@@ -556,10 +583,24 @@ fn rules_give_each_sample_its_structure() {
         "sample.toml",
         "sample.xml",
         "sample.html",
+        "sample.astro",
     ] {
         let text = read(sample);
         assert_eq!(verify(sample, &text, 4096).chunks.len(), 1, "{sample}");
     }
+    // A diff is one chunk per file section, and a GraphQL document one per definition.
+    assert_eq!(
+        verify("sample.diff", &read("sample.diff"), 4096)
+            .chunks
+            .len(),
+        3
+    );
+    assert_eq!(
+        verify("sample.graphql", &read("sample.graphql"), 4096)
+            .chunks
+            .len(),
+        17
+    );
 }
 
 /// Small bounds split prose, markup and data along their structure, with scopes.
@@ -605,6 +646,21 @@ fn small_bounds_follow_the_structure() {
             "Points are",
             "Geometry guide › # Geometry › ## Usage",
         ),
+        ("sample.astro", 300, "Astro.props", "---"),
+        (
+            "sample.astro",
+            300,
+            "toFixed",
+            "<Layout title={title}> › <section id=\"orders\">",
+        ),
+        (
+            "sample.diff",
+            400,
+            "unwrap_or(0.0)",
+            "diff --git a/src/orders.rs b/src/orders.rs › @@ -18,9 +19,14 @@ impl Orders",
+        ),
+        ("sample.graphql", 100, "total: Float!", "type Order"),
+        ("sample.graphql", 100, "quantity\n    }", "query GetOrder"),
     ];
     for (sample, max, needle, scope) in cases {
         let text = read(sample);
@@ -616,6 +672,22 @@ fn small_bounds_follow_the_structure() {
             "{sample}: {needle:?}"
         );
     }
+    // A hunk's header lines start its first chunk.
+    let text = read("sample.diff");
+    let file = verify("sample.diff", &text, 400);
+    assert!(
+        file.chunks[0].end_byte > text.find("+use std::fmt").unwrap(),
+        "{:?}",
+        file.chunks[0]
+    );
+    // A unified diff without `diff` lines, and the `{ ... }` query shorthand, pack.
+    let text = "--- a/x.txt\n+++ b/x.txt\n@@ -1,2 +1,2 @@\n-one\n+two\n three\n";
+    let file = verify("plain.patch", text, 4096);
+    assert_eq!(file.chunks.len(), 1);
+    assert_eq!(file.chunks[0].language, "diff");
+    let text = "{ me { id } }\n\n{ shop { name } }\n";
+    let file = verify("shorthand.gql", text, 4096);
+    assert_eq!((file.chunks.len(), file.chunks[0].scope.as_str()), (1, ""));
     // A code fence that fits stays whole.
     let text = read("sample.md");
     let file = verify("sample.md", &text, 256);

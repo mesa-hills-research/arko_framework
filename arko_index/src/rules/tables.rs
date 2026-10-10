@@ -12,11 +12,13 @@ pub(crate) fn table(parser: &str) -> &'static Table {
         }
         "cuda" => &CUDA,
         "glsl" => &GLSL,
+        "astro" => &ASTRO,
         "bash" => &BASH,
         "c_sharp" => &C_SHARP,
         "cmake" => &CMAKE,
         "css" => &CSS,
         "dart" => &DART,
+        "diff" => &DIFF,
         "dtd" => &DTD,
         "elixir" => &ELIXIR,
         "elm" => &ELM,
@@ -24,6 +26,7 @@ pub(crate) fn table(parser: &str) -> &'static Table {
         "erlang" => &ERLANG,
         "fortran" => &FORTRAN,
         "fsharp" => &FSHARP,
+        "graphql" => &GRAPHQL,
         "haskell" => &HASKELL,
         "hcl" => &HCL,
         "html" => &HTML,
@@ -493,6 +496,24 @@ const GLSL: Table = Table {
     ..CLASSIC
 };
 
+/// Astro components: the `---` frontmatter script, then markup like Svelte's.
+const ASTRO: Table = Table {
+    key: "astro",
+    name_fields: &[],
+    atomic: &["frontmatter", "script_element", "style_element"],
+    attach_back: &["end_tag"],
+    // The frontmatter's label is its opening `---`.
+    bodies: &[("frontmatter", "#frontmatter_js_block")],
+    labels: &[
+        ("frontmatter", Label::Header),
+        ("element", Label::Path("#start_tag")),
+        ("script_element", Label::Path("#start_tag")),
+        ("style_element", Label::Path("#start_tag")),
+    ],
+    split_small: false,
+    ..D
+};
+
 const BASH: Table = Table {
     key: "bash",
     breadcrumbs: &[
@@ -732,6 +753,18 @@ const DART: Table = Table {
     ..D
 };
 
+/// A diff splits into its file sections (`diff --git a/x b/x` and what follows), and a
+/// section larger than the bound into its hunks, each with its `@@` line.
+const DIFF: Table = Table {
+    key: "diff",
+    name_fields: &[],
+    definitions: &["block", "hunk"],
+    bodies: &[("block", "#hunks"), ("hunk", "changes")],
+    names: &[("block", "#command/#filename")],
+    labels: &[("block", Label::Line), ("hunk", Label::Line)],
+    ..D
+};
+
 const DTD: Table = Table {
     key: "dtd",
     content: Content::Data,
@@ -930,6 +963,95 @@ const FSHARP: Table = Table {
         ("exception_definition", Label::Keyword("exception")),
     ],
     families: &["function_or_value_defn", "member_defn"],
+    ..D
+};
+
+const GRAPHQL_OPERATIONS: &[&str] = &["query", "mutation", "subscription"];
+/// GraphQL: schema and type definitions, their extensions, directives, fragments and
+/// named operations.
+const GRAPHQL: Table = Table {
+    key: "graphql",
+    definitions: &[
+        "schema_definition",
+        "schema_extension",
+        "scalar_type_definition",
+        "object_type_definition",
+        "interface_type_definition",
+        "union_type_definition",
+        "enum_type_definition",
+        "input_object_type_definition",
+        "scalar_type_extension",
+        "object_type_extension",
+        "interface_type_extension",
+        "union_type_extension",
+        "enum_type_extension",
+        "input_object_type_extension",
+        "directive_definition",
+        "fragment_definition",
+    ],
+    // An operation is a definition when it starts with its type (`query GetOrder`),
+    // and the `{ ... }` shorthand packs with its neighbours.
+    keyed: &[Keyed {
+        kind: "operation_definition",
+        key: "#operation_type",
+        values: GRAPHQL_OPERATIONS,
+        role: Role::Definition,
+        key_label: true,
+    }],
+    bodies: &[
+        ("object_type_definition", "#fields_definition"),
+        ("interface_type_definition", "#fields_definition"),
+        ("object_type_extension", "#fields_definition"),
+        ("interface_type_extension", "#fields_definition"),
+        ("input_object_type_definition", "#input_fields_definition"),
+        ("input_object_type_extension", "#input_fields_definition"),
+        ("enum_type_definition", "#enum_values_definition"),
+        ("enum_type_extension", "#enum_values_definition"),
+        ("operation_definition", "#selection_set"),
+        ("fragment_definition", "#selection_set"),
+    ],
+    name_fields: &[],
+    names: &[
+        ("scalar_type_definition", "#name"),
+        ("object_type_definition", "#name"),
+        ("interface_type_definition", "#name"),
+        ("union_type_definition", "#name"),
+        ("enum_type_definition", "#name"),
+        ("input_object_type_definition", "#name"),
+        ("scalar_type_extension", "#name"),
+        ("object_type_extension", "#name"),
+        ("interface_type_extension", "#name"),
+        ("union_type_extension", "#name"),
+        ("enum_type_extension", "#name"),
+        ("input_object_type_extension", "#name"),
+        ("directive_definition", "#name"),
+        ("fragment_definition", "#fragment_name"),
+        ("operation_definition", "#name"),
+    ],
+    labels: &[
+        ("schema_definition", Label::Prefix("schema")),
+        ("schema_extension", Label::Prefix("extend schema")),
+        ("scalar_type_definition", Label::Keyword("scalar")),
+        ("object_type_definition", Label::Keyword("type")),
+        ("interface_type_definition", Label::Keyword("interface")),
+        ("union_type_definition", Label::Keyword("union")),
+        ("enum_type_definition", Label::Keyword("enum")),
+        ("input_object_type_definition", Label::Keyword("input")),
+        ("scalar_type_extension", Label::Keyword("extend scalar")),
+        ("object_type_extension", Label::Keyword("extend type")),
+        (
+            "interface_type_extension",
+            Label::Keyword("extend interface"),
+        ),
+        ("union_type_extension", Label::Keyword("extend union")),
+        ("enum_type_extension", Label::Keyword("extend enum")),
+        (
+            "input_object_type_extension",
+            Label::Keyword("extend input"),
+        ),
+        ("directive_definition", Label::Prefix("directive @")),
+        ("fragment_definition", Label::Keyword("fragment")),
+    ],
     ..D
 };
 

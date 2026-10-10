@@ -188,6 +188,7 @@ dependencies = [
  "libc",
  "libm",
  "mesquite",
+ "mesquite_astro",
  "mesquite_bash",
  "mesquite_c",
  "mesquite_c_sharp",
@@ -196,6 +197,7 @@ dependencies = [
  "mesquite_css",
  "mesquite_cuda",
  "mesquite_dart",
+ "mesquite_diff",
  "mesquite_elixir",
  "mesquite_elm",
  "mesquite_embedded_template",
@@ -204,6 +206,7 @@ dependencies = [
  "mesquite_fsharp",
  "mesquite_glsl",
  "mesquite_go",
+ "mesquite_graphql",
  "mesquite_haskell",
  "mesquite_hcl",
  "mesquite_html",
@@ -1824,7 +1827,7 @@ dependencies = [
 [[package]]
 name = "mesquite"
 version = "0.25.10"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
  "regex",
@@ -1832,9 +1835,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mesquite_astro"
+version = "0.1.0"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
+dependencies = [
+ "mesquite_language",
+]
+
+[[package]]
 name = "mesquite_bash"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1842,7 +1853,7 @@ dependencies = [
 [[package]]
 name = "mesquite_c"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1850,7 +1861,7 @@ dependencies = [
 [[package]]
 name = "mesquite_c_sharp"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1858,7 +1869,7 @@ dependencies = [
 [[package]]
 name = "mesquite_cmake"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1866,7 +1877,7 @@ dependencies = [
 [[package]]
 name = "mesquite_cpp"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1874,7 +1885,7 @@ dependencies = [
 [[package]]
 name = "mesquite_css"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1882,7 +1893,7 @@ dependencies = [
 [[package]]
 name = "mesquite_cuda"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1890,7 +1901,15 @@ dependencies = [
 [[package]]
 name = "mesquite_dart"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
+dependencies = [
+ "mesquite_language",
+]
+
+[[package]]
+name = "mesquite_diff"
+version = "0.1.0"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1898,7 +1917,7 @@ dependencies = [
 [[package]]
 name = "mesquite_dtd"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1906,7 +1925,7 @@ dependencies = [
 [[package]]
 name = "mesquite_elixir"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1914,7 +1933,7 @@ dependencies = [
 [[package]]
 name = "mesquite_elm"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1922,7 +1941,7 @@ dependencies = [
 [[package]]
 name = "mesquite_embedded_template"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1930,7 +1949,7 @@ dependencies = [
 [[package]]
 name = "mesquite_erlang"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1938,7 +1957,7 @@ dependencies = [
 [[package]]
 name = "mesquite_fortran"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1946,7 +1965,7 @@ dependencies = [
 [[package]]
 name = "mesquite_fsharp"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1954,7 +1973,7 @@ dependencies = [
 [[package]]
 name = "mesquite_glsl"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1962,7 +1981,15 @@ dependencies = [
 [[package]]
 name = "mesquite_go"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
+dependencies = [
+ "mesquite_language",
+]
+
+[[package]]
+name = "mesquite_graphql"
+version = "0.1.0"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1970,7 +1997,7 @@ dependencies = [
 [[package]]
 name = "mesquite_haskell"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1978,7 +2005,7 @@ dependencies = [
 [[package]]
 name = "mesquite_hcl"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1986,7 +2013,7 @@ dependencies = [
 [[package]]
 name = "mesquite_html"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -1994,7 +2021,7 @@ dependencies = [
 [[package]]
 name = "mesquite_java"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2002,7 +2029,7 @@ dependencies = [
 [[package]]
 name = "mesquite_javascript"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2010,7 +2037,7 @@ dependencies = [
 [[package]]
 name = "mesquite_json"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2018,7 +2045,7 @@ dependencies = [
 [[package]]
 name = "mesquite_julia"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2026,7 +2053,7 @@ dependencies = [
 [[package]]
 name = "mesquite_kotlin"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2034,12 +2061,12 @@ dependencies = [
 [[package]]
 name = "mesquite_language"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 
 [[package]]
 name = "mesquite_lua"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2047,7 +2074,7 @@ dependencies = [
 [[package]]
 name = "mesquite_make"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2055,7 +2082,7 @@ dependencies = [
 [[package]]
 name = "mesquite_markdown"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
  "mesquite_markdown_inline",
@@ -2064,7 +2091,7 @@ dependencies = [
 [[package]]
 name = "mesquite_markdown_inline"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2072,7 +2099,7 @@ dependencies = [
 [[package]]
 name = "mesquite_objc"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2080,7 +2107,7 @@ dependencies = [
 [[package]]
 name = "mesquite_ocaml"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
  "mesquite_ocaml_interface",
@@ -2089,7 +2116,7 @@ dependencies = [
 [[package]]
 name = "mesquite_ocaml_interface"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2097,7 +2124,7 @@ dependencies = [
 [[package]]
 name = "mesquite_odin"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2105,7 +2132,7 @@ dependencies = [
 [[package]]
 name = "mesquite_perl"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2113,7 +2140,7 @@ dependencies = [
 [[package]]
 name = "mesquite_php"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
  "mesquite_php_only",
@@ -2122,7 +2149,7 @@ dependencies = [
 [[package]]
 name = "mesquite_php_only"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2130,7 +2157,7 @@ dependencies = [
 [[package]]
 name = "mesquite_powershell"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2138,7 +2165,7 @@ dependencies = [
 [[package]]
 name = "mesquite_proto"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2146,7 +2173,7 @@ dependencies = [
 [[package]]
 name = "mesquite_python"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2154,7 +2181,7 @@ dependencies = [
 [[package]]
 name = "mesquite_r"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2162,7 +2189,7 @@ dependencies = [
 [[package]]
 name = "mesquite_ruby"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2170,7 +2197,7 @@ dependencies = [
 [[package]]
 name = "mesquite_rust"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2178,7 +2205,7 @@ dependencies = [
 [[package]]
 name = "mesquite_scala"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2186,7 +2213,7 @@ dependencies = [
 [[package]]
 name = "mesquite_solidity"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2194,7 +2221,7 @@ dependencies = [
 [[package]]
 name = "mesquite_sql"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2202,7 +2229,7 @@ dependencies = [
 [[package]]
 name = "mesquite_svelte"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2210,7 +2237,7 @@ dependencies = [
 [[package]]
 name = "mesquite_swift"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2218,7 +2245,7 @@ dependencies = [
 [[package]]
 name = "mesquite_toml"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2226,7 +2253,7 @@ dependencies = [
 [[package]]
 name = "mesquite_tsx"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2234,7 +2261,7 @@ dependencies = [
 [[package]]
 name = "mesquite_typescript"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
  "mesquite_tsx",
@@ -2243,7 +2270,7 @@ dependencies = [
 [[package]]
 name = "mesquite_verilog"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2251,7 +2278,7 @@ dependencies = [
 [[package]]
 name = "mesquite_xml"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_dtd",
  "mesquite_language",
@@ -2260,7 +2287,7 @@ dependencies = [
 [[package]]
 name = "mesquite_yaml"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]
@@ -2268,7 +2295,7 @@ dependencies = [
 [[package]]
 name = "mesquite_zig"
 version = "0.1.0"
-source = "git+https://github.com/mesa-hills-research/mesquite?rev=a94f0d8e9f4ce22a32eef801970a296a9a7080f4#a94f0d8e9f4ce22a32eef801970a296a9a7080f4"
+source = "git+https://github.com/mesa-hills-research/mesquite?rev=fef5b10845abe8fb435b2c4192aec3920d3f1898#fef5b10845abe8fb435b2c4192aec3920d3f1898"
 dependencies = [
  "mesquite_language",
 ]

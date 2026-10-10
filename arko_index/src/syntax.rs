@@ -223,6 +223,10 @@ fn table_label(n: Node, text: &str, rules: &Rules) -> Option<String> {
     };
     let label = match label {
         Label::Keyword(keyword) => format!("{keyword} {}", clip(name(n, text, rules)?)),
+        Label::Prefix(prefix) => match name(n, text, rules) {
+            Some(name) => format!("{prefix}{}", clip(name)),
+            None => prefix.to_owned(),
+        },
         Label::Name => clip(unquote(name(n, text, rules)?)),
         Label::Header => {
             let end = rules

@@ -1,0 +1,40 @@
+---
+import Layout from "../layouts/Layout.astro";
+import OrderRow from "../components/OrderRow.astro";
+
+interface Props {
+  title: string;
+}
+
+const { title } = Astro.props;
+const response = await fetch("https://shop.example/api/orders");
+const orders: { id: string; total: number }[] = await response.json();
+const total = orders.reduce((sum, o) => sum + o.total, 0);
+---
+
+<Layout title={title}>
+  <!-- The order list. -->
+  <section id="orders">
+    <h1>{title}</h1>
+    {orders.length === 0 ? (
+      <p>No orders.</p>
+    ) : (
+      <ul>
+        {orders.map((order) => <OrderRow order={order} />)}
+      </ul>
+    )}
+    <p class="total">Total: {total.toFixed(2)}</p>
+  </section>
+  <button id="refresh">Refresh</button>
+</Layout>
+
+<script>
+  const button = document.querySelector("#refresh");
+  button?.addEventListener("click", () => location.reload());
+</script>
+
+<style>
+  .total {
+    font-weight: bold;
+  }
+</style>

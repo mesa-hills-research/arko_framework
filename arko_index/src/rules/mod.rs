@@ -24,6 +24,9 @@ pub(crate) use tables::table;
 pub(crate) enum Label {
     /// `keyword name` (`fn f`, `class C`); nothing when the node has no name.
     Keyword(&'static str),
+    /// The prefix and the name with nothing between (`directive @auth`), or the prefix
+    /// alone when the node has no name (GraphQL's `schema`).
+    Prefix(&'static str),
     /// The name alone (a JSON key, a Make target).
     Name,
     /// The node's text up to its body (or all of it), whitespace collapsed, without a

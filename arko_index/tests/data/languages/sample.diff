@@ -1,0 +1,41 @@
+diff --git a/src/orders.rs b/src/orders.rs
+index 3f2a1b7..9c4d2e8 100644
+--- a/src/orders.rs
++++ b/src/orders.rs
+@@ -1,6 +1,7 @@
+ use std::collections::HashMap;
++use std::fmt;
+ 
+ pub struct Orders {
+     totals: HashMap<String, f64>,
+ }
+ 
+@@ -18,9 +19,14 @@ impl Orders {
+     pub fn total(&self, sku: &str) -> f64 {
+-        self.totals.get(sku).copied().unwrap_or(0.0)
++        match self.totals.get(sku) {
++            Some(total) => *total,
++            None => 0.0,
++        }
+     }
+ 
+-    pub fn clear(&mut self) {
+-        self.totals = HashMap::new();
++    /// Forgets every total.
++    pub fn clear(&mut self) {
++        self.totals.clear();
+     }
+ }
+diff --git a/README.md b/README.md
+index 1a2b3c4..5d6e7f8 100644
+--- a/README.md
++++ b/README.md
+@@ -3,4 +3,4 @@
+ Order totals by SKU.
+ 
+-Run `cargo test` to check it.
++Run `cargo test --locked` to check it.
+diff --git a/assets/logo.png b/assets/logo.png
+new file mode 100644
+index 0000000..b1946ac
+Binary files /dev/null and b/assets/logo.png differ
