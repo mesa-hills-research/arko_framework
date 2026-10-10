@@ -17,7 +17,7 @@ mod local;
 
 use arko_index::dense::{
     Embedder, InputKind,
-    local::{CODE_RANK_EMBED, JINA_CODE_V2, LocalModel, Precision},
+    local::{CODE_RANK_EMBED, Device, JINA_CODE_V2, LocalModel, Precision},
 };
 use serde::Deserialize;
 use std::{
@@ -50,6 +50,22 @@ fn the_lazy_embedder_loads_on_first_use() {
     assert!(e.embed(&["x"], InputKind::Query).is_err());
     assert!(e.is_loaded());
     assert_eq!(loads.load(Ordering::SeqCst), 1);
+    // A placed one finds its device and limits without loading: int8 on Auto and
+    // anything on the CPU never look for a GPU.
+    for (precision, device) in [
+        (Precision::Int8, Device::Auto),
+        (Precision::F32, Device::Cpu),
+    ] {
+        let e = local::LazyEmbedder::on(&CODE_RANK_EMBED, precision, device).unwrap();
+        assert_eq!(e.descriptor(), CODE_RANK_EMBED.descriptor(precision));
+        assert_eq!(e.limits(), CODE_RANK_EMBED.limits());
+        assert!(!e.is_loaded());
+    }
+    let err = local::LazyEmbedder::on(&CODE_RANK_EMBED, Precision::F16, Device::Cpu)
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(err.contains("runs on a GPU"), "{err}");
 }
 
 /// The `arko_index_cli` example, which `cargo test` builds before the tests.

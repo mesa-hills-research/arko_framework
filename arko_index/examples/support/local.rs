@@ -4,7 +4,8 @@
 //!
 //! [`LazyEmbedder`] loads the model on its first use: a process that only records
 //! which model an index uses, such as `index2` before it hands the embedding to a
-//! background run, never reads the model's 548 MB.
+//! background run, never reads the model's 548 MB. On a GPU it finds the device when
+//! it is made, which reads no model either.
 //!
 //! The file depends only on arko_index and hf-hub, so a host of the code-search tool
 //! can take it unchanged, as with `voyage.rs`.
@@ -12,7 +13,7 @@ use arko_index::{
     bench_v1::Error,
     dense::{
         EmbedLimits, Embedder, Embedding, InputKind, ModelDescriptor,
-        local::{LocalEmbedder, LocalModel, Precision},
+        local::{Device, LocalEmbedder, LocalModel, Placement, Precision},
     },
 };
 use hf_hub::{Cache, Repo, RepoType, api::sync::ApiBuilder};
@@ -56,32 +57,68 @@ pub fn model_dir(model: &LocalModel) -> Result<PathBuf, Error> {
     dir.ok_or_else(|| format!("{} lists no files", model.repo).into())
 }
 
-/// `model` in `precision`, loaded from the cache (downloaded first if need be), with
-/// `ARKO_INDEX_THREADS` threads (default: every CPU this process may use).
+/// `model` in `precision` on the CPU, loaded from the cache (downloaded first if need
+/// be), with `ARKO_INDEX_THREADS` threads (default: every CPU this process may use).
 pub fn embedder(model: &'static LocalModel, precision: Precision) -> Result<LocalEmbedder, Error> {
     LocalEmbedder::load_with_precision(model, &model_dir(model)?, precision)
+}
+
+/// [`embedder`] on the device `placement` found, saying so when it is a GPU.
+pub fn embedder_placed(
+    model: &'static LocalModel,
+    precision: Precision,
+    placement: &Placement,
+) -> Result<LocalEmbedder, Error> {
+    let e = LocalEmbedder::load_placed(model, &model_dir(model)?, precision, placement)?;
+    if e.on_gpu() {
+        eprintln!(
+            "arko_index: {} in {precision} on {}",
+            model.repo,
+            e.device()
+        );
+    }
+    Ok(e)
 }
 
 /// How a [`LazyEmbedder`] loads its model.
 type Loader = Box<dyn Fn() -> Result<LocalEmbedder, Error> + Send + Sync>;
 
-/// A local model loaded on first use. Its descriptor and limits come from the catalog,
-/// so asking for them loads nothing. The first token count or embedding downloads the
-/// model if need be and loads it, and a failure is kept and returned from then on.
+/// A local model loaded on first use. Its descriptor and limits come from the catalog
+/// and the device, so asking for them loads nothing. The first token count or embedding
+/// downloads the model if need be and loads it, and a failure is kept and returned from
+/// then on.
 pub struct LazyEmbedder {
     model: &'static LocalModel,
     precision: Precision,
+    limits: EmbedLimits,
     load: Loader,
     loaded: OnceLock<Result<LocalEmbedder, String>>,
 }
 
 impl LazyEmbedder {
-    /// `model` in `precision`, loaded by [`embedder`] on first use.
+    /// `model` in `precision` on the CPU, loaded by [`embedder`] on first use.
     pub fn new(model: &'static LocalModel, precision: Precision) -> Self {
         Self::with_loader(model, precision, move || embedder(model, precision))
     }
 
-    /// `model` in `precision`, loaded by `load` on first use.
+    /// `model` in `precision` on `device`, loaded by [`embedder_placed`] on first use.
+    /// The device is found now ([`Placement::find`]), so a device this build or
+    /// machine lacks is an error here, and the limits are those of the device found.
+    pub fn on(
+        model: &'static LocalModel,
+        precision: Precision,
+        device: Device,
+    ) -> Result<Self, Error> {
+        let placement = Placement::find(device, precision)?;
+        let limits = placement.limits(model);
+        let mut lazy = Self::with_loader(model, precision, move || {
+            embedder_placed(model, precision, &placement)
+        });
+        lazy.limits = limits;
+        Ok(lazy)
+    }
+
+    /// `model` in `precision` on the CPU, loaded by `load` on first use.
     pub fn with_loader(
         model: &'static LocalModel,
         precision: Precision,
@@ -90,6 +127,7 @@ impl LazyEmbedder {
         Self {
             model,
             precision,
+            limits: model.limits(),
             load: Box::new(load),
             loaded: OnceLock::new(),
         }
@@ -114,7 +152,7 @@ impl Embedder for LazyEmbedder {
     }
 
     fn limits(&self) -> EmbedLimits {
-        self.model.limits()
+        self.limits
     }
 
     fn count_tokens(&self, texts: &[&str]) -> Result<Vec<u64>, Error> {

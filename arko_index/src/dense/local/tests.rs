@@ -6,12 +6,12 @@ use super::safetensors::tests::write as write_safetensors;
 use super::*;
 use std::collections::HashMap;
 
-type Weights = HashMap<String, Vec<f32>>;
+pub(crate) type Weights = HashMap<String, Vec<f32>>;
 /// A tensor to write: name, shape, values.
 type Tensor = (String, Vec<usize>, Vec<f32>);
 
-struct Tiny {
-    arch: Architecture,
+pub(crate) struct Tiny {
+    pub(crate) arch: Architecture,
     hidden: usize,
     heads: usize,
     layers: usize,
@@ -19,7 +19,7 @@ struct Tiny {
     vocab: usize,
 }
 
-const JINA: Tiny = Tiny {
+pub(crate) const JINA: Tiny = Tiny {
     arch: Architecture::JinaBert,
     hidden: 16,
     heads: 4,
@@ -27,7 +27,7 @@ const JINA: Tiny = Tiny {
     inter: 24,
     vocab: 64,
 };
-const NOMIC: Tiny = Tiny {
+pub(crate) const NOMIC: Tiny = Tiny {
     arch: Architecture::NomicBert,
     hidden: 16,
     heads: 2,
@@ -205,7 +205,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// Writes a tiny model's files and returns its (leaked) catalog entry and weights.
-fn tiny_model(
+pub(crate) fn tiny_model(
     t: &Tiny,
     dir: &Path,
     query_prefix: &'static str,
@@ -293,7 +293,7 @@ fn add(a: &[Vec<f32>], b: &[Vec<f32>]) -> Vec<Vec<f32>> {
         .collect()
 }
 
-fn reference(t: &Tiny, w: &Weights, ids: &[u32]) -> Vec<f32> {
+pub(crate) fn reference(t: &Tiny, w: &Weights, ids: &[u32]) -> Vec<f32> {
     let (h, i, nh) = (t.hidden, t.inter, t.heads);
     let dh = h / nh;
     let n = ids.len();
@@ -445,12 +445,12 @@ fn reference(t: &Tiny, w: &Weights, ids: &[u32]) -> Vec<f32> {
     v
 }
 
-fn close(a: &[f32], b: &[f32], tol: f32) -> bool {
+pub(crate) fn close(a: &[f32], b: &[f32], tol: f32) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| (a - b).abs() <= tol)
 }
 
 /// Texts of 1 to 150 words: longer than one attention block of 64 query rows.
-fn texts() -> Vec<String> {
+pub(crate) fn texts() -> Vec<String> {
     let mut texts = vec![
         "w10".to_string(),
         "w11 w12 w13".into(),
@@ -498,7 +498,7 @@ fn matches_a_direct_transcription_of_both_architectures() {
 }
 
 /// Cosine similarity of two unit vectors.
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn cosine(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(a, b)| a * b).sum()
 }
 
@@ -528,6 +528,7 @@ fn batching_threads_and_order_leave_vectors_unchanged() {
     for (t, precision) in [&JINA, &NOMIC]
         .into_iter()
         .flat_map(|t| Precision::ALL.map(|p| (t, p)))
+        .filter(|(_, p)| p.runs_on_cpu())
     {
         let dir = tempfile::tempdir().unwrap();
         let (model, _) = tiny_model(t, dir.path(), "", 4096);
@@ -695,6 +696,12 @@ fn the_catalog_names_pinned_models() {
     assert_eq!(Precision::default(), Precision::Int8);
     assert_eq!("F32".parse::<Precision>().unwrap(), Precision::F32);
     assert_eq!("int8".parse::<Precision>().unwrap(), Precision::Int8);
-    assert!("f16".parse::<Precision>().is_err());
+    assert_eq!("F16".parse::<Precision>().unwrap(), Precision::F16);
+    assert_eq!("bf16".parse::<Precision>().unwrap(), Precision::Bf16);
+    assert!("f8".parse::<Precision>().is_err());
+    assert_eq!(
+        CODE_RANK_EMBED.descriptor(Precision::F16).revision,
+        Some(format!("{}+f16", CODE_RANK_EMBED.revision))
+    );
     assert!(find("voyage-code-4").is_none());
 }

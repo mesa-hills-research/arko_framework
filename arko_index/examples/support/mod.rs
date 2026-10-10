@@ -18,9 +18,11 @@ use arko_index::{
 pub const HASH_DIMENSIONS: usize = 256;
 
 /// The model an `--embed` value names: `voyage-code-4` (a bare Voyage model name),
-/// `voyage:MODEL`, `local`, `local:MODEL`, `local:PRECISION` or
-/// `local:MODEL:PRECISION` (a model run on this machine, in `int8` by default or
-/// `f32`; needs `--features local-embed`), or `hash` / `hash:hash-v1` (offline; for
+/// `voyage:MODEL`, `local[:MODEL][:PRECISION][:DEVICE]` (a model run on this machine;
+/// needs `--features local-embed`: in `int8` by default or `f32` on the CPU, and in
+/// `f32` by default, `f16` or `bf16` on a GPU with `local-embed-gpu` or
+/// `local-embed-cuda`; the device `auto`, `cpu`, `gpu`, `cuda` or `wgpu` is
+/// [`set_device`] for this process), or `hash` / `hash:hash-v1` (offline; for
 /// trying things out without a key). `dimensions` overrides the model's default.
 pub fn descriptor_for(spec: &str, dimensions: Option<usize>) -> Result<ModelDescriptor, Error> {
     let (provider, model) = match spec.split_once(':') {
@@ -58,18 +60,27 @@ pub fn descriptor_for(spec: &str, dimensions: Option<usize>) -> Result<ModelDesc
     }
 }
 
-/// A local model by name or repository (`""`: the default model), optionally
-/// followed by `:int8` or `:f32` (or a precision alone).
+/// A local model by name or repository (`""`: the default model), a precision and a
+/// device, each optional, separated by `:`.
 #[cfg(feature = "local-embed")]
 fn local_descriptor(spec: &str, dimensions: Option<usize>) -> Result<ModelDescriptor, Error> {
-    use arko_index::dense::local::{self, Precision};
-    let (model, precision) = match spec.rsplit_once(':') {
-        Some((model, precision)) => (model, precision.parse()?),
-        None => match spec.parse::<Precision>() {
-            Ok(precision) => ("", precision),
-            Err(_) => (spec, Precision::default()),
-        },
-    };
+    use arko_index::dense::local::{self, Device, Precision};
+    let (mut model, mut precision, mut device) = ("", None, None);
+    for part in spec.split(':').filter(|p| !p.is_empty()) {
+        if let Ok(p) = part.parse::<Precision>() {
+            precision = Some(p);
+        } else if let Ok(d) = part.parse::<Device>() {
+            device = Some(d);
+        } else if model.is_empty() {
+            model = part;
+        } else {
+            return Err(format!("{part:?} in local:{spec} is no precision or device").into());
+        }
+    }
+    if let Some(d) = device {
+        set_device(d.as_str());
+    }
+    let precision = precision.unwrap_or(device.unwrap_or_default().default_precision());
     let m = if model.is_empty() {
         local::DEFAULT_MODEL
     } else {
@@ -94,8 +105,49 @@ fn local_descriptor(_: &str, _: Option<usize>) -> Result<ModelDescriptor, Error>
 
 const NO_LOCAL: &str = "local models need arko_index built with --features local-embed";
 
+/// The device a local model runs on in this process: one an `--embed` value named
+/// ([`set_device`]), else `ARKO_INDEX_EMBED_DEVICE`, else `auto`.
+static DEVICE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Sets the device of local models for this process (and the background embedding
+/// it starts: [`named_device`]).
+pub fn set_device(device: &str) {
+    *DEVICE.lock().unwrap() = Some(device.to_owned());
+}
+
+/// The device an `--embed` value named in this process, if one did.
+pub fn named_device() -> Option<String> {
+    DEVICE.lock().unwrap().clone()
+}
+
+#[cfg(feature = "local-embed")]
+fn local_device() -> Result<arko_index::dense::local::Device, Error> {
+    match named_device().or_else(|| std::env::var("ARKO_INDEX_EMBED_DEVICE").ok()) {
+        Some(d) if !d.trim().is_empty() => d.trim().parse(),
+        _ => Ok(Default::default()),
+    }
+}
+
+/// [`embedder_for`] a search's queries: a local model runs on the CPU when the CPU
+/// runs its precision, since one query takes milliseconds there and a GPU takes
+/// seconds to start. The model loads on first use, as with [`embedder_for`].
+pub fn query_embedder_for(descriptor: &ModelDescriptor) -> Result<Box<dyn Embedder>, Error> {
+    #[cfg(feature = "local-embed")]
+    if descriptor.provider == "local" {
+        let (model, precision) = arko_index::dense::local::LocalModel::for_descriptor(descriptor)?;
+        let device = if precision.runs_on_cpu() {
+            arko_index::dense::local::Device::Cpu
+        } else {
+            local_device()?
+        };
+        return Ok(Box::new(local::LazyEmbedder::on(model, precision, device)?));
+    }
+    embedder_for(descriptor)
+}
+
 /// An embedder that produces the vectors `descriptor` names (Voyage needs
-/// `VOYAGE_API_KEY`; a local model loads on first use, downloaded if need be).
+/// `VOYAGE_API_KEY`; a local model loads on first use, downloaded if need be, on the
+/// device [`local_device`] names).
 pub fn embedder_for(descriptor: &ModelDescriptor) -> Result<Box<dyn Embedder>, Error> {
     let embedder: Box<dyn Embedder> = match descriptor.provider.as_str() {
         "voyage" => Box::new(voyage::VoyageEmbedder::from_env(
@@ -108,7 +160,7 @@ pub fn embedder_for(descriptor: &ModelDescriptor) -> Result<Box<dyn Embedder>, E
         "local" => {
             let (model, precision) =
                 arko_index::dense::local::LocalModel::for_descriptor(descriptor)?;
-            Box::new(local::LazyEmbedder::new(model, precision))
+            Box::new(local::LazyEmbedder::on(model, precision, local_device()?)?)
         }
         #[cfg(not(feature = "local-embed"))]
         "local" => return Err(NO_LOCAL.into()),

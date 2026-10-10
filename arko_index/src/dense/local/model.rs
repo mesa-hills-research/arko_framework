@@ -126,9 +126,10 @@ impl Config {
     }
 }
 
-struct Norm {
-    w: Vec<f32>,
-    b: Vec<f32>,
+/// A layer norm's scale and shift.
+pub(crate) struct Norm {
+    pub(crate) w: Vec<f32>,
+    pub(crate) b: Vec<f32>,
 }
 
 impl Norm {
@@ -164,7 +165,16 @@ struct F32Linear {
     inp: usize,
 }
 
-impl Linear {
+/// A linear layer's weights as stored, `W` `[out, in]` (as PyTorch stores it) and the
+/// bias, stacked along the output axis when they come from several layers.
+pub(crate) struct Weights {
+    pub(crate) w: Vec<f32>,
+    pub(crate) b: Option<Vec<f32>>,
+    pub(crate) out: usize,
+    pub(crate) inp: usize,
+}
+
+impl Weights {
     /// Loads and stacks the weights (and biases) of `names` along the output axis.
     fn load(
         t: &Tensors,
@@ -172,7 +182,6 @@ impl Linear {
         out: usize,
         inp: usize,
         bias: bool,
-        precision: Precision,
     ) -> Result<Self, Error> {
         let mut w = Vec::with_capacity(names.len() * out * inp);
         let mut b = Vec::with_capacity(names.len() * out);
@@ -182,16 +191,24 @@ impl Linear {
                 b.extend(t.get(&format!("{name}.bias"), &[out])?);
             }
         }
-        let out = names.len() * out;
-        Ok(match precision {
-            Precision::F32 => Linear::F32(F32Linear {
-                w,
-                b: bias.then_some(b),
-                out,
-                inp,
-            }),
-            Precision::Int8 => Linear::Int8(Int8Linear::new(&w, bias.then_some(&b[..]), out, inp)),
+        Ok(Self {
+            w,
+            b: bias.then_some(b),
+            out: names.len() * out,
+            inp,
         })
+    }
+}
+
+impl Linear {
+    /// The layer in `precision`, which the CPU runs (`int8` or `f32`).
+    fn new(weights: Weights, precision: Precision) -> Self {
+        let Weights { w, b, out, inp } = weights;
+        if precision == Precision::Int8 {
+            Linear::Int8(Int8Linear::new(&w, b.as_deref(), out, inp))
+        } else {
+            Linear::F32(F32Linear { w, b, out, inp })
+        }
     }
 
     /// `y[rows, out] = x[rows, in] Wᵀ + b`.
@@ -258,6 +275,129 @@ struct Layer {
     norm2: Norm,
 }
 
+/// One encoder layer's weights as stored, in the shape of [`Layer`], before the CPU or
+/// a GPU takes them.
+pub(crate) struct LayerWeights {
+    pub(crate) qkv: Weights,
+    pub(crate) q_norm: Option<Norm>,
+    pub(crate) k_norm: Option<Norm>,
+    pub(crate) out: Weights,
+    pub(crate) attn_norm: Option<Norm>,
+    pub(crate) norm1: Norm,
+    pub(crate) up: Weights,
+    pub(crate) down: Weights,
+    pub(crate) norm2: Norm,
+}
+
+/// The embedding tables and their layer norm.
+pub(crate) struct EmbeddingWeights {
+    pub(crate) vocab: usize,
+    /// `[vocab, hidden]`.
+    pub(crate) word: Vec<f32>,
+    /// The first token type's row, `[hidden]`.
+    pub(crate) token_type: Vec<f32>,
+    pub(crate) norm: Norm,
+}
+
+/// Reads an encoder's weights from the model file: the embeddings, and each layer
+/// converted by `layer` before the next is read.
+pub(crate) fn read_weights<L>(
+    cfg: &Config,
+    t: &Tensors,
+    mut layer: impl FnMut(LayerWeights) -> Result<L, Error>,
+) -> Result<(EmbeddingWeights, Vec<L>), Error> {
+    let (h, i) = (cfg.hidden, cfg.intermediate);
+    // Some checkpoints keep the `bert.` prefix of the pretraining model.
+    let pre = if t.contains("bert.embeddings.word_embeddings.weight") {
+        "bert."
+    } else {
+        ""
+    };
+    let word_name = format!("{pre}embeddings.word_embeddings.weight");
+    let vocab = t.rows(&word_name)?;
+    let word = t.get(&word_name, &[vocab, h])?;
+    let tt_name = format!("{pre}embeddings.token_type_embeddings.weight");
+    let types = t.rows(&tt_name)?;
+    let token_type = t.get(&tt_name, &[types, h])?[..h].to_vec();
+    let names = |p: &str, list: &[&str]| -> Vec<String> {
+        list.iter().map(|n| format!("{p}{n}")).collect()
+    };
+    let mut layers = Vec::with_capacity(cfg.layers);
+    let norm = match cfg.arch {
+        Architecture::JinaBert => {
+            for l in 0..cfg.layers {
+                let p = format!("{pre}encoder.layer.{l}.");
+                layers.push(layer(LayerWeights {
+                    qkv: Weights::load(
+                        t,
+                        &names(
+                            &p,
+                            &[
+                                "attention.self.query",
+                                "attention.self.key",
+                                "attention.self.value",
+                            ],
+                        ),
+                        h,
+                        h,
+                        true,
+                    )?,
+                    q_norm: Some(Norm::load(
+                        t,
+                        &format!("{p}attention.self.layer_norm_q"),
+                        h,
+                    )?),
+                    k_norm: Some(Norm::load(
+                        t,
+                        &format!("{p}attention.self.layer_norm_k"),
+                        h,
+                    )?),
+                    out: Weights::load(t, &names(&p, &["attention.output.dense"]), h, h, true)?,
+                    attn_norm: Some(Norm::load(t, &format!("{p}attention.output.LayerNorm"), h)?),
+                    norm1: Norm::load(t, &format!("{p}layer_norm_1"), h)?,
+                    up: Weights::load(t, &names(&p, &["mlp.up_gated_layer"]), 2 * i, h, false)?,
+                    down: Weights::load(t, &names(&p, &["mlp.down_layer"]), h, i, true)?,
+                    norm2: Norm::load(t, &format!("{p}layer_norm_2"), h)?,
+                })?);
+            }
+            Norm::load(t, &format!("{pre}embeddings.LayerNorm"), h)?
+        }
+        Architecture::NomicBert => {
+            for l in 0..cfg.layers {
+                let p = format!("{pre}encoder.layers.{l}.");
+                layers.push(layer(LayerWeights {
+                    qkv: Weights::load(t, &names(&p, &["attn.Wqkv"]), 3 * h, h, cfg.qkv_bias)?,
+                    q_norm: None,
+                    k_norm: None,
+                    out: Weights::load(t, &names(&p, &["attn.out_proj"]), h, h, cfg.qkv_bias)?,
+                    attn_norm: None,
+                    norm1: Norm::load(t, &format!("{p}norm1"), h)?,
+                    // fc11 is the value, fc12 the gate: fc11(x) · silu(fc12(x)).
+                    up: Weights::load(
+                        t,
+                        &names(&p, &["mlp.fc11", "mlp.fc12"]),
+                        i,
+                        h,
+                        cfg.fc1_bias,
+                    )?,
+                    down: Weights::load(t, &names(&p, &["mlp.fc2"]), h, i, cfg.fc2_bias)?,
+                    norm2: Norm::load(t, &format!("{p}norm2"), h)?,
+                })?);
+            }
+            Norm::load(t, &format!("{pre}emb_ln"), h)?
+        }
+    };
+    Ok((
+        EmbeddingWeights {
+            vocab,
+            word,
+            token_type,
+            norm,
+        },
+        layers,
+    ))
+}
+
 /// A loaded encoder.
 pub(crate) struct Encoder {
     cfg: Config,
@@ -289,152 +429,30 @@ impl Encoder {
     /// vectors to a cosine similarity of about 0.987 with the `f32` ones, where the
     /// other three layers together stay above 0.998.
     pub(crate) fn load(cfg: Config, t: &Tensors, precision: Precision) -> Result<Self, Error> {
-        let (h, i) = (cfg.hidden, cfg.intermediate);
-        // Some checkpoints keep the `bert.` prefix of the pretraining model.
-        let pre = if t.contains("bert.embeddings.word_embeddings.weight") {
-            "bert."
-        } else {
-            ""
+        let (emb, layers) = read_weights(&cfg, t, |w| {
+            Ok(Layer {
+                qkv: Linear::new(w.qkv, Precision::F32),
+                q_norm: w.q_norm,
+                k_norm: w.k_norm,
+                out: Linear::new(w.out, precision),
+                attn_norm: w.attn_norm,
+                norm1: w.norm1,
+                up: Linear::new(w.up, precision),
+                down: Linear::new(w.down, precision),
+                norm2: w.norm2,
+            })
+        })?;
+        let slopes = match cfg.arch {
+            Architecture::JinaBert => alibi_slopes(cfg.heads),
+            Architecture::NomicBert => Vec::new(),
         };
-        let word_name = format!("{pre}embeddings.word_embeddings.weight");
-        let vocab = t.rows(&word_name)?;
-        let word = t.get(&word_name, &[vocab, h])?;
-        let tt_name = format!("{pre}embeddings.token_type_embeddings.weight");
-        let types = t.rows(&tt_name)?;
-        let token_type = t.get(&tt_name, &[types, h])?[..h].to_vec();
-        let names = |p: &str, list: &[&str]| -> Vec<String> {
-            list.iter().map(|n| format!("{p}{n}")).collect()
-        };
-        let mut layers = Vec::with_capacity(cfg.layers);
-        let emb_norm;
-        match cfg.arch {
-            Architecture::JinaBert => {
-                emb_norm = Norm::load(t, &format!("{pre}embeddings.LayerNorm"), h)?;
-                for l in 0..cfg.layers {
-                    let p = format!("{pre}encoder.layer.{l}.");
-                    layers.push(Layer {
-                        qkv: Linear::load(
-                            t,
-                            &names(
-                                &p,
-                                &[
-                                    "attention.self.query",
-                                    "attention.self.key",
-                                    "attention.self.value",
-                                ],
-                            ),
-                            h,
-                            h,
-                            true,
-                            Precision::F32,
-                        )?,
-                        q_norm: Some(Norm::load(
-                            t,
-                            &format!("{p}attention.self.layer_norm_q"),
-                            h,
-                        )?),
-                        k_norm: Some(Norm::load(
-                            t,
-                            &format!("{p}attention.self.layer_norm_k"),
-                            h,
-                        )?),
-                        out: Linear::load(
-                            t,
-                            &names(&p, &["attention.output.dense"]),
-                            h,
-                            h,
-                            true,
-                            precision,
-                        )?,
-                        attn_norm: Some(Norm::load(
-                            t,
-                            &format!("{p}attention.output.LayerNorm"),
-                            h,
-                        )?),
-                        norm1: Norm::load(t, &format!("{p}layer_norm_1"), h)?,
-                        up: Linear::load(
-                            t,
-                            &names(&p, &["mlp.up_gated_layer"]),
-                            2 * i,
-                            h,
-                            false,
-                            precision,
-                        )?,
-                        down: Linear::load(
-                            t,
-                            &names(&p, &["mlp.down_layer"]),
-                            h,
-                            i,
-                            true,
-                            precision,
-                        )?,
-                        norm2: Norm::load(t, &format!("{p}layer_norm_2"), h)?,
-                    });
-                }
-            }
-            Architecture::NomicBert => {
-                emb_norm = Norm::load(t, &format!("{pre}emb_ln"), h)?;
-                for l in 0..cfg.layers {
-                    let p = format!("{pre}encoder.layers.{l}.");
-                    layers.push(Layer {
-                        qkv: Linear::load(
-                            t,
-                            &names(&p, &["attn.Wqkv"]),
-                            3 * h,
-                            h,
-                            cfg.qkv_bias,
-                            Precision::F32,
-                        )?,
-                        q_norm: None,
-                        k_norm: None,
-                        out: Linear::load(
-                            t,
-                            &names(&p, &["attn.out_proj"]),
-                            h,
-                            h,
-                            cfg.qkv_bias,
-                            precision,
-                        )?,
-                        attn_norm: None,
-                        norm1: Norm::load(t, &format!("{p}norm1"), h)?,
-                        // fc11 is the value, fc12 the gate: fc11(x) · silu(fc12(x)).
-                        up: Linear::load(
-                            t,
-                            &names(&p, &["mlp.fc11", "mlp.fc12"]),
-                            i,
-                            h,
-                            cfg.fc1_bias,
-                            precision,
-                        )?,
-                        down: Linear::load(
-                            t,
-                            &names(&p, &["mlp.fc2"]),
-                            h,
-                            i,
-                            cfg.fc2_bias,
-                            precision,
-                        )?,
-                        norm2: Norm::load(t, &format!("{p}norm2"), h)?,
-                    });
-                }
-            }
-        }
-        let dh = h / cfg.heads;
-        let (slopes, inv_freq) = match cfg.arch {
-            Architecture::JinaBert => (alibi_slopes(cfg.heads), Vec::new()),
-            Architecture::NomicBert => (
-                Vec::new(),
-                (0..dh / 2)
-                    .map(|k| 1.0 / cfg.rotary_base.powf((2 * k) as f32 / dh as f32))
-                    .collect(),
-            ),
-        };
+        let inv_freq = inv_freq(&cfg);
         Ok(Self {
             cfg,
-            vocab,
-            word,
-            token_type,
-            emb_norm,
+            vocab: emb.vocab,
+            word: emb.word,
+            token_type: emb.token_type,
+            emb_norm: emb.norm,
             layers,
             slopes,
             inv_freq,
@@ -527,22 +545,7 @@ impl Encoder {
 
     /// Rotary cos and sin for positions `0..len`, `[len, head_dim / 2]` each.
     fn rotary_table(&self, len: usize) -> Option<(Vec<f32>, Vec<f32>)> {
-        if self.inv_freq.is_empty() {
-            return None;
-        }
-        let half = self.inv_freq.len();
-        let (mut cos, mut sin) = (
-            Vec::with_capacity(len * half),
-            Vec::with_capacity(len * half),
-        );
-        for p in 0..len {
-            for f in &self.inv_freq {
-                let angle = p as f32 * f;
-                cos.push(angle.cos());
-                sin.push(angle.sin());
-            }
-        }
-        Some((cos, sin))
+        (!self.inv_freq.is_empty()).then(|| rotary_table(&self.inv_freq, len))
     }
 
     /// Rotates the query and key of every head by the token's position (the two halves
@@ -714,10 +717,41 @@ fn silu(x: f32) -> f32 {
     x / (1.0 + exp(-x))
 }
 
+/// Rotary positions: the inverse frequency of each pair of a head's dimensions (none
+/// for ALiBi models).
+pub(crate) fn inv_freq(cfg: &Config) -> Vec<f32> {
+    match cfg.arch {
+        Architecture::JinaBert => Vec::new(),
+        Architecture::NomicBert => {
+            let dh = cfg.hidden / cfg.heads;
+            (0..dh / 2)
+                .map(|k| 1.0 / cfg.rotary_base.powf((2 * k) as f32 / dh as f32))
+                .collect()
+        }
+    }
+}
+
+/// Rotary cos and sin for positions `0..len`, `[len, inv_freq.len()]` each.
+pub(crate) fn rotary_table(inv_freq: &[f32], len: usize) -> (Vec<f32>, Vec<f32>) {
+    let half = inv_freq.len();
+    let (mut cos, mut sin) = (
+        Vec::with_capacity(len * half),
+        Vec::with_capacity(len * half),
+    );
+    for p in 0..len {
+        for f in inv_freq {
+            let angle = p as f32 * f;
+            cos.push(angle.cos());
+            sin.push(angle.sin());
+        }
+    }
+    (cos, sin)
+}
+
 /// ALiBi head slopes (Press et al.), as Jina computes them: a geometric sequence for
 /// the largest power of two at most `heads`, then every other slope of the next power
 /// of two.
-fn alibi_slopes(heads: usize) -> Vec<f32> {
+pub(crate) fn alibi_slopes(heads: usize) -> Vec<f32> {
     fn power_of_two(n: usize) -> Vec<f64> {
         let start = 2f64.powf(-(2f64.powf(-((n as f64).log2() - 3.0))));
         (0..n).map(|i| start * start.powi(i as i32)).collect()

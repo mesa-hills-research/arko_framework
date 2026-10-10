@@ -525,6 +525,10 @@ fn embed_in_background(state: &Path, owner: u32) -> Result<u32, Error> {
     let _ = std::fs::remove_file(&log);
     let log = std::fs::File::create(log)?;
     let mut command = std::process::Command::new(std::env::current_exe()?);
+    // The device an `--embed local:...:DEVICE` value named runs the background embedding.
+    if let Some(device) = support::named_device() {
+        command.env("ARKO_INDEX_EMBED_DEVICE", device);
+    }
     command
         .arg("embed")
         .arg("--owner-pid")
@@ -623,7 +627,7 @@ fn search2(state: &Path, query: &str, f: &Flags) -> Result<(), Error> {
     }
     let embedder = match (&info, mode) {
         (Some(info), Mode::Dense | Mode::Hybrid) => Some(
-            support::embedder_for(&info.embedder)
+            support::query_embedder_for(&info.embedder)
                 .map_err(|e| format!("{e} (or search with --mode lexical)"))?,
         ),
         _ => None,

@@ -85,12 +85,36 @@ rayon = { version = "1.10", optional = true }
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"], optional = true }
 libm = { version = "0.2", optional = true }
 
+# The `local-embed-gpu` and `local-embed-cuda` features: the local models on a GPU, on
+# burn's tensors (pure Rust). wgpu runs Vulkan, Metal and DirectX 12. CUDA (through
+# cubecl and cudarc) loads the driver and NVRTC when it starts and compiles its kernels at
+# run time, so building needs no CUDA toolkit. Both include burn's ndarray backend, on
+# which the offline tests run. burn 0.22's CUDA backend downloads LLVM and compiles C
+# while building, so these stay on 0.21.
+burn-tensor = { version = "=0.21.0", default-features = false, features = ["std"], optional = true }
+burn-ndarray = { version = "=0.21.0", default-features = false, features = ["std", "simd", "multi-threads"], optional = true }
+burn-wgpu = { version = "=0.21.0", default-features = false, features = ["std", "fusion", "autotune"], optional = true }
+burn-cuda = { version = "=0.21.0", default-features = false, features = ["std", "fusion", "autotune"], optional = true }
+# Finding the adapters (wgpu) and the driver, GPUs and NVRTC (cudarc) before choosing a
+# device, and placing cubecl's kernel tuning cache: the versions burn uses.
+wgpu = { version = "29", default-features = false, optional = true }
+cubecl-runtime = { version = "=0.10.0", default-features = false, features = ["std"], optional = true }
+cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "nvrtc", "fallback-dynamic-loading", "cuda-version-from-build-system", "fallback-latest"], optional = true }
+
 [features]
 # Local embedding models (`dense::local`), off by default.
 local-embed = ["dep:gemm", "dep:pulp", "dep:rayon", "dep:tokenizers", "dep:libm"]
+# Local embedding models on a GPU through wgpu (Vulkan, Metal, DirectX 12), off by default.
+local-embed-gpu = ["local-embed", "dep:burn-tensor", "dep:burn-ndarray", "dep:burn-wgpu", "dep:wgpu", "dep:cubecl-runtime"]
+# Local embedding models on an NVIDIA GPU through CUDA, off by default.
+local-embed-cuda = ["local-embed", "dep:burn-tensor", "dep:burn-ndarray", "dep:burn-cuda", "dep:cudarc", "dep:cubecl-runtime"]
 
 [[example]]
 name = "local_embed_bench"
+required-features = ["local-embed"]
+
+[[example]]
+name = "local_embed_device_bench"
 required-features = ["local-embed"]
 
 [[test]]
