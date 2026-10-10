@@ -36,6 +36,9 @@ pub(crate) enum Choice {
         name: String,
         /// A quarter of the GPU's memory: cubecl's largest allocation on CUDA.
         max_buffer: u64,
+        /// What the compiled kernels depend on, such as `sm89-nvrtc12.4`: the GPU's
+        /// architecture and the NVRTC version. Names their cache directory.
+        target: String,
     },
     #[cfg(feature = "local-embed-gpu")]
     Wgpu {
@@ -61,6 +64,17 @@ impl Choice {
             Choice::Wgpu { name, .. } => format!("wgpu: {name}"),
             #[cfg(test)]
             Choice::NdArray { .. } => "burn ndarray (CPU)".into(),
+        }
+    }
+
+    /// What the device's compiled kernels depend on, when cubecl can keep them on disk
+    /// (CUDA: `sm89-nvrtc12.4`, the GPU's architecture and the NVRTC version).
+    fn kernel_target(&self) -> Option<&str> {
+        match self {
+            #[cfg(feature = "local-embed-cuda")]
+            Choice::Cuda { target, .. } => Some(target),
+            #[allow(unreachable_patterns)]
+            _ => None,
         }
     }
 
@@ -127,6 +141,12 @@ fn cuda() -> Result<Choice, String> {
     let name = result::device::get_name(dev).map_err(|e| format!("CUDA: {e}"))?;
     // SAFETY: `dev` is a device the driver listed.
     let memory = unsafe { result::device::total_mem(dev) }.map_err(|e| format!("CUDA: {e}"))?;
+    let attribute = |a| {
+        // SAFETY: `dev` is a device the driver listed.
+        unsafe { result::device::get_attribute(dev, a) }.map_err(|e| format!("CUDA: {e}"))
+    };
+    let major = attribute(sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)?;
+    let minor = attribute(sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)?;
     // SAFETY: loads the NVRTC library, as cudarc's NVRTC calls do first.
     if !unsafe { cudarc::nvrtc::sys::is_culib_present() } {
         return Err(
@@ -137,9 +157,13 @@ fn cuda() -> Result<Choice, String> {
     if !cuda_path().is_some_and(|p| p.join("include/cuda_fp16.h").is_file()) {
         return Err("CUDA: the toolkit's headers (include/cuda_fp16.h) not found under CUDA_PATH, /usr/local/cuda, /opt/cuda or /usr".into());
     }
+    let (mut nvrtc_major, mut nvrtc_minor) = (0, 0);
+    // SAFETY: NVRTC is present, and the two pointers are valid for writes.
+    unsafe { cudarc::nvrtc::sys::nvrtcVersion(&mut nvrtc_major, &mut nvrtc_minor) };
     Ok(Choice::Cuda {
         name,
         max_buffer: memory as u64 / 4,
+        target: format!("sm{major}{minor}-nvrtc{nvrtc_major}.{nvrtc_minor}"),
     })
 }
 
@@ -329,9 +353,12 @@ where
 
 /// cubecl saves its kernel tuning results under the nearest directory above the
 /// working directory with a `Cargo.toml` (in its `target/`), else in the user's cache
-/// directory. The embedder puts them in the user's cache directory (`cubecl/`) whatever
-/// the working directory, unless the program configured cubecl before. Tests tune less.
-fn configure_cubecl() {
+/// directory, and keeps compiled kernels in memory only. The embedder puts the tuning
+/// results in the user's cache directory (`cubecl/`) whatever the working directory,
+/// and on CUDA the compiled kernels too (`cubecl/kernels/TARGET/`, TARGET as in
+/// [`Choice::kernel_target`]), unless the program configured cubecl before. Tests tune
+/// less.
+fn configure_cubecl(choice: &Choice) {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         use cubecl_runtime::config::{CubeClRuntimeConfig, RuntimeConfig, cache::CacheConfig};
@@ -340,7 +367,14 @@ fn configure_cubecl() {
         }
         let mut config = CubeClRuntimeConfig::default().override_from_env();
         if let Some(dir) = user_cache_dir() {
-            config.autotune.cache = CacheConfig::File(dir.join("cubecl"));
+            let dir = dir.join("cubecl");
+            config.autotune.cache = CacheConfig::File(dir.clone());
+            // cubecl stops the device if it can't write there.
+            if let Some(kernels) = choice.kernel_target().map(|t| dir.join("kernels").join(t))
+                && std::fs::create_dir_all(&kernels).is_ok()
+            {
+                config.compilation.cache = Some(CacheConfig::File(kernels));
+            }
         }
         #[cfg(test)]
         {
@@ -381,7 +415,7 @@ impl Gpu {
         let name = choice.name();
         // The most f32 values one tensor may hold.
         let max_elements = usize::try_from(choice.max_buffer() / 4).unwrap_or(usize::MAX);
-        configure_cubecl();
+        configure_cubecl(&choice);
         let loaded = catch_unwind(AssertUnwindSafe(|| -> Result<Box<dyn Run>, Error> {
             match choice {
                 #[cfg(feature = "local-embed-cuda")]
