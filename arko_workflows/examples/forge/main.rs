@@ -263,6 +263,20 @@ struct Settings {
     #[arg(long, default_value_t = 300_000)]
     handover_at: usize,
 
+    /// Deliberation agents hand their conversations over at this many input
+    /// tokens (at most `--handover-at`); 200,000 when omitted.
+    #[arg(long, value_name = "TOKENS")]
+    #[serde(default)]
+    deliberation_handover_at: Option<usize>,
+
+    /// Agents on OpenAI models hand their conversations over at this many
+    /// input tokens, in place of the thresholds above (at most the ChatGPT
+    /// login's input limit); three quarters of that limit, or less when the
+    /// thresholds above are lower, when omitted.
+    #[arg(long, value_name = "TOKENS")]
+    #[serde(default)]
+    openai_handover_at: Option<usize>,
+
     /// Times the forge sends failed checks back to the architect.
     #[arg(long, default_value_t = 3)]
     max_repairs: u32,
@@ -552,22 +566,37 @@ async fn main() -> ForgeResult<()> {
     architect.handover = Some(HandoverConfig::at_input_tokens(handover_at(
         &architect_model,
         settings.handover_at,
+        settings.openai_handover_at,
     )));
+    if settings.trial_runs > 0 {
+        architect.tool_config.tool_specific_configs.insert(
+            "trial_run".into(),
+            trial_run_time_limit(settings.trial_minutes),
+        );
+    }
     architect.complete_task_summary_prompt_override = Some(prompts::SUMMARY_REQUEST.into());
     let mut configs = vec![(ARCHITECT.to_string(), architect)];
     if !settings.no_explorers {
-        configs.push((
-            EXPLORER.to_string(),
-            agents.config(
-                EXPLORER,
-                "Framework explorer",
-                &ModelSpec::new(&settings.explorer_model, settings.explorer_effort)?,
-                "You find things in the arko framework and report them exactly.",
-                &manifest.explorer_instructions,
-                Access::Read,
-                &[],
-            )?,
-        ));
+        let explorer_model = ModelSpec::new(&settings.explorer_model, settings.explorer_effort)?;
+        let mut explorer = agents.config(
+            EXPLORER,
+            "Framework explorer",
+            &explorer_model,
+            "You find things in the arko framework and report them exactly.",
+            &manifest.explorer_instructions,
+            Access::Read,
+            &[],
+        )?;
+        // An explorer on an OpenAI model stays under the ChatGPT login's
+        // input limit.
+        if Model::find(&explorer_model.id).is_some_and(|model| model.provider == Provider::OpenAI) {
+            explorer.handover = Some(HandoverConfig::at_input_tokens(handover_at(
+                &explorer_model,
+                settings.handover_at,
+                settings.openai_handover_at,
+            )));
+        }
+        configs.push((EXPLORER.to_string(), explorer));
     }
     // Deliberation: its agents, the tools they submit their parts with, and
     // the architect's request (and, when it rules, its ruling).
@@ -598,7 +627,10 @@ async fn main() -> ForgeResult<()> {
             )?;
             agent.handover = Some(HandoverConfig::at_input_tokens(handover_at(
                 model,
-                settings.handover_at.min(200_000),
+                settings
+                    .handover_at
+                    .min(settings.deliberation_handover_at.unwrap_or(200_000)),
+                settings.openai_handover_at,
             )));
             configs.push((name.clone(), agent));
             for &part in deliberation::Config::parts(role) {
@@ -1345,11 +1377,25 @@ fn deliberation_role(role: &str) -> (&'static str, &'static str, Access) {
     }
 }
 
+/// The architect's time limit for a `trial_run` call: a trial may take
+/// `--trial-minutes`, past the runtime's default tool time limit (20
+/// minutes), and the call waits for it, with ten minutes to spare.
+fn trial_run_time_limit(trial_minutes: u64) -> PerToolConfigOverride {
+    PerToolConfigOverride {
+        tool_timeout_seconds: Some(Some(trial_minutes * 60 + 600)),
+        ..PerToolConfigOverride::default()
+    }
+}
+
 /// The handover threshold for an agent on `model`: `wanted`, kept under the
-/// ChatGPT login's input limit for OpenAI models.
-fn handover_at(model: &ModelSpec, wanted: usize) -> usize {
+/// ChatGPT login's input limit for OpenAI models, or `openai` in its place
+/// (`--openai-handover-at`) for them.
+fn handover_at(model: &ModelSpec, wanted: usize, openai: Option<usize>) -> usize {
     match Model::find(&model.id).map(|model| model.provider) {
-        Some(Provider::OpenAI) => wanted.min(arko_ai::CHATGPT_OAUTH_MAX_INPUT_TOKENS * 3 / 4),
+        Some(Provider::OpenAI) => match openai {
+            Some(openai) => openai.min(arko_ai::CHATGPT_OAUTH_MAX_INPUT_TOKENS),
+            None => wanted.min(arko_ai::CHATGPT_OAUTH_MAX_INPUT_TOKENS * 3 / 4),
+        },
         _ => wanted,
     }
 }
@@ -1970,6 +2016,34 @@ fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_trial_can_run_past_the_default_tool_time_limit() {
+        let limit = trial_run_time_limit(75).tool_timeout_seconds;
+        assert_eq!(limit, Some(Some(75 * 60 + 600)));
+        assert!(arko_agents::agent_config::DEFAULT_TOOL_TIMEOUT_SECONDS < 75 * 60);
+    }
+
+    #[test]
+    fn handover_thresholds_follow_the_provider() {
+        let opus: ModelSpec = "claude-opus-5-5".parse().unwrap();
+        let astra: ModelSpec = "gpt-6-astra".parse().unwrap();
+        assert_eq!(handover_at(&opus, 450_000, Some(200_000)), 450_000);
+        assert_eq!(handover_at(&astra, 450_000, Some(200_000)), 200_000);
+        assert_eq!(handover_at(&astra, 450_000, None), 204_000);
+        assert_eq!(handover_at(&astra, 150_000, None), 150_000);
+        assert_eq!(handover_at(&astra, 150_000, Some(900_000)), 272_000);
+        let args = Args::parse_from(["forge", "--output", "crate"]);
+        assert_eq!(args.settings.deliberation_handover_at, None);
+        assert_eq!(args.settings.openai_handover_at, None);
+        // Settings saved before these flags existed still load.
+        let mut saved = serde_json::to_value(&args.settings).unwrap();
+        let object = saved.as_object_mut().unwrap();
+        object.remove("deliberation_handover_at");
+        object.remove("openai_handover_at");
+        let loaded: Settings = serde_json::from_value(saved).unwrap();
+        assert_eq!(loaded.openai_handover_at, None);
+    }
 
     fn metadata(flags: &[&str]) -> WorkflowMetadata {
         let args = Args::parse_from([&["forge", "--output", "crate"], flags].concat());

@@ -18,7 +18,7 @@ use arko_workflows::budget::CostSource;
 use arko_workflows::context::SharedContext;
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::scaffold::tail;
 
@@ -299,17 +299,16 @@ impl Tool for TrialRun {
                 let _ = stdin.write_all(input.as_bytes()).await;
             });
         }
-        let outcome =
-            tokio::time::timeout(Duration::from_secs(minutes * 60), child.wait_with_output()).await;
-        let (status, stdout, stderr) = match outcome {
-            Ok(Ok(output)) => (
-                match output.status.code() {
-                    Some(code) => format!("exit code {code}"),
-                    None => "killed by a signal".into(),
-                },
-                String::from_utf8_lossy(&output.stdout).into_owned(),
-                String::from_utf8_lossy(&output.stderr).into_owned(),
-            ),
+        // Output is collected as it arrives, so a run stopped at its time
+        // limit still reports what it printed.
+        let stdout = collect(child.stdout.take());
+        let stderr = collect(child.stderr.take());
+        let outcome = tokio::time::timeout(Duration::from_secs(minutes * 60), child.wait()).await;
+        let status = match outcome {
+            Ok(Ok(status)) => match status.code() {
+                Some(code) => format!("exit code {code}"),
+                None => "killed by a signal".into(),
+            },
             Ok(Err(source)) => {
                 return Err(ToolError::Io {
                     tool_name: "trial_run".into(),
@@ -318,13 +317,11 @@ impl Tool for TrialRun {
             }
             Err(_) => {
                 kill_group(pid);
-                (
-                    format!("stopped after {minutes} minutes"),
-                    String::new(),
-                    String::new(),
-                )
+                format!("stopped after {minutes} minutes")
             }
         };
+        let stdout = collected(stdout).await;
+        let stderr = collected(stderr).await;
         let log = self.log_dir.join(format!("trial-{run}.log"));
         let _ = std::fs::create_dir_all(&self.log_dir);
         let _ = std::fs::write(
@@ -339,6 +336,35 @@ impl Tool for TrialRun {
             stdout = tail(&stdout, 8_000),
             stderr = tail(&stderr, 8_000),
         ))
+    }
+}
+
+/// Reads a trial's output stream as it arrives, until it ends.
+fn collect(
+    stream: Option<impl AsyncRead + Unpin + Send + 'static>,
+) -> tokio::task::JoinHandle<Vec<u8>> {
+    tokio::spawn(async move {
+        let mut output = Vec::new();
+        if let Some(mut stream) = stream {
+            let mut chunk = [0u8; 8192];
+            while let Ok(read) = stream.read(&mut chunk).await {
+                if read == 0 {
+                    break;
+                }
+                output.extend_from_slice(&chunk[..read]);
+            }
+        }
+        output
+    })
+}
+
+/// What [`collect`] read: all of it once the stream has ended, or, when
+/// something the trial started still holds the stream open a few seconds
+/// after it stopped, nothing (the log says so).
+async fn collected(reader: tokio::task::JoinHandle<Vec<u8>>) -> String {
+    match tokio::time::timeout(Duration::from_secs(10), reader).await {
+        Ok(Ok(output)) => String::from_utf8_lossy(&output).into_owned(),
+        _ => "(the output stream was still open 10 s after the run stopped)".into(),
     }
 }
 
@@ -550,6 +576,30 @@ pub fn command_rules(spike_root: Option<&Path>) -> Vec<CommandRule> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A trial stopped at its time limit still reports what it printed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_printed_before_a_stop_is_kept() {
+        let mut child = shell("echo printed before the stop; echo on stderr >&2; sleep 30")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let stdout = collect(child.stdout.take());
+        let stderr = collect(child.stderr.take());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), child.wait())
+                .await
+                .is_err()
+        );
+        kill_group(pid);
+        assert!(collected(stdout).await.contains("printed before the stop"));
+        assert!(collected(stderr).await.contains("on stderr"));
+    }
 
     #[test]
     fn a_trial_must_pass_its_reserved_budget() {

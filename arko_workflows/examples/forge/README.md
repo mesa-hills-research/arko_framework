@@ -192,6 +192,8 @@ which you want, or the architect chooses and explains it.
 | `--trial-runs N`, `--trial-minutes M` | 0, 20 | Live trial runs allowed, and the longest each may take. |
 | `--trial-budget DOLLARS` | none | The most all trial runs together may spend. Each run reserves its cap in full (the workflow's own budget flag enforces it); without this, trials draw on `--budget`, and their reservations count toward it. |
 | `--handover-at TOKENS` | 300000 | The architect's handover threshold. |
+| `--deliberation-handover-at TOKENS` | 200000 | The deliberation agents' handover threshold (at most `--handover-at`). |
+| `--openai-handover-at TOKENS` | | The threshold of every agent on an OpenAI model, in place of the two above (at most the ChatGPT login's 272,000-token input limit). Without it, OpenAI agents use those thresholds, kept under 204,000. |
 | `--max-repairs N` | 3 | Failed checks sent back to the architect. |
 | `--lessons PATH`, `--no-lessons` | `~/.arko/forge/lessons.md` | The lessons file. |
 | `--arko PATH` | this checkout | The arko checkout the crate depends on and the agents read. |
