@@ -45,7 +45,7 @@ use std::path::Path;
 let chunks = chunk_str(Path::new("sample.rs"), "fn hello() {}\n", &Options::default())?;
 ```
 
-Languages: 50, from extensions and well-known file names (`Makefile`,
+Languages: 53, from extensions and well-known file names (`Makefile`,
 `CMakeLists.txt`, `PKGBUILD`, ...), listed with each language's rules in
 [arko_index languages](arko_index-languages.md). Anything else is `text`, split by the
 bounded fallback.
@@ -830,8 +830,8 @@ with it.
 ## Parsing
 
 Parsing uses [Mesquite](https://github.com/mesa-hills-research/mesquite)
-(a Git dependency pinned to commit a94f0d8 in `Cargo.toml`), a pure, safe Rust port of
-tree-sitter 0.25.10 and 54 grammars, so the library needs no C compiler. Its libraries keep
+(a Git dependency pinned to commit fef5b10 in `Cargo.toml`), a pure, safe Rust port of
+tree-sitter 0.25.10 and 58 grammars, so the library needs no C compiler. Its libraries keep
 tree-sitter's names (`tree_sitter`, `tree_sitter_rust`, ...). The port pins the grammar
 versions: an upgrade changes chunk boundaries and IDs. The grammars of the original nine
 languages are the versions this crate used with the C library: tree-sitter-rust 0.24.2,
@@ -912,7 +912,7 @@ chunking sources and the locked tree-sitter versions) and `max_bytes` match. Oth
 the files are parsed again, without spurious deltas, except once for chunk format 2:
 chunks that gain a `scope` are delivered as `changed`. The engine digest also changes
 with `Options::front_matter_description`, and with the Mesquite commit (the move
-to a94f0d8 rebuilds the watchers' cached chunks once). An index2 generation from before
+to fef5b10 rebuilds the watchers' cached chunks once). An index2 generation from before
 this version loads and searches lexically, and filters need its `files.dat` (rebuild to
 filter). Saved files with embeddings carry versions (`dense.json` 1, the generation's
 `dense.json` 2, `cache.json` 1, and Caprock's own format versions) and new fields get

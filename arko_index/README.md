@@ -2,7 +2,7 @@
 
 arko_index splits source repositories into chunks along their syntax, searches them with
 BM25, and keeps the chunks current with durable watchers that turn file changes into chunk
-deltas. Code, prose, markup and data in 50 languages are parsed with tree-sitter and chunked
+deltas. Code, prose, markup and data in 53 languages are parsed with tree-sitter and chunked
 along their structure, and other UTF-8 text is split by a strictly bounded fallback. Every
 chunk carries a context header: its enclosing definitions (`impl Display for Point › fn fmt`)
 or, in Markdown, the document's title and heading chain. Chunking, lexical search and
@@ -137,21 +137,22 @@ once across crashes. See [Watchers](../docs/arko_index-reference.md#watchers).
 
 ## Languages
 
-Bash, C, C#, C++, CMake, CSS, CUDA, Dart, DTD, Elixir, Elm, embedded templates (ERB,
-EJS), Erlang, F#, Fortran, GLSL, Go, Haskell, HCL (Terraform), HTML, Java, JavaScript,
-JSON, Julia, Kotlin, Lua, Make, Markdown and MDX, Objective-C, OCaml, Odin, Perl, PHP,
-PowerShell, Protocol Buffers, Python, R, Ruby, Rust, Scala, Solidity, SQL, Svelte,
-Swift, TOML, TypeScript and TSX, Verilog, XML, YAML and Zig.
+Astro, Bash, C, C#, C++, CMake, CSS, CUDA, Dart, diffs and patches, DTD, Elixir, Elm,
+embedded templates (ERB, EJS), Erlang, F#, Fortran, GLSL, Go, GraphQL, Haskell, HCL
+(Terraform), HTML, Java, JavaScript, JSON, Julia, Kotlin, Lua, Make, Markdown and MDX,
+Objective-C, OCaml, Odin, Perl, PHP, PowerShell, Protocol Buffers, Python, R, Ruby, Rust,
+Scala, Solidity, SQL, Svelte, Swift, TOML, TypeScript and TSX, Verilog, XML, YAML and Zig.
 
-Code splits into its definitions, prose into sections, markup into elements and data into
-keys or tables. [arko_index languages](../docs/arko_index-languages.md) lists the extensions
-and file names of each language, how ambiguous ones are settled (`.h`, `.m`, `.v`, `.pl`)
-and every language's rules.
+Code splits into its definitions, prose into sections, markup into elements, data into
+keys or tables, and diffs into file sections and hunks.
+[arko_index languages](../docs/arko_index-languages.md) lists the extensions and file
+names of each language, how ambiguous ones are settled (`.h`, `.m`, `.v`, `.pl`) and
+every language's rules.
 
 ## Parsing
 
 Parsing uses [Mesquite](https://github.com/mesa-hills-research/mesquite), a pure, safe
-Rust port of tree-sitter 0.25.10 and 54 grammars. When this crate moved to it
+Rust port of tree-sitter 0.25.10 and 58 grammars. When this crate moved to it
 from the C library, its `chunk` output stayed byte-identical on eight trees: 237,312 files,
 18.9 GB of text and 6.5 million chunks. [Verification](../docs/arko_index-verification.md)
 has the details.

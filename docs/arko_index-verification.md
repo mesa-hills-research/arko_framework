@@ -28,7 +28,7 @@ each language are described in [arko_index languages](arko_index-languages.md#ch
 ## The pure-Rust parser
 
 arko_index parses with [Mesquite](https://github.com/mesa-hills-research/mesquite),
-a pure, safe Rust port of tree-sitter 0.25.10 and 54 grammars (see
+a pure, safe Rust port of tree-sitter 0.25.10 and 58 grammars (see
 [Parsing](arko_index-reference.md#parsing)).
 
 Before the switch, the crate used the C library and an optional GCC profile-guided

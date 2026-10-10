@@ -5,9 +5,11 @@ has a grammar for and chunks it along that grammar's structure. This page lists 
 files go to which grammar, how the rules tables work, what each language's rules are,
 how Markdown's front matter is handled, and how the rules are checked.
 
-Fifty-two grammars parse files. Mesquite's other two have no file type of their own:
-`markdown_inline` (Markdown's inline syntax, which chunk boundaries never need) and
-`php_only` (PHP without the surrounding HTML, while `.php` files are parsed with `php`).
+Fifty-five grammars parse files. Mesquite's other three have no file type of their own:
+`markdown_inline` (Markdown's inline syntax, which chunk boundaries never need),
+`php_only` (PHP without the surrounding HTML, while `.php` files are parsed with `php`)
+and `jsdoc` (the tags inside JavaScript and TypeScript doc comments, which attach whole
+to the definition after them).
 
 ## Which grammar parses a file
 
@@ -17,6 +19,7 @@ Well-known file names match exactly, case included.
 
 | Language (`language` field) | Extensions | File names |
 |---|---|---|
+| astro | `astro` | |
 | bash | `sh`, `bash`, `zsh` | `.bashrc`, `.bash_profile`, `.bash_login`, `.bash_logout`, `.profile`, `.zshrc`, `.zshenv`, `.zprofile`, `PKGBUILD`, `APKBUILD` |
 | c | `c`, `h` (`.h` parsed with the C++ grammar) | |
 | c_sharp | `cs`, `csx` | |
@@ -25,6 +28,7 @@ Well-known file names match exactly, case included.
 | css | `css` | |
 | cuda | `cu`, `cuh` | |
 | dart | `dart` | |
+| diff | `diff`, `patch` | |
 | dtd | `dtd` | |
 | elixir | `ex`, `exs` | |
 | elm | `elm` | |
@@ -34,6 +38,7 @@ Well-known file names match exactly, case included.
 | fsharp | `fs`, `fsx` | |
 | glsl | `glsl`, `vert`, `frag`, `geom`, `comp`, `tesc`, `tese`, `vsh`, `fsh` | |
 | go | `go` | |
+| graphql | `graphql`, `graphqls`, `gql` | |
 | haskell | `hs` | |
 | hcl | `hcl`, `tf`, `tfvars` | |
 | html | `html`, `htm` | |
@@ -109,10 +114,10 @@ of rules (`arko_index/src/rules/tables.rs`) that names node kinds:
 | attach | Kinds that join the next unit (comments, doc comments, attributes, decorators, signatures, Markdown headings). Every kind whose name contains `comment` attaches. |
 | attach back | Kinds that join the unit before them (`end module`, `endfunction()`, closing tags). |
 | bodies | Where a kind's members are (a field or a child kind). The default is the `body` field. |
-| names, labels | The symbol name and the scope label (`fn f`, `class C`, `@media (min-width: 800px)`, `<section id="x">`). A label is a keyword and the name, the name alone, the text up to the body, the first line, or the text at a path. |
+| names, labels | The symbol name and the scope label (`fn f`, `class C`, `@media (min-width: 800px)`, `<section id="x">`). A label is a keyword and the name, a prefix joined to the name (`directive @auth`), the name alone, the text up to the body, the first line, or the text at a path. |
 | families | Callables that can pair as a `function_family`. |
 | atomic | Kinds kept whole when they fit, even if they contain definitions (HTML `<script>` and `<style>`). |
-| split small | On for most code and for HCL and Protocol Buffers: a node that fits splits into its definitions. Off for prose, markup, the other data formats, CSS, SQL, Make and CMake: what fits stays whole, and only what exceeds the bound splits. |
+| split small | On for most code, for HCL, Protocol Buffers and GraphQL, and for diffs: a node that fits splits into its definitions. Off for prose, markup, the other data formats, CSS, SQL, Make and CMake: what fits stays whole, and only what exceeds the bound splits. |
 | merge clauses | Adjacent definitions of the same kind and name, in the same scope, merge while they fit (Haskell equations, Elixir and Erlang function clauses). |
 
 Every table also has these behaviours, which the classic table leaves off: a whitespace
@@ -224,15 +229,17 @@ chunks (chunk format 3), which a reader tells apart by its `file` key. `outline`
 prints it as a line with the path and lines, `metadata` and the title. Watcher deltas
 and indexes hold chunks only.
 
-### HTML, XML, Svelte and embedded templates
+### HTML, XML, Svelte, Astro and embedded templates
 
 Elements are the units. An element that fits stays whole, a larger one splits into its
 child elements and text, which pack together, and a closing tag stays with the content
-before it. HTML `<script>` and `<style>` blocks (and Svelte's) stay whole when they
-fit. Scopes are the chain of start tags, for example
+before it. HTML `<script>` and `<style>` blocks (and Svelte's and Astro's) stay whole
+when they fit. Scopes are the chain of start tags, for example
 `<html lang="en"> › <body> › <section id="summary">`. XML comments attach to the next
-element. Embedded templates (ERB, EJS) split between their text and directives when a
-file exceeds the bound. A file that fits is one chunk.
+element. An Astro component's `---` frontmatter script is a unit like a `<script>`
+block, and the pieces of one larger than the bound have the scope `---`. Embedded
+templates (ERB, EJS) split between their text and directives when a file exceeds the
+bound. A file that fits is one chunk.
 
 ### CSS
 
@@ -253,6 +260,10 @@ structure, and the scope is the key path:
   (`resource "aws_lb" "web"`), and a file splits into them like code.
 - **Protocol Buffers:** messages, enums, services, RPCs and `extend` blocks
   (`service Orders › rpc Get`).
+- **GraphQL:** `schema`, types (`type`, `interface`, `enum`, `input`, `union`,
+  `scalar`), their `extend` forms, directives, fragments and named operations are
+  definitions (`type Order`, `directive @auth`, `query GetOrder`), and a file splits
+  into them like code. The `{ ... }` query shorthand packs with what is around it.
 
 ## Scripts and builds
 
@@ -266,6 +277,16 @@ structure, and the scope is the key path:
   together.
 - **Bash and PowerShell:** functions (and PowerShell classes) are definitions, and the
   top-level commands between them pack into groups.
+
+## Diffs
+
+A diff splits into its file sections, each a `diff` line and what follows it, labelled
+by that line (`diff --git a/src/orders.rs b/src/orders.rs`). A section larger than the
+bound splits into its hunks, labelled by their `@@` line
+(`diff --git a/src/orders.rs b/src/orders.rs › @@ -18,9 +19,14 @@ impl Orders`), and the
+section's header lines join its first hunk. A hunk larger than the bound splits between
+its lines. A unified diff without `diff` lines (plain `diff -u` output) has no file
+sections in the grammar, and its lines pack up to the bound.
 
 ## Fields for the next chunker steps
 
@@ -294,7 +315,7 @@ The tests in `arko_index/tests/languages.rs` run on a sample of every grammar
   unclosed tags, runs of quotes and backticks), each chunked in under a minute with every
   grammar
 - every prefix, cut at each character boundary, of the first 300 bytes of each sample
-  and of an annotated Kotlin sample (16,591 files in one walk): the invariants, no parser
+  and of an annotated Kotlin sample (17,491 files in one walk): the invariants, no parser
   warning, and no 30 seconds without a file finishing
 - invariants on randomly mutated samples (deletions, duplications, inserted syntax,
   swapped lines, truncation) for every grammar

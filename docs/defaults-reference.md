@@ -87,7 +87,7 @@ Defaults of arko_index (see [Defaults (arko_index)](reference-map.md#defaults-ar
   added in chunk JSON format 2 without changing boundaries or IDs. Lexical search indexes a
   chunk's path and source, and its scope only with `BuildOptions::lexical_scope`
   (`index2 --lexical-scope`).
-- 50 languages are parsed and chunked along their structure, and anything else is split
+- 53 languages are parsed and chunked along their structure, and anything else is split
   by the bounded fallback. A Markdown file's front matter is file metadata (chunk format 3
   records it), and its title, without the description, roots every chunk's scope
   (`Options::front_matter_description` adds the description). See
