@@ -90,11 +90,13 @@ libm = { version = "0.2", optional = true }
 # cubecl and cudarc) loads the driver and NVRTC when it starts and compiles its kernels at
 # run time, so building needs no CUDA toolkit. Both include burn's ndarray backend, on
 # which the offline tests run. burn 0.22's CUDA backend downloads LLVM and compiles C
-# while building, so these stay on 0.21.
+# while building, so these stay on 0.21. burn's operation fusion stays off: its fused
+# kernels returned wrong vectors for whole batches of some shapes (an RTX 5090 in f16 at
+# 13 x 608 tokens, an L4 in f32 at 16 x 992), which the same graph without fusion did not.
 burn-tensor = { version = "=0.21.0", default-features = false, features = ["std"], optional = true }
 burn-ndarray = { version = "=0.21.0", default-features = false, features = ["std", "simd", "multi-threads"], optional = true }
-burn-wgpu = { version = "=0.21.0", default-features = false, features = ["std", "fusion", "autotune"], optional = true }
-burn-cuda = { version = "=0.21.0", default-features = false, features = ["std", "fusion", "autotune"], optional = true }
+burn-wgpu = { version = "=0.21.0", default-features = false, features = ["std", "autotune"], optional = true }
+burn-cuda = { version = "=0.21.0", default-features = false, features = ["std", "autotune"], optional = true }
 # Finding the adapters (wgpu) and the driver, GPUs and NVRTC (cudarc) before choosing a
 # device, and placing cubecl's kernel tuning cache: the versions burn uses.
 wgpu = { version = "29", default-features = false, optional = true }
