@@ -95,7 +95,7 @@ fn local_descriptor(_: &str, _: Option<usize>) -> Result<ModelDescriptor, Error>
 const NO_LOCAL: &str = "local models need arko_index built with --features local-embed";
 
 /// An embedder that produces the vectors `descriptor` names (Voyage needs
-/// `VOYAGE_API_KEY`; a local model is downloaded on first use).
+/// `VOYAGE_API_KEY`; a local model loads on first use, downloaded if need be).
 pub fn embedder_for(descriptor: &ModelDescriptor) -> Result<Box<dyn Embedder>, Error> {
     let embedder: Box<dyn Embedder> = match descriptor.provider.as_str() {
         "voyage" => Box::new(voyage::VoyageEmbedder::from_env(
@@ -108,7 +108,7 @@ pub fn embedder_for(descriptor: &ModelDescriptor) -> Result<Box<dyn Embedder>, E
         "local" => {
             let (model, precision) =
                 arko_index::dense::local::LocalModel::for_descriptor(descriptor)?;
-            Box::new(local::embedder(model, precision)?)
+            Box::new(local::LazyEmbedder::new(model, precision))
         }
         #[cfg(not(feature = "local-embed"))]
         "local" => return Err(NO_LOCAL.into()),

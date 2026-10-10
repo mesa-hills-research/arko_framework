@@ -2,14 +2,21 @@
 //! model's pinned files into the Hugging Face cache once, then loads them with
 //! arko_index's [`LocalEmbedder`], which checks every file's size and SHA-256.
 //!
+//! [`LazyEmbedder`] loads the model on its first use: a process that only records
+//! which model an index uses, such as `index2` before it hands the embedding to a
+//! background run, never reads the model's 548 MB.
+//!
 //! The file depends only on arko_index and hf-hub, so a host of the code-search tool
 //! can take it unchanged, as with `voyage.rs`.
 use arko_index::{
     bench_v1::Error,
-    dense::local::{LocalEmbedder, LocalModel, Precision},
+    dense::{
+        EmbedLimits, Embedder, Embedding, InputKind, ModelDescriptor,
+        local::{LocalEmbedder, LocalModel, Precision},
+    },
 };
 use hf_hub::{Cache, Repo, RepoType, api::sync::ApiBuilder};
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::OnceLock};
 
 /// The directory of `model`'s files in the Hugging Face cache (`$HF_HOME/hub`, by
 /// default `~/.cache/huggingface/hub`), downloading the files it lacks.
@@ -53,4 +60,68 @@ pub fn model_dir(model: &LocalModel) -> Result<PathBuf, Error> {
 /// `ARKO_INDEX_THREADS` threads (default: every CPU this process may use).
 pub fn embedder(model: &'static LocalModel, precision: Precision) -> Result<LocalEmbedder, Error> {
     LocalEmbedder::load_with_precision(model, &model_dir(model)?, precision)
+}
+
+/// How a [`LazyEmbedder`] loads its model.
+type Loader = Box<dyn Fn() -> Result<LocalEmbedder, Error> + Send + Sync>;
+
+/// A local model loaded on first use. Its descriptor and limits come from the catalog,
+/// so asking for them loads nothing. The first token count or embedding downloads the
+/// model if need be and loads it, and a failure is kept and returned from then on.
+pub struct LazyEmbedder {
+    model: &'static LocalModel,
+    precision: Precision,
+    load: Loader,
+    loaded: OnceLock<Result<LocalEmbedder, String>>,
+}
+
+impl LazyEmbedder {
+    /// `model` in `precision`, loaded by [`embedder`] on first use.
+    pub fn new(model: &'static LocalModel, precision: Precision) -> Self {
+        Self::with_loader(model, precision, move || embedder(model, precision))
+    }
+
+    /// `model` in `precision`, loaded by `load` on first use.
+    pub fn with_loader(
+        model: &'static LocalModel,
+        precision: Precision,
+        load: impl Fn() -> Result<LocalEmbedder, Error> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            model,
+            precision,
+            load: Box::new(load),
+            loaded: OnceLock::new(),
+        }
+    }
+
+    /// Whether the model was loaded, or its loading tried.
+    pub fn is_loaded(&self) -> bool {
+        self.loaded.get().is_some()
+    }
+
+    fn embedder(&self) -> Result<&LocalEmbedder, Error> {
+        self.loaded
+            .get_or_init(|| (self.load)().map_err(|e| e.to_string()))
+            .as_ref()
+            .map_err(|e| e.clone().into())
+    }
+}
+
+impl Embedder for LazyEmbedder {
+    fn descriptor(&self) -> ModelDescriptor {
+        self.model.descriptor(self.precision)
+    }
+
+    fn limits(&self) -> EmbedLimits {
+        self.model.limits()
+    }
+
+    fn count_tokens(&self, texts: &[&str]) -> Result<Vec<u64>, Error> {
+        self.embedder()?.count_tokens(texts)
+    }
+
+    fn embed(&self, texts: &[&str], kind: InputKind) -> Result<Embedding, Error> {
+        self.embedder()?.embed(texts, kind)
+    }
 }

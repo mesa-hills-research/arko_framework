@@ -132,9 +132,10 @@ pub(crate) fn embed_spool(
                 }
             }
         }
-        // A text over a per-input or per-request limit can never be sent.
+        // A text over the per-input limit can never be sent. One over the per-request
+        // limit alone goes in a request of its own.
         if let Some(&(_, _, n)) = queue.front()
-            && (n > limits.max_input_tokens || n > limits.max_request_tokens)
+            && n > limits.max_input_tokens
         {
             queue.pop_front();
             totals.too_long += 1;
@@ -148,12 +149,12 @@ pub(crate) fn embed_spool(
             }
             continue;
         }
-        // The longest prefix within the request limits...
+        // The longest prefix within the request limits, at least the first text...
         let (mut n, mut sum) = (0usize, 0u64);
         for (_, _, t) in &queue {
             if n == limits.max_items
                 || *t > limits.max_input_tokens
-                || sum + t > limits.max_request_tokens
+                || (n > 0 && sum + t > limits.max_request_tokens)
             {
                 break;
             }

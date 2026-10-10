@@ -192,7 +192,8 @@ impl ModelDescriptor {
 pub struct EmbedLimits {
     /// Texts per request.
     pub max_items: usize,
-    /// Total tokens per request (by [`Embedder::count_tokens`]).
+    /// Total tokens per request (by [`Embedder::count_tokens`]). A text over it but
+    /// within `max_input_tokens` goes in a request of its own.
     pub max_request_tokens: u64,
     /// Tokens per text. A longer text is not embedded (counted in
     /// [`EmbedStats::too_long`]); its chunk stays searchable lexically.

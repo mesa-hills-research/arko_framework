@@ -8,14 +8,17 @@
 //! ([`LocalEmbedder::load`]) and checks them. Fetching them is the caller's: the
 //! examples download into the Hugging Face cache (`examples/support/local.rs`).
 //!
-//! A batch of texts is tokenized with the model's own tokenizer (truncated at
-//! [`LocalModel::max_tokens`]), run through the encoder packed together without
-//! padding, pooled ([`Pooling`]) and normalized to unit length. The linear layers run
-//! in int8 by default ([`Precision`]). Work is spread over a dedicated thread pool
+//! A batch of texts is tokenized with the model's own tokenizer, run through the
+//! encoder packed together without padding, pooled ([`Pooling`]) and normalized to
+//! unit length. A text longer than [`LocalModel::max_tokens`] is embedded in windows
+//! the model takes, each with its special tokens, and its vector is their mean weighted
+//! by the text tokens each holds, at unit length. The linear layers run in int8 by
+//! default ([`Precision`]). Work is spread over a dedicated thread pool
 //! ([`LocalEmbedder::with_threads`]; by default [`threads`](crate::threads)).
 mod int8;
 mod model;
 mod safetensors;
+mod window;
 
 pub use model::{Architecture, Pooling};
 
@@ -25,7 +28,7 @@ use model::{Config, Encoder};
 use safetensors::Tensors;
 use sha2::{Digest, Sha256};
 use std::path::Path;
-use tokenizers::{Tokenizer, TruncationParams};
+use tokenizers::Tokenizer;
 
 /// One file of a model: its name in the repository, its size and SHA-256 (hex).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,7 +51,8 @@ pub struct LocalModel {
     /// The pinned commit of the repository.
     pub revision: &'static str,
     pub dimensions: usize,
-    /// Tokens per text, special tokens included. Longer texts are truncated.
+    /// Tokens per text the model takes, special tokens included. Longer texts are
+    /// embedded in windows of this many tokens.
     pub max_tokens: usize,
     /// Prepended to a search query.
     pub query_prefix: &'static str,
@@ -235,10 +239,27 @@ impl LocalModel {
     pub fn download_size(&self) -> u64 {
         self.files.iter().map(|f| f.size).sum()
     }
+
+    /// The limits of a [`LocalEmbedder`] of this model with the default batch size,
+    /// known without loading it.
+    pub fn limits(&self) -> EmbedLimits {
+        limits(self, DEFAULT_BATCH_TOKENS)
+    }
 }
 
 /// Texts per [`embed`](Embedder::embed) call ([`EmbedLimits::max_items`]).
 const MAX_ITEMS: usize = 256;
+
+/// Up to 256 texts and the larger of `batch_tokens` and the model's input per request.
+/// No text is too long: a longer one goes in a request of its own and is embedded in
+/// windows.
+fn limits(model: &LocalModel, batch_tokens: usize) -> EmbedLimits {
+    EmbedLimits::new(
+        MAX_ITEMS,
+        batch_tokens.max(model.max_tokens) as u64,
+        u64::MAX,
+    )
+}
 
 /// The default tokens per forward pass ([`LocalEmbedder::with_batch_tokens`]).
 pub const DEFAULT_BATCH_TOKENS: usize = 8192;
@@ -249,6 +270,10 @@ pub struct LocalEmbedder {
     precision: Precision,
     encoder: Encoder,
     tokenizer: Tokenizer,
+    /// The query and document prefixes' tokens, which every window of a long text
+    /// repeats.
+    query_prefix: Vec<u32>,
+    document_prefix: Vec<u32>,
     pool: rayon::ThreadPool,
     threads: usize,
     batch_tokens: usize,
@@ -321,17 +346,26 @@ impl LocalEmbedder {
             .into());
         }
         tokenizer.with_padding(None);
+        // Whole texts: a `tokenizer.json` may set a truncation (CodeRankEmbed's, 512).
         tokenizer
-            .with_truncation(Some(TruncationParams {
-                max_length: model.max_tokens,
-                ..TruncationParams::default()
-            }))
+            .with_truncation(None)
             .map_err(|e| format!("{}: truncation: {e}", model.repo))?;
+        let prefix = |text: &str| -> Result<Vec<u32>, Error> {
+            Ok(tokenizer
+                .encode_fast(text, false)
+                .map_err(|e| format!("tokenizing for {}: {e}", model.repo))?
+                .get_ids()
+                .to_vec())
+        };
+        let (query_prefix, document_prefix) =
+            (prefix(model.query_prefix)?, prefix(model.document_prefix)?);
         Ok(Self {
             model,
             precision,
             encoder,
             tokenizer,
+            query_prefix,
+            document_prefix,
             pool,
             threads,
             batch_tokens: DEFAULT_BATCH_TOKENS,
@@ -346,7 +380,7 @@ impl LocalEmbedder {
     }
 
     /// Tokens per forward pass (default [`DEFAULT_BATCH_TOKENS`]). Larger batches keep
-    /// more threads busy and take more memory: about 12 KB per token for a model with
+    /// more threads busy and take more memory: about 58 KB per token for a model with
     /// 768 dimensions.
     pub fn with_batch_tokens(mut self, tokens: usize) -> Self {
         self.batch_tokens = tokens.max(1);
@@ -365,9 +399,9 @@ impl LocalEmbedder {
         self.threads
     }
 
-    /// Token ids of each text with the prefix of `kind`, special tokens included,
-    /// truncated at the model's limit.
-    fn encode(&self, texts: &[&str], kind: InputKind) -> Result<Vec<Vec<u32>>, Error> {
+    /// Each text with the prefix of `kind`, tokenized whole: its token ids, special
+    /// tokens included, and how many special tokens lead and trail.
+    fn encode(&self, texts: &[&str], kind: InputKind) -> Result<Vec<Encoded>, Error> {
         let prefix = match kind {
             InputKind::Query => self.model.query_prefix,
             InputKind::Document => self.model.document_prefix,
@@ -377,16 +411,27 @@ impl LocalEmbedder {
             .pool
             .install(|| self.tokenizer.encode_batch_fast(inputs, true))
             .map_err(|e| format!("tokenizing for {}: {e}", self.model.repo))?;
-        let ids: Vec<Vec<u32>> = encodings.iter().map(|e| e.get_ids().to_vec()).collect();
-        if ids.iter().any(Vec::is_empty) {
-            return Err(format!("{}: a text produced no tokens", self.model.repo).into());
-        }
-        Ok(ids)
+        encodings
+            .iter()
+            .map(|e| {
+                let special = e.get_special_tokens_mask();
+                let lead = special.iter().take_while(|&&s| s == 1).count();
+                let tail = special.iter().rev().take_while(|&&s| s == 1).count();
+                if e.get_ids().is_empty() {
+                    return Err(format!("{}: a text produced no tokens", self.model.repo).into());
+                }
+                Ok(Encoded {
+                    ids: e.get_ids().to_vec(),
+                    lead: lead.min(e.len()),
+                    tail: tail.min(e.len() - lead.min(e.len())),
+                })
+            })
+            .collect()
     }
 
-    /// One forward pass over `batch`; each text's unit vector.
-    fn run(&self, batch: &[Vec<u32>]) -> Result<Vec<Vec<f32>>, Error> {
-        let lens: Vec<usize> = batch.iter().map(Vec::len).collect();
+    /// One forward pass over `batch`; each sequence's unit vector.
+    fn run(&self, batch: &[&[u32]]) -> Result<Vec<Vec<f32>>, Error> {
+        let lens: Vec<usize> = batch.iter().map(|ids| ids.len()).collect();
         let ids = batch.concat();
         let h = self.encoder.hidden();
         let states = self.pool.install(|| self.encoder.forward(&ids, &lens))?;
@@ -431,44 +476,69 @@ impl Embedder for LocalEmbedder {
         self.model.descriptor(self.precision)
     }
 
-    /// Up to 256 texts per call, at least the model's own limit of tokens per call;
-    /// no text is too long, since longer texts are truncated.
+    /// Up to 256 texts and the larger of the batch size and the model's input per
+    /// call. No text is too long: a longer one is embedded in windows.
     fn limits(&self) -> EmbedLimits {
-        EmbedLimits::new(
-            MAX_ITEMS,
-            self.batch_tokens.max(self.model.max_tokens) as u64,
-            self.model.max_tokens as u64,
-        )
+        limits(self.model, self.batch_tokens)
     }
 
-    /// Tokens as documents, after truncation.
+    /// Tokens as documents, special tokens included, of the whole text.
     fn count_tokens(&self, texts: &[&str]) -> Result<Vec<u64>, Error> {
         Ok(self
             .encode(texts, InputKind::Document)?
             .iter()
-            .map(|ids| ids.len() as u64)
+            .map(|e| e.ids.len() as u64)
             .collect())
     }
 
-    /// Returns the tokens processed as `tokens` (nothing is billed).
+    /// One vector per text. Returns the tokens processed as `tokens`, the special
+    /// tokens and prefixes that windows repeat included (nothing is billed).
     fn embed(&self, texts: &[&str], kind: InputKind) -> Result<Embedding, Error> {
-        let ids = self.encode(texts, kind)?;
-        let mut vectors = Vec::with_capacity(ids.len());
+        let prefix = match kind {
+            InputKind::Query => &self.query_prefix,
+            InputKind::Document => &self.document_prefix,
+        };
+        // Every text's windows, in order: (text, window).
+        let mut windows = Vec::new();
+        for (t, e) in self.encode(texts, kind)?.into_iter().enumerate() {
+            for w in window::split(&e.ids, e.lead, e.tail, prefix, self.model.max_tokens)? {
+                windows.push((t, w));
+            }
+        }
+        // Forward passes of at most `batch_tokens` (one window may exceed it alone).
+        let mut window_vectors = Vec::with_capacity(windows.len());
         let mut tokens = 0u64;
-        // Forward passes of at most `batch_tokens` (one text may exceed it alone).
         let mut i = 0;
-        while i < ids.len() {
+        while i < windows.len() {
             let (mut j, mut sum) = (i, 0);
-            while j < ids.len() && (j == i || sum + ids[j].len() <= self.batch_tokens) {
-                sum += ids[j].len();
+            while j < windows.len() && (j == i || sum + windows[j].1.ids.len() <= self.batch_tokens)
+            {
+                sum += windows[j].1.ids.len();
                 j += 1;
             }
-            vectors.extend(self.run(&ids[i..j])?);
+            let batch: Vec<&[u32]> = windows[i..j].iter().map(|(_, w)| &w.ids[..]).collect();
+            window_vectors.extend(self.run(&batch)?);
             tokens += sum as u64;
             i = j;
         }
+        let mut vectors = Vec::with_capacity(texts.len());
+        let mut at = 0;
+        while at < windows.len() {
+            let text = windows[at].0;
+            let end = at + windows[at..].iter().take_while(|(t, _)| *t == text).count();
+            let weights: Vec<usize> = windows[at..end].iter().map(|(_, w)| w.weight).collect();
+            vectors.push(window::combine(&window_vectors[at..end], &weights));
+            at = end;
+        }
         Ok(Embedding { vectors, tokens })
     }
+}
+
+/// A tokenized text: its ids and how many special tokens lead and trail them.
+struct Encoded {
+    ids: Vec<u32>,
+    lead: usize,
+    tail: usize,
 }
 
 #[cfg(test)]

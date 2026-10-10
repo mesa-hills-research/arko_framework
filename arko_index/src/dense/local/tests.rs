@@ -483,11 +483,14 @@ fn matches_a_direct_transcription_of_both_architectures() {
         let texts = texts();
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
         let got = e.embed(&refs, InputKind::Document).unwrap();
-        let ids = e.encode(&refs, InputKind::Document).unwrap();
+        let encoded = e.encode(&refs, InputKind::Document).unwrap();
         assert_eq!(got.vectors.len(), texts.len());
-        assert_eq!(got.tokens, ids.iter().map(|i| i.len() as u64).sum::<u64>());
-        for (v, ids) in got.vectors.iter().zip(&ids) {
-            let want = reference(t, &w, ids);
+        assert_eq!(
+            got.tokens,
+            encoded.iter().map(|e| e.ids.len() as u64).sum::<u64>()
+        );
+        for (v, e) in got.vectors.iter().zip(&encoded) {
+            let want = reference(t, &w, &e.ids);
             assert!(close(v, &want, 2e-5), "{:?}\n{v:?}\n{want:?}", t.arch);
             assert!((v.iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-5);
         }
@@ -510,9 +513,9 @@ fn int8_vectors_stay_close_to_f32() {
         let texts = texts();
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
         let got = e.embed(&refs, InputKind::Document).unwrap();
-        let ids = e.encode(&refs, InputKind::Document).unwrap();
-        for (v, ids) in got.vectors.iter().zip(&ids) {
-            let want = reference(t, &w, ids);
+        let encoded = e.encode(&refs, InputKind::Document).unwrap();
+        for (v, e) in got.vectors.iter().zip(&encoded) {
+            let want = reference(t, &w, &e.ids);
             let sim = cosine(v, &want);
             assert!(sim > 0.995, "{:?}: {sim}", t.arch);
             assert!((cosine(v, v) - 1.0).abs() < 1e-5);
@@ -557,8 +560,21 @@ fn batching_threads_and_order_leave_vectors_unchanged() {
     }
 }
 
+/// The vector of a text the model takes in windows: their reference vectors' mean
+/// weighted by the text tokens each holds, at unit length.
+fn windowed(t: &Tiny, w: &Weights, windows: &[(Vec<u32>, usize)]) -> Vec<f32> {
+    let mut v = vec![0f32; t.hidden];
+    for (ids, weight) in windows {
+        for (s, x) in v.iter_mut().zip(reference(t, w, ids)) {
+            *s += *weight as f32 * x;
+        }
+    }
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    v.iter().map(|x| x / norm).collect()
+}
+
 #[test]
-fn queries_take_the_prefix_and_long_texts_are_truncated() {
+fn queries_take_the_prefix_and_long_texts_are_embedded_whole() {
     let dir = tempfile::tempdir().unwrap();
     let (model, w) = tiny_model(&NOMIC, dir.path(), "search for : ", 32);
     let e = LocalEmbedder::load_with_precision(model, dir.path(), Precision::F32).unwrap();
@@ -573,20 +589,52 @@ fn queries_take_the_prefix_and_long_texts_are_truncated() {
         &reference(&NOMIC, &w, &[2, 4, 5, 6, 20, 21, 3]),
         2e-5
     ));
-    // 100 words become 30 words and the two special tokens.
-    let long = (0..100)
-        .map(|k| format!("w{}", 10 + k % 50))
+    // 100 words, over the model's 32 tokens: counted whole, embedded in windows of 30
+    // words between [CLS] and [SEP].
+    let words: Vec<u32> = (0..100).map(|k| 10 + k % 50).collect();
+    let long = words
+        .iter()
+        .map(|k| format!("w{k}"))
         .collect::<Vec<_>>()
         .join(" ");
-    assert_eq!(e.count_tokens(&[&long, "w9"]).unwrap(), vec![32, 3]);
-    let v = e.embed(&[&long], InputKind::Document).unwrap();
-    assert_eq!(v.tokens, 32);
-    let mut ids = vec![2u32];
-    ids.extend((0..30).map(|k| 10 + k % 50));
-    ids.push(3);
-    assert!(close(&v.vectors[0], &reference(&NOMIC, &w, &ids), 2e-5));
+    assert_eq!(e.count_tokens(&[&long, "w9"]).unwrap(), vec![102, 3]);
+    let v = e.embed(&[&long, "w9"], InputKind::Document).unwrap();
+    assert_eq!(v.vectors.len(), 2);
+    assert_eq!(v.tokens, 100 + 4 * 2 + 3);
+    let documents: Vec<(Vec<u32>, usize)> = words
+        .chunks(30)
+        .map(|piece| ([&[2][..], piece, &[3]].concat(), piece.len()))
+        .collect();
+    assert!(close(
+        &v.vectors[0],
+        &windowed(&NOMIC, &w, &documents),
+        2e-5
+    ));
+    assert!(close(
+        &v.vectors[1],
+        &reference(&NOMIC, &w, &[2, 9, 3]),
+        2e-5
+    ));
+    // The tail changes the vector.
+    let mut other = words.clone();
+    other[95..].fill(60);
+    let other = other
+        .iter()
+        .map(|k| format!("w{k}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let o = e.embed(&[&other], InputKind::Document).unwrap();
+    assert!(cosine(&v.vectors[0], &o.vectors[0]) < 0.9999);
+    // A long query repeats the prefix in every window: 27 words each.
+    let q = e.embed(&[&long], InputKind::Query).unwrap();
+    let queries: Vec<(Vec<u32>, usize)> = words
+        .chunks(27)
+        .map(|piece| ([&[2, 4, 5, 6][..], piece, &[3]].concat(), piece.len()))
+        .collect();
+    assert!(close(&q.vectors[0], &windowed(&NOMIC, &w, &queries), 2e-5));
     let limits = e.limits();
-    assert_eq!(limits.max_input_tokens, 32);
+    assert_eq!(limits.max_input_tokens, u64::MAX);
+    assert_eq!(limits, model.limits());
     assert!(limits.max_request_tokens >= 32);
 }
 

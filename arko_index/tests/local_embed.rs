@@ -1,7 +1,8 @@
-//! The local models against their own PyTorch code (`--features local-embed`).
+//! The local models against their own PyTorch code (`--features local-embed`), and
+//! the CLI's lazy loading of them.
 //!
-//! Ignored by default: it downloads both models (about 870 MB) into the Hugging Face
-//! cache. Run it with
+//! The model tests are ignored by default: they download both models (about 870 MB)
+//! into the Hugging Face cache. Run them with
 //! `cargo test -p arko_index --features local-embed --test local_embed -- --ignored`.
 //!
 //! `tests/data/local-embed/*.json` hold, for eight texts (a model-card example, code,
@@ -10,6 +11,7 @@
 //! the first 16 components, a projection over all 768 and every pairwise similarity.
 //! Those checks run in f32. The int8 vectors are checked against the f32 ones and
 //! PyTorch's similarities, within the quantization's error.
+#[allow(dead_code)]
 #[path = "../examples/support/local.rs"]
 mod local;
 
@@ -18,6 +20,103 @@ use arko_index::dense::{
     local::{CODE_RANK_EMBED, JINA_CODE_V2, LocalModel, Precision},
 };
 use serde::Deserialize;
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+/// The lazy embedder answers for its model and limits without loading it, loads on
+/// the first token count, once, and keeps a failure.
+#[test]
+fn the_lazy_embedder_loads_on_first_use() {
+    let loads = Arc::new(AtomicUsize::new(0));
+    let counter = loads.clone();
+    let e = local::LazyEmbedder::with_loader(&CODE_RANK_EMBED, Precision::Int8, move || {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Err("no model here".into())
+    });
+    assert_eq!(e.descriptor(), CODE_RANK_EMBED.descriptor(Precision::Int8));
+    assert_eq!(e.limits(), CODE_RANK_EMBED.limits());
+    assert!(!e.is_loaded());
+    assert_eq!(loads.load(Ordering::SeqCst), 0);
+    for _ in 0..2 {
+        let err = e.count_tokens(&["fn main() {}"]).unwrap_err().to_string();
+        assert!(err.contains("no model here"), "{err}");
+    }
+    assert!(e.embed(&["x"], InputKind::Query).is_err());
+    assert!(e.is_loaded());
+    assert_eq!(loads.load(Ordering::SeqCst), 1);
+}
+
+/// The `arko_index_cli` example, which `cargo test` builds before the tests.
+fn cli() -> PathBuf {
+    let exe = std::env::current_exe().unwrap();
+    let profile_dir = exe.parent().and_then(Path::parent).unwrap();
+    let cli = profile_dir
+        .join("examples")
+        .join(format!("arko_index_cli{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        cli.is_file(),
+        "{} is missing: run the whole suite or build it first \
+         (`cargo build -p arko_index --features local-embed --example arko_index_cli`)",
+        cli.display()
+    );
+    cli
+}
+
+/// `index2 --embed local` returns once lexical search is ready without loading the
+/// model: here there is none to load, in an empty Hugging Face cache with no server.
+/// The background run is the one that loads it, in the precision the index records.
+#[test]
+fn index2_hands_the_local_model_to_the_background_run_unloaded() {
+    let dir = tempfile::tempdir().unwrap();
+    let (root, state, hf) = (
+        dir.path().join("tree"),
+        dir.path().join("state"),
+        dir.path().join("hf"),
+    );
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn backoff(attempt: u32) -> u64 {\n    1 << attempt.min(16)\n}\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(cli())
+        .args(["index2", "--embed", "local:f32"])
+        .arg(&root)
+        .arg(&state)
+        .env("HF_HOME", &hf)
+        .env("HF_ENDPOINT", "http://127.0.0.1:9")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(stderr.contains("embedding in the background"), "{stderr}");
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(state.join("dense.json")).unwrap()).unwrap();
+    assert_eq!(
+        config["embedder"]["revision"].as_str(),
+        CODE_RANK_EMBED
+            .descriptor(Precision::F32)
+            .revision
+            .as_deref()
+    );
+    // The background run tries to load the model, and fails without one.
+    let log = state.join("embed.log");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        if text.contains(CODE_RANK_EMBED.repo) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "embed.log: {text}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
 
 #[derive(Deserialize)]
 struct Reference {
@@ -159,6 +258,29 @@ fn check_int8(model: &'static LocalModel, reference: &str) {
 const INT8_MIN_COSINE: f32 = 0.997;
 /// How far an int8 similarity of two texts may be from PyTorch's.
 const INT8_SIMILARITY_TOLERANCE: f32 = 0.015;
+
+/// A text over the model's 8,192 tokens is embedded whole: its tail moves its vector.
+#[test]
+#[ignore = "downloads both models (about 870 MB) from Hugging Face"]
+fn long_texts_are_embedded_whole() {
+    let e = local::embedder(&CODE_RANK_EMBED, Precision::Int8).unwrap();
+    let body: String = (0..1200)
+        .map(|i| format!("let value_{i} = compute({i});\n"))
+        .collect();
+    let a = format!("{body}fn retry_with_backoff() {{}}\n");
+    let b = format!("{body}struct JournalEntry;\n");
+    let texts = [a.as_str(), b.as_str()];
+    let counts = e.count_tokens(&texts).unwrap();
+    assert!(counts.iter().all(|&n| n > 8192), "{counts:?}");
+    let v = e.embed(&texts, InputKind::Document).unwrap();
+    assert!(v.tokens >= counts.iter().sum::<u64>());
+    let sim: f32 = v.vectors[0]
+        .iter()
+        .zip(&v.vectors[1])
+        .map(|(x, y)| x * y)
+        .sum();
+    assert!(sim < 0.99999, "{sim}");
+}
 
 #[test]
 #[ignore = "downloads both models (about 870 MB) from Hugging Face"]
