@@ -385,7 +385,7 @@ pub const DEFAULT_BATCH_TOKENS: usize = 8192;
 
 /// The default tokens per forward pass on a GPU, padding included
 /// ([`LocalEmbedder::with_batch_tokens`]).
-pub const DEFAULT_GPU_BATCH_TOKENS: usize = 16384;
+pub const DEFAULT_GPU_BATCH_TOKENS: usize = 4096;
 
 /// Runs a [`LocalModel`] on the CPU or a GPU. See the [module docs](self).
 pub struct LocalEmbedder {

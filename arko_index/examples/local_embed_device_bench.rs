@@ -19,7 +19,7 @@
 //!
 //! ```sh
 //! cargo run --release -p arko_index --features local-embed-cuda --example local_embed_device_bench -- \
-//!     run --corpus corpus.jsonl --device cuda --precision f16 --batch-tokens 8192,16384,32768 \
+//!     run --corpus corpus.jsonl --device cuda --precision f16 --batch-tokens 2048,4096,8192 \
 //!     [--model NAME] [--repeats 3] [--max-seconds 120] [--limit N] [--sample N] [--long N] \
 //!     [--only-sample] [--save-sample FILE] [--reference FILE] [--out results.jsonl] [--label TEXT]
 //! ```
