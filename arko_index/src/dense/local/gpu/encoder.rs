@@ -349,6 +349,8 @@ impl<B: Backend> Encoder<B> {
     /// Scaled dot-product attention of `q`, `k` and `v` (`[rows, heads, len, head_dim]`,
     /// `f32`) with the padding `mask`, and ALiBi biases for Jina, in blocks of query rows
     /// of at most [`SCORE_ELEMENTS`] scores and what one buffer holds. Returns `f32`.
+    /// The queries are scaled before the product, so that scores in `f16` stay far
+    /// from its largest value (65,504).
     fn attention(
         &self,
         q: Tensor<B, 4>,
@@ -359,7 +361,7 @@ impl<B: Backend> Encoder<B> {
         let [rows, heads, len, dh] = q.dims();
         let scale = 1.0 / (dh as f32).sqrt();
         let block = query_block(rows * heads, len, score_limit().min(self.max_elements));
-        let q = q.cast(self.dtype);
+        let q = (q * scale).cast(self.dtype);
         let kt = k.cast(self.dtype).swap_dims(2, 3);
         let v = v.cast(self.dtype);
         let mut parts = Vec::with_capacity(len.div_ceil(block));
@@ -370,7 +372,7 @@ impl<B: Backend> Encoder<B> {
             } else {
                 q.clone().narrow(2, r0, n)
             };
-            let mut scores = qb.matmul(kt.clone()).cast(FloatDType::F32) * scale + mask.clone();
+            let mut scores = qb.matmul(kt.clone()).cast(FloatDType::F32) + mask.clone();
             if let Some(neg_slopes) = &self.neg_slopes {
                 let dev = &self.device;
                 let r = Tensor::<B, 1, Int>::arange(r0 as i64..(r0 + n) as i64, dev)

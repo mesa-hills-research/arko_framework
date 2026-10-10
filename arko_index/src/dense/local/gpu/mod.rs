@@ -499,6 +499,15 @@ impl Gpu {
         if pooled.len() != seqs.len() {
             return Err("the GPU returned the wrong number of vectors".into());
         }
+        // A wrong kernel or an overflow in f16 can leave NaN or infinity: an error
+        // rather than a vector that spoils every score it enters.
+        if pooled.iter().flatten().any(|x| !x.is_finite()) {
+            return Err(format!(
+                "{} returned a vector with NaN or infinite values",
+                self.name
+            )
+            .into());
+        }
         let mut out = vec![Vec::new(); seqs.len()];
         for (&i, mut v) in plan.order().zip(pooled) {
             let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
