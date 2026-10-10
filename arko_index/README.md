@@ -10,8 +10,9 @@ watching run entirely on your machine.
 
 Dense (embedding) and hybrid search are opt-in. They embed through a `dense::Embedder` the
 caller supplies (the CLI uses Voyage through arko_ai) or with a code-embedding model run on
-the CPU ([local models](#local-models)), and the library itself never makes a network call. Lexical search works as soon as a build has chunked the tree, and dense
-results fill in while the chunks are embedded, however long a slow model takes. The vectors
+the CPU ([local models](#local-models)), and the library itself never makes a network call.
+Lexical search works as soon as a build has chunked the tree, and dense results fill in while
+the chunks are embedded, however long a slow model takes. The vectors
 live in [Caprock](https://github.com/mesa-hills-research/caprock), a pure-Rust store
 updated in place as they arrive. A search scans int8 codes held in memory and rescores the
 best candidates at full precision: on 199,999 code chunks it took 13.5 ms per query and

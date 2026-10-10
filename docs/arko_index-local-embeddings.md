@@ -65,10 +65,6 @@ below it matched voyage-code-4, while the Jina model fell well behind, so CodeRa
 is the default. The Jina model reads code with fewer tokens (about 14% fewer on the
 arko snapshot) and so runs a little faster.
 
-Qwen3-Embedding-0.6B scores higher on MTEB code tasks but has four times the
-parameters, so it would embed about four times slower on the CPU. Adding it means a
-decoder implementation (grouped-query attention, RMSNorm, last-token pooling).
-
 ## Precision
 
 The linear layers after attention, the output projection and the two feed-forward
@@ -94,7 +90,7 @@ instructions. Both compute the same integer sums. Weights take 7 bits because
 `vpmaddubsw` adds pairs of byte products into 16 bits with saturation, and pairs of
 8-bit activations times 7-bit weights stay within the 16-bit range.
 
-Int8 embeds about 1.4 times as fast as f32 and keeps 0.3 GB less in memory. Its
+Int8 embeds about 1.4 times as fast as f32 and takes 0.2 GB less memory. Its
 vectors stay within a cosine similarity of 0.998 of the f32 ones, and on the arko
 evaluation it finds what f32 finds ([measurements](#measurements)). `local:f32` runs
 the model as it was trained.
@@ -102,8 +98,11 @@ the model as it was trained.
 ## How it runs
 
 - **Tokens.** The model's own `tokenizer.json`, through the `tokenizers` crate with the
-  pure-Rust fancy-regex engine. Every chunk is embedded whole: only texts longer than
-  the model's 8,192 tokens are truncated, and arko_index's chunks stay far below that.
+  pure-Rust fancy-regex engine. Every text is embedded whole. One longer than the
+  model's 8,192 tokens, which arko_index's default chunks never reach, runs in windows
+  of up to 8,192 tokens, each with the model's special tokens and the query prefix.
+  Its vector is the mean of the windows' vectors, weighted by the text tokens each
+  holds, at unit length.
 - **Batches.** A build sends up to 256 texts and 8,192 tokens per request. The texts of
   a request run through the encoder packed back to back, without padding: the linear
   layers run once over all tokens, attention runs per text, head and block of 128
@@ -117,9 +116,11 @@ the model as it was trained.
 - **Output.** Mean or `[CLS]` pooling as the model was trained, then unit length.
   `tokens` in the build's statistics counts the tokens processed. Nothing is billed, and
   a `--max-embed-tokens` cap still applies as a work limit.
-- **Memory.** While embedding with CodeRankEmbed, about 0.45 GB in int8 and 0.75 GB in
-  f32: the weights, and about 12 KB per token of the batch in flight. Loading peaks at
-  1.0 GB in int8 and 1.2 GB in f32, with the model file in memory.
+- **Memory.** CodeRankEmbed holds 0.34 GB in int8 and 0.57 GB in f32 once loaded. A
+  forward pass adds about 58 KB per token in flight, so a full pass of 8,192 tokens
+  peaks at 0.8 GB in int8 and 1.0 GB in f32. A smaller `with_batch_tokens` lowers
+  that. Loading peaks at 1.0 GB in int8 and 1.2 GB in f32, with the model file in
+  memory.
 
 The feature adds gemm, pulp, rayon, tokenizers and libm, all pure Rust:
 `cargo tree -p arko_index --features local-embed -e normal,build --target all -i cc`
@@ -127,20 +128,13 @@ prints nothing.
 
 ## Verification
 
-`tests/local_embed.rs` (ignored, it downloads both models) embeds eight texts with
-each model, among them the Jina model card's example and a 2,400-token text, and
-compares them with vectors from the models' own PyTorch code
-(`scripts/local_embed_reference.py`, transformers 4.56 with `trust_remote_code`). In
-f32 every component and every pairwise similarity agrees within 2·10⁻⁴, token counts
-are identical, and the Jina model card's similarity of 0.7282 comes out the same. In
-int8 each text's vector has a cosine similarity above 0.997 with its f32 vector, and
-the pairwise similarities stay within 0.015 of PyTorch's.
+```sh
+cargo test -p arko_index --features local-embed
+cargo test -p arko_index --features local-embed --test local_embed -- --ignored   # downloads both models
+```
 
-The offline unit tests build tiny random models of both architectures and check the
-packed, threaded forward pass against a direct transcription of the PyTorch code, and
-that batching, thread count and order leave every vector unchanged, in both
-precisions. The int8 kernels are checked against a plain loop over the whole range of
-levels.
+The ignored tests compare both models' f32 vectors with their PyTorch code, within
+2·10⁻⁴, and the int8 vectors with the f32 ones.
 
 ## Measurements
 
@@ -210,16 +204,3 @@ On 40 threads of an AMD EPYC 9354P (Zen 4, AVX-512) shared with other jobs, Code
 in f32 embedded the 7,438 chunks of the arko repository in 330 s, 22 chunks/s. The
 index state took 50.3 MB: 23.0 MB of vectors, 23.1 MB of embedding cache and 4.2 MB of
 lexical index. AVX-512 made the f32 matrix products 54% faster than AVX2 there.
-
-## Making dense search the default
-
-Dense search can turn on by default once these hold:
-
-1. **The host builds with `local-embed`** and a first use downloads 548 MB, which needs
-   a notice and an opt-out (`--no-embed` exists).
-2. **A thread budget.** Embedding takes every CPU by default. A background embedder
-   should use a share of them, at low priority, so the machine stays usable.
-3. **Measurements on Apple Silicon**, where the int8 kernel runs on `sdot`.
-4. **VNNI.** On x86 CPUs with VNNI (`vpdpbusd`: Intel since Ice Lake and Alder Lake,
-   AMD since Zen 4) an int8 kernel could do in one instruction what AVX2 does in three,
-   and take 8-bit weights.
