@@ -125,8 +125,10 @@ files (548 MB) into the Hugging Face cache. On the retrieval questions above it 
 voyage-code-4 finds. On 6 cores of a laptop's i9-13980HX it embeds about 7.6 chunks a
 second, so the 7,521 chunks of this repository's evaluation snapshot took about 16 minutes,
 once: the cache keeps the vectors, and lexical search works while they fill in.
-[arko_index local embeddings](../docs/arko_index-local-embeddings.md) has the models, the
-measurements and the evaluation.
+With `local-embed-cuda` (NVIDIA, through CUDA) or `local-embed-gpu` (Vulkan, Metal or
+DirectX 12, through wgpu) the same models run on a GPU, in f32, f16 or bf16
+(`--embed local:f16:gpu`). [arko_index local embeddings](../docs/arko_index-local-embeddings.md)
+has the models, the GPUs, the measurements and the evaluation.
 
 ## Watchers
 

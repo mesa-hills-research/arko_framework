@@ -5,7 +5,8 @@ offline BM25 indexes over them, optionally embeds the chunks for dense and hybri
 search, and keeps chunk snapshots current with durable watchers. The library makes no
 network calls and depends on no other arko crate: embeddings come from a caller's
 `dense::Embedder` (its examples adapt arko_ai's Voyage client, a dev-dependency), or
-from a model run on the CPU with the `local-embed` feature. The
+from a model run on the CPU with the `local-embed` feature (on a GPU with
+`local-embed-cuda` or `local-embed-gpu`). The
 [crate README](../arko_index/README.md) is the overview. This page describes the
 behaviour (which files are indexed, how boundaries and IDs are chosen, context headers,
 dense and hybrid search, the watchers' durability) and lists the API, the CLI, the
@@ -19,7 +20,7 @@ environment variables, the defaults and the on-disk state.
 | `arko_index::search` | The first index format (one JSON file): `index`, `index_with`, `search`, `outline`. | `arko_index/src/search.rs` |
 | `arko_index::index2` | The disk-resident index: `index`, `index_with`, `build`, `BuildOptions`, `search`, `dense_info`, `BuildStats`, and its embedding: `embed`, `status`, `IndexStatus`. | `arko_index/src/index2.rs` |
 | `arko_index::dense` | Embeddings: `Embedder`, `ModelDescriptor`, `EmbedLimits`, `Embedding`, `InputKind`, `HashEmbedder`, `embed_query`, `render`, `render_with`, `EmbedText`, `RENDER_VERSION`, `DenseConfig`, `DenseBuild`, `EmbedProgress`, `EmbedStats`, `EmbedState`, `DenseIndexInfo`. | `arko_index/src/dense/` |
-| `arko_index::dense::local` | Feature `local-embed`: `LocalEmbedder`, `LocalModel`, `Precision`, `ModelFile`, `Architecture`, `Pooling`, `MODELS`, `DEFAULT_MODEL`, `CODE_RANK_EMBED`, `JINA_CODE_V2`, `DEFAULT_BATCH_TOKENS`, `find`. | `arko_index/src/dense/local/` |
+| `arko_index::dense::local` | Feature `local-embed`: `LocalEmbedder`, `LocalModel`, `Precision`, `Device`, `Placement`, `BatchStats`, `ModelFile`, `Architecture`, `Pooling`, `MODELS`, `DEFAULT_MODEL`, `CODE_RANK_EMBED`, `JINA_CODE_V2`, `DEFAULT_BATCH_TOKENS`, `DEFAULT_GPU_BATCH_TOKENS`, `find`. GPUs with `local-embed-cuda` and `local-embed-gpu`. | `arko_index/src/dense/local/` |
 | `arko_index::vector` | Vector storage: `VectorStore`, `CaprockStore`, `StoreConfig`, `Quantization`, `VectorIndex`, `Filter`, `VectorId`, `VectorMeta`, `VectorRecord`, `VectorHit`. | `arko_index/src/vector.rs` |
 | `arko_index::hybrid` | Lexical, dense and hybrid search: `search`, `SearchRequest`, `Mode`, `Fusion`, `fuse`, `Fused`, `SearchHit`, `SearchResults`. | `arko_index/src/hybrid.rs` |
 | `arko_index::watch2` | Linux only: `Watcher2`, the inotify watcher. | `arko_index/src/watch2.rs` |
@@ -492,9 +493,11 @@ components: `src/net` finds `src/net/retry.rs` and `src/net`, but not `src/netwo
 | `dense::DenseConfig` | The per-index settings in `STATE_DIR/dense.json`: `version` (1), `embedder` (a `ModelDescriptor`), `render_version`, `quantization`, `vector_index` (`Flat` when absent), `max_tokens_per_run`, `embed_text` (`PathScopeSource` when absent), with `new`, `with_*`, `load(state_dir)`, `read(path)`, `save(state_dir)`, `remove(state_dir)`. Saved by every build with embeddings. |
 | `dense::DenseBuild` | One build's or run's embedding: `embedder`, `quantization` (`Int8`), `vector_index` (`Flat`), `max_tokens` (`None`), `embed_text` (`PathScopeSource`), `progress` (called after each request with `EmbedProgress { texts, total, tokens, requests, embedded_docs, docs }`), `embed_later` (`false`: `build` embeds before it returns), `stop` (`None`: a `StopSignal` that, once stopped, makes the run stop after its current request), with `new`, `from_config`, `with_*`. `index2::embed` uses the embedder, the cap, `progress` and `stop`, and takes the other settings from the generation. |
 | `dense::EmbedStats` | `BuildStats::dense` and `index2::embed`'s result: `embedder`, `render_version`, `embed_text`, `docs`, `embedded_docs`, `texts` (distinct), `cached`, `new`, `requests`, `tokens` (billed), `max_tokens`, `cap_reached`, `not_embedded`, `not_embedded_tokens` (counted), `too_long`, `cache_records`, `vectors_added`, `vectors_removed` (the vector store's update), `store_created`, `superseded` (a newer generation was published), `stopped`. A build with `embed_later` reports what it published: `embedded_docs` chunks with a vector already, and `texts - cached` texts to embed. |
-| `dense::local::LocalEmbedder::load(model, dir)` | Feature `local-embed`. Loads a `LocalModel` from `dir` (`config.json`, `tokenizer.json`, `model.safetensors`), each file checked by size and SHA-256, in the default precision (int8). `load_with_precision(model, dir, precision)` picks it. `with_threads(n)` (default `threads()`), `with_batch_tokens(n)` (tokens per forward pass, 8,192), `model()`, `precision()`, `threads()`. Implements `Embedder`: 256 texts and 8,192 tokens per request, a longer text alone, whole texts (one longer than the model's `max_tokens` is embedded in windows of that many tokens, each with the special tokens and the query prefix, and its vector is their mean weighted by text tokens, at unit length), query and document prefixes, unit vectors, `tokens` = tokens processed. `LocalModel::limits()` gives the limits without loading. |
-| `dense::local::Precision` | The arithmetic of the linear layers after attention: `Int8` (default: 7-bit weights per output channel, 8-bit activations per token, exact integer sums) or `F32`. `as_str` and `FromStr` use `int8` and `f32`. Part of the model descriptor. |
-| `dense::local::LocalModel` | A pinned model: `name`, `repo`, `revision` (a commit), `dimensions`, `max_tokens`, `query_prefix`, `document_prefix`, `licence`, `architecture` (`JinaBert`, `NomicBert`), `pooling` (`Mean`, `Cls`), `files`, with `descriptor(precision)` (provider `local`, the repository as model, the commit as revision with `+int8` appended for int8, input types when the prefixes differ), `for_descriptor` (the model and precision), `download_size`. `MODELS` lists `CODE_RANK_EMBED` (the `DEFAULT_MODEL`) and `JINA_CODE_V2`, and `find(name)` matches a name or repository. |
+| `dense::local::LocalEmbedder::load(model, dir)` | Feature `local-embed`. Loads a `LocalModel` from `dir` (`config.json`, `tokenizer.json`, `model.safetensors`), each file checked by size and SHA-256, in the default precision (int8). `load_with_precision(model, dir, precision)` picks it. `load_on(model, dir, precision, device)` runs it on a `Device`, and `load_placed(model, dir, precision, &placement)` on a device found before. `with_threads(n)` (default `threads()`), `with_batch_tokens(n)` (tokens per forward pass: 8,192 on the CPU, 16,384 with padding on a GPU), `model()`, `precision()`, `threads()`, `batch_tokens()`, `device()` (`CPU`, `CUDA: NAME` or `wgpu: NAME (API, type)`), `on_gpu()`, `batch_stats()` (forward passes, sequences, tokens and padded tokens since loading). Implements `Embedder`: 256 texts and 8,192 tokens per request on the CPU, 1,024 texts and eight passes of tokens on a GPU, a longer text alone, whole texts (one longer than the model's `max_tokens` is embedded in windows of that many tokens, each with the special tokens and the query prefix, and its vector is their mean weighted by text tokens, at unit length), query and document prefixes, unit vectors, `tokens` = tokens processed. `LocalModel::limits()` gives the limits without loading. |
+| `dense::local::Precision` | The arithmetic a model runs in: on the CPU `Int8` (default: the linear layers after attention on 7-bit weights per output channel, 8-bit activations per token, exact integer sums) or `F32`, on a GPU `F32`, `F16` or `Bf16` (CUDA only), where every matrix product takes the 16-bit type. `as_str` and `FromStr` use `int8`, `f32`, `f16` and `bf16`, and `runs_on_cpu`, `runs_on_gpu` say where it runs. Part of the model descriptor. |
+| `dense::local::Device` | Where a model runs: `Auto` (default: the CPU for int8, CUDA or a discrete wgpu GPU for f32 when the build and machine have one, else the CPU, and a GPU for f16 and bf16), `Cpu`, `Gpu` (CUDA, else any wgpu GPU), `Cuda`, `Wgpu`. `as_str` and `FromStr` use `auto`, `cpu`, `gpu`, `cuda`, `wgpu`. `default_precision()`: int8 for `Auto` and `Cpu`, f32 on a GPU. |
+| `dense::local::Placement` | The device a `Device` and precision come to on this machine, found without loading the model: `find(device, precision)` (an error when the named device can't run it), `cpu()`, `on_gpu()`, `name()`, `limits(model)` (the request limits the model will report there). |
+| `dense::local::LocalModel` | A pinned model: `name`, `repo`, `revision` (a commit), `dimensions`, `max_tokens`, `query_prefix`, `document_prefix`, `licence`, `architecture` (`JinaBert`, `NomicBert`), `pooling` (`Mean`, `Cls`), `files`, with `descriptor(precision)` (provider `local`, the repository as model, the commit as revision with `+int8`, `+f16` or `+bf16` appended for those precisions, input types when the prefixes differ), `for_descriptor` (the model and precision), `download_size`. `MODELS` lists `CODE_RANK_EMBED` (the `DEFAULT_MODEL`) and `JINA_CODE_V2`, and `find(name)` matches a name or repository. |
 | `dense::StopSignal` | Asks a run to stop after its current request: `new`, `stop(reason)` (the first reason is kept, and it returns whether this call stopped it), `is_stopped`, `reason`. Shared between threads. |
 | `dense::EmbedState` | How far a generation's embedding has come (`DenseIndexInfo::state`): `Embedding`, `Complete` (the default, and what a generation written before runs existed reads as), `CapReached`. |
 | `vector::VectorStore` | `dimensions`, `len`, `is_empty`, `upsert(&[VectorRecord { id, vector, meta: VectorMeta { path, language } }])` (replaces, a batch all or nothing), `delete(&[id])`, `ids()` (ascending), `search(query, k, &Filter) -> Vec<VectorHit { id, score }>` (cosine, best first, then id ascending), `persist` (atomic). Ids are `VectorId` (`u128`). |
@@ -742,7 +745,7 @@ peak memory.
 
 | `index2` flag | Effect |
 |---|---|
-| `--embed MODEL` | Embed with `MODEL`: a Voyage model (`voyage-code-4`), `voyage:MODEL`, `local`, `local:NAME`, `local:PRECISION` or `local:NAME:PRECISION` (a [local model](arko_index-local-embeddings.md) in `int8`, the default, or `f32`, with `--features local-embed`), or `hash` (offline, for trying things out). Saved in `dense.json`. Needs `VOYAGE_API_KEY` for Voyage. |
+| `--embed MODEL` | Embed with `MODEL`: a Voyage model (`voyage-code-4`), `voyage:MODEL`, `local`, `local:NAME`, `local:PRECISION` or `local:NAME:PRECISION` (a [local model](arko_index-local-embeddings.md) in `int8`, the default, or `f32`, with `--features local-embed`), each optionally followed by `:DEVICE` (`auto`, `cpu`, `gpu`, `cuda` or `wgpu`, for this command and its background embedding, with a GPU running `f32` by default, `f16` or `bf16`, with `local-embed-cuda` or `local-embed-gpu`), or `hash` (offline, for trying things out). Saved in `dense.json`. Needs `VOYAGE_API_KEY` for Voyage. |
 | `--dimensions N` | Vector dimensions (voyage-code-4: 256, 512, 1024 by default, 2048. Local models: 768 only). |
 | `--embed-text source\|path-source\|path-scope-source` | What each chunk's embedded text holds besides its source (default `path-scope-source`). Saved in `dense.json`. |
 | `--embed-config FILE` | Take the settings from a file in the format of `dense.json`. `--dimensions` applies after it, checked against the file's model. With `--embed` it is an error (`--embed and --embed-config both choose the model: give one`). |
@@ -811,7 +814,9 @@ scores and tokens (`--dry-run` only counts tokens). It spends Voyage tokens, unl
 [retrieval evaluation](arko_index-verification.md#retrieval-evaluation).
 `local_embed_bench` (feature `local-embed`) measures a local model's throughput on a
 tree at chosen thread counts and, with `--index STATE`, the size of an index built
-with it.
+with it. `local_embed_device_bench` measures a device and precision (`--device`,
+`--precision`, `--batch-tokens`) over a fixed corpus of rendered chunks, and compares a
+sample's vectors with a saved reference run's.
 
 ## Environment variables
 
@@ -825,6 +830,8 @@ with it.
 | `HF_HOME` | `~/.cache/huggingface` | Examples only (through hf-hub): local models are downloaded into `$HF_HOME/hub`. |
 | `VOYAGE_API_KEY` | Unset | Examples only (through arko_ai's `EmbeddingClient::from_env`): the key for embedding with Voyage. The library reads no credentials. |
 | `ARKO_INDEX_OWNER_PID` | Unset | CLI only: the owner of an embedding run when no `--owner-pid` is given (`0`: none). |
+| `ARKO_INDEX_EMBED_DEVICE` | Unset (`auto`) | CLI only: the device of local models (`auto`, `cpu`, `gpu`, `cuda`, `wgpu`) when no `--embed` value names one. |
+| `CUDA_PATH` | Unset: `/usr/local/cuda`, `/opt/cuda`, or `/usr` with `nvcc` | With `local-embed-cuda`: the CUDA toolkit folder whose `include/` the kernels compile against. |
 | `ARKO_INDEX_HASH_DELAY_MS` | 0 | Examples only: the offline `hash` embedder waits this long per request, to try background embedding at the pace of a real model. |
 
 ## Parsing
@@ -848,7 +855,9 @@ commit 5ec18cc in `Cargo.toml`), also pure, safe Rust.
 
 The `local-embed` feature (off by default) adds `dense::local`, embedding models run on
 the CPU, with gemm, rayon, tokenizers (fancy-regex engine) and libm, all pure Rust, so
-the library still needs no C compiler. See
+the library still needs no C compiler. `local-embed-gpu` and `local-embed-cuda` (off)
+add GPUs through burn 0.21, also pure Rust: CUDA loads the driver and NVRTC when it
+starts and compiles its kernels at run time, so building needs no CUDA toolkit. See
 [arko_index local embeddings](arko_index-local-embeddings.md). The examples use arko_ai
 for Voyage, a dev-dependency whose dependencies need a C compiler, so building the tests
 and examples needs one.
@@ -883,7 +892,7 @@ and examples needs one.
 | Render version (`RENDER_VERSION`) | 1: path, scope, trimmed source |
 | Embedding cache compaction | When the model's cache holds more than twice the index's distinct texts plus 1,024 records |
 | Local model (CLI `--embed local`) | `nomic-ai/CodeRankEmbed` at commit `3c4b608`, 768 dimensions, int8 |
-| Local embedder (`LocalEmbedder`) | Int8 (`Precision::Int8`), `threads()` workers, 8,192 tokens per forward pass, 256 texts per request, longer texts in windows of 8,192 tokens |
+| Local embedder (`LocalEmbedder`) | Int8 (`Precision::Int8`) on the CPU (`Device::Auto`), `threads()` workers, 8,192 tokens per forward pass, 256 texts per request, longer texts in windows of 8,192 tokens. On a GPU: `f32`, 16,384 padded tokens per forward pass, 1,024 texts and eight passes per request |
 | Voyage adapter (examples) | 1,000 texts and 320,000 tokens per request for voyage-code-4, and 4 retries of transient failures |
 
 ## On-disk state

@@ -1,7 +1,8 @@
 # arko_index local embeddings
 
 With the `local-embed` feature, `dense::local::LocalEmbedder` runs a code-embedding
-model on the CPU, in pure Rust, behind the same `dense::Embedder` trait as Voyage.
+model on the CPU, in pure Rust, behind the same `dense::Embedder` trait as Voyage, and
+with `local-embed-cuda` or `local-embed-gpu` on a [GPU](#gpus).
 Dense and hybrid search then need no API key and cost nothing per token, and the code
 stays on the machine. The [crate README](../arko_index/README.md#local-models) has the
 overview, this page the details.
@@ -125,6 +126,68 @@ the model as it was trained.
 The feature adds gemm, pulp, rayon, tokenizers and libm, all pure Rust:
 `cargo tree -p arko_index --features local-embed -e normal,build --target all -i cc`
 prints nothing.
+
+## GPUs
+
+With `local-embed-cuda` or `local-embed-gpu` the same models run on a GPU, on burn's
+tensors in pure Rust. `local-embed-cuda` runs NVIDIA GPUs through CUDA: cubecl loads the
+driver and NVRTC when it starts and compiles its kernels at run time, so the build needs
+no CUDA toolkit. The machine needs the driver, NVRTC and the toolkit's headers (cudart,
+crt and CCCL) of a CUDA version no newer than the driver's. They are found through
+`CUDA_PATH`, else `/usr/local/cuda`, `/opt/cuda` or `/usr` (with `nvcc`), and `libnvrtc`
+through the library path. NVIDIA's redistributable archives (`cuda_nvrtc`, `cuda_cudart`,
+`cuda_cccl` and the `include/crt` folder of `cuda_nvcc`) unpacked into one folder named
+by `CUDA_PATH` serve as well. `local-embed-gpu` runs any GPU through wgpu: Vulkan, Metal
+or DirectX 12.
+
+```sh
+cargo build --release -p arko_index --features local-embed-cuda --example arko_index_cli
+$CLI index2 --embed local:gpu ./repo ./index-state          # CodeRankEmbed in f32 on the GPU
+$CLI index2 --embed local:f16:cuda ./repo ./index-state     # in f16 through CUDA
+```
+
+| Device | Runs |
+|---|---|
+| `auto` (the default) | int8 on the CPU. f32 on CUDA when the build has it and the machine an NVIDIA GPU with NVRTC, else on a discrete GPU through wgpu, else on the CPU. f16 and bf16 as `gpu` |
+| `cpu` | int8 and f32 |
+| `gpu` | CUDA when available, else the first GPU wgpu finds, discrete ones first |
+| `cuda`, `wgpu` | that backend |
+
+`--embed local[:NAME][:PRECISION][:DEVICE]` names the device for that command and its
+background embedding, and `ARKO_INDEX_EMBED_DEVICE` sets it for any command. A library
+caller passes a `Device` to `LocalEmbedder::load_on`, or finds the device first with
+`Placement::find`, which reads no model, and loads with `LocalEmbedder::load_placed` when
+the model is first needed. The CLI works that way: it finds the device when a command
+starts, so a missing GPU is reported at once, and loads the model on its first embedding.
+
+- **Precision.** `f32` by default on a GPU, `f16` and `bf16` (CUDA only) on request. In
+  `f16` and `bf16` every matrix product takes 16-bit inputs, the weights stored in
+  them. Layer norms, softmax, residual sums and pooling stay in f32. The precision is
+  part of the vectors' identity and the device is not: f32 vectors from a GPU and from
+  the CPU differ by rounding and share one index. Searches embed their queries on the
+  CPU when it runs the index's precision.
+- **Long texts.** Split into the same windows as on the CPU and combined the same way.
+- **Batches.** A request takes up to 1,024 texts and eight forward passes' worth of
+  tokens. Its texts are sorted by token count and split into batches of at most 16,384
+  tokens with padding (`with_batch_tokens`), so texts of similar length share a batch.
+  Padded keys are masked out of attention, and the vectors come back in input order.
+- **Buffers.** Every tensor stays within the device's largest buffer: the adapter's
+  largest storage buffer on wgpu (128 MiB on Mesa's llvmpipe) and a quarter of the GPU's
+  memory on CUDA. A batch holds at most one buffer of hidden states. Attention splits a
+  batch's query rows into blocks when its scores would pass that or 64M values (256 MB in
+  f32), and the query, key and value projection and the feed-forward layer run on blocks
+  of tokens when their outputs would.
+- **The process.** The background embedding holds the GPU only while it runs: it
+  ends after its current request when its owner ends, and the driver frees what the
+  process held when it exits.
+- **Kernel tuning.** cubecl times kernel variants the first time it sees a shape and
+  keeps the results in the user's cache directory (`~/.cache/cubecl` on Linux).
+
+The GPU features add burn 0.21 (its tensor, ndarray, wgpu and CUDA crates), cubecl, wgpu
+and cudarc, also Rust only: `cargo tree -p arko_index --features
+local-embed-cuda,local-embed-gpu -e normal,build --target all -i cc` prints nothing as
+well. `local_embed_device_bench` measures a device and precision over a fixed corpus and
+compares the vectors with a reference run's.
 
 ## Verification
 
