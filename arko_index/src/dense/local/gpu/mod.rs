@@ -7,6 +7,12 @@
 //! batches of at most the embedder's batch tokens (`rows × padded length`, one text
 //! alone may exceed it), so padding stays small. Every batch is queued before the
 //! first is read back, and the vectors return in input order.
+//!
+//! Every tensor stays within the device's largest buffer ([`Choice::max_buffer`]): a
+//! batch holds at most as many tokens as one hidden state of that size, and the encoder
+//! splits its widest work (the feed-forward layer, the query, key and value projection
+//! and attention's scores) into pieces that fit. cubecl panics on its device thread
+//! when an allocation is larger than that, and the device is unusable from then on.
 mod encoder;
 
 use super::{
@@ -26,17 +32,23 @@ const PAD: usize = 8;
 #[derive(Clone)]
 pub(crate) enum Choice {
     #[cfg(feature = "local-embed-cuda")]
-    Cuda { name: String },
+    Cuda {
+        name: String,
+        /// A quarter of the GPU's memory: cubecl's largest allocation on CUDA.
+        max_buffer: u64,
+    },
     #[cfg(feature = "local-embed-gpu")]
     Wgpu {
         device: burn_wgpu::WgpuDevice,
         name: String,
-        /// The adapter's largest storage buffer, which bounds one tensor.
+        /// The adapter's largest storage buffer, cubecl's largest allocation on wgpu
+        /// (128 MiB on Mesa's llvmpipe).
         max_buffer: u64,
     },
-    /// burn's ndarray backend, for tests.
+    /// burn's ndarray backend, for tests. It allocates any size, and `max_buffer`
+    /// makes the encoder split its work as a device with that limit would.
     #[cfg(test)]
-    NdArray,
+    NdArray { max_buffer: u64 },
 }
 
 impl Choice {
@@ -44,11 +56,23 @@ impl Choice {
     pub(crate) fn name(&self) -> String {
         match self {
             #[cfg(feature = "local-embed-cuda")]
-            Choice::Cuda { name } => format!("CUDA: {name}"),
+            Choice::Cuda { name, .. } => format!("CUDA: {name}"),
             #[cfg(feature = "local-embed-gpu")]
             Choice::Wgpu { name, .. } => format!("wgpu: {name}"),
             #[cfg(test)]
-            Choice::NdArray => "burn ndarray (CPU)".into(),
+            Choice::NdArray { .. } => "burn ndarray (CPU)".into(),
+        }
+    }
+
+    /// The largest buffer, in bytes, the device allocates: the bound of every tensor.
+    pub(crate) fn max_buffer(&self) -> u64 {
+        match self {
+            #[cfg(feature = "local-embed-cuda")]
+            Choice::Cuda { max_buffer, .. } => *max_buffer,
+            #[cfg(feature = "local-embed-gpu")]
+            Choice::Wgpu { max_buffer, .. } => *max_buffer,
+            #[cfg(test)]
+            Choice::NdArray { max_buffer } => *max_buffer,
         }
     }
 }
@@ -99,9 +123,10 @@ fn cuda() -> Result<Choice, String> {
     if count < 1 {
         return Err("CUDA: the driver lists no GPU".into());
     }
-    let name = result::device::get(0)
-        .and_then(result::device::get_name)
-        .map_err(|e| format!("CUDA: {e}"))?;
+    let dev = result::device::get(0).map_err(|e| format!("CUDA: {e}"))?;
+    let name = result::device::get_name(dev).map_err(|e| format!("CUDA: {e}"))?;
+    // SAFETY: `dev` is a device the driver listed.
+    let memory = unsafe { result::device::total_mem(dev) }.map_err(|e| format!("CUDA: {e}"))?;
     // SAFETY: loads the NVRTC library, as cudarc's NVRTC calls do first.
     if !unsafe { cudarc::nvrtc::sys::is_culib_present() } {
         return Err(
@@ -112,7 +137,10 @@ fn cuda() -> Result<Choice, String> {
     if !cuda_path().is_some_and(|p| p.join("include/cuda_fp16.h").is_file()) {
         return Err("CUDA: the toolkit's headers (include/cuda_fp16.h) not found under CUDA_PATH, /usr/local/cuda, /opt/cuda or /usr".into());
     }
-    Ok(Choice::Cuda { name })
+    Ok(Choice::Cuda {
+        name,
+        max_buffer: memory as u64 / 4,
+    })
 }
 
 #[cfg(not(feature = "local-embed-cuda"))]
@@ -224,8 +252,11 @@ pub(crate) struct Gpu {
     run: Box<dyn Run>,
     name: String,
     hidden: usize,
-    /// The most tokens one forward pass may hold on this device (a wgpu buffer limit).
+    /// The most tokens one forward pass may hold on this device: one hidden state of
+    /// them fills the largest buffer.
     max_pass_tokens: usize,
+    /// Why the device failed, after a panic in its runtime, which leaves it unusable.
+    failed: std::sync::Mutex<Option<String>>,
 }
 
 /// Forward passes of a loaded encoder, whatever its backend.
@@ -275,6 +306,7 @@ fn load_on<B: Backend>(
     pooling: Pooling,
     t: &Tensors,
     precision: Precision,
+    max_elements: usize,
 ) -> Result<Box<dyn Run>, Error>
 where
     Encoder<B>: Send + Sync,
@@ -291,7 +323,7 @@ where
         return Err(format!("this device has no {precision} arithmetic").into());
     }
     Ok(Box::new(Runner::<B> {
-        encoder: Encoder::load(cfg, pooling, t, dtype, &device)?,
+        encoder: Encoder::load(cfg, pooling, t, dtype, &device, max_elements)?,
     }))
 }
 
@@ -346,58 +378,50 @@ impl Gpu {
         precision: Precision,
     ) -> Result<Self, Error> {
         let hidden = cfg.hidden;
-        #[cfg(feature = "local-embed-gpu")]
-        let intermediate = cfg.intermediate as u64;
+        let name = choice.name();
+        // The most f32 values one tensor may hold.
+        let max_elements = usize::try_from(choice.max_buffer() / 4).unwrap_or(usize::MAX);
         configure_cubecl();
-        let loaded = catch_unwind(AssertUnwindSafe(|| -> Result<Self, Error> {
-            Ok(match choice {
+        let loaded = catch_unwind(AssertUnwindSafe(|| -> Result<Box<dyn Run>, Error> {
+            match choice {
                 #[cfg(feature = "local-embed-cuda")]
-                Choice::Cuda { name } => Self {
-                    run: load_on::<burn_cuda::Cuda<f32, i32>>(
-                        burn_cuda::CudaDevice::default(),
-                        cfg,
-                        pooling,
-                        t,
-                        precision,
-                    )?,
-                    name: format!("CUDA: {name}"),
-                    hidden,
-                    max_pass_tokens: usize::MAX,
-                },
+                Choice::Cuda { .. } => load_on::<burn_cuda::Cuda<f32, i32>>(
+                    burn_cuda::CudaDevice::default(),
+                    cfg,
+                    pooling,
+                    t,
+                    precision,
+                    max_elements,
+                ),
                 #[cfg(feature = "local-embed-gpu")]
-                Choice::Wgpu {
+                Choice::Wgpu { device, .. } => load_on::<burn_wgpu::Wgpu<f32, i32, u32>>(
                     device,
-                    name,
-                    max_buffer,
-                } => Self {
-                    run: load_on::<burn_wgpu::Wgpu<f32, i32, u32>>(
-                        device, cfg, pooling, t, precision,
-                    )?,
-                    name: format!("wgpu: {name}"),
-                    hidden,
-                    // The widest activation of a pass is the feed-forward layer's
-                    // input, `2 × intermediate` f32 values per token.
-                    max_pass_tokens: usize::try_from(max_buffer / (8 * intermediate))
-                        .unwrap_or(usize::MAX)
-                        .max(PAD),
-                },
+                    cfg,
+                    pooling,
+                    t,
+                    precision,
+                    max_elements,
+                ),
                 #[cfg(test)]
-                Choice::NdArray => Self {
-                    run: load_on::<burn_ndarray::NdArray<f32>>(
-                        Default::default(),
-                        cfg,
-                        pooling,
-                        t,
-                        precision,
-                    )?,
-                    name: "burn ndarray (CPU)".into(),
-                    hidden,
-                    max_pass_tokens: usize::MAX,
-                },
-            })
+                Choice::NdArray { .. } => load_on::<burn_ndarray::NdArray<f32>>(
+                    Default::default(),
+                    cfg,
+                    pooling,
+                    t,
+                    precision,
+                    max_elements,
+                ),
+            }
         }));
-        loaded.unwrap_or_else(|p| {
+        let run = loaded.unwrap_or_else(|p| {
             Err(format!("loading the model on the GPU: {}", panic_text(p)).into())
+        })?;
+        Ok(Self {
+            run,
+            name,
+            hidden,
+            max_pass_tokens: (max_elements / hidden).max(PAD),
+            failed: Default::default(),
         })
     }
 
@@ -411,12 +435,18 @@ impl Gpu {
     }
 
     /// Each sequence's unit vector, in order, from forward passes of at most
-    /// `batch_tokens` padded tokens. Returns the passes and their padded tokens too.
+    /// `batch_tokens` padded tokens (and at most what the device's buffers hold).
+    /// Returns the passes and their padded tokens too. After a panic in the GPU's
+    /// runtime every call fails with its message.
     pub(crate) fn embed(
         &self,
         seqs: &[&[u32]],
         batch_tokens: usize,
     ) -> Result<(Vec<Vec<f32>>, Plan), Error> {
+        let failed = || self.failed.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(why) = &*failed() {
+            return Err(format!("the GPU failed before: {why}").into());
+        }
         let lens: Vec<usize> = seqs.iter().map(|s| s.len()).collect();
         let plan = Plan::new(&lens, batch_tokens.min(self.max_pass_tokens));
         let batches: Vec<(Vec<&[u32]>, usize)> = plan
@@ -424,8 +454,14 @@ impl Gpu {
             .iter()
             .map(|(texts, len)| (texts.iter().map(|&i| seqs[i]).collect(), *len))
             .collect();
-        let pooled = catch_unwind(AssertUnwindSafe(|| self.run.run(&batches)))
-            .unwrap_or_else(|p| Err(format!("the GPU failed: {}", panic_text(p)).into()))?;
+        let pooled = match catch_unwind(AssertUnwindSafe(|| self.run.run(&batches))) {
+            Ok(pooled) => pooled?,
+            Err(p) => {
+                let why = panic_text(p);
+                *failed() = Some(why.clone());
+                return Err(format!("the GPU failed: {why}").into());
+            }
+        };
         if pooled.len() != seqs.len() {
             return Err("the GPU returned the wrong number of vectors".into());
         }

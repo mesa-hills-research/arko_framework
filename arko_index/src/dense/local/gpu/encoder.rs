@@ -5,8 +5,14 @@
 //! Padded keys get a large negative score before the softmax, so a text's vector
 //! depends only on its own tokens. Matrix products take the precision's float type
 //! (`f32`, `f16` or `bf16`), with the weights stored in it. Layer norms, softmax,
-//! residual sums and pooling run in `f32`. Attention splits its query rows into blocks
-//! when one batch's scores would take more than [`SCORE_ELEMENTS`] values.
+//! residual sums and pooling run in `f32`.
+//!
+//! No tensor holds more than the device's largest buffer (`max_elements` f32 values).
+//! Attention splits its query rows into blocks when one batch's scores would take more
+//! than that or [`SCORE_ELEMENTS`], and the query, key and value projection and the
+//! feed-forward layer, whose outputs are wider than a hidden state, run on blocks of
+//! tokens when a batch's outputs would take more. The caller keeps a batch's hidden
+//! states within the limit.
 use super::super::model::{
     Architecture, Config, LayerWeights, Norm as NormWeights, Pooling, Weights, alibi_slopes,
     inv_freq, read_weights, rotary_table,
@@ -37,6 +43,36 @@ fn score_limit() -> usize {
         }
     }
     SCORE_ELEMENTS
+}
+
+/// Checks that a weight of `elements` f32 values fits in one buffer of the device.
+fn fits(what: &str, elements: usize, max_elements: usize) -> Result<(), Error> {
+    if elements <= max_elements {
+        return Ok(());
+    }
+    Err(format!(
+        "the model's {what} take {} MB, more than this device's largest buffer ({} MB)",
+        (elements * 4).div_ceil(1 << 20),
+        (max_elements * 4) >> 20
+    )
+    .into())
+}
+
+/// `f` applied to blocks of at most `rows` rows of `x` (`[n, _]`), joined again.
+fn by_rows<B: Backend>(
+    x: Tensor<B, 2>,
+    rows: usize,
+    f: impl Fn(Tensor<B, 2>) -> Tensor<B, 2>,
+) -> Tensor<B, 2> {
+    let n = x.dims()[0];
+    if n <= rows {
+        return f(x);
+    }
+    let parts = (0..n)
+        .step_by(rows)
+        .map(|r0| f(x.clone().narrow(0, r0, rows.min(n - r0))))
+        .collect();
+    Tensor::cat(parts, 0)
 }
 
 /// The score of a padded key: `e^(x - max)` is zero for it, and adding ALiBi biases to
@@ -111,9 +147,17 @@ struct Layer<B: Backend> {
 }
 
 impl<B: Backend> Layer<B> {
-    fn new(w: LayerWeights, dtype: FloatDType, device: &B::Device) -> Self {
+    fn new(
+        w: LayerWeights,
+        dtype: FloatDType,
+        device: &B::Device,
+        max_elements: usize,
+    ) -> Result<Self, Error> {
+        for weights in [&w.qkv, &w.out, &w.up, &w.down] {
+            fits("linear weights", weights.w.len(), max_elements)?;
+        }
         let norm = |n: Option<NormWeights>| n.map(|n| Norm::new(n, device));
-        Self {
+        Ok(Self {
             qkv: Linear::new(w.qkv, dtype, device),
             q_norm: norm(w.q_norm),
             k_norm: norm(w.k_norm),
@@ -123,7 +167,7 @@ impl<B: Backend> Layer<B> {
             up: Linear::new(w.up, dtype, device),
             down: Linear::new(w.down, dtype, device),
             norm2: Norm::new(w.norm2, device),
-        }
+        })
     }
 }
 
@@ -133,6 +177,8 @@ pub(crate) struct Encoder<B: Backend> {
     pooling: Pooling,
     dtype: FloatDType,
     device: B::Device,
+    /// The most f32 values one tensor may hold: the device's largest buffer.
+    max_elements: usize,
     vocab: usize,
     /// `[vocab, hidden]`, `f32`.
     word: Tensor<B, 2>,
@@ -148,15 +194,24 @@ pub(crate) struct Encoder<B: Backend> {
 
 impl<B: Backend> Encoder<B> {
     /// Loads the weights onto `device`, the matrices in `dtype`, one layer at a time.
+    /// `max_elements` is the most f32 values one tensor may hold on the device.
     pub(crate) fn load(
         cfg: Config,
         pooling: Pooling,
         t: &Tensors,
         dtype: FloatDType,
         device: &B::Device,
+        max_elements: usize,
     ) -> Result<Self, Error> {
         let h = cfg.hidden;
-        let (emb, layers) = read_weights(&cfg, t, |w| Ok(Layer::new(w, dtype, device)))?;
+        // The output of the widest projection of one token must fit.
+        fits(
+            "activations of one token",
+            (3 * h).max(2 * cfg.intermediate),
+            max_elements,
+        )?;
+        let (emb, layers) = read_weights(&cfg, t, |w| Layer::new(w, dtype, device, max_elements))?;
+        fits("word embeddings", emb.word.len(), max_elements)?;
         let neg_slopes = (cfg.arch == Architecture::JinaBert).then(|| {
             let s: Vec<f32> = alibi_slopes(cfg.heads).iter().map(|s| -s).collect();
             Tensor::from_data(TensorData::new(s, [1, cfg.heads, 1, 1]), device)
@@ -166,6 +221,7 @@ impl<B: Backend> Encoder<B> {
             pooling,
             dtype,
             device: device.clone(),
+            max_elements,
             vocab: emb.vocab,
             word: Tensor::from_data(TensorData::new(emb.word, [emb.vocab, h]), device),
             token_type: Tensor::from_data(TensorData::new(emb.token_type, [1, h]), device),
@@ -183,7 +239,8 @@ impl<B: Backend> Encoder<B> {
 
     /// The pooled final states of `batch` (each text's token ids), `[rows, hidden]`
     /// in `f32`, not yet normalized. The texts are padded to `len` tokens, at least the
-    /// longest one's.
+    /// longest one's. The batch's hidden states, `rows × len × hidden` f32 values, must
+    /// fit in one buffer of the device.
     pub(crate) fn forward(&self, batch: &[&[u32]], len: usize) -> Result<Tensor<B, 2>, Error> {
         let (h, i, eps) = (self.cfg.hidden, self.cfg.intermediate, self.cfg.eps);
         let (heads, rows) = (self.cfg.heads, batch.len());
@@ -215,13 +272,32 @@ impl<B: Backend> Encoder<B> {
             )
         });
 
+        // Tokens per block of the projections wider than a hidden state.
+        let qkv_rows = (self.max_elements / (3 * h)).max(1);
+        let ffn_rows = (self.max_elements / (2 * i)).max(1);
         let x = self.word.clone().select(0, ids) + self.token_type.clone();
         let mut x = self.emb_norm.apply(x, eps);
         for layer in &self.layers {
-            let qkv = layer.qkv.forward(x.clone(), self.dtype);
-            let mut q = qkv.clone().narrow(1, 0, h);
-            let mut k = qkv.clone().narrow(1, h, h);
-            let v = qkv.narrow(1, 2 * h, h);
+            let (mut q, mut k, v) = if rows * len <= qkv_rows {
+                let qkv = layer.qkv.forward(x.clone(), self.dtype);
+                (
+                    qkv.clone().narrow(1, 0, h),
+                    qkv.clone().narrow(1, h, h),
+                    qkv.narrow(1, 2 * h, h),
+                )
+            } else {
+                // Queries, keys and values of each block of tokens, each joined over
+                // the blocks.
+                let (mut qs, mut ks, mut vs) = (Vec::new(), Vec::new(), Vec::new());
+                for r0 in (0..rows * len).step_by(qkv_rows) {
+                    let n = qkv_rows.min(rows * len - r0);
+                    let qkv = layer.qkv.forward(x.clone().narrow(0, r0, n), self.dtype);
+                    qs.push(qkv.clone().narrow(1, 0, h));
+                    ks.push(qkv.clone().narrow(1, h, h));
+                    vs.push(qkv.narrow(1, 2 * h, h));
+                }
+                (Tensor::cat(qs, 0), Tensor::cat(ks, 0), Tensor::cat(vs, 0))
+            };
             if let (Some(qn), Some(kn)) = (&layer.q_norm, &layer.k_norm) {
                 q = qn.apply(q, eps);
                 k = kn.apply(k, eps);
@@ -244,14 +320,17 @@ impl<B: Backend> Encoder<B> {
                 tmp = an.apply(tmp + x.clone(), eps);
             }
             x = layer.norm1.apply(x + tmp, eps);
-            let up = layer.up.forward(x.clone(), self.dtype);
-            let value = up.clone().narrow(1, 0, i);
-            let gate = up.narrow(1, i, i);
-            let act = match self.cfg.arch {
-                Architecture::JinaBert => value * gelu(gate),
-                Architecture::NomicBert => value * silu(gate),
+            let ffn = |x: Tensor<B, 2>| {
+                let up = layer.up.forward(x, self.dtype);
+                let value = up.clone().narrow(1, 0, i);
+                let gate = up.narrow(1, i, i);
+                let act = match self.cfg.arch {
+                    Architecture::JinaBert => value * gelu(gate),
+                    Architecture::NomicBert => value * silu(gate),
+                };
+                layer.down.forward(act, self.dtype)
             };
-            let tmp = layer.down.forward(act, self.dtype);
+            let tmp = by_rows(x.clone(), ffn_rows, ffn);
             x = layer.norm2.apply(x + tmp, eps);
         }
         let x = x.reshape([rows, len, h]);
@@ -269,7 +348,7 @@ impl<B: Backend> Encoder<B> {
 
     /// Scaled dot-product attention of `q`, `k` and `v` (`[rows, heads, len, head_dim]`,
     /// `f32`) with the padding `mask`, and ALiBi biases for Jina, in blocks of query rows
-    /// of at most [`SCORE_ELEMENTS`] scores. Returns `f32`.
+    /// of at most [`SCORE_ELEMENTS`] scores and what one buffer holds. Returns `f32`.
     fn attention(
         &self,
         q: Tensor<B, 4>,
@@ -279,7 +358,7 @@ impl<B: Backend> Encoder<B> {
     ) -> Tensor<B, 4> {
         let [rows, heads, len, dh] = q.dims();
         let scale = 1.0 / (dh as f32).sqrt();
-        let block = query_block(rows * heads, len, score_limit());
+        let block = query_block(rows * heads, len, score_limit().min(self.max_elements));
         let q = q.cast(self.dtype);
         let kt = k.cast(self.dtype).swap_dims(2, 3);
         let v = v.cast(self.dtype);
@@ -315,13 +394,16 @@ impl<B: Backend> Encoder<B> {
 }
 
 /// Query rows per attention block: all of them when `streams × len × len` scores fit in
-/// `limit`, else the most that fit, a multiple of 16 (at least 16).
+/// `limit`, else the most that fit, a multiple of 16 when at least 16 fit, and at least
+/// one.
 pub(crate) fn query_block(streams: usize, len: usize, limit: usize) -> usize {
     let fit = limit / (streams * len).max(1);
     if fit >= len {
         len
+    } else if fit >= 16 {
+        fit / 16 * 16
     } else {
-        (fit / 16 * 16).max(16).min(len)
+        fit.max(1)
     }
 }
 

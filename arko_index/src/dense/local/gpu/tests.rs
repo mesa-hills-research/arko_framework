@@ -21,6 +21,13 @@ fn more_texts() -> Vec<String> {
     t
 }
 
+/// burn's ndarray backend with no buffer limit.
+fn ndarray() -> Choice {
+    Choice::NdArray {
+        max_buffer: u64::MAX,
+    }
+}
+
 fn embed(e: &LocalEmbedder, texts: &[String]) -> Vec<Vec<f32>> {
     let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
     e.embed(&refs, InputKind::Document).unwrap().vectors
@@ -69,7 +76,7 @@ fn matches_cpu(choice: impl Fn() -> Choice, precision: Precision, tol: f32, min_
 
 #[test]
 fn ndarray_matches_the_cpu_encoder() {
-    matches_cpu(|| Choice::NdArray, Precision::F32, 2e-5, 0.99999);
+    matches_cpu(ndarray, Precision::F32, 2e-5, 0.99999);
 }
 
 /// Texts over the model's input run in the same windows on the GPU as on the CPU,
@@ -79,8 +86,8 @@ fn long_texts_run_in_the_cpus_windows() {
     let dir = tempfile::tempdir().unwrap();
     let (model, _) = tiny_model(&NOMIC, dir.path(), "search for : ", 32);
     let cpu = LocalEmbedder::load_with_precision(model, dir.path(), Precision::F32).unwrap();
-    let gpu = LocalEmbedder::load_choice(model, dir.path(), Precision::F32, Some(Choice::NdArray))
-        .unwrap();
+    let gpu =
+        LocalEmbedder::load_choice(model, dir.path(), Precision::F32, Some(ndarray())).unwrap();
     let long = (0..100)
         .map(|k| format!("w{}", 10 + k % 50))
         .collect::<Vec<_>>()
@@ -107,10 +114,38 @@ fn long_texts_run_in_the_cpus_windows() {
 fn attention_in_blocks_matches_one_block() {
     // 16 query rows per block: the 400-token texts take 25 blocks.
     SCORE_LIMIT.store(16 * 400 * 4, Ordering::Relaxed);
-    let result =
-        std::panic::catch_unwind(|| matches_cpu(|| Choice::NdArray, Precision::F32, 2e-5, 0.99999));
+    let result = std::panic::catch_unwind(|| matches_cpu(ndarray, Precision::F32, 2e-5, 0.99999));
     SCORE_LIMIT.store(0, Ordering::Relaxed);
     result.unwrap();
+}
+
+/// A device with small buffers gets smaller batches, the query, key and value
+/// projection and the feed-forward layer in blocks of tokens and attention in blocks of
+/// a few query rows, and the same vectors.
+#[test]
+fn small_buffers_split_the_work_alike() {
+    // 8,192 f32 values (the tiny Nomic model's largest weight): 512 tokens of hidden
+    // states per pass, blocks of 16 to 170 tokens for the projections, and 5 to 10
+    // query rows per attention block of the longest texts.
+    matches_cpu(
+        || Choice::NdArray { max_buffer: 32768 },
+        Precision::F32,
+        2e-5,
+        0.99999,
+    );
+    // Weights larger than a buffer are refused when the model loads.
+    let dir = tempfile::tempdir().unwrap();
+    let (model, _) = tiny_model(&NOMIC, dir.path(), "", 64);
+    let err = LocalEmbedder::load_choice(
+        model,
+        dir.path(),
+        Precision::F32,
+        Some(Choice::NdArray { max_buffer: 256 }),
+    )
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(err.contains("largest buffer"), "{err}");
 }
 
 #[test]
@@ -118,13 +153,13 @@ fn ndarray_refuses_half_precision() {
     let dir = tempfile::tempdir().unwrap();
     let (model, _) = tiny_model(&NOMIC, dir.path(), "", 64);
     for p in [Precision::F16, Precision::Bf16] {
-        let err = LocalEmbedder::load_choice(model, dir.path(), p, Some(Choice::NdArray))
+        let err = LocalEmbedder::load_choice(model, dir.path(), p, Some(ndarray()))
             .err()
             .unwrap()
             .to_string();
         assert!(err.contains(&format!("no {p} arithmetic")), "{err}");
     }
-    let err = LocalEmbedder::load_choice(model, dir.path(), Precision::Int8, Some(Choice::NdArray))
+    let err = LocalEmbedder::load_choice(model, dir.path(), Precision::Int8, Some(ndarray()))
         .err()
         .unwrap()
         .to_string();
@@ -165,8 +200,11 @@ fn query_blocks_bound_the_scores() {
     assert_eq!(query_block(12, 512, 1 << 26), 512);
     // 8,192 tokens and 12 heads: 682 rows fit, 672 in multiples of 16.
     assert_eq!(query_block(12, 8192, 1 << 26), 672);
-    assert_eq!(query_block(1000, 8192, 1 << 20), 16);
-    assert_eq!(query_block(1, 8, 1), 8);
+    // Fewer than 16 rows fit: as many as fit, at least one.
+    assert_eq!(query_block(12, 8192, 12 * 8192 * 5), 5);
+    assert_eq!(query_block(1000, 8192, 1 << 20), 1);
+    assert_eq!(query_block(1, 8, 1), 1);
+    assert_eq!(query_block(1, 8, 64), 8);
 }
 
 #[test]
@@ -233,4 +271,36 @@ fn wgpu_matches_the_cpu_encoder() {
         Ok(_) => matches_cpu(choice, Precision::F16, 2e-2, 0.999),
         Err(e) => eprintln!("f16 skipped: {e}"),
     }
+}
+
+/// A text whose attention scores are larger than the adapter's largest buffer (Mesa's
+/// llvmpipe allows 128 MiB) runs in blocks of query rows within it, with the CPU's
+/// vector. Without the bound, cubecl panics on its device thread and the device fails
+/// from then on.
+#[cfg(feature = "local-embed-gpu")]
+#[test]
+fn wgpu_scores_over_the_largest_buffer_run_in_blocks() {
+    let Some(choice) = wgpu_adapter() else {
+        return;
+    };
+    // Jina's 4 heads: one 3,202-token text has 41M scores per layer, 164 MB in f32.
+    let tokens = 3202u64;
+    if choice.max_buffer() >= 4 * 4 * tokens * tokens {
+        eprintln!("skipped: the adapter's buffers hold the scores whole");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (model, _) = tiny_model(&JINA, dir.path(), "", 4096);
+    let text = (0..tokens - 2)
+        .map(|k| format!("w{}", 4 + k % 60))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cpu = LocalEmbedder::load_with_precision(model, dir.path(), Precision::F32).unwrap();
+    assert_eq!(cpu.count_tokens(&[&text]).unwrap(), vec![tokens]);
+    let want = cpu.embed(&[&text], InputKind::Document).unwrap();
+    let gpu = LocalEmbedder::load_choice(model, dir.path(), Precision::F32, Some(choice)).unwrap();
+    let got = gpu.embed(&[&text, "w9"], InputKind::Document).unwrap();
+    assert!(cosine(&got.vectors[0], &want.vectors[0]) >= 0.99999);
+    // The device still works.
+    gpu.embed(&["w10 w11"], InputKind::Document).unwrap();
 }
