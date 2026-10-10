@@ -168,9 +168,10 @@ starts, so a missing GPU is reported at once, and loads the model on its first e
   CPU when it runs the index's precision.
 - **Long texts.** Split into the same windows as on the CPU and combined the same way.
 - **Batches.** A request takes up to 1,024 texts and eight forward passes' worth of
-  tokens. Its texts are sorted by token count and split into batches of at most 16,384
+  tokens. Its texts are sorted by token count and split into batches of at most 4,096
   tokens with padding (`with_batch_tokens`), so texts of similar length share a batch.
   Padded keys are masked out of attention, and the vectors come back in input order.
+  Smaller batches ran faster on the GPUs measured ([GPU speed](#gpu-speed)).
 - **Buffers.** Every tensor stays within the device's largest buffer: the adapter's
   largest storage buffer on wgpu (128 MiB on Mesa's llvmpipe) and a quarter of the GPU's
   memory on CUDA. A batch holds at most one buffer of hidden states. Attention splits a
@@ -180,14 +181,23 @@ starts, so a missing GPU is reported at once, and loads the model on its first e
 - **The process.** The background embedding holds the GPU only while it runs: it
   ends after its current request when its owner ends, and the driver frees what the
   process held when it exits.
-- **Kernel tuning.** cubecl times kernel variants the first time it sees a shape and
-  keeps the results in the user's cache directory (`~/.cache/cubecl` on Linux).
+- **Kernels.** cubecl compiles a kernel the first time it needs it and times kernel
+  variants the first time it sees a shape, about two minutes on a new machine. The
+  timings stay in the user's cache directory (`~/.cache/cubecl` on Linux), and on CUDA
+  the compiled kernels too (`~/.cache/cubecl/kernels/`, about 120 MB per GPU
+  architecture and NVRTC version), so a later run starts in seconds.
+- **Checks.** A vector with NaN or infinite values fails the request. In f16 the
+  queries are scaled before their product with the keys, which keeps the scores far
+  from f16's largest value.
 
 The GPU features add burn 0.21 (its tensor, ndarray, wgpu and CUDA crates), cubecl, wgpu
 and cudarc, also Rust only: `cargo tree -p arko_index --features
 local-embed-cuda,local-embed-gpu -e normal,build --target all -i cc` prints nothing as
-well. `local_embed_device_bench` measures a device and precision over a fixed corpus and
-compares the vectors with a reference run's.
+well. burn's operation fusion is off. Its fused kernels returned wrong vectors for
+whole batches of some shapes (on an L4 through CUDA and Vulkan, on an RTX 5090 through
+CUDA), and the same operations unfused did not. `local_embed_device_bench` measures a
+device and precision over a fixed corpus and compares the vectors with a reference
+run's.
 
 ## Verification
 
@@ -217,6 +227,25 @@ snapshot, 327 tokens per chunk on average, each chunk whole. The better of two r
 The whole snapshot, 7,521 chunks and 2.35 million tokens, took 982 s in int8 and
 1,384 s in f32 at 6 threads. The Jina model ran 7.8 chunks/s in int8 and 6.0 in f32. A
 query embeds in about 20 ms. Memory is under [How it runs](#how-it-runs).
+
+### GPU speed
+
+On an NVIDIA GeForce RTX 5090 through CUDA 13.2, CodeRankEmbed embedded 1,000 code
+chunks (225,638 tokens, a median of 132 per chunk) in requests as a build sends them,
+with the kernels already compiled and tuned. Texts per second, by batch size:
+
+| Batch tokens | f32 texts/s | f32 tokens/s | f16 texts/s | f16 tokens/s | Padding |
+|---|---|---|---|---|---|
+| 4,096 | 548 | 124k | 706 | 159k | 17% |
+| 8,192 | 466 | 105k | 566 | 128k | 21% |
+| 16,384 | 402 | 91k | 470 | 106k | 25% |
+
+Every vector of a sample of 130 chunks, two of them near the 8,192-token limit, stayed
+within a cosine similarity of 0.999997 of the CPU's f32 vector in both precisions. The
+first run compiled and tuned the kernels in 130 to 145 s, and a later run's first pass
+took 2.2 s. An NVIDIA L4 ran f32 at 95 texts/s through CUDA and 55 through Vulkan, at
+16,384 batch tokens and with burn's operation fusion, which made the RTX 5090 1.6 times
+as fast in f16 at 8,192.
 
 ### Int8 against f32
 
