@@ -46,9 +46,16 @@ pub struct WorkflowServicesConfig {
     /// agents.
     pub all_targets: bool,
     /// Calls running at once, workflow-wide (nested delegation included);
-    /// a call over the limit fails at once. Default
+    /// a call over the limit fails at once, or waits for a place with
+    /// [`queue_active_calls`](Self::queue_active_calls). Default
     /// [`DEFAULT_MAX_ACTIVE_CALLS`].
     pub max_active_calls: NonZeroU32,
+    /// Opt-in: no limit on calls running at once
+    /// ([`max_active_calls`](Self::max_active_calls) is ignored).
+    pub unlimited_active_calls: bool,
+    /// Opt-in: a call over [`max_active_calls`](Self::max_active_calls)
+    /// waits until one ends, instead of failing.
+    pub queue_active_calls: bool,
     /// `max_active_calls(0)` was asked for; `WorkflowBuilder::build`
     /// reports it.
     zero_max_active_calls: bool,
@@ -65,6 +72,8 @@ impl Default for WorkflowServicesConfig {
             all_callers: false,
             all_targets: false,
             max_active_calls: DEFAULT_MAX_ACTIVE_CALLS,
+            unlimited_active_calls: false,
+            queue_active_calls: false,
             zero_max_active_calls: false,
         }
     }
@@ -110,6 +119,19 @@ impl WorkflowServicesConfig {
         self
     }
 
+    /// Opt-in: no limit on calls running at once.
+    pub fn unlimited_active_calls(mut self) -> Self {
+        self.unlimited_active_calls = true;
+        self
+    }
+
+    /// Opt-in: a call over [`max_active_calls`](Self::max_active_calls)
+    /// waits until one ends, instead of failing.
+    pub fn queue_active_calls(mut self) -> Self {
+        self.queue_active_calls = true;
+        self
+    }
+
     /// Every agent the configuration names must be registered, and the
     /// call limit must be at least 1.
     pub(crate) fn validate(&self, agents: &HashSet<String>) -> Result<(), WorkflowError> {
@@ -141,6 +163,8 @@ pub struct WorkflowServices {
     persistence: Option<Arc<PersistenceManager>>,
     config: WorkflowServicesConfig,
     active_calls: Arc<AtomicU32>,
+    /// Notified when a call ends, for the calls waiting for a place.
+    call_ended: Arc<tokio::sync::Notify>,
 }
 
 impl WorkflowServices {
@@ -156,6 +180,7 @@ impl WorkflowServices {
             persistence,
             config,
             active_calls: Arc::new(AtomicU32::new(0)),
+            call_ended: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -242,7 +267,7 @@ impl WorkflowServices {
         parent: Option<TaskParent>,
     ) -> Result<AgentResult, WorkflowError> {
         self.authorize(caller, agent_name)?;
-        let _guard = self.enter_call(true)?;
+        let _guard = self.enter_call(true).await?;
         let context = self.context()?;
         WorkflowEngine::from_shared(self.client.clone(), self.persistence.clone())
             .run_nested(agent_name, prompt, &context, depth, parent)
@@ -253,21 +278,48 @@ impl WorkflowServices {
     /// stand-in for one.
     #[cfg(test)]
     pub(crate) fn hold_call(&self) -> CallGuard {
-        CallGuard(self.active_calls.clone()).counted()
+        self.guard().counted()
+    }
+
+    fn guard(&self) -> CallGuard {
+        CallGuard {
+            count: self.active_calls.clone(),
+            ended: self.call_ended.clone(),
+        }
     }
 
     /// Counts a call until the guard is dropped; with `refuse`, fails when
-    /// [`WorkflowServicesConfig::max_active_calls`] are running.
-    fn enter_call(&self, refuse: bool) -> Result<CallGuard, WorkflowError> {
-        let previous = self.active_calls.fetch_add(1, Ordering::AcqRel);
-        let guard = CallGuard(self.active_calls.clone());
-        if refuse && previous >= self.config.max_active_calls.get() {
-            return Err(WorkflowError::Channel(format!(
-                "workflow service active-call limit ({}) reached",
-                self.config.max_active_calls
-            )));
+    /// [`WorkflowServicesConfig::max_active_calls`] are running (or waits
+    /// for a place, with [`WorkflowServicesConfig::queue_active_calls`]).
+    async fn enter_call(&self, refuse: bool) -> Result<CallGuard, WorkflowError> {
+        if !refuse || self.config.unlimited_active_calls {
+            self.active_calls.fetch_add(1, Ordering::AcqRel);
+            return Ok(self.guard());
         }
-        Ok(guard)
+        let max = self.config.max_active_calls.get();
+        loop {
+            // Listening before the check, so an end between the two counts.
+            let ended = self.call_ended.notified();
+            tokio::pin!(ended);
+            ended.as_mut().enable();
+            let running = self.active_calls.load(Ordering::Acquire);
+            if running < max {
+                if self
+                    .active_calls
+                    .compare_exchange(running, running + 1, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    return Ok(self.guard());
+                }
+                continue;
+            }
+            if !self.config.queue_active_calls {
+                return Err(WorkflowError::Channel(format!(
+                    "workflow service active-call limit ({max}) reached"
+                )));
+            }
+            ended.await;
+        }
     }
 
     /// Recovers call `parent` of `caller`, which was running `agent_name`
@@ -292,7 +344,7 @@ impl WorkflowServices {
         parent: TaskParent,
     ) -> Result<AgentResult, WorkflowError> {
         self.authorize(caller, agent_name)?;
-        let _guard = self.enter_call(false)?;
+        let _guard = self.enter_call(false).await?;
         let context = self.context()?;
         let engine = WorkflowEngine::from_shared(self.client.clone(), self.persistence.clone());
         let started = context
@@ -370,7 +422,7 @@ impl WorkflowServices {
         parent: Option<TaskParent>,
     ) -> Result<AgentResult, WorkflowError> {
         self.authorize(caller, agent_name)?;
-        let _guard = self.enter_call(true)?;
+        let _guard = self.enter_call(true).await?;
         self.resume_admitted(caller_run, agent_name, run_id, message, depth, parent)
             .await
     }
@@ -616,19 +668,23 @@ impl WorkflowServices {
 }
 
 /// Counts a running call until dropped.
-pub(crate) struct CallGuard(Arc<AtomicU32>);
+pub(crate) struct CallGuard {
+    count: Arc<AtomicU32>,
+    ended: Arc<tokio::sync::Notify>,
+}
 
 impl CallGuard {
     #[cfg(test)]
     fn counted(self) -> Self {
-        self.0.fetch_add(1, Ordering::AcqRel);
+        self.count.fetch_add(1, Ordering::AcqRel);
         self
     }
 }
 
 impl Drop for CallGuard {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        self.count.fetch_sub(1, Ordering::AcqRel);
+        self.ended.notify_waiters();
     }
 }
 
@@ -909,6 +965,50 @@ mod tests {
             .max_active_calls(2);
         assert_eq!(config.max_active_calls.get(), 2);
         assert!(config.validate(&HashSet::new()).is_ok());
+    }
+
+    /// Over the limit a call fails, or waits for a place with
+    /// `queue_active_calls`; `unlimited_active_calls` lifts the limit.
+    #[tokio::test]
+    async fn calls_over_the_limit_fail_wait_or_run() {
+        let services = |config: WorkflowServicesConfig| {
+            WorkflowServices::new(
+                Weak::new(),
+                Arc::new(arko_ai::LLMClient::new()),
+                None,
+                config.max_active_calls(1),
+            )
+        };
+        let failing = services(WorkflowServicesConfig::default());
+        let held = failing.enter_call(true).await.unwrap();
+        let error = failing.enter_call(true).await.err().unwrap();
+        assert!(error.to_string().contains("active-call limit (1) reached"));
+        drop(held);
+        assert!(failing.enter_call(true).await.is_ok());
+
+        let queueing = Arc::new(services(
+            WorkflowServicesConfig::default().queue_active_calls(),
+        ));
+        let held = queueing.enter_call(true).await.unwrap();
+        let waiting = tokio::spawn({
+            let queueing = queueing.clone();
+            async move { queueing.enter_call(true).await.map(|_| ()) }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "it waits for a place");
+        drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        let unlimited = services(WorkflowServicesConfig::default().unlimited_active_calls());
+        let mut guards = Vec::new();
+        for _ in 0..8 {
+            guards.push(unlimited.enter_call(true).await.unwrap());
+        }
+        assert_eq!(unlimited.active_calls.load(Ordering::Acquire), 8);
     }
 
     /// Names must be registered agents.
