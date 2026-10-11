@@ -558,10 +558,10 @@ impl AgentLoop {
         Ok(Flow::Proceed)
     }
 
-    /// A native turn without calls: the handover report, when it is due,
-    /// or a response without a tool call, which gets a note and is asked
-    /// again under the error policy. Calls the stream announced are
-    /// rejected.
+    /// A native turn without calls: the handover report, when it is due
+    /// and the agent isn't offered `handover_report`, or a response without
+    /// a tool call, which gets a note and is asked again under the error
+    /// policy. Calls the stream announced are rejected.
     async fn native_turn_without_calls(
         &mut self,
         final_generation_response: Option<ai::GenerationResponse>,
@@ -586,7 +586,8 @@ impl AgentLoop {
         Ok(self.end_of_pass())
     }
 
-    /// A native call's checks, in order: arguments that aren't JSON, a
+    /// A native call's checks, in order: arguments that aren't JSON,
+    /// `handover_report` (answered by the runtime where it is offered), a
     /// handover report that is due, a tool the run doesn't offer, and its
     /// paths. A call they reject is answered (`ToolRejected` or
     /// `UnavailableToolAttempted`, and its result recorded); otherwise it
@@ -629,17 +630,45 @@ impl AgentLoop {
             return Ok(NativeCall::Answered);
         }
 
+        if ai_tool_call.name == HANDOVER_REPORT_TOOL_NAME && self.offers_report_tool() {
+            let result = match self.take_report_call(&params_map) {
+                Ok(received) => {
+                    self.emit_tool_result_events(
+                        tool_call_id,
+                        HANDOVER_REPORT_TOOL_NAME,
+                        received,
+                        received,
+                        false,
+                    )
+                    .await?;
+                    ai::ToolResult::from_tool_call(ai_tool_call, received)
+                }
+                Err(reason) => {
+                    self.emit_event(AgentEvent::ToolRejected {
+                        tool_call_id,
+                        tool_name: ai_tool_call.name.clone(),
+                        reason: Some(reason.to_string()),
+                    })
+                    .await?;
+                    ai::ToolResult::error_from_tool_call(ai_tool_call, reason)
+                }
+            };
+            results.record(&mut self.task, call_index, result);
+            return Ok(NativeCall::Answered);
+        }
+
         if self.handover_blocks(&ai_tool_call.name) {
+            let reason = self.handover_report_due_reason();
             self.emit_event(AgentEvent::ToolRejected {
                 tool_call_id,
                 tool_name: ai_tool_call.name.clone(),
-                reason: Some(HANDOVER_REPORT_DUE.to_string()),
+                reason: Some(reason.to_string()),
             })
             .await?;
             results.record(
                 &mut self.task,
                 call_index,
-                ai::ToolResult::error_from_tool_call(ai_tool_call, HANDOVER_REPORT_DUE),
+                ai::ToolResult::error_from_tool_call(ai_tool_call, reason),
             );
             return Ok(NativeCall::Answered);
         }

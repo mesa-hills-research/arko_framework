@@ -1280,8 +1280,10 @@ pub struct AgentConfig {
     pub refusal_fallback: Option<AgentLLMConfig>,
     /// Opt-in: once the context reaches a threshold, the agent writes a
     /// report and continues from it in a fresh conversation, in the same
-    /// task; see [`crate::handover`]. Off by default. A host can ask for a
-    /// handover with [`UserCommand::RequestHandover`](crate::runtime::command::UserCommand::RequestHandover)
+    /// task; see [`crate::handover`]. Off by default. With native tool
+    /// calling, set means the agent is offered the `handover_report` tool
+    /// for the report. A host can ask for a handover with
+    /// [`UserCommand::RequestHandover`](crate::runtime::command::UserCommand::RequestHandover)
     /// whether or not this is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handover: Option<HandoverConfig>,
@@ -1426,8 +1428,10 @@ impl AgentConfig {
         self.tool_config.tool_calling_mode == ToolCallingMode::Native
     }
 
-    /// Checks the settings the builder checks: retry timing, monitors, a
-    /// command timeout and reminder frequency of at least 1, a forced tool
+    /// Checks the settings the builder checks: retry timing, monitors, the
+    /// handover (and, beside it in native mode, no agent tool named
+    /// `handover_report`), a command timeout and reminder frequency of at
+    /// least 1, a forced tool
     /// choice only where the model takes it
     /// ([`Model::supports_forced_tool_choice`](arko_ai::Model::supports_forced_tool_choice),
     /// for the configured model and the refusal fallback), and a refusal
@@ -1440,6 +1444,22 @@ impl AgentConfig {
         self.monitoring.validate()?;
         if let Some(handover) = &self.handover {
             handover.validate()?;
+            if self.is_native_tool_calling()
+                && !self.runs_in_claude_code()
+                && self
+                    .tool_config
+                    .available_tool_names
+                    .iter()
+                    .any(|name| name == crate::handover::HANDOVER_REPORT_TOOL_NAME)
+            {
+                return Err(ArkoAgentsError::BuilderError {
+                    struct_name: "AgentConfig".into(),
+                    message: format!(
+                        "With handover set, the runtime offers its own '{}' tool for the report; rename the agent's tool of that name.",
+                        crate::handover::HANDOVER_REPORT_TOOL_NAME
+                    ),
+                });
+            }
         }
         self.tool_config.validate()?;
         if self.user_command_timeout_seconds == Some(0) {
@@ -2009,6 +2029,23 @@ mod validation_tests {
         assert!(!details.file_tree.include);
         assert_eq!(details.file_tree.depth, Some(2));
         assert!(details.current_datetime.include);
+    }
+
+    /// With handover set, a native agent's own tool can't take the name of
+    /// the runtime's `handover_report` tool; without it, it can.
+    #[test]
+    fn a_tool_named_like_the_report_tool_fails_validation_beside_handover() {
+        let mut config = luna();
+        config
+            .tool_config
+            .available_tool_names
+            .push(crate::handover::HANDOVER_REPORT_TOOL_NAME.into());
+        assert!(config.validate().is_ok());
+        config.handover = Some(crate::handover::HandoverConfig::at_input_tokens(100_000));
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("handover_report"), "{error}");
+        config.tool_config.tool_calling_mode = ToolCallingMode::OutputBased;
+        assert!(config.validate().is_ok());
     }
 
     /// A forced tool choice the configured model (or the refusal fallback)

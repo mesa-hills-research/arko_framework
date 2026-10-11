@@ -162,7 +162,7 @@ runtime validates them again when a task starts. The quick start's agent as JSON
 | `skills_config` | None | Skill sources; see [Skills](#skills). |
 | `monitoring` | Nothing monitored | Plan-usage and prompt-cache monitors; see [Monitoring](#monitoring). |
 | `refusal_fallback` | None | A model that answers a refused turn once; see [Refusals](#refusals). |
-| `handover` | None | Opt-in: at a context size, the agent writes a report and continues from it in a fresh conversation; see [Conversation handover](#conversation-handover). |
+| `handover` | None | Opt-in: at a context size, the agent writes a report (with native tool calling, through the `handover_report` tool) and continues from it in a fresh conversation; see [Conversation handover](#conversation-handover). |
 | `claude_code` | None (the defaults) | How the Claude Code CLI runs, for a Claude Code model; see [Claude Code models](#claude-code-models). |
 | `complete_task_summary_prompt_override` | None | Replaces the description of `complete_task`'s `summary` parameter. |
 | `parsing_config_override` | Default tags | Tag syntax for output-based tool calls. |
@@ -1310,7 +1310,9 @@ let config = AgentConfig::builder(id, name, llm_config)
    `at_context_fraction` of the model's input limit; the fraction is ignored for a model
    whose limit is unknown), or after a host sent
    `UserCommand::RequestHandover`, the runtime adds a user message asking for the report
-   (`DEFAULT_REPORT_REQUEST`, or `report_request`) and emits `HandoverRequested`. It waits
+   (`DEFAULT_REPORT_REQUEST` for an agent that gives it with the `handover_report` tool,
+   `DEFAULT_TEXT_REPORT_REQUEST` for one that replies with it, or `report_request` for
+   either) and emits `HandoverRequested`. It waits
    for a boundary where a user message can go: not while calls wait for results, and not
    for a refusal fallback's request. A conversation whose first request was already over
    the threshold doesn't hand over (the fresh one would start over it too); a warning is
@@ -1323,17 +1325,26 @@ let config = AgentConfig::builder(id, name, llm_config)
    not one request later. `HandoverRequested` and the record keep the latest request's
    reported input. The Claude Code runtime checks the latest request's input, as Claude
    Code reports it.
-2. **The report turn.** The agent replies with the report as plain text. The request
-   asks for the task, what was done and the evidence, decisions, where it stopped, the
-   next steps, what it is still waiting for and from whom (such as a reply to a
-   question it sent), and every message it hasn't fully answered, with what it meant to
-   reply. Context that arrives from the moment the report is requested (injected
+2. **The report turn.** With native tool calling, an agent with `handover` set is
+   offered the `handover_report` tool from its first request and gives the report as the
+   tool's `report` argument. An agent told that every response must call a tool can keep
+   to that while it writes the report. Other agents (output-based tool calling, Claude
+   Code, and a host's request to an agent without `handover`) reply with the report as
+   plain text. The request asks for the task, what was done and the evidence, decisions,
+   where it stopped, the next steps, what it is still waiting for and from whom (such as
+   a reply to a question it sent), and every message it hasn't fully answered, with what
+   it meant to reply. Context that arrives from the moment the report is requested (injected
    context, the turn-context source's, file-tree changes) is held in
    `Task::pending_context_injections` and added to the fresh conversation, not the one
-   being replaced, so a message that needs a reply is read in full after the handover. Tool calls in this turn are rejected with a result saying the report
-   is due, except `complete_task`: a task that is done completes instead. A reply without
-   text gets a note and the request stands. The tools offered don't change, so the
-   request keeps its cache prefix.
+   being replaced, so a message that needs a reply is read in full after the handover.
+   Other tool calls in this turn are rejected with a result saying the report is due,
+   except `complete_task`: a task that is done completes instead. A reply without the
+   report gets a note and the request stands: for an agent offered the tool, a reply
+   without a tool call, and for the others, a reply without text. A `handover_report` call
+   made when no report is due, or without a report, is rejected. The tools offered don't
+   change, so the request keeps its cache prefix. A report given with the tool waits in
+   `HandoverRequest::report` until the next turn boundary, once the turn's results are in,
+   so a task stopped in between still hands over when it runs again.
 3. **The fresh conversation.** `Task::start_fresh_conversation` clears the messages (and
    what refers to them: runtime-message indices, a refused input, the ChatGPT turn state,
    the user-message count) and keeps the system prompt, the pending context injections,

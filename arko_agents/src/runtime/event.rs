@@ -238,8 +238,9 @@ pub enum AgentEvent {
         error_message: String,
     },
     /// A handover started: the agent was asked for its handover report,
-    /// and its tool calls other than `complete_task` are rejected until it
-    /// replies. See [`crate::handover`].
+    /// and its tool calls other than `complete_task` (and `handover_report`,
+    /// where it is offered) are rejected until it gives it. See
+    /// [`crate::handover`].
     HandoverRequested {
         /// The input size of the latest request of the conversation being
         /// replaced; 0 when a host asked before any request.

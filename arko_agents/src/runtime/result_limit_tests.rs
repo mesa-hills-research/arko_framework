@@ -103,9 +103,16 @@ fn respond(calls: &[(&str, &str, Value)], input_tokens: usize) -> ScriptedStream
     scripted("", calls, input_tokens, 10)
 }
 
-/// A reply without tool calls.
-fn reply(text: &str, input_tokens: usize) -> ScriptedStreamResult {
-    scripted(text, &[], input_tokens, 10)
+/// A `handover_report` call with `text`.
+fn report(text: &str, input_tokens: usize) -> ScriptedStreamResult {
+    respond(
+        &[(
+            "report",
+            HANDOVER_REPORT_TOOL_NAME,
+            json!({ "report": text }),
+        )],
+        input_tokens,
+    )
 }
 
 fn scripted(
@@ -356,7 +363,7 @@ async fn a_task_run_again_estimates_from_its_saved_usage() {
         .push(ai::UsageInfo::new(15_000, 10));
     push(
         &mut agent,
-        vec![reply("REPORT: read the data.", 16_000), complete()],
+        vec![report("REPORT: read the data.", 16_000), complete()],
     );
     let (task, events) = run(agent, &mut events).await;
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
@@ -418,7 +425,7 @@ async fn the_handover_check_counts_the_models_reply() {
         &mut agent,
         vec![
             scripted("", &[("data", "dump", json!({"bytes": 300}))], 5_000, 6_000),
-            reply("REPORT: read the data.", 11_000),
+            report("REPORT: read the data.", 11_000),
             complete(),
         ],
     );
@@ -697,7 +704,7 @@ async fn the_handover_check_counts_the_turns_results() {
         agent.task.agent_config.handover = Some(HandoverConfig::at_input_tokens(10_000));
         let mut responses = vec![respond(&[("data", "dump", json!({"bytes": bytes}))], 5_000)];
         if handover {
-            responses.push(reply("REPORT: read the data.", 6_000));
+            responses.push(report("REPORT: read the data.", 6_000));
         }
         responses.push(complete());
         push(&mut agent, responses);

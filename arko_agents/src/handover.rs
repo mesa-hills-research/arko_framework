@@ -15,18 +15,55 @@
 //! A [`HandoverHook`] lets the host adjust the fresh conversation's first
 //! message and update its own records at the moment the conversation is
 //! replaced.
+//!
+//! How the agent gives the report depends on how it calls tools. With native
+//! tool calling and `handover` set, arko's runtime offers it the
+//! [`HANDOVER_REPORT_TOOL_NAME`] tool from the first request (so the tool
+//! list, and the prompt cache, stay the same when the report is asked for),
+//! and the report is that tool's `report` argument. Agents told that every
+//! response must call a tool can then follow that rule while they write it.
+//! Otherwise (output-based tool calling, Claude Code, or a host's request to
+//! an agent without `handover`) the report is a reply without a tool call.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ArkoAgentsError;
 use crate::task::Task;
+use crate::tool::{ToolDefinition, ToolParameterDefinition, ToolParameterType, ToolTypeDetails};
 
-/// What the runtime asks for, as a user message, when a handover starts.
-/// The agent answers with the report as plain text; other tool calls are
+/// The tool an agent gives its handover report with; see the
+/// [module docs](self) for when it is offered.
+pub const HANDOVER_REPORT_TOOL_NAME: &str = "handover_report";
+
+/// The [`HANDOVER_REPORT_TOOL_NAME`] tool's parameter that holds the report.
+pub const HANDOVER_REPORT_PARAM_NAME: &str = "report";
+
+/// What the report request asks the report to cover, after it says how to
+/// give the report.
+macro_rules! report_contents {
+    () => {
+        "Cover what the task is, what you have done and the evidence for it (files, commands, results), decisions you made and why, what you were doing when you stopped, and the next steps. List anything you are still waiting for, such as a reply to a question you asked, and from whom, and every message you received that you haven't fully answered yet: who sent it, what it asked, and what you meant to reply. Be complete: the fresh conversation will have only the task and this report. Messages that arrive while you write it are delivered after it, in the fresh conversation."
+    };
+}
+
+/// What the runtime asks for, as a user message, when a handover starts
+/// and the agent is offered the [`HANDOVER_REPORT_TOOL_NAME`] tool. Other
+/// tool calls are rejected until the agent calls it (it may still call
+/// `complete_task` if the task is done).
+pub const DEFAULT_REPORT_REQUEST: &str = concat!(
+    "Your conversation is getting long, so it will be replaced with a fresh one that starts from your task and a report you write now. Call `handover_report` with that report; your other tool calls are not run until you do (call `complete_task` instead if the task is done). ",
+    report_contents!()
+);
+
+/// What the runtime asks for when the agent gives the report as a reply
+/// without a tool call (see the [module docs](self)). Other tool calls are
 /// rejected until it does (it may still call `complete_task` if the task is
 /// done).
-pub const DEFAULT_REPORT_REQUEST: &str = "Your conversation is getting long, so it will be replaced with a fresh one that starts from your task and a report you write now. Reply with that report as plain text, without calling a tool. Cover what the task is, what you have done and the evidence for it (files, commands, results), decisions you made and why, what you were doing when you stopped, and the next steps. List anything you are still waiting for, such as a reply to a question you asked, and from whom, and every message you received that you haven't fully answered yet: who sent it, what it asked, and what you meant to reply. Be complete: the fresh conversation will have only the task and this report. Messages that arrive while you write it are delivered after it, in the fresh conversation.";
+pub const DEFAULT_TEXT_REPORT_REQUEST: &str = concat!(
+    "Your conversation is getting long, so it will be replaced with a fresh one that starts from your task and a report you write now. Reply with that report as plain text, without calling a tool. ",
+    report_contents!()
+);
 
 /// The heading of the report in the fresh conversation's first message.
 pub const REPORT_HEADING: &str = "# Handover report";
@@ -59,7 +96,10 @@ pub struct HandoverConfig {
     /// is unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub at_context_fraction: Option<f64>,
-    /// Replaces [`DEFAULT_REPORT_REQUEST`].
+    /// Replaces [`DEFAULT_REPORT_REQUEST`] (or [`DEFAULT_TEXT_REPORT_REQUEST`]
+    /// where the report is a reply without a tool call). It should say how
+    /// to give the report: with the [`HANDOVER_REPORT_TOOL_NAME`] tool where
+    /// it is offered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report_request: Option<String>,
 }
@@ -96,11 +136,14 @@ impl HandoverConfig {
         }
     }
 
-    /// The request the agent receives when the handover starts.
-    pub fn report_request(&self) -> &str {
+    /// The request the agent receives when the handover starts:
+    /// `report_request`, or by default [`DEFAULT_REPORT_REQUEST`] when the
+    /// agent gives the report with the [`HANDOVER_REPORT_TOOL_NAME`] tool
+    /// (`with_tool`) and [`DEFAULT_TEXT_REPORT_REQUEST`] otherwise.
+    pub fn report_request(&self, with_tool: bool) -> &str {
         self.report_request
             .as_deref()
-            .unwrap_or(DEFAULT_REPORT_REQUEST)
+            .unwrap_or(default_report_request(with_tool))
     }
 
     pub fn validate(&self) -> Result<(), ArkoAgentsError> {
@@ -133,6 +176,39 @@ impl HandoverConfig {
     }
 }
 
+/// The default report request: [`DEFAULT_REPORT_REQUEST`] when the agent
+/// gives the report with the [`HANDOVER_REPORT_TOOL_NAME`] tool
+/// (`with_tool`), [`DEFAULT_TEXT_REPORT_REQUEST`] otherwise.
+pub fn default_report_request(with_tool: bool) -> &'static str {
+    if with_tool {
+        DEFAULT_REPORT_REQUEST
+    } else {
+        DEFAULT_TEXT_REPORT_REQUEST
+    }
+}
+
+/// The definition of the [`HANDOVER_REPORT_TOOL_NAME`] tool. The runtime
+/// answers its calls itself: it isn't in a [`ToolRegistry`](crate::tool::ToolRegistry).
+pub fn report_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: HANDOVER_REPORT_TOOL_NAME.to_string(),
+        description: "Gives the handover report the runtime asks for when your conversation gets long: your conversation is then replaced with a fresh one that starts from your task and this report. Call it only after that request, which says what the report should cover.".to_string(),
+        output_based_example: None,
+        parameters: vec![ToolParameterDefinition {
+            name: HANDOVER_REPORT_PARAM_NAME.to_string(),
+            description: "The full report, in Markdown. The fresh conversation has only your task and this report.".to_string(),
+            param_type: ToolParameterType::String,
+            required: true,
+            is_path: false,
+            flag: None,
+            default_value: None,
+        }],
+        parallel_safe: false,
+        tool_type_details: ToolTypeDetails::BuiltIn,
+        raw_json_schema_override: None,
+    }
+}
+
 /// A handover the runtime has asked the agent for and is waiting on.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HandoverRequest {
@@ -145,6 +221,25 @@ pub struct HandoverRequest {
     /// user message can go.
     #[serde(default)]
     pub report_requested: bool,
+    /// The report the agent gave with the [`HANDOVER_REPORT_TOOL_NAME`]
+    /// tool. The runtime replaces the conversation with it at the next turn
+    /// boundary, once the turn's results are in, so a task stopped in
+    /// between still hands over with it when it runs again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<String>,
+}
+
+impl HandoverRequest {
+    /// A request made now, at `input_tokens`, whose report isn't asked for
+    /// yet.
+    pub fn new(input_tokens: usize) -> Self {
+        Self {
+            requested_at: Utc::now(),
+            input_tokens,
+            report_requested: false,
+            report: None,
+        }
+    }
 }
 
 /// A handover that has taken place.
@@ -242,6 +337,50 @@ mod tests {
             ..HandoverConfig::at_input_tokens(10)
         };
         assert!(blank.validate().is_err());
+    }
+
+    #[test]
+    fn the_report_request_says_how_to_give_the_report() {
+        let config = HandoverConfig::at_input_tokens(10);
+        assert_eq!(config.report_request(true), DEFAULT_REPORT_REQUEST);
+        assert_eq!(config.report_request(false), DEFAULT_TEXT_REPORT_REQUEST);
+        assert!(DEFAULT_REPORT_REQUEST.contains("Call `handover_report`"));
+        assert!(DEFAULT_TEXT_REPORT_REQUEST.contains("without calling a tool"));
+        // Both ask for the same contents.
+        assert!(DEFAULT_REPORT_REQUEST.ends_with(report_contents!()));
+        assert!(DEFAULT_TEXT_REPORT_REQUEST.ends_with(report_contents!()));
+        let custom = HandoverConfig {
+            report_request: Some("Report.".into()),
+            ..config
+        };
+        assert_eq!(custom.report_request(true), "Report.");
+        assert_eq!(custom.report_request(false), "Report.");
+    }
+
+    #[test]
+    fn the_report_tool_takes_the_report() {
+        let definition = report_tool_definition();
+        assert_eq!(definition.name, HANDOVER_REPORT_TOOL_NAME);
+        let [parameter] = definition.parameters.as_slice() else {
+            panic!("{definition:?}");
+        };
+        assert_eq!(parameter.name, HANDOVER_REPORT_PARAM_NAME);
+        assert!(parameter.required);
+    }
+
+    #[test]
+    fn requests_saved_without_a_report_load() {
+        let request = HandoverRequest::new(1_500);
+        let saved = serde_json::to_value(&request).unwrap();
+        assert!(saved.get("report").is_none(), "{saved}");
+        let loaded: HandoverRequest = serde_json::from_value(serde_json::json!({
+            "requested_at": request.requested_at,
+            "input_tokens": 1_500,
+            "report_requested": true,
+        }))
+        .unwrap();
+        assert_eq!(loaded.report, None);
+        assert!(loaded.report_requested);
     }
 
     #[test]

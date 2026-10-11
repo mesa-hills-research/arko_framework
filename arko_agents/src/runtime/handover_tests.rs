@@ -3,7 +3,9 @@
 
 use super::image_tests::{call, harness};
 use super::*;
-use crate::handover::{DEFAULT_REPORT_REQUEST, HandoverConfig, REPORT_HEADING};
+use crate::handover::{
+    DEFAULT_REPORT_REQUEST, DEFAULT_TEXT_REPORT_REQUEST, HandoverConfig, REPORT_HEADING,
+};
 use futures::StreamExt;
 
 /// A scripted response with `input_tokens` of input. Output-based text is
@@ -56,6 +58,48 @@ fn reply(text: &str, input_tokens: usize) -> ScriptedStreamResult {
     scripted(ai::Message::new_assistant(text), input_tokens)
 }
 
+/// A `handover_report` call with `report`, after the calls named in
+/// `before` (each called with its name as its id).
+fn native_report(before: &[&str], report: &str, input_tokens: usize) -> ScriptedStreamResult {
+    let mut message = ai::Message::new_assistant("");
+    for name in before {
+        message.tool_calls.push(call(name, name));
+    }
+    let mut report_call = call("report", HANDOVER_REPORT_TOOL_NAME);
+    report_call.arguments = serde_json::json!({ "report": report });
+    message.tool_calls.push(report_call);
+    scripted(message, input_tokens)
+}
+
+/// A native agent with `handover` set, which gives its report with the
+/// `handover_report` tool. The threshold is out of reach: the tests ask for
+/// the handover with a command.
+fn tool_harness() -> (
+    AgentLoop,
+    mpsc::Receiver<AgentEvent>,
+    mpsc::Sender<UserCommand>,
+) {
+    let (mut agent, events, commands) = harness(ToolCallingMode::Native);
+    agent.task.agent_config.handover = Some(HandoverConfig::at_input_tokens(1_000_000));
+    (agent, events, commands)
+}
+
+/// Why the calls to `tool` were rejected, from the events (the replaced
+/// conversation that held their results is gone).
+fn rejections(events: &[AgentEvent], tool: &str) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolRejected {
+                tool_name,
+                reason: Some(reason),
+                ..
+            } if tool_name == tool => Some(reason.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn push(agent: &mut AgentLoop, responses: Vec<ScriptedStreamResult>) {
     agent
         .scripted_responses
@@ -96,7 +140,7 @@ async fn a_conversation_over_the_threshold_is_handed_over_in_place() {
             native_call("plain_text", 500),
             // Over it: the next request asks for the report.
             native_call("plain_text", 1_500),
-            reply("Done: read the fixture. Next: finish.", 1_600),
+            native_report(&[], "Done: read the fixture. Next: finish.", 1_600),
             // The fresh conversation, small again.
             native_call("plain_text", 200),
             native_complete(),
@@ -144,6 +188,209 @@ async fn a_conversation_over_the_threshold_is_handed_over_in_place() {
     // The usage delta doesn't compare the fresh conversation with the old.
     let first_fresh = &task.model_call_usage_history[task.conversation_model_call_start];
     assert_eq!(first_fresh.input_delta_from_previous_call, None);
+}
+
+/// With `handover` set, native requests offer `handover_report` from the
+/// first one, so the tool list is the same when the report is asked for.
+/// Without it, or for output-based agents, the tool isn't offered.
+#[tokio::test]
+async fn the_report_tool_is_offered_with_handover_set() {
+    let offers = |agent: &AgentLoop| {
+        agent
+            .build_native_tool_config(&agent.task.conversation.model, None)
+            .tools
+            .iter()
+            .any(|tool| tool.name == HANDOVER_REPORT_TOOL_NAME)
+    };
+    let (agent, _events, _commands) = harness(ToolCallingMode::Native);
+    assert!(!agent.offers_report_tool());
+    assert!(!offers(&agent));
+    let (agent, _events, _commands) = tool_harness();
+    assert!(agent.offers_report_tool());
+    assert!(offers(&agent));
+    let (mut agent, _events, _commands) = harness(ToolCallingMode::OutputBased);
+    agent.task.agent_config.handover = Some(HandoverConfig::at_input_tokens(1_000));
+    assert!(!agent.offers_report_tool());
+}
+
+/// The report request asks for `handover_report`, the turn's other calls
+/// are rejected with a result that asks for it too, and the report call's
+/// argument is the report the fresh conversation starts from.
+#[tokio::test]
+async fn the_report_comes_from_the_report_tool() {
+    let (mut agent, mut events, commands) = tool_harness();
+    commands.try_send(UserCommand::RequestHandover).unwrap();
+    push(
+        &mut agent,
+        vec![
+            native_report(&["plain_text"], "  Tool report: nothing done yet.  ", 100),
+            native_complete(),
+        ],
+    );
+    let (task, events) = run(agent, &mut events).await;
+
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(task.handovers.len(), 1);
+    let record = &task.handovers[0];
+    assert_eq!(record.report, "Tool report: nothing done yet.");
+    // The task prompt, the request, the report turn and its results.
+    assert_eq!(record.replaced_messages, 4);
+    assert!(task.handover_requested.is_none());
+    let first = &texts(&task)[0];
+    assert!(first.contains(REPORT_HEADING));
+    assert!(first.contains("Tool report: nothing done yet."));
+
+    assert_eq!(
+        rejections(&events, "plain_text"),
+        [HANDOVER_REPORT_TOOL_DUE]
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolResult { tool_name, output, .. }
+            if tool_name == HANDOVER_REPORT_TOOL_NAME && output == REPORT_RECEIVED
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ConversationHandedOver { report, handovers: 1, .. }
+            if report == "Tool report: nothing done yet."
+    )));
+}
+
+/// What the old conversation held when it was replaced: the request for
+/// the tool, and the report call answered.
+#[tokio::test]
+async fn the_replaced_conversation_asks_for_the_tool_and_holds_its_result() {
+    struct Seen(std::sync::Mutex<Option<Vec<ai::Message>>>);
+    impl HandoverHook for Seen {
+        fn on_handover(&self, task: &Task, _report: &str) -> HandoverSeed {
+            *self.0.lock().unwrap() = Some(task.conversation.messages.clone());
+            HandoverSeed::for_task(task)
+        }
+    }
+    let (mut agent, mut events, commands) = tool_harness();
+    let hook = Arc::new(Seen(Default::default()));
+    agent.handover_hook = Some(hook.clone());
+    commands.try_send(UserCommand::RequestHandover).unwrap();
+    push(
+        &mut agent,
+        vec![native_report(&[], "The report.", 100), native_complete()],
+    );
+    let (task, _events) = run(agent, &mut events).await;
+    assert_eq!(task.handovers.len(), 1);
+    let old = hook.0.lock().unwrap().clone().unwrap();
+    assert!(message_text(&old[1]).contains(DEFAULT_REPORT_REQUEST));
+    let results: Vec<&ai::ToolResult> = old
+        .last()
+        .unwrap()
+        .content
+        .iter()
+        .filter_map(ai::Content::as_tool_result)
+        .collect();
+    assert_eq!(results.len(), 1, "{old:#?}");
+    assert!(!results[0].is_error);
+    assert_eq!(results[0].name, HANDOVER_REPORT_TOOL_NAME);
+}
+
+/// An agent offered `handover_report` that replies without a tool call
+/// gets a note asking for the tool: its text isn't taken as the report.
+#[tokio::test]
+async fn a_reply_without_the_report_tool_gets_a_note() {
+    let (mut agent, mut events, commands) = tool_harness();
+    commands.try_send(UserCommand::RequestHandover).unwrap();
+    push(
+        &mut agent,
+        vec![
+            reply("I'll write the report now.", 10),
+            native_report(&[], "The real report.", 20),
+            native_complete(),
+        ],
+    );
+    let (task, _events) = run(agent, &mut events).await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(task.handovers.len(), 1);
+    assert_eq!(task.handovers[0].report, "The real report.");
+}
+
+/// A report call without a report is rejected and the report asked again;
+/// one made when no report is due is rejected and the task goes on.
+#[tokio::test]
+async fn report_calls_without_a_report_or_a_request_are_rejected() {
+    let (mut agent, mut events, commands) = tool_harness();
+    commands.try_send(UserCommand::RequestHandover).unwrap();
+    push(
+        &mut agent,
+        vec![
+            native_report(&[], "   ", 10),
+            native_report(&[], "Second try.", 20),
+            native_complete(),
+        ],
+    );
+    let (task, events) = run(agent, &mut events).await;
+    assert_eq!(task.handovers.len(), 1);
+    assert_eq!(task.handovers[0].report, "Second try.");
+    assert_eq!(
+        rejections(&events, HANDOVER_REPORT_TOOL_NAME),
+        [EMPTY_REPORT_CALL]
+    );
+
+    let (mut agent, mut events, _commands) = tool_harness();
+    push(
+        &mut agent,
+        vec![native_report(&[], "Unasked.", 10), native_complete()],
+    );
+    let (task, events) = run(agent, &mut events).await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(task.handovers.is_empty());
+    assert!(task.handover_requested.is_none());
+    assert_eq!(
+        rejections(&events, HANDOVER_REPORT_TOOL_NAME),
+        [REPORT_NOT_REQUESTED]
+    );
+}
+
+/// `complete_task` beside the report completes the task: no handover.
+#[tokio::test]
+async fn complete_task_beside_the_report_completes_the_task() {
+    let (mut agent, mut events, commands) = tool_harness();
+    commands.try_send(UserCommand::RequestHandover).unwrap();
+    let mut message = ai::Message::new_assistant("");
+    let mut report = call("report", HANDOVER_REPORT_TOOL_NAME);
+    report.arguments = serde_json::json!({"report": "Done anyway."});
+    let mut complete = call("complete", "complete_task");
+    complete.arguments = serde_json::json!({"summary": "done"});
+    message.tool_calls.extend([report, complete]);
+    push(&mut agent, vec![scripted(message, 10)]);
+    let (task, _events) = run(agent, &mut events).await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(task.handovers.is_empty());
+}
+
+/// A task saved with the report received, before its conversation was
+/// replaced, hands over with that report when it runs again, before its
+/// next request.
+#[tokio::test]
+async fn a_task_saved_with_its_report_hands_over_when_it_runs_again() {
+    let (mut agent, mut events, _commands) = tool_harness();
+    agent.task.handover_requested = Some(HandoverRequest {
+        report_requested: true,
+        report: Some("Saved report.".into()),
+        ..HandoverRequest::new(1_500)
+    });
+    push(&mut agent, vec![native_complete()]);
+    let (task, events) = run(agent, &mut events).await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(task.handovers.len(), 1);
+    assert_eq!(task.handovers[0].report, "Saved report.");
+    assert_eq!(task.handovers[0].input_tokens, 1_500);
+    assert!(texts(&task)[0].contains("Saved report."));
+    // The one request went to the fresh conversation.
+    assert_eq!(task.usage_history.len(), 1);
+    assert_eq!(task.conversation_usage_start, 0);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::HandoverRequested { .. }))
+    );
 }
 
 #[tokio::test]
@@ -200,9 +447,12 @@ async fn a_reply_without_text_gets_a_note_and_the_report_is_asked_again() {
     assert_eq!(task.handovers[0].report, "The report.");
 }
 
+/// Output-based agents give the report as plain text, also with `handover`
+/// set: the tool is for native tool calling.
 #[tokio::test]
 async fn output_based_agents_hand_over_from_their_plain_text() {
     let (mut agent, mut events, commands) = harness(ToolCallingMode::OutputBased);
+    agent.task.agent_config.handover = Some(HandoverConfig::at_input_tokens(1_000_000));
     commands.try_send(UserCommand::RequestHandover).unwrap();
     push(
         &mut agent,
@@ -230,6 +480,8 @@ struct RosterHook {
 impl HandoverHook for RosterHook {
     fn on_handover(&self, task: &Task, report: &str) -> HandoverSeed {
         assert_eq!(report, "Hooked report.");
+        // Without `handover` set, the report is asked for as plain text.
+        assert!(message_text(&task.conversation.messages[1]).contains(DEFAULT_TEXT_REPORT_REQUEST));
         *self.seen_messages.lock().unwrap() = Some(task.conversation.messages.len());
         HandoverSeed {
             task_prompt: "Restated task".into(),

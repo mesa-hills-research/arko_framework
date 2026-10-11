@@ -12,8 +12,7 @@ use super::*;
 use crate::messaging::registry::{AgentStatus, WaitReason};
 use crate::messaging::tools::{LIST_RECIPIENTS_TOOL_NAME, SEND_MESSAGE_TOOL_NAME};
 use crate::test_support::{
-    ProbeTool, Reply, ResponsesServer, Workspace, agent_config, complete_turn, text_turn,
-    tool_call_turn,
+    ProbeTool, Reply, ResponsesServer, Workspace, agent_config, complete_turn, tool_call_turn,
 };
 use crate::workflow::result::AgentRunStatus;
 
@@ -853,7 +852,11 @@ async fn a_handover_restates_the_task_and_keeps_its_messages_read() {
         Some(if text.contains("# Handover report") {
             complete_turn("done", "drafted")
         } else if text.contains("Your conversation is getting long") {
-            text_turn("report", "REPORT: drafted the intro in British spelling.")
+            tool_call_turn(
+                "report",
+                "handover_report",
+                json!({ "report": "REPORT: drafted the intro in British spelling." }),
+            )
         } else {
             // Under the threshold, then over it: a conversation that starts
             // over it doesn't hand over.

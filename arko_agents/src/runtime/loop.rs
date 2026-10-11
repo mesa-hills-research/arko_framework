@@ -7,7 +7,9 @@ use crate::agent_config::{
     UsageLimitPolicy,
 };
 use crate::error::ArkoAgentsError;
-use crate::handover::{HandoverHook, HandoverRecord, HandoverRequest, HandoverSeed};
+use crate::handover::{
+    HANDOVER_REPORT_TOOL_NAME, HandoverHook, HandoverRecord, HandoverRequest, HandoverSeed,
+};
 use crate::parsing::{
     ParsedToolCall, PromptBuilder, RawParserEvent, ToolCallGroup, ToolCallParser,
     ToolParsingConfig, assemble_tool_calls,

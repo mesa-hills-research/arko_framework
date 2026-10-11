@@ -10,11 +10,13 @@ pub(super) type ScriptedStreamResult =
     Result<futures::stream::BoxStream<'static, Result<ai::StreamEvent, ai::Error>>, ai::Error>;
 
 impl AgentLoop {
-    /// The tools of a native request: the agent's offered tools, with the
-    /// configured tool choice (none, the provider's `auto`, by default: tool
-    /// use is optional) and parallel-call setting. One call per turn
-    /// ([`AgentConfig::asks_one_tool_call_per_turn`]) disables parallel calls
-    /// where the provider can.
+    /// The tools of a native request: the agent's offered tools, then
+    /// `handover_report` for an agent with `handover` set (from the first
+    /// request, so the list doesn't change when the report is asked for),
+    /// with the configured tool choice (none, the provider's `auto`, by
+    /// default: tool use is optional) and parallel-call setting. One call
+    /// per turn ([`AgentConfig::asks_one_tool_call_per_turn`]) disables
+    /// parallel calls where the provider can.
     pub(super) fn build_native_tool_config(
         &self,
         model: &ai::Model,
@@ -40,6 +42,9 @@ impl AgentLoop {
             && let Some(ct) = self.tool_registry.get(COMPLETE_TASK_TOOL_NAME)
         {
             ai_tools.push(offered(ct));
+        }
+        if self.offers_report_tool() {
+            ai_tools.push(crate::handover::report_tool_definition().to_arko_ai_tool_definition());
         }
 
         let mut config = ai::ToolConfig::new(ai_tools);

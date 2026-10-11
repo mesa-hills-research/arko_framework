@@ -10,8 +10,7 @@ use super::*;
 use crate::WorkflowBuilder;
 use crate::persistence::PersistenceConfig;
 use crate::test_support::{
-    ProbeTool, Reply, ResponsesServer, Workspace, agent_config, complete_turn, text_turn,
-    tool_call_turn,
+    ProbeTool, Reply, ResponsesServer, Workspace, agent_config, complete_turn, tool_call_turn,
 };
 use crate::verification::CompletionVerifierConfig;
 use crate::workflow::Workflow;
@@ -461,7 +460,11 @@ async fn a_handover_carries_the_standing_notes() {
         Some(if text.contains("# Handover report") {
             complete_turn("done", "drafted")
         } else if text.contains("Your conversation is getting long") {
-            text_turn("report", "REPORT: drafted the intro.")
+            tool_call_turn(
+                "report",
+                "handover_report",
+                json!({ "report": "REPORT: drafted the intro." }),
+            )
         } else {
             // Under the threshold, then over it (by more than a turn's
             // bytes, which the handover check adds to the last request's
@@ -1087,7 +1090,11 @@ async fn a_note_posted_during_a_handover_report_is_given_once() {
                     }
                 } else if text.contains("Your conversation is getting long") {
                     go.notified().await;
-                    text_turn("report", "REPORT: drafted the intro.")
+                    tool_call_turn(
+                        "report",
+                        "handover_report",
+                        json!({ "report": "REPORT: drafted the intro." }),
+                    )
                 } else {
                     let turns = tool_outputs(&body);
                     tool_call_turn(&format!("p{turns}"), "probe", json!({})).replace(

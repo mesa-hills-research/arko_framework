@@ -30,7 +30,7 @@ use crate::agent_config::{AgentConfig, LLMErrorPolicy, PathSafetyPolicy, ToolErr
 use crate::claude_code::built_in_path_parameters;
 use crate::error::ArkoAgentsError;
 use crate::handover::{
-    DEFAULT_REPORT_REQUEST, HandoverHook, HandoverRecord, HandoverRequest, HandoverSeed,
+    DEFAULT_TEXT_REPORT_REQUEST, HandoverHook, HandoverRecord, HandoverRequest, HandoverSeed,
 };
 use crate::parsing::{PromptBuilder, ToolParsingConfig};
 use crate::skill::SkillPromptContext;
@@ -1135,9 +1135,8 @@ impl ClaudeCodeRun {
         }
         let input_tokens = self.context_size.unwrap_or(0);
         self.task.handover_requested = Some(HandoverRequest {
-            requested_at: chrono::Utc::now(),
-            input_tokens,
             report_requested: true,
+            ..HandoverRequest::new(input_tokens)
         });
         self.emit(AgentEvent::HandoverRequested { input_tokens })
             .await
@@ -1152,7 +1151,9 @@ impl ClaudeCodeRun {
             .agent_config
             .handover
             .as_ref()
-            .map_or(DEFAULT_REPORT_REQUEST, |config| config.report_request())
+            .map_or(DEFAULT_TEXT_REPORT_REQUEST, |config| {
+                config.report_request(false)
+            })
             .to_string()
     }
 
@@ -2850,9 +2851,8 @@ impl ClaudeCodeRun {
             return Ok(());
         }
         self.task.handover_requested = Some(HandoverRequest {
-            requested_at: chrono::Utc::now(),
-            input_tokens: size,
             report_requested: true,
+            ..HandoverRequest::new(size)
         });
         log::info!(
             "Task {}: Handover requested at {size} input tokens.",

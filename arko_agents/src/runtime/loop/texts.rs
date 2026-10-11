@@ -9,6 +9,21 @@ pub(super) const HANDOVER_REPORT_DUE: &str = "This call was not run: your handov
 /// The note after a reply to a report request that had no text.
 pub(super) const NO_HANDOVER_REPORT: &str = "Your reply had no text, so no handover report was received. Reply with the handover report as plain text, without calling a tool.";
 
+/// For an agent offered `handover_report`: the result of another tool call
+/// made while the report is due.
+pub(super) const HANDOVER_REPORT_TOOL_DUE: &str = "This call was not run: your handover report is due. Call handover_report with the report (or complete_task if the task is done).";
+
+/// For an agent offered `handover_report`: the note after a reply without a
+/// tool call while the report is due.
+pub(super) const NO_REPORT_TOOL_CALL: &str = "Your response did not call a tool, so no handover report was received. Call handover_report with the report (or complete_task if the task is done).";
+
+/// The results of `handover_report` calls: the report taken, no report
+/// asked for, and a call without a report.
+pub(super) const REPORT_RECEIVED: &str =
+    "Handover report received. Your conversation continues from it in a fresh one.";
+pub(super) const REPORT_NOT_REQUESTED: &str = "This call was not run: no handover report was asked for. Continue with your task: you will be asked for a report if your conversation needs to be handed over.";
+pub(super) const EMPTY_REPORT_CALL: &str = "No handover report was received: the call had no report. Call handover_report again with the full report in its `report` parameter.";
+
 /// The runtime's notes on a response it can't use, added to the
 /// conversation before it asks again; see
 /// [`AgentLoop::handle_model_output_failure`].
