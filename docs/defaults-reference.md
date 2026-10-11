@@ -45,6 +45,20 @@ Defaults of operator notes and graceful stops:
   retires the runs. The workflow reads the requests every second while agents run, and
   only those written after it was built. `runctl stop` asks for a 600-second wrap-up.
 
+Defaults of background subagents (`WorkflowBuilder::subagents`, off until set), detailed in
+[Background subagents](reference-map.md#background-subagents-arko_workflows):
+
+- At most 4 run at once (`max_running`), and starts over that wait in a queue.
+- Subagents start no subagents (`max_depth` 1), and callers keep `run_workflow_agent`.
+- A lead may link its subagents as peers, who may then send each other 20 messages
+  between two of the lead's (`max_peer_messages`). The lead gets no copies unless
+  `copy_peer_messages_to_lead` is set.
+- A subagent's `ask_user` goes to its lead (`questions_to_lead`).
+- A `workspace` must be inside the caller's directory (`workspaces_anywhere` lifts this),
+  and `isolated` is offered only with a `WorkspaceProvider`.
+- Workflow-service calls over `max_active_calls` (4) fail at once unless
+  `queue_active_calls` is set.
+
 Defaults of arko_index (see [Defaults (arko_index)](reference-map.md#defaults-arko_index)):
 
 - Every regular file under the root is indexed, hidden and gitignored files included.

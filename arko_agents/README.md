@@ -801,6 +801,7 @@ unclassified ones, and in a task saved by an older version, and left out when `N
 | `UsageReported`, `ModelCallUsageReported`, `PlanUsageReported`, `ModelRerouted` | Usage after each model call. |
 | `CacheEfficiencyReported`, `CacheEfficiencyLow`, `PlanUsageThresholdReached` | Opt-in monitors. |
 | `HandoverRequested`, `ConversationHandedOver` | A handover started (the agent was asked for its report), then the conversation was replaced; see [Conversation handover](#conversation-handover). |
+| `ContextInjected { ids, bytes }` | A `# Workflow context update` went into the conversation: `bytes` is its size, and `ids` names what it held, as the turn-context source identifies it (below). |
 | `TaskStreamEnd` | The run ended. |
 
 Besides answers to the waiting states, a running task accepts:
@@ -816,6 +817,12 @@ Besides answers to the waiting states, a running task accepts:
   `llm_error_policy`; `ContinueAfterError` asks again, and approving adds no error note.
   A workflow holds agents over their budget this way. A Claude Code agent is asked before
   each turn and at each message of a turn, and a turn it holds is interrupted.
+  Each update that goes into the conversation is reported with `ContextInjected`. Its
+  `ids` come from the source: `context_update` returns a `TurnContext { content, ids }`
+  (by default `turn_context` with no ids), and `identify` gives an id for each queued
+  `InjectContext` (by default none). A workflow names notes `note:N`, subagent mail
+  `mail:N` and bus messages `message:<uuid>`, so its host can tell what each run has
+  read.
 - `HostDeciding`: while the task awaits a command, the host is deciding that wait itself
   (an approval handler, or a wait before it continues after a usage limit), so
   `user_command_timeout_seconds` doesn't end it; the next wait is timed again. Ignored

@@ -829,7 +829,9 @@ configuration example.
 
 Workflow services let named agents run other configured agents through the
 `run_workflow_agent` tool, with separate caller and target lists and a limit on
-concurrent calls. With `resume_run`, a call resumes an unfinished run it was told
+concurrent calls (`max_active_calls`, 4 by default). A call over the limit fails, or
+waits for a place with `queue_active_calls()`, and `unlimited_active_calls()` lifts
+the limit. With `resume_run`, a call resumes an unfinished run it was told
 about instead of starting a new one. Callers and targets are named explicitly (`allow_caller`,
 `allow_target`); with none named, no agent is offered the tool. The opt-ins
 `allow_all_callers` and `allow_all_targets` admit every agent except
@@ -840,6 +842,59 @@ named ballots with eligibility, quorum, consensus thresholds, weights, and tie
 handling. See
 [workflow services](INDEX.md#workflow-services-and-custom-tools) and
 [structured voting](INDEX.md#structured-voting).
+
+## Background subagents
+
+`run_workflow_agent` holds its caller until the run it starts is done. With
+`subagents` set, callers can also start runs in the background and go on with their
+own work: `start_agent` returns a run id such as `r1` at once, and the run's report
+reaches the caller at its next turn boundary, the way notes do.
+
+```rust
+use arko_workflows::services::WorkflowServicesConfig;
+use arko_workflows::subagents::{GitWorktreeProvider, SubagentsConfig};
+
+let workflow = Workflow::builder()
+    // ...
+    .agent("lead", lead_config)
+    .agent("worker", worker_config)
+    .workflow_services(
+        WorkflowServicesConfig::default()
+            .allow_caller("lead")
+            .allow_target("worker"),
+    )
+    .subagents(
+        SubagentsConfig::default()
+            .max_running(4)
+            .workspace_provider(Arc::new(GitWorktreeProvider::new("/tmp/worktrees"))),
+    )
+    .build()?;
+```
+
+The lead gets `start_agent`, `message_agent`, `wait_for_agents`, `list_agents` and
+`stop_agent`. A subagent gets `message_agent` and `wait_for_agents` to talk with its
+lead, and with the lead's other runs when the lead names them as peers.
+`wait_for_agents` returns the reports and messages themselves.
+
+- **Delivery.** A report, failure, stop or message reaches a running agent at its
+  next turn boundary. A message to a subagent that finished continues its run, with
+  its conversation, and a message from its lead restarts a stopped one. When the
+  recipient is a run the host drives and it is idle, `subscribe_subagents()` sends
+  `NewsWaiting` so the host can start its next turn.
+- **Limits.** Starts over `max_running` wait in a queue (`unlimited()` lifts the cap).
+  Subagents start no subagents of their own unless `max_depth` allows it. Two peers
+  may send each other `max_peer_messages` messages between two of their lead's.
+- **Workspaces.** `start_agent`'s `workspace` sets the directory a run works in, as
+  `RunOptions::workspace` does for `run_agent_with`. With a `WorkspaceProvider`
+  (`GitWorktreeProvider`, or your own), `isolated: true` gives the run a workspace of
+  its own, kept for its later messages and restarts.
+- **Costs and persistence.** Subagent costs go into the workflow's ledger. The runs,
+  their mailboxes and workspaces are saved in checkpoints, and
+  `resume_subagents()` relaunches the runs a stop or crash ended.
+
+A subagent's `ask_user` goes to its lead as a message, and the lead's reply is the
+answer. See [background subagents](INDEX.md#background-subagents) for the tools,
+settings, events and how mail is delivered.
 
 ## Persistence
 
@@ -978,6 +1033,7 @@ See [stopping tool calls](../arko_agents/README.md#stopping-tool-calls).
 │   workflow builder and engine · memory store, tools   │
 │   freshness tracker · hooks · message bus · budgets   │
 │   verification · distillation · persistence           │
+│   background subagents and their mailboxes            │
 ├───────────────────────────────────────────────────────┤
 │ arko_agents                                           │
 │   AgentRuntime · agent loop (event stream)            │

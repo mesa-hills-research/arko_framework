@@ -10,6 +10,7 @@ Signatures are declarations with their receivers, not complete implementations. 
 - [Result and event types](#result-and-event-types)
 - [Hooks and human input](#hooks-and-human-input)
 - [Workflow services and custom tools](#workflow-services-and-custom-tools)
+- [Background subagents](#background-subagents)
 - [Shared context](#shared-context)
 - [Memory](#memory)
 - [Messaging](#messaging)
@@ -31,7 +32,7 @@ Source: [Cargo.toml](Cargo.toml), [crate exports](src/lib.rs).
 
 No Cargo features are enabled by default. The `python` feature enables the PyO3 bindings and their Tokio bridge; see [Python bindings](#python-bindings).
 
-Root re-exports: `Workflow`, `WorkflowBuilder`, `AgentHandle`, `WorkflowError`, `WorkflowCancelHandle`, `CancelCause`, `Cancellation`, `SupportedPlatform`, `WorkflowDependency`, `WorkflowMetadata`, `AgentResult`, `AgentRunStatus`, `WorkflowEvent`, `WorkflowResult`, and from `workflow::stop`: `StopKind`, `StopRequest`, `WrapUp`, `StopRecord`, `StoppedRun`, `Restart`, `stop_on_signals`.
+Root re-exports: `Workflow`, `WorkflowBuilder`, `AgentHandle`, `RunOptions`, `WorkflowError`, `WorkflowCancelHandle`, `CancelCause`, `Cancellation`, `SupportedPlatform`, `WorkflowDependency`, `WorkflowMetadata`, `AgentResult`, `AgentRunStatus`, `WorkflowEvent`, `WorkflowResult`, and from `workflow::stop`: `StopKind`, `StopRequest`, `WrapUp`, `StopRecord`, `StoppedRun`, `Restart`, `stop_on_signals`.
 
 `use arko_workflows::prelude::*;` re-exports the groups below. Other public types are reached through their module paths.
 
@@ -49,6 +50,7 @@ Root re-exports: `Workflow`, `WorkflowBuilder`, `AgentHandle`, `WorkflowError`, 
 | `persistence` | `EventLog`, `PersistenceConfig` |
 | `policy` | `AgentPause`, `AgentResume`, `ApprovalPolicy`, `ErrorRecoveryPolicy`, `ToolApprovalHandler`, `ToolApprovalOutcome`, `ToolApprovalRequest` |
 | `services` | `WorkflowServices`, `WorkflowServicesConfig` |
+| `subagents` | `GitWorktreeProvider`, `IsolatedWorkspace`, `MailItem`, `MailKind`, `MailSender`, `StartRequest`, `SubagentEvent`, `SubagentEventKind`, `SubagentHook`, `SubagentRecord`, `SubagentState`, `SubagentsConfig`, `WorkspaceProvider`, `WorkspaceRequest` |
 | `user_input` | `UserInputHandler`, `UserInputRequest` |
 | `verification` | `CompletionVerifierConfig`, `RepairContextConfig`, `VERIFIER_OUTPUT_CONTRACT`, `VerificationDecision`, `VerificationKind`, `VerificationRecord` |
 | `voting` | `BallotConfig`, `BallotResult`, `CastVote`, `TieBreak`, `VoteOption` |
@@ -73,6 +75,8 @@ Other public modules: `context`, `hooks::context`, `memory::tools`, `messaging::
 | Checkpoint, restore, or reconcile uncertain side effects | `PersistenceConfig`, durable steps |
 | Continue agents that were running when the workflow crashed | `resume_from`, `interrupted_runs`, `recover_agent` ([Task journal and recovery](#task-journal-and-recovery)) |
 | Let agents delegate or vote | `WorkflowServicesConfig`, `enable_voting` |
+| Let agents start runs in the background and message them | `subagents`, `SubagentsConfig` ([Background subagents](#background-subagents)) |
+| Run an agent in a directory of its own | `run_agent_with`, `spawn_agent_with`, `RunOptions` |
 | Route human input | `UserInputHandler`, or handle `UserInputRequired` and continue |
 | Keep long-running agents' context small | `AgentConfig::handover` (arko_agents); see [Conversation handover](#conversation-handover) |
 | Decide tool approvals and error recovery | `approval_policy`, `error_recovery_policy`, `ToolApprovalHandler`, or handle `AgentPaused` and `resume_agent` |
@@ -115,6 +119,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 | `completion_verifier(self, config: CompletionVerifierConfig) -> Self` | Append a gate on matching agents' `complete_task` calls. See [Completion verification](#completion-verification). |
 | `distiller(self, config: DistillationConfig) -> Self` | Append an LLM distiller; distillers run after all custom interceptors. See [Tool-result distillation](#tool-result-distillation). |
 | `workflow_services(self, config: WorkflowServicesConfig) -> Self` | Enable bounded agent-to-agent delegation through the `run_workflow_agent` tool. |
+| `subagents(self, config: SubagentsConfig) -> Self` | Let the workflow services' callers start runs of their targets in the background, with messages between them. Requires `workflow_services`. Default: off. See [Background subagents](#background-subagents). |
 | `messaging(self, policy: MessagingPolicy) -> Self` | Set whom each agent may message with `send_message`. Default `MessagingPolicy::all()`: every agent may message every other agent. See [Messaging policy](#messaging-policy). |
 | `disable_messaging(self) -> Self` | Offer no agent `send_message`, `list_recipients`, or `wait_for_message`. |
 | `notes_by_name_only<I, S>(self, agents: I) -> Self` (`I: IntoIterator<Item = S>`, `S: Into<String>`) | Agents (registration names) that get a note only when its audience names them, as completion verifiers do: roles that must stay independent. Adds to earlier calls. Default: none besides the verifiers. See [Operator notes](#operator-notes). |
@@ -150,7 +155,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 
 Checkpoint read and parse failures return `Io` or `Json`. A warning threshold may exceed the budget limit. Tool names are only warned about, since MCP servers and skills add tools whose names aren't known at build: a tool the context freshness mapping or a distiller's targets name that no agent is configured with (`available_tool_names`), no workflow or custom tool has, and no `arko_agents` or Claude Code built-in has is logged as a warning. Workflow services that name no caller are logged as a warning too: no agent is offered `run_workflow_agent`. The builder neither installs nor checks metadata dependencies; `WorkflowMetadata::missing_dependencies` reports the missing ones, for the workflow to act on at startup.
 
-Tool names: duplicate global tool names, duplicate names within one agent's tools, and a name shared by a global and an agent-local tool are rejected. Global tools cannot use the reserved names `complete_task`, `ask_user`, `read_memory`, `write_memory`, `list_memories`, `run_workflow_agent`, or `cast_vote`, nor `send_message` or `list_recipients` while any agent is offered the workflow's messaging tools, nor `wait_for_message` while any agent is offered it; an agent-local tool with one of these names is rejected for an agent that is offered the workflow's tool. Agent-local tools are not checked against reserved names: an agent-local tool with a reserved name replaces that workflow or built-in tool for its agent, except `complete_task`, which `arko_agents` never lets a non-built-in tool replace. Custom tools are registered after the workflow tools, so a custom tool named like an `arko_agents` built-in (for example `read_file`) replaces it for the agents that receive it.
+Tool names: duplicate global tool names, duplicate names within one agent's tools, and a name shared by a global and an agent-local tool are rejected. Global tools cannot use the reserved names `complete_task`, `ask_user`, `read_memory`, `write_memory`, `list_memories`, `run_workflow_agent`, or `cast_vote`, nor the [subagent tools](#background-subagents)' names while `subagents` is set, nor `send_message` or `list_recipients` while any agent is offered the workflow's messaging tools, nor `wait_for_message` while any agent is offered it; an agent-local tool with one of these names is rejected for an agent that is offered the workflow's tool. Agent-local tools are not checked against reserved names: an agent-local tool with a reserved name replaces that workflow or built-in tool for its agent, except `complete_task`, which `arko_agents` never lets a non-built-in tool replace. Custom tools are registered after the workflow tools, so a custom tool named like an `arko_agents` built-in (for example `read_file`) replaces it for the agents that receive it.
 
 Tools added automatically: `send_message` and `list_recipients` for each agent with at least one permitted recipient under the messaging policy; `wait_for_message` for each agent that another agent may message; `read_memory` for each agent that can read at least one memory tier, `write_memory` for each that can write at least one, and `list_memories` for each that can do either; `run_workflow_agent` for permitted callers when services are enabled; `cast_vote` for the voters named in `enable_voting`. The agent's pending messages are appended to the prompt of each new run and continuation, under `# Messages from other agents:`. A new run's initial prompt also lists the agents it may message; see [What agents are told about their recipients](#what-agents-are-told-about-their-recipients). Skills configured on an agent are initialized against the workspace. There is no separate graph or scheduler configuration.
 
@@ -227,6 +232,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs), [engine](src/workflow/engine.rs)
 | `async recover_agent(&self, previous: &AgentResult) -> Result<AgentResult, WorkflowError>` | Continue an `Interrupted` result where its task was saved, with its run ID and without a new message; returns as `run_agent` does. Tool calls it was running are settled by their tools' `recovery_mode` (by default answered as possibly run, without running them again; read-only built-ins run again; `run_workflow_agent` recovers the run it started); a wait it was saved in (tool approval, error-recovery pause, question) is answered again under the workflow's policies and handlers. Another status returns `BuilderInvalid`, and so do a nested run its parent can still resume (recover the parent, or, while the parent runs, let it resume the run) and a run being recovered already: a run is never recovered twice. An orphaned nested run is recovered as the host's own: its parent link (`task.parent`) is released. A `previous` that was `Interrupted` but has since been recovered (or resumed by an agent) returns the outcome recorded, without running again. Fires `PreAgentSpawn` like a continuation. |
 | `async run_agents_parallel(&self, agents: Vec<(&str, String)>) -> Result<Vec<AgentResult>, WorkflowError>` | Run agent-name/prompt pairs concurrently; one agent may appear several times. All the agents are marked running before any is prompted, so each one's recipient list shows the others as running; under `max_parallel_agents`, at most that many run at once, and each is marked running as it starts (a waiting one is `not_started`). Waits for every invocation, then returns the results in input order, or the first failure in input order. An agent waiting for a place was admitted (`PreAgentSpawn`) when the call began; when it starts, the run's stop and the workflow budget are checked again, and either ends it before it starts (its error in its place). With `fail_fast`, the first failure instead stops the others (each is cancelled, winding down within the cancel grace period, and recorded `Cancelled` with a reason naming the failed agent; an agent inside one's tool call, such as a verifier, is aborted with it after the grace period), agents not yet started don't start and have no result, and the call returns that failure. An agent that pauses (waiting for input, paused for a decision, or paused because a completion verifier could not review its completion) is not a failure, and doesn't trigger `fail_fast`: its result comes back in its place with status `WaitingForInput` or `Paused`, and the others run on. So does a run its own stop cancelled (`AgentStopped`), with status `Cancelled`. Finalized outcomes are recorded either way. |
 | `async spawn_agent(&self, agent_name: &str, prompt: &str) -> Result<AgentHandle, WorkflowError>` | Set up and start the agent and return its handle. Nothing drives its events until `wait` is called or the raw channels are used. |
+| `async run_agent_with(&self, agent_name: &str, prompt: &str, options: RunOptions) -> Result<AgentResult, WorkflowError>`, `async spawn_agent_with(&self, agent_name: &str, prompt: &str, options: RunOptions) -> Result<AgentHandle, WorkflowError>` | `run_agent` and `spawn_agent` with options. `RunOptions` (`Debug`, `Clone`, `Default`, `PartialEq`, `Eq`, `#[non_exhaustive]`, built with `RunOptions::new().workspace(path)`) has one field, `workspace: Option<PathBuf>`: the run's working directory instead of the workflow's workspace. It is the task's `current_working_directory`, so the shell, terminal and file tools work there and the path checks allow it, and skills load from it. A relative path is resolved against the workflow's workspace, and the result is absolute with `.` and `..` resolved lexically. A directory that doesn't exist returns `BuilderInvalid` (`... does not exist`). Saved with the task, so a continued, resumed or recovered run keeps it. |
 
 Under `BudgetExceededPolicy::Pause` (the default), a run over the budget starts (or continues) and is held at its next model request; see [Budget holds](#budget-holds). Under `Cancel`, all four return `BudgetExceeded` without starting an agent when the workflow budget is already exceeded, `AgentBudgetExceeded` without starting or continuing that agent when its own cumulative limit is already exceeded, and `PlanBudgetExceeded` when a [plan budget](#plan-budgets) window is. Once the run is stopped, all four return the stop's error (`Cancelled` or `AbortedByHook`) at once, without firing `PreAgentSpawn` or starting an agent, and during a graceful stop's wrap-up they return `Cancelled`; see [Stopping a run](#stopping-a-run) and [Graceful stop](#graceful-stop).
 
@@ -730,6 +736,8 @@ Source: [services/mod.rs](src/services/mod.rs), [builder integration](src/workfl
 | `all_callers` | `bool` | Opt-in, default `false`: every agent is a caller, except completion-verifier agents. |
 | `all_targets` | `bool` | Opt-in, default `false`: a caller may run every agent, except itself and completion-verifier agents. |
 | `max_active_calls` | `NonZeroU32` | `DEFAULT_MAX_ACTIVE_CALLS`, 4. Limit on simultaneous service calls, including nested delegation. |
+| `unlimited_active_calls` | `bool` | Opt-in, default `false`: no limit on simultaneous calls (`max_active_calls` is ignored). |
+| `queue_active_calls` | `bool` | Opt-in, default `false`: a call over `max_active_calls` waits until a call ends, instead of failing. |
 
 ```rust
 // WorkflowServicesConfig
@@ -738,6 +746,8 @@ fn allow_target(self, agent: impl Into<String>) -> Self;
 fn allow_all_callers(self) -> Self;
 fn allow_all_targets(self) -> Self;
 fn max_active_calls(self, max: u32) -> Self;
+fn unlimited_active_calls(self) -> Self;
+fn queue_active_calls(self) -> Self;
 
 // WorkflowServices: Clone
 fn is_allowed(&self, caller: &str) -> bool;
@@ -748,7 +758,7 @@ async fn run_agent(&self, caller: &str, agent_name: &str, prompt: &str)
 
 Callers and targets must be named explicitly (`allow_caller`, `allow_target`), or admitted with the opt-ins, which leave out completion-verifier agents (and, as a target, the caller itself); an explicitly named agent is admitted either way (so a caller also named as a target may run itself). `max_active_calls(0)` makes `build` fail ("max_active_calls needs at least 1; the default is 4"), and the field can't hold 0. `build` rejects a caller or target that is not a registered agent. The tool's `agent` parameter lists the caller's targets with their roles. `WorkflowServices` has no public constructor; after enabling services, `workflow.context().workflow_services.get()` returns it. It holds a weak reference to the workflow context and returns `Channel` once the workflow has been dropped.
 
-`run_agent` checks the caller and target policies, then runs the target with the workflow's shared memory, budget, hooks, persistence, and completion verifiers. Once the run is stopped, it returns the stop's error. A disallowed caller or target returns `BuilderInvalid`; reaching the active-call limit returns `Channel` immediately instead of queuing. `caller` is a host-supplied identity, not authentication. Apart from the active-call limit, there is no call-depth or cycle limit.
+`run_agent` checks the caller and target policies, then runs the target with the workflow's shared memory, budget, hooks, persistence, and completion verifiers. Once the run is stopped, it returns the stop's error. A disallowed caller or target returns `BuilderInvalid`. Reaching the active-call limit returns `Channel` immediately, or with `queue_active_calls` waits until a call ends (waiting calls go on in no set order). `caller` is a host-supplied identity, not authentication. Apart from the active-call limit, there is no call-depth or cycle limit.
 
 A run the tool starts records its parent in its task (`Task::parent`: the calling run's task ID and the call's `tool_call_id`). The tool's `recovery_mode` is `Resume`: when a calling run that was running at a crash is recovered, its open call finds that run instead of starting another. A run that completed returns its summary without running again; an interrupted one is recovered (in doubt about its own open calls, and so on down) and waited for; one that ended otherwise returns its error; and when the call started no run that was saved (a run is saved before its first tool call, so it can't have run one), the target runs now. Such a recovered call counts toward `max_active_calls` but is never refused by it (it was admitted before the crash), and the caller and target policies are checked again. A run another recovery is recovering already is waited for, and its recorded outcome returned: it never runs twice.
 
@@ -763,6 +773,125 @@ Tool name constants: `services::RUN_WORKFLOW_AGENT_TOOL_NAME: &str = "run_workfl
 | `run_workflow_agent` | Required `agent: string` (an allowed target) and `prompt: string` (a bounded task, or with `resume_run` the message to the resumed run); optional `resume_run: string` (`RESUME_RUN_PARAMETER`), the ID of an unfinished run of `agent` to resume instead of starting one (see above). The `agent` parameter's description names the allowed targets with their role descriptions (every registered agent when no target is restricted); it depends only on the configuration. | The target's completion summary, after any configured verification; for a run that completed after a [graceful stop](#graceful-stop)'s wrap-up notice (unreviewed), the summary followed by the note naming the run. A missing string parameter is a `MissingParameter` error, a `resume_run` that is not a UUID a `ParameterValidation` error; workflow failures become `ExecutionFailed`, followed by the note naming the run the call ran when it did not finish. Not batch-safe. |
 
 Custom domain tools implement `arko_agents::tool::Tool` and are registered with `global_tool` or `agent_tool`, which also add their names to the receiving agents' available tools. Use a `ToolResultInterceptor` to transform output and the freshness APIs to record custom resource effects. These traits are defined and documented in `arko_agents`.
+
+## Background subagents
+
+Source: [subagents/mod.rs](src/subagents/mod.rs), [board](src/subagents/board.rs), [tools](src/subagents/tools.rs), [workspaces](src/subagents/workspace.rs).
+
+`WorkflowBuilder::subagents(SubagentsConfig)` lets the agents the workflow services name as callers start runs of their targets in the background. `start_agent` returns a short run id (`r1`, `r2`, ...) at once, the run works while its caller (its lead) goes on, and its report reaches the lead at the lead's next turn boundary. Callers and targets are `WorkflowServicesConfig`'s, so `subagents` without `workflow_services` fails the build.
+
+A subagent is an ordinary run of the workflow, with its own run ID (`SubagentRecord::run_id`). Its costs go into the workflow's ledger, its task and result are saved like any other, and the budget, approval and error-recovery policies, hooks, notes and verifiers apply to it. It runs outside its lead's tool calls, so the lead's run can end or be stopped while it works on. `interrupted_runs()` and `stopped_runs()` leave subagents out, since `resume_subagents` relaunches them.
+
+### `SubagentsConfig`
+
+`SubagentsConfig` (`Clone`, `Default`) is built with `Default` and the setters below. Its fields are public.
+
+| Field | Type | Default and meaning |
+| --- | --- | --- |
+| `max_running` | `Option<NonZeroUsize>` | `DEFAULT_MAX_RUNNING`, 4. Subagents running at once, workflow-wide. A start, or a restart, over the cap waits in a queue and starts when a run ends, oldest first. `None` (`unlimited()`): no cap. |
+| `max_depth` | `u32` | 1. A run may start subagents while its depth is below this. A host's run has depth 0 and its subagents depth 1, so by default subagents start none and aren't offered `run_workflow_agent`. |
+| `peer_messages` | `bool` | `true`. The lead may let its subagents message each other (`start_agent`'s `peers`, `link_agents`). |
+| `max_peer_messages` | `u32` | `DEFAULT_MAX_PEER_MESSAGES`, 20. Messages two subagents may send each other between two of their lead's messages to either of them. Over it, `message_agent` is refused and says to ask the lead. |
+| `copy_peer_messages_to_lead` | `bool` | `false`. The lead gets a copy of each message its subagents send each other. A copy ends no wait and wakes no one. |
+| `workspaces_anywhere` | `bool` | `false`. `start_agent`'s `workspace` may name any directory, instead of one inside the caller's working directory. |
+| `offer_blocking_tool` | `bool` | `true`. Callers are offered `run_workflow_agent` too. |
+| `questions_to_lead` | `bool` | `true`. A subagent's `ask_user` goes to its lead as a message (`MailKind::Question`), and the lead's next message to it is the answer. Off: it goes to the workflow's `UserInputHandler`, as other runs' questions do. |
+| `workspace_provider` | `Option<Arc<dyn WorkspaceProvider>>` | None. Creates and removes isolated workspaces. With one, `start_agent` offers `isolated` and `stop_agent` offers `remove_workspace`. |
+| `hook` | `Option<Arc<dyn SubagentHook>>` | None. Adjusts a subagent's `AgentConfig` as it starts. |
+| `start_parameters` | `Vec<arko_agents::ToolParameterDefinition>` | Empty. The host's own `start_agent` parameters, whose values reach the hook. |
+
+```rust
+// SubagentsConfig
+fn max_running(self, max: usize) -> Self;          // at least 1
+fn unlimited(self) -> Self;
+fn max_depth(self, depth: u32) -> Self;
+fn peer_messages(self, enabled: bool) -> Self;
+fn max_peer_messages(self, max: u32) -> Self;
+fn copy_peer_messages_to_lead(self, enabled: bool) -> Self;
+fn workspaces_anywhere(self) -> Self;
+fn offer_blocking_tool(self, enabled: bool) -> Self;
+fn questions_to_lead(self, enabled: bool) -> Self;
+fn workspace_provider(self, provider: Arc<dyn WorkspaceProvider>) -> Self;
+fn hook(self, hook: Arc<dyn SubagentHook>) -> Self;
+fn start_parameter(self, parameter: ToolParameterDefinition) -> Self;
+
+// The hook, also implemented by closures of the same signature
+trait SubagentHook: Send + Sync {
+    fn prepare(&self, request: &StartRequest, config: &mut AgentConfig) -> Result<(), String>;
+}
+```
+
+`build` rejects a start parameter named like one of `start_agent`'s own (`agent`, `task`, `workspace`, `isolated`, `peers`) or another start parameter. `StartRequest` (`Debug`, `Clone`, `PartialEq`, Serde) has `workflow_run_id`, `run_id`, `handle`, `agent`, `caller_run_id`, `caller_agent`, `task` and `parameters: BTreeMap<String, Value>`, the host parameters the call gave. The hook runs once per start, before a workspace is made, and its error is the caller's `start_agent` error. It runs again on resume, for each saved subagent, so that a resumed task's configuration compares with the prepared one, not the agent's.
+
+### Tools
+
+Tool name constants: `subagents::START_AGENT_TOOL_NAME` and the like, all in `SUBAGENT_TOOL_NAMES`. While `subagents` is set, global tools may not use these names.
+
+| Tool | Offered to | JSON parameters | Output |
+| --- | --- | --- | --- |
+| `start_agent` | Callers whose depth allows it | Required `agent` (a target, described with the caller's targets and their roles) and `task` (the whole task). Optional `workspace` (a directory, relative to the caller's), `isolated: bool` (with a provider), `peers` (with peer messages on: run ids separated by commas, or `all`), and the host's start parameters. | `Started r1 (agent `worker`).`, or `Queued r2 ...` over the cap, with where it works and how to reach it. Refused, with the reason: an unknown or disallowed agent, an empty task, a workflow or caller run that is stopping, a workspace that doesn't exist or is outside the caller's directory, `workspace` with `isolated`, a provider or hook error. |
+| `message_agent` | Callers and subagents | Required `to` (`lead`, a run id such as `r1`, or a run ID) and `message`. | Where the message went: read at the recipient's next step, or the run it continued or restarted. Refused for a run that isn't the sender's lead, subagent or linked peer, over the peer cap, and for a run that can't go on (closed, retired by the host, or failed in a way a message can't continue). |
+| `wait_for_agents` | Callers and subagents | Optional `runs` (ids separated by commas, default all of the caller's), `all: bool`, `timeout_seconds`. | The reports and messages themselves, whole, with the runs still running. Ends when a run waited for ends (each of them, with `all`), at any message or question, when a note arrives, when the run or the workflow stops, or at the time limit (`Nothing new in N s.`). The limit is the agent's `wait_for_message` limit, and the model may only shorten it. Recovered by running again. |
+| `list_agents` | Callers | None. | Each of the caller's runs: id, agent, state and for how long (a queued run's place in line), where it works (with the branch), its task, its report or error once it ended, its peers, the messages it hasn't read yet, and its cost so far. Recovered by running again. |
+| `stop_agent` | Callers | Required `run`. Optional `reason` and `remove_workspace: bool` (with a provider). | A running subagent gets a two-minute wrap-up (`StopRequest::operator`, with intent `Relaunch`) to save its progress and report, and its report then reaches the lead as a stop. A queued one is stopped before it starts. With `remove_workspace`, once the run has ended, the provider removes its workspace and the record becomes `Closed`. |
+| `link_agents` | Callers, with peer messages on | Required `runs`, two or more ids. | The runs may now message each other. |
+
+A subagent's initial prompt is its task, then a section saying it is agent run `rN` started by its lead, how to message the lead and wait for it, and where it works (an isolated workspace's `description` included).
+
+### Mail and delivery
+
+Reports, failures, stops, messages and questions go through a mailbox kept per run. Each `MailItem` has `id: u64`, `to` (a run ID), `from: MailSender` (`Run(Uuid)` or `Host`), `kind: MailKind` (`Report`, `Failed`, `Stopped`, `Message`, `Question`, `Copy`), `heading`, `body`, `at`, `delivered_at` and `file`. `text()` is the item whole: `[mail N] heading`, a blank line and the body. An item reaches its recipient in the first way that applies.
+
+1. A `wait_for_agents` call waiting for it returns it whole.
+2. While the recipient runs, its next turn boundary adds it to the `# Workflow context update`, oldest first, up to about `UPDATE_MAX_MAIL_BYTES` (48 KiB) per update, with the rest at the next boundary. An item over `MAX_MAIL_BYTES` (16 KiB) is shown as an excerpt with the path of the file that holds all of it (`<checkpoint_dir>/subagents/mail-N.md` with persistence, else under the temp directory).
+3. Otherwise it waits. A subagent that finished is continued with its conversation, and gets the item at its first turn boundary. A subagent that was stopped, failed or interrupted is restarted only by its lead's mail. For a run the host drives, the workflow sends `SubagentEventKind::NewsWaiting`, and the host continues that run (`continue_agent`, say), which then gets the news at its first turn boundary, or takes it with `take_news`.
+
+Mail given to a run that ends before its task holds it is given again, at the run's next turn or to the host. Mail that reaches a subagent as it completes continues it, and its new report follows. When a subagent is stopped, its lead is told which run stopped and why, in three wordings: `you stopped it: <reason>`, `the workflow's host stopped it (<reason>)` (a `Workflow::stop_run`), or `it was stopped with the workflow (<reason>)`. A run the host retired (`RunStopIntent::Retire`) can't be restarted.
+
+### Workspaces and isolation
+
+`start_agent`'s `workspace` gives the run a working directory, as `RunOptions::workspace` does for the host's runs (see [Run, continue, and spawn](#run-continue-and-spawn)): its tools work there, its path checks allow it, and it is saved with the task. With `isolated: true`, the `WorkspaceProvider` makes a workspace for the run, and the record keeps it (`SubagentRecord::isolated`), so its later messages, restarts and resumes use the same one.
+
+```rust
+#[async_trait]
+trait WorkspaceProvider: Send + Sync {
+    async fn create(&self, request: &WorkspaceRequest) -> Result<IsolatedWorkspace, String>;
+    async fn remove(&self, workspace: &IsolatedWorkspace) -> Result<(), String>;
+}
+
+// GitWorktreeProvider: a worktree per subagent, at <folder>/<id> on branch <prefix><id>
+fn new(folder: impl Into<PathBuf>) -> Self;          // branch prefix "arko/"
+fn branch_prefix(self, prefix: impl Into<String>) -> Self;
+```
+
+`WorkspaceRequest` (`Debug`, `Clone`, `PartialEq`, `Eq`) has `workflow_run_id`, `run_id`, `handle`, `agent`, `caller_run_id` and `base`, the caller's working directory. `IsolatedWorkspace` (`Debug`, `Clone`, `PartialEq`, `Eq`, Serde, built with `IsolatedWorkspace::at(path)`) has `path`, the run's working directory, which must exist, and the optional `root` (the workspace's top directory, when `path` is below it), `repository`, `branch`, `base_commit` and `description` (what the subagent is told about where it works). `GitWorktreeProvider` checks out the caller's `HEAD` in a new worktree on a new branch, one at a time, with the subagent in the same subdirectory as its caller. `<id>` is the run's short id, with a suffix (`r1-2`) when an earlier workflow run left that folder or branch. Removing a worktree keeps its branch, and git refuses while it has changes that aren't committed.
+
+### Records, events and host methods
+
+`SubagentRecord` (`Debug`, `Clone`, Serde) has `run_id`, `handle`, `agent`, `caller_run_id`, `caller_agent`, `depth`, `task`, `workspace`, `isolated`, `parameters`, `peers`, `all_peers`, `state: SubagentState`, `created`, `since` (when it entered its state), `report`, `error`, `pending: Option<PendingLaunch>` (how a queued run starts: `Start { prompt }` or `Resume { message }`), `stopped_by_caller` and `asking` (it waits for its lead's answer to a question). `SubagentState` is `Queued`, `Running`, `Finished`, `Failed`, `Stopped`, `Interrupted` (the workflow stopped while it ran) or `Closed` (its workspace was removed). `is_active()` is true for `Queued` and `Running`.
+
+`SubagentEvent` (`Debug`, `Clone`, Serde) has `timestamp`, `workflow_run_id`, `run_id`, `handle`, `agent_name`, `caller_run_id`, `caller_agent` and `kind: SubagentEventKind`: `Queued`, `Started`, `Resumed`, `Finished { summary }`, `Failed { error }`, `Stopped { reason, by_caller }`, `Message { mail_id, from, to }`, `Delivered { to, mail_ids }`, `NewsWaiting { mail_ids }` (for a run that isn't running) and `WorkspaceRemoved`. Events are also written to the event log, as records with `"subagent": true` and the event's fields. Their order relative to `WorkflowEvent`s isn't guaranteed. `NewsWaiting` may come more than once for the same items.
+
+| `Workflow` method | Purpose |
+| --- | --- |
+| `subagents(&self) -> Vec<SubagentRecord>` | Every subagent of the run, in start order. |
+| `active_subagents(&self) -> Vec<SubagentRecord>` | The subagents running or queued. A host that runs to the end (a one-shot command) waits until this is empty and no news is pending. |
+| `subscribe_subagents(&self) -> broadcast::Receiver<SubagentEvent>` | The events above. |
+| `pending_news(&self, agent_run_id: Uuid) -> Vec<MailItem>` | The mail for a run it hasn't received, oldest first. |
+| `take_news(&self, agent_run_id: Uuid) -> Vec<MailItem>` | Takes that mail out of the mailbox, for a host that puts it in its own message to the run. |
+| `resume_subagents(&self) -> Vec<String>` | After `resume_from`, relaunches the subagents that were running or queued when the workflow stopped, and returns their ids. A subagent not relaunched waits, and its lead's message restarts it. |
+| `transfer_subagents(&self, from: Uuid, to: Uuid) -> usize` | Run `from`'s subagents, and its pending mail, become run `to`'s (a new conversation of the same lead). Returns how many. |
+| `notes_given(&self, agent_run_id: Uuid) -> u64` | The number of the newest [note](#operator-notes) the run has been given (`NotesHandle::given` too). |
+
+To stop a lead while its subagents go on, stop the lead's run (`stop_run`). `Workflow::stop` and `cancel` stop the subagents too. Dropping the `Workflow` aborts their drivers.
+
+### Read receipts
+
+Each context update a run receives is reported with `AgentEvent::ContextInjected { ids, bytes }` (arko_agents), through `subscribe_events`. The ids name what it held: `note:N` for an operator note, `mail:N` for a mailbox item, and `message:<uuid>` for a bus message.
+
+### Persistence
+
+`WorkflowState::subagents` (`SubagentsSnapshot`: `runs`, `mail`, `last_handle`, `last_mail` and `peer_counts`, each defaulting when missing) saves the records, the mailbox and the peer counts with each checkpoint, and with the live checkpoint while runs are live. On resume, a record that was running is settled by its run's saved result: `Finished` (with its report posted if it was missing), `Stopped`, `Failed` or `Interrupted`. A lead's saved task holds the mail it was given, so mail given after its last save is given again.
 
 ## Shared context
 
@@ -1077,10 +1206,12 @@ A note is guidance the host gives the agents while the workflow runs: a correcti
 fn post_note(&self, note: Note) -> Result<PostedNote, WorkflowError>;
 fn notes(&self) -> Vec<PostedNote>; // every note, oldest first
 fn notes_handle(&self) -> NotesHandle;
+fn notes_given(&self, agent_run_id: Uuid) -> u64; // the newest note's seq the run was given, 0 for none
 
 // NotesHandle: Clone, Debug, Send, Sync
 fn post(&self, note: Note) -> Result<PostedNote, WorkflowError>;
 fn notes(&self) -> Vec<PostedNote>;
+fn given(&self, agent_run_id: Uuid) -> u64;
 
 // Note: a standing note from the operator to every agent, then setters.
 fn new(text: impl Into<String>) -> Self;
@@ -1686,6 +1817,7 @@ After a graceful stop, `stopped_runs()` lists the interrupted runs together with
 | `agent_registry` | `Option<crate::messaging::registry::RegistrySnapshot>` | Agent statuses and what each agent run has seen of them (omitted from JSON when `None`); `None`. |
 | `notes` | `Option<crate::notes::NotesSnapshot>` | The [operator notes](#operator-notes) posted, what each run has been given, and how much of the control folder has been read; written once the run has any of these, omitted from JSON when `None`; `None` (no notes). |
 | `plan_budget` | `Option<PlanBudgetState>` | The plan budget's `limits: PlanBudget`, each plan's counting in `plans: BTreeMap<SubscriptionPlan, PlanUsageTracking>` (keys `chatgpt`, `claude_code`; omitted when empty), and `usage: PlanUsageTracking`, the counting without a plan (an earlier version's, until a plan takes it over). A `PlanUsageTracking` has per window `five_hour`/`seven_day`: `PlanWindowUsage { baseline, latest, accumulated, resets_at }`. Written once the run has a plan budget or has seen plan usage; omitted from JSON when `None`; `None`. See [Plan budgets](#plan-budgets). |
+| `subagents` | `Option<crate::subagents::SubagentsSnapshot>` | The [background subagents](#background-subagents): their records, the mailbox, and the peer message counts, omitted from JSON when `None`. `None` when missing. |
 | `budget_limits` | `Option<BudgetLimits>` | The limits in force: `limit: Option<f64>` (none: no limit; omitted when `None`) and `agent_limits: BTreeMap<String, f64>` (omitted when empty); omitted from JSON when `None`; `None`. See [Budget holds](#budget-holds). |
 
 `RegistrySnapshot` has public fields `version: u64`, which every status change increases; `agents: std::collections::BTreeMap<String, AgentRecord>`, keyed by registration name; and `seen: HashMap<Uuid, u64>`, the registry version each agent run (by task ID) has been told about. `AgentRecord` has `last_start: u64`, the version at the agent's latest start (`0` if it never started), `finished: Option<AgentRunStatus>`, how its latest run ended when none is running (omitted from JSON when `None`), and `last_finish: u64`, the version at which its last running run ended (`0` if it never finished, or in a record saved before finish notices). Every field defaults when missing. Both types implement `Debug`, `Clone`, `Default`, `PartialEq`, `Eq`, and Serde. What a run that cannot be continued (any status other than `Completed` or `WaitingForInput`) has seen is dropped when it ends.
