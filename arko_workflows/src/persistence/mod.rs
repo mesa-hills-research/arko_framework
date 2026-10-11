@@ -714,6 +714,7 @@ impl PersistenceManager {
         };
         let plan_budget = ctx.budget.plan_state();
         let notes = ctx.notes.snapshot();
+        let subagents = ctx.subagents.snapshot();
         let shared = fingerprint(&(
             &memory_snapshot,
             &message_queues,
@@ -725,6 +726,7 @@ impl PersistenceManager {
             &budget_limits,
             &plan_budget,
             &notes,
+            &subagents,
         ));
 
         let mut agent_runs = Vec::new();
@@ -880,6 +882,7 @@ impl PersistenceManager {
             budget_limits: Some(budget_limits),
             // Recorded once the run has a plan budget or has seen plan usage.
             plan_budget: (plan_budget != Default::default()).then_some(plan_budget),
+            subagents,
         };
         Some(Built {
             state,
@@ -1091,6 +1094,26 @@ impl PersistenceManager {
                 note,
             },
             "a posted note",
+        );
+    }
+
+    /// Records a background subagent's event in the event log, whatever
+    /// [`PersistenceConfig::event_log`] selects: a line with the event's
+    /// fields and `"subagent": true` (see
+    /// [`SubagentEvent`](crate::subagents::SubagentEvent)).
+    pub(crate) fn append_subagent_event(&self, event: &crate::subagents::SubagentEvent) {
+        #[derive(serde::Serialize)]
+        struct SubagentEventRecord<'a> {
+            subagent: bool,
+            #[serde(flatten)]
+            event: &'a crate::subagents::SubagentEvent,
+        }
+        self.events.append_record(
+            &SubagentEventRecord {
+                subagent: true,
+                event,
+            },
+            "a subagent event",
         );
     }
 

@@ -59,6 +59,8 @@ pub struct SharedContext {
     pub(crate) registry: crate::messaging::registry::AgentRegistry,
     /// The notes posted to the agents (`Workflow::post_note`).
     pub(crate) notes: crate::notes::NoteBoard,
+    /// The background subagents, their mailboxes and their drivers.
+    pub(crate) subagents: crate::subagents::Board,
     /// Whether and why the run was stopped (cancelled or aborted by a hook).
     pub(crate) run_control: Arc<crate::workflow::cancel::RunControl>,
     /// The run's persistence, when configured: changes the host makes

@@ -1,8 +1,11 @@
 pub mod cancel;
 pub mod config;
 pub mod engine;
+pub(crate) mod options;
 pub mod result;
 pub mod stop;
+
+pub use options::RunOptions;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -56,6 +59,14 @@ pub struct Workflow {
     context: Arc<SharedContext>,
 }
 
+/// Dropping the workflow aborts its background subagents' drivers (see
+/// [`crate::subagents`]): their runs stop where they are, as after a crash.
+impl Drop for Workflow {
+    fn drop(&mut self) {
+        self.context.subagents.abort_all();
+    }
+}
+
 impl Workflow {
     /// Creates a new workflow builder.
     pub fn builder() -> WorkflowBuilder {
@@ -78,6 +89,28 @@ impl Workflow {
             let result = self
                 .engine
                 .run_agent(agent_name, prompt, &self.context)
+                .await;
+            self.finish_call(result, |hook| {
+                hook.agent_name = Some(agent_name.to_string());
+            })
+            .await
+        })
+        .await
+    }
+
+    /// [`run_agent`](Self::run_agent) with `options`, such as a working
+    /// directory of the run's own ([`RunOptions::workspace`]).
+    pub async fn run_agent_with(
+        &self,
+        agent_name: &str,
+        prompt: &str,
+        options: RunOptions,
+    ) -> Result<AgentResult, WorkflowError> {
+        Box::pin(async move {
+            self.ensure_admitting().await?;
+            let result = self
+                .engine
+                .run_agent_with(agent_name, prompt, options, &self.context)
                 .await;
             self.finish_call(result, |hook| {
                 hook.agent_name = Some(agent_name.to_string());
@@ -235,7 +268,8 @@ impl Workflow {
         interrupted
             .into_iter()
             .filter(|result| {
-                result.task.parent.is_none() || engine::is_orphaned(&self.context, result)
+                (result.task.parent.is_none() || engine::is_orphaned(&self.context, result))
+                    && !self.context.subagents.is_subagent(result.agent_run_id)
             })
             .collect()
     }
@@ -324,10 +358,82 @@ impl Workflow {
         agent_name: &str,
         prompt: &str,
     ) -> Result<AgentHandle, WorkflowError> {
+        self.spawn_agent_with(agent_name, prompt, RunOptions::default())
+            .await
+    }
+
+    /// [`spawn_agent`](Self::spawn_agent) with `options`, such as a working
+    /// directory of the run's own ([`RunOptions::workspace`]).
+    pub async fn spawn_agent_with(
+        &self,
+        agent_name: &str,
+        prompt: &str,
+        options: RunOptions,
+    ) -> Result<AgentHandle, WorkflowError> {
         self.ensure_admitting().await?;
         self.engine
-            .spawn_agent(agent_name, prompt, &self.context)
+            .spawn_agent_with(agent_name, prompt, options, &self.context)
             .await
+    }
+
+    /// Every background subagent of the run, in the order they were started
+    /// (see [`crate::subagents`]).
+    pub fn subagents(&self) -> Vec<crate::subagents::SubagentRecord> {
+        self.context.subagents.records()
+    }
+
+    /// The background subagents running, or queued to run.
+    pub fn active_subagents(&self) -> Vec<crate::subagents::SubagentRecord> {
+        self.context.subagents.active()
+    }
+
+    /// Background subagent events: starts, reports, failures, stops,
+    /// messages, deliveries, and
+    /// [`NewsWaiting`](crate::subagents::SubagentEventKind::NewsWaiting) for
+    /// a run that isn't running and has news. Also recorded in the event
+    /// log. Their order relative to [`subscribe_events`](Self::subscribe_events)'
+    /// events isn't guaranteed.
+    pub fn subscribe_subagents(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::subagents::SubagentEvent> {
+        self.context.subagents.subscribe()
+    }
+
+    /// The mailbox items for agent run `agent_run_id` it hasn't received:
+    /// its subagents' reports, failures, stops and messages, oldest first.
+    /// A run that is continued gets them at its first turn boundary.
+    pub fn pending_news(&self, agent_run_id: uuid::Uuid) -> Vec<crate::subagents::MailItem> {
+        self.context.subagents.pending(agent_run_id)
+    }
+
+    /// Takes the items [`pending_news`](Self::pending_news) lists: they
+    /// count as received, for a host that puts them in its own message to
+    /// the run ([`MailItem::text`](crate::subagents::MailItem::text) is each
+    /// one whole).
+    pub fn take_news(&self, agent_run_id: uuid::Uuid) -> Vec<crate::subagents::MailItem> {
+        self.context.subagents.take(agent_run_id)
+    }
+
+    /// Relaunches the background subagents that were running, or queued,
+    /// when the workflow stopped (after a resume from a checkpoint), in the
+    /// background: returns their ids (`r1`, ...). Their reports reach their
+    /// leads as usual. A subagent that isn't relaunched waits, and a message
+    /// from its lead restarts it.
+    pub fn resume_subagents(&self) -> Vec<String> {
+        self.context.subagents.resume_all(&self.context)
+    }
+
+    /// Agent run `from`'s background subagents become run `to`'s (a new
+    /// conversation of the same lead, say), with the news for `from` it
+    /// hasn't received. Returns how many.
+    pub fn transfer_subagents(&self, from: uuid::Uuid, to: uuid::Uuid) -> usize {
+        self.context.subagents.transfer(from, to)
+    }
+
+    /// The number of the newest note agent run `agent_run_id` has been
+    /// given; see [`NotesHandle::given`](crate::notes::NotesHandle::given).
+    pub fn notes_given(&self, agent_run_id: uuid::Uuid) -> u64 {
+        self.context.notes.given(agent_run_id)
     }
 
     /// A handle that cancels or stops this run from any task or thread.
@@ -495,6 +601,7 @@ impl Workflow {
                     .stopped_by
                     .as_ref()
                     .is_some_and(StopRecord::is_retired)
+                    || self.context.subagents.is_subagent(result.agent_run_id)
                 {
                     return None;
                 } else if interrupted.contains(&result.agent_run_id) {
@@ -1274,6 +1381,7 @@ pub struct WorkflowBuilder {
     completion_verifiers: Vec<CompletionVerifierConfig>,
     distillation_configs: Vec<DistillationConfig>,
     services_config: Option<WorkflowServicesConfig>,
+    subagents: Option<crate::subagents::SubagentsConfig>,
     messaging: Option<MessagingPolicy>,
     wait_timeouts: WaitTimeouts,
     user_input_handler: Option<Arc<dyn UserInputHandler>>,
@@ -1319,6 +1427,7 @@ impl WorkflowBuilder {
             completion_verifiers: Vec::new(),
             distillation_configs: Vec::new(),
             services_config: None,
+            subagents: None,
             messaging: Some(MessagingPolicy::default()),
             wait_timeouts: WaitTimeouts::default(),
             user_input_handler: None,
@@ -1612,6 +1721,15 @@ impl WorkflowBuilder {
 
     pub fn workflow_services(mut self, config: WorkflowServicesConfig) -> Self {
         self.services_config = Some(config);
+        self
+    }
+
+    /// Lets the workflow services' callers start background subagents of
+    /// their targets: runs that work while the caller goes on, with
+    /// messages between them (see [`crate::subagents`]). Needs
+    /// [`workflow_services`](Self::workflow_services).
+    pub fn subagents(mut self, config: crate::subagents::SubagentsConfig) -> Self {
+        self.subagents = Some(config);
         self
     }
 
@@ -1927,6 +2045,14 @@ impl WorkflowBuilder {
                 );
             }
         }
+        if let Some(subagents) = &self.subagents {
+            if self.services_config.is_none() {
+                return Err(WorkflowError::BuilderInvalid(
+                    "subagents need workflow_services naming who may start which agent".to_string(),
+                ));
+            }
+            subagents.validate()?;
+        }
         if let Some(voters) = &self.voters {
             let mut voters = voters.iter().collect::<Vec<_>>();
             voters.sort();
@@ -2013,10 +2139,12 @@ impl WorkflowBuilder {
                     | "list_memories"
                     | RUN_WORKFLOW_AGENT_TOOL_NAME
                     | CAST_VOTE_TOOL_NAME
-            ) || (matches!(
-                tool_name.as_str(),
-                SEND_MESSAGE_TOOL_NAME | LIST_RECIPIENTS_TOOL_NAME
-            ) && !messaging_agents.is_empty())
+            ) || (self.subagents.is_some()
+                && crate::subagents::SUBAGENT_TOOL_NAMES.contains(&tool_name.as_str()))
+                || (matches!(
+                    tool_name.as_str(),
+                    SEND_MESSAGE_TOOL_NAME | LIST_RECIPIENTS_TOOL_NAME
+                ) && !messaging_agents.is_empty())
                 || (tool_name == WAIT_FOR_MESSAGE_TOOL_NAME && !receiving_agents.is_empty())
             {
                 return Err(WorkflowError::BuilderInvalid(format!(
@@ -2080,6 +2208,44 @@ impl WorkflowBuilder {
             }
             _ => Vec::new(),
         };
+        // A subagent's saved configuration is its agent's as the host's hook
+        // changes it.
+        let restored_subagents = resume_state
+            .as_ref()
+            .and_then(|state| state.subagents.clone());
+        let mut prepared = HashMap::new();
+        if let (Some(snapshot), Some(hook)) = (
+            &restored_subagents,
+            self.subagents
+                .as_ref()
+                .and_then(|config| config.hook.as_ref()),
+        ) {
+            for record in &snapshot.runs {
+                let Some(mut config) = self
+                    .agents
+                    .iter()
+                    .find(|(agent, _)| *agent == record.agent)
+                    .map(|(_, config)| config.clone())
+                else {
+                    continue;
+                };
+                let request = crate::subagents::StartRequest {
+                    workflow_run_id: resume_state
+                        .as_ref()
+                        .map_or_else(uuid::Uuid::nil, |state| state.workflow_run_id),
+                    run_id: record.run_id,
+                    handle: record.handle.clone(),
+                    agent: record.agent.clone(),
+                    caller_run_id: record.caller_run_id,
+                    caller_agent: record.caller_agent.clone(),
+                    task: record.task.clone(),
+                    parameters: record.parameters.clone(),
+                };
+                if hook.prepare(&request, &mut config).is_ok() {
+                    prepared.insert(record.run_id, config);
+                }
+            }
+        }
         validate_resumed_agent_configs(
             &self.agents,
             &self.global_tools,
@@ -2090,6 +2256,7 @@ impl WorkflowBuilder {
                 .iter()
                 .map(|verifier| verifier.verifier_agent.as_str())
                 .collect(),
+            &prepared,
         )?;
         if resume_state.is_some() && self.persistence_config.is_none() {
             return Err(WorkflowError::BuilderInvalid(
@@ -2302,6 +2469,13 @@ impl WorkflowBuilder {
                 control_folder,
                 persistence.clone(),
             ),
+            subagents: crate::subagents::Board::new(
+                self.subagents,
+                restored_subagents,
+                &resumed_results,
+                workflow_run_id,
+                persistence.clone(),
+            ),
             user_input_handler: self.user_input_handler,
             approval_policy: self.approval_policy,
             error_recovery_policy: self.error_recovery_policy,
@@ -2395,6 +2569,7 @@ fn validate_resumed_agent_configs(
     agent_tools: &HashMap<String, Vec<Arc<dyn arko_agents::tool::Tool>>>,
     resumed_results: &[AgentResult],
     verifier_agents: &HashSet<&str>,
+    prepared: &HashMap<uuid::Uuid, AgentConfig>,
 ) -> Result<(), WorkflowError> {
     let by_id = resumed_results
         .iter()
@@ -2416,6 +2591,7 @@ fn validate_resumed_agent_configs(
         arko_agents::LOAD_SKILL_TOOL_NAME,
     ]
     .into_iter()
+    .chain(crate::subagents::SUBAGENT_TOOL_NAMES.iter().copied())
     .map(str::to_string)
     .collect::<HashSet<_>>();
     workflow_tools.extend(global_tools.iter().map(|tool| tool.name()));
@@ -2439,7 +2615,10 @@ fn validate_resumed_agent_configs(
         if !continued && !stopped {
             continue;
         }
-        let Some(current) = configured.get(&result.agent_name) else {
+        let Some(current) = prepared
+            .get(&result.agent_run_id)
+            .or_else(|| configured.get(&result.agent_name).copied())
+        else {
             continue;
         };
         if result.status == AgentRunStatus::Interrupted
@@ -2626,6 +2805,11 @@ fn warn_unknown_tool_names(
             arko_agents::LOAD_SKILL_TOOL_NAME,
         ]
         .map(str::to_string),
+    );
+    known.extend(
+        crate::subagents::SUBAGENT_TOOL_NAMES
+            .iter()
+            .map(|name| name.to_string()),
     );
     known.extend(
         agents

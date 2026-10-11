@@ -1156,6 +1156,19 @@ async fn answer_questions(
         ctx,
         ..
     } = *drive;
+    // A subagent asks its lead, which asks the user if it needs to.
+    if ctx
+        .subagents
+        .config()
+        .is_some_and(|config| config.questions_to_lead)
+        && ctx.subagents.is_subagent(agent_run_id)
+    {
+        let response = ctx.subagents.ask(ctx, agent_run_id, &questions).await?;
+        return cmd_tx
+            .send(UserCommand::SubmitUserResponse { response })
+            .await
+            .map_err(|error| WorkflowError::Channel(error.to_string()));
+    }
     if let Some(handler) = &ctx.user_input_handler {
         let request = crate::user_input::UserInputRequest {
             workflow_run_id: ctx.workflow_run_id,
@@ -1285,7 +1298,7 @@ pub(crate) fn is_run_stop(error: &WorkflowError) -> bool {
 }
 
 /// How a run starts.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct StartOptions {
     /// The run's task ID, already marked running in the agent registry.
     pub reserved: Option<uuid::Uuid>,
@@ -1305,6 +1318,73 @@ pub(crate) struct StartOptions {
     /// A completion verifier's review: it may start during a graceful
     /// stop's wrap-up, and isn't told to wrap up.
     pub review: bool,
+    /// The run's working directory, when not the workflow's workspace (see
+    /// [`RunOptions::workspace`](super::RunOptions::workspace)).
+    pub workspace: Option<std::path::PathBuf>,
+    /// The run is a background subagent's: its tools are a subagent's (see
+    /// [`crate::subagents`]).
+    pub subagent: bool,
+    /// The configuration it starts with, instead of its agent's registered
+    /// one (a subagent's, as the host's hook changed it).
+    pub config: Option<AgentConfig>,
+}
+
+/// What a run is, for the workflow tools it gets: how deep it is (see
+/// [`StartedRun::depth`]), and whether it is a background subagent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RunRole {
+    pub depth: u32,
+    pub subagent: bool,
+}
+
+impl From<u32> for RunRole {
+    fn from(depth: u32) -> Self {
+        Self {
+            depth,
+            subagent: false,
+        }
+    }
+}
+
+impl RunRole {
+    /// The role of run `task_id` at `depth`.
+    pub(crate) fn of(ctx: &SharedContext, depth: u32, task_id: uuid::Uuid) -> Self {
+        Self {
+            depth,
+            subagent: ctx.subagents.is_subagent(task_id),
+        }
+    }
+}
+
+/// Which subagent tools a run of `agent_name` in `role` gets: the caller's
+/// (it may start subagents), and those for talking with its runs or its
+/// lead.
+fn subagent_tools(ctx: &SharedContext, agent_name: &str, role: RunRole) -> (bool, bool) {
+    let caller = ctx.subagents.may_start_at(role.depth)
+        && ctx
+            .workflow_services
+            .get()
+            .is_some_and(|services| services.is_allowed(agent_name));
+    let talks = ctx.subagents.config().is_some() && (caller || role.subagent);
+    (caller, talks)
+}
+
+/// Whether a run of `agent_name` in `role` is offered `run_workflow_agent`:
+/// a caller, unless the subagents configuration hides it from callers, or
+/// from subagents as deep as subagents may nest.
+fn offers_blocking_tool(ctx: &SharedContext, agent_name: &str, role: RunRole) -> bool {
+    let allowed = ctx
+        .workflow_services
+        .get()
+        .is_some_and(|services| services.is_allowed(agent_name));
+    match ctx.subagents.config() {
+        Some(config) => {
+            allowed
+                && config.offer_blocking_tool
+                && !(role.subagent && role.depth >= config.max_depth)
+        }
+        None => allowed,
+    }
 }
 
 impl Default for StartOptions {
@@ -1317,6 +1397,9 @@ impl Default for StartOptions {
             driven: true,
             parent: None,
             review: false,
+            workspace: None,
+            subagent: false,
+            config: None,
         }
     }
 }
@@ -2123,6 +2206,9 @@ pub(crate) async fn finalize_agent_task(
         &task.pending_context_injections,
         matches!(task.current_state, TaskState::Completed { .. }),
     );
+    // Its subagent mail too: what it holds leaves the mailbox, the rest is
+    // given again.
+    ctx.subagents.settle_run(ctx, &task);
     let pause = AgentPause::of(&task.current_state);
     let mut result = AgentResult::of_task(agent_name.clone(), task);
     // Ended by a stop the host asked for: not the agent's failure.
@@ -2283,8 +2369,10 @@ impl WorkflowEngine {
         &self,
         agent_name: &str,
         ctx: &Arc<SharedContext>,
-        depth: u32,
+        role: impl Into<RunRole>,
     ) -> ToolRegistry {
+        let role = role.into();
+        let depth = role.depth;
         let mut registry = ToolRegistry::new();
 
         let (reads, writes) = ctx.memory.access_of(agent_name);
@@ -2325,12 +2413,40 @@ impl WorkflowEngine {
             )));
         }
         if let Some(services) = ctx.workflow_services.get()
-            && services.is_allowed(agent_name)
+            && offers_blocking_tool(ctx, agent_name, role)
         {
             registry.register(Arc::new(RunWorkflowAgentTool::new(
                 services.clone(),
                 agent_name.to_string(),
                 depth,
+            )));
+        }
+        let (caller, talks) = subagent_tools(ctx, agent_name, role);
+        if caller {
+            registry.register(Arc::new(crate::subagents::StartAgentTool::new(
+                ctx.clone(),
+                agent_name.to_string(),
+                depth,
+            )));
+            registry.register(Arc::new(crate::subagents::ListAgentsTool::new(ctx.clone())));
+            registry.register(Arc::new(crate::subagents::StopAgentTool::new(ctx.clone())));
+            if ctx
+                .subagents
+                .config()
+                .is_some_and(|config| config.peer_messages)
+            {
+                registry.register(Arc::new(crate::subagents::LinkAgentsTool::new(ctx.clone())));
+            }
+        }
+        if talks {
+            registry.register(Arc::new(crate::subagents::MessageAgentTool::new(
+                ctx.clone(),
+                caller,
+            )));
+            registry.register(Arc::new(crate::subagents::WaitForAgentsTool::new(
+                ctx.clone(),
+                agent_name.to_string(),
+                self.llm_client.clone(),
             )));
         }
         if let Some(ballots) = &ctx.ballots
@@ -2418,11 +2534,24 @@ impl WorkflowEngine {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_agent_config(
         &self,
         agent_name: &str,
         base_config: &AgentConfig,
         ctx: &Arc<SharedContext>,
+    ) -> AgentConfig {
+        self.prepare_agent_config_for(agent_name, base_config, ctx, RunRole::default())
+    }
+
+    /// [`prepare_agent_config`](Self::prepare_agent_config) for a run in
+    /// `role`.
+    pub(crate) fn prepare_agent_config_for(
+        &self,
+        agent_name: &str,
+        base_config: &AgentConfig,
+        ctx: &Arc<SharedContext>,
+        role: RunRole,
     ) -> AgentConfig {
         let mut config = base_config.clone();
 
@@ -2443,10 +2572,25 @@ impl WorkflowEngine {
         if !ctx.message_senders(agent_name).is_empty() {
             ensure_tool_name(&mut config, WAIT_FOR_MESSAGE_TOOL_NAME);
         }
-        if let Some(services) = ctx.workflow_services.get()
-            && services.is_allowed(agent_name)
-        {
+        if offers_blocking_tool(ctx, agent_name, role) {
             ensure_tool_name(&mut config, RUN_WORKFLOW_AGENT_TOOL_NAME);
+        }
+        let (caller, talks) = subagent_tools(ctx, agent_name, role);
+        if caller {
+            ensure_tool_name(&mut config, crate::subagents::START_AGENT_TOOL_NAME);
+            ensure_tool_name(&mut config, crate::subagents::LIST_AGENTS_TOOL_NAME);
+            ensure_tool_name(&mut config, crate::subagents::STOP_AGENT_TOOL_NAME);
+            if ctx
+                .subagents
+                .config()
+                .is_some_and(|config| config.peer_messages)
+            {
+                ensure_tool_name(&mut config, crate::subagents::LINK_AGENTS_TOOL_NAME);
+            }
+        }
+        if talks {
+            ensure_tool_name(&mut config, crate::subagents::MESSAGE_AGENT_TOOL_NAME);
+            ensure_tool_name(&mut config, crate::subagents::WAIT_FOR_AGENTS_TOOL_NAME);
         }
         if ctx.ballots.is_some() && ctx.voters.contains(agent_name) {
             ensure_tool_name(&mut config, CAST_VOTE_TOOL_NAME);
@@ -2535,7 +2679,7 @@ impl WorkflowEngine {
     /// Prepares a new run of a registered agent and starts it. A run
     /// `reserved` is already marked running in the agent registry (a batch
     /// started together) and is abandoned if it can't start.
-    fn start_agent(
+    pub(crate) fn start_agent(
         &self,
         agent_name: &str,
         prompt: &str,
@@ -2547,18 +2691,28 @@ impl WorkflowEngine {
         } else {
             self.admit(agent_name, None, options.review, ctx)
         };
+        let role = RunRole {
+            depth: options.depth,
+            subagent: options.subagent,
+        };
         let prepared = admission.and_then(|()| {
-            let base_config = ctx
-                .agent_configs
-                .get(agent_name)
-                .ok_or_else(|| WorkflowError::AgentNotFound(agent_name.to_string()))?;
-            let mut config = self.prepare_agent_config(agent_name, base_config, ctx);
-            let mut registry = self.build_tool_registry(agent_name, ctx, options.depth);
-            let skill_prompt_context =
-                Self::setup_skills(&mut config, &mut registry, &ctx.workspace)?;
-            Ok((config, registry, skill_prompt_context))
+            let base_config = match &options.config {
+                Some(config) => config,
+                None => ctx
+                    .agent_configs
+                    .get(agent_name)
+                    .ok_or_else(|| WorkflowError::AgentNotFound(agent_name.to_string()))?,
+            };
+            let workspace = match &options.workspace {
+                Some(workspace) => super::options::run_workspace(&ctx.workspace, workspace)?,
+                None => ctx.workspace.clone(),
+            };
+            let mut config = self.prepare_agent_config_for(agent_name, base_config, ctx, role);
+            let mut registry = self.build_tool_registry(agent_name, ctx, role);
+            let skill_prompt_context = Self::setup_skills(&mut config, &mut registry, &workspace)?;
+            Ok((config, registry, skill_prompt_context, workspace))
         });
-        let (config, registry, skill_prompt_context) = match prepared {
+        let (config, registry, skill_prompt_context, workspace) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
                 if let Some(task_id) = options.reserved {
@@ -2568,7 +2722,7 @@ impl WorkflowEngine {
             }
         };
 
-        let mut task = Task::new(config, String::new(), ctx.workspace.clone(), None);
+        let mut task = Task::new(config, String::new(), workspace, None);
         task.parent = options.parent;
         match options.reserved {
             Some(task_id) => task.id = task_id,
@@ -2712,7 +2866,23 @@ impl WorkflowEngine {
         prompt: &str,
         ctx: &Arc<SharedContext>,
     ) -> Result<AgentResult, WorkflowError> {
-        let run = self.start_agent(agent_name, prompt, ctx, StartOptions::default())?;
+        self.run_agent_with(agent_name, prompt, super::RunOptions::default(), ctx)
+            .await
+    }
+
+    /// [`run_agent`](Self::run_agent) with `options`.
+    pub async fn run_agent_with(
+        &self,
+        agent_name: &str,
+        prompt: &str,
+        options: super::RunOptions,
+        ctx: &Arc<SharedContext>,
+    ) -> Result<AgentResult, WorkflowError> {
+        let options = StartOptions {
+            workspace: options.workspace,
+            ..StartOptions::default()
+        };
+        let run = self.start_agent(agent_name, prompt, ctx, options)?;
         drive_to_result(run, ctx, self.persistence.as_ref()).await
     }
 
@@ -2986,17 +3156,19 @@ impl WorkflowEngine {
     ///
     /// The caller drives execution either by calling [`AgentHandle::wait`]
     /// (default workflow behavior) or [`AgentHandle::into_parts`] (custom
-    /// event processing).
-    pub async fn spawn_agent(
+    /// event processing). `options` set up the run (its working directory).
+    pub async fn spawn_agent_with(
         &self,
         agent_name: &str,
         prompt: &str,
+        options: super::RunOptions,
         ctx: &Arc<SharedContext>,
     ) -> Result<AgentHandle, WorkflowError> {
         // The caller chooses who drives it: `AgentHandle::wait` hands it to
         // the workflow.
         let options = StartOptions {
             driven: false,
+            workspace: options.workspace,
             ..StartOptions::default()
         };
         let run = self.start_agent(agent_name, prompt, ctx, options)?;
@@ -3065,9 +3237,13 @@ impl WorkflowEngine {
         self.admit(agent_name, Some(previous.agent_run_id), review, ctx)?;
         let mut task = previous.task.clone();
         task.parent = parent;
-        let mut registry = self.build_tool_registry(agent_name, ctx, depth);
-        let skill_prompt_context =
-            Self::setup_skills(&mut task.agent_config, &mut registry, &ctx.workspace)?;
+        let mut registry =
+            self.build_tool_registry(agent_name, ctx, RunRole::of(ctx, depth, task.id));
+        let skill_prompt_context = Self::setup_skills(
+            &mut task.agent_config,
+            &mut registry,
+            &task.current_working_directory,
+        )?;
         // Continued once at a time.
         if !ctx.registry.start_unless_running(task.id, agent_name) {
             return Err(WorkflowError::BuilderInvalid(format!(
@@ -3273,9 +3449,13 @@ impl WorkflowEngine {
             &task.pending_context_injections,
             false,
         );
-        let mut registry = self.build_tool_registry(agent_name, ctx, depth);
-        let skill_prompt_context =
-            Self::setup_skills(&mut task.agent_config, &mut registry, &ctx.workspace)?;
+        let mut registry =
+            self.build_tool_registry(agent_name, ctx, RunRole::of(ctx, depth, task.id));
+        let skill_prompt_context = Self::setup_skills(
+            &mut task.agent_config,
+            &mut registry,
+            &task.current_working_directory,
+        )?;
         // Resumed once at a time.
         if !ctx.registry.start_unless_running(task.id, agent_name) {
             return Err(WorkflowError::BuilderInvalid(format!(
@@ -3457,9 +3637,16 @@ impl WorkflowEngine {
             let agent_name = &current.agent_name;
             self.admit(agent_name, Some(agent_run_id), false, ctx)?;
             let mut task = current.task.clone();
-            let mut registry = self.build_tool_registry(agent_name, ctx, recovery.depth);
-            let skill_prompt_context =
-                Self::setup_skills(&mut task.agent_config, &mut registry, &ctx.workspace)?;
+            let mut registry = self.build_tool_registry(
+                agent_name,
+                ctx,
+                RunRole::of(ctx, recovery.depth, task.id),
+            );
+            let skill_prompt_context = Self::setup_skills(
+                &mut task.agent_config,
+                &mut registry,
+                &task.current_working_directory,
+            )?;
             // Claimed before anything is recorded, so that a second recovery
             // of the same run records nothing twice.
             match ctx.registry.claim_recovery(agent_run_id, agent_name) {
@@ -3528,6 +3715,7 @@ impl WorkflowEngine {
         // The notes it was given after its task was saved, given again (it
         // is launched as an ordinary run, below).
         ctx.notes.recovered(agent_name, &task, false);
+        ctx.subagents.recovered(&task);
         // Its caller's message goes with the task, as context taken and not
         // yet added: it is added at the first turn boundary, after the
         // results of the calls it was running (and is saved with the task
@@ -4091,8 +4279,11 @@ impl WorkflowExecutionMiddleware {
         }
 
         if let Some(tracker) = &self.context.resource_tracker
-            && let Some((resource, true)) =
-                tracker.resource_for_tool(call.tool_name, call.parameters)
+            && let Some((resource, true)) = tracker.resource_for_tool_in(
+                call.tool_name,
+                call.parameters,
+                execution.current_working_directory,
+            )
         {
             let actor = ActorId::new(execution.task_id, &self.agent_name);
             let conflicts = tracker.check_write(&actor, &resource);
@@ -4183,8 +4374,11 @@ impl ToolExecutionMiddleware for WorkflowExecutionMiddleware {
 
         if successful_output.is_some()
             && let Some(tracker) = &self.context.resource_tracker
-            && let Some((resource, is_write)) =
-                tracker.resource_for_tool(call.tool_name, call.parameters)
+            && let Some((resource, is_write)) = tracker.resource_for_tool_in(
+                call.tool_name,
+                call.parameters,
+                execution.current_working_directory,
+            )
         {
             let actor = ActorId::new(execution.task_id, &self.agent_name);
             if is_write {

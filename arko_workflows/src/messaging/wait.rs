@@ -176,7 +176,7 @@ impl WaitForMessageTool {
     /// limit counts from the run's last model request, when the cache was
     /// last used, so the time the model took to answer is included; at least
     /// a second is left.
-    async fn wait_limit(&self, task_id: uuid::Uuid) -> Duration {
+    pub(crate) async fn wait_limit(&self, task_id: uuid::Uuid) -> Duration {
         let limit = self.limit().await;
         if self.context.wait_timeouts.for_agent(&self.agent_name) != WaitForMessageTimeout::Auto {
             return limit;

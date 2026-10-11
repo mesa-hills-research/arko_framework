@@ -44,6 +44,7 @@ pub mod notes;
 pub mod persistence;
 pub mod policy;
 pub mod services;
+pub mod subagents;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod user_input;
@@ -61,7 +62,7 @@ pub use workflow::result::{AgentResult, AgentRunStatus, WorkflowEvent, WorkflowR
 pub use workflow::stop::{
     Restart, RunStopIntent, StopKind, StopRecord, StopRequest, StoppedRun, WrapUp, stop_on_signals,
 };
-pub use workflow::{AgentHandle, Workflow, WorkflowBuilder};
+pub use workflow::{AgentHandle, RunOptions, Workflow, WorkflowBuilder};
 
 /// Convenience re-exports for common usage.
 pub mod prelude {
@@ -93,6 +94,11 @@ pub mod prelude {
         ToolApprovalOutcome, ToolApprovalRequest,
     };
     pub use crate::services::{WorkflowServices, WorkflowServicesConfig};
+    pub use crate::subagents::{
+        GitWorktreeProvider, IsolatedWorkspace, MailItem, MailKind, MailSender, StartRequest,
+        SubagentEvent, SubagentEventKind, SubagentHook, SubagentRecord, SubagentState,
+        SubagentsConfig, WorkspaceProvider, WorkspaceRequest,
+    };
     pub use crate::user_input::{UserInputHandler, UserInputRequest};
     pub use crate::verification::{
         CompletionVerifierConfig, RepairContextConfig, VERIFIER_OUTPUT_CONTRACT,
@@ -106,5 +112,5 @@ pub mod prelude {
         Restart, RunStopIntent, StopKind, StopRecord, StopRequest, StoppedRun, WrapUp,
         stop_on_signals,
     };
-    pub use crate::workflow::{Workflow, WorkflowBuilder};
+    pub use crate::workflow::{RunOptions, Workflow, WorkflowBuilder};
 }

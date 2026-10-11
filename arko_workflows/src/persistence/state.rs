@@ -81,6 +81,11 @@ pub struct WorkflowState {
     /// Absent in checkpoints from before it existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_budget: Option<crate::budget::PlanBudgetState>,
+    /// The background subagents, their mailboxes and the run ids handed out
+    /// (see [`crate::subagents`]). Absent while there is nothing to record,
+    /// and in checkpoints from before subagents existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagents: Option<crate::subagents::SubagentsSnapshot>,
 }
 
 /// The budget limits a checkpoint records.
@@ -294,6 +299,7 @@ mod tests {
             notes: None,
             budget_limits: None,
             plan_budget: None,
+            subagents: None,
         };
 
         let json = serde_json::to_string_pretty(&state).unwrap();

@@ -201,7 +201,7 @@ impl WorkflowServices {
     /// The `agent` parameter's description for `caller`: the agents it may
     /// run, with their roles. Configuration only, so it doesn't change
     /// during a task.
-    fn target_guidance(&self, caller: &str) -> String {
+    pub(crate) fn target_guidance(&self, caller: &str) -> String {
         let Some(context) = self.context.upgrade() else {
             return "Use only a configured agent name.".to_string();
         };
@@ -581,6 +581,11 @@ impl WorkflowServices {
         }
     }
 
+    /// An engine running agents for the workflow the services serve.
+    pub(crate) fn engine(&self) -> WorkflowEngine {
+        WorkflowEngine::from_shared(self.client.clone(), self.persistence.clone())
+    }
+
     /// The workflow the services serve.
     fn context(&self) -> Result<Arc<SharedContext>, WorkflowError> {
         self.context.upgrade().ok_or_else(|| {
@@ -589,7 +594,7 @@ impl WorkflowServices {
     }
 
     /// Fails unless `caller` may run `agent_name`.
-    fn authorize(&self, caller: &str, agent_name: &str) -> Result<(), WorkflowError> {
+    pub(crate) fn authorize(&self, caller: &str, agent_name: &str) -> Result<(), WorkflowError> {
         if !self.is_allowed(caller) {
             return Err(WorkflowError::BuilderInvalid(format!(
                 "agent '{caller}' is not authorized to invoke workflow services"

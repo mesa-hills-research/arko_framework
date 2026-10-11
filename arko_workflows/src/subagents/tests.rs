@@ -1,0 +1,1126 @@
+//! Background subagents end to end, against the local model server: starts,
+//! reports at turn boundaries and through waits, messages both ways, the
+//! queue, stops, isolation, per-run workspaces, questions, receipts, and
+//! checkpoints.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use arko_agents::{TaskContext, Tool, ToolDefinition, ToolError, ToolTypeDetails};
+use serde_json::{Value, json};
+
+use super::*;
+use crate::persistence::PersistenceConfig;
+use crate::services::WorkflowServicesConfig;
+use crate::test_support::{ResponsesServer, Workspace, agent_config, tool_call_turn};
+use crate::workflow::result::AgentRunStatus;
+use crate::{Workflow, WorkflowBuilder};
+
+/// A model turn: the tool it calls and its arguments.
+type Step = (&'static str, Value);
+
+/// Which conversation a request belongs to: a subagent's (`r1`, `r2`, ...)
+/// or the lead's.
+fn role(body: &str) -> String {
+    for n in 1..10 {
+        if body.contains(&format!("You are agent run r{n},")) {
+            return format!("r{n}");
+        }
+    }
+    "lead".to_string()
+}
+
+/// How many tool results a request sends: the turn its conversation is at.
+fn turn(body: &str) -> usize {
+    body.matches("\"function_call_output\"").count()
+}
+
+/// A server that answers each conversation from its script, turn by turn,
+/// and completes it (`<role> done`) once the script is over.
+async fn serve(scripts: Vec<(&'static str, Vec<Step>)>) -> ResponsesServer {
+    let scripts: HashMap<String, Vec<Step>> = scripts
+        .into_iter()
+        .map(|(role, steps)| (role.to_string(), steps))
+        .collect();
+    ResponsesServer::start(move |_, body| {
+        let role = role(body);
+        let turn = turn(body);
+        let id = format!("{role}_{turn}");
+        Some(match scripts.get(&role).and_then(|steps| steps.get(turn)) {
+            Some((tool, arguments)) => tool_call_turn(&id, tool, arguments.clone()),
+            None => tool_call_turn(
+                &id,
+                "complete_task",
+                json!({ "summary": format!("{role} done") }),
+            ),
+        })
+    })
+    .await
+}
+
+fn builder(
+    server: &ResponsesServer,
+    workspace: &Workspace,
+    config: SubagentsConfig,
+) -> WorkflowBuilder {
+    Workflow::builder()
+        .name("subagents-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("lead", agent_config("Lead"))
+        .agent("worker", agent_config("Worker"))
+        .workflow_services(
+            WorkflowServicesConfig::default()
+                .allow_caller("lead")
+                .allow_target("worker"),
+        )
+        .subagents(config)
+}
+
+async fn within<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(Duration::from_secs(30), future)
+        .await
+        .expect("in time")
+}
+
+/// Waits until `done` holds.
+async fn until(mut done: impl FnMut() -> bool) {
+    within(async {
+        while !done() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+}
+
+/// The requests of conversation `role`, in order.
+fn bodies_of(server: &ResponsesServer, of: &str) -> Vec<String> {
+    server
+        .bodies()
+        .into_iter()
+        .filter(|body| role(body) == of)
+        .collect()
+}
+
+/// The tool result a conversation's request carries for its call at turn
+/// `turn` (whose id is `<role>_<turn>`).
+fn result_of(body: &str, of: &str, turn: usize) -> String {
+    let body: Value = serde_json::from_str(body).unwrap();
+    body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| {
+            item["type"] == "function_call_output" && item["call_id"] == format!("call_{of}_{turn}")
+        })
+        .and_then(|item| item["output"].as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The names of the tools a request offers.
+fn offered(body: &str) -> Vec<String> {
+    let body: Value = serde_json::from_str(body).unwrap();
+    body["tools"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A tool that waits until the test opens it, or the task's stop signal
+/// fires.
+#[derive(Debug, Default)]
+struct Gate {
+    started: tokio::sync::Notify,
+    open: tokio::sync::Notify,
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Tool for Gate {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "gate".to_string(),
+            description: "Waits.".to_string(),
+            output_based_example: None,
+            parameters: vec![],
+            parallel_safe: false,
+            tool_type_details: ToolTypeDetails::DeveloperDefined,
+            raw_json_schema_override: None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        context: &TaskContext<'_>,
+        _params: HashMap<String, Value>,
+    ) -> Result<String, ToolError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.started.notify_one();
+        tokio::select! {
+            _ = self.open.notified() => Ok("opened".to_string()),
+            _ = context.stop.stopping() => Ok("stopped".to_string()),
+        }
+    }
+}
+
+/// A tool that answers with the directory it was called in.
+#[derive(Debug)]
+struct Where;
+
+#[async_trait::async_trait]
+impl Tool for Where {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "where".to_string(),
+            description: "Says where.".to_string(),
+            output_based_example: None,
+            parameters: vec![],
+            parallel_safe: false,
+            tool_type_details: ToolTypeDetails::DeveloperDefined,
+            raw_json_schema_override: None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        context: &TaskContext<'_>,
+        _params: HashMap<String, Value>,
+    ) -> Result<String, ToolError> {
+        Ok(format!(
+            "here: {}",
+            context.current_working_directory.display()
+        ))
+    }
+}
+
+fn start(task: &str) -> Step {
+    ("start_agent", json!({ "agent": "worker", "task": task }))
+}
+
+fn wait() -> Step {
+    ("wait_for_agents", json!({}))
+}
+
+fn complete(summary: &str) -> Step {
+    ("complete_task", json!({ "summary": summary }))
+}
+
+/// `start_agent` returns a run id at once while the subagent works, and
+/// `wait_for_agents` returns its report itself. The report's costs are in
+/// the workflow's ledger, and the subagent isn't a host run to recover.
+#[tokio::test]
+async fn a_start_returns_at_once_and_a_wait_returns_the_report() {
+    let server = serve(vec![
+        ("lead", vec![start("Count the files."), wait()]),
+        ("r1", vec![complete("There are 3 files.")]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let workflow = builder(&server, &workspace, SubagentsConfig::default())
+        .build()
+        .unwrap();
+    let mut events = workflow.subscribe_subagents();
+    let result = within(workflow.run_agent("lead", "Delegate the count."))
+        .await
+        .unwrap();
+    assert_eq!(result.summary, "lead done");
+
+    let lead = bodies_of(&server, "lead");
+    let started = result_of(&lead[1], "lead", 0);
+    assert!(
+        started.starts_with("Started r1 (agent `worker`)."),
+        "{started}"
+    );
+    let waited = result_of(&lead[2], "lead", 1);
+    assert!(
+        waited.contains("[mail 1] r1 (agent `worker`) finished. Its report:\n\nThere are 3 files."),
+        "{waited}"
+    );
+    let worker = &bodies_of(&server, "r1")[0];
+    assert!(worker.contains("Count the files."));
+    assert!(worker.contains("started by agent `lead` (your lead)"));
+    // The lead may start runs and use the blocking tool; the subagent
+    // talks with its lead only.
+    let lead_tools = offered(&lead[0]);
+    for tool in [
+        "start_agent",
+        "message_agent",
+        "wait_for_agents",
+        "list_agents",
+        "stop_agent",
+        "link_agents",
+        "run_workflow_agent",
+    ] {
+        assert!(
+            lead_tools.contains(&tool.to_string()),
+            "{tool}: {lead_tools:?}"
+        );
+    }
+    let worker_tools = offered(worker);
+    assert!(worker_tools.contains(&"message_agent".to_string()));
+    assert!(worker_tools.contains(&"wait_for_agents".to_string()));
+    for tool in ["start_agent", "run_workflow_agent", "stop_agent"] {
+        assert!(
+            !worker_tools.contains(&tool.to_string()),
+            "{tool}: {worker_tools:?}"
+        );
+    }
+
+    let records = workflow.subagents();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].state, SubagentState::Finished);
+    assert_eq!(records[0].report.as_deref(), Some("There are 3 files."));
+    assert_eq!(records[0].caller_run_id, result.agent_run_id);
+    let ledger = workflow.cost_ledger();
+    assert!(
+        ledger
+            .entries
+            .iter()
+            .any(|entry| entry.agent_name.as_deref() == Some("worker"))
+            || ledger.entries.len() >= 4
+    );
+    assert!(workflow.interrupted_runs().is_empty());
+    let mut kinds = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        kinds.push(event.kind);
+    }
+    assert!(matches!(kinds[0], SubagentEventKind::Started));
+    assert!(kinds.iter().any(|kind| matches!(kind, SubagentEventKind::Finished { summary } if summary == "There are 3 files.")));
+    assert!(kinds.iter().any(
+        |kind| matches!(kind, SubagentEventKind::Delivered { mail_ids, .. } if mail_ids == &[1])
+    ));
+}
+
+/// A report reaches a lead that is busy at its next turn boundary, in its
+/// context update, which `ContextInjected` reports with the item's id.
+#[tokio::test]
+async fn a_report_reaches_a_running_lead_at_its_next_step() {
+    let server = serve(vec![
+        ("lead", vec![start("Look around."), ("gate", json!({}))]),
+        ("r1", vec![complete("Looked.")]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let workflow = Arc::new(
+        builder(&server, &workspace, SubagentsConfig::default())
+            .agent_tool("lead", gate.clone())
+            .build()
+            .unwrap(),
+    );
+    let mut agent_events = workflow.subscribe_events();
+    let run = tokio::spawn({
+        let workflow = workflow.clone();
+        async move { workflow.run_agent("lead", "Delegate.").await }
+    });
+    within(gate.started.notified()).await;
+    until(|| {
+        workflow
+            .subagents()
+            .first()
+            .is_some_and(|run| run.state == SubagentState::Finished)
+    })
+    .await;
+    gate.open.notify_one();
+    let result = within(run).await.unwrap().unwrap();
+    assert_eq!(result.summary, "lead done");
+    let lead = bodies_of(&server, "lead");
+    let last = lead.last().unwrap();
+    assert!(
+        last.contains("# Workflow context update")
+            && last.contains("[mail 1] r1 (agent `worker`) finished. Its report:\\n  Looked."),
+        "{last}"
+    );
+    let mut receipts = Vec::new();
+    while let Ok(event) = agent_events.try_recv() {
+        if let arko_agents::AgentEvent::ContextInjected { ids, .. } = event.event
+            && event.agent_run_id == result.agent_run_id
+        {
+            receipts.push(ids);
+        }
+    }
+    assert!(
+        receipts
+            .iter()
+            .any(|ids| ids.contains(&"mail:1".to_string())),
+        "{receipts:?}"
+    );
+    assert!(workflow.pending_news(result.agent_run_id).is_empty());
+}
+
+/// A lead that finished before its subagent did gets `NewsWaiting`, and a
+/// continuation gets the report at its first turn boundary. The report
+/// survives a checkpoint and resume while it waits.
+#[tokio::test]
+async fn news_for_an_idle_lead_waits_and_reaches_its_next_turn() {
+    let server = serve(vec![
+        (
+            "lead",
+            vec![start("Take your time."), complete("Started it.")],
+        ),
+        ("r1", vec![("gate", json!({})), complete("Took my time.")]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let run_dir = workspace.0.join(".run");
+    let workflow = builder(&server, &workspace, SubagentsConfig::default())
+        .agent_tool("worker", gate.clone())
+        .persistence(PersistenceConfig::new(&run_dir))
+        .build()
+        .unwrap();
+    let mut events = workflow.subscribe_subagents();
+    let lead = within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    assert_eq!(lead.summary, "Started it.");
+    within(gate.started.notified()).await;
+    gate.open.notify_one();
+    let news = within(async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if let SubagentEventKind::NewsWaiting { mail_ids } = event.kind {
+                assert_eq!(event.caller_run_id, lead.agent_run_id);
+                return mail_ids;
+            }
+        }
+    })
+    .await;
+    assert_eq!(news, [1]);
+    let pending = workflow.pending_news(lead.agent_run_id);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].kind, MailKind::Report);
+    assert_eq!(pending[0].body, "Took my time.");
+
+    // Saved, it waits across a resume.
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+    let latest = std::fs::read_to_string(run_dir.join("latest-checkpoint")).unwrap();
+    let resumed = builder(&server, &workspace, SubagentsConfig::default())
+        .agent_tool("worker", gate.clone())
+        .persistence(PersistenceConfig::new(&run_dir))
+        .resume_from(run_dir.join(latest.trim()))
+        .build()
+        .unwrap();
+    assert_eq!(resumed.pending_news(lead.agent_run_id).len(), 1);
+    assert_eq!(resumed.subagents()[0].state, SubagentState::Finished);
+    let lead_result = resumed.agent_result(lead.agent_run_id).unwrap();
+    let continued = within(resumed.continue_agent(&lead_result, "Your agents have news."))
+        .await
+        .unwrap();
+    assert_eq!(continued.agent_run_id, lead.agent_run_id);
+    let last = bodies_of(&server, "lead").pop().unwrap();
+    assert!(last.contains("Your agents have news."));
+    assert!(
+        last.contains("[mail 1] r1 (agent `worker`) finished. Its report:\\n  Took my time."),
+        "{last}"
+    );
+    assert!(resumed.pending_news(lead.agent_run_id).is_empty());
+}
+
+/// Messages go both ways while a subagent runs, and each wait returns the
+/// text itself: the subagent asks, the lead answers, the subagent reports.
+/// A message to the finished subagent continues its run, with its context.
+#[tokio::test]
+async fn messages_go_both_ways_and_a_finished_subagent_continues() {
+    let server = serve(vec![
+        (
+            "lead",
+            vec![
+                start("Ask me first."),
+                wait(),
+                (
+                    "message_agent",
+                    json!({ "to": "r1", "message": "Use blue." }),
+                ),
+                wait(),
+                (
+                    "message_agent",
+                    json!({ "to": "r1", "message": "Now make it red." }),
+                ),
+                wait(),
+            ],
+        ),
+        (
+            "r1",
+            vec![
+                (
+                    "message_agent",
+                    json!({ "to": "lead", "message": "Which colour?" }),
+                ),
+                wait(),
+                complete("Painted it blue."),
+                complete("Painted it red."),
+            ],
+        ),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let workflow = builder(&server, &workspace, SubagentsConfig::default())
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Paint.")).await.unwrap();
+    let lead = bodies_of(&server, "lead");
+    let asked = result_of(&lead[2], "lead", 1);
+    assert!(
+        asked.contains(
+            "r1 (agent `worker`) sent you a message (it goes on working):\n\nWhich colour?"
+        ),
+        "{asked}"
+    );
+    assert!(result_of(&lead[4], "lead", 3).contains("Painted it blue."));
+    let sent = result_of(&lead[5], "lead", 4);
+    assert!(
+        sent.contains("continues its task with your message"),
+        "{sent}"
+    );
+    assert!(result_of(&lead[6], "lead", 5).contains("Painted it red."));
+
+    let worker = bodies_of(&server, "r1");
+    let answered = result_of(&worker[2], "r1", 1);
+    assert!(
+        answered.contains("Your lead sent you a message:\n\nUse blue."),
+        "{answered}"
+    );
+    // Continued: the same conversation, with the message after the report.
+    let continued = worker.last().unwrap();
+    assert!(continued.contains("Painted it blue."));
+    assert!(continued.contains("Now make it red."));
+    let records = workflow.subagents();
+    assert_eq!(records.len(), 1, "continued, not started again");
+    assert_eq!(records[0].report.as_deref(), Some("Painted it red."));
+}
+
+/// Over the cap a start is queued, and starts when a place frees up.
+#[tokio::test]
+async fn starts_over_the_cap_wait_in_a_queue() {
+    let server = serve(vec![
+        (
+            "lead",
+            vec![
+                start("First."),
+                start("Second."),
+                ("list_agents", json!({})),
+                ("wait_for_agents", json!({ "all": true })),
+            ],
+        ),
+        ("r1", vec![complete("One.")]),
+        ("r2", vec![complete("Two.")]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let workflow = builder(
+        &server,
+        &workspace,
+        SubagentsConfig::default().max_running(1),
+    )
+    .build()
+    .unwrap();
+    let mut events = workflow.subscribe_subagents();
+    within(workflow.run_agent("lead", "Delegate twice."))
+        .await
+        .unwrap();
+    let lead = bodies_of(&server, "lead");
+    let queued = result_of(&lead[2], "lead", 1);
+    assert!(queued.starts_with("Queued r2 (agent `worker`)"), "{queued}");
+    let all = result_of(&lead[4], "lead", 3);
+    assert!(all.contains("One.") && all.contains("Two."), "{all}");
+    let mut order = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        match event.kind {
+            SubagentEventKind::Queued
+            | SubagentEventKind::Started
+            | SubagentEventKind::Finished { .. } => {
+                order.push(format!(
+                    "{} {:?}",
+                    event.handle,
+                    std::mem::discriminant(&event.kind)
+                ));
+            }
+            _ => {}
+        }
+    }
+    let position = |handle: &str, kind: SubagentEventKind| {
+        order
+            .iter()
+            .position(|line| *line == format!("{handle} {:?}", std::mem::discriminant(&kind)))
+            .unwrap()
+    };
+    assert!(
+        position("r2", SubagentEventKind::Queued)
+            < position(
+                "r1",
+                SubagentEventKind::Finished {
+                    summary: String::new()
+                }
+            )
+    );
+    assert!(
+        position(
+            "r1",
+            SubagentEventKind::Finished {
+                summary: String::new()
+            }
+        ) < position("r2", SubagentEventKind::Started)
+    );
+    assert!(
+        workflow
+            .subagents()
+            .iter()
+            .all(|run| run.state == SubagentState::Finished)
+    );
+}
+
+/// A lead's stop winds its subagent down: the subagent saves its progress
+/// and reports, and the lead is told which run stopped and why. A message
+/// restarts it where it stopped.
+#[tokio::test]
+async fn a_stopped_subagent_reports_and_restarts_with_a_message() {
+    let server = ResponsesServer::start(|_, body| {
+        let role = role(body);
+        let turn = turn(body);
+        let id = format!("{role}_{turn}");
+        Some(match (role.as_str(), turn) {
+            ("lead", 0) => tool_call_turn(
+                &id,
+                "start_agent",
+                json!({ "agent": "worker", "task": "Work long." }),
+            ),
+            ("lead", 1) => tool_call_turn(
+                &id,
+                "stop_agent",
+                json!({ "run": "r1", "reason": "plans changed" }),
+            ),
+            ("lead", 2) => tool_call_turn(&id, "wait_for_agents", json!({})),
+            ("lead", 3) => tool_call_turn(
+                &id,
+                "message_agent",
+                json!({ "to": "r1", "message": "Carry on after all." }),
+            ),
+            ("lead", 4) => tool_call_turn(&id, "wait_for_agents", json!({})),
+            ("r1", _) if body.contains("Carry on after all.") => tool_call_turn(
+                &id,
+                "complete_task",
+                json!({ "summary": "Finished after all." }),
+            ),
+            ("r1", _) if body.contains("Your run is being stopped") => {
+                tool_call_turn(&id, "complete_task", json!({ "summary": "Half done." }))
+            }
+            ("r1", _) => tool_call_turn(&id, "gate", json!({})),
+            (_, _) => tool_call_turn(&id, "complete_task", json!({ "summary": "lead done" })),
+        })
+    })
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let workflow = builder(&server, &workspace, SubagentsConfig::default())
+        .agent_tool("worker", gate.clone())
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    let lead = bodies_of(&server, "lead");
+    let stopping = result_of(&lead[2], "lead", 1);
+    assert!(stopping.starts_with("r1 is stopping"), "{stopping}");
+    let told = result_of(&lead[3], "lead", 2);
+    assert!(
+        told.contains(
+            "r1 (agent `worker`) stopped before it finished: you stopped it: plans changed."
+        ) && told.contains("Half done."),
+        "{told}"
+    );
+    let restarted = result_of(&lead[4], "lead", 3);
+    assert!(
+        restarted.contains("restarts where it stopped"),
+        "{restarted}"
+    );
+    assert!(result_of(&lead[5], "lead", 4).contains("Finished after all."));
+    let record = &workflow.subagents()[0];
+    assert_eq!(record.state, SubagentState::Finished);
+}
+
+/// A run stopped by the host tells its lead too.
+#[tokio::test]
+async fn a_host_stop_is_reported_to_the_lead() {
+    let server = serve(vec![
+        ("lead", vec![start("Work."), wait()]),
+        ("r1", vec![("gate", json!({}))]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let gate = Arc::new(Gate::default());
+    let workflow = Arc::new(
+        builder(&server, &workspace, SubagentsConfig::default())
+            .agent_tool("worker", gate.clone())
+            .build()
+            .unwrap(),
+    );
+    let run = tokio::spawn({
+        let workflow = workflow.clone();
+        async move { workflow.run_agent("lead", "Delegate.").await }
+    });
+    within(gate.started.notified()).await;
+    let id = workflow.subagents()[0].run_id;
+    assert!(workflow.stop_run(
+        id,
+        crate::StopRequest::operator("maintenance"),
+        crate::RunStopIntent::Relaunch
+    ));
+    within(run).await.unwrap().unwrap();
+    let lead = bodies_of(&server, "lead");
+    let told = result_of(&lead[2], "lead", 1);
+    assert!(
+        told.contains("the workflow's host stopped it (maintenance)"),
+        "{told}"
+    );
+    assert_eq!(workflow.subagents()[0].state, SubagentState::Stopped);
+}
+
+/// A subagent's question goes to its lead, and the lead's message answers
+/// it: the subagent gets the answer as its question's.
+#[tokio::test]
+async fn a_subagents_question_goes_to_its_lead() {
+    let server = serve(vec![
+        (
+            "lead",
+            vec![
+                start("Ask before you act."),
+                wait(),
+                (
+                    "message_agent",
+                    json!({ "to": "r1", "message": "Yes, go ahead." }),
+                ),
+                wait(),
+            ],
+        ),
+        (
+            "r1",
+            vec![
+                (
+                    "ask_user",
+                    json!({ "questions": "May I delete the cache?" }),
+                ),
+                complete("Deleted it."),
+            ],
+        ),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let workflow = builder(&server, &workspace, SubagentsConfig::default())
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    let lead = bodies_of(&server, "lead");
+    let asked = result_of(&lead[2], "lead", 1);
+    assert!(
+        asked.contains("r1 (agent `worker`) asks you") && asked.contains("May I delete the cache?"),
+        "{asked}"
+    );
+    assert!(
+        result_of(&lead[3], "lead", 2).contains("gets it as the answer"),
+        "{}",
+        result_of(&lead[3], "lead", 2)
+    );
+    assert!(result_of(&lead[4], "lead", 3).contains("Deleted it."));
+    let worker = bodies_of(&server, "r1");
+    assert!(worker.last().unwrap().contains("Yes, go ahead."));
+}
+
+/// Linked subagents message each other, up to the cap between two of
+/// their lead's messages; the lead may get a copy.
+#[tokio::test]
+async fn linked_subagents_message_each_other_up_to_a_cap() {
+    let server = serve(vec![
+        (
+            "lead",
+            vec![
+                (
+                    "start_agent",
+                    json!({ "agent": "worker", "task": "Wait for r2." }),
+                ),
+                (
+                    "start_agent",
+                    json!({ "agent": "worker", "task": "Tell r1.", "peers": "r1" }),
+                ),
+                ("wait_for_agents", json!({ "all": true })),
+            ],
+        ),
+        ("r1", vec![wait()]),
+        (
+            "r2",
+            vec![
+                (
+                    "message_agent",
+                    json!({ "to": "r1", "message": "Found it." }),
+                ),
+                ("message_agent", json!({ "to": "r1", "message": "Again." })),
+            ],
+        ),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let workflow = builder(
+        &server,
+        &workspace,
+        SubagentsConfig::default()
+            .max_peer_messages(1)
+            .copy_peer_messages_to_lead(true),
+    )
+    .build()
+    .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    let r1 = bodies_of(&server, "r1");
+    let got = result_of(&r1[1], "r1", 0);
+    assert!(
+        got.contains(
+            "r2 (agent `worker`), another agent run of your lead, sent you a message:\n\nFound it."
+        ),
+        "{got}"
+    );
+    let r2 = bodies_of(&server, "r2");
+    let refused = result_of(&r2[2], "r2", 1);
+    assert!(refused.contains("the most allowed"), "{refused}");
+    let lead = bodies_of(&server, "lead");
+    let all = lead.iter().map(|body| body.as_str()).collect::<String>();
+    assert!(all.contains("sent r1 a message (a copy for you)"));
+    // Unlinked, r1 can't message r2's peers it doesn't know: r2 linked them both ways.
+    assert_eq!(
+        workflow.subagents()[1].peers,
+        vec![workflow.subagents()[0].run_id]
+    );
+}
+
+/// A run works in the directory it is given: the host's
+/// `run_agent_with`, and `start_agent`'s `workspace` (inside the caller's
+/// directory only).
+#[tokio::test]
+async fn runs_work_in_their_own_directories() {
+    let workspace = Workspace::new();
+    std::fs::create_dir_all(workspace.0.join("a/b")).unwrap();
+    let server = serve(vec![
+        (
+            "lead",
+            vec![
+                ("where", json!({})),
+                (
+                    "start_agent",
+                    json!({ "agent": "worker", "task": "Where are you?", "workspace": "b" }),
+                ),
+                (
+                    "start_agent",
+                    json!({ "agent": "worker", "task": "Escape.", "workspace": "../.." }),
+                ),
+                wait(),
+            ],
+        ),
+        ("r1", vec![("where", json!({}))]),
+    ])
+    .await;
+    let workflow = builder(&server, &workspace, SubagentsConfig::default())
+        .global_tool(Arc::new(Where))
+        .build()
+        .unwrap();
+    let result =
+        within(workflow.run_agent_with("lead", "Look.", crate::RunOptions::new().workspace("a")))
+            .await
+            .unwrap();
+    let a = workspace.0.join("a");
+    assert_eq!(result.task.current_working_directory, a);
+    let lead = bodies_of(&server, "lead");
+    assert_eq!(
+        result_of(&lead[1], "lead", 0),
+        format!("here: {}", a.display())
+    );
+    let escaped = result_of(&lead[3], "lead", 2);
+    assert!(
+        escaped.contains("must be inside your working directory"),
+        "{escaped}"
+    );
+    let worker = bodies_of(&server, "r1");
+    assert_eq!(
+        result_of(&worker[1], "r1", 0),
+        format!("here: {}", a.join("b").display())
+    );
+    assert_eq!(workflow.subagents()[0].workspace, a.join("b"));
+    // A directory that doesn't exist is refused.
+    let error = workflow
+        .run_agent_with(
+            "lead",
+            "Look.",
+            crate::RunOptions::new().workspace("missing"),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("does not exist"), "{error}");
+}
+
+/// A provider that makes a directory per run and counts removals.
+#[derive(Debug, Default)]
+struct Folders {
+    root: std::path::PathBuf,
+    removed: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl WorkspaceProvider for Folders {
+    async fn create(&self, request: &WorkspaceRequest) -> Result<IsolatedWorkspace, String> {
+        let path = self.root.join(&request.handle);
+        std::fs::create_dir_all(&path).map_err(|error| error.to_string())?;
+        Ok(IsolatedWorkspace {
+            branch: Some(format!("work/{}", request.handle)),
+            description: Some(format!("You work in your own folder {}.", path.display())),
+            ..IsolatedWorkspace::at(path)
+        })
+    }
+
+    async fn remove(&self, workspace: &IsolatedWorkspace) -> Result<(), String> {
+        self.removed.fetch_add(1, Ordering::SeqCst);
+        std::fs::remove_dir_all(&workspace.path).map_err(|error| error.to_string())
+    }
+}
+
+/// An isolated subagent works in the workspace the host's provider makes,
+/// which is kept for its later runs and removed on request; a host
+/// parameter of `start_agent` reaches the host's hook.
+#[tokio::test]
+async fn an_isolated_subagent_works_in_its_providers_workspace() {
+    let workspace = Workspace::new();
+    let server = serve(vec![
+        (
+            "lead",
+            vec![
+                ("start_agent", json!({ "agent": "worker", "task": "Build it.", "isolated": true, "flavour": "spicy" })),
+                wait(),
+                ("stop_agent", json!({ "run": "r1", "remove_workspace": true })),
+                ("message_agent", json!({ "to": "r1", "message": "More." })),
+            ],
+        ),
+        ("r1", vec![("where", json!({}))]),
+    ])
+    .await;
+    let provider = Arc::new(Folders {
+        root: workspace.0.join("isolated"),
+        ..Folders::default()
+    });
+    let hooked = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let config = SubagentsConfig::default()
+        .workspace_provider(provider.clone())
+        .start_parameter(arko_agents::ToolParameterDefinition {
+            name: "flavour".to_string(),
+            description: "How it tastes.".to_string(),
+            param_type: arko_agents::ToolParameterType::String,
+            required: false,
+            is_path: false,
+            flag: None,
+            default_value: None,
+        })
+        .hook(Arc::new({
+            let hooked = hooked.clone();
+            move |request: &StartRequest, config: &mut arko_agents::AgentConfig| {
+                hooked
+                    .lock()
+                    .push(request.parameters.get("flavour").cloned());
+                config.instructions.push_str(" Taste it.");
+                Ok(())
+            }
+        }));
+    let workflow = builder(&server, &workspace, config)
+        .global_tool(Arc::new(Where))
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    let path = workspace.0.join("isolated/r1");
+    let lead = bodies_of(&server, "lead");
+    assert!(offered(&lead[0]).contains(&"start_agent".to_string()));
+    assert!(
+        lead[0].contains("\"flavour\""),
+        "the host's parameter is offered"
+    );
+    let started = result_of(&lead[1], "lead", 0);
+    assert!(
+        started.contains("in an isolated workspace") && started.contains("work/r1"),
+        "{started}"
+    );
+    let worker = bodies_of(&server, "r1");
+    assert!(worker[0].contains("You work in your own folder"));
+    assert!(
+        worker[0].contains("Taste it."),
+        "the hook changed its configuration"
+    );
+    assert_eq!(
+        result_of(&worker[1], "r1", 0),
+        format!("here: {}", path.display())
+    );
+    assert_eq!(*hooked.lock(), [Some(json!("spicy"))]);
+    let removed = result_of(&lead[3], "lead", 2);
+    assert!(removed.contains("Removed r1's workspace"), "{removed}");
+    assert_eq!(provider.removed.load(Ordering::SeqCst), 1);
+    let refused = result_of(&lead[4], "lead", 3);
+    assert!(refused.contains("workspace was removed"), "{refused}");
+    let record = &workflow.subagents()[0];
+    assert_eq!(record.state, SubagentState::Closed);
+    assert_eq!(record.isolated.as_ref().unwrap().path, path);
+}
+
+/// A subagent running when its workflow stops comes back from the
+/// checkpoint stopped, with its lead's knowledge of it, and
+/// `resume_subagents` relaunches it where it was; its report then reaches
+/// its lead.
+#[tokio::test]
+async fn subagents_survive_a_stop_and_a_resume() {
+    let server = ResponsesServer::start(|_, body| {
+        let role = role(body);
+        let turn = turn(body);
+        let id = format!("{role}_{turn}");
+        Some(match (role.as_str(), turn) {
+            ("lead", 0) => tool_call_turn(
+                &id,
+                "start_agent",
+                json!({ "agent": "worker", "task": "Work on." }),
+            ),
+            ("lead", 1) => tool_call_turn(&id, "gate", json!({})),
+            ("r1", _) if body.contains("has now been reopened") => {
+                tool_call_turn(&id, "complete_task", json!({ "summary": "Done at last." }))
+            }
+            ("r1", _) => tool_call_turn(&id, "gate", json!({})),
+            _ => tool_call_turn(&id, "complete_task", json!({ "summary": "lead done" })),
+        })
+    })
+    .await;
+    let workspace = Workspace::new();
+    let run_dir = workspace.0.join(".run");
+    let gate = Arc::new(Gate::default());
+    let workflow = Arc::new(
+        builder(&server, &workspace, SubagentsConfig::default())
+            .global_tool(gate.clone())
+            .persistence(PersistenceConfig::new(&run_dir))
+            .build()
+            .unwrap(),
+    );
+    let run = tokio::spawn({
+        let workflow = workflow.clone();
+        async move { workflow.run_agent("lead", "Delegate.").await }
+    });
+    until(|| gate.calls.load(Ordering::SeqCst) == 2).await;
+    workflow.stop(crate::StopRequest::operator("closing"));
+    let _ = within(run).await.unwrap();
+    until(|| workflow.active_subagents().is_empty()).await;
+    workflow.checkpoint().await.unwrap();
+    drop(workflow);
+
+    let latest = std::fs::read_to_string(run_dir.join("latest-checkpoint")).unwrap();
+    let gate = Arc::new(Gate::default());
+    let resumed = builder(&server, &workspace, SubagentsConfig::default())
+        .global_tool(gate.clone())
+        .persistence(PersistenceConfig::new(&run_dir))
+        .resume_from(run_dir.join(latest.trim()))
+        .build()
+        .unwrap();
+    let records = resumed.subagents();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].state, SubagentState::Stopped);
+    // Left to `resume_subagents`, not to the host's restart of its own runs.
+    assert!(
+        resumed
+            .stopped_runs()
+            .iter()
+            .all(|run| run.result.agent_name == "lead")
+    );
+    let lead = resumed
+        .stopped_runs()
+        .into_iter()
+        .find(|run| run.result.agent_name == "lead")
+        .unwrap();
+    assert_eq!(resumed.resume_subagents(), ["r1"]);
+    until(|| resumed.subagents()[0].state == SubagentState::Finished).await;
+    let news = resumed.pending_news(lead.result.agent_run_id);
+    assert!(
+        news.iter().any(|item| item.body == "Done at last."),
+        "{news:?}"
+    );
+}
+
+/// Background runs need workflow services, and host parameters may not
+/// take `start_agent`'s own names; a host tool may not take a subagent
+/// tool's name.
+#[test]
+fn the_builder_checks_the_subagents_configuration() {
+    let build = |builder: WorkflowBuilder| builder.build().err().map(|error| error.to_string());
+    let base = || {
+        Workflow::builder()
+            .name("subagents-test")
+            .workspace(std::env::temp_dir())
+            .llm_client(Arc::new(arko_ai::LLMClient::new()))
+            .agent("lead", agent_config("Lead"))
+            .agent("worker", agent_config("Worker"))
+    };
+    let error = build(base().subagents(SubagentsConfig::default())).unwrap();
+    assert!(error.contains("need workflow_services"), "{error}");
+    let services = || {
+        WorkflowServicesConfig::default()
+            .allow_caller("lead")
+            .allow_target("worker")
+    };
+    let clash = arko_agents::ToolParameterDefinition {
+        name: "task".to_string(),
+        description: String::new(),
+        param_type: arko_agents::ToolParameterType::String,
+        required: false,
+        is_path: false,
+        flag: None,
+        default_value: None,
+    };
+    let error = build(
+        base()
+            .workflow_services(services())
+            .subagents(SubagentsConfig::default().start_parameter(clash)),
+    )
+    .unwrap();
+    assert!(error.contains("already has a parameter 'task'"), "{error}");
+    assert!(
+        build(
+            base()
+                .workflow_services(services())
+                .subagents(SubagentsConfig::default())
+        )
+        .is_none()
+    );
+}
+
+/// Saved mail and records load from JSON with only their required fields.
+#[test]
+fn a_snapshot_loads_with_defaults() {
+    let snapshot: SubagentsSnapshot = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(snapshot, SubagentsSnapshot::default());
+    let item: MailItem = serde_json::from_value(json!({
+        "id": 3, "to": uuid::Uuid::nil(), "from": "host", "kind": "message",
+        "heading": "h", "body": "b", "at": "2026-01-01T00:00:00Z",
+    }))
+    .unwrap();
+    assert_eq!(item.delivered_at, None);
+    assert_eq!(item.text(), "[mail 3] h\n\nb");
+    let long = MailItem {
+        body: "x".repeat(MAX_MAIL_BYTES + 10),
+        file: Some("/tmp/mail-3.md".into()),
+        ..item
+    };
+    let excerpt = long.excerpt();
+    assert!(excerpt.len() < MAX_MAIL_BYTES);
+    assert!(excerpt.contains("the whole text is in /tmp/mail-3.md"));
+    let _ = AgentRunStatus::Completed;
+}

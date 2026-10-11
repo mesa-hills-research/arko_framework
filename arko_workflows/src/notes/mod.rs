@@ -235,6 +235,8 @@ pub(crate) struct NoteBoard {
     events: Option<PersistenceManager>,
     /// The agents a leak through messaging was warned about.
     warned: Mutex<HashSet<String>>,
+    /// Bumped when a note is posted, for the waits that end on one.
+    posted: tokio::sync::watch::Sender<u64>,
 }
 
 impl NoteBoard {
@@ -252,7 +254,30 @@ impl NoteBoard {
             read_error: Mutex::new(None),
             events,
             warned: Mutex::new(HashSet::new()),
+            posted: tokio::sync::watch::Sender::new(0),
         }
+    }
+
+    /// Changes when a note is posted.
+    pub(crate) fn watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.posted.subscribe()
+    }
+
+    /// The number of the newest note run `task_id` has been given (in its
+    /// prompt or at a turn boundary); 0 when it has been given none.
+    pub(crate) fn given(&self, task_id: Uuid) -> u64 {
+        self.state.lock().seen.get(&task_id).copied().unwrap_or(0)
+    }
+
+    /// Whether run `task_id` of `agent` (not a completion verifier's review)
+    /// receives a note it hasn't been given.
+    pub(crate) fn has_update(&self, agent: &str, task_id: Uuid) -> bool {
+        let state = self.state.lock();
+        let seen = state.seen.get(&task_id).copied().unwrap_or(0);
+        state
+            .notes
+            .iter()
+            .any(|posted| posted.seq > seen && self.receives(&posted.note, agent, false))
     }
 
     /// The state a checkpoint saves; `None` while there is nothing to save.
@@ -276,6 +301,8 @@ impl NoteBoard {
         let (note, recipients) = self.check(ctx, note)?;
         let posted = insert(&mut self.state.lock(), note, None, None);
         self.announce(ctx, &posted, &recipients);
+        self.posted
+            .send_modify(|count| *count = count.wrapping_add(1));
         Ok(posted)
     }
 
@@ -334,15 +361,16 @@ impl NoteBoard {
     /// The notes run `task_id` of `agent` (`review` for a completion
     /// verifier's review) receives that it hasn't been given, for its next
     /// turn boundary, oldest first, as many as fit ([`PROMPT_MAX_NOTES`],
-    /// [`PROMPT_MAX_BYTES`]); `None` when there are none. Only the notes
-    /// shown count as given: the rest come at the next boundary.
-    pub(crate) fn update(
+    /// [`PROMPT_MAX_BYTES`]), with the numbers of the notes shown; `None`
+    /// when there are none. Only the notes shown count as given: the rest
+    /// come at the next boundary.
+    pub(crate) fn update_with_seqs(
         &self,
         ctx: &SharedContext,
         agent: &str,
         task_id: Uuid,
         review: bool,
-    ) -> Option<String> {
+    ) -> Option<(String, Vec<u64>)> {
         self.poll(ctx);
         let mut state = self.state.lock();
         let newest = state.notes.last()?.seq;
@@ -361,7 +389,12 @@ impl NoteBoard {
             Some(_) => notes[shown - 1].seq,
             None => newest,
         };
-        let text = (!notes.is_empty()).then(|| update(&notes[..shown], notes.len() - shown));
+        let text = (!notes.is_empty()).then(|| {
+            (
+                update(&notes[..shown], notes.len() - shown),
+                notes[..shown].iter().map(|posted| posted.seq).collect(),
+            )
+        });
         state.seen.insert(task_id, given);
         text
     }
@@ -615,8 +648,13 @@ impl NoteBoard {
             state.control_offset = batch.end;
             posted
         };
+        let any = !posted.is_empty();
         for (posted, recipients) in posted {
             self.announce(ctx, &posted, &recipients);
+        }
+        if any {
+            self.posted
+                .send_modify(|count| *count = count.wrapping_add(1));
         }
     }
 }
@@ -812,6 +850,18 @@ impl NotesHandle {
         Ok(posted)
     }
 
+    /// The number of the newest note agent run `agent_run_id` has been
+    /// given, in its prompt or at a turn boundary (notes are given oldest
+    /// first, so it has been given every earlier note it receives); 0 when
+    /// it has been given none. A run gets its notes in the context update
+    /// [`AgentEvent::ContextInjected`](arko_agents::AgentEvent::ContextInjected)
+    /// reports, whose ids name them (`note:<number>`).
+    pub fn given(&self, agent_run_id: Uuid) -> u64 {
+        self.context
+            .upgrade()
+            .map_or(0, |context| context.notes.given(agent_run_id))
+    }
+
     /// Every note posted, oldest first; see
     /// [`Workflow::notes`](crate::Workflow::notes).
     pub fn notes(&self) -> Vec<PostedNote> {
@@ -844,15 +894,46 @@ pub(crate) struct WithNotes<S> {
 
 impl<S: arko_agents::TurnContextSource> arko_agents::TurnContextSource for WithNotes<S> {
     fn turn_context(&self, task_id: Uuid) -> Option<String> {
-        let notices = self.inner.turn_context(task_id);
-        let notes =
-            self.context
-                .notes
-                .update(&self.context, &self.agent_name, task_id, self.review);
-        match (notices, notes) {
-            (Some(notices), Some(notes)) => Some(format!("{notices}\n\n{notes}")),
-            (notices, notes) => notices.or(notes),
+        self.context_update(task_id).map(|update| update.content)
+    }
+
+    /// The inner source's context, the notes the run hasn't been given
+    /// (`note:<number>`), and its subagent mail (`mail:<id>`).
+    fn context_update(&self, task_id: Uuid) -> Option<arko_agents::TurnContext> {
+        let mut parts = Vec::new();
+        let mut ids = Vec::new();
+        if let Some(inner) = self.inner.context_update(task_id) {
+            parts.push(inner.content);
+            ids.extend(inner.ids);
         }
+        if let Some((notes, seqs)) = self.context.notes.update_with_seqs(
+            &self.context,
+            &self.agent_name,
+            task_id,
+            self.review,
+        ) {
+            parts.push(notes);
+            ids.extend(seqs.into_iter().map(|seq| format!("note:{seq}")));
+        }
+        if !self.review
+            && let Some((mail, mail_ids)) = self.context.subagents.update(task_id)
+        {
+            parts.push(mail);
+            ids.extend(mail_ids);
+        }
+        (!parts.is_empty()).then(|| arko_agents::TurnContext {
+            content: parts.join("\n\n"),
+            ids,
+        })
+    }
+
+    /// An agent message's delivery: `message:<id>`.
+    fn identify(&self, content: &str) -> Option<String> {
+        let rest = content.strip_prefix("Message ")?;
+        let (id, rest) = rest.split_once(' ')?;
+        let id = Uuid::parse_str(id).ok()?;
+        rest.starts_with("from agent '")
+            .then(|| format!("message:{id}"))
     }
 
     fn hold_request(&self, task_id: Uuid) -> Option<String> {

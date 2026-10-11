@@ -309,21 +309,41 @@ impl ResourceTracker {
         tool_name: &str,
         parameters: &HashMap<String, Value>,
     ) -> Option<(ResourceId, bool)> {
+        self.resource_for_tool_in(tool_name, parameters, &self.workspace)
+    }
+
+    /// [`resource_for_tool`](Self::resource_for_tool) for a call made by a
+    /// run working in `working_directory` (the task's working directory: the
+    /// workflow's workspace, or the run's own, see
+    /// [`RunOptions::workspace`](crate::workflow::RunOptions::workspace)). A
+    /// path parameter's key is the path the built-in file tools
+    /// (`read_file`, `write_file`, `apply_diff`, `list_files`) open, resolved
+    /// against `working_directory` with arko_agents'
+    /// [`resolve_path`](arko_agents::utils::resolve_path), which the
+    /// runtime's workspace check also uses; `None` for a path that can't be
+    /// resolved, which no tool opens.
+    pub fn resource_for_tool_in(
+        &self,
+        tool_name: &str,
+        parameters: &HashMap<String, Value>,
+        working_directory: &std::path::Path,
+    ) -> Option<(ResourceId, bool)> {
+        let resolve = |path: &str| arko_agents::utils::resolve_path(path, working_directory).ok();
         match self.config.tool_effects.get(tool_name)? {
             ToolResourceEffect::ReadFile { parameter } => parameters
                 .get(parameter)
                 .and_then(Value::as_str)
-                .and_then(|path| self.resolve_path(path))
+                .and_then(resolve)
                 .map(|path| (ResourceId::File(path), false)),
             ToolResourceEffect::ReadDirectoryTree { parameter } => parameters
                 .get(parameter)
                 .and_then(Value::as_str)
-                .and_then(|path| self.resolve_path(path))
+                .and_then(resolve)
                 .map(|path| (ResourceId::DirectoryTree(path), false)),
             ToolResourceEffect::WriteFile { parameter } => parameters
                 .get(parameter)
                 .and_then(Value::as_str)
-                .and_then(|path| self.resolve_path(path))
+                .and_then(resolve)
                 .map(|path| (ResourceId::File(path), true)),
         }
     }
@@ -535,17 +555,6 @@ impl ResourceTracker {
             ResourceId::MemoryTier(tier) => format!("memory tier `{tier}`"),
             ResourceId::Custom { namespace, key } => format!("`{namespace}:{key}`"),
         }
-    }
-
-    /// The resource key for a tool's path parameter: the path the built-in
-    /// file tools (`read_file`, `write_file`, `apply_diff`, `list_files`)
-    /// open, resolved against the workspace (the task's working directory,
-    /// for workflow agents) with arko_agents'
-    /// [`resolve_path`](arko_agents::utils::resolve_path), which the
-    /// runtime's workspace check also uses. `None` for a path that can't be
-    /// resolved, which no tool opens.
-    fn resolve_path(&self, input: &str) -> Option<PathBuf> {
-        arko_agents::utils::resolve_path(input, &self.workspace).ok()
     }
 }
 
