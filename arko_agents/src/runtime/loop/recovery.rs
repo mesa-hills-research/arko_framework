@@ -26,6 +26,11 @@ pub(super) struct RecoveryState {
     pub(super) paused_recovery_elapsed: Option<Duration>,
     /// Time spent in this recovery episode waiting out rate limits.
     pub(super) rate_limit_waited: Duration,
+    /// A reply in plain text was sent to the user as a message since the
+    /// last tool call or new message
+    /// ([`AgentToolConfig::text_reply_as_message`](crate::agent_config::AgentToolConfig::text_reply_as_message)):
+    /// another one is a response without a tool call.
+    pub(super) text_reply_sent: bool,
 }
 
 /// How recovery from a failed model request waits.

@@ -1,6 +1,6 @@
 use super::builtins::{
     ApplyDiffTool, AskUserTool, COMPLETE_TASK_TOOL_NAME, CompleteTaskTool, ListFilesTool,
-    ReadFileTool, WriteFileTool,
+    MessageUserTool, ReadFileTool, WriteFileTool,
 };
 use super::{EndUserTool, Tool, ToolDefinition, ToolError};
 use std::collections::HashMap;
@@ -49,10 +49,22 @@ impl ToolRegistry {
         let ask_user_tool = Arc::new(AskUserTool::new());
         tools.insert(ask_user_tool.name(), ask_user_tool.clone() as Arc<dyn Tool>);
 
+        let message_user_tool = Arc::new(MessageUserTool::new());
+        tools.insert(
+            message_user_tool.name(),
+            message_user_tool.clone() as Arc<dyn Tool>,
+        );
+
         Self { tools }
     }
 
-    /// Registers a tool in the registry.
+    /// Registers a tool in the registry, replacing a tool registered under
+    /// its name before (a built-in included), except that `complete_task`
+    /// can't be replaced by a tool that isn't built-in. A host's own
+    /// `message_user` replaces the built-in: it runs as any other tool, and
+    /// the runtime sends no
+    /// [`AgentEvent::MessageToUser`](crate::AgentEvent::MessageToUser) for
+    /// its calls.
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         let tool_name = tool.name();
         if tool_name == COMPLETE_TASK_TOOL_NAME

@@ -36,7 +36,7 @@ use crate::parsing::{PromptBuilder, ToolParsingConfig};
 use crate::skill::SkillPromptContext;
 use crate::snapshot::TaskSnapshots;
 use crate::task::{ApprovalReason, ErrorRecoveryCause, RunningToolCall, Task, TaskState};
-use crate::tool::builtins::{ASK_USER_TOOL_NAME, COMPLETE_TASK_TOOL_NAME};
+use crate::tool::builtins::{ASK_USER_TOOL_NAME, COMPLETE_TASK_TOOL_NAME, message_user};
 use crate::tool::{
     InterceptorConfig, ToolCallContext, ToolExecutionContext, ToolExecutionDecision,
     ToolExecutionMiddleware, ToolExecutionOutcome, ToolRecovery, ToolRegistry,
@@ -61,6 +61,10 @@ const USAGE_LIMIT_RESET_JITTER: Duration = Duration::from_secs(30);
 const MAX_OPEN_TURNS: u32 = 10;
 
 const OPEN_TURN_NOTE: &str = "Your turn ended without calling complete_task, so the task is still open. Continue with your tools, or call mcp__arko__complete_task with a summary if the task is finished.";
+
+/// The note after an open turn whose final text was sent to the user as a
+/// message ([`AgentToolConfig::text_reply_as_message`](crate::agent_config::AgentToolConfig::text_reply_as_message)).
+const OPEN_TURN_MESSAGE_NOTE: &str = "Your reply was sent to the user as a message. Your turn ended without calling complete_task, so the task is still open: continue with your tools, or call mcp__arko__complete_task with a summary if the task is finished.";
 
 const NO_HANDOVER_REPORT: &str = "Your reply had no text, so no handover report was received. Reply with the handover report as plain text, without calling a tool.";
 
@@ -2257,7 +2261,7 @@ impl ClaudeCodeRun {
                     } else {
                         ai::ToolResult::from_tool_call(&record, &text)
                     });
-                    self.call_finished(id, &name, &text, *is_error, session)
+                    self.call_finished(id, &name, &record.arguments, &text, *is_error, session)
                         .await?;
                 }
                 if !results.is_empty() {
@@ -2381,11 +2385,12 @@ impl ClaudeCodeRun {
     }
 
     /// A call's result arrived: its events, and what its outcome does to the
-    /// task.
+    /// task. `arguments` are the call's.
     async fn call_finished(
         &mut self,
         id: Uuid,
         name: &str,
+        arguments: &Value,
         text: &str,
         is_error: bool,
         session: &cc::ClaudeSession,
@@ -2410,6 +2415,19 @@ impl ClaudeCodeRun {
                 effective,
                 intercepted,
             }) => {
+                if let Some(message) = self.registry.get(name).and_then(|tool| {
+                    message_user::message_to_user(
+                        name,
+                        tool.as_ref(),
+                        arguments.get(message_user::MESSAGE_USER_MESSAGE_PARAM_NAME),
+                    )
+                }) {
+                    self.emit(AgentEvent::MessageToUser {
+                        message,
+                        tool_call_id: Some(id),
+                    })
+                    .await?;
+                }
                 self.emit(AgentEvent::ToolResult {
                     tool_call_id: id,
                     tool_name: name.to_string(),
@@ -3050,6 +3068,19 @@ impl ClaudeCodeRun {
             return Ok(Some(SessionEnd::Stop));
         }
         let mut note = OPEN_TURN_NOTE.to_string();
+        if self.task.agent_config.tool_config.text_reply_as_message
+            && let Some(text) = result
+                .result
+                .as_ref()
+                .filter(|text| !text.trim().is_empty())
+        {
+            self.emit(AgentEvent::MessageToUser {
+                message: text.clone(),
+                tool_call_id: None,
+            })
+            .await?;
+            note = OPEN_TURN_MESSAGE_NOTE.to_string();
+        }
         if let Some(context) = self.take_context() {
             note.push_str("\n\n");
             note.push_str(&context);

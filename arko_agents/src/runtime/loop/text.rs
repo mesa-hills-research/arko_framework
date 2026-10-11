@@ -617,6 +617,10 @@ impl AgentLoop {
             this.prompts()
                 .format_tool_execution_error_as_user_message(tool_name, message)
         };
+        let message_to_user = self.message_to_user(
+            tool_name,
+            parameters.get(crate::tool::builtins::message_user::MESSAGE_USER_MESSAGE_PARAM_NAME),
+        );
         let mut run = self.tool_run(
             tool_call_id,
             tool_name,
@@ -642,6 +646,13 @@ impl AgentLoop {
                 return Ok(format_error(self, reason));
             }
         };
+        if let (Some(message), RunOutcome::Finished { .. }) = (message_to_user, &outcome) {
+            self.emit_event(AgentEvent::MessageToUser {
+                message,
+                tool_call_id: Some(tool_call_id),
+            })
+            .await?;
+        }
         let result = self
             .finish_text_call(
                 tool_name,

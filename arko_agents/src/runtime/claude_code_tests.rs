@@ -283,6 +283,76 @@ async fn a_turn_without_complete_task_gets_a_note() {
     );
 }
 
+/// A Claude Code agent's `message_user` calls reach the host as
+/// `MessageToUser`, and with `text_reply_as_message` so does the text of a
+/// turn that ends without `complete_task`; off, that text isn't sent.
+#[tokio::test]
+async fn messages_reach_the_user_through_the_tool_and_open_turns() {
+    for opted_in in [false, true] {
+        let fake = Fake::new(json!([
+            [{"text": "Halfway there."}],
+            [
+                {"tool": "mcp__arko__message_user", "input": {"message": "Almost done."}},
+                complete("Now done"),
+            ],
+        ]));
+        let mut config = config(&fake, &["message_user"]);
+        config.tool_config.text_reply_as_message = opted_in;
+        let task = Task::new(config, "Do the thing.".into(), fake.workspace(), None);
+        let (task, events) = start(task).finish().await;
+        assert!(matches!(task.current_state, TaskState::Completed { .. }));
+        let served = &fake.logged("tools")[0]["tools"];
+        assert!(
+            served
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "message_user"),
+            "{served}"
+        );
+        let call = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolCallFormatted {
+                    tool_call_id,
+                    tool_name,
+                    ..
+                } if tool_name == "message_user" => Some(*tool_call_id),
+                _ => None,
+            })
+            .unwrap();
+        let messages: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::MessageToUser {
+                    message,
+                    tool_call_id,
+                } => Some((message.as_str(), *tool_call_id)),
+                _ => None,
+            })
+            .collect();
+        let mut expected = vec![("Almost done.", Some(call))];
+        if opted_in {
+            expected.insert(0, ("Halfway there.", None));
+        }
+        assert_eq!(messages, expected, "opted in: {opted_in}");
+        let users = fake.logged("user");
+        let note = users[1]["text"].as_str().unwrap();
+        assert!(note.contains("without calling complete_task"), "{note}");
+        assert_eq!(
+            note.contains("sent to the user as a message"),
+            opted_in,
+            "{note}"
+        );
+        assert!(
+            fake.logged("post")[0]["output"]
+                .as_str()
+                .unwrap()
+                .contains("message was sent to the user")
+        );
+    }
+}
+
 #[tokio::test]
 async fn built_ins_are_offered_only_when_listed_and_pass_the_gate() {
     // An absolute path outside the workspace on every platform.

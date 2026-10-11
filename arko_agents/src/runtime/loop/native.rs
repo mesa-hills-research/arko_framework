@@ -349,8 +349,9 @@ impl AgentLoop {
 
     /// A native call that finished: `ask_user` awaits the answer and
     /// `complete_task` completes the task (unless another call of its
-    /// group already ended it), the result events are sent, and the result
-    /// carries the host's message and the tool's images.
+    /// group already ended it), `message_user` sends its message to the
+    /// host, the result events are sent, and the result carries the host's
+    /// message and the tool's images.
     async fn finish_native_result(
         &mut self,
         call: &ai::ToolCall,
@@ -376,6 +377,17 @@ impl AgentLoop {
             .await?;
             self.emit_event(AgentEvent::UserQuestionsAsked {
                 questions: raw.clone(),
+            })
+            .await?;
+        }
+        if let Some(message) = self.message_to_user(
+            tool_name,
+            call.arguments
+                .get(crate::tool::builtins::message_user::MESSAGE_USER_MESSAGE_PARAM_NAME),
+        ) {
+            self.emit_event(AgentEvent::MessageToUser {
+                message,
+                tool_call_id: Some(tool_call_id),
             })
             .await?;
         }
@@ -576,6 +588,24 @@ impl AgentLoop {
                 .unwrap_or_default();
             self.take_handover_report(report).await?;
             return Ok(self.end_of_pass());
+        }
+        if self.task.agent_config.tool_config.text_reply_as_message
+            && !self.recovery.text_reply_sent
+        {
+            let text = final_generation_response
+                .as_ref()
+                .map(|response| message_text(&response.message))
+                .unwrap_or_default();
+            if !text.trim().is_empty() {
+                self.recovery.text_reply_sent = true;
+                self.emit_event(AgentEvent::MessageToUser {
+                    message: text,
+                    tool_call_id: None,
+                })
+                .await?;
+                self.add_runtime_message(TEXT_REPLY_SENT)?;
+                return Ok(self.end_of_pass());
+            }
         }
         log::warn!(
             "LLM response for task {} did not contain a native tool call.",

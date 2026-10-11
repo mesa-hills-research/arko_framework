@@ -194,10 +194,28 @@ first snapshot followed by changes at model-call boundaries; see
 ## Tools
 
 `ToolRegistry::new()` registers the built-in tools: `complete_task`, `read_file`,
-`write_file`, `apply_diff`, `list_files`, and `ask_user`. An agent is offered the
-registered tools named in `tool_config.available_tool_names`, and always
+`write_file`, `apply_diff`, `list_files`, `ask_user`, and `message_user`. An agent is
+offered the registered tools named in `tool_config.available_tool_names`, and always
 `complete_task`, which ends the task as `Completed { summary }`. `ask_user` puts the task
 in `AwaitingUserResponse` until `UserCommand::SubmitUserResponse` answers it.
+
+`message_user` shows the user a message while the agent works, with nothing to wait for:
+an answer to a question the user asked meanwhile, or progress. The runtime sends its
+`message` parameter to the host as `MessageToUser { message, tool_call_id }`, between the
+call's `ToolCallFormatted` and its `ToolResult`, and the task carries on in the state it
+was in. The model's result says the message was sent. Like any tool, it follows
+`default_auto_approve_tool_use`. A host tool registered under the same name replaces the
+built-in, as for any built-in other than `complete_task`. It then runs as the host wrote
+it, and the runtime sends no `MessageToUser` for its calls.
+
+With `tool_config.text_reply_as_message` on (off by default), a native response with text
+and no tool call is a message too: the runtime sends the text as `MessageToUser` without a
+`tool_call_id`, adds a note that the user has it and the task is still open, and asks
+again, outside error recovery. Only the first such reply since the agent's last tool call
+or new message counts as a message. Another one right after it gets the usual note (see
+[Model-call recovery](#model-call-recovery)), so a model that keeps answering in text
+still reaches the attempt limit. The system prompt tells the model that a plain-text reply
+reaches the user. Output-based mode ignores the setting.
 
 The runtime runs only the tools the agent is offered, in either tool calling mode. In
 native mode, a call to any other tool, registered or not, gets an error result and emits
@@ -241,7 +259,7 @@ finished, and any other call once every earlier call has finished. So `[read, re
 together, and `[read, write, read]` runs the first read, then the write, then the second
 read. A tool is parallel-safe when its definition sets
 `parallel_safe`, unless its `tool_specific_configs` entry sets `parallel_safe` otherwise.
-The built-in `read_file`, `list_files`, and `load_skill` are parallel-safe; `write_file`,
+The built-in `read_file`, `list_files`, `message_user`, and `load_skill` are parallel-safe; `write_file`,
 `apply_diff`, `ask_user`, and `complete_task` are not; an MCP tool is parallel-safe only
 when its server marks it `readOnlyHint: true`. Calls after one that ends the turn
 (`complete_task`, `ask_user`, a tool error under `FailTask`, or a middleware's decision)
@@ -774,6 +792,7 @@ unclassified ones, and in a task saved by an older version, and left out when `N
 | `AssistantResponseChunk`, `ReasoningChunk` | Response text and reasoning; `event_throttle_ms` coalesces chunks. |
 | `ToolCallInitiated`, `ToolCallFormatted` | A tool call was announced, then parsed. Output-based mode with `simplified_tool_events` off also emits `ToolParamName`, `ToolParamValueChunk`, and `ToolParamEnd`. |
 | `ToolCallAwaitingApproval`, `BatchToolCallAwaitingApproval`, `UserQuestionsAsked` | The task waits for a command. |
+| `MessageToUser` | The agent sent the user a message and carries on: a `message_user` call (`tool_call_id` names it), or with `text_reply_as_message` a reply in plain text (`tool_call_id` is `None`, and the text has already streamed as `AssistantResponseChunk`). See [Tools](#tools). |
 | `ToolResultShortened` | A result was shortened before it went into the conversation (`reason`: the overflow guard, a cap, or overflow recovery); see [Tool result size](#tool-result-size). |
 | `ToolResult`, `ToolResultIntercepted`, `ToolRejected`, `UnavailableToolAttempted` | Tool outcomes. `ToolRejected` also reports calls that did not run: stopped, held, not reached, announced in an output-based turn that can't run them, or a `complete_task` refused after an earlier call of its turn was rejected or failed. |
 | `ErrorEncountered`, `RetryScheduled`, `UsageLimitReached` | Errors and recovery. `requires_approval_to_retry` marks a pause; `error_kind` is a failed model request's `arko_ai::ErrorKind`, when classified; `RetryScheduled` carries the attempt, delay, and elapsed milliseconds, and `rate_limit` when the retry waits out a provider rate limit. |
@@ -897,7 +916,7 @@ When a task with running calls runs again, each is settled first, by its tool's
 | `ToolRecovery` | The call |
 | --- | --- |
 | `InDoubt` (default) | Is not run again. Its result says the task was restarted while it ran, that it may have run partly or fully, and to check its effects before calling it again. |
-| `Rerun` | Runs again as it was made, with `TaskContext::recovering` set. `read_file`, `list_files`, `load_skill`, `ask_user`, `complete_task` (the host's completion checks run again) and MCP tools the server marks read-only. |
+| `Rerun` | Runs again as it was made, with `TaskContext::recovering` set. `read_file`, `list_files`, `load_skill`, `ask_user`, `message_user` (its message is sent again), `complete_task` (the host's completion checks run again) and MCP tools the server marks read-only. |
 | `Resume` | Runs again with `recovering` set and its original `TaskContext::tool_call_id`, so the tool can find the work its first run started and return its result (a workflow's `run_workflow_agent` recovers the agent run it started). |
 
 A call the host answered with its own output gives that output again, and a call to a tool
@@ -950,8 +969,9 @@ A failed request (a connection failure, an HTTP 408, 409 or 5xx response, a trun
 stream, including one cut by the opt-in stream idle timeout, or an error reported after a
 stream started) is sent again unchanged, without a note in the conversation: the model
 had no part in it. A response the runtime cannot use is retried with a note that tells
-the model what to do: a native response without a tool call, an output-based response
-without one, or output-based calls that cannot be read. Such a retry is not an outage: it
+the model what to do: a native response without a tool call (unless
+`text_reply_as_message` makes it a message to the user, see [Tools](#tools)), an
+output-based response without one, or output-based calls that cannot be read. Such a retry is not an outage: it
 is made at once, without backoff, and bounded by the attempt limit (10 under
 `InformAgentAndContinue`, which has none), not by the elapsed budget. Any completed
 response ends the elapsed budget a failed request started. From a pause,
@@ -1151,11 +1171,12 @@ let config = AgentConfig::builder(id, name, AgentLLMConfig {
 .build()?;
 ```
 
-**Tools.** The agent's arko tools (`complete_task`, `ask_user`, a workflow's
-`send_message`, custom tools) are served to Claude Code in-process as the MCP server
-`arko`, so the model sees them as `mcp__arko__<name>` (the system prompt says so). They
-run as for any agent, with the execution middleware, result interception and time
-limits. Claude Code's built-in tools (`claude_code::BUILT_IN_TOOLS`: `Read`, `Edit`,
+**Tools.** The agent's arko tools (`complete_task`, `ask_user`, `message_user`, a
+workflow's `send_message`, custom tools) are served to Claude Code in-process as the MCP
+server `arko`, so the model sees them as `mcp__arko__<name>` (the system prompt says so).
+They run as for any agent, with the execution middleware, result interception and time
+limits. With `text_reply_as_message` on, a turn that ends without `complete_task` sends
+its final text as `MessageToUser` before the runtime's note. Claude Code's built-in tools (`claude_code::BUILT_IN_TOOLS`: `Read`, `Edit`,
 `Bash`, `Grep`, `WebFetch`, …) are offered when `available_tool_names` lists them, and
 only then; `ClaudeCodeTools::{read_only, editing, shell, web, all}` list common sets. A
 name that isn't an arko tool is offered as a built-in, so tools a newer CLI adds can be

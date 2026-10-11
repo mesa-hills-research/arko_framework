@@ -30,6 +30,10 @@ pub(super) const EMPTY_REPORT_CALL: &str = "No handover report was received: the
 pub(super) const NO_NATIVE_TOOL_CALL: &str = "Your response did not call a tool, so the task is still open. Continue with your tools, or call complete_task with a summary if the task is finished.";
 pub(super) const NO_TEXT_TOOL_CALL: &str = "Your response did not contain a tool call. Use one of your tools in the format the system prompt describes, or complete_task if the task is finished.";
 
+/// The note after a reply in plain text that was sent to the user as a
+/// message ([`AgentToolConfig::text_reply_as_message`](crate::agent_config::AgentToolConfig::text_reply_as_message)).
+pub(super) const TEXT_REPLY_SENT: &str = "Your reply was sent to the user as a message. The task is still open: carry on with your tools, or call complete_task with a summary if the task is finished.";
+
 /// `ToolRejected` reasons for calls a stream announced but never finished.
 pub(super) const INTERRUPTED_CALL: &str =
     "The model's response was interrupted before this call finished; it was not run.";

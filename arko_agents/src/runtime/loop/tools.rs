@@ -138,6 +138,20 @@ impl AgentLoop {
         }
     }
 
+    /// The message a finished call to `tool_name` sends the user, given its
+    /// `message` argument: only a call of the built-in `message_user` sends
+    /// one (see [`message_user::message_to_user`]).
+    ///
+    /// [`message_user::message_to_user`]: crate::tool::builtins::message_user::message_to_user
+    pub(super) fn message_to_user(
+        &self,
+        tool_name: &str,
+        message: Option<&Value>,
+    ) -> Option<String> {
+        let tool = self.tool_registry.get(tool_name)?;
+        crate::tool::builtins::message_user::message_to_user(tool_name, tool.as_ref(), message)
+    }
+
     /// Runs `runs` at the same time while watching the command channel:
     /// context sent meanwhile is kept for the next boundary, and
     /// `CancelTask` or `SuspendTask` stops the calls (dropping them, which

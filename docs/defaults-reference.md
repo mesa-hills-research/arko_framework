@@ -15,6 +15,10 @@ Defaults that change what an agent sees of its tool results, in arko's own runti
 - Caps are opt-in: `ToolResultLimits::max_result_tokens` and
   `PerToolConfigOverride::max_result_tokens` are `None`. So are `read_file` line ranges
   (`AgentToolConfig::read_file_line_ranges`, `false`).
+- A native reply in plain text, without a tool call, goes through error recovery with a
+  note asking for a tool call. `AgentToolConfig::text_reply_as_message` (`false`) sends it
+  to the user as a message instead. The built-in `message_user` tool, offered when listed,
+  sends a message either way.
 - Error kinds (`arko_ai::ErrorKind`) are recorded with pauses and failures, and stop
   nothing by themselves.
 
