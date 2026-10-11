@@ -740,11 +740,7 @@ async fn a_host_stop_is_reported_to_the_lead() {
     });
     within(gate.started.notified()).await;
     let id = workflow.subagents()[0].run_id;
-    assert!(workflow.stop_run(
-        id,
-        crate::StopRequest::operator("maintenance"),
-        crate::RunStopIntent::Relaunch
-    ));
+    assert!(workflow.stop_subagent(id, crate::StopRequest::operator("maintenance")));
     within(run).await.unwrap().unwrap();
     let lead = bodies_of(&server, "lead");
     let told = result_of(&lead[2], "lead", 1);
@@ -753,6 +749,140 @@ async fn a_host_stop_is_reported_to_the_lead() {
         "{told}"
     );
     assert_eq!(workflow.subagents()[0].state, SubagentState::Stopped);
+}
+
+async fn start_worker(workflow: &Workflow, caller: Uuid, task: &str) -> Uuid {
+    let ctx = workflow.context();
+    ctx.subagents
+        .start(
+            ctx,
+            caller,
+            "lead",
+            0,
+            &ctx.workspace,
+            "worker",
+            task,
+            None,
+            false,
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    workflow.subagents().last().unwrap().run_id
+}
+
+#[tokio::test]
+async fn a_host_stop_of_a_queued_subagent_saves_news_and_allows_restart() {
+    let server = serve(vec![("r1", vec![("gate", json!({}))])]).await;
+    let workspace = Workspace::new();
+    let run_dir = workspace.0.join(".run");
+    let gate = Arc::new(Gate::default());
+    let workflow = builder(
+        &server,
+        &workspace,
+        SubagentsConfig::default().max_running(1),
+    )
+    .agent_tool("worker", gate.clone())
+    .persistence(PersistenceConfig::new(&run_dir))
+    .build()
+    .unwrap();
+    let caller = Uuid::new_v4();
+    start_worker(&workflow, caller, "First.").await;
+    let queued = start_worker(&workflow, caller, "Second.").await;
+    within(gate.started.notified()).await;
+    assert_eq!(workflow.subagents()[1].state, SubagentState::Queued);
+    assert!(workflow.stop_subagent(queued, crate::StopRequest::operator("plans changed")));
+    assert!(!workflow.stop_subagent(queued, crate::StopRequest::operator("again")));
+    assert!(!workflow.stop_subagent(Uuid::new_v4(), crate::StopRequest::operator("unknown")));
+    assert!(
+        workflow.pending_news(caller).iter().any(|item| {
+            item.kind == MailKind::Stopped && item.heading.contains("plans changed")
+        })
+    );
+    workflow.checkpoint().await.unwrap();
+    let latest = std::fs::read_to_string(run_dir.join("latest-checkpoint")).unwrap();
+    let saved =
+        crate::persistence::PersistenceManager::load_checkpoint(&run_dir.join(latest.trim()))
+            .await
+            .unwrap()
+            .subagents
+            .unwrap();
+    assert_eq!(saved.runs[1].state, SubagentState::Stopped);
+    assert_eq!(saved.runs[1].pending, None);
+    assert!(saved.mail.iter().any(|item| item.kind == MailKind::Stopped));
+    gate.open.notify_one();
+    until(|| workflow.active_subagents().is_empty()).await;
+    assert!(bodies_of(&server, "r2").is_empty());
+    workflow
+        .context()
+        .subagents
+        .message(workflow.context(), caller, "r2", "Do it after all.")
+        .unwrap();
+    until(|| workflow.subagents()[1].state == SubagentState::Finished).await;
+    assert!(bodies_of(&server, "r2")[0].contains("Second."));
+    assert!(
+        bodies_of(&server, "r2")
+            .iter()
+            .any(|body| body.contains("Do it after all."))
+    );
+}
+
+#[tokio::test]
+async fn a_host_stop_before_registration_is_applied_and_allows_restart() {
+    for (wraps_up, escalate) in [(false, false), (true, false), (true, true)] {
+        let server = serve(vec![]).await;
+        let workspace = Workspace::new();
+        let workflow = builder(&server, &workspace, SubagentsConfig::default())
+            .build()
+            .unwrap();
+        let caller = Uuid::new_v4();
+        // The current-thread runtime cannot poll the spawned driver before
+        // this task yields, so this stop precedes RunControl registration.
+        let id = start_worker(&workflow, caller, "Work.").await;
+        assert!(workflow.context().run_control.run_cancel(id).is_none());
+        let mut request = crate::StopRequest::operator("startup stop");
+        if wraps_up {
+            request = request.wrap_up(Duration::from_secs(30));
+        }
+        assert!(workflow.stop_subagent(id, request.clone()));
+        assert!(!workflow.stop_subagent(id, request));
+        if escalate {
+            assert!(workflow.stop_subagent(id, crate::StopRequest::operator("stop now")));
+        }
+        // A checkpoint in this same registration window preserves the
+        // stop even though the agent has no saved Task yet.
+        let saved =
+            serde_json::to_string(&workflow.context().subagents.snapshot().unwrap()).unwrap();
+        let restored = super::board::Board::new(
+            Some(SubagentsConfig::default()),
+            Some(serde_json::from_str(&saved).unwrap()),
+            &[],
+            Uuid::new_v4(),
+            None,
+        );
+        assert_eq!(restored.records()[0].state, SubagentState::Stopped);
+        assert_eq!(restored.records()[0].error.as_deref(), Some("startup stop"));
+        assert!(
+            restored
+                .pending(caller)
+                .iter()
+                .any(|item| item.kind == MailKind::Stopped)
+        );
+        until(|| workflow.subagents()[0].state == SubagentState::Stopped).await;
+        let stopped = workflow.agent_result(id).unwrap().stopped_by.unwrap();
+        assert_eq!(stopped.reason, "startup stop");
+        assert_eq!(stopped.intent, Some(crate::RunStopIntent::Relaunch));
+        if !wraps_up || escalate {
+            assert!(bodies_of(&server, "r1").is_empty());
+        }
+        workflow
+            .context()
+            .subagents
+            .message(workflow.context(), caller, "r1", "Carry on.")
+            .unwrap();
+        until(|| workflow.subagents()[0].state == SubagentState::Finished).await;
+    }
 }
 
 /// A subagent's question goes to its lead, and the lead's message answers

@@ -415,6 +415,10 @@ pub struct SubagentRecord {
     /// Its lead stopped it, with this reason (until it runs again).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped_by_caller: Option<String>,
+    /// A stop accepted for the current launch, kept until it ends so that
+    /// a checkpoint taken during startup preserves the stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_requested: Option<crate::StopRecord>,
     /// It waits for its lead's answer to a question.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub asking: bool,

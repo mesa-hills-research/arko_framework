@@ -64,6 +64,8 @@ pub(crate) struct Board {
     /// The configurations the host's hook prepared for runs that start:
     /// the hook runs once per start.
     prepared: Mutex<HashMap<Uuid, AgentConfig>>,
+    /// Stops received after launch selection and before run registration.
+    starting: Mutex<HashMap<Uuid, Option<(StopRequest, std::time::Instant)>>>,
 }
 
 impl Board {
@@ -97,6 +99,7 @@ impl Board {
             workflow_run_id,
             mail_dir,
             prepared: Mutex::new(HashMap::new()),
+            starting: Mutex::new(HashMap::new()),
         }
     }
 
@@ -613,6 +616,7 @@ impl Board {
             error: None,
             pending: None,
             stopped_by_caller: None,
+            stop_requested: None,
             asking: false,
         };
         // The host's changes are checked before a workspace is made for the
@@ -718,6 +722,16 @@ impl Board {
     /// Launches run `run_id` (`launch` says how), or queues it while
     /// [`SubagentsConfig::max_running`] runs are running.
     fn launch(&self, ctx: &Arc<SharedContext>, run_id: Uuid, launch: PendingLaunch) {
+        self.launch_if(ctx, run_id, launch, false);
+    }
+
+    fn launch_if(
+        &self,
+        ctx: &Arc<SharedContext>,
+        run_id: Uuid,
+        launch: PendingLaunch,
+        queued_only: bool,
+    ) {
         let max = self.config.as_ref().and_then(|config| config.max_running);
         let resumed = matches!(launch, PendingLaunch::Resume { .. });
         let (record, started) = {
@@ -730,17 +744,21 @@ impl Board {
             let Some(record) = state.runs.iter_mut().find(|run| run.run_id == run_id) else {
                 return;
             };
-            if record.state == SubagentState::Running {
+            if record.state == SubagentState::Running
+                || (queued_only && record.state != SubagentState::Queued)
+            {
                 return;
             }
             let has_place = max.is_none_or(|max| running < max.get());
             let runtime = tokio::runtime::Handle::try_current().ok();
             record.since = Utc::now();
             record.stopped_by_caller = None;
+            record.stop_requested = None;
             record.error = None;
             if has_place && runtime.is_some() {
                 record.state = SubagentState::Running;
                 record.pending = None;
+                self.starting.lock().insert(run_id, None);
                 (record.clone(), runtime)
             } else {
                 record.state = SubagentState::Queued;
@@ -793,10 +811,10 @@ impl Board {
             if ctx.run_control.check_admission(false).is_err() {
                 return;
             }
-            self.launch(ctx, run_id, launch);
+            self.launch_if(ctx, run_id, launch, true);
             if self
                 .record(run_id)
-                .is_none_or(|record| record.state != SubagentState::Running)
+                .is_some_and(|record| record.state == SubagentState::Queued)
             {
                 return;
             }
@@ -811,6 +829,7 @@ impl Board {
         run_id: Uuid,
         outcome: Result<AgentResult, WorkflowError>,
     ) {
+        self.starting.lock().remove(&run_id);
         self.drivers.lock().remove(&run_id);
         let Some(record) = self.record(run_id) else {
             return;
@@ -824,23 +843,30 @@ impl Board {
         let agent = &record.agent;
         let (state, kind, heading, body, event) = match &outcome {
             Ok(result)
-                if result.status == AgentRunStatus::Completed && result.stopped_by.is_none() =>
+                if result.status == AgentRunStatus::Completed
+                    && result.stopped_by.is_none()
+                    && record.stop_requested.is_none() =>
             {
                 // Mail that came as it finished: it goes on, and reports again.
                 if !workflow_stopped && self.pending(run_id).iter().any(|item| item.kind.wakes()) {
-                    self.finish_record(
-                        run_id,
-                        SubagentState::Finished,
-                        Some(result.summary.clone()),
-                        None,
-                    );
-                    self.launch(
-                        ctx,
-                        run_id,
-                        PendingLaunch::Resume {
-                            message: String::new(),
-                        },
-                    );
+                    let launch = PendingLaunch::Resume {
+                        message: String::new(),
+                    };
+                    {
+                        let mut state = self.state.lock();
+                        if let Some(record) = state.runs.iter_mut().find(|run| run.run_id == run_id)
+                        {
+                            settle_record(
+                                record,
+                                SubagentState::Queued,
+                                Some(result.summary.clone()),
+                                None,
+                            );
+                            record.pending = Some(launch.clone());
+                        }
+                    }
+                    self.bump();
+                    self.launch_if(ctx, run_id, launch, true);
                     self.start_queued(ctx);
                     return;
                 }
@@ -855,7 +881,10 @@ impl Board {
                 )
             }
             _ => {
-                let stop = result.as_ref().and_then(|result| result.stopped_by.clone());
+                let stop = result
+                    .as_ref()
+                    .and_then(|result| result.stopped_by.clone())
+                    .or_else(|| record.stop_requested.clone());
                 let stopped = stop.is_some()
                     || matches!(&outcome, Err(WorkflowError::AgentStopped { .. }))
                     || workflow_stopped;
@@ -933,47 +962,31 @@ impl Board {
             SubagentEventKind::Stopped { reason, .. } => Some(reason.clone()),
             _ => None,
         };
-        self.finish_record(run_id, state, report, error);
-        let record = self.record(run_id).unwrap_or(record);
-        self.emit(&record, event);
-        let item = {
-            let mut state = self.state.lock();
-            self.add_mail(
-                &mut state,
+        // Publish the terminal state and its news together, so a host
+        // checking for idle workers cannot miss the final report.
+        let (record, item) = {
+            let mut board = self.state.lock();
+            let Some(record) = board.runs.iter_mut().find(|run| run.run_id == run_id) else {
+                return;
+            };
+            settle_record(record, state, report, error);
+            let record = record.clone();
+            let item = self.add_mail(
+                &mut board,
                 record.caller_run_id,
                 MailSender::Run(run_id),
                 kind,
                 heading,
                 body,
-            )
+            );
+            (record, item)
         };
+        self.bump();
+        self.emit(&record, event);
         self.posted(ctx, &item);
         if !workflow_stopped {
             self.start_queued(ctx);
         }
-    }
-
-    fn finish_record(
-        &self,
-        run_id: Uuid,
-        state: SubagentState,
-        report: Option<String>,
-        error: Option<String>,
-    ) {
-        let mut board = self.state.lock();
-        if let Some(record) = board.runs.iter_mut().find(|run| run.run_id == run_id) {
-            record.state = state;
-            record.since = Utc::now();
-            if report.is_some() {
-                record.report = report;
-            }
-            record.error = error;
-            record.pending = None;
-            record.stopped_by_caller = None;
-            record.asking = false;
-        }
-        drop(board);
-        self.bump();
     }
 
     /// Relaunches the subagents a stop of the workflow ended, or that were
@@ -1543,6 +1556,132 @@ impl Board {
         }
     }
 
+    /// Applies a stop received while the driver was preparing this launch.
+    /// Called just after `begin_run`, before the agent runtime is spawned.
+    pub(crate) fn registered(&self, ctx: &Arc<SharedContext>, run_id: Uuid) {
+        let mut starting = self.starting.lock();
+        if let Some(Some((mut request, at))) = starting.remove(&run_id) {
+            if let Some(wrap_up) = &mut request.wrap_up {
+                wrap_up.within = wrap_up.within.saturating_sub(at.elapsed());
+                if wrap_up.within.is_zero() {
+                    request.wrap_up = None;
+                }
+            }
+            crate::workflow::cancel::WorkflowCancelHandle::new(ctx).stop_run(
+                run_id,
+                request,
+                RunStopIntent::Relaunch,
+            );
+        }
+    }
+
+    pub(crate) fn stop_subagent(
+        &self,
+        ctx: &Arc<SharedContext>,
+        run_id: Uuid,
+        request: StopRequest,
+    ) -> bool {
+        self.request_stop(ctx, run_id, request, None).is_some()
+    }
+
+    /// Returns whether a changed stop belongs to a running (rather than
+    /// queued) subagent. State selection and startup stops share the launch
+    /// locks, so a queued stop cannot be overtaken by a driver starting it.
+    fn request_stop(
+        &self,
+        ctx: &Arc<SharedContext>,
+        run_id: Uuid,
+        request: StopRequest,
+        caller_reason: Option<String>,
+    ) -> Option<bool> {
+        if ctx.run_control.is_stopped() {
+            return None;
+        }
+        let reason = caller_reason.as_ref().unwrap_or(&request.reason).clone();
+        let stop_record = StopRecord {
+            kind: request.kind,
+            reason: request.reason.clone(),
+            timestamp: Utc::now(),
+            intent: Some(RunStopIntent::Relaunch),
+        };
+        let (record, running, item) = {
+            let mut state = self.state.lock();
+            let record = state.runs.iter_mut().find(|run| run.run_id == run_id)?;
+            match record.state {
+                SubagentState::Queued => {
+                    record.state = SubagentState::Stopped;
+                    record.since = Utc::now();
+                    record.error = Some(reason.clone());
+                    record.pending = None;
+                    record.asking = false;
+                    let record = record.clone();
+                    let who = if caller_reason.is_some() {
+                        "you stopped it"
+                    } else {
+                        "the workflow's host stopped it"
+                    };
+                    let why = if reason.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {reason}")
+                    };
+                    let item = self.add_mail(
+                        &mut state,
+                        record.caller_run_id,
+                        MailSender::Run(run_id),
+                        MailKind::Stopped,
+                        format!(
+                            "{} (agent `{}`) stopped before it started: {who}{why}.",
+                            record.handle, record.agent
+                        ),
+                        "message_agent starts it later.".to_string(),
+                    );
+                    (record, false, Some(item))
+                }
+                SubagentState::Running => {
+                    let mut starting = self.starting.lock();
+                    if let Some(pending) = starting.get_mut(&run_id) {
+                        match pending {
+                            Some((first, _))
+                                if first.wrap_up.is_some() && request.wrap_up.is_none() =>
+                            {
+                                first.wrap_up = None;
+                            }
+                            Some(_) => return None,
+                            None => *pending = Some((request, std::time::Instant::now())),
+                        }
+                    } else if !crate::workflow::cancel::WorkflowCancelHandle::new(ctx).stop_run(
+                        run_id,
+                        request,
+                        RunStopIntent::Relaunch,
+                    ) {
+                        return None;
+                    }
+                    if record.stopped_by_caller.is_none() {
+                        record.stopped_by_caller = caller_reason.clone();
+                    }
+                    record.stop_requested.get_or_insert(stop_record);
+                    (record.clone(), true, None)
+                }
+                _ => return None,
+            }
+        };
+        self.bump();
+        if running {
+            self.save_soon(ctx);
+        } else {
+            self.emit(
+                &record,
+                SubagentEventKind::Stopped {
+                    reason: reason.clone(),
+                    by_caller: caller_reason.is_some(),
+                },
+            );
+            self.posted(ctx, &item.expect("queued stop has news"));
+        }
+        Some(running)
+    }
+
     /// Stops run `id` of caller `caller`, as `stop_agent` does: the tool's
     /// result.
     pub(crate) async fn stop(
@@ -1565,61 +1704,21 @@ impl Board {
             return Err(format!("{handle} has no isolated workspace to remove"));
         }
         let reason = reason.trim().to_string();
-        let mut stopping = false;
-        match run.state {
-            SubagentState::Queued => {
-                self.finish_record(
-                    run.run_id,
-                    SubagentState::Stopped,
-                    None,
-                    Some(reason.clone()),
-                );
-                if let Some(record) = self.record(run.run_id) {
-                    self.emit(
-                        &record,
-                        SubagentEventKind::Stopped {
-                            reason: reason.clone(),
-                            by_caller: true,
-                        },
-                    );
-                }
-                self.save_soon(ctx);
-            }
-            SubagentState::Running => {
-                {
-                    let mut state = self.state.lock();
-                    if let Some(record) = state
-                        .runs
-                        .iter_mut()
-                        .find(|record| record.run_id == run.run_id)
-                    {
-                        record.stopped_by_caller = Some(reason.clone());
-                    }
-                }
-                let why = if reason.is_empty() {
-                    "your lead stopped you".to_string()
-                } else {
-                    format!("your lead stopped you: {reason}")
-                };
-                stopping = crate::workflow::cancel::WorkflowCancelHandle::new(ctx).stop_run(
-                    run.run_id,
-                    StopRequest::operator(why).wrap_up(STOP_WRAP_UP),
-                    RunStopIntent::Relaunch,
-                );
-                if !stopping {
-                    let mut state = self.state.lock();
-                    if let Some(record) = state
-                        .runs
-                        .iter_mut()
-                        .find(|record| record.run_id == run.run_id)
-                    {
-                        record.stopped_by_caller = None;
-                    }
-                }
-            }
-            _ if !remove_workspace => return Ok(format!("{handle} isn't running.")),
-            _ => {}
+        let why = if reason.is_empty() {
+            "your lead stopped you".to_string()
+        } else {
+            format!("your lead stopped you: {reason}")
+        };
+        let stopped = self.request_stop(
+            ctx,
+            run.run_id,
+            StopRequest::operator(why).wrap_up(STOP_WRAP_UP),
+            Some(reason),
+        );
+        if stopped.is_none() && !remove_workspace {
+            return Ok(format!("{handle} is already stopped or stopping."));
         }
+        let stopping = stopped == Some(true);
         if !remove_workspace {
             return Ok(if stopping {
                 format!(
@@ -1790,6 +1889,24 @@ impl Board {
     }
 }
 
+fn settle_record(
+    record: &mut SubagentRecord,
+    state: SubagentState,
+    report: Option<String>,
+    error: Option<String>,
+) {
+    record.state = state;
+    record.since = Utc::now();
+    if report.is_some() {
+        record.report = report;
+    }
+    record.error = error;
+    record.pending = None;
+    record.stopped_by_caller = None;
+    record.stop_requested = None;
+    record.asking = false;
+}
+
 /// Drives subagent `run_id`'s run, launched as `launch` says, and records
 /// how it ended.
 async fn drive(ctx: Arc<SharedContext>, run_id: Uuid, launch: PendingLaunch) {
@@ -1946,7 +2063,7 @@ fn stopped_with_workflow(ctx: &SharedContext, run_id: Uuid) -> bool {
 /// Settles the records a checkpoint saved running: by the outcome their
 /// runs recorded.
 fn settle_restored(state: &mut SubagentsSnapshot, results: &[AgentResult]) {
-    let mut reports = Vec::new();
+    let mut news = Vec::new();
     for record in &mut state.runs {
         if record.state != SubagentState::Running {
             continue;
@@ -1956,11 +2073,34 @@ fn settle_restored(state: &mut SubagentsSnapshot, results: &[AgentResult]) {
             .find(|result| result.agent_run_id == record.run_id);
         record.since = Utc::now();
         record.asking = false;
+        if let Some(stop) = record.stop_requested.take() {
+            record.state = SubagentState::Stopped;
+            record.pending = None;
+            record.error = Some(stop.reason.clone());
+            news.push((
+                record.clone(),
+                MailKind::Stopped,
+                format!(
+                    "{} (agent `{}`) stopped: {}.",
+                    record.handle, record.agent, stop.reason
+                ),
+                "message_agent restarts it where it stopped.".to_string(),
+            ));
+            continue;
+        }
         match result.map(|result| (&result.status, result)) {
             Some((AgentRunStatus::Completed, result)) if result.stopped_by.is_none() => {
                 record.state = SubagentState::Finished;
                 record.report = Some(result.summary.clone());
-                reports.push((record.clone(), result.summary.clone()));
+                news.push((
+                    record.clone(),
+                    MailKind::Report,
+                    format!(
+                        "{} (agent `{}`) finished. Its report:",
+                        record.handle, record.agent
+                    ),
+                    result.summary.clone(),
+                ));
             }
             Some((AgentRunStatus::Cancelled | AgentRunStatus::Completed, result))
                 if result.stopped_by.is_some() =>
@@ -1975,11 +2115,12 @@ fn settle_restored(state: &mut SubagentsSnapshot, results: &[AgentResult]) {
             _ => record.state = SubagentState::Interrupted,
         }
     }
-    // A report the lead never got: it gets it now.
-    for (record, summary) in reports {
-        let delivered = state.mail.iter().any(|item| {
-            item.from == MailSender::Run(record.run_id) && item.kind == MailKind::Report
-        });
+    // News the lead never got: it gets it now.
+    for (record, kind, heading, body) in news {
+        let delivered = state
+            .mail
+            .iter()
+            .any(|item| item.from == MailSender::Run(record.run_id) && item.kind == kind);
         if delivered {
             continue;
         }
@@ -1988,12 +2129,9 @@ fn settle_restored(state: &mut SubagentsSnapshot, results: &[AgentResult]) {
             id: state.last_mail,
             to: record.caller_run_id,
             from: MailSender::Run(record.run_id),
-            kind: MailKind::Report,
-            heading: format!(
-                "{} (agent `{}`) finished. Its report:",
-                record.handle, record.agent
-            ),
-            body: summary,
+            kind,
+            heading,
+            body,
             at: Utc::now(),
             delivered_at: None,
             file: None,
@@ -2187,4 +2325,56 @@ fn cut(text: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}…", &line[..end])
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_selected_queued_run_stopped_before_launch_stays_stopped() {
+        let workspace = crate::test_support::Workspace::new();
+        let workflow = crate::Workflow::builder()
+            .name("queued-stop")
+            .workspace(&workspace.0)
+            .llm_client(Arc::new(arko_ai::LLMClient::new()))
+            .agent("lead", crate::test_support::agent_config("Lead"))
+            .agent("worker", crate::test_support::agent_config("Worker"))
+            .workflow_services(
+                crate::services::WorkflowServicesConfig::default()
+                    .allow_caller("lead")
+                    .allow_target("worker"),
+            )
+            .subagents(SubagentsConfig::default().max_running(1))
+            .build()
+            .unwrap();
+        let ctx = workflow.context();
+        let caller = Uuid::new_v4();
+        for task in ["First.", "Second."] {
+            ctx.subagents
+                .start(
+                    ctx,
+                    caller,
+                    "lead",
+                    0,
+                    &workspace.0,
+                    "worker",
+                    task,
+                    None,
+                    false,
+                    None,
+                    BTreeMap::new(),
+                )
+                .await
+                .unwrap();
+        }
+        let selected = workflow.subagents()[1].clone();
+        assert!(workflow.stop_subagent(selected.run_id, StopRequest::operator("cancel queued")));
+        // Simulate a place opening after start_queued selected its next run.
+        ctx.subagents.state.lock().runs[0].state = SubagentState::Finished;
+        ctx.subagents
+            .launch_if(ctx, selected.run_id, selected.pending.unwrap(), true);
+        assert_eq!(workflow.subagents()[1].state, SubagentState::Stopped);
+        assert!(!ctx.subagents.starting.lock().contains_key(&selected.run_id));
+    }
 }

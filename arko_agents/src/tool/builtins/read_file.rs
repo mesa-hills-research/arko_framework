@@ -1,6 +1,6 @@
 use crate::tool::{
-    TaskContext, Tool, ToolDefinition, ToolError, ToolParameterDefinition, ToolParameterType,
-    ToolTypeDetails,
+    MAX_TOOL_IMAGE_BYTES, TaskContext, Tool, ToolDefinition, ToolError, ToolImage, ToolOutput,
+    ToolParameterDefinition, ToolParameterType, ToolTypeDetails,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -141,7 +141,7 @@ impl Tool for ReadFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: READ_FILE_TOOL_NAME.to_string(),
-            description: "Reads the content of a file from the workspace, prepending line numbers to each line (e.g., '1 | line content').".to_string(),
+            description: "Reads the content of a file from the workspace, prepending line numbers to each line (e.g., '1 | line content'). An image file (PNG, JPEG, GIF or WebP) is shown as an image.".to_string(),
             output_based_example: Some(
                 "<read_file>\n<path>src/main.rs</path>\n</read_file>".to_string()
             ),
@@ -160,15 +160,28 @@ impl Tool for ReadFileTool {
         }
     }
 
-    /// Reads the file, or with `start_line` and/or `end_line` (which the
-    /// runtime passes only when the agent's configuration turns line
-    /// ranges on) only those lines, followed by a line giving the range and
-    /// the file's line count.
+    /// The file's text: see [`execute_with_output`](Self::execute_with_output).
     async fn execute(
         &self,
         context: &TaskContext<'_>,
         params: HashMap<String, Value>,
     ) -> Result<String, ToolError> {
+        self.execute_with_output(context, params)
+            .await
+            .map(|output| output.text)
+    }
+
+    /// Reads the file, or with `start_line` and/or `end_line` (which the
+    /// runtime passes only when the agent's configuration turns line
+    /// ranges on) only those lines, followed by a line giving the range and
+    /// the file's line count. An image file (PNG, JPEG, GIF or WebP, told
+    /// by its first bytes) is returned as an image, with a line naming it,
+    /// unless it is larger than [`MAX_TOOL_IMAGE_BYTES`].
+    async fn execute_with_output(
+        &self,
+        context: &TaskContext<'_>,
+        params: HashMap<String, Value>,
+    ) -> Result<ToolOutput, ToolError> {
         let file_path_str = params
             .get(PATH_PARAM_NAME)
             .ok_or_else(|| ToolError::MissingParameter {
@@ -217,6 +230,10 @@ impl Tool for ReadFileTool {
                 source: e,
             })?;
 
+        if let Some(mime_type) = image_type(&bytes) {
+            return Ok(image_output(&file_path_str, mime_type, &bytes));
+        }
+
         let content_bytes = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
             bytes[3..].to_vec()
         } else {
@@ -228,12 +245,14 @@ impl Tool for ReadFileTool {
         let normalized = content.replace("\r\n", "\n");
         let numbered = |(i, line): (usize, &str)| format!("{} | {}", i + 1, line);
         if start_line.is_none() && end_line.is_none() {
-            return Ok(normalized
-                .lines()
-                .enumerate()
-                .map(numbered)
-                .collect::<Vec<_>>()
-                .join("\n"));
+            return Ok(ToolOutput::text(
+                normalized
+                    .lines()
+                    .enumerate()
+                    .map(numbered)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ));
         }
         let total = normalized.lines().count();
         let start = start_line.unwrap_or(1);
@@ -254,7 +273,46 @@ impl Tool for ReadFileTool {
             .map(numbered)
             .collect::<Vec<_>>();
         lines.push(format!("[Lines {start}-{end} of {total}.]"));
-        Ok(lines.join("\n"))
+        Ok(ToolOutput::text(lines.join("\n")))
+    }
+}
+
+/// The image type of a file that starts with `bytes`: PNG, JPEG, GIF or
+/// WebP.
+fn image_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+/// An image file's result: a line naming it, and the image, or for a file
+/// over [`MAX_TOOL_IMAGE_BYTES`] a line saying it is too large to show.
+fn image_output(path: &str, mime_type: &str, bytes: &[u8]) -> ToolOutput {
+    let size = if bytes.len() < 1024 * 1024 {
+        format!("{} KB", bytes.len().div_ceil(1024))
+    } else {
+        format!("{:.1} MB", bytes.len() as f64 / (1024.0 * 1024.0))
+    };
+    if bytes.len() > MAX_TOOL_IMAGE_BYTES {
+        return ToolOutput::text(format!(
+            "{path} is an image ({mime_type}, {size}), too large to show: the limit is {} MB.",
+            MAX_TOOL_IMAGE_BYTES / (1024 * 1024)
+        ));
+    }
+    ToolOutput {
+        text: format!("{path} is an image ({mime_type}, {size}), shown below."),
+        images: vec![ToolImage {
+            description: format!("{path}, {size}"),
+            image: arko_ai::Image::from_bytes(bytes, mime_type),
+        }],
     }
 }
 
@@ -330,6 +388,132 @@ mod tests {
 
     fn params(value: Value) -> HashMap<String, Value> {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[tokio::test]
+    async fn image_signatures_are_detected_without_relying_on_the_file_extension() {
+        let directory =
+            std::env::temp_dir().join(format!("arko-read-images-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let context = context(&directory);
+        // Only the file signature matters here; the reader does not decode pixels.
+        for (name, bytes, mime_type) in [
+            (
+                "png.txt",
+                b"\x89PNG\r\n\x1a\n\x00\xff".as_slice(),
+                "image/png",
+            ),
+            ("jpeg.txt", b"\xff\xd8\xff\x00".as_slice(), "image/jpeg"),
+            ("gif87.txt", b"GIF87a\x00\xff".as_slice(), "image/gif"),
+            ("gif89.txt", b"GIF89a\x00\xff".as_slice(), "image/gif"),
+            (
+                "webp.txt",
+                b"RIFF\x04\x00\x00\x00WEBP\xff".as_slice(),
+                "image/webp",
+            ),
+        ] {
+            std::fs::write(directory.join(name), bytes).unwrap();
+            let output = ReadFileTool
+                .execute_with_output(&context, params(json!({"path": name})))
+                .await
+                .unwrap();
+            assert_eq!(output.images.len(), 1, "{name}");
+            assert_eq!(
+                output.images[0].image,
+                arko_ai::Image::from_bytes(bytes, mime_type)
+            );
+            assert!(output.images[0].description.contains(name));
+            assert!(output.text.contains(name));
+            assert!(output.text.contains(mime_type));
+            assert_eq!(
+                ReadFileTool
+                    .execute(&context, params(json!({"path": name})))
+                    .await
+                    .unwrap(),
+                output.text,
+                "legacy string reads still describe {name}"
+            );
+        }
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn structured_file_reads_preserve_text_normalization_ranges_and_errors() {
+        let directory =
+            std::env::temp_dir().join(format!("arko-read-text-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        // An image extension cannot override text detection, including a UTF-8 BOM.
+        std::fs::write(
+            directory.join("notes.png"),
+            "\u{feff}first\r\n二\r\nlast\r\n",
+        )
+        .unwrap();
+        std::fs::write(directory.join("empty"), []).unwrap();
+        std::fs::write(directory.join("not-an-image"), [0xff, 0x00, 0x01]).unwrap();
+        let context = context(&directory);
+        for (arguments, expected) in [
+            (json!({"path": "notes.png"}), "1 | first\n2 | 二\n3 | last"),
+            (
+                json!({"path": "notes.png", "start_line": 2, "end_line": 2}),
+                "2 | 二\n[Lines 2-2 of 3.]",
+            ),
+            (json!({"path": "empty"}), ""),
+        ] {
+            let output = ReadFileTool
+                .execute_with_output(&context, params(arguments.clone()))
+                .await
+                .unwrap();
+            assert!(output.images.is_empty());
+            assert_eq!(output.text, expected);
+            assert_eq!(
+                ReadFileTool
+                    .execute(&context, params(arguments))
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
+        let error = ReadFileTool
+            .execute_with_output(&context, params(json!({"path": "not-an-image"})))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ToolError::ExecutionFailed(message) if message == "File is not valid UTF-8")
+        );
+        let missing = ReadFileTool
+            .execute_with_output(&context, params(json!({"path": "missing.png"})))
+            .await
+            .unwrap_err();
+        assert!(matches!(missing, ToolError::Io { .. }));
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn file_images_at_the_size_limit_are_shown_but_larger_images_are_described() {
+        let directory =
+            std::env::temp_dir().join(format!("arko-read-image-limit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let context = context(&directory);
+        let mut bytes = vec![0; MAX_TOOL_IMAGE_BYTES];
+        bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        std::fs::write(directory.join("limit.png"), &bytes).unwrap();
+        let output = ReadFileTool
+            .execute_with_output(&context, params(json!({"path": "limit.png"})))
+            .await
+            .unwrap();
+        assert_eq!(output.images.len(), 1);
+        assert_eq!(output.images[0].decoded_len(), Some(MAX_TOOL_IMAGE_BYTES));
+        bytes.push(0);
+        std::fs::write(directory.join("too-large.png"), &bytes).unwrap();
+        let output = ReadFileTool
+            .execute_with_output(&context, params(json!({"path": "too-large.png"})))
+            .await
+            .unwrap();
+        assert!(output.images.is_empty());
+        assert!(output.text.contains("too-large.png"));
+        assert!(output.text.contains("too large to show"));
+        assert!(output.text.contains("limit is 5 MB"));
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[tokio::test]

@@ -387,6 +387,16 @@ impl Workflow {
         self.context.subagents.active()
     }
 
+    /// Stops a queued or running background subagent and reports the stop
+    /// to its lead. A queued run stops before it starts. A running run uses
+    /// `request` with [`RunStopIntent::Relaunch`], so a later message from
+    /// its lead can restart it. Returns whether this call changed its stop.
+    pub fn stop_subagent(&self, run_id: uuid::Uuid, request: StopRequest) -> bool {
+        self.context
+            .subagents
+            .stop_subagent(&self.context, run_id, request)
+    }
+
     /// Background subagent events: starts, reports, failures, stops,
     /// messages, deliveries, and
     /// [`NewsWaiting`](crate::subagents::SubagentEventKind::NewsWaiting) for

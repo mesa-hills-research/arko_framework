@@ -50,7 +50,7 @@ impl Content {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Image {
     Url(String),
     Base64 { data: String, mime_type: String },
@@ -64,6 +64,15 @@ impl Image {
     pub fn new_base64(data: &str, mime_type: &str) -> Self {
         Image::Base64 {
             data: data.to_string(),
+            mime_type: mime_type.to_string(),
+        }
+    }
+
+    /// An image of the file content `bytes`, base64-encoded.
+    pub fn from_bytes(bytes: &[u8], mime_type: &str) -> Self {
+        use base64::Engine as _;
+        Image::Base64 {
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
             mime_type: mime_type.to_string(),
         }
     }

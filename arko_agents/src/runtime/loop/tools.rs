@@ -60,6 +60,7 @@ impl AgentLoop {
             working_directory: self.task.current_working_directory.clone(),
             middleware: self.execution_middleware.clone(),
             stop: self.host_stop.or(&self.calls_stop.signal()),
+            model: self.task.conversation.model.clone(),
         })
     }
 

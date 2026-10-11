@@ -1672,6 +1672,182 @@ async fn a_rerun_tool_open_at_the_stop_runs_again_for_the_resumed_session() {
 }
 
 #[tokio::test]
+async fn recovered_tool_images_are_sent_and_survive_saving_before_delivery() {
+    let fake = Fake::new(json!([
+        [{
+            "tool": "mcp__arko__read_file",
+            "input": {"path": "a.png"},
+            "id": "toolu_image",
+            "crash": "pre",
+        }],
+        [complete("Recovered")],
+        [complete("Recovered from saved note")],
+    ]));
+    let bytes = b"\x89PNG\r\n\x1a\nimage-fixture";
+    std::fs::write(fake.workspace().join("a.png"), bytes).unwrap();
+    let recorder = Arc::new(Recorder::default());
+    let task = Task::new(
+        config(&fake, &["read_file"]),
+        "Read the image.".into(),
+        fake.workspace(),
+        None,
+    );
+    let mut run = start_with(task, recording(&recorder));
+    run.events_until(|event| {
+        matches!(
+            event,
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+        )
+    })
+    .await;
+    run.handle.abort();
+    let saved = recorder.latest(|task| {
+        !task.running_tool_calls.is_empty() && task.current_state == TaskState::InProgress
+    });
+    let saved: Task = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+    let recovered = Arc::new(Recorder::default());
+    let (task, _) = start_with(saved, recording(&recovered)).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    // The fake logs array input as JSON inside its `text` field.
+    let sent: Value =
+        serde_json::from_str(fake.logged("user")[1]["text"].as_str().unwrap()).unwrap();
+    let blocks = sent.as_array().expect("recovered image input uses blocks");
+    let image = arko_ai::Image::from_bytes(bytes, "image/png");
+    let arko_ai::Image::Base64 { data, mime_type } = &image else {
+        unreachable!()
+    };
+    assert_eq!(
+        blocks.last().unwrap(),
+        &json!({
+            "type": "image",
+            "source": {"type": "base64", "data": data, "media_type": mime_type},
+        })
+    );
+    assert!(
+        blocks[blocks.len() - 2]["text"]
+            .as_str()
+            .unwrap()
+            .contains("`mcp__arko__read_file` (toolu_image)"),
+        "{sent}"
+    );
+    let pending = recovered.latest(|task| {
+        task.running_tool_calls.is_empty()
+            && task.claude_code_synced < task.conversation.messages.len()
+            && task.conversation.messages.last().is_some_and(|message| {
+                message
+                    .content
+                    .iter()
+                    .any(|content| content.as_image() == Some(&image))
+            })
+    });
+    // Resume the snapshot taken after recovery, before delivery. The image
+    // must come from saved state even though the source file no longer exists.
+    std::fs::remove_file(fake.workspace().join("a.png")).unwrap();
+    let (task, resumed) = run_saved(&fake, &pending).await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert_eq!(serde_json::from_str::<Value>(&resumed).unwrap(), sent);
+    assert!(task.running_tool_calls.is_empty());
+}
+
+#[tokio::test]
+async fn completed_tool_images_survive_a_stop_before_claude_code_records_the_result() {
+    let fake = Fake::new(json!([
+        [{
+            "tool": "mcp__arko__read_file",
+            "input": {"path": "done.png"},
+            "id": "toolu_image_done",
+            "crash": "post",
+        }],
+        [complete("Recovered completed image")],
+    ]));
+    let path = fake.workspace().join("done.png");
+    let bytes = b"\x89PNG\r\n\x1a\ncompleted-image-fixture";
+    std::fs::write(&path, bytes).unwrap();
+    let image = arko_ai::Image::from_bytes(bytes, "image/png");
+    let arko_ai::Image::Base64 { data, mime_type } = &image else {
+        unreachable!()
+    };
+    let recorder = Arc::new(Recorder::default());
+    let task = Task::new(
+        config(&fake, &["read_file"]),
+        "Inspect the image.".into(),
+        fake.workspace(),
+        None,
+    );
+    let mut run = start_with(task, recording(&recorder));
+    run.events_until(|event| {
+        matches!(
+            event,
+            AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval { .. })
+        )
+    })
+    .await;
+    run.handle.abort();
+    let saved = recorder.latest(|task| {
+        task.current_state == TaskState::InProgress
+            && task
+                .running_tool_calls
+                .iter()
+                .any(|call| call.output.is_some())
+    });
+    let call = &saved.running_tool_calls[0];
+    assert_eq!(call.output_images.len(), 1);
+    assert_eq!(call.output_images[0].image, image);
+    assert!(!call.output.as_ref().unwrap().contains(data));
+    assert!(
+        !format!("{call:?}").contains(data),
+        "debug must omit pixels"
+    );
+    // The CLI's hook in this fixture returns text only. The host must have
+    // kept the image it served, and replay it without executing read_file.
+    std::fs::remove_file(path).unwrap();
+    let (task, resumed) = run_saved(&fake, &saved).await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let sent: Value = serde_json::from_str(&resumed).unwrap();
+    let blocks = sent.as_array().expect("saved images use content blocks");
+    assert!(
+        blocks[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("had completed")
+    );
+    assert_eq!(
+        blocks.last().unwrap(),
+        &json!({
+            "type": "image",
+            "source": {"type": "base64", "data": data, "media_type": mime_type},
+        })
+    );
+    assert!(task.running_tool_calls.is_empty());
+}
+
+#[test]
+fn reported_image_results_keep_pixels_out_of_text() {
+    let blocks = json!([
+        {"type": "text", "text": "Two images"},
+        {"type": "image", "data": "bWNw", "mimeType": "image/png"},
+        {"type": "image", "source": {"type": "base64", "data": "Y2xhdWRl", "media_type": "image/jpeg"}},
+    ]);
+    for content in [blocks.clone(), json!({"content": blocks, "isError": false})] {
+        assert_eq!(super::result_text(&content), "Two images");
+        let images = super::result_images(&content);
+        assert_eq!(images.len(), 2);
+        assert_eq!(
+            images[0].image,
+            arko_ai::Image::new_base64("bWNw", "image/png")
+        );
+        assert_eq!(
+            images[1].image,
+            arko_ai::Image::new_base64("Y2xhdWRl", "image/jpeg")
+        );
+    }
+    assert_eq!(
+        super::result_text(&json!({"type": "image", "data": "bWNw", "mimeType": "image/png"})),
+        ""
+    );
+}
+
+#[tokio::test]
 async fn a_call_that_finished_before_claude_code_exited_is_reported_completed() {
     let fake = Fake::new(json!([
         [{

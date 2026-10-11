@@ -322,6 +322,71 @@ async fn text_mode_approval_errors_and_legacy_tools_preserve_their_semantics() {
     assert!(agent.task.pending_tool_images.is_empty());
 }
 
+#[tokio::test]
+async fn a_model_without_image_input_gets_the_tools_text_and_an_omission_note() {
+    let (mut agent, mut events, _commands) = harness(ToolCallingMode::Native);
+    agent.task.conversation.model.supports_image_input = false;
+    let result = agent
+        .execute_native_tool(&call("image", "view_image"), Uuid::new_v4())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!result.is_error);
+    assert!(result.images.is_empty());
+    assert!(result.output.contains("Viewed fixture.png"));
+    assert!(result.output.contains("this model doesn't take images"));
+    while let Ok(event) = events.try_recv() {
+        assert!(!serde_json::to_string(&event).unwrap().contains(IMAGE_DATA));
+    }
+
+    let (mut agent, _events, _commands) = harness(ToolCallingMode::OutputBased);
+    agent.task.conversation.model.supports_image_input = false;
+    let text = agent
+        .execute_text_call(
+            "view_image",
+            HashMap::new(),
+            Uuid::new_v4(),
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(text.contains("this model doesn't take images"));
+    assert!(agent.task.pending_tool_images.is_empty());
+}
+
+#[test]
+fn oversized_tool_images_are_left_out_without_losing_other_images_or_text() {
+    use crate::tool::MAX_TOOL_IMAGE_BYTES;
+
+    let mut output = ToolOutput {
+        text: "Two screenshots".into(),
+        images: vec![
+            ToolImage {
+                description: "at limit".into(),
+                image: ai::Image::from_bytes(&vec![0; MAX_TOOL_IMAGE_BYTES], "image/png"),
+            },
+            ToolImage {
+                description: "over limit".into(),
+                image: ai::Image::from_bytes(&vec![0; MAX_TOOL_IMAGE_BYTES + 1], "image/png"),
+            },
+            ToolImage {
+                description: "link".into(),
+                image: ai::Image::new_url("https://example.test/image.png"),
+            },
+        ],
+    };
+    output.admit_images(&super::tests::test_config().llm_config.model);
+    assert_eq!(output.images.len(), 2);
+    assert_eq!(output.images[0].description, "at limit");
+    assert_eq!(output.images[1].description, "link");
+    assert!(output.text.starts_with("Two screenshots"));
+    assert!(output.text.contains("over limit, left out"));
+    assert_eq!(output.images[0].decoded_len(), Some(MAX_TOOL_IMAGE_BYTES));
+    assert_eq!(output.images[1].decoded_len(), None);
+}
+
 struct ReplaceText;
 #[async_trait]
 impl crate::tool::ToolResultInterceptor for ReplaceText {
@@ -469,4 +534,28 @@ async fn native_user_answer_is_kept_after_ask_user_results_were_already_flushed(
             .is_some_and(|text| text.contains("Remove the entire image browser."))
     }));
     while events.try_recv().is_ok() {}
+}
+
+#[test]
+fn google_gif_results_are_described_without_blocking_other_images() {
+    let mut model = super::tests::test_config().llm_config.model;
+    model.provider = ai::Provider::Google;
+    model.supports_image_input = true;
+    let mut output = ToolOutput {
+        text: "Screenshots".into(),
+        images: vec![
+            ToolImage::base64("animation", "R0lGODlh".into(), "image/gif"),
+            ToolImage::base64("still", IMAGE_DATA.into(), "image/png"),
+        ],
+    };
+    let mut other_provider = model.clone();
+    other_provider.provider = ai::Provider::Anthropic;
+    let mut accepted = output.clone();
+    accepted.admit_images(&other_provider);
+    assert_eq!(accepted.images.len(), 2);
+    output.admit_images(&model);
+    assert_eq!(output.images.len(), 1);
+    assert_eq!(output.images[0].description, "still");
+    assert!(output.text.starts_with("Screenshots"));
+    assert!(output.text.contains("Google models don't take GIF images"));
 }

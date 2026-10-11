@@ -2794,6 +2794,7 @@ impl WorkflowEngine {
             review,
             task.parent.map(|parent| parent.task_id),
         );
+        ctx.subagents.registered(ctx, agent_run_id);
         let mut runtime = AgentRuntime::new(self.llm_client.clone())
             .with_turn_context(Arc::new(crate::notes::WithNotes {
                 inner: ActivityNotices {

@@ -74,6 +74,22 @@ const ASKED: &str = "Your questions were sent to the user. End your turn now wit
 
 const CONTINUE: &str = "Continue the task from where you left off.";
 
+/// A call's result as Claude Code is served it: `text`, then each image's
+/// label on a line of its own, and the images as MCP image content.
+fn served_output(text: String, images: Vec<crate::tool::ToolImage>) -> cc::ToolOutput {
+    if images.is_empty() {
+        return cc::ToolOutput::text(text);
+    }
+    let mut text = text;
+    for image in images.iter().filter(|image| !image.description.is_empty()) {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&format!("Image: {}", image.description));
+    }
+    cc::ToolOutput::text(text).with_images(images.into_iter().map(|image| image.image).collect())
+}
+
 /// The error a refusal resolution gets: Claude Code sends its own
 /// conversation.
 const CANT_RESOLVE_REFUSAL: &str = "Could not resolve the refusal: a Claude Code agent's conversation is kept by Claude Code, so the refused input can't be changed. Continue or fail the task instead.";
@@ -252,7 +268,7 @@ struct ToolHost {
     registry: Arc<ToolRegistry>,
     interceptor: Option<InterceptorConfig>,
     admitted: Mutex<HashMap<(String, String), VecDeque<Admitted>>>,
-    outcomes: Mutex<HashMap<Uuid, CallOutcome>>,
+    outcomes: Mutex<HashMap<Uuid, (CallOutcome, Vec<crate::tool::ToolImage>)>>,
 }
 
 impl ToolHost {
@@ -298,7 +314,18 @@ impl ToolHost {
         let (outcome, output) = self
             .run(name, tool, &arguments, id, admitted.custom_output, false)
             .await;
-        self.outcomes.lock().unwrap().insert(id, outcome);
+        // The CLI may report only a call's text in its hook. Keep the
+        // actual images until the runtime records that completed result.
+        let images = output
+            .images
+            .iter()
+            .cloned()
+            .map(|image| crate::tool::ToolImage {
+                description: String::new(),
+                image,
+            })
+            .collect();
+        self.outcomes.lock().unwrap().insert(id, (outcome, images));
         output
     }
 
@@ -350,13 +377,14 @@ impl ToolHost {
                     ASK_USER_TOOL_NAME => ASKED.to_string(),
                     _ => effective.clone(),
                 };
+                let reply = served_output(text, output.images);
                 (
                     CallOutcome::Finished {
                         raw: output.text,
                         effective,
                         intercepted,
                     },
-                    cc::ToolOutput::text(text),
+                    reply,
                 )
             }
             RunOutcome::MiddlewareErrorAfter {
@@ -366,13 +394,13 @@ impl ToolHost {
                 reason,
                 is_error,
             } => {
-                let _ = (output, intercepted, is_error);
+                let _ = (intercepted, is_error);
                 (
                     CallOutcome::Pause {
                         message: effective.clone(),
                         reason,
                     },
-                    cc::ToolOutput::text(effective),
+                    served_output(effective, output.images),
                 )
             }
             RunOutcome::Rejected(message) => (
@@ -710,6 +738,7 @@ impl ClaudeCodeRun {
             message_to_agent: None,
             built_in: call.built_in,
             output: None,
+            output_images: Vec::new(),
         };
         let rerunnable = running.custom_output.is_none()
             && if running.built_in {
@@ -729,13 +758,28 @@ impl ClaudeCodeRun {
     /// A call's result, as Claude Code reported it: kept with the running
     /// call until the model's next message shows Claude Code has it (its
     /// transcript is saved a little after the result is reported).
-    fn record_output(&mut self, tool_use_id: Option<&String>, output: String) {
+    fn record_output(&mut self, tool_use_id: Option<&String>, content: &Value) {
         if let Some(running) =
             self.task.running_tool_calls.iter_mut().find(|running| {
                 running.call_id.is_some() && running.call_id.as_ref() == tool_use_id
             })
         {
-            running.output = Some(output);
+            running.output = Some(result_text(content));
+            let images = self.host.as_ref().and_then(|host| {
+                host.outcomes
+                    .lock()
+                    .unwrap()
+                    .get(&running.tool_call_id)
+                    .map(|(_, images)| images.clone())
+            });
+            if let Some(images) = images {
+                running.output_images = images;
+            } else {
+                let images = result_images(content);
+                if !images.is_empty() {
+                    running.output_images = images;
+                }
+            }
         }
     }
 
@@ -834,6 +878,7 @@ impl ClaudeCodeRun {
             open.len()
         );
         let mut lines = Vec::new();
+        let mut images = Vec::new();
         // The pauses the calls run again ask for: the task pauses once.
         let mut pauses = Vec::new();
         for call in open {
@@ -851,6 +896,16 @@ impl ClaudeCodeRun {
                     "- {named} had completed. Its result was: {}",
                     bounded(output)
                 ));
+                if !call.output_images.is_empty() {
+                    images.push(ai::Content::Text(format!(
+                        "Images from recovered tool {named}:"
+                    )));
+                    images.extend(
+                        call.output_images
+                            .iter()
+                            .map(|image| ai::Content::Image(image.image.clone())),
+                    );
+                }
                 continue;
             }
             let tool = (!call.built_in)
@@ -924,6 +979,12 @@ impl ClaudeCodeRun {
                 "- {named} was running, so it was run again. Its result: {}",
                 bounded(&output.text)
             ));
+            if !output.images.is_empty() {
+                images.push(ai::Content::Text(format!(
+                    "Images from recovered tool {named}:"
+                )));
+                images.extend(output.images.into_iter().map(ai::Content::Image));
+            }
         }
         self.task.running_tool_calls.clear();
         if !pauses.is_empty() && !self.task.current_state.is_terminal() {
@@ -946,6 +1007,15 @@ impl ClaudeCodeRun {
             note.push_str(&format!("\n\n{CONTINUE}"));
         }
         self.add_user_message(&note)?;
+        // Keep the pixels with the recovery note so another stop before
+        // sending it does not lose them or rerun the tool a second time.
+        self.task
+            .conversation
+            .messages
+            .last_mut()
+            .unwrap()
+            .content
+            .extend(images);
         self.report(false).await;
         Ok(())
     }
@@ -1359,6 +1429,7 @@ impl ClaudeCodeRun {
                 working_directory: self.task.current_working_directory.clone(),
                 middleware: self.middleware.clone(),
                 stop: self.host_stop.or(&self.calls_stop.signal()),
+                model: self.task.agent_config.llm_config.model.clone(),
             }),
             config: self.task.agent_config.clone(),
             registry: self.registry.clone(),
@@ -1386,7 +1457,7 @@ impl ClaudeCodeRun {
     /// since it last ran (the task prompt, a follow-up, an answer, a note),
     /// and context waiting for the model. A resumed session with nothing new
     /// is asked to continue.
-    fn unsent_input(&mut self) -> Result<String, ArkoAgentsError> {
+    fn unsent_input(&mut self) -> Result<Value, ArkoAgentsError> {
         let synced = self
             .task
             .claude_code_synced
@@ -1426,8 +1497,34 @@ impl ClaudeCodeRun {
             self.task.increment_user_message_count();
             parts.push(context);
         }
+        let messages = &self.task.conversation.messages[synced..];
+        let contents = || {
+            messages
+                .iter()
+                .filter(|message| message.role == ai::Role::User)
+                .flat_map(|message| &message.content)
+        };
+        let input = if contents().any(|content| content.as_image().is_some()) {
+            Value::Array(
+                contents()
+                    .filter_map(|content| match content {
+                        ai::Content::Text(text) => Some(json!({"type": "text", "text": text})),
+                        ai::Content::Image(ai::Image::Base64 { data, mime_type }) => Some(json!({
+                            "type": "image",
+                            "source": {"type": "base64", "data": data, "media_type": mime_type},
+                        })),
+                        ai::Content::Image(ai::Image::Url(url)) => {
+                            Some(json!({"type": "text", "text": format!("Image: {url}")}))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            )
+        } else {
+            Value::String(parts.join("\n\n"))
+        };
         self.task.claude_code_synced = self.task.conversation.messages.len();
-        Ok(parts.join("\n\n"))
+        Ok(input)
     }
 
     /// Sends a user message to the running session and records it.
@@ -1465,7 +1562,11 @@ impl ClaudeCodeRun {
         self.report_tool_errors().await?;
         // The session (and what it was sent) is saved before it runs.
         self.report(true).await;
-        if let Err(error) = session.send(input).await {
+        let sent = match input {
+            Value::String(text) => session.send(text).await,
+            content => session.send_content(content).await,
+        };
+        if let Err(error) = sent {
             let end = self.session_failed(error.to_string()).await?;
             let _ = session.close().await;
             return Ok(end);
@@ -1677,7 +1778,7 @@ impl ClaudeCodeRun {
                 response,
                 reply,
             } => {
-                self.record_output(tool_use_id.as_ref(), result_text(&response));
+                self.record_output(tool_use_id.as_ref(), &response);
                 self.report(false).await;
                 let answer = self.after_tool(tool_use_id, &tool_name, response).await?;
                 let _ = reply.send(answer);
@@ -2130,10 +2231,7 @@ impl ClaudeCodeRun {
             && call.built_in
         {
             let params = params_of(&call.input);
-            let output = match &response {
-                Value::String(text) => text.clone(),
-                other => other.to_string(),
-            };
+            let output = result_text(&response);
             let execution = ToolExecutionContext {
                 task_id: self.task.id,
                 agent_name: &self.task.agent_config.name,
@@ -2284,7 +2382,7 @@ impl ClaudeCodeRun {
                         continue;
                     };
                     let text = result_text(content);
-                    self.record_output(Some(tool_use_id), text.clone());
+                    self.record_output(Some(tool_use_id), content);
                     let Some(call) = self.calls.get(tool_use_id) else {
                         continue;
                     };
@@ -2431,7 +2529,8 @@ impl ClaudeCodeRun {
         let outcome = self
             .host
             .as_ref()
-            .and_then(|host| host.outcomes.lock().unwrap().remove(&id));
+            .and_then(|host| host.outcomes.lock().unwrap().remove(&id))
+            .map(|(outcome, _)| outcome);
         match outcome {
             // A built-in, or a call the gate refused.
             None => {
@@ -3481,8 +3580,45 @@ fn result_text(content: &Value) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         Value::Null => String::new(),
+        Value::Object(object) if object.contains_key("content") => result_text(&object["content"]),
+        Value::Object(object) if object.get("type").and_then(Value::as_str) == Some("image") => {
+            String::new()
+        }
         other => other.to_string(),
     }
+}
+
+/// Images in a reported result, either MCP content or Claude's image
+/// source blocks. Arko tools retain their originals in `ToolHost` too.
+fn result_images(content: &Value) -> Vec<crate::tool::ToolImage> {
+    let blocks = match content {
+        Value::Array(blocks) => blocks,
+        Value::Object(object) if object.contains_key("content") => {
+            return result_images(&object["content"]);
+        }
+        _ => return Vec::new(),
+    };
+    blocks
+        .iter()
+        .filter(|block| block["type"] == "image")
+        .filter_map(|block| {
+            let source = block.get("source").unwrap_or(block);
+            let image = if source["type"] == "url" {
+                ai::Image::new_url(source["url"].as_str()?)
+            } else {
+                ai::Image::new_base64(
+                    source["data"].as_str()?,
+                    source["media_type"]
+                        .as_str()
+                        .or_else(|| source["mimeType"].as_str())?,
+                )
+            };
+            Some(crate::tool::ToolImage {
+                description: String::new(),
+                image,
+            })
+        })
+        .collect()
 }
 
 async fn sleep_until(deadline: Option<tokio::time::Instant>) {

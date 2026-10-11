@@ -868,7 +868,7 @@ fn branch_prefix(self, prefix: impl Into<String>) -> Self;
 
 ### Records, events and host methods
 
-`SubagentRecord` (`Debug`, `Clone`, Serde) has `run_id`, `handle`, `agent`, `caller_run_id`, `caller_agent`, `depth`, `task`, `workspace`, `isolated`, `parameters`, `peers`, `all_peers`, `state: SubagentState`, `created`, `since` (when it entered its state), `report`, `error`, `pending: Option<PendingLaunch>` (how a queued run starts: `Start { prompt }` or `Resume { message }`), `stopped_by_caller` and `asking` (it waits for its lead's answer to a question). `SubagentState` is `Queued`, `Running`, `Finished`, `Failed`, `Stopped`, `Interrupted` (the workflow stopped while it ran) or `Closed` (its workspace was removed). `is_active()` is true for `Queued` and `Running`.
+`SubagentRecord` (`Debug`, `Clone`, Serde) has `run_id`, `handle`, `agent`, `caller_run_id`, `caller_agent`, `depth`, `task`, `workspace`, `isolated`, `parameters`, `peers`, `all_peers`, `state: SubagentState`, `created`, `since` (when it entered its state), `report`, `error`, `pending: Option<PendingLaunch>` (how a queued run starts: `Start { prompt }` or `Resume { message }`), `stopped_by_caller`, `stop_requested: Option<StopRecord>` (an accepted stop kept until the launch ends, including during startup) and `asking` (it waits for its lead's answer to a question). `SubagentState` is `Queued`, `Running`, `Finished`, `Failed`, `Stopped`, `Interrupted` (the workflow stopped while it ran) or `Closed` (its workspace was removed). `is_active()` is true for `Queued` and `Running`.
 
 `SubagentEvent` (`Debug`, `Clone`, Serde) has `timestamp`, `workflow_run_id`, `run_id`, `handle`, `agent_name`, `caller_run_id`, `caller_agent` and `kind: SubagentEventKind`: `Queued`, `Started`, `Resumed`, `Finished { summary }`, `Failed { error }`, `Stopped { reason, by_caller }`, `Message { mail_id, from, to }`, `Delivered { to, mail_ids }`, `NewsWaiting { mail_ids }` (for a run that isn't running) and `WorkspaceRemoved`. Events are also written to the event log, as records with `"subagent": true` and the event's fields. Their order relative to `WorkflowEvent`s isn't guaranteed. `NewsWaiting` may come more than once for the same items.
 
@@ -876,6 +876,7 @@ fn branch_prefix(self, prefix: impl Into<String>) -> Self;
 | --- | --- |
 | `subagents(&self) -> Vec<SubagentRecord>` | Every subagent of the run, in start order. |
 | `active_subagents(&self) -> Vec<SubagentRecord>` | The subagents running or queued. A host that runs to the end (a one-shot command) waits until this is empty and no news is pending. |
+| `stop_subagent(&self, run_id: Uuid, request: StopRequest) -> bool` | Stops a queued or running subagent and sends its lead stop news. Queued runs stop before they start. Running runs use the request with intent `Relaunch`, and a later message from the lead can restart either. Returns whether the stop changed. |
 | `subscribe_subagents(&self) -> broadcast::Receiver<SubagentEvent>` | The events above. |
 | `pending_news(&self, agent_run_id: Uuid) -> Vec<MailItem>` | The mail for a run it hasn't received, oldest first. |
 | `take_news(&self, agent_run_id: Uuid) -> Vec<MailItem>` | Takes that mail out of the mailbox, for a host that puts it in its own message to the run. |

@@ -23,6 +23,9 @@ pub trait ClaudeTool: Send + Sync {
 pub struct ToolOutput {
     pub text: String,
     pub is_error: bool,
+    /// Images sent after the text, as MCP `image` content: base64 images
+    /// only (an image given by URL is sent as a line of text with its URL).
+    pub images: Vec<crate::Image>,
 }
 
 impl ToolOutput {
@@ -30,6 +33,7 @@ impl ToolOutput {
         Self {
             text: text.into(),
             is_error: false,
+            images: Vec::new(),
         }
     }
 
@@ -37,7 +41,32 @@ impl ToolOutput {
         Self {
             text: text.into(),
             is_error: true,
+            images: Vec::new(),
         }
+    }
+
+    /// The output with `images` after its text.
+    pub fn with_images(mut self, images: Vec<crate::Image>) -> Self {
+        self.images = images;
+        self
+    }
+
+    /// The MCP `content` of the result: the text (left out when empty and
+    /// there are images), then each image.
+    fn content(&self) -> Vec<Value> {
+        let mut content = Vec::new();
+        if !self.text.is_empty() || self.images.is_empty() {
+            content.push(json!({"type": "text", "text": self.text}));
+        }
+        for image in &self.images {
+            content.push(match image {
+                crate::Image::Base64 { data, mime_type } => {
+                    json!({"type": "image", "data": data, "mimeType": mime_type})
+                }
+                crate::Image::Url(url) => json!({"type": "text", "text": format!("Image: {url}")}),
+            });
+        }
+        content
     }
 }
 
@@ -125,7 +154,7 @@ impl ToolServer {
                     Some(tool) => {
                         let output = tool.call(arguments).await;
                         Ok(json!({
-                            "content": [{"type": "text", "text": output.text}],
+                            "content": output.content(),
                             "isError": output.is_error,
                         }))
                     }
@@ -140,5 +169,85 @@ impl ToolServer {
                 json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ImageTool;
+
+    #[async_trait]
+    impl ClaudeTool for ImageTool {
+        fn name(&self) -> String {
+            "image".into()
+        }
+
+        fn description(&self) -> String {
+            "Returns an image for testing.".into()
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({"type": "object", "properties": {}})
+        }
+
+        async fn call(&self, arguments: Value) -> ToolOutput {
+            let output = if arguments["fail"].as_bool() == Some(true) {
+                ToolOutput::error("could not render")
+            } else {
+                ToolOutput::text("rendered")
+            };
+            output.with_images(vec![crate::Image::from_bytes(b"image bytes", "image/png")])
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_server_emits_image_blocks_and_keeps_the_error_flag() {
+        let server = ToolServer::new("test").tool(Arc::new(ImageTool));
+        for fail in [false, true] {
+            let response = server
+                .handle(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "method": "tools/call",
+                    "params": {"name": "image", "arguments": {"fail": fail}},
+                }))
+                .await
+                .unwrap();
+            assert_eq!(
+                response,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "result": {
+                        "content": [
+                            {"type": "text", "text": if fail { "could not render" } else { "rendered" }},
+                            {"type": "image", "mimeType": "image/png", "data": "aW1hZ2UgYnl0ZXM="},
+                        ],
+                        "isError": fail,
+                    },
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn image_only_results_omit_empty_text_and_url_images_remain_readable() {
+        assert_eq!(
+            ToolOutput::text("").content(),
+            vec![json!({"type": "text", "text": ""})]
+        );
+        let output = ToolOutput::text("").with_images(vec![
+            crate::Image::from_bytes(b"gif", "image/gif"),
+            crate::Image::Url("https://example.com/image.png".into()),
+        ]);
+        assert_eq!(
+            output.content(),
+            vec![
+                json!({"type": "image", "mimeType": "image/gif", "data": "Z2lm"}),
+                json!({"type": "text", "text": "Image: https://example.com/image.png"}),
+            ]
+        );
     }
 }

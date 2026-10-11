@@ -983,6 +983,7 @@ fn running(call_id: Option<&str>, tool: &str, what: &str) -> RunningToolCall {
         message_to_agent: None,
         built_in: false,
         output: None,
+        output_images: Vec::new(),
     }
 }
 

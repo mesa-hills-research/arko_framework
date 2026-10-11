@@ -2,13 +2,16 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use rmcp::model::CallToolRequestParams;
+use rmcp::model::{CallToolRequestParams, RawContent, ResourceContents};
 use rmcp::service::{Peer, RoleClient};
 
 use crate::tool::{
-    TaskContext, Tool, ToolDefinition, ToolError, ToolParameterDefinition, ToolParameterType,
-    ToolTypeDetails,
+    TaskContext, Tool, ToolDefinition, ToolError, ToolImage, ToolOutput, ToolParameterDefinition,
+    ToolParameterType, ToolTypeDetails,
 };
+
+/// The image types accepted from MCP tools.
+const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 /// An MCP tool exposed by a remote MCP server, wrapped to implement the
 /// `arko_agents::Tool` trait.
@@ -146,9 +149,23 @@ impl Tool for McpTool {
 
     async fn execute(
         &self,
-        _context: &TaskContext<'_>,
+        context: &TaskContext<'_>,
         params: HashMap<String, Value>,
     ) -> Result<String, ToolError> {
+        self.execute_with_output(context, params)
+            .await
+            .map(|output| output.text)
+    }
+
+    /// The call's text, and its images (MCP `image` content, and embedded
+    /// image resources) as the result's images. Other content is described
+    /// in the text: a resource's text is included, and audio, other binary
+    /// resources and images of a type the providers don't take are named.
+    async fn execute_with_output(
+        &self,
+        _context: &TaskContext<'_>,
+        params: HashMap<String, Value>,
+    ) -> Result<ToolOutput, ToolError> {
         let arguments: serde_json::Map<String, Value> = params.into_iter().collect();
 
         let call_params =
@@ -161,33 +178,96 @@ impl Tool for McpTool {
             ))
         })?;
 
-        let mut output = String::new();
+        let mut output = ToolOutput::default();
+        let mut push = |text: &str| {
+            if !output.text.is_empty() {
+                output.text.push('\n');
+            }
+            output.text.push_str(text);
+        };
+        let mut images = Vec::new();
         for content in &result.content {
-            if let Some(text) = content.as_text() {
-                if !output.is_empty() {
-                    output.push('\n');
+            match &content.raw {
+                RawContent::Text(text) => push(&text.text),
+                RawContent::Image(image) => match image_type(&image.mime_type) {
+                    Some(mime_type) => images.push(ToolImage::base64(
+                        format!("image {} ({mime_type})", images.len() + 1),
+                        image.data.clone(),
+                        mime_type,
+                    )),
+                    None => push(&format!(
+                        "[An image of type {} that the model can't be shown.]",
+                        image.mime_type
+                    )),
+                },
+                RawContent::Resource(resource) => match &resource.resource {
+                    ResourceContents::TextResourceContents { uri, text, .. } => {
+                        push(&format!("Resource {uri}:\n{text}"))
+                    }
+                    ResourceContents::BlobResourceContents {
+                        uri,
+                        mime_type,
+                        blob,
+                        ..
+                    } => match mime_type.as_deref().and_then(image_type) {
+                        Some(mime_type) => {
+                            images.push(ToolImage::base64(uri.clone(), blob.clone(), mime_type))
+                        }
+                        None => push(&format!(
+                            "[Resource {uri}: binary content ({}) that can't be shown.]",
+                            mime_type.as_deref().unwrap_or("of an unknown type")
+                        )),
+                    },
+                },
+                RawContent::Audio(audio) => push(&format!(
+                    "[Audio ({}) that the model can't be given.]",
+                    audio.mime_type
+                )),
+                RawContent::ResourceLink(link) => {
+                    push(&format!("Resource link: {} ({})", link.uri, link.name))
                 }
-                output.push_str(&text.text);
             }
         }
+        output.images = images;
 
         if result.is_error == Some(true) {
-            return Err(ToolError::ExecutionFailed(if output.is_empty() {
+            return Err(ToolError::ExecutionFailed(if output.text.is_empty() {
                 format!(
                     "MCP tool '{}' returned an error with no text content",
                     self.remote_tool_name
                 )
             } else {
-                output
+                output.text
             }));
         }
 
-        if output.is_empty()
-            && let Some(ref structured) = result.structured_content
-        {
-            output = serde_json::to_string_pretty(structured).unwrap_or_default();
+        // Descriptions synthesized for non-text content must not hide the
+        // server's structured result when it supplied no text equivalent.
+        let has_text = result
+            .content
+            .iter()
+            .any(|content| matches!(&content.raw, RawContent::Text(text) if !text.text.is_empty()));
+        if !has_text && let Some(ref structured) = result.structured_content {
+            if !output.text.is_empty() {
+                output.text.push_str("\n\n");
+            }
+            output
+                .text
+                .push_str(&serde_json::to_string_pretty(structured).unwrap_or_default());
         }
 
         Ok(output)
     }
+}
+
+/// `mime_type` as one of [`IMAGE_TYPES`] (`image/jpg` read as JPEG), or
+/// `None` for a type the providers don't take.
+fn image_type(mime_type: &str) -> Option<&'static str> {
+    let mime_type = mime_type.trim().to_ascii_lowercase();
+    let mime_type = if mime_type == "image/jpg" {
+        "image/jpeg".to_string()
+    } else {
+        mime_type
+    };
+    IMAGE_TYPES.into_iter().find(|known| *known == mime_type)
 }

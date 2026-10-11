@@ -27,7 +27,7 @@ pub use types::ToolTypeDetails;
 
 /// A real image input returned by a tool, with a human-readable source label.
 /// Image bytes belong in saved task state, never in text tool-result events.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolImage {
     pub description: String,
     pub image: arko_ai::Image,
@@ -46,6 +46,33 @@ impl Debug for ToolImage {
     }
 }
 
+/// The largest base64 image a tool result carries: 5 MiB once decoded.
+pub const MAX_TOOL_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+impl ToolImage {
+    /// A base64 image with its label.
+    pub fn base64(description: impl Into<String>, data: String, mime_type: &str) -> Self {
+        Self {
+            description: description.into(),
+            image: arko_ai::Image::Base64 {
+                data,
+                mime_type: mime_type.to_string(),
+            },
+        }
+    }
+
+    /// Its size in bytes once decoded: `None` for an image given by URL.
+    pub fn decoded_len(&self) -> Option<usize> {
+        match &self.image {
+            arko_ai::Image::Base64 { data, .. } => {
+                let data = data.trim_end_matches('=');
+                Some(data.len() / 4 * 3 + (data.len() % 4).saturating_sub(1))
+            }
+            arko_ai::Image::Url(_) => None,
+        }
+    }
+}
+
 /// Structured output is opt-in; existing string-returning tools need no changes.
 #[derive(Debug, Clone, Default)]
 pub struct ToolOutput {
@@ -58,6 +85,54 @@ impl ToolOutput {
         Self {
             text: text.into(),
             images: Vec::new(),
+        }
+    }
+
+    /// Leaves out the images the model can't be sent: every image for a
+    /// model without image input, GIF images on Google, and any larger than
+    /// [`MAX_TOOL_IMAGE_BYTES`]. A line for each says so, after the text.
+    pub fn admit_images(&mut self, model: &arko_ai::Model) {
+        let mut notes = Vec::new();
+        self.images.retain(|image| {
+            let label = if image.description.is_empty() {
+                "an image".to_string()
+            } else {
+                format!("image {}", image.description)
+            };
+            if !model.supports_image_input {
+                notes.push(format!(
+                    "[The tool returned {label}, left out: this model doesn't take images.]"
+                ));
+                return false;
+            }
+            // Google's image MIME list excludes GIF:
+            // https://ai.google.dev/gemini-api/docs/image-understanding#supported-image-formats
+            if model.provider == arko_ai::Provider::Google
+                && matches!(&image.image, arko_ai::Image::Base64 { mime_type, .. }
+                    if mime_type.trim().eq_ignore_ascii_case("image/gif"))
+            {
+                notes.push(format!(
+                    "[The tool returned {label}, left out: Google models don't take GIF images. Convert it to PNG or JPEG.]"
+                ));
+                return false;
+            }
+            match image.decoded_len() {
+                Some(bytes) if bytes > MAX_TOOL_IMAGE_BYTES => {
+                    notes.push(format!(
+                        "[The tool returned {label}, left out: its {:.1} MB are over the {} MB limit for an image.]",
+                        bytes as f64 / (1024.0 * 1024.0),
+                        MAX_TOOL_IMAGE_BYTES / (1024 * 1024)
+                    ));
+                    false
+                }
+                _ => true,
+            }
+        });
+        for note in notes {
+            if !self.text.is_empty() {
+                self.text.push_str("\n\n");
+            }
+            self.text.push_str(&note);
         }
     }
 }

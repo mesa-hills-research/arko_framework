@@ -24,6 +24,8 @@ pub(super) struct RunEnvironment {
     pub middleware: Option<Arc<dyn ToolExecutionMiddleware>>,
     /// What the task's calls see of a stop: see [`TaskContext::stop`].
     pub stop: crate::stop::StopSignal,
+    /// The model whose image capabilities apply to tool results.
+    pub model: arko_ai::Model,
 }
 
 impl RunEnvironment {
@@ -97,6 +99,7 @@ impl ToolRun {
             message_to_agent: self.message_to_agent.clone(),
             built_in: false,
             output: None,
+            output_images: Vec::new(),
         }
     }
 }
@@ -220,7 +223,8 @@ pub(super) async fn run_tool(
                 None => execution_future.await,
             };
             match result {
-                Ok(output) => {
+                Ok(mut output) => {
+                    output.admit_images(&environment.model);
                     if let Some(middleware) = middleware
                         && let Err(error) = middleware
                             .after(

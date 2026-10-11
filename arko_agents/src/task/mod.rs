@@ -535,6 +535,10 @@ pub struct RunningToolCall {
     /// call recovered with its output completed before the host stopped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
+    /// Images belonging to the completed Claude Code result in `output`.
+    /// Kept until its transcript has the result, and replayed on recovery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_images: Vec<crate::tool::ToolImage>,
 }
 
 /// A failed tool call the task will pause on; see

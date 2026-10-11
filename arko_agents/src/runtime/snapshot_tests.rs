@@ -150,6 +150,7 @@ fn running(id: Uuid, call_id: Option<&str>, name: &str, what: &str) -> RunningTo
         message_to_agent: None,
         built_in: false,
         output: None,
+        output_images: Vec::new(),
     }
 }
 
@@ -1046,6 +1047,13 @@ fn a_task_saved_without_running_calls_loads_and_running_calls_round_trip() {
     }))
     .unwrap();
     assert!(minimal.parameters.is_empty() && !minimal.built_in && minimal.output.is_none());
+    assert!(minimal.output_images.is_empty());
+    assert!(
+        serde_json::to_value(&minimal)
+            .unwrap()
+            .get("output_images")
+            .is_none()
+    );
     assert_eq!(
         serde_json::to_value(ToolRecovery::Resume).unwrap(),
         serde_json::json!("resume")
