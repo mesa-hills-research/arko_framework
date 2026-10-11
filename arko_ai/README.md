@@ -174,15 +174,20 @@ request's prompt cache after its last use: `PromptCacheLifetime::Known(duration)
 `Unknown` or `Disabled`. Every cache hit starts the lifetime again, so a conversation that
 makes a request within it stays cached however long it waits in between. Anthropic, and
 Claude on OpenRouter: 5 minutes, or 1 hour with `anthropic_cache_ttl` set to `OneHour`.
-OpenAI, every model, with an API key or ChatGPT OAuth: a conservative 5 minutes, the lower
-end of the documented in-memory retention, on purpose. Longer retention exists (GPT-5.6
-and later default to a 30-minute `prompt_cache_options.ttl` on the API, so none is sent),
-but the ChatGPT OAuth backend caches implicitly only, with a lifetime neither documented
-nor configurable, and a request after a longer idle time can miss the cache. Gemini and
-other OpenRouter models: `Unknown`. Models without caching, and caching turned off where
-the request can turn it off (Anthropic, Claude on OpenRouter, GPT-5.6 and later with an
-API key): `Disabled`. The `prompt_cache` module has the constants and the providers'
-documentation links.
+OpenAI with an API key, every model: a conservative 5 minutes, the lower end of the
+documented in-memory retention, on purpose. Longer retention exists (GPT-5.6 and later
+default to a 30-minute `prompt_cache_options.ttl` on the API, so none is sent), but not on
+every model and organization, and a request after a longer idle time can miss the cache.
+OpenAI over ChatGPT OAuth, every model: 30 minutes, the lifetime of the backend's implicit
+cache, which no request configures. Gemini and other OpenRouter models: `Unknown`. Models
+without caching, and caching turned off where the request can turn it off (Anthropic,
+Claude on OpenRouter, GPT-5.6 and later with an API key): `Disabled`. The `prompt_cache`
+module has the constants and the providers' documentation links.
+
+A host that knows how long its route keeps the cache sets
+`GenerationConfig::prompt_cache_lifetime_seconds` (or `with_prompt_cache_lifetime`). The
+lifetime is then reported as that, whatever the provider, unless the request isn't cached
+at all. Nothing is sent to the provider.
 
 `with_prompt_caching(false)`, or `Conversation::with_cache_disabled()`, turns caching off
 where the provider has a switch. Where caching is implicit it stays on:

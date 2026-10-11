@@ -511,6 +511,31 @@ pub struct AgentToolConfig {
     /// already points to.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub read_file_line_ranges: bool,
+    /// Opt-in (off by default): a reply in plain text, without a tool call,
+    /// is a message to the user, and the task carries on. Off, a native
+    /// response with text but no tool call is a response the runtime can't
+    /// use: it goes through error recovery (an `ErrorEncountered` and a
+    /// `RetryScheduled` event, and the runtime's note that the response
+    /// called no tool, which counts against the recovery's attempts).
+    ///
+    /// On, in native mode, the runtime sends the text to the host as
+    /// [`AgentEvent::MessageToUser`](crate::AgentEvent::MessageToUser)
+    /// (without a `tool_call_id`), adds a note that the user has the message
+    /// and the task is still open, and asks again, without an error event.
+    /// Only the first such reply since the agent's last tool call or new
+    /// message is a message: another one right after it is handled as with
+    /// the setting off, so a model that keeps replying in text still reaches
+    /// the recovery's attempt limit. The native system prompt tells the
+    /// model that a reply in plain text reaches the user. A Claude Code
+    /// agent's turn that ends without `complete_task` sends its final text
+    /// as `MessageToUser` before the runtime's note. Output-based mode
+    /// ignores the setting: its format asks for a tool call in every
+    /// response.
+    ///
+    /// The built-in `message_user` tool sends a message without this
+    /// setting, when `available_tool_names` lists it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub text_reply_as_message: bool,
 }
 
 /// The terminal tool that starts a command; an agent offered it has a
@@ -545,6 +570,8 @@ struct AgentToolConfigRepr {
     result_limits: ToolResultLimits,
     #[serde(default)]
     read_file_line_ranges: bool,
+    #[serde(default)]
+    text_reply_as_message: bool,
     /// Removed: every call of a response runs now. Read only to warn when a
     /// configuration had turned batching off.
     #[serde(default)]
@@ -571,6 +598,7 @@ impl From<AgentToolConfigRepr> for AgentToolConfig {
             tool_timeout_seconds: repr.tool_timeout_seconds,
             result_limits: repr.result_limits,
             read_file_line_ranges: repr.read_file_line_ranges,
+            text_reply_as_message: repr.text_reply_as_message,
         }
     }
 }
@@ -681,6 +709,7 @@ impl Default for AgentToolConfig {
             tool_timeout_seconds: default_tool_timeout_seconds(),
             result_limits: ToolResultLimits::default(),
             read_file_line_ranges: false,
+            text_reply_as_message: false,
         }
     }
 }
@@ -1101,8 +1130,9 @@ pub struct PlanUsageThreshold {
 /// the cache has expired reads the whole context again as uncached input,
 /// which uses more of the plan than cached input, more than any wait saves. [`prompt_cache_lifetime`](arko_ai::prompt_cache::prompt_cache_lifetime)
 /// gives the model's lifetime: 5 minutes for Anthropic by default (1 hour
-/// with `AnthropicCacheTtl::OneHour`), a conservative 5 minutes for OpenAI;
-/// for a Claude Code model, `anthropic_cache_ttl` when set (Claude Code's
+/// with `AnthropicCacheTtl::OneHour`), a conservative 5 minutes for OpenAI
+/// with an API key and 30 minutes over ChatGPT OAuth; for a Claude Code
+/// model, `anthropic_cache_ttl` when set (Claude Code's
 /// `promptCacheTtl`), otherwise Claude Code's choice: 1 hour on a Claude
 /// subscription within its usage limits, 5 minutes on an API key. Claude
 /// Code's subagents (its `Agent` tool) and helper requests cache for 5
@@ -1947,6 +1977,25 @@ mod validation_tests {
             error.contains("max_result_tokens must be positive"),
             "{error}"
         );
+    }
+
+    /// `text_reply_as_message` is off in a configuration saved without it,
+    /// and written only when on.
+    #[test]
+    fn text_reply_as_message_loads_off_and_is_written_when_on() {
+        let saved = serde_json::to_value(luna()).unwrap();
+        assert!(
+            saved["tool_config"].get("text_reply_as_message").is_none(),
+            "{saved}"
+        );
+        let loaded: AgentConfig = serde_json::from_value(saved).unwrap();
+        assert!(!loaded.tool_config.text_reply_as_message);
+        let mut config = luna();
+        config.tool_config.text_reply_as_message = true;
+        let saved = serde_json::to_value(&config).unwrap();
+        assert_eq!(saved["tool_config"]["text_reply_as_message"], true);
+        let loaded: AgentConfig = serde_json::from_value(saved).unwrap();
+        assert!(loaded.tool_config.text_reply_as_message);
     }
 
     /// A zero command timeout (which ended every wait at once) is rejected,

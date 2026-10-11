@@ -327,13 +327,22 @@ async fn automatic_limits_follow_each_agents_prompt_cache() {
             arko_ai::Model::anthropic_claude_opus_5_5(),
             default(),
         ),
+        // The host's lifetime replaces the provider's.
+        with_model(
+            "hosted",
+            arko_ai::Model::openai_gpt_6_astra(),
+            default().with_prompt_cache_lifetime(Duration::from_secs(600)),
+        ),
     ];
     let minutes = |minutes: u64| Duration::from_secs(minutes * 60);
     let clients = [
-        LLMClient::new().with_openai_api_key("sk-test"),
-        LLMClient::new().with_openai_chatgpt_oauth("access", None, "account"),
+        (LLMClient::new().with_openai_api_key("sk-test"), false),
+        (
+            LLMClient::new().with_openai_chatgpt_oauth("access", None, "account"),
+            true,
+        ),
     ];
-    for client in clients {
+    for (client, oauth) in clients {
         let client = Arc::new(client);
         let mut builder = Workflow::builder()
             .name("wait-test")
@@ -351,15 +360,22 @@ async fn automatic_limits_follow_each_agents_prompt_cache() {
                 client.clone(),
             )
         };
+        // OpenAI is a conservative 5 minutes with an API key, and 30
+        // minutes over ChatGPT OAuth, whose cache ignores the caching switch.
+        let openai = if oauth {
+            minutes(27)
+        } else {
+            Duration::from_secs(270)
+        };
         for (agent, expected) in [
-            // OpenAI is a conservative 5 minutes on either auth.
-            ("openai", Duration::from_secs(270)),
-            ("older", minutes(5) - Duration::from_secs(30)),
+            ("openai", openai),
+            ("older", openai),
             ("claude", Duration::from_secs(270)),
             ("claude_hour", minutes(54)),
             ("claude_off", DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT),
             ("gemini", DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT),
             ("fixed", Duration::from_secs(42)),
+            ("hosted", minutes(9)),
         ] {
             assert_eq!(limit(agent).limit().await, expected, "{agent}");
         }

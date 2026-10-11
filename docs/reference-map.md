@@ -231,8 +231,9 @@ Code paths are relative to the repository root. Items are listed by their shorte
 | Item | What it is | Code | Docs |
 |---|---|---|---|
 | `PromptCacheLifetime` (`Known(Duration)`, `Unknown`, `Disabled`) | How long a provider keeps a request's prompt cache after its last use. | `arko_ai/src/prompt_cache.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
-| `prompt_cache::prompt_cache_lifetime` | The lifetime for a model, config and auth path; reads `GenerationConfig::prompt_caching`, not `Conversation::enable_cache`. | `arko_ai/src/prompt_cache.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
-| `prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME`, `ANTHROPIC_EXTENDED_PROMPT_CACHE_LIFETIME`, `OPENAI_PROMPT_CACHE_LIFETIME` | 5 minutes, 1 hour, and 5 minutes (a conservative value for every OpenAI path). | `arko_ai/src/prompt_cache.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
+| `prompt_cache::prompt_cache_lifetime` | The lifetime for a model, config and auth path; reads `GenerationConfig::prompt_caching` and `prompt_cache_lifetime_seconds`, not `Conversation::enable_cache`. | `arko_ai/src/prompt_cache.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
+| `prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME`, `ANTHROPIC_EXTENDED_PROMPT_CACHE_LIFETIME`, `OPENAI_PROMPT_CACHE_LIFETIME`, `CHATGPT_OAUTH_PROMPT_CACHE_LIFETIME` | 5 minutes, 1 hour, 5 minutes (a conservative value for OpenAI with an API key), and 30 minutes (OpenAI over ChatGPT OAuth). | `arko_ai/src/prompt_cache.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
+| `GenerationConfig::prompt_cache_lifetime_seconds`, `GenerationConfig::with_prompt_cache_lifetime` | The host's prompt-cache lifetime, reported in place of the provider's. | `arko_ai/src/config.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
 | `AnthropicCacheTtl` (`FiveMinutes` = `"5m"`, `OneHour` = `"1h"`), `AnthropicCacheTtl::duration` | Claude cache lifetimes and their durations. | `arko_ai/src/config.rs`, `arko_ai/src/prompt_cache.rs` | [Prompt caching (arko_ai)](#prompt-caching-arko_ai) |
 
 **Usage and cost**
@@ -379,6 +380,7 @@ does use is an error before anything is sent. Exceptions: `temperature` and
 | `interleaved_thinking` | Automatic on Claude 4.6 and later while adaptive thinking is active | On the Anthropic provider, `Some(true)` needs a model that supports it and active thinking (not a manual budget on Opus 4.6); with a manual budget it sends the `interleaved-thinking-2025-05-14` beta header, with adaptive thinking nothing. `Some(false)` is `Error::InvalidRequest` while adaptive thinking is active on 4.6 and later, and sends nothing otherwise. For Claude on OpenRouter, `Some(true)` adds the beta header and `Some(false)` is `Error::UnsupportedFeature`. |
 | `openai_service_tier` | Not sent: the project's default tier | `auto`, `default`, `flex`, `priority` (the `Fast` variant). With an API key, Flex and Fast only on models that offer them (`Error::InvalidRequest` otherwise). Over ChatGPT OAuth, as in Codex: Fast (`priority`, plus `tier=priority` in the `x-codex-routing-hint` header) on GPT-6 Astra, Sol, Luna and 6.1 Sol, GPT-5.6 Sol, Terra and Luna, and GPT-5.5 (`Error::InvalidRequest` on other models); `Default` sends no tier; Flex and Auto are `Error::UnsupportedFeature`. |
 | `anthropic_cache_ttl` | No `ttl`: 5 minutes | `"5m"`, `"1h"` (1-hour cache writes cost 2x base input). `Error::InvalidRequest` while caching is off. Also used for Claude on OpenRouter. |
+| `prompt_cache_lifetime_seconds` | `None`: the provider's lifetime | Never sent. Replaces the lifetime `prompt_cache_lifetime` reports, `Known` or `Unknown`. An uncached request stays `Disabled`, and `0` reports `Disabled`. Left out of saved configs when `None`. |
 | `anthropic_fast_mode` | Nothing sent | `Some(true)` sends `speed: "fast"` with the `fast-mode-2026-02-01` beta header on Opus 5.5, Opus 5 and Opus 4.8 (`Error::InvalidRequest` on other models); billed at fast-mode rates. |
 | `anthropic_inference_geo` | Not sent: the workspace's default | `global`, `us` (1.1x price); Claude 4.6 and later (`Error::InvalidRequest` on older models). |
 | `openrouter` | The client's default options | `OpenRouterOptions`, merged over `OpenRouterClient::with_default_options`; see [OpenRouter (arko_ai)](#openrouter-arko_ai). |
@@ -452,9 +454,10 @@ The conversation's key goes with every OpenAI request, and as `session_id` with 
 OpenRouter request, either way; it routes requests but doesn't turn caching on. On
 Anthropic and OpenRouter, caching also needs the model's cache support
 (`Model::supports_cache`). `prompt_cache_lifetime` reports 5 minutes for Anthropic and
-Claude on OpenRouter (1 hour with `anthropic_cache_ttl: OneHour`) and a conservative
-5 minutes for OpenAI on both auth paths; Gemini and other OpenRouter models are
-`Unknown`. It reports `Disabled` for models without cache support (the OpenAI Pro models,
+Claude on OpenRouter (1 hour with `anthropic_cache_ttl: OneHour`), a conservative
+5 minutes for OpenAI with an API key, and 30 minutes for OpenAI over ChatGPT OAuth; Gemini
+and other OpenRouter models are `Unknown`. `GenerationConfig::prompt_cache_lifetime_seconds`
+replaces any of these, except for an uncached request. It reports `Disabled` for models without cache support (the OpenAI Pro models,
 `o3-pro`, `gemini-2.0-flash`, OpenRouter catalog models without cache prices), and with
 caching off on Anthropic, Claude on OpenRouter, and GPT-5.6 and later with an API key.
 `LLMClient::prompt_cache_lifetime(&model, &config)` reads only `config.prompt_caching`,
@@ -741,6 +744,7 @@ Most items are re-exported at the crate root (`arko_agents::AgentConfig`). Items
 | `AgentToolConfig::result_limits`, `ToolResultLimits { overflow_guard, margin_tokens, max_result_tokens }`, `ToolResultLimits::{is_default, without_overflow_guard, margin_tokens, max_result_tokens}` | Host-side limits on what tool results add to the conversation: the overflow guard (on by default) and an opt-in cap per result. Never shown to the model. | `arko_agents/src/agent_config.rs` | [Tool result size (arko_agents)](#tool-result-size-arko_agents) |
 | `AgentToolConfig::max_result_tokens(tool_name)`, `PerToolConfigOverride::max_result_tokens` | A tool's effective cap; a tool's own cap (`null`: none for this tool). | `arko_agents/src/agent_config.rs` | [Tool result size (arko_agents)](#tool-result-size-arko_agents) |
 | `AgentToolConfig::read_file_line_ranges` | Opt-in: the built-in `read_file` takes `start_line` and `end_line`. | `arko_agents/src/agent_config.rs` | [Tool result size (arko_agents)](#tool-result-size-arko_agents) |
+| `AgentToolConfig::text_reply_as_message` | Opt-in: a reply in plain text, without a tool call, is sent to the user as `MessageToUser` and the task carries on. | `arko_agents/src/agent_config.rs` | [Tools (arko_agents)](#tools-arko_agents) |
 
 #### Map: environment details (arko_agents)
 
@@ -817,6 +821,7 @@ Most items are re-exported at the crate root (`arko_agents::AgentConfig`). Items
 | `AgentEvent::{ToolCallInitiated, ToolCallFormatted}` | A call announced, then parsed with its parameters. | `arko_agents/src/runtime/event.rs` | [Running tasks](../arko_agents/README.md#running-tasks) |
 | `AgentEvent::{ToolParamName, ToolParamValueChunk, ToolParamEnd}` | Parameter-by-parameter parsing events, in output-based mode with `simplified_tool_events` off. | `arko_agents/src/runtime/event.rs` | [Runtime (arko_agents)](#runtime-arko_agents) |
 | `AgentEvent::{ToolCallAwaitingApproval, BatchToolCallAwaitingApproval, UserQuestionsAsked}` | The task waits for an approval or an answer. | `arko_agents/src/runtime/event.rs` | [Approvals and workspace paths](../arko_agents/README.md#approvals-and-workspace-paths) |
+| `AgentEvent::MessageToUser { message, tool_call_id }` | A message for the user, and the task carries on: a `message_user` call, or (`tool_call_id` `None`) a reply in plain text under `text_reply_as_message`. | `arko_agents/src/runtime/event.rs` | [Tools](../arko_agents/README.md#tools) |
 | `AgentEvent::{ToolResult, ToolResultIntercepted}` | A call's result, and the replacement when an interceptor changed it. | `arko_agents/src/runtime/event.rs` | [Result interception and execution middleware](../arko_agents/README.md#result-interception-and-execution-middleware) |
 | `AgentEvent::{ToolRejected, UnavailableToolAttempted}` | A call that was rejected, stopped or not run; a call to a tool the task can't run. | `arko_agents/src/runtime/event.rs` | [Running tasks](../arko_agents/README.md#running-tasks) |
 | `AgentEvent::{ErrorEncountered, RetryScheduled}` | An error (`requires_approval_to_retry` marks a pause; `error_kind` is a failed model request's `arko_ai::ErrorKind`, when classified), and a scheduled retry with its attempt, delay and elapsed time. | `arko_agents/src/runtime/event.rs` | [Model-call recovery (arko_agents)](#model-call-recovery-arko_agents) |
@@ -868,6 +873,7 @@ Most items are re-exported at the crate root (`arko_agents::AgentConfig`). Items
 |---|---|---|---|
 | `complete_task`: `builtins::{CompleteTaskTool, COMPLETE_TASK_TOOL_NAME}`, `builtins::complete_task::COMPLETE_TASK_SUMMARY_PARAM_NAME`, `CompleteTaskTool::default_summary_description` | Ends the task as `Completed { summary }`; offered whether listed or not. | `arko_agents/src/tool/builtins/complete_task.rs` | [Tools](../arko_agents/README.md#tools) |
 | `ask_user`: `builtins::{AskUserTool, ASK_USER_TOOL_NAME}`, `builtins::ask_user::ASK_USER_QUESTIONS_PARAM_NAME` | Puts the task in `AwaitingUserResponse` with its `questions`; runs without approval by default. | `arko_agents/src/tool/builtins/ask_user.rs` | [Tools](../arko_agents/README.md#tools) |
+| `message_user`: `builtins::{MessageUserTool, MESSAGE_USER_TOOL_NAME}`, `builtins::message_user::{MESSAGE_USER_MESSAGE_PARAM_NAME, MESSAGE_USER_RESULT}` | Sends its `message` to the host as `AgentEvent::MessageToUser` and the task carries on, with no wait and no state change. Parallel-safe. A host tool registered under the name replaces it, and its calls send no `MessageToUser`. | `arko_agents/src/tool/builtins/message_user.rs` | [Tools](../arko_agents/README.md#tools) |
 | `read_file`: `builtins::{ReadFileTool, READ_FILE_TOOL_NAME}`, `builtins::read_file::{offered_definition, TERMINAL_HINT, LINE_RANGES_HINT, START_LINE_PARAM_NAME, END_LINE_PARAM_NAME}` | Returns a UTF-8 file with numbered lines (`1 \| …`); parallel-safe. With `AgentToolConfig::read_file_line_ranges`, `start_line` and `end_line` read only those lines. Offered beside the terminal tools, its description gains `TERMINAL_HINT`. | `arko_agents/src/tool/builtins/read_file.rs` | [Tool result size (arko_agents)](#tool-result-size-arko_agents) |
 | `write_file`: `builtins::{WriteFileTool, WRITE_FILE_TOOL_NAME}` | Writes `content` to `path`, creating parent directories. | `arko_agents/src/tool/builtins/write_file.rs` | [Tools (arko_agents)](#tools-arko_agents) |
 | `apply_diff`: `builtins::{ApplyDiffTool, APPLY_DIFF_TOOL_NAME}` | Applies SEARCH/REPLACE blocks to an existing file. | `arko_agents/src/tool/builtins/apply_diff.rs` | [Tools (arko_agents)](#tools-arko_agents) |
@@ -971,7 +977,7 @@ Most items are re-exported at the crate root (`arko_agents::AgentConfig`). Items
 
 ### Tools (arko_agents)
 
-`ToolRegistry::new()` registers `complete_task`, `read_file`, `write_file`, `apply_diff`, `list_files` and `ask_user`. A task runs only the registry's tools that its configuration offers.
+`ToolRegistry::new()` registers `complete_task`, `read_file`, `write_file`, `apply_diff`, `list_files`, `ask_user` and `message_user`. A task runs only the registry's tools that its configuration offers. `ToolRegistry::register` replaces a tool registered under the same name, a built-in included, except that only a built-in can replace `complete_task`.
 
 | `AgentToolConfig` field | Default | Omitted in JSON | Notes |
 |---|---|---|---|
@@ -984,6 +990,7 @@ Most items are re-exported at the crate root (`arko_agents::AgentConfig`). Items
 | `tool_specific_configs` | Empty | Empty | A `PerToolConfigOverride` per tool name, below. |
 | `result_limits` | `ToolResultLimits::default()`: the overflow guard on, no caps | The default; left out when default | See [Tool result size (arko_agents)](#tool-result-size-arko_agents). |
 | `read_file_line_ranges` | `false` | `false`; left out when `false` | `true` adds `start_line` and `end_line` to `read_file`. |
+| `text_reply_as_message` | `false` | `false`; left out when `false` | `true` makes a native reply in plain text a message to the user (`MessageToUser` without a `tool_call_id`), followed by a note, outside error recovery. Only the first such reply since the last tool call or new message counts: another one right after it is handled as a response without a tool call. A Claude Code agent sends the final text of a turn that ends without `complete_task`. Output-based mode ignores it. |
 
 `PerToolConfigOverride` fields all default to `None`, which inherits the agent's setting: `auto_approve_tool_use`, `parallel_safe` (instead of the tool definition's), `out_of_workspace_path_policy`, `tool_timeout_seconds` (omitted: inherit; `null`: no limit; a number: that limit, which applies to exempt tools too), and `max_result_tokens` (omitted: inherit; `null`: no cap for this tool; a number: that cap).
 
@@ -991,11 +998,11 @@ A custom tool sets its own behaviour: `ToolDefinition::parallel_safe` (omitted i
 
 How a native response's calls run (an output-based response holds one call, or one batch of calls to one tool, run one after another):
 
-- Native calls get exactly one result each. Calls run in call order under a fair read/write lock: a parallel-safe call starts once every earlier call that isn't parallel-safe has finished, and any other call waits for every earlier call. `read_file`, `list_files` and `load_skill` are parallel-safe; the other built-in tools and the terminal tools are not; an MCP tool is parallel-safe only when its server marks it `readOnlyHint: true`.
+- Native calls get exactly one result each. Calls run in call order under a fair read/write lock: a parallel-safe call starts once every earlier call that isn't parallel-safe has finished, and any other call waits for every earlier call. `read_file`, `list_files`, `message_user` and `load_skill` are parallel-safe; the other built-in tools and the terminal tools are not; an MCP tool is parallel-safe only when its server marks it `readOnlyHint: true`.
 - A call awaiting approval counts as unfinished: the calls after it that must wait are held with it until the approvals are decided.
 - Calls after one that ends the turn (`complete_task`, `ask_user`, a tool error under `FailTask`, a middleware's `FailTask` or `CancelTask`) are not run, and their results say so; parallel-safe calls already running beside it finish. Among the calls run once approvals are decided, only a call that ends the task stops the others. `CancelTask` and `SuspendTask` stop the calls still running (their results say so) unless one of them isn't interruptible.
 - `complete_task` always runs alone, after the calls before it. After an earlier call of its turn was rejected or failed, it doesn't complete the task, and its result says so.
-- A response without a tool call doesn't end the task: a note asks the model to continue or call `complete_task`, and the response counts as a model-call recovery attempt (under `LLMErrorPolicy::PauseAndAwaitApproval` the task pauses at once).
+- A response without a tool call doesn't end the task: a note asks the model to continue or call `complete_task`, and the response counts as a model-call recovery attempt (under `LLMErrorPolicy::PauseAndAwaitApproval` the task pauses at once). With `text_reply_as_message`, a reply with text is first sent to the user as a message instead (see the table above).
 - A `tool_config` in the model's `GenerationConfig` supplies `tool_choice` and `parallel_tool_calls`; its tool list is ignored, with a warning in the log. Without one, no tool choice is sent.
 
 In both modes:
@@ -1155,7 +1162,7 @@ MCP tools are named `mcp__<server>__<tool>` and return text only: images are dro
 - Terminal job records left `running` by a stopped host load as `interrupted`; processes are never reattached.
 - A task saved without `parent` has none (it ran at the top level).
 - A task saved without `running_tool_calls` has none. One saved with some (by a host that crashed while its calls ran) settles them by each tool's `recovery_mode` before it goes on.
-- A pause, failure or `ErrorEncountered` event saved without `error_kind` loads with `None`, and `None` is not written, so older versions read new tasks as before; a kind a later version adds loads as `Unknown`. A configuration saved without `result_limits` or `read_file_line_ranges` loads with the defaults (the guard on, no caps, no ranges), which are not written either, so a resumed run compares equal.
+- A pause, failure or `ErrorEncountered` event saved without `error_kind` loads with `None`, and `None` is not written, so older versions read new tasks as before; a kind a later version adds loads as `Unknown`. A configuration saved without `result_limits`, `read_file_line_ranges` or `text_reply_as_message` loads with the defaults (the guard on, no caps, no ranges, text replies not messages), which are not written either, so a resumed run compares equal.
 
 ### Example binaries (arko_agents)
 

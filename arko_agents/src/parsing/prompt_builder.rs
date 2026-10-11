@@ -89,11 +89,16 @@ impl<'a> PromptBuilder<'a> {
             } else {
                 "You can call several tools in one response; calls that don't depend on each other can run at the same time, and each call gets its own result."
             };
+            let without_call = if self.agent_config.tool_config.text_reply_as_message {
+                "A reply in plain text, without a tool call, is sent to the user as a message; it does not end the task either."
+            } else {
+                "A response without a tool call does not end the task."
+            };
             prompt.push_str(&format!(
                 "## Tool Usage\n\
                 You have tools available through the native tool calling interface. {calls} \
                 The task ends only when you call `complete_task`: call it with a summary once the task is finished. \
-                A response without a tool call does not end the task.\n\n"
+                {without_call}\n\n"
             ));
         } else {
             prompt.push_str("## Tools Available\n");

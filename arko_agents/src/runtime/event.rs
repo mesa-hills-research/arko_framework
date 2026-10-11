@@ -67,6 +67,22 @@ pub enum AgentEvent {
         /// The questions asked by the agent.
         questions: String,
     },
+    /// The agent sent the user a message without ending its turn: it called
+    /// the built-in `message_user` tool, or, with
+    /// [`AgentToolConfig::text_reply_as_message`](crate::agent_config::AgentToolConfig::text_reply_as_message),
+    /// replied in plain text without a tool call. Nothing waits for an
+    /// answer, and the task's state doesn't change. For a call, it follows
+    /// the call's `ToolCallFormatted` and comes before its `ToolResult`; a
+    /// reply in plain text has already streamed as `AssistantResponseChunk`
+    /// events.
+    MessageToUser {
+        /// The message, as the agent wrote it.
+        message: String,
+        /// The `message_user` call that sent it; `None` for a reply in
+        /// plain text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<Uuid>,
+    },
     /// A tool has finished executing with a result.
     ///
     /// Contains the **original** tool output before any interception.

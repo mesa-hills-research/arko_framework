@@ -63,9 +63,11 @@ const FORWARD_WAIT: Duration = Duration::from_secs(1);
 /// lifetime, from [`LLMClient::prompt_cache_lifetime`] for its model and
 /// settings: the lifetime minus a margin of a tenth of it, at least 30
 /// seconds. That is 4 minutes 30 seconds for a 5-minute cache (Anthropic's
-/// default, and OpenAI's, reported conservatively on every model and auth)
-/// and 54 minutes with Anthropic's 1-hour TTL, an explicit opt-in. With an
-/// unknown lifetime, or caching off, it is
+/// default, and OpenAI's with an API key, reported conservatively on every
+/// model), 27 minutes for ChatGPT OAuth's 30-minute cache, and 54 minutes
+/// with Anthropic's 1-hour TTL, an explicit opt-in. A host's
+/// `GenerationConfig::prompt_cache_lifetime_seconds` replaces the lifetime.
+/// With an unknown lifetime, or caching off, it is
 /// [`DEFAULT_WAIT_FOR_MESSAGE_TIMEOUT`]: with nothing to keep warm, a
 /// bounded wait still lets the agent look around now and then.
 ///

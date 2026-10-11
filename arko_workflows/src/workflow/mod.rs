@@ -1785,8 +1785,9 @@ impl WorkflowBuilder {
     /// own setting ([`agent_wait_for_message_timeout`](Self::agent_wait_for_message_timeout)).
     /// Default [`WaitForMessageTimeout::Auto`]: just inside the agent's
     /// prompt-cache lifetime, so the request after a wait still finds the
-    /// prompt cached: 4 minutes 30 seconds, or 54 minutes with Anthropic's
-    /// 1-hour TTL. An agent waits longer by calling the tool again. A
+    /// prompt cached: 4 minutes 30 seconds, 27 minutes over ChatGPT OAuth, or
+    /// 54 minutes with Anthropic's 1-hour TTL. An agent waits longer by
+    /// calling the tool again. A
     /// `Duration` sets a fixed limit, more than zero and at most 24 hours; one
     /// past the cache lifetime can cost a cache miss on the next turn.
     pub fn wait_for_message_timeout(mut self, timeout: impl Into<WaitForMessageTimeout>) -> Self {

@@ -515,3 +515,7 @@ mod snapshot_tests;
 #[cfg(test)]
 #[path = "result_limit_tests.rs"]
 mod result_limit_tests;
+
+#[cfg(test)]
+#[path = "message_user_tests.rs"]
+mod message_user_tests;

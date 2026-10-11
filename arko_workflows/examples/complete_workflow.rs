@@ -442,6 +442,10 @@ fn agent_config(
         // for the model's context is shortened with a notice (pointing to the
         // terminal when one is offered). True adds start_line and end_line.
         read_file_line_ranges: false,
+        // Default false: a reply in plain text, without a tool call, gets a
+        // note asking for a tool call. True sends it to the user as a
+        // message (AgentEvent::MessageToUser) and the agent carries on.
+        text_reply_as_message: false,
     };
     let mut builder = AgentConfig::builder(id.to_string(), name.to_string(), llm_config)
         .role_description(role.to_string())

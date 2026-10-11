@@ -4,6 +4,7 @@ pub mod apply_diff;
 pub mod ask_user;
 pub mod complete_task;
 pub mod list_files;
+pub mod message_user;
 pub mod read_file;
 pub mod write_file;
 
@@ -24,6 +25,9 @@ pub use list_files::ListFilesTool;
 
 pub use ask_user::ASK_USER_TOOL_NAME;
 pub use ask_user::AskUserTool;
+
+pub use message_user::MESSAGE_USER_TOOL_NAME;
+pub use message_user::MessageUserTool;
 
 /// The path a file tool opens for its `param_name` parameter: resolved with
 /// [`crate::utils::resolve_path`], which the runtime's workspace check also
