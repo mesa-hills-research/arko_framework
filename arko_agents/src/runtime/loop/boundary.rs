@@ -92,14 +92,26 @@ impl AgentLoop {
         if self.handover_report_due() {
             return Ok(());
         }
-        if let Some(content) = self
+        if let Some(update) = self
             .turn_context
             .as_ref()
-            .and_then(|source| source.turn_context(self.task.id))
+            .and_then(|source| source.context_update(self.task.id))
         {
-            self.queue_context_injection(content);
+            if !update.content.trim().is_empty() {
+                self.context_ids.extend(update.ids);
+            }
+            self.queue_context_injection(update.content);
         }
         self.add_taken_context()
+    }
+
+    /// Emits the `ContextInjected` events of the context updates added
+    /// since the last call.
+    pub(super) async fn emit_context_receipts(&mut self) -> Result<(), ArkoAgentsError> {
+        for event in std::mem::take(&mut self.context_receipts) {
+            self.emit_event(event).await?;
+        }
+        Ok(())
     }
 
     /// Adds the context taken from the command channel
@@ -129,6 +141,24 @@ impl AgentLoop {
         )?;
         self.task.conversation.add_user_message(&message);
         self.task.increment_user_message_count();
+        // The host's identifiers of what it holds, for its receipt: those of
+        // the content it sent, then the turn context source's.
+        let mut ids = self
+            .turn_context
+            .as_ref()
+            .map(|source| {
+                self.task
+                    .pending_context_injections
+                    .iter()
+                    .filter_map(|content| source.identify(content))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        ids.append(&mut self.context_ids);
+        self.context_receipts.push(AgentEvent::ContextInjected {
+            ids,
+            bytes: content.len(),
+        });
         self.task.pending_context_injections.clear();
         Ok(())
     }
@@ -238,6 +268,7 @@ impl AgentLoop {
             // the fresh conversation.
             self.start_handover_if_due().await?;
             self.flush_context_injections()?;
+            self.emit_context_receipts().await?;
             self.refresh_file_tree_context();
         }
         self.ensure_user_turn_before_request()?;

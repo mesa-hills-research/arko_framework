@@ -237,6 +237,7 @@ impl AgentLoop {
         }
         if self.task.fallback_for.is_none() {
             self.add_taken_context()?;
+            self.emit_context_receipts().await?;
         }
         Ok(true)
     }

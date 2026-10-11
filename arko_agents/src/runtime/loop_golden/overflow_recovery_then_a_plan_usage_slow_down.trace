@@ -39,6 +39,7 @@ E {"ToolCallFormatted":{"parameters":{},"tool_call_id":"id5","tool_name":"missin
 E {"UnavailableToolAttempted":{"tool_name":"missing_tool"}}
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=c28c8123c6163244
 E {"PlanUsageThresholdReached":{"action":{"SlowDown":{"delay_ms":10000}},"resets_at_unix_ms":"<time>","threshold_percent":90.0,"used_percent":95.0,"window":"primary"}}
+E {"ContextInjected":{"bytes":26}}
 R msgs=4 model=gpt-5.6-luna request=e38f9417e9509150
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}

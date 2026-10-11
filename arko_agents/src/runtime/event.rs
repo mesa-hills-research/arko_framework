@@ -246,6 +246,27 @@ pub enum AgentEvent {
         /// replaced; 0 when a host asked before any request.
         input_tokens: usize,
     },
+    /// A context update joined the conversation: content the host sent with
+    /// [`InjectContext`](crate::runtime::command::UserCommand::InjectContext)
+    /// and its turn context source's context
+    /// ([`TurnContextSource`](crate::runtime::TurnContextSource)), added as
+    /// one user message headed `# Workflow context update`. Emitted once the
+    /// message is in the conversation (for a Claude Code agent, once it is
+    /// sent to the session), so the task has received what it carries.
+    ContextInjected {
+        /// The host's identifiers of the items the update holds
+        /// ([`TurnContext::ids`](crate::runtime::TurnContext::ids), and
+        /// [`TurnContextSource::identify`](crate::runtime::TurnContextSource::identify)
+        /// for injected content), in the order they were added; empty when
+        /// the host identified none. arko_workflows uses `note:<seq>` for a
+        /// note, `message:<id>` for an agent message and `mail:<id>` for a
+        /// subagent mailbox item.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ids: Vec<String>,
+        /// The update's size in bytes, without its heading.
+        #[serde(default)]
+        bytes: usize,
+    },
     /// The conversation was replaced with a fresh one that starts from the
     /// task prompt and the report ([`Task::handovers`](crate::task::Task::handovers)
     /// holds the record).

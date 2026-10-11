@@ -500,6 +500,8 @@ pub(super) struct ClaudeCodeRun {
     events: mpsc::Sender<AgentEvent>,
     commands: mpsc::Receiver<UserCommand>,
     pub(super) turn_context: Option<Arc<dyn super::TurnContextSource>>,
+    /// `ContextInjected` events for context taken and not yet reported.
+    context_receipts: Vec<AgentEvent>,
     pub(super) host_decisions: super::HostDecisions,
     pub(super) handover_hook: Option<Arc<dyn HandoverHook>>,
     middleware: Option<Arc<dyn ToolExecutionMiddleware>>,
@@ -606,6 +608,7 @@ impl ClaudeCodeRun {
             events,
             commands,
             turn_context: None,
+            context_receipts: Vec::new(),
             host_decisions: super::HostDecisions::default(),
             handover_hook: None,
             middleware,
@@ -1164,19 +1167,47 @@ impl ClaudeCodeRun {
         if self.handover_due() {
             return None;
         }
-        if let Some(content) = self
+        let mut update_ids = Vec::new();
+        if let Some(update) = self
             .turn_context
             .as_ref()
-            .and_then(|source| source.turn_context(self.task.id))
+            .and_then(|source| source.context_update(self.task.id))
         {
-            self.queue_context(content);
+            if !update.content.trim().is_empty() {
+                update_ids = update.ids;
+            }
+            self.queue_context(update.content);
         }
         if self.task.pending_context_injections.is_empty() {
             return None;
         }
         let content = self.task.pending_context_injections.join("\n\n");
+        let mut ids = self
+            .turn_context
+            .as_ref()
+            .map(|source| {
+                self.task
+                    .pending_context_injections
+                    .iter()
+                    .filter_map(|content| source.identify(content))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        ids.append(&mut update_ids);
+        self.context_receipts.push(AgentEvent::ContextInjected {
+            ids,
+            bytes: content.len(),
+        });
         self.task.pending_context_injections.clear();
         Some(format!("# Workflow context update\n\n{content}"))
+    }
+
+    /// Reports the context updates taken (and now sent) since the last call.
+    async fn emit_context_receipts(&mut self) -> Result<(), ArkoAgentsError> {
+        for event in std::mem::take(&mut self.context_receipts) {
+            self.emit(event).await?;
+        }
+        Ok(())
     }
 
     fn session_options(
@@ -1435,6 +1466,7 @@ impl ClaudeCodeRun {
             let _ = session.close().await;
             return Ok(end);
         }
+        self.emit_context_receipts().await?;
         self.questions = None;
         // Claude Code exited on its own: it may not have saved every call.
         let mut cli_exited = false;
@@ -2134,6 +2166,7 @@ impl ClaudeCodeRun {
         }
         let text = texts.join("\n\n");
         self.delivered_context.push(text.clone());
+        self.emit_context_receipts().await?;
         Ok(add_context(&text))
     }
 
@@ -3057,6 +3090,7 @@ impl ClaudeCodeRun {
         if let Err(error) = self.send(session, &note).await {
             return self.session_failed(error.to_string()).await.map(Some);
         }
+        self.emit_context_receipts().await?;
         Ok(None)
     }
 

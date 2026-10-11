@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 use self::command::UserCommand;
 use self::event::AgentEvent;
 use self::r#loop::AgentLoop;
-pub use self::turn_context::TurnContextSource;
+pub use self::turn_context::{TurnContext, TurnContextSource};
 use crate::error::ArkoAgentsError;
 use crate::handover::HandoverHook;
 use crate::skill::SkillPromptContext;

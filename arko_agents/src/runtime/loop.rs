@@ -158,6 +158,12 @@ pub struct AgentLoop {
     execution_middleware: Option<Arc<dyn ToolExecutionMiddleware>>,
     /// Asked for context at each safe turn boundary.
     pub(super) turn_context: Option<Arc<dyn super::TurnContextSource>>,
+    /// The identifiers of the turn context source's content queued and not
+    /// yet added; see [`add_taken_context`](Self::add_taken_context).
+    pub(super) context_ids: Vec<String>,
+    /// `ContextInjected` events for context updates added and not yet
+    /// emitted (the update is added where no event can be sent).
+    pub(super) context_receipts: Vec<AgentEvent>,
     /// Called when the conversation is handed over.
     pub(super) handover_hook: Option<Arc<dyn HandoverHook>>,
     /// Receives the task at its safe points; see [`report_task`](Self::report_task).
@@ -265,6 +271,8 @@ impl AgentLoop {
             interceptor_config,
             execution_middleware,
             turn_context: None,
+            context_ids: Vec::new(),
+            context_receipts: Vec::new(),
             handover_hook: None,
             snapshots: Default::default(),
             host_stop: crate::stop::StopSignal::never(),
@@ -390,6 +398,8 @@ impl AgentLoop {
     async fn finish(mut self) -> Result<Task, ArkoAgentsError> {
         // Whatever stopped the loop, context it took is not lost.
         self.keep_taken_context()?;
+        // Reported if the host still listens.
+        let _ = self.emit_context_receipts().await;
         self.report_task(false).await;
         self.flush_throttled_text().await?;
         self.flush_throttled_reasoning().await?;

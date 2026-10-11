@@ -11,6 +11,7 @@ E {"ToolResult":{"output":"winds_down wound down: Task cancelled.","tool_call_id
 E {"TaskStateChanged":{"Cancelled":{"reason":"Task cancelled by user."}}}
 S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=1 handovers=0 state={"Cancelled":{"reason":"Task cancelled by user."}} task=12663332597b3402
 E {"ToolRejected":{"reason":"The task was cancelled, so this call was not run.","tool_call_id":"id3","tool_name":"step"}}
+E {"ContextInjected":{"bytes":29}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Cancelled":{"reason":"Task cancelled by user."}} task=07b3f8ac385cf049
 E "TaskStreamEnd"
 --- conversation: 4 messages, system prompt d1669b0441bd8242

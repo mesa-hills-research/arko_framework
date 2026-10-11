@@ -13,6 +13,7 @@ R msgs=1 model=gpt-5.6-luna request=e1b7359ec5ce14c7
 E {"AssistantResponseChunk":"Working on it"}
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=1 handovers=1 state="InProgress" task=f6e5e65eaab58b9a
+E {"ContextInjected":{"bytes":23}}
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=1 state="InProgress" task=8477dbc06ccec048
 E "TaskStreamEnd"
 --- conversation: 3 messages, system prompt d1669b0441bd8242

@@ -964,3 +964,57 @@ async fn context_taken_in_the_final_turn_waits_for_a_continuation() {
     );
     assert!(task.pending_context_injections.is_empty());
 }
+
+/// A turn context source whose context carries identifiers, and which
+/// identifies injected content that starts with `id:`.
+struct Identified;
+
+impl crate::runtime::TurnContextSource for Identified {
+    fn turn_context(&self, _task_id: uuid::Uuid) -> Option<String> {
+        None
+    }
+
+    fn context_update(&self, _task_id: uuid::Uuid) -> Option<crate::runtime::TurnContext> {
+        Some(crate::runtime::TurnContext {
+            content: "From the source.".into(),
+            ids: vec!["note:1".into()],
+        })
+    }
+
+    fn identify(&self, content: &str) -> Option<String> {
+        content
+            .strip_prefix("id:")
+            .and_then(|rest| rest.split_whitespace().next())
+            .map(str::to_string)
+    }
+}
+
+/// Each context update is reported once it is in the conversation, with
+/// the identifiers of what it holds: the injected content the source
+/// identifies, then the source's own.
+#[tokio::test]
+async fn a_context_update_is_reported_with_its_identifiers() {
+    let (mut agent, mut events, commands) = harness();
+    native(&mut agent);
+    agent.turn_context = Some(Arc::new(Identified));
+    inject(&commands, "id:m7 Hello.");
+    inject(&commands, "Unidentified.");
+    push(&mut agent, scripted(complete_response()));
+    let run = tokio::spawn(agent.run());
+    let mut seen = Vec::new();
+    rest(&mut events, &mut seen).await;
+    let task = joined(run).await;
+    let update = update_texts(&task.conversation).remove(0);
+    assert_eq!(update, "id:m7 Hello.\n\nUnidentified.\n\nFrom the source.");
+    let receipts = seen
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ContextInjected { ids, bytes } => Some((ids.clone(), *bytes)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        receipts,
+        [(vec!["m7".to_string(), "note:1".to_string()], update.len())]
+    );
+}
