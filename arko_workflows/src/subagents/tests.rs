@@ -1149,7 +1149,7 @@ async fn an_isolated_subagent_works_in_its_providers_workspace() {
     within(workflow.run_agent("lead", "Delegate."))
         .await
         .unwrap();
-    let path = workspace.0.join("isolated/r1");
+    let path = workspace.0.join("isolated").join("r1");
     let lead = bodies_of(&server, "lead");
     assert!(offered(&lead[0]).contains(&"start_agent".to_string()));
     assert!(
