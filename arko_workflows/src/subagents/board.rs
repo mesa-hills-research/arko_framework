@@ -61,6 +61,9 @@ pub(crate) struct Board {
     workflow_run_id: Uuid,
     /// Where long mailbox items are saved whole.
     mail_dir: PathBuf,
+    /// The configurations the host's hook prepared for runs that start:
+    /// the hook runs once per start.
+    prepared: Mutex<HashMap<Uuid, AgentConfig>>,
 }
 
 impl Board {
@@ -93,6 +96,7 @@ impl Board {
             persistence,
             workflow_run_id,
             mail_dir,
+            prepared: Mutex::new(HashMap::new()),
         }
     }
 
@@ -142,22 +146,29 @@ impl Board {
             .collect()
     }
 
-    /// Takes the mailbox items for run `to` it hasn't received: they count
-    /// as delivered.
-    pub(crate) fn take(&self, to: Uuid) -> Vec<MailItem> {
+    /// Takes the mailbox items for run `to` it hasn't received out of the
+    /// mailbox: the host delivers them its own way.
+    pub(crate) fn take(&self, ctx: &Arc<SharedContext>, to: Uuid) -> Vec<MailItem> {
         let taken = {
             let mut state = self.state.lock();
             let now = Utc::now();
             let mut taken = Vec::new();
-            for item in &mut state.mail {
+            state.mail.retain(|item| {
                 if item.to == to && item.delivered_at.is_none() {
+                    let mut item = item.clone();
                     item.delivered_at = Some(now);
-                    taken.push(item.clone());
+                    taken.push(item);
+                    false
+                } else {
+                    true
                 }
-            }
+            });
             taken
         };
-        self.delivered(to, &taken);
+        if !taken.is_empty() {
+            self.delivered(to, &taken);
+            self.save_soon(ctx);
+        }
         taken
     }
 
@@ -581,6 +592,32 @@ impl Board {
             state.last_handle += 1;
             format!("r{}", state.last_handle)
         };
+        let now = Utc::now();
+        let mut record = SubagentRecord {
+            run_id,
+            handle: handle.clone(),
+            agent: agent.to_string(),
+            caller_run_id: caller,
+            caller_agent: caller_agent.to_string(),
+            depth: caller_depth + 1,
+            task: task.to_string(),
+            workspace: caller_dir.to_path_buf(),
+            isolated: None,
+            parameters,
+            peers: peer_ids,
+            all_peers,
+            state: SubagentState::Queued,
+            created: now,
+            since: now,
+            report: None,
+            error: None,
+            pending: None,
+            stopped_by_caller: None,
+            asking: false,
+        };
+        // The host's changes are checked before a workspace is made for the
+        // run, or the run is recorded.
+        let prepared = self.prepared_config(ctx, &record)?;
         let (workspace, isolated) = match (
             workspace.map(str::trim).filter(|w| !w.is_empty()),
             isolated,
@@ -606,6 +643,7 @@ impl Board {
                 };
                 let created = provider.create(&request).await?;
                 if !created.path.is_dir() {
+                    let _ = provider.remove(&created).await;
                     return Err(format!(
                         "the isolated workspace {} doesn't exist",
                         created.path.display()
@@ -626,32 +664,10 @@ impl Board {
             }
             (None, false) => (caller_dir.to_path_buf(), None),
         };
-        let now = Utc::now();
-        let record = SubagentRecord {
-            run_id,
-            handle: handle.clone(),
-            agent: agent.to_string(),
-            caller_run_id: caller,
-            caller_agent: caller_agent.to_string(),
-            depth: caller_depth + 1,
-            task: task.to_string(),
-            workspace: workspace.clone(),
-            isolated: isolated.clone(),
-            parameters,
-            peers: peer_ids,
-            all_peers,
-            state: SubagentState::Queued,
-            created: now,
-            since: now,
-            report: None,
-            error: None,
-            pending: None,
-            stopped_by_caller: None,
-            asking: false,
-        };
-        // The host's changes are checked before the run is recorded.
-        self.prepared_config(ctx, &record)?;
+        record.workspace = workspace.clone();
+        record.isolated = isolated.clone();
         let prompt = subagent_prompt(config, &record);
+        self.prepared.lock().insert(run_id, prepared);
         self.state.lock().runs.push(record);
         self.launch(ctx, run_id, PendingLaunch::Start { prompt });
         let queued = self
@@ -1796,12 +1812,26 @@ async fn run(
         .record(run_id)
         .ok_or_else(|| WorkflowError::Channel(format!("no subagent {run_id}")))?;
     let depth = record.depth;
+    let launch = match (launch, ctx.subagents.config()) {
+        // A run stopped before it started starts now, from its task.
+        (PendingLaunch::Resume { .. }, Some(config)) if recorded_result(ctx, run_id).is_none() => {
+            PendingLaunch::Start {
+                prompt: subagent_prompt(config, &record),
+            }
+        }
+        (launch, _) => launch,
+    };
     match launch {
         PendingLaunch::Start { prompt } => {
-            let config = ctx
-                .subagents
-                .prepared_config(ctx, &record)
-                .map_err(WorkflowError::BuilderInvalid)?;
+            // Prepared at the start, or again for a start a resume relaunches.
+            let prepared = ctx.subagents.prepared.lock().remove(&run_id);
+            let config = match prepared {
+                Some(config) => config,
+                None => ctx
+                    .subagents
+                    .prepared_config(ctx, &record)
+                    .map_err(WorkflowError::BuilderInvalid)?,
+            };
             ctx.registry.start(&[(run_id, record.agent.as_str())]);
             let options = StartOptions {
                 reserved: Some(run_id),

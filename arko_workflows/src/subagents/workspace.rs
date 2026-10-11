@@ -79,12 +79,13 @@ pub trait WorkspaceProvider: Send + Sync {
 }
 
 /// Gives each subagent a git worktree of the repository its caller works
-/// in: a checkout of the current commit (`HEAD`) at `<folder>/<run id>`, on
-/// a new branch `<prefix><run id>` (default prefix `arko/`), with the
-/// subagent working in the same subdirectory its caller works in. Worktrees
-/// are made one at a time (git locks the repository's files). Removing one
-/// keeps its branch, and git refuses while it has changes that aren't
-/// committed.
+/// in: a checkout of the current commit (`HEAD`) at `<folder>/<id>`, on a
+/// new branch `<prefix><id>` (default prefix `arko/`), with the subagent
+/// working in the same subdirectory its caller works in. `<id>` is the
+/// subagent's short id (`r1`), with a suffix (`r1-2`) when an earlier
+/// workflow run left that folder or branch. Worktrees are made one at a
+/// time (git locks the repository's files). Removing one keeps its branch,
+/// and git refuses while it has changes that aren't committed.
 #[derive(Debug)]
 pub struct GitWorktreeProvider {
     folder: PathBuf,
@@ -102,7 +103,7 @@ impl GitWorktreeProvider {
         }
     }
 
-    /// Branches named `<prefix><run id>`.
+    /// Branches named `<prefix><id>`.
     pub fn branch_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.branch_prefix = prefix.into();
         self
@@ -145,12 +146,35 @@ impl WorkspaceProvider for GitWorktreeProvider {
         let commit = git(base, &["rev-parse", "--verify", "HEAD"])
             .await
             .map_err(|_| "the repository has no commit to make a worktree from".to_string())?;
-        let root = self.folder.join(&request.handle);
-        let branch = format!("{}{}", self.branch_prefix, request.handle);
         std::fs::create_dir_all(&self.folder)
             .map_err(|error| format!("could not create {}: {error}", self.folder.display()))?;
+        let root;
+        let branch;
         {
             let _one_at_a_time = self.lock.lock().await;
+            // A free name: an earlier workflow run may have left `r1`.
+            let mut name = request.handle.clone();
+            let mut n = 1;
+            loop {
+                let taken_branch = git(
+                    &repository,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/heads/{}{name}", self.branch_prefix),
+                    ],
+                )
+                .await
+                .is_ok();
+                if !taken_branch && !self.folder.join(&name).exists() {
+                    break;
+                }
+                n += 1;
+                name = format!("{}-{n}", request.handle);
+            }
+            root = self.folder.join(&name);
+            branch = format!("{}{name}", self.branch_prefix);
             let target = root.to_string_lossy().to_string();
             git(
                 &repository,
@@ -265,6 +289,11 @@ mod tests {
             run_git(&repository, &["branch", "--list", "test/r1"]),
             "test/r1"
         );
+        // A later workflow run's `r1` gets a free name: the branch stayed.
+        let again = provider.create(&request).await.unwrap();
+        assert_eq!(again.root, Some(workspace.0.join("worktrees/r1-2")));
+        assert_eq!(again.branch.as_deref(), Some("test/r1-2"));
+        provider.remove(&again).await.unwrap();
 
         // Outside a repository, the start fails with the reason.
         let outside = workspace.0.join("plain");

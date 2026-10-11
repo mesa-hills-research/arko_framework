@@ -65,12 +65,22 @@ fn builder(
     workspace: &Workspace,
     config: SubagentsConfig,
 ) -> WorkflowBuilder {
+    builder_with(server, workspace, config, agent_config("Worker"))
+}
+
+/// [`builder`] with agent `worker` configured as `worker`.
+fn builder_with(
+    server: &ResponsesServer,
+    workspace: &Workspace,
+    config: SubagentsConfig,
+    worker: AgentConfig,
+) -> WorkflowBuilder {
     Workflow::builder()
         .name("subagents-test")
         .workspace(&workspace.0)
         .llm_client(Arc::new(server.client()))
         .agent("lead", agent_config("Lead"))
-        .agent("worker", agent_config("Worker"))
+        .agent("worker", worker)
         .workflow_services(
             WorkflowServicesConfig::default()
                 .allow_caller("lead")
@@ -281,11 +291,12 @@ async fn a_start_returns_at_once_and_a_wait_returns_the_report() {
     assert_eq!(records[0].caller_run_id, result.agent_run_id);
     let ledger = workflow.cost_ledger();
     assert!(
-        ledger
-            .entries
-            .iter()
-            .any(|entry| entry.agent_name.as_deref() == Some("worker"))
-            || ledger.entries.len() >= 4
+        ledger.entries.iter().any(|entry| matches!(
+            &entry.source,
+            crate::budget::CostSource::Agent { agent_name, .. } if agent_name == "worker"
+        )),
+        "{:?}",
+        ledger.entries
     );
     assert!(workflow.interrupted_runs().is_empty());
     let mut kinds = Vec::new();
@@ -531,8 +542,11 @@ async fn starts_over_the_cap_wait_in_a_queue() {
     let lead = bodies_of(&server, "lead");
     let queued = result_of(&lead[2], "lead", 1);
     assert!(queued.starts_with("Queued r2 (agent `worker`)"), "{queued}");
+    // Each report reaches the lead once: at a turn boundary, or in the wait.
     let all = result_of(&lead[4], "lead", 3);
-    assert!(all.contains("One.") && all.contains("Two."), "{all}");
+    assert!(all.contains("Two."), "{all}");
+    assert!(lead[4].contains("One."));
+    assert!(all.contains("None of your agent runs is running now."));
     let mut order = Vec::new();
     while let Ok(event) = events.try_recv() {
         match event.kind {
@@ -570,6 +584,62 @@ async fn starts_over_the_cap_wait_in_a_queue() {
                 summary: String::new()
             }
         ) < position("r2", SubagentEventKind::Started)
+    );
+    assert!(
+        workflow
+            .subagents()
+            .iter()
+            .all(|run| run.state == SubagentState::Finished)
+    );
+}
+
+/// A queued start the lead stops never runs, and the lead's message starts
+/// it later, from its task, with the message.
+#[tokio::test]
+async fn a_queued_start_stopped_starts_with_a_later_message() {
+    let server = serve(vec![
+        (
+            "lead",
+            vec![
+                start("First."),
+                start("Second."),
+                ("stop_agent", json!({ "run": "r2" })),
+                (
+                    "message_agent",
+                    json!({ "to": "r2", "message": "Do it after all." }),
+                ),
+                ("message_agent", json!({ "to": "r1", "message": "Finish." })),
+                ("wait_for_agents", json!({ "all": true })),
+            ],
+        ),
+        ("r1", vec![wait(), complete("One.")]),
+        ("r2", vec![complete("Two.")]),
+    ])
+    .await;
+    let workspace = Workspace::new();
+    let workflow = builder(
+        &server,
+        &workspace,
+        SubagentsConfig::default().max_running(1),
+    )
+    .build()
+    .unwrap();
+    within(workflow.run_agent("lead", "Delegate twice."))
+        .await
+        .unwrap();
+    let lead = bodies_of(&server, "lead");
+    let stopped = result_of(&lead[3], "lead", 2);
+    assert!(
+        stopped.contains("Stopped r2 before it started"),
+        "{stopped}"
+    );
+    let all = result_of(&lead[6], "lead", 5);
+    assert!(lead[6].contains("One.") && all.contains("Two."), "{all}");
+    let second = bodies_of(&server, "r2");
+    assert!(second[0].contains("Second."));
+    assert!(
+        second.iter().any(|body| body.contains("Do it after all.")),
+        "the lead's message reaches it"
     );
     assert!(
         workflow
@@ -715,7 +785,12 @@ async fn a_subagents_question_goes_to_its_lead() {
     ])
     .await;
     let workspace = Workspace::new();
-    let workflow = builder(&server, &workspace, SubagentsConfig::default())
+    let mut worker = agent_config("Worker");
+    worker
+        .tool_config
+        .available_tool_names
+        .push("ask_user".to_string());
+    let workflow = builder_with(&server, &workspace, SubagentsConfig::default(), worker)
         .build()
         .unwrap();
     within(workflow.run_agent("lead", "Delegate."))

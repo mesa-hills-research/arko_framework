@@ -406,12 +406,12 @@ impl Workflow {
         self.context.subagents.pending(agent_run_id)
     }
 
-    /// Takes the items [`pending_news`](Self::pending_news) lists: they
-    /// count as received, for a host that puts them in its own message to
-    /// the run ([`MailItem::text`](crate::subagents::MailItem::text) is each
-    /// one whole).
+    /// Takes the items [`pending_news`](Self::pending_news) lists out of the
+    /// mailbox, for a host that puts them in its own message to the run
+    /// ([`MailItem::text`](crate::subagents::MailItem::text) is each one
+    /// whole).
     pub fn take_news(&self, agent_run_id: uuid::Uuid) -> Vec<crate::subagents::MailItem> {
-        self.context.subagents.take(agent_run_id)
+        self.context.subagents.take(&self.context, agent_run_id)
     }
 
     /// Relaunches the background subagents that were running, or queued,
