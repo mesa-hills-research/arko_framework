@@ -149,6 +149,18 @@ pub struct GenerationConfig {
     /// Also the `ttl` of the `cache_control` sent for Claude models on OpenRouter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anthropic_cache_ttl: Option<AnthropicCacheTtl>,
+    /// The prompt-cache lifetime arko reports for these requests, in seconds,
+    /// in place of the provider's
+    /// ([`prompt_cache_lifetime`](crate::prompt_cache::prompt_cache_lifetime)),
+    /// for a host that knows how long its route keeps the cache. `None` (the
+    /// default) reports the provider's. Nothing is sent to the provider:
+    /// the setting changes only what arko takes the lifetime to be, such as
+    /// for the automatic limit of arko_workflows' `wait_for_message`. A
+    /// request that isn't cached (a model without caching, or caching
+    /// turned off where the provider allows it) is still reported as
+    /// uncached, and `Some(0)` reports it so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_lifetime_seconds: Option<u64>,
     /// Anthropic fast mode (`speed: "fast"` with the `fast-mode-2026-02-01` beta
     /// header; research preview, Claude API only). Supported on Claude Opus 5.5,
     /// Opus 5 and Opus 4.8 and rejected locally for other models. Priced at the
@@ -384,6 +396,13 @@ impl GenerationConfig {
     /// Sets the Anthropic prompt-cache lifetime.
     pub fn with_anthropic_cache_ttl(mut self, ttl: AnthropicCacheTtl) -> Self {
         self.anthropic_cache_ttl = Some(ttl);
+        self
+    }
+
+    /// Sets the prompt-cache lifetime arko reports for these requests, in
+    /// whole seconds ([`prompt_cache_lifetime_seconds`](Self::prompt_cache_lifetime_seconds)).
+    pub fn with_prompt_cache_lifetime(mut self, lifetime: std::time::Duration) -> Self {
+        self.prompt_cache_lifetime_seconds = Some(lifetime.as_secs());
         self
     }
 

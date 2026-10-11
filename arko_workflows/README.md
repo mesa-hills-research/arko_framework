@@ -581,10 +581,11 @@ is `waiting (awaiting_message)`. Cancelling the workflow, or the workflow
 stopping the agent, ends the wait at once.
 
 A wait lasts up to about 4.5 minutes by default. Each wake-up is a cheap turn that keeps
-the provider's prompt cache warm, so a long wait is simply several short waits. With
-Anthropic's 1-hour cache TTL (`anthropic_cache_ttl` set to `AnthropicCacheTtl::OneHour`)
-the default stretches to about 54 minutes. You can set a longer wait, for every agent or
-one:
+the provider's prompt cache warm, so a long wait is simply several short waits. The
+default follows the agent's cache lifetime: about 27 minutes for OpenAI over ChatGPT
+OAuth, whose cache lasts 30, and about 54 minutes with Anthropic's 1-hour cache TTL
+(`anthropic_cache_ttl` set to `AnthropicCacheTtl::OneHour`). You can set a longer wait,
+for every agent or one:
 
 ```rust
 use std::time::Duration;
