@@ -23,6 +23,19 @@ pub struct LLMClient {
     openai_originator: Option<String>,
     openai_user_agent: Option<String>,
     stream_idle_timeout: Option<std::time::Duration>,
+    /// The provider clients set while the client is in use, shared by every
+    /// clone (see [`set_anthropic_client`](Self::set_anthropic_client)).
+    set_clients: Arc<std::sync::RwLock<SetClients>>,
+}
+
+/// Provider clients set with [`LLMClient::set_openai_client`] and the like.
+/// Each comes before the provider's client the `LLMClient` was built with.
+#[derive(Default)]
+struct SetClients {
+    openai: Option<providers::openai::OpenAIClient>,
+    anthropic: Option<providers::anthropic::AnthropicClient>,
+    google: Option<providers::google::GoogleClient>,
+    openrouter: Option<providers::openrouter::OpenRouterClient>,
 }
 
 impl LLMClient {
@@ -38,6 +51,7 @@ impl LLMClient {
             openai_originator: None,
             openai_user_agent: None,
             stream_idle_timeout: None,
+            set_clients: Arc::default(),
         }
     }
 
@@ -163,9 +177,18 @@ impl LLMClient {
         Ok(self.with_openai_client(client))
     }
 
-    /// Whether a provider client is configured for `provider`.
+    /// Whether a provider client is configured for `provider`, by a builder
+    /// or set while the client is in use.
     pub fn has_provider(&self, provider: &Provider) -> bool {
-        self.get_provider(provider).is_ok()
+        let set = self.read_set_clients();
+        let is_set = match provider {
+            Provider::OpenAI => set.openai.is_some(),
+            Provider::Anthropic => set.anthropic.is_some(),
+            Provider::Google => set.google.is_some(),
+            Provider::OpenRouter => set.openrouter.is_some(),
+            Provider::ClaudeCode => false,
+        };
+        is_set || self.get_provider(provider).is_ok()
     }
 
     /// Sends `originator: <originator>` with every OpenAI request, naming
@@ -269,13 +292,17 @@ impl LLMClient {
         }
     }
 
-    /// The OpenAI client the OAuth methods act on: the configured one, or,
-    /// with a ChatGPT account list, the account the next request would go
-    /// to.
-    fn openai(&self) -> Option<&providers::openai::OpenAIClient> {
+    /// The OpenAI client the OAuth methods act on: one set with
+    /// [`set_openai_client`](Self::set_openai_client), else the configured
+    /// one, or, with a ChatGPT account list, the account the next request
+    /// would go to. (Clones share the credentials.)
+    fn openai(&self) -> Option<providers::openai::OpenAIClient> {
+        if let Some(client) = self.set_openai() {
+            return Some(client);
+        }
         match &self.openai_accounts {
-            Some(accounts) => Some(accounts.preferred_client()),
-            None => self.openai_client.as_ref(),
+            Some(accounts) => Some(accounts.preferred_client().clone()),
+            None => self.openai_client.clone(),
         }
     }
 
@@ -420,6 +447,10 @@ impl LLMClient {
         &self,
         auth: providers::openai::OpenAIAuth,
     ) -> Result<(), Error> {
+        if let Some(client) = self.set_openai() {
+            client.update_auth(auth).await;
+            return Ok(());
+        }
         if self.openai_accounts.is_some() {
             return Err(Error::InvalidRequest(
                 "The OpenAI provider has several ChatGPT accounts; update an account's own client (ChatGptAccount::client)".into(),
@@ -622,8 +653,8 @@ impl LLMClient {
         self
     }
 
-    /// The configured OpenRouter client, for catalog access
-    /// ([`fetch_models`](providers::openrouter::OpenRouterClient::fetch_models),
+    /// The OpenRouter client the `LLMClient` was built with, for catalog
+    /// access ([`fetch_models`](providers::openrouter::OpenRouterClient::fetch_models),
     /// [`model`](providers::openrouter::OpenRouterClient::model)).
     pub fn openrouter(&self) -> Option<&providers::openrouter::OpenRouterClient> {
         self.openrouter_client.as_ref()
@@ -699,6 +730,94 @@ impl LLMClient {
         self
     }
 
+    /// Sets the OpenAI client of this `LLMClient` and of every clone of it,
+    /// made before or after: for an application that takes credentials while
+    /// it runs. It comes before the OpenAI client (or the ChatGPT accounts)
+    /// the client was built with, and replaces one set before. Requests that
+    /// start afterwards use it, also those of conversations and agent runs
+    /// already going on. Requests in flight finish with the client they
+    /// started with.
+    ///
+    /// Each clone's OpenAI settings (trace, hook, `originator`,
+    /// `User-Agent`, the stream idle timeout) are applied to it where they are
+    /// set, as [`with_openai_client`](Self::with_openai_client) applies them.
+    pub fn set_openai_client(&self, client: providers::openai::OpenAIClient) {
+        self.write_set_clients().openai = Some(client);
+    }
+
+    /// Sets the Anthropic client of this `LLMClient` and of every clone of
+    /// it, made before or after, as
+    /// [`set_openai_client`](Self::set_openai_client) sets OpenAI's. Each
+    /// clone's stream idle timeout applies to it where one is set.
+    pub fn set_anthropic_client(&self, client: providers::anthropic::AnthropicClient) {
+        self.write_set_clients().anthropic = Some(client);
+    }
+
+    /// Sets the Google client of this `LLMClient` and of every clone of it,
+    /// made before or after, as [`set_openai_client`](Self::set_openai_client)
+    /// sets OpenAI's. Each clone's stream idle timeout applies to it where
+    /// one is set.
+    pub fn set_google_client(&self, client: providers::google::GoogleClient) {
+        self.write_set_clients().google = Some(client);
+    }
+
+    /// Sets the OpenRouter client of this `LLMClient` and of every clone of
+    /// it, made before or after, as
+    /// [`set_openai_client`](Self::set_openai_client) sets OpenAI's. Each
+    /// clone's stream idle timeout applies to it where one is set.
+    pub fn set_openrouter_client(&self, client: providers::openrouter::OpenRouterClient) {
+        self.write_set_clients().openrouter = Some(client);
+    }
+
+    fn write_set_clients(&self) -> std::sync::RwLockWriteGuard<'_, SetClients> {
+        self.set_clients
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn read_set_clients(&self) -> std::sync::RwLockReadGuard<'_, SetClients> {
+        self.set_clients
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The OpenAI client set with [`set_openai_client`](Self::set_openai_client),
+    /// with this client's OpenAI settings.
+    fn set_openai(&self) -> Option<providers::openai::OpenAIClient> {
+        let client = self.read_set_clients().openai.clone()?;
+        Some(self.configure_openai(client))
+    }
+
+    /// The client set for `provider` while the client is in use, with this
+    /// client's settings.
+    fn set_client(&self, provider: &Provider) -> Option<Box<dyn ProviderClient + Send + Sync>> {
+        match provider {
+            Provider::OpenAI => Some(Box::new(self.set_openai()?)),
+            Provider::Anthropic => {
+                let client = self.read_set_clients().anthropic.clone()?;
+                Some(Box::new(self.idle(
+                    client,
+                    providers::anthropic::AnthropicClient::with_stream_idle_timeout,
+                )))
+            }
+            Provider::Google => {
+                let client = self.read_set_clients().google.clone()?;
+                Some(Box::new(self.idle(
+                    client,
+                    providers::google::GoogleClient::with_stream_idle_timeout,
+                )))
+            }
+            Provider::OpenRouter => {
+                let client = self.read_set_clients().openrouter.clone()?;
+                Some(Box::new(self.idle(
+                    client,
+                    providers::openrouter::OpenRouterClient::with_stream_idle_timeout,
+                )))
+            }
+            Provider::ClaudeCode => None,
+        }
+    }
+
     fn get_provider(&self, provider: &Provider) -> Result<&dyn ProviderClient, Error> {
         match provider {
             Provider::OpenAI => self
@@ -745,6 +864,10 @@ impl LLMClient {
         conversation: &Conversation,
         config: GenerationConfig,
     ) -> Result<GenerationResponse, Error> {
+        if let Some(set) = self.set_client(&conversation.model.provider) {
+            self.note_untraced(&conversation.model.provider);
+            return set.generate_text(conversation, &config).await;
+        }
         let provider = self.get_provider(&conversation.model.provider)?;
         self.note_untraced(&conversation.model.provider);
         provider.generate_text(conversation, &config).await
@@ -760,6 +883,10 @@ impl LLMClient {
         conversation: &Conversation,
         config: GenerationConfig,
     ) -> Result<BoxStream<'static, Result<StreamEvent, Error>>, Error> {
+        if let Some(set) = self.set_client(&conversation.model.provider) {
+            self.note_untraced(&conversation.model.provider);
+            return set.generate_stream(conversation, &config).await;
+        }
         let provider = self.get_provider(&conversation.model.provider)?;
         self.note_untraced(&conversation.model.provider);
         provider.generate_stream(conversation, &config).await
@@ -1066,6 +1193,121 @@ mod tests {
                 .is_err()
         );
         assert!(crate::notice::warned("trace:Anthropic"));
+    }
+
+    /// A provider client set while the client is in use reaches every clone,
+    /// made before or after, from their next request: it adds the provider,
+    /// and replaces the one the client was built with and one set before.
+    #[tokio::test]
+    async fn a_provider_client_set_in_use_reaches_every_clone() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // A local server that keeps each request's key and answers 500.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let keys = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = keys.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut chunk = [0; 8192];
+                    while let Ok(n @ 1..) = socket.read(&mut chunk).await {
+                        request.extend_from_slice(&chunk[..n]);
+                        let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                            continue;
+                        };
+                        let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                        let length: usize = head
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .map_or(0, |value| value.trim().parse().unwrap_or(0));
+                        if request.len() >= end + 4 + length {
+                            let key = head
+                                .lines()
+                                .find_map(|line| {
+                                    line.strip_prefix("x-api-key:")
+                                        .or_else(|| line.strip_prefix("authorization: bearer"))
+                                })
+                                .unwrap_or_default();
+                            seen.lock().unwrap().push(key.trim().to_string());
+                            break;
+                        }
+                    }
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                        .await;
+                });
+            }
+        });
+        let anthropic =
+            |key: &str| providers::anthropic::AnthropicClient::new(key).with_base_url(&url);
+        let mut claude = Conversation::new(Model::anthropic_claude_opus_5_5());
+        claude.add_user_message("Hi.");
+        let last_key = || keys.lock().unwrap().last().cloned();
+
+        let client = LLMClient::new();
+        let before = Arc::new(client.clone());
+        assert!(!before.has_provider(&Provider::Anthropic));
+        client.set_anthropic_client(anthropic("first"));
+        let after = client.clone().with_openai_api_key("sk-other");
+        for clone in [&client, &*before, &after] {
+            assert!(clone.has_provider(&Provider::Anthropic));
+            assert!(
+                clone
+                    .generate_text(&claude, GenerationConfig::default())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(last_key().as_deref(), Some("first"));
+        }
+        // It comes before the client built with, and a later one replaces it.
+        let built = LLMClient::new().with_anthropic_client(anthropic("built"));
+        assert!(
+            built
+                .generate_stream(&claude, GenerationConfig::default())
+                .await
+                .is_err()
+        );
+        assert_eq!(last_key().as_deref(), Some("built"));
+        built.set_anthropic_client(anthropic("first"));
+        before.set_anthropic_client(anthropic("second"));
+        for clone in [&built, &client] {
+            assert!(
+                clone
+                    .generate_stream(&claude, GenerationConfig::default())
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            *keys.lock().unwrap(),
+            ["first", "first", "first", "built", "first", "second"]
+        );
+
+        // An OpenAI client set over a ChatGPT login is what the OAuth methods
+        // see too.
+        let oauth = client_with_oauth();
+        assert!(oauth.is_openai_chatgpt_oauth().await);
+        oauth.set_openai_client(providers::openai::OpenAIClient::new("sk-set").with_base_url(&url));
+        assert!(!oauth.is_openai_chatgpt_oauth().await);
+        assert!(oauth.openai_chatgpt_oauth_credentials().await.is_none());
+        let mut gpt = Conversation::new(Model::openai_gpt_6_astra());
+        gpt.add_user_message("Hi.");
+        assert!(
+            oauth
+                .generate_text(&gpt, GenerationConfig::default())
+                .await
+                .is_err()
+        );
+        assert_eq!(last_key().as_deref(), Some("sk-set"));
+    }
+
+    fn client_with_oauth() -> LLMClient {
+        client(&[
+            ("OPENAI_OAUTH_ACCESS_TOKEN", "access"),
+            ("OPENAI_OAUTH_ACCOUNT_ID", "account"),
+        ])
     }
 
     /// The client's OpenAI auth decides the lifetime (5 minutes with an API

@@ -91,7 +91,10 @@ The builder methods configure providers explicitly: `with_openai_api_key`,
 `with_anthropic_client`, `with_google_client`, and `with_openrouter_client` install a
 provider client built with its own options, such as a base URL for a proxy or test
 server. A request to a provider that is not configured fails with
-`Error::MissingApiKey`. Clones of an `LLMClient` share its credentials.
+`Error::MissingApiKey`. Clones of an `LLMClient` share its credentials. An application
+that takes credentials while it runs sets a provider on a client in use with
+`set_openai_client`, `set_anthropic_client`, `set_google_client` or
+`set_openrouter_client`, and every clone uses it from its next request.
 
 Gemini requests use Google's Interactions API. OpenAI requests carry no `originator` or
 `User-Agent` header unless the application sets one with `with_openai_originator` or
