@@ -217,28 +217,28 @@ impl Report {
                 .iter()
                 .map(|(r, n)| format!("{n} {}", r.as_str()))
                 .collect();
-            s += &format!("; {skipped} skipped ({})", parts.join(", "));
+            s += &format!(", {skipped} skipped ({})", parts.join(", "));
         }
         if self.excluded_by_pattern > 0 {
-            s += &format!("; {} excluded by pattern", self.excluded_by_pattern);
+            s += &format!(", {} excluded by pattern", self.excluded_by_pattern);
         }
         if self.not_included > 0 {
-            s += &format!("; {} not included", self.not_included);
+            s += &format!(", {} not included", self.not_included);
         }
         let ignored = self.ignored_total();
         if ignored > 0 {
             s += &format!(
-                "; {ignored} ignored ({} .gitignore, {} .ignore, {} .git/info/exclude)",
+                ", {ignored} ignored ({} .gitignore, {} .ignore, {} .git/info/exclude)",
                 self.ignored_by_gitignore,
                 self.ignored_by_ignore_file,
                 self.ignored_by_git_info_exclude
             );
         }
         if self.rules.respect_ignore {
-            s += "; ignore files honoured";
+            s += ", ignore files honoured";
         }
         if !self.warnings.is_empty() {
-            s += &format!("; {} warnings", self.warnings.len());
+            s += &format!(", {} warnings", self.warnings.len());
         }
         s
     }

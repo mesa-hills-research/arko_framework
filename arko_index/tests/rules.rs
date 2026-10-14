@@ -709,7 +709,7 @@ fn cli_flags_and_report() {
         .collect();
     assert_eq!(got, set(&[".gitignore", "a.rs"]));
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("2 files indexed; 1 skipped (1 not-utf8); 1 excluded by pattern"));
+    assert!(stderr.contains("2 files indexed, 1 skipped (1 not-utf8), 1 excluded by pattern"));
     assert!(stderr.contains("skipped (not-utf8): latin1.txt"));
     let saved: Report = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
     assert_eq!(saved.files, 2);

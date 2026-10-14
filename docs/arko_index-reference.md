@@ -258,7 +258,7 @@ the counts are complete). `--exclude` and `--include` removals are counted
   always written, complete:
 
   ```text
-  arko_index: 90419 files indexed; 87 skipped (4 binary, 2 not-utf8, 81 symlink)
+  arko_index: 90419 files indexed, 87 skipped (4 binary, 2 not-utf8, 81 symlink)
   arko_index: skipped (not-utf8): arch/m68k/hp300/hp300map.map
   arko_index: skipped (not-utf8): drivers/tty/vt/defkeymap.map
   ```
