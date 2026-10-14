@@ -10,11 +10,11 @@ E {"ToolResult":{"output":"line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 
 S durable=0 msgs=2 native_results=1 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f917af4c95054f8b
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=42266266bbb4a7b0
 R msgs=3 model=gpt-5.6-luna request=f96f66ea42e8c14c
-E {"ErrorEncountered":{"error_kind":"context_overflow","error_message":"The request was over the model's input limit; the result of step was shortened and the request is sent again (1/2): Provider error (status Some(400), code Some(\"context_length_exceeded\")): Your input exceeds the context window of this model.","requires_approval_to_retry":false,"tool_call_id":null}}
+E {"ErrorEncountered":{"error_kind":"context_overflow","error_message":"The request was over the model's input limit, so the result of step was shortened and the request is sent again (1/2): Provider error (status Some(400), code Some(\"context_length_exceeded\")): Your input exceeds the context window of this model.","requires_approval_to_retry":false,"tool_call_id":null}}
 E {"ToolResultShortened":{"call_id":"huge","kept_tokens":16008,"original_tokens":100000,"reason":"overflow_recovery","tool_name":"step"}}
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=a51f909931151521
 R msgs=3 model=gpt-5.6-luna request=800fa668387ba319
-E {"ErrorEncountered":{"error_kind":"context_overflow","error_message":"The request was over the model's input limit; the result of step was shortened and the request is sent again (2/2): Provider error (status Some(400), code Some(\"context_length_exceeded\")): Your input exceeds the context window of this model.","requires_approval_to_retry":false,"tool_call_id":null}}
+E {"ErrorEncountered":{"error_kind":"context_overflow","error_message":"The request was over the model's input limit, so the result of step was shortened and the request is sent again (2/2): Provider error (status Some(400), code Some(\"context_length_exceeded\")): Your input exceeds the context window of this model.","requires_approval_to_retry":false,"tool_call_id":null}}
 E {"ToolResultShortened":{"call_id":"huge","kept_tokens":0,"original_tokens":16008,"reason":"overflow_recovery","tool_name":"step"}}
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=9f57c2cedbd3747f
 R msgs=3 model=gpt-5.6-luna request=dc1c5f0bdde78309

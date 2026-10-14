@@ -407,13 +407,13 @@ impl AgentLoop {
         self.recovery.indefinite_interactions =
             self.recovery.indefinite_interactions.saturating_add(1);
         log::warn!(
-            "Task {}: the request was over the model's input limit; the result of {tool_name} was shortened and the request is sent again ({}/{MAX_OVERFLOW_RECOVERIES}).",
+            "Task {}: the request was over the model's input limit, so the result of {tool_name} was shortened and the request is sent again ({}/{MAX_OVERFLOW_RECOVERIES}).",
             self.task.id,
             self.overflow_recoveries
         );
         self.emit_event(AgentEvent::ErrorEncountered {
             error_message: format!(
-                "The request was over the model's input limit; the result of {tool_name} was shortened and the request is sent again ({}/{MAX_OVERFLOW_RECOVERIES}): {error}",
+                "The request was over the model's input limit, so the result of {tool_name} was shortened and the request is sent again ({}/{MAX_OVERFLOW_RECOVERIES}): {error}",
                 self.overflow_recoveries
             ),
             requires_approval_to_retry: false,
