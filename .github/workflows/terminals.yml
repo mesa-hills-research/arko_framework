@@ -5,6 +5,11 @@ on: [push, pull_request, workflow_dispatch]
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+# Test binaries keep line numbers for backtraces but no full debug info. Each
+# test file links the whole dependency tree, and with full debug info the
+# Linux runner's disk filled up while linking arko_index's tests.
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 jobs:
   native:
     strategy:
