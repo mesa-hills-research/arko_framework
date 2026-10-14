@@ -348,6 +348,9 @@ pub struct TerminalManager {
     jobs: Mutex<HashMap<Uuid, Arc<Job>>>,
     runtimes: Mutex<HashMap<Uuid, RuntimeBinding>>,
     closing: std::sync::atomic::AtomicBool,
+    /// The command guard's `allow_outside_workspace`, which can change
+    /// while jobs run.
+    allow_outside_workspace: std::sync::atomic::AtomicBool,
     _directory_lock: Arc<std::fs::File>,
 }
 impl std::fmt::Debug for TerminalManager {
@@ -388,6 +391,7 @@ impl TerminalManager {
             TerminalError::Invalid(format!("terminal directory is already in use: {error}"))
         })?;
         let manager = Arc::new(Self {
+            allow_outside_workspace: config.command_guard.allow_outside_workspace.into(),
             config,
             detector,
             jobs: Mutex::new(HashMap::new()),
@@ -430,6 +434,37 @@ impl TerminalManager {
             manager.jobs.lock().unwrap().insert(id, completed_job(data));
         }
         Ok(manager)
+    }
+
+    /// Sets the command guard's
+    /// [`allow_outside_workspace`](CommandGuard::allow_outside_workspace)
+    /// while the manager runs: it applies from the next `terminal_start`
+    /// command or `terminal_input` text. Jobs already running keep going.
+    pub fn set_allow_outside_workspace(&self, allow: bool) {
+        self.allow_outside_workspace
+            .store(allow, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether the command guard allows destructive commands on paths
+    /// outside the working directory, as last set.
+    pub fn allows_outside_workspace(&self) -> bool {
+        self.allow_outside_workspace
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Checks a command run in `working_directory` against the command
+    /// guard, with outside access as last set.
+    fn check_command(&self, command: &str, working_directory: &Path) -> Result<()> {
+        let guard = CommandGuard {
+            allow_outside_workspace: self.allows_outside_workspace(),
+            ..self.config.command_guard.clone()
+        };
+        guard.check(
+            command,
+            ShellDialect::from_shell(&self.config.shell),
+            working_directory,
+        )?;
+        Ok(())
     }
 
     /// Tools remain opt-in: registering them does not add their names to an agent's allowlist.
@@ -547,11 +582,7 @@ impl TerminalManager {
                 "empty/oversized command or zero timeout".into(),
             ));
         }
-        self.config.command_guard.check(
-            command,
-            ShellDialect::from_shell(&self.config.shell),
-            context.current_working_directory,
-        )?;
+        self.check_command(command, context.current_working_directory)?;
         let mut jobs = self.jobs.lock().unwrap();
         if self.closing.load(std::sync::atomic::Ordering::Acquire) {
             return Err(TerminalError::Invalid(
@@ -669,11 +700,7 @@ impl TerminalManager {
         }
         // Input may be a command typed into a shell the job runs.
         if let Some(directory) = &job.working_directory {
-            self.config.command_guard.check(
-                &text,
-                ShellDialect::from_shell(&self.config.shell),
-                directory,
-            )?;
+            self.check_command(&text, directory)?;
         }
         let (response, answer) = oneshot::channel();
         job.controls

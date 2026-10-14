@@ -821,3 +821,44 @@ async fn dangerously_allow_all_commands_turns_the_guard_off() {
         .unwrap();
     assert_eq!(f.finished(job.job_id).await.exit_code, Some(3));
 }
+
+#[tokio::test]
+async fn outside_access_can_change_while_the_manager_runs() {
+    let f = Fixture::new(|_| {});
+    assert!(!f.manager.allows_outside_workspace());
+    // The shell stops before the destructive half, so this is safe to run.
+    let name = format!("arko-outside-test-{}", Uuid::new_v4());
+    let (outside, protected) = if cfg!(windows) {
+        (
+            format!("exit /b 3 && rd /s /q %USERPROFILE%\\{name}"),
+            "exit /b 3 && rd /s /q %USERPROFILE%",
+        )
+    } else {
+        (format!("exit 3 && rm -rf ~/{name}"), "exit 3 && rm -rf ~")
+    };
+    let refused = |result: Result<TerminalSnapshot>| match result {
+        Err(TerminalError::Refused(refusal)) => refusal,
+        other => panic!("expected a refusal, got {other:?}"),
+    };
+    let start = |command: &str| {
+        f.manager
+            .start(&f.context(), command, StartOptions::default())
+    };
+    assert!(!refused(start(&outside)).protected);
+
+    f.manager.set_allow_outside_workspace(true);
+    assert!(f.manager.allows_outside_workspace());
+    let job = start(&outside).unwrap();
+    assert_eq!(f.finished(job.job_id).await.exit_code, Some(3));
+    assert!(
+        refused(start(protected)).protected,
+        "protected paths stay refused"
+    );
+
+    f.manager.set_allow_outside_workspace(false);
+    assert!(!refused(start(&outside)).protected);
+
+    // A guard configured with outside access starts with it.
+    let f = Fixture::new(|config| config.command_guard.allow_outside_workspace = true);
+    assert!(f.manager.allows_outside_workspace());
+}

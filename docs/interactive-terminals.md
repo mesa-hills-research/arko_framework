@@ -141,6 +141,12 @@ config.command_guard.allowed_paths.push(home.join(".cache/my-app"));
 // config.command_guard.dangerously_allow_all_commands = true;
 ```
 
+`TerminalManager::set_allow_outside_workspace(allow)` changes
+`allow_outside_workspace` while the manager runs, for hosts that let the user
+turn outside access on and off during a session. It applies from the next
+`terminal_start` command or `terminal_input` text, and
+`allows_outside_workspace()` reads the current value.
+
 `CommandGuard::check(command, dialect, working_directory)` runs the same check
 for other tools that run shell commands; the `deepcoder` example's `run_shell`
 uses it, with a `--dangerously-allow-all-commands` flag.
