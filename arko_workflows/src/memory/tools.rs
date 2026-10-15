@@ -68,8 +68,8 @@ impl Tool for ReadMemoryTool {
                 },
                 ToolParameterDefinition {
                     name: "max_chars".to_string(),
-                    description: "Optional maximum number of trailing characters to return, encoded as a positive integer string.".to_string(),
-                    param_type: ToolParameterType::String,
+                    description: "Optional: the most characters to return, from the end of the tier.".to_string(),
+                    param_type: ToolParameterType::Integer,
                     required: false,
                     is_path: false,
                     flag: None,
@@ -93,19 +93,16 @@ impl Tool for ReadMemoryTool {
             }
         })?;
 
+        // A number, or text holding one (as conversations saved before the
+        // parameter was an integer hold it).
         let max_chars = params
             .get("max_chars")
             .map(|value| {
-                value
-                    .as_str()
+                arko_agents::tool::definition::integer_argument(value)
+                    .and_then(|number| usize::try_from(number).ok())
                     .ok_or_else(|| ToolError::ParameterValidation {
                         param_name: "max_chars".into(),
-                        message: "Expected a positive integer string".into(),
-                    })?
-                    .parse::<usize>()
-                    .map_err(|error| ToolError::ParameterValidation {
-                        param_name: "max_chars".into(),
-                        message: error.to_string(),
+                        message: "Expected a positive whole number".into(),
                     })
             })
             .transpose()?;
@@ -427,10 +424,24 @@ mod tests {
                 "full"
             );
         }
+        // max_chars is a number, or text holding one, as conversations
+        // saved before it was an integer hold it.
+        for max_chars in [serde_json::json!(5), serde_json::json!("5")] {
+            let result = tool
+                .execute(
+                    &task,
+                    params(serde_json::json!({"tier":"notes", "max_chars":max_chars})),
+                )
+                .await
+                .unwrap();
+            let result: Value = serde_json::from_str(&result).unwrap();
+            assert_eq!(result["kind"], "partial");
+            assert_eq!(result["content"], " line");
+        }
         for invalid in [
             serde_json::json!({"tier":"notes", "full":"yes"}),
             serde_json::json!({"tier":"notes", "max_chars":"0"}),
-            serde_json::json!({"tier":"notes", "max_chars":5}),
+            serde_json::json!({"tier":"notes", "max_chars":-5}),
             serde_json::json!({"tier":"notes", "max_chars":"invalid"}),
             serde_json::json!({"tier":"private"}),
             serde_json::json!({"tier":"missing"}),

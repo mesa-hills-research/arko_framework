@@ -1,6 +1,6 @@
 use super::ToolError;
 use super::definition::ToolParameterDefinition;
-use super::definition::{ToolParameterType, parse_bool_text};
+use super::definition::{ToolParameterType, integer_argument, parse_bool_text};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -74,6 +74,37 @@ pub(crate) async fn execute_command_from_template(
                 } else {
                     OsString::from(str_val)
                 };
+                if let Some(flag_str) = &def.flag {
+                    command_args.push(flag_str.into());
+                    command_args.push(argument);
+                } else {
+                    let pos_idx = positional_args_values.len();
+                    positional_args_values.insert(pos_idx, argument);
+                    if pos_idx > max_pos_idx {
+                        max_pos_idx = pos_idx;
+                    }
+                }
+            }
+            ToolParameterType::Integer => {
+                // Also as text, as output-based calls and hand-written
+                // defaults give it.
+                if current_value
+                    .as_str()
+                    .is_some_and(|text| text.trim().is_empty())
+                    && !def.required
+                {
+                    continue;
+                }
+                let number = integer_argument(&current_value).ok_or_else(|| {
+                    ToolError::ParameterValidation {
+                        param_name: def.name.clone(),
+                        message: format!(
+                            "Expected a whole number for parameter '{}', got {:?}",
+                            def.name, current_value
+                        ),
+                    }
+                })?;
+                let argument = OsString::from(number.to_string());
                 if let Some(flag_str) = &def.flag {
                     command_args.push(flag_str.into());
                     command_args.push(argument);
@@ -232,6 +263,40 @@ mod tests {
         assert_eq!(run(Value::from(" false ")).await.unwrap(), "hi\n");
         assert!(matches!(
             run(Value::from("loudly")).await,
+            Err(ToolError::ParameterValidation { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn integer_parameters_accept_numbers_and_text() {
+        let definitions = [ToolParameterDefinition {
+            name: "count".into(),
+            description: "Count".into(),
+            param_type: ToolParameterType::Integer,
+            required: false,
+            is_path: false,
+            flag: Some("-n".into()),
+            default_value: None,
+        }];
+        let run = |value: Value| {
+            let definitions = definitions.clone();
+            async move {
+                let params = HashMap::from([("count".to_string(), value)]);
+                execute_command_from_template(
+                    "say",
+                    "echo hi",
+                    &definitions,
+                    &params,
+                    &std::env::temp_dir(),
+                )
+                .await
+            }
+        };
+        assert_eq!(run(Value::from(3)).await.unwrap(), "hi -n 3\n");
+        assert_eq!(run(Value::from(" 4 ")).await.unwrap(), "hi -n 4\n");
+        assert_eq!(run(Value::from("")).await.unwrap(), "hi\n");
+        assert!(matches!(
+            run(Value::from("many")).await,
             Err(ToolError::ParameterValidation { .. })
         ));
     }

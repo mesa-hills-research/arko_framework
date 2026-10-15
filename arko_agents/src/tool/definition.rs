@@ -10,6 +10,28 @@ pub enum ToolParameterType {
     String,
     #[serde(rename = "bool")]
     Bool,
+    /// A whole number (`"integer"` in the JSON schema). A tool should also
+    /// take its value as text, as [`integer_argument`] reads it:
+    /// output-based calls carry text, and conversations saved before a
+    /// parameter had this type hold text.
+    #[serde(rename = "integer")]
+    Integer,
+}
+
+/// A whole-number argument: a JSON integer (or a float with no fraction),
+/// or text holding one, surrounding whitespace ignored. `None` for anything
+/// else, such as `"ten"` or `1.5`.
+pub fn integer_argument(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(number) => number.as_i64().or_else(|| {
+            number
+                .as_f64()
+                .filter(|number| number.fract() == 0.0 && number.abs() < 9.0e15)
+                .map(|number| number as i64)
+        }),
+        Value::String(text) => text.trim().parse().ok(),
+        _ => None,
+    }
 }
 
 fn is_false(b: &bool) -> bool {
@@ -102,14 +124,28 @@ impl ToolDefinition {
     /// Gives text arguments their declared types. Output-based tool calls
     /// carry every value as a string: a `bool` parameter's `"true"` or
     /// `"false"` (in any case, surrounding whitespace ignored) becomes a
-    /// JSON boolean. Other values are left as they are.
+    /// JSON boolean, and an `integer` parameter's whole number (`" 12"`) a
+    /// JSON number. Other values are left as they are.
     pub fn coerce_text_arguments(&self, params: &mut std::collections::HashMap<String, Value>) {
         for def in &self.parameters {
-            if def.param_type == ToolParameterType::Bool
-                && let Some(value) = params.get_mut(&def.name)
-                && let Some(boolean) = value.as_str().and_then(parse_bool_text)
-            {
-                *value = Value::Bool(boolean);
+            let Some(value) = params.get_mut(&def.name) else {
+                continue;
+            };
+            let Some(text) = value.as_str() else {
+                continue;
+            };
+            match def.param_type {
+                ToolParameterType::Bool => {
+                    if let Some(boolean) = parse_bool_text(text) {
+                        *value = Value::Bool(boolean);
+                    }
+                }
+                ToolParameterType::Integer => {
+                    if let Ok(number) = text.trim().parse::<i64>() {
+                        *value = Value::from(number);
+                    }
+                }
+                ToolParameterType::String => {}
             }
         }
     }
@@ -134,6 +170,14 @@ impl ToolDefinition {
                             return Err(super::error::ToolError::ParameterValidation {
                                 param_name: def.name.clone(),
                                 message: format!("Expected a boolean value, got {:?}", value),
+                            });
+                        }
+                    }
+                    ToolParameterType::Integer => {
+                        if integer_argument(value).is_none() {
+                            return Err(super::error::ToolError::ParameterValidation {
+                                param_name: def.name.clone(),
+                                message: format!("Expected a whole number, got {:?}", value),
                             });
                         }
                     }
@@ -170,6 +214,7 @@ impl ToolDefinition {
             let type_str = match param.param_type {
                 ToolParameterType::String => "string",
                 ToolParameterType::Bool => "boolean",
+                ToolParameterType::Integer => "integer",
             };
             let prop = serde_json::json!({
                 "type": type_str,
@@ -283,5 +328,60 @@ mod tests {
         assert_eq!(params["c"], serde_json::json!("yes"));
         assert_eq!(params["d"], serde_json::json!(true));
         assert_eq!(params["text"], serde_json::json!("true"));
+    }
+
+    /// An integer parameter is an `integer` in the schema. Its text in an
+    /// output-based call becomes a number, and both forms are valid, as
+    /// conversations saved before the type hold text.
+    #[test]
+    fn integer_parameters_take_numbers_and_text() {
+        let definition = ToolDefinition {
+            name: "fixture".into(),
+            description: "Fixture".into(),
+            output_based_example: None,
+            parameters: vec![ToolParameterDefinition {
+                name: "limit".into(),
+                description: "How many".into(),
+                param_type: ToolParameterType::Integer,
+                required: false,
+                is_path: false,
+                flag: None,
+                default_value: None,
+            }],
+            parallel_safe: false,
+            tool_type_details: ToolTypeDetails::DeveloperDefined,
+            raw_json_schema_override: None,
+        };
+        let schema = definition.to_json_schema();
+        assert_eq!(schema["properties"]["limit"]["type"], "integer");
+        let with = |value: Value| HashMap::from([("limit".to_string(), value)]);
+        let mut params = with(serde_json::json!(" 12\n"));
+        definition.coerce_text_arguments(&mut params);
+        assert_eq!(params["limit"], serde_json::json!(12));
+        let mut params = with(serde_json::json!("ten"));
+        definition.coerce_text_arguments(&mut params);
+        assert_eq!(params["limit"], serde_json::json!("ten"));
+        for valid in [
+            serde_json::json!(12),
+            serde_json::json!("12"),
+            serde_json::json!(-3),
+            serde_json::json!(4.0),
+        ] {
+            definition.validate_params(&with(valid.clone())).unwrap();
+            assert!(integer_argument(&valid).is_some(), "{valid}");
+        }
+        for invalid in [
+            serde_json::json!("ten"),
+            serde_json::json!(1.5),
+            serde_json::json!(true),
+        ] {
+            assert!(definition.validate_params(&with(invalid.clone())).is_err());
+            assert_eq!(integer_argument(&invalid), None, "{invalid}");
+        }
+        let saved: ToolParameterDefinition = serde_json::from_value(serde_json::json!({
+            "name": "limit", "description": "How many", "type": "integer", "required": false
+        }))
+        .unwrap();
+        assert_eq!(saved.param_type, ToolParameterType::Integer);
     }
 }

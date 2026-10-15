@@ -230,7 +230,8 @@ impl Drop for AwaitingMessage<'_> {
 }
 
 /// The model's `timeout_seconds`, if given: a positive number of seconds,
-/// as a string (the parameter's type) or a number.
+/// as a number (the parameter's type) or a string (as conversations saved
+/// before it was an integer hold it).
 fn requested_timeout(params: &HashMap<String, Value>) -> Result<Option<f64>, ToolError> {
     let Some(value) = params.get("timeout_seconds") else {
         return Ok(None);
@@ -285,7 +286,7 @@ impl Tool for WaitForMessageTool {
             parameters: vec![ToolParameterDefinition {
                 name: "timeout_seconds".to_string(),
                 description: "Optional: the most seconds to wait.".to_string(),
-                param_type: ToolParameterType::String,
+                param_type: ToolParameterType::Integer,
                 required: false,
                 is_path: false,
                 flag: None,

@@ -63,6 +63,8 @@ fn string<'a>(
             message: "expected a string".into(),
         })
 }
+/// A whole-number parameter: a number, or text holding one (as calls saved
+/// before the parameters were integers give it).
 fn number(
     params: &HashMap<String, Value>,
     name: &str,
@@ -70,12 +72,11 @@ fn number(
     params
         .get(name)
         .map(|value| {
-            value
-                .as_str()
-                .and_then(|text| text.parse().ok())
+            crate::tool::definition::integer_argument(value)
+                .and_then(|number| u64::try_from(number).ok())
                 .ok_or_else(|| ToolError::ParameterValidation {
                     param_name: name.into(),
-                    message: "expected a nonnegative integer string".into(),
+                    message: "expected a whole number, 0 or more".into(),
                 })
         })
         .transpose()
@@ -180,8 +181,12 @@ impl Tool for TerminalTool {
         };
         let mut parameters = parameters;
         for param in &mut parameters {
-            if param.name == "terminal" || param.name == "detect_prompts" {
-                param.param_type = ToolParameterType::Bool;
+            match param.name.as_str() {
+                "terminal" | "detect_prompts" => param.param_type = ToolParameterType::Bool,
+                "timeout_ms" | "after_output" | "revision" | "wait_ms" => {
+                    param.param_type = ToolParameterType::Integer
+                }
+                _ => {}
             }
         }
         ToolDefinition {

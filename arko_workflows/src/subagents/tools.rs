@@ -368,7 +368,7 @@ impl Tool for WaitForAgentsTool {
                 param(
                     "timeout_seconds",
                     "Optional: the most seconds to wait.",
-                    ToolParameterType::String,
+                    ToolParameterType::Integer,
                     false,
                 ),
             ],

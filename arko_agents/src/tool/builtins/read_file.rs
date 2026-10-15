@@ -75,7 +75,7 @@ pub fn offered_definition(
             definition.parameters.push(ToolParameterDefinition {
                 name: name.to_string(),
                 description: description.to_string(),
-                param_type: ToolParameterType::String,
+                param_type: ToolParameterType::Integer,
                 required: false,
                 is_path: false,
                 flag: None,
