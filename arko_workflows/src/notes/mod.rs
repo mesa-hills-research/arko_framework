@@ -7,8 +7,9 @@
 //! most [`PROMPT_MAX_NOTES`] and about [`PROMPT_MAX_BYTES`] of new notes per
 //! update, oldest first; the rest at the next boundaries). A standing note
 //! ([`NoteKind::Standing`], the default) is also shown in the initial prompt
-//! of every later run of its audience, newest first and capped, and in the
-//! fresh conversation after a handover. A one-time note ([`NoteKind::Once`])
+//! of every later run of its audience, newest first and capped, in the
+//! fresh conversation after a handover, and again after Claude Code compacts
+//! the conversation. A one-time note ([`NoteKind::Once`])
 //! reaches each run of its audience that has started when it is posted,
 //! once.
 //!
@@ -353,7 +354,8 @@ impl NoteBoard {
     }
 
     /// The notes for the fresh conversation of run `task_id` after a
-    /// handover: the standing notes it receives that it had been given,
+    /// handover, and for its conversation after Claude Code compacted it:
+    /// the standing notes it receives that it had been given,
     /// newest first and capped, as an initial prompt shows them. The notes
     /// it hasn't been given (such as one posted while it wrote its report)
     /// come in the context update before its first request, so none is lost

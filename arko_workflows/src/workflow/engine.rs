@@ -1484,7 +1484,10 @@ pub(crate) fn task_part(prompt: &str) -> &str {
 /// the fresh conversation restates the task without the delivered messages
 /// (the report covers them), with the standing notes for the agent it had
 /// been given (newer ones come in its next context update), and with the
-/// current list of agents it may message, when its prompt had one.
+/// current list of agents it may message, when its prompt had one. After
+/// Claude Code compacted the conversation of an agent whose model runs in
+/// it, the agent gets those standing notes again, which a summary may leave
+/// out.
 pub(crate) struct WorkflowHandover {
     pub context: Arc<SharedContext>,
     pub agent_name: String,
@@ -1525,6 +1528,15 @@ impl HandoverHook for WorkflowHandover {
             task_prompt: task_part(prompt).to_string(),
             context: (!context.is_empty()).then_some(context),
         }
+    }
+
+    fn on_compaction(&self, task: &Task) -> Option<String> {
+        let notes = self
+            .context
+            .notes
+            .handover_section(&self.agent_name, task.id, self.review);
+        let notes = notes.trim();
+        (!notes.is_empty()).then(|| notes.to_string())
     }
 }
 

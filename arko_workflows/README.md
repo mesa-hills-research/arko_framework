@@ -644,8 +644,9 @@ Completion verifiers' reviews get a note only when it names them, and so do the 
 `WorkflowBuilder::notes_by_name_only([...])`: keep independent roles, such as a checker,
 independent of your steering (and restrict whom they can hear from, since an agent can
 pass a note on in a message). A verifier judges without the target's notes, so address a
-note to it too when the note changes what counts as done. Notes are saved in checkpoints, logged once, and carried
-into the fresh conversation after a handover.
+note to it too when the note changes what counts as done. Notes are saved in checkpoints, logged once, carried
+into the fresh conversation after a handover, and given again after Claude Code compacts a
+Claude Code agent's conversation.
 
 To post from another process (a `note` subcommand of your binary, a bot, an
 observer), turn on the control folder with `WorkflowBuilder::control_folder()`; it needs

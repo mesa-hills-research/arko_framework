@@ -509,6 +509,96 @@ async fn a_handover_carries_the_standing_notes() {
     assert!(fresh.find("REPORT:") < fresh.find("Use British spelling."));
 }
 
+/// After Claude Code compacts a Claude Code agent's conversation (against
+/// the scripted fake CLI of arko_agents' tests), the agent gets the
+/// standing notes it had been given again with its next input: a summary
+/// may leave them out.
+#[tokio::test]
+async fn a_claude_code_compaction_gives_the_standing_notes_again() {
+    let workspace = Workspace::new();
+    let fake = std::env::temp_dir().join(format!("arko-notes-fake-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&fake).unwrap();
+    std::fs::write(
+        fake.join("script.json"),
+        json!([
+            [
+                {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 400},
+                {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
+                {"text": "Not reached: the turn was interrupted."},
+            ],
+            {"compact": {"pre_tokens": 1520, "post_tokens": 300}},
+            [{"tool": "mcp__arko__complete_task", "input": {"summary": "drafted"}}],
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let python = std::env::var("ARKO_TEST_PYTHON")
+        .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.into());
+    let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../arko_agents/tests/fixtures/fake_claude_agent.py");
+    let path = |name: &str| fake.join(name).display().to_string();
+    let mut writer = agent_config("Friendly writer");
+    writer.llm_config.model =
+        arko_ai::Model::claude_code(arko_ai::Model::anthropic_claude_opus_5_5());
+    writer.tool_config.available_tool_names.push("Grep".into());
+    writer.handover = Some(arko_agents::HandoverConfig {
+        compact_in_claude_code: true,
+        ..arko_agents::HandoverConfig::at_input_tokens(1000)
+    });
+    writer.claude_code = Some(arko_agents::ClaudeCodeSettings {
+        cli_path: Some(python.into()),
+        cli_args: vec![script.display().to_string()],
+        env: std::collections::BTreeMap::from([
+            ("FAKE_CLAUDE_SCRIPT".to_string(), path("script.json")),
+            ("FAKE_CLAUDE_LOG".to_string(), path("log.jsonl")),
+            ("FAKE_CLAUDE_STATE".to_string(), path("state")),
+        ]),
+        ..Default::default()
+    });
+    let workflow = Workflow::builder()
+        .name("notes-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(arko_ai::LLMClient::new()))
+        .agent("lead", agent_config("Friendly lead"))
+        .agent("writer", writer)
+        .build()
+        .unwrap();
+    workflow
+        .post_note(Note::new("Use British spelling."))
+        .unwrap();
+    workflow
+        .post_note(Note::new("For the lead.").to(["lead"]))
+        .unwrap();
+
+    let result = workflow.run_agent("writer", "Draft it.").await.unwrap();
+    assert_eq!(
+        result.status,
+        AgentRunStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    assert!(result.task.handovers.is_empty());
+    let users: Vec<String> = std::fs::read_to_string(fake.join("log.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|entry| entry["event"] == "user")
+        .map(|entry| entry["text"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(users.len(), 3, "{users:#?}");
+    assert!(users[0].contains("Use British spelling."), "{}", users[0]);
+    assert_eq!(users[1], "/compact");
+    let after = &users[2];
+    assert!(
+        after.contains("Claude Code compacted your conversation"),
+        "{after}"
+    );
+    assert_eq!(after.matches("# Notes on your task").count(), 1, "{after}");
+    assert_eq!(after.matches("Use British spelling.").count(), 1, "{after}");
+    assert!(!after.contains("For the lead."), "{after}");
+    let _ = std::fs::remove_dir_all(&fake);
+}
+
 /// Notes are saved in checkpoints: a resumed workflow has them, a new run
 /// gets the standing ones, and a restored run continued after the resume
 /// isn't given again what it had been given, only what was posted since.
