@@ -803,6 +803,7 @@ unclassified ones, and in a task saved by an older version, and left out when `N
 | `UsageReported`, `ModelCallUsageReported`, `PlanUsageReported`, `ModelRerouted` | Usage after each model call. |
 | `CacheEfficiencyReported`, `CacheEfficiencyLow`, `PlanUsageThresholdReached` | Opt-in monitors. |
 | `HandoverRequested`, `ConversationHandedOver` | A handover started (the agent was asked for its report), then the conversation was replaced; see [Conversation handover](#conversation-handover). |
+| `ConversationCompacted { input_tokens, compacted_tokens }` | Claude Code compacted a Claude Code agent's conversation, with its size before and after. See [Claude Code models](#claude-code-models). |
 | `ContextInjected { ids, bytes }` | A `# Workflow context update` went into the conversation: `bytes` is its size, and `ids` names what it held, as the turn-context source identifies it (below). |
 | `TaskStreamEnd` | The run ended. |
 
@@ -835,7 +836,7 @@ Besides answers to the waiting states, a running task accepts:
 - `RequestHandover`: the agent hands its conversation over at the next turn boundary
   where a user message can go, whether or not `AgentConfig::handover` is set; see
   [Conversation handover](#conversation-handover). It doesn't end a wait, and is ignored
-  while a handover is under way.
+  while a handover is under way. An agent that compacts in Claude Code compacts instead.
 - `CancelTask`: the task ends as `Cancelled { reason }` with `CANCELLED_BY_USER` ("Task
   cancelled by user."). Tool calls running when it arrives are stopped, and calls it
   waited on or that had not run yet get a result saying they were not run. A task saved
@@ -1309,9 +1310,26 @@ sent as a message); the report is the turn's text, and a fresh Claude Code sessi
 from the seed and the report. Claude Code's own auto-compaction is off for such an
 agent (`autoCompactEnabled: false`), so it never replaces the conversation first.
 
+**Compaction.** With `HandoverConfig::compact_in_claude_code`, the agent compacts instead
+of handing over, at the same threshold (and on `RequestHandover`). Once the threshold is
+reached, the model's next tool call is held and its turn interrupted, and the runtime
+then sends Claude Code's own `/compact` into the session. The agent goes on in the same
+session from Claude Code's summary, with a message that names the calls held and asks it
+to continue. A conversation whose last turn ended over the threshold compacts as its next
+session starts, before the new input, and so does a request sent while no session runs
+(commands sent then are handled as the next session starts). A turn that fails over the
+model's input limit compacts at once. When Claude Code doesn't compact (no
+`compact_boundary` before the `/compact` turn ends), the agent hands over instead. Each
+compaction, the runtime's or Claude Code's own, is reported as `ConversationCompacted`
+with the size before and after, and the task's conversation keeps every message. Tools
+observing the conversation start over, the cache monitor judges the compacted
+conversation alone, and `HandoverHook::on_compaction` can give the agent context again
+(arko_workflows gives it the standing notes), sent with its next input.
+
 `examples/claude_code_agent.rs` runs an agent with Claude Code's read-only tools and a
-handover threshold, printing its calls, usage and handovers; it uses the CLI's login and
-counts against its plan usage. The tests run a scripted fake CLI
+handover threshold, printing its calls, usage and handovers (with `--compact`, Claude Code
+compacts at the threshold instead). It uses the CLI's login and counts against its plan
+usage. The tests run a scripted fake CLI
 (`tests/fixtures/fake_claude_agent.py`) and need Python 3 (`ARKO_TEST_PYTHON` selects the
 interpreter).
 
@@ -1399,8 +1417,10 @@ clears it.
 returns the `HandoverSeed { task_prompt, context }` that starts the fresh one
 (`HandoverSeed::for_task` is the default). A host that tracks what a conversation holds
 (messages delivered into it, files it read) updates its records there, and can restate
-the task without material the report covers and add context after the report. The
-arko_workflows engine does this for every agent it runs.
+the task without material the report covers and add context after the report. Its
+`on_compaction(task)` is called after Claude Code compacted a Claude Code agent's
+conversation, and returns context the agent gets again with its next input. The
+arko_workflows engine does both for every agent it runs.
 
 ## Refusals
 

@@ -24,6 +24,12 @@
 //! response must call a tool can then follow that rule while they write it.
 //! Otherwise (output-based tool calling, Claude Code, or a host's request to
 //! an agent without `handover`) the report is a reply without a tool call.
+//!
+//! An agent whose model runs in Claude Code can compact instead
+//! ([`HandoverConfig::compact_in_claude_code`]): at the threshold, or at a
+//! host's request, the runtime sends Claude Code's own `/compact` into the
+//! session, and the agent goes on in the same session from Claude Code's
+//! summary of the conversation. See [`crate::claude_code`].
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -102,6 +108,16 @@ pub struct HandoverConfig {
     /// it is offered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report_request: Option<String>,
+    /// On a Claude Code model, compact instead of handing over: at the
+    /// threshold, or when a host asks with
+    /// [`UserCommand::RequestHandover`](crate::runtime::command::UserCommand::RequestHandover),
+    /// the runtime has Claude Code compact the conversation with its own
+    /// `/compact`, and the agent goes on in the same session from Claude
+    /// Code's summary. A compaction that doesn't take place falls back to a
+    /// handover. See [`crate::claude_code`]. Other models hand over as
+    /// usual.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub compact_in_claude_code: bool,
 }
 
 impl HandoverConfig {
@@ -290,8 +306,9 @@ impl HandoverSeed {
     }
 }
 
-/// Called by the runtime at the moment a task's conversation is replaced.
-/// Set with [`AgentRuntime::with_handover_hook`](crate::runtime::AgentRuntime::with_handover_hook).
+/// Called by the runtime at the moment a task's conversation is replaced,
+/// or compacted in Claude Code. Set with
+/// [`AgentRuntime::with_handover_hook`](crate::runtime::AgentRuntime::with_handover_hook).
 pub trait HandoverHook: Send + Sync {
     /// `task` still holds the conversation being replaced. Returns the fresh
     /// conversation's first message; the default restates the task's
@@ -301,6 +318,16 @@ pub trait HandoverHook: Send + Sync {
     fn on_handover(&self, task: &Task, report: &str) -> HandoverSeed {
         let _ = report;
         HandoverSeed::for_task(task)
+    }
+
+    /// Claude Code compacted `task`'s conversation: its summary replaced the
+    /// earlier messages in the session (`task` keeps them all). Returns
+    /// context to give the agent again with its next input, such as
+    /// standing instructions a summary may leave out, or `None` (the
+    /// default). It reaches the agent as a context update.
+    fn on_compaction(&self, task: &Task) -> Option<String> {
+        let _ = task;
+        None
     }
 }
 
@@ -337,6 +364,22 @@ mod tests {
             ..HandoverConfig::at_input_tokens(10)
         };
         assert!(blank.validate().is_err());
+    }
+
+    #[test]
+    fn compaction_in_claude_code_is_saved_only_when_set() {
+        let config = HandoverConfig::at_input_tokens(10);
+        assert!(!config.compact_in_claude_code);
+        let saved = serde_json::to_value(&config).unwrap();
+        assert_eq!(saved, serde_json::json!({"at_input_tokens": 10}));
+        let compacting = HandoverConfig {
+            compact_in_claude_code: true,
+            ..config
+        };
+        let saved = serde_json::to_value(&compacting).unwrap();
+        assert_eq!(saved["compact_in_claude_code"], true);
+        let loaded: HandoverConfig = serde_json::from_value(saved).unwrap();
+        assert_eq!(loaded, compacting);
     }
 
     #[test]

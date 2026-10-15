@@ -1,10 +1,14 @@
 //! Runs an arko agent in the installed Claude Code CLI, under its login, and
-//! prints what happens: tool calls through the gate, usage, and handovers.
+//! prints what happens: tool calls through the gate, usage, handovers and
+//! compactions.
 //!
 //! ```text
 //! cargo run -p arko_agents --example claude_code_agent -- \
 //!     --workspace arko_ai/src/providers/claude_code --handover-at 20000
 //! ```
+//!
+//! With `--compact`, Claude Code compacts the conversation at that size
+//! instead of a handover.
 //!
 //! It uses the CLI's login and counts against its plan usage. For the raw
 //! stream-json traffic (every line to and from the CLI), add
@@ -44,6 +48,9 @@ struct Args {
     /// Hand over once a request's input reaches this many tokens.
     #[arg(long)]
     handover_at: Option<usize>,
+    /// Compact the conversation in Claude Code at that size instead.
+    #[arg(long, requires = "handover_at")]
+    compact: bool,
     /// Replace Claude Code's system prompt with the agent's.
     #[arg(long)]
     replace_system_prompt: bool,
@@ -78,7 +85,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..ClaudeCodeSettings::default()
     });
     if let Some(tokens) = args.handover_at {
-        builder = builder.handover(HandoverConfig::at_input_tokens(tokens));
+        builder = builder.handover(HandoverConfig {
+            compact_in_claude_code: args.compact,
+            ..HandoverConfig::at_input_tokens(tokens)
+        });
     }
     if let Some(fallback) = &args.refusal_fallback {
         builder = builder.refusal_fallback(AgentLLMConfig {
@@ -140,6 +150,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 handovers,
             } => println!(
                 "=== handover {handovers} done ({input_tokens} tokens); report:\n{report}\n==="
+            ),
+            AgentEvent::ConversationCompacted {
+                input_tokens,
+                compacted_tokens,
+            } => println!(
+                "=== Claude Code compacted the conversation: {input_tokens} tokens before, {} after ===",
+                compacted_tokens.map_or("unknown".to_string(), |tokens| tokens.to_string())
             ),
             AgentEvent::ToolResult {
                 tool_name, output, ..

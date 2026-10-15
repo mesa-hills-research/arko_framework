@@ -100,8 +100,10 @@ pub enum UserCommand {
     /// one that starts from the task prompt and the report. Works whether
     /// or not [`AgentConfig::handover`](crate::agent_config::AgentConfig::handover)
     /// is set; ignored while a handover is already under way. It doesn't
-    /// end a wait: a task awaiting a command hands over after the wait. See
-    /// [`crate::handover`].
+    /// end a wait: a task awaiting a command hands over after the wait. An
+    /// agent that compacts in Claude Code
+    /// ([`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code))
+    /// compacts instead. See [`crate::handover`].
     RequestHandover,
 
     /// Request to gracefully cancel the currently running task.

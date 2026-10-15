@@ -23,6 +23,11 @@
 //! - Environment details, reminders, the system prompt (appended to Claude
 //!   Code's, or replacing it), workflow context updates and handovers work as
 //!   for other agents.
+//! - Instead of handing over, the agent can have Claude Code compact its
+//!   conversation in the session, with Claude Code's own `/compact`
+//!   ([`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code)).
+//!   Each compaction is reported as
+//!   [`AgentEvent::ConversationCompacted`](crate::runtime::event::AgentEvent::ConversationCompacted).
 //!
 //! [`ClaudeCodeSettings`] sets how the CLI runs.
 
@@ -78,6 +83,12 @@ pub const READ_ONLY_BUILT_IN_TOOLS: &[&str] = &[
 /// to the user, or leaving plan mode).
 pub const UNSUPPORTED_BUILT_IN_TOOLS: &[&str] =
     &["AskUserQuestion", "ExitPlanMode", "EnterPlanMode"];
+
+/// The reason in [`AgentEvent::ToolRejected`](crate::runtime::event::AgentEvent::ToolRejected)
+/// for a call held while a compaction is due
+/// ([`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code)).
+/// The agent makes the call again after the compaction if it still needs it.
+pub const HELD_FOR_COMPACTION: &str = "Held so that Claude Code can compact the conversation first. The agent can make the call again after.";
 
 /// Whether `name` is a Claude Code built-in tool this crate knows.
 pub fn is_built_in_tool(name: &str) -> bool {

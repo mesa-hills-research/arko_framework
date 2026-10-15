@@ -18,7 +18,9 @@ the next turn's index). Steps:
                                          after its PostToolUse hook, before
                                          its result is reported
   {"rate_limit": {...}}                  a rate_limit_event with this info
-  {"fail": "..."}                        the turn ends in this error
+  {"fail": "..."}                        the turn ends in this error, with
+                                         "terminal_reason" (such as
+                                         "prompt_too_long") when given
   {"api_error": "authentication_failed", "text": "...", "status": 401}
                                          a request fails as Claude Code
                                          2.1 reports it (not signed in:
@@ -31,6 +33,15 @@ the next turn's index). Steps:
                                          "refusal" and these stop_details
 
 Text and tool steps take "model", the model that served them.
+
+A "/compact" message plays the next entry of the script when it is
+{"compact": {"pre_tokens": 1500, "post_tokens": 300}}: the compaction as
+Claude Code 2.1.300 reports it (status messages, a new init, the
+compact_boundary, the summary and the command's output as user messages,
+and a result with no turns). {"compact": {"error": "..."}} reports a
+compaction that failed, without a compact_boundary (the shape is assumed,
+not taken from a real failure). Otherwise "/compact" is an ordinary message
+that plays a turn, as a CLI without the command would pass it to the model.
 
 A turn's result is its last text. FAKE_CLAUDE_LOG receives one JSON line per
 event: argv, tools, user messages, hook and permission answers, tool results.
@@ -89,13 +100,42 @@ def ask(request):
         handle(message)
 
 
-def next_turn():
+def next_turn(advance=True):
     script = json.load(open(os.environ["FAKE_CLAUDE_SCRIPT"]))
     state_path = os.environ["FAKE_CLAUDE_STATE"]
     index = int(open(state_path).read()) if os.path.exists(state_path) else 0
-    with open(state_path, "w") as out:
-        out.write(str(index + 1))
+    if advance:
+        with open(state_path, "w") as out:
+            out.write(str(index + 1))
     return script[index] if index < len(script) else [{"text": "script exhausted"}]
+
+
+def compact(spec):
+    send({"type": "system", "subtype": "status", "status": "compacting", "session_id": SESSION})
+    if "error" in spec:
+        send({"type": "system", "subtype": "status", "status": None, "compact_result": "failed",
+              "session_id": SESSION})
+        send({"type": "user", "parent_tool_use_id": None, "session_id": SESSION, "isReplay": True,
+              "message": {"role": "user", "content":
+                          "<local-command-stderr>Error: %s</local-command-stderr>" % spec["error"]}})
+    else:
+        send({"type": "system", "subtype": "status", "status": None, "compact_result": "success",
+              "session_id": SESSION})
+        send({"type": "system", "subtype": "init", "session_id": SESSION})
+        send({"type": "system", "subtype": "compact_boundary", "session_id": SESSION,
+              "compact_metadata": {"trigger": "manual", "pre_tokens": spec.get("pre_tokens", 0),
+                                   "post_tokens": spec.get("post_tokens", 0),
+                                   "cumulative_dropped_tokens": 0, "duration_ms": 5}})
+        send({"type": "user", "parent_tool_use_id": None, "session_id": SESSION,
+              "isSynthetic": True, "message": {"role": "user", "content":
+                  "This session is being continued from a previous conversation that ran out of "
+                  "context. The summary below covers the earlier portion of the conversation.\n\n"
+                  "Summary:\n" + spec.get("summary", "The work so far.")}})
+        send({"type": "user", "parent_tool_use_id": None, "session_id": SESSION, "isReplay": True,
+              "message": {"role": "user",
+                          "content": "<local-command-stdout>Compacted </local-command-stdout>"}})
+    send({"type": "result", "subtype": "success", "is_error": False, "num_turns": 0,
+          "session_id": SESSION, "duration_ms": 5, "result": "", "local_command": "compact"})
 
 
 def usage(step, output):
@@ -198,6 +238,12 @@ def turn(text):
         listed = ask({"subtype": "mcp_message", "server_name": "arko",
                       "message": {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}})
         log("tools", tools=listed["mcp_response"]["result"]["tools"])
+    if text.startswith("/compact"):
+        entry = next_turn(advance=False)
+        if isinstance(entry, dict) and "compact" in entry:
+            next_turn()
+            compact(entry["compact"])
+            return
     send({"type": "system", "subtype": "init", "session_id": SESSION})
     state["interrupted"] = False
     final = ""
@@ -242,9 +288,12 @@ def turn(text):
                   "api_error_status": step.get("status"), "terminal_reason": "api_error"})
             return
         if "fail" in step:
-            send({"type": "result", "subtype": "error_during_execution", "is_error": True,
-                  "num_turns": 1, "session_id": SESSION, "duration_ms": 5,
-                  "result": step["fail"]})
+            result = {"type": "result", "subtype": "error_during_execution", "is_error": True,
+                      "num_turns": 1, "session_id": SESSION, "duration_ms": 5,
+                      "result": step["fail"]}
+            if "terminal_reason" in step:
+                result["terminal_reason"] = step["terminal_reason"]
+            send(result)
             return
         if "text" in step:
             assistant([{"type": "text", "text": step["text"]}], step)

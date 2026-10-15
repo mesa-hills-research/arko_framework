@@ -101,7 +101,7 @@ impl AgentRuntime {
     }
 
     /// Calls `hook` when a task this runtime runs hands its conversation
-    /// over; see [`HandoverHook`].
+    /// over, or Claude Code compacts it. See [`HandoverHook`].
     pub fn with_handover_hook(mut self, hook: Arc<dyn HandoverHook>) -> Self {
         self.handover_hook = Some(hook);
         self

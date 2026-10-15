@@ -295,6 +295,19 @@ pub enum AgentEvent {
         /// How many handovers the task has made, this one included.
         handovers: usize,
     },
+    /// Claude Code compacted the conversation of an agent whose model runs
+    /// in it: at the runtime's request (see
+    /// [`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code))
+    /// or on its own. Its summary replaced the earlier messages in the
+    /// session, and the agent goes on from it. The task's conversation
+    /// keeps every message.
+    ConversationCompacted {
+        /// The conversation's size before, in tokens, as Claude Code
+        /// reported it.
+        input_tokens: usize,
+        /// Its size after, as Claude Code reported it, when it did.
+        compacted_tokens: Option<usize>,
+    },
 }
 
 /// Why a tool result was shortened ([`AgentEvent::ToolResultShortened`]).

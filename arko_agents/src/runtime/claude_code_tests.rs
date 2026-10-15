@@ -498,6 +498,19 @@ async fn ask_user_waits_and_the_answer_resumes_the_session() {
     );
 }
 
+/// Context for the model once it has been asked for context before.
+struct SecondUpdate {
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+impl crate::runtime::TurnContextSource for SecondUpdate {
+    fn turn_context(&self, _task_id: uuid::Uuid) -> Option<String> {
+        let asked = self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (asked == 1).then(|| "Message from agent 'lead': skip vendor/.".to_string())
+    }
+}
+
+/// Context that arrives during a turn goes with the next call's result.
 #[tokio::test]
 async fn context_arrives_with_the_next_result() {
     let fake = Fake::new(json!([[
@@ -510,14 +523,12 @@ async fn context_arrives_with_the_next_result() {
         fake.workspace(),
         None,
     );
-    let run = start(task);
-    run.commands
-        .send(UserCommand::InjectContext {
-            content: "Message from agent 'lead': skip vendor/.".into(),
-        })
-        .await
-        .unwrap();
-    let (task, _) = run.finish().await;
+    let runtime = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_turn_context(
+        Arc::new(SecondUpdate {
+            asked: Default::default(),
+        }),
+    );
+    let (task, _) = start_with(task, runtime).finish().await;
     let posts = fake.logged("post");
     let context = posts[0]["answer"]["hookSpecificOutput"]["additionalContext"]
         .as_str()
@@ -536,6 +547,38 @@ async fn context_arrives_with_the_next_result() {
                 && text.contains("skip vendor/"))
     );
     assert!(task.pending_context_injections.is_empty());
+}
+
+/// Context sent before the session starts goes with its first input.
+#[tokio::test]
+async fn context_sent_before_the_session_goes_with_its_first_input() {
+    let fake = Fake::new(json!([[complete("Found them")]]));
+    let task = Task::new(
+        config(&fake, &[]),
+        "Find todos.".into(),
+        fake.workspace(),
+        None,
+    );
+    let run = start(task);
+    run.commands
+        .send(UserCommand::InjectContext {
+            content: "Message from agent 'lead': skip vendor/.".into(),
+        })
+        .await
+        .unwrap();
+    let (task, events) = run.finish().await;
+    assert!(task.pending_context_injections.is_empty());
+    let first = &user_texts(&fake)[0];
+    assert!(first.starts_with("Find todos."), "{first}");
+    assert!(
+        first.contains("# Workflow context update\n\nMessage from agent 'lead': skip vendor/."),
+        "{first}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ContextInjected { .. }))
+    );
 }
 
 #[tokio::test]
@@ -1986,4 +2029,361 @@ async fn calls_that_ended_normally_are_not_reported_again() {
     assert!(matches!(task.current_state, TaskState::Completed { .. }));
     let resumed = fake.logged("user")[1]["text"].as_str().unwrap().to_string();
     assert!(!resumed.contains("tool calls were open"), "{resumed}");
+}
+
+/// An agent that compacts at `tokens`, with a handover hook whose context
+/// follows each compaction.
+fn compacting(fake: &Fake, tools: &[&str], tokens: usize) -> AgentConfig {
+    let mut config = config(fake, tools);
+    config.handover = Some(HandoverConfig {
+        compact_in_claude_code: true,
+        ..HandoverConfig::at_input_tokens(tokens)
+    });
+    config
+}
+
+struct StandingNotes;
+
+impl crate::handover::HandoverHook for StandingNotes {
+    fn on_compaction(&self, _task: &Task) -> Option<String> {
+        Some("# Notes on your task\n- Keep the tests green.".into())
+    }
+}
+
+fn with_notes() -> AgentRuntime {
+    AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .with_handover_hook(Arc::new(StandingNotes))
+}
+
+fn user_texts(fake: &Fake) -> Vec<String> {
+    fake.logged("user")
+        .iter()
+        .map(|entry| entry["text"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// At the threshold, mid-turn, the next call is held and the turn
+/// interrupted (its next step doesn't run). `/compact` goes into the same
+/// session, and the agent continues from Claude Code's summary, told of
+/// the held call and given the hook's context again. No handover takes
+/// place.
+#[tokio::test]
+async fn a_compaction_holds_the_next_call_and_continues_in_the_same_session() {
+    let fake = Fake::new(json!([
+        [
+            {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 400},
+            {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
+            {"text": "Not reached: the turn was interrupted."},
+        ],
+        {"compact": {"pre_tokens": 1520, "post_tokens": 300}},
+        [
+            {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 600},
+            complete("Searched a and b"),
+        ],
+    ]));
+    let task = Task::new(
+        compacting(&fake, &["Grep"], 1000),
+        "Search a and b.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (task, events) = start_with(task, with_notes()).finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert!(task.handovers.is_empty());
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ConversationCompacted {
+            input_tokens: 1520,
+            compacted_tokens: Some(300)
+        }
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::HandoverRequested { .. }))
+    );
+    // The call at the threshold was held, not run, and said so.
+    let posts = fake.logged("post");
+    assert_eq!(posts[1]["is_error"], true);
+    let held = posts[1]["output"].as_str().unwrap();
+    assert!(
+        held.starts_with(
+            "Not an error: arko held this Grep call because Claude Code compacts your conversation now."
+        ),
+        "{held}"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolRejected { tool_name, reason: Some(reason), .. }
+            if tool_name == "Grep" && reason.starts_with("Held so that Claude Code can compact")
+    )));
+    // One session: `/compact` as it is, then the note that continues.
+    assert_eq!(fake.logged("argv").len(), 1);
+    let users = user_texts(&fake);
+    assert_eq!(users.len(), 3, "{users:#?}");
+    assert_eq!(users[1], "/compact");
+    let note = &users[2];
+    assert!(
+        note.contains("arko held these tool calls of yours and ended your turn"),
+        "{note}"
+    );
+    assert!(note.contains(r#"- `Grep` with {"pattern":"b"}"#), "{note}");
+    assert!(
+        note.contains("Claude Code compacted your conversation"),
+        "{note}"
+    );
+    assert!(
+        note.contains("# Workflow context update\n\n# Notes on your task\n- Keep the tests green."),
+        "{note}"
+    );
+    // Claude Code's own compaction stays off.
+    let argv: Vec<String> = serde_json::from_value(fake.logged("argv")[0]["argv"].clone()).unwrap();
+    let settings = argv.iter().position(|arg| arg == "--settings").unwrap();
+    assert!(argv[settings + 1].contains("\"autoCompactEnabled\":false"));
+    // The task keeps the whole conversation, and its usage after the
+    // compaction counts as the current conversation's.
+    let texts = texts(&task);
+    assert!(texts.iter().any(|text| text.starts_with("Search a and b.")));
+    assert!(!texts.iter().any(|text| text == "/compact"));
+    assert!(!texts.iter().any(|text| text.starts_with("Not reached")));
+    assert_eq!(task.conversation_usage_start, 2);
+    assert_eq!(task.usage_history[2].input_tokens, 600);
+}
+
+/// A conversation whose last turn ended over the threshold compacts as
+/// its next session starts: `/compact` first, then the task's new input.
+#[tokio::test]
+async fn a_compaction_due_as_a_session_starts_comes_first() {
+    let fake = Fake::new(json!([
+        [
+            {"text": "Looking.", "input_tokens": 400},
+            {"tool": "mcp__arko__complete_task", "input": {"summary": "First answer."},
+             "input_tokens": 1500},
+        ],
+        {"compact": {"pre_tokens": 1510, "post_tokens": 200}},
+        [complete("Second answer.")],
+    ]));
+    let task = Task::new(
+        compacting(&fake, &[], 1000),
+        "First question.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (mut task, events) = start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ConversationCompacted { .. })),
+        "complete_task ends the turn before a compaction"
+    );
+    task.prepare_for_resumption_from_completed("Second question.".into())
+        .unwrap();
+    let (task, events) = start_with(task, with_notes()).finish().await;
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "Second answer."),
+        "{:?}",
+        task.current_state
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ConversationCompacted {
+            input_tokens: 1510,
+            ..
+        }
+    )));
+    let users = user_texts(&fake);
+    assert_eq!(users.len(), 3, "{users:#?}");
+    assert_eq!(users[1], "/compact");
+    // The new input continues the task: no note to continue is needed.
+    assert!(users[2].starts_with("Second question."), "{}", users[2]);
+    assert!(!users[2].contains("Claude Code compacted"), "{}", users[2]);
+    assert!(users[2].contains("Keep the tests green."), "{}", users[2]);
+    // The same session, resumed.
+    let argvs = fake.logged("argv");
+    let second: Vec<String> = serde_json::from_value(argvs[1]["argv"].clone()).unwrap();
+    assert!(second.iter().any(|arg| arg.starts_with("--resume=")));
+}
+
+/// A host's request compacts an agent that compacts: sent before its next
+/// run starts, before that run's input. Sent before anything, it has nothing
+/// to compact.
+#[tokio::test]
+async fn a_host_request_compacts() {
+    let fake = Fake::new(json!([
+        [complete("First answer.")],
+        {"compact": {"pre_tokens": 800, "post_tokens": 100}},
+        [complete("Second answer.")],
+    ]));
+    let task = Task::new(
+        compacting(&fake, &[], 100_000),
+        "First question.".into(),
+        fake.workspace(),
+        None,
+    );
+    let run = start(task);
+    run.commands
+        .send(UserCommand::RequestHandover)
+        .await
+        .unwrap();
+    let (mut task, events) = run.finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ConversationCompacted { .. }))
+    );
+    task.prepare_for_resumption_from_completed("Second question.".into())
+        .unwrap();
+    let run = start(task);
+    run.commands
+        .send(UserCommand::RequestHandover)
+        .await
+        .unwrap();
+    let (task, events) = run.finish().await;
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "Second answer.")
+    );
+    assert!(task.handovers.is_empty());
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ConversationCompacted {
+            input_tokens: 800,
+            ..
+        }
+    )));
+    let users = user_texts(&fake);
+    assert_eq!(users.len(), 3, "{users:#?}");
+    assert_eq!(users[1], "/compact");
+    assert!(users[2].starts_with("Second question."), "{}", users[2]);
+}
+
+/// When Claude Code doesn't compact (`/compact` fails, or this Claude
+/// Code passes it to the model as a message), the agent hands over
+/// instead: the report request follows, and a fresh session starts from
+/// the report.
+#[tokio::test]
+async fn a_compaction_that_doesnt_happen_falls_back_to_a_handover() {
+    for compaction in [
+        json!({"compact": {"error": "Not enough messages to compact."}}),
+        json!([{"text": "I don't know /compact."}]),
+    ] {
+        let fake = Fake::new(json!([
+            [
+                {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 400},
+                {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
+                {"text": "Not reached: the turn was interrupted."},
+            ],
+            compaction,
+            [{"text": "REPORT: searched a; next, b."}],
+            [complete("Searched b")],
+        ]));
+        let task = Task::new(
+            compacting(&fake, &["Grep"], 1000),
+            "Search a and b.".into(),
+            fake.workspace(),
+            None,
+        );
+        let (task, events) = start(task).finish().await;
+        assert!(
+            matches!(task.current_state, TaskState::Completed { .. }),
+            "{:?}",
+            task.current_state
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ConversationCompacted { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::HandoverRequested { .. }))
+        );
+        assert_eq!(task.handovers.len(), 1);
+        assert_eq!(task.handovers[0].report, "REPORT: searched a; next, b.");
+        let users = user_texts(&fake);
+        assert_eq!(users[1], "/compact");
+        assert!(
+            users[2].contains("Reply with that report as plain text"),
+            "{}",
+            users[2]
+        );
+        assert!(users[3].contains(REPORT_HEADING));
+        assert_eq!(fake.logged("argv").len(), 2, "a fresh session");
+    }
+}
+
+/// A turn that fails over the model's input limit compacts at once.
+#[tokio::test]
+async fn going_over_the_input_limit_compacts() {
+    let fake = Fake::new(json!([
+        [
+            {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 400},
+            {"fail": "Prompt is too long", "terminal_reason": "prompt_too_long"},
+        ],
+        {"compact": {"pre_tokens": 1_000_100, "post_tokens": 900}},
+        [complete("done")],
+    ]));
+    let task = Task::new(
+        compacting(&fake, &["Grep"], 500_000),
+        "Search.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (task, events) = start(task).finish().await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ConversationCompacted {
+            input_tokens: 1_000_100,
+            ..
+        }
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ErrorEncountered { .. }))
+    );
+    let users = user_texts(&fake);
+    assert_eq!(users[1], "/compact");
+    assert!(users[2].contains("Claude Code compacted your conversation"));
+}
+
+/// A compaction Claude Code makes on its own (its auto-compaction, on for
+/// an agent without `handover`) is reported too.
+#[tokio::test]
+async fn claude_codes_own_compaction_is_reported() {
+    let fake = Fake::new(json!([[
+        {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 900},
+        {"system": {"subtype": "compact_boundary",
+                    "compact_metadata": {"trigger": "auto", "pre_tokens": 950, "post_tokens": 120}}},
+        complete("done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &["Grep"]),
+        "Search.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (task, events) = start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ConversationCompacted {
+            input_tokens: 950,
+            compacted_tokens: Some(120)
+        }
+    )));
+    assert_eq!(task.conversation_usage_start, 1);
+    let argv: Vec<String> = serde_json::from_value(fake.logged("argv")[0]["argv"].clone()).unwrap();
+    assert!(!argv.iter().any(|arg| arg.contains("autoCompactEnabled")));
 }

@@ -12,7 +12,9 @@
 //! The session lives while the task is in progress. A wait (for an answer,
 //! or an error-recovery decision) ends it, and the task resumes it
 //! ([`Task::claude_code_session`]) when it continues. A handover starts a
-//! new session.
+//! new session. A compaction ([`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code))
+//! keeps it: the runtime sends Claude Code's `/compact` between turns, and
+//! the agent goes on from Claude Code's summary.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -27,7 +29,7 @@ use super::command::UserCommand;
 use super::event::AgentEvent;
 use super::tool_run::{self, Interception, RunEnvironment, RunOutcome, ToolRun};
 use crate::agent_config::{AgentConfig, LLMErrorPolicy, PathSafetyPolicy, ToolErrorPolicy};
-use crate::claude_code::built_in_path_parameters;
+use crate::claude_code::{HELD_FOR_COMPACTION, built_in_path_parameters};
 use crate::error::ArkoAgentsError;
 use crate::handover::{
     DEFAULT_TEXT_REPORT_REQUEST, HandoverHook, HandoverRecord, HandoverRequest, HandoverSeed,
@@ -73,6 +75,17 @@ const TASK_COMPLETE: &str = "The task is complete; end your turn without calling
 const ASKED: &str = "Your questions were sent to the user. End your turn now without calling tools; the answer arrives as the next message.";
 
 const CONTINUE: &str = "Continue the task from where you left off.";
+
+/// What the runtime sends to have Claude Code compact the session's
+/// conversation: Claude Code's own command, as a user message.
+const COMPACT_COMMAND: &str = "/compact";
+
+/// The model's next input after a compaction the runtime asked for, when no
+/// other input (a user's message) continues the task.
+const COMPACTED: &str = "Claude Code compacted your conversation: the summary above replaces the earlier messages. Continue the task from where you left off.";
+
+/// Heads the list of the calls held while a compaction was due.
+const HELD_CALLS: &str = "For the compaction, arko held these tool calls of yours and ended your turn, so they did not run; make them again if they are still needed:";
 
 /// A call's result as Claude Code is served it: `text`, then each image's
 /// label on a line of its own, and the images as MCP image content.
@@ -198,6 +211,13 @@ fn refused(tool: &str, reason: &str) -> Value {
 fn held_for_report(tool: &str, request: &str) -> Value {
     cc::Hook::deny_tool(format!(
         "Not an error: arko held this {tool} call so you can write your handover report now. {request}"
+    ))
+}
+
+/// A call held while a compaction is due: not an error.
+fn held_for_compaction(tool: &str) -> Value {
+    cc::Hook::deny_tool(format!(
+        "Not an error: arko held this {tool} call because Claude Code compacts your conversation now. End your turn without calling a tool; you continue after the compaction, and can make this call again then."
     ))
 }
 
@@ -508,6 +528,19 @@ struct Approval {
     deadline: Option<tokio::time::Instant>,
 }
 
+/// A compaction of the session's conversation with Claude Code's
+/// `/compact` (see [`HandoverConfig::compact_in_claude_code`](crate::handover::HandoverConfig::compact_in_claude_code)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Compaction {
+    /// Due: the model's next tool call is held and its turn interrupted
+    /// (its other calls are held too), and `/compact` is sent when the turn
+    /// ends (or first, when a session starts).
+    Due,
+    /// `/compact` was sent, and `compacted` once Claude Code reported the
+    /// compaction.
+    Sent { compacted: bool },
+}
+
 /// How a session ended.
 enum SessionEnd {
     /// The task stopped (it ended, was suspended, or its host is gone).
@@ -575,7 +608,9 @@ pub(super) struct ClaudeCodeRun {
     /// The refusal fallback model answers this turn; the configured model
     /// takes over again when it ends.
     fallback_turn: bool,
-    /// The input of the current conversation's latest and first requests.
+    /// The input of the current conversation's latest and first requests
+    /// (the first also when an earlier run made it). A conversation is
+    /// current from its start, its handover or its latest compaction.
     context_size: Option<usize>,
     first_context_size: Option<usize>,
     open_turns: u32,
@@ -604,6 +639,10 @@ pub(super) struct ClaudeCodeRun {
     error_kind: Option<arko_ai::ErrorKind>,
     stopping: Option<Stopping>,
     handover_skip_warned: bool,
+    /// A compaction under way.
+    compaction: Option<Compaction>,
+    /// The calls held while it was due, as the model is told of them after.
+    held_calls: Vec<String>,
     host: Option<Arc<ToolHost>>,
     /// Receives the task at its safe points.
     pub(super) snapshots: TaskSnapshots,
@@ -634,6 +673,10 @@ impl ClaudeCodeRun {
             }
         }
         let parsing = task.agent_config.get_tool_parsing_config();
+        let first_context_size = task
+            .usage_history
+            .get(task.conversation_usage_start)
+            .map(|usage| usage.input_tokens);
         Self {
             task,
             registry,
@@ -663,7 +706,7 @@ impl ClaudeCodeRun {
             refusal_details: None,
             fallback_turn: false,
             context_size: None,
-            first_context_size: None,
+            first_context_size,
             open_turns: 0,
             questions: None,
             report_delivered: false,
@@ -676,6 +719,8 @@ impl ClaudeCodeRun {
             error_kind: None,
             stopping: None,
             handover_skip_warned: false,
+            compaction: None,
+            held_calls: Vec::new(),
             host: None,
             snapshots: TaskSnapshots::default(),
             host_stop: crate::stop::StopSignal::never(),
@@ -1048,6 +1093,9 @@ impl ClaudeCodeRun {
                 self.hold(reason).await?;
                 continue;
             }
+            if !self.take_waiting_commands().await? {
+                return Ok(());
+            }
             let session = match self.start_session().await {
                 Ok(session) => session,
                 Err(error) => {
@@ -1200,6 +1248,34 @@ impl ClaudeCodeRun {
         }
     }
 
+    /// Handles the commands that arrived while no session ran, before the
+    /// next one starts, so that a request for a handover or a compaction
+    /// applies to its first input. Returns false when the task stops
+    /// instead.
+    async fn take_waiting_commands(&mut self) -> Result<bool, ArkoAgentsError> {
+        while let Ok(command) = self.commands.try_recv() {
+            match command {
+                UserCommand::InjectContext { content } => self.queue_context(content),
+                UserCommand::RequestHandover => self.note_handover_request().await?,
+                UserCommand::HostDeciding => {}
+                UserCommand::CancelTask => {
+                    self.set_state(TaskState::Cancelled {
+                        reason: crate::task::CANCELLED_BY_USER.into(),
+                    })
+                    .await?;
+                    return Ok(false);
+                }
+                UserCommand::SuspendTask => return Ok(false),
+                other => log::warn!(
+                    "Task {}: command {:?} doesn't apply before Claude Code runs; ignored.",
+                    self.task.id,
+                    other
+                ),
+            }
+        }
+        Ok(true)
+    }
+
     fn queue_context(&mut self, content: String) {
         if !content.trim().is_empty() {
             self.task.pending_context_injections.push(content);
@@ -1207,7 +1283,12 @@ impl ClaudeCodeRun {
     }
 
     async fn note_handover_request(&mut self) -> Result<(), ArkoAgentsError> {
-        if self.task.handover_requested.is_some() {
+        if self.task.handover_requested.is_some() || self.compaction.is_some() {
+            return Ok(());
+        }
+        if self.compacts() {
+            log::info!("Task {}: Compaction requested by the host.", self.task.id);
+            self.compaction = Some(Compaction::Due);
             return Ok(());
         }
         let input_tokens = self.context_size.unwrap_or(0);
@@ -1223,6 +1304,24 @@ impl ClaudeCodeRun {
         self.task.handover_requested.is_some()
     }
 
+    /// Whether the agent compacts its conversation in Claude Code instead of
+    /// handing it over.
+    fn compacts(&self) -> bool {
+        self.task
+            .agent_config
+            .handover
+            .as_ref()
+            .is_some_and(|handover| handover.compact_in_claude_code)
+    }
+
+    /// The input of the conversation's latest request: this run's, else as
+    /// the task recorded it.
+    fn latest_size(&self) -> usize {
+        self.context_size
+            .or_else(|| self.task.current_conversation_context_size())
+            .unwrap_or(0)
+    }
+
     fn report_request(&self) -> String {
         self.task
             .agent_config
@@ -1236,9 +1335,10 @@ impl ClaudeCodeRun {
 
     /// The context waiting for the model (taken from the channel, and the
     /// turn context source's), as one context update; `None` while a
-    /// handover report is due, when it waits for the fresh conversation.
+    /// handover report is due, when it waits for the fresh conversation,
+    /// and during a compaction, when it waits for the agent's next input.
     fn take_context(&mut self) -> Option<String> {
-        if self.handover_due() {
+        if self.handover_due() || self.compaction.is_some() {
             return None;
         }
         let mut update_ids = Vec::new();
@@ -1555,7 +1655,30 @@ impl ClaudeCodeRun {
         &mut self,
         (mut session, mut requests): (cc::ClaudeSession, mpsc::UnboundedReceiver<HostRequest>),
     ) -> Result<SessionEnd, ArkoAgentsError> {
-        let input = self.unsent_input()?;
+        // A compaction due as the session starts (asked for while the task
+        // waited, or the conversation's last turn ended over the threshold)
+        // comes first, and the task's input follows Claude Code's summary.
+        // A session that has received nothing has nothing to compact.
+        if self.compaction.is_none()
+            && self.compacts()
+            && !self.handover_due()
+            && let Some(size) = self.over_threshold(self.latest_size())
+        {
+            log::info!(
+                "Task {}: Compaction due at {size} input tokens.",
+                self.task.id
+            );
+            self.compaction = Some(Compaction::Due);
+        }
+        if self.task.claude_code_synced == 0 && self.compaction == Some(Compaction::Due) {
+            self.compaction = None;
+        }
+        let input = if self.compaction == Some(Compaction::Due) {
+            self.compaction = Some(Compaction::Sent { compacted: false });
+            Value::String(COMPACT_COMMAND.to_string())
+        } else {
+            self.unsent_input()?
+        };
         self.api_error = None;
         self.error_kind = None;
         // A session that ended before its turn did: reported now.
@@ -1626,6 +1749,11 @@ impl ClaudeCodeRun {
         // Late hook requests get their stopping answer.
         drop(requests);
         self.slowed.clear();
+        // A `/compact` whose turn didn't end: whether it compacted is
+        // unknown, and the threshold decides again.
+        if matches!(self.compaction, Some(Compaction::Sent { .. })) {
+            self.compaction = None;
+        }
         self.flush_usage().await?;
         if let Some(approval) = self.approval.take() {
             let _ = approval
@@ -1843,6 +1971,22 @@ impl ClaudeCodeRun {
             })
             .await?;
             return Ok(held_for_report(&name, &request));
+        }
+        if self.compaction.is_some() && name != COMPLETE_TASK_TOOL_NAME {
+            // The first call held ends the turn, so that the compaction
+            // doesn't wait for the model.
+            if self.compaction == Some(Compaction::Due) && self.held_calls.is_empty() {
+                let _ = session.interrupt().await;
+            }
+            self.held_calls
+                .push(format!("- `{served}` with {}", bounded(&input.to_string())));
+            self.emit(AgentEvent::ToolRejected {
+                tool_call_id: id,
+                tool_name: name.clone(),
+                reason: Some(HELD_FOR_COMPACTION.to_string()),
+            })
+            .await?;
+            return Ok(held_for_compaction(&name));
         }
         let offered = if built_in {
             self.task
@@ -2484,10 +2628,7 @@ impl ClaudeCodeRun {
                 .await?;
             }
             cc::Message::System(system) if system.subtype == "compact_boundary" => {
-                log::warn!(
-                    "Task {}: Claude Code compacted the conversation; the task's record keeps the full conversation.",
-                    self.task.id
-                );
+                self.compacted(&system.raw).await?;
             }
             cc::Message::System(system) if system.subtype == "api_retry" => {
                 log::info!("Task {}: Claude Code is retrying a request.", self.task.id);
@@ -2970,34 +3111,57 @@ impl ClaudeCodeRun {
         Ok(())
     }
 
-    /// After a request of the main conversation: a handover starts once its
-    /// input reaches the threshold. The report request reaches the model as
-    /// the result of its next tool call, or as a message when its turn ends.
-    async fn check_handover_threshold(&mut self) -> Result<(), ArkoAgentsError> {
-        if self.handover_due() {
-            return Ok(());
-        }
+    /// `size` (a request's input), when it reached the handover threshold
+    /// of a conversation whose first request didn't: a conversation that
+    /// starts over the threshold would start over it again after another
+    /// handover or compaction.
+    fn over_threshold(&mut self, size: usize) -> Option<usize> {
         let config = &self.task.agent_config;
-        let Some(threshold) = config
+        let threshold = config
             .handover
-            .as_ref()
-            .and_then(|handover| handover.threshold(config.llm_config.model.max_input_tokens))
-        else {
-            return Ok(());
-        };
-        let Some(size) = self.context_size.filter(|size| *size >= threshold) else {
-            return Ok(());
-        };
+            .as_ref()?
+            .threshold(config.llm_config.model.max_input_tokens)?;
+        if size < threshold {
+            return None;
+        }
         if self
             .first_context_size
             .is_some_and(|first| first >= threshold)
         {
             if !std::mem::replace(&mut self.handover_skip_warned, true) {
+                let what = if self.compacts() {
+                    "compaction"
+                } else {
+                    "handover"
+                };
                 log::warn!(
-                    "Task {}: No handover: the conversation's first request was already over the handover threshold ({threshold}).",
+                    "Task {}: No {what}: the conversation's first request was already over the handover threshold ({threshold}).",
                     self.task.id
                 );
             }
+            return None;
+        }
+        Some(size)
+    }
+
+    /// After a request of the main conversation: a handover starts once its
+    /// input reaches the threshold. The report request reaches the model as
+    /// the result of its next tool call, or as a message when its turn ends.
+    /// An agent that compacts holds its next call instead and ends its turn,
+    /// and Claude Code compacts the conversation then.
+    async fn check_handover_threshold(&mut self) -> Result<(), ArkoAgentsError> {
+        if self.handover_due() || self.compaction.is_some() {
+            return Ok(());
+        }
+        let Some(size) = self.context_size.and_then(|size| self.over_threshold(size)) else {
+            return Ok(());
+        };
+        if self.compacts() {
+            log::info!(
+                "Task {}: Compaction due at {size} input tokens.",
+                self.task.id
+            );
+            self.compaction = Some(Compaction::Due);
             return Ok(());
         }
         self.task.handover_requested = Some(HandoverRequest {
@@ -3037,6 +3201,23 @@ impl ClaudeCodeRun {
         }
         if self.task.current_state.is_terminal() {
             return Ok(Some(SessionEnd::Stop));
+        }
+        if let Some(Compaction::Sent { compacted }) = self.compaction {
+            // The `/compact` turn ended.
+            self.compaction = None;
+            if compacted {
+                self.add_compaction_note()?;
+            } else {
+                self.held_calls.clear();
+                if self.pause_after_turn.is_none() {
+                    self.compaction_failed(result).await?;
+                }
+            }
+            // Its note (or the report request) goes out with the task's
+            // input, after the pause the turn asked for if it did.
+            if self.pause_after_turn.is_none() {
+                return self.send_unsent(session).await;
+            }
         }
         if let Some((reason, cause)) = self.pause_after_turn.take() {
             if matches!(cause, ErrorRecoveryCause::BudgetExceeded) {
@@ -3127,6 +3308,10 @@ impl ClaudeCodeRun {
                 .await?;
             return Ok(Some(SessionEnd::Wait));
         }
+        if self.compaction == Some(Compaction::Due) && !self.held_calls.is_empty() {
+            // The turn was interrupted for the compaction.
+            return self.compact_now(session).await;
+        }
         if result.is_error {
             let message = result
                 .result
@@ -3168,7 +3353,24 @@ impl ClaudeCodeRun {
                     },
                 ));
             }
+            if kind == arko_ai::ErrorKind::ContextOverflow
+                && self.compacts()
+                && !self.handover_due()
+            {
+                // Over the model's input limit before the compaction: Claude
+                // Code's `/compact` tries now (and a handover follows if it
+                // can't).
+                log::warn!(
+                    "Task {}: The conversation went over the model's input limit, so it is compacted now.",
+                    self.task.id
+                );
+                self.error_kind = None;
+                return self.compact_now(session).await;
+            }
             return self.session_failed(message).await.map(Some);
+        }
+        if self.compaction == Some(Compaction::Due) {
+            return self.compact_now(session).await;
         }
         if self.handover_due() {
             if !self.report_delivered {
@@ -3440,6 +3642,133 @@ impl ClaudeCodeRun {
             .await?;
         }
         Ok(())
+    }
+
+    /// Sends `/compact` into the session between turns.
+    async fn compact_now(
+        &mut self,
+        session: &cc::ClaudeSession,
+    ) -> Result<Option<SessionEnd>, ArkoAgentsError> {
+        self.compaction = Some(Compaction::Sent { compacted: false });
+        if let Err(error) = session.send(COMPACT_COMMAND).await {
+            return self.session_failed(error.to_string()).await.map(Some);
+        }
+        Ok(None)
+    }
+
+    /// Sends the session the task's input it hasn't received, as a turn.
+    async fn send_unsent(
+        &mut self,
+        session: &cc::ClaudeSession,
+    ) -> Result<Option<SessionEnd>, ArkoAgentsError> {
+        let sent = match self.unsent_input()? {
+            Value::String(text) => session.send(text).await,
+            content => session.send_content(content).await,
+        };
+        if let Err(error) = sent {
+            return self.session_failed(error.to_string()).await.map(Some);
+        }
+        self.emit_context_receipts().await?;
+        Ok(None)
+    }
+
+    /// Claude Code compacted the session's conversation (`compact_boundary`),
+    /// at the runtime's request or on its own: its summary replaced the
+    /// earlier messages, which the task's conversation keeps. What the
+    /// runtime keeps about the conversation starts over (as after a
+    /// handover), and the handover hook's context waits for the agent's next
+    /// input.
+    async fn compacted(&mut self, raw: &Value) -> Result<(), ArkoAgentsError> {
+        let metadata = &raw["compact_metadata"];
+        let tokens = |field: &str| metadata[field].as_u64().map(|tokens| tokens as usize);
+        let input_tokens = tokens("pre_tokens").unwrap_or_else(|| self.latest_size());
+        let compacted_tokens = tokens("post_tokens");
+        if let Some(Compaction::Sent { compacted }) = &mut self.compaction {
+            *compacted = true;
+        }
+        // The requests so far belong to the conversation before.
+        self.flush_usage().await?;
+        self.task.conversation_usage_start = self.task.usage_history.len();
+        self.task.conversation_model_call_start = self.task.model_call_usage_history.len();
+        self.context_size = None;
+        self.first_context_size = None;
+        self.cache_warned = false;
+        self.cache_pause_episode = false;
+        self.handover_skip_warned = false;
+        for name in self.registry.list_tool_names() {
+            if let Some(tool) = self.registry.get(&name) {
+                tool.reset_context(self.task.id);
+            }
+        }
+        if let Some(context) = self
+            .handover_hook
+            .as_ref()
+            .and_then(|hook| hook.on_compaction(&self.task))
+        {
+            self.queue_context(context);
+        }
+        log::info!(
+            "Task {}: Claude Code compacted the conversation ({input_tokens} input tokens before, {} after). The task's record keeps the full conversation.",
+            self.task.id,
+            compacted_tokens.map_or("unknown".to_string(), |tokens| tokens.to_string())
+        );
+        self.report(false).await;
+        self.emit(AgentEvent::ConversationCompacted {
+            input_tokens,
+            compacted_tokens,
+        })
+        .await
+    }
+
+    /// After a compaction the runtime asked for: tells the model of the calls
+    /// it held, and lets it continue when no other input (a user's message)
+    /// does.
+    fn add_compaction_note(&mut self) -> Result<(), ArkoAgentsError> {
+        let mut parts = Vec::new();
+        if !self.held_calls.is_empty() {
+            parts.push(format!("{HELD_CALLS}\n{}", self.held_calls.join("\n")));
+            self.held_calls.clear();
+        }
+        let synced = self
+            .task
+            .claude_code_synced
+            .min(self.task.conversation.messages.len());
+        let unsent = self.task.conversation.messages[synced..]
+            .iter()
+            .any(|message| message.role == ai::Role::User);
+        if !unsent {
+            parts.push(COMPACTED.to_string());
+        }
+        if parts.is_empty() {
+            return Ok(());
+        }
+        self.add_user_message(&parts.join("\n\n"))
+    }
+
+    /// Claude Code didn't compact the conversation (`/compact` failed, or
+    /// isn't a command of this Claude Code): the agent hands over instead.
+    /// The report request goes out with the task's input that waited for
+    /// the compaction, so the report covers it.
+    async fn compaction_failed(
+        &mut self,
+        result: &cc::ResultMessage,
+    ) -> Result<(), ArkoAgentsError> {
+        log::warn!(
+            "Task {}: Claude Code did not compact the conversation ({}: {}), so the agent hands over instead.",
+            self.task.id,
+            result.subtype,
+            result.result.as_deref().unwrap_or_default()
+        );
+        let input_tokens = self.latest_size();
+        self.task.handover_requested = Some(HandoverRequest {
+            report_requested: true,
+            ..HandoverRequest::new(input_tokens)
+        });
+        self.report_delivered = true;
+        let request = self.report_request();
+        self.add_user_message(&request)?;
+        self.emit(AgentEvent::HandoverRequested { input_tokens })
+            .await
     }
 
     /// The report arrived: a fresh session starts from the seed and the
