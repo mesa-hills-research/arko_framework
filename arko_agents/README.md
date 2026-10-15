@@ -194,7 +194,10 @@ first snapshot followed by changes at model-call boundaries; see
 ## Tools
 
 `ToolRegistry::new()` registers the built-in tools: `complete_task`, `read_file`,
-`write_file`, `apply_diff`, `list_files`, `ask_user`, and `message_user`. An agent is
+`write_file`, `edit_file`, `apply_diff`, `list_files`, `ask_user`, and `message_user`.
+`edit_file` replaces one exact piece of text in a file (or every occurrence, with
+`replace_all`) and changes nothing when the text isn't there exactly once; `apply_diff`
+applies SEARCH/REPLACE blocks. An agent is
 offered the registered tools named in `tool_config.available_tool_names`, and always
 `complete_task`, which ends the task as `Completed { summary }`. `ask_user` puts the task
 in `AwaitingUserResponse` until `UserCommand::SubmitUserResponse` answers it.
@@ -270,7 +273,7 @@ together, and `[read, write, read]` runs the first read, then the write, then th
 read. A tool is parallel-safe when its definition sets
 `parallel_safe`, unless its `tool_specific_configs` entry sets `parallel_safe` otherwise.
 The built-in `read_file`, `list_files`, `message_user`, and `load_skill` are parallel-safe; `write_file`,
-`apply_diff`, `ask_user`, and `complete_task` are not; an MCP tool is parallel-safe only
+`edit_file`, `apply_diff`, `ask_user`, and `complete_task` are not; an MCP tool is parallel-safe only
 when its server marks it `readOnlyHint: true`. Calls after one that ends the turn
 (`complete_task`, `ask_user`, a tool error under `FailTask`, or a middleware's decision)
 are not run, and their results say so; parallel-safe calls already running beside it

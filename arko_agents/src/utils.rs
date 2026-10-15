@@ -53,8 +53,8 @@ pub fn normalize_path(path: &Path) -> PathBuf {
 }
 
 /// Resolves a tool's path parameter against a task's working directory: the
-/// path the built-in file tools (`read_file`, `write_file`, `apply_diff`,
-/// `list_files`) open, and the path [`is_path_in_workspace`] checks.
+/// path the built-in file tools (`read_file`, `write_file`, `edit_file`,
+/// `apply_diff`, `list_files`) open, and the path [`is_path_in_workspace`] checks.
 ///
 /// - Surrounding whitespace is trimmed.
 /// - The path is taken literally: `~` and `$VAR` are not expanded (`~/notes`

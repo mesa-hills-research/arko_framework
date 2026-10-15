@@ -317,6 +317,79 @@ async fn native_paths_outside_the_workspace_are_judged_as_the_tools_open_them() 
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// `edit_file`'s path is checked as `write_file`'s: outside the workspace
+/// the path-safety policy decides, by default refusing the call, which
+/// changes nothing. A policy that allows it lets the edit through.
+#[tokio::test]
+async fn native_edit_file_calls_outside_the_workspace_follow_the_path_policy() {
+    let root = workspace();
+    let workspace = root.join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("inside.txt"), "old inside").unwrap();
+    std::fs::write(root.join("outside.txt"), "old outside").unwrap();
+    let edit = |id: &str, path: &str| {
+        native_call(
+            id,
+            crate::tool::builtins::EDIT_FILE_TOOL_NAME,
+            serde_json::json!({"path": path, "old_string": "old", "new_string": "new"}),
+        )
+    };
+    let (mut refusing, _events, _commands) = agent(
+        config(ToolCallingMode::Native, &["edit_file"]),
+        ToolRegistry::new(),
+        &workspace,
+    );
+    refusing.scripted_responses.get_mut().unwrap().extend([
+        turn(vec![edit("escape", "../outside.txt")]),
+        turn(vec![edit("inside", "inside.txt")]),
+        complete(),
+    ]);
+    let task = timeout(Duration::from_secs(5), refusing.run())
+        .await
+        .unwrap()
+        .unwrap();
+    let escape = result_for(&task.conversation, "escape");
+    assert!(escape[0].is_error && escape[0].output.contains("outside the workspace"));
+    assert_eq!(
+        std::fs::read_to_string(root.join("outside.txt")).unwrap(),
+        "old outside"
+    );
+    assert!(
+        result_for(&task.conversation, "inside")[0]
+            .output
+            .starts_with("Edited inside.txt")
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("inside.txt")).unwrap(),
+        "new inside"
+    );
+
+    let mut allowed = config(ToolCallingMode::Native, &["edit_file"]);
+    allowed.tool_config.tool_specific_configs.insert(
+        "edit_file".into(),
+        PerToolConfigOverride {
+            out_of_workspace_path_policy: Some(PathSafetyPolicy::AutoApprove),
+            ..Default::default()
+        },
+    );
+    let (mut allowing, _events, _commands) = agent(allowed, ToolRegistry::new(), &workspace);
+    allowing
+        .scripted_responses
+        .get_mut()
+        .unwrap()
+        .extend([turn(vec![edit("allowed", "../outside.txt")]), complete()]);
+    let task = timeout(Duration::from_secs(5), allowing.run())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!result_for(&task.conversation, "allowed")[0].is_error);
+    assert_eq!(
+        std::fs::read_to_string(root.join("outside.txt")).unwrap(),
+        "new outside"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 // Only the tools the agent is offered run.
 
 #[tokio::test]

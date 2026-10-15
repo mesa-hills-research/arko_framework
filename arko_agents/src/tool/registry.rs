@@ -1,6 +1,6 @@
 use super::builtins::{
-    ApplyDiffTool, AskUserTool, COMPLETE_TASK_TOOL_NAME, CompleteTaskTool, ListFilesTool,
-    MessageUserTool, ReadFileTool, WriteFileTool,
+    ApplyDiffTool, AskUserTool, COMPLETE_TASK_TOOL_NAME, CompleteTaskTool, EditFileTool,
+    ListFilesTool, MessageUserTool, ReadFileTool, WriteFileTool,
 };
 use super::{EndUserTool, Tool, ToolDefinition, ToolError};
 use std::collections::HashMap;
@@ -32,6 +32,12 @@ impl ToolRegistry {
         tools.insert(
             write_file_tool.name(),
             write_file_tool.clone() as Arc<dyn Tool>,
+        );
+
+        let edit_file_tool = Arc::new(EditFileTool::new());
+        tools.insert(
+            edit_file_tool.name(),
+            edit_file_tool.clone() as Arc<dyn Tool>,
         );
 
         let apply_diff_tool = Arc::new(ApplyDiffTool::new());

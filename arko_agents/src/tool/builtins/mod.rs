@@ -3,6 +3,7 @@
 pub mod apply_diff;
 pub mod ask_user;
 pub mod complete_task;
+pub mod edit_file;
 pub mod list_files;
 pub mod message_user;
 pub mod read_file;
@@ -16,6 +17,9 @@ pub use read_file::ReadFileTool;
 
 pub use write_file::WRITE_FILE_TOOL_NAME;
 pub use write_file::WriteFileTool;
+
+pub use edit_file::EDIT_FILE_TOOL_NAME;
+pub use edit_file::EditFileTool;
 
 pub use apply_diff::APPLY_DIFF_TOOL_NAME;
 pub use apply_diff::ApplyDiffTool;
@@ -98,11 +102,18 @@ mod tests {
                 .execute(&context, params(json!({"path": path, "diff": diff})))
                 .await
                 .unwrap();
+            EditFileTool
+                .execute(
+                    &context,
+                    params(json!({"path": path, "old_string": "two", "new_string": "three"})),
+                )
+                .await
+                .unwrap();
             let read = ReadFileTool
                 .execute(&context, params(json!({"path": path})))
                 .await
                 .unwrap();
-            assert_eq!(read, "1 | two", "{path}");
+            assert_eq!(read, "1 | three", "{path}");
         }
         let listed = ListFilesTool
             .execute(&context, params(json!({"directory": " ~/ "})))
