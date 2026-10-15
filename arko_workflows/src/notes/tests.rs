@@ -1017,6 +1017,42 @@ async fn a_continued_run_gets_every_one_time_note_past_the_cap() {
     }
 }
 
+/// A run the host skipped the one-time notes for doesn't get those posted
+/// before, when continued, but gets the standing notes posted among them
+/// and the one-time notes posted after. The skip survives a checkpoint.
+#[tokio::test]
+async fn a_run_skips_the_one_time_notes_posted_before_the_host_said_so() {
+    let workspace = Workspace::new();
+    let server = done_server().await;
+    let persisted = || {
+        builder(&server, &workspace, &["worker"])
+            .persistence(PersistenceConfig::new(run_dir(&workspace)))
+    };
+    let first = persisted().build().unwrap();
+    let earlier = first.run_agent("worker", "Write it.").await.unwrap();
+    first
+        .post_note(Note::new("For the other run.").once())
+        .unwrap();
+    first.post_note(Note::new("Keep it short.")).unwrap();
+    first.skip_one_time_notes(earlier.agent_run_id);
+    first.checkpoint().await.unwrap();
+    drop(first);
+
+    let resumed = persisted()
+        .resume_from(latest_checkpoint(&workspace))
+        .build()
+        .unwrap();
+    resumed
+        .post_note(Note::new("For this run too.").once())
+        .unwrap();
+    let earlier = resumed.agent_result(earlier.agent_run_id).unwrap();
+    resumed.continue_agent(&earlier, "Carry on.").await.unwrap();
+    let continued = &requests_of(&server, "Carry on.")[0];
+    assert!(!continued.contains("For the other run."), "{continued}");
+    assert_eq!(continued.matches("Keep it short.").count(), 1);
+    assert_eq!(continued.matches("For this run too.").count(), 1);
+}
+
 /// A one-time note posted before a run started never reaches it, also when
 /// the run is recovered after a crash: what it was given is read from its
 /// task only after its start.

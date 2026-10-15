@@ -446,6 +446,19 @@ impl Workflow {
         self.context.notes.given(agent_run_id)
     }
 
+    /// The one-time notes ([`NoteKind::Once`](crate::notes::NoteKind::Once))
+    /// posted so far no longer reach agent run `agent_run_id`, which isn't
+    /// running: they were for the runs running when they were posted, such
+    /// as a user's lines typed during another conversation of the same
+    /// agent, which the host continues the run in place of. Standing notes
+    /// and the one-time notes posted from now on still reach it. Saved with
+    /// the notes in checkpoints.
+    pub fn skip_one_time_notes(&self, agent_run_id: uuid::Uuid) {
+        self.context
+            .notes
+            .skip_one_time(&self.context, agent_run_id);
+    }
+
     /// A handle that cancels or stops this run from any task or thread.
     pub fn cancel_handle(&self) -> WorkflowCancelHandle {
         WorkflowCancelHandle::new(&self.context)

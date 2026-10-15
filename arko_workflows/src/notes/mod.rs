@@ -193,6 +193,12 @@ pub struct NotesSnapshot {
     /// since from its task.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub started: BTreeMap<Uuid, u64>,
+    /// Per agent run the host skipped the one-time notes for
+    /// ([`Workflow::skip_one_time_notes`](crate::Workflow::skip_one_time_notes)),
+    /// the number of the newest note then: the one-time notes up to it
+    /// don't reach it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub skipped: BTreeMap<Uuid, u64>,
     /// How many bytes of the control folder's notes file have been read.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub control_offset: u64,
@@ -274,10 +280,21 @@ impl NoteBoard {
     pub(crate) fn has_update(&self, agent: &str, task_id: Uuid) -> bool {
         let state = self.state.lock();
         let seen = state.seen.get(&task_id).copied().unwrap_or(0);
-        state
-            .notes
-            .iter()
-            .any(|posted| posted.seq > seen && self.receives(&posted.note, agent, false))
+        state.notes.iter().any(|posted| {
+            posted.seq > seen
+                && self.receives(&posted.note, agent, false)
+                && !skipped(&state, task_id, posted)
+        })
+    }
+
+    /// The one-time notes posted so far don't reach run `task_id`; see
+    /// [`Workflow::skip_one_time_notes`](crate::Workflow::skip_one_time_notes).
+    pub(crate) fn skip_one_time(&self, ctx: &SharedContext, task_id: Uuid) {
+        self.poll(ctx);
+        let mut state = self.state.lock();
+        if let Some(newest) = state.notes.last().map(|posted| posted.seq) {
+            state.skipped.insert(task_id, newest);
+        }
     }
 
     /// The state a checkpoint saves; `None` while there is nothing to save.
@@ -381,7 +398,11 @@ impl NoteBoard {
         let notes = state
             .notes
             .iter()
-            .filter(|posted| posted.seq > seen && self.receives(&posted.note, agent, review))
+            .filter(|posted| {
+                posted.seq > seen
+                    && self.receives(&posted.note, agent, review)
+                    && !skipped(&state, task_id, posted)
+            })
             .collect::<Vec<_>>();
         let shown = fitting(&notes);
         let given = match notes.get(shown) {
@@ -690,6 +711,16 @@ fn holds(task: &arko_agents::Task, text: &str) -> bool {
                     .filter_map(arko_ai::Content::as_text)
                     .any(|part| part.contains(text))
         })
+}
+
+/// Whether `posted` is a one-time note the host skipped for run `task_id`
+/// ([`NoteBoard::skip_one_time`]).
+fn skipped(state: &NotesSnapshot, task_id: Uuid, posted: &PostedNote) -> bool {
+    posted.note.kind == NoteKind::Once
+        && state
+            .skipped
+            .get(&task_id)
+            .is_some_and(|newest| posted.seq <= *newest)
 }
 
 /// Whether `c` is a line break or a control character: what a source
