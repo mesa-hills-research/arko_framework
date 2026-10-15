@@ -210,6 +210,27 @@ pub(crate) fn tool_call_turn(call_id: &str, name: &str, arguments: Value) -> Str
     .collect()
 }
 
+/// A streamed model turn of text alone, without a tool call.
+pub(crate) fn text_turn(id: &str, text: &str) -> String {
+    let message = json!({
+        "type": "message", "id": format!("msg_{id}"), "status": "completed", "role": "assistant",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    });
+    let completed = json!({"type": "response.completed", "response": {
+        "id": format!("resp_{id}"), "object": "response", "created_at": 0, "status": "completed",
+        "model": "gpt-5.6-luna", "output": [], "usage": {"input_tokens": 10, "output_tokens": 5},
+        "metadata": {},
+    }});
+    [
+        json!({"type": "response.output_text.delta", "item_id": format!("msg_{id}"), "output_index": 0, "delta": text}),
+        json!({"type": "response.output_item.done", "output_index": 0, "item": message}),
+        completed,
+    ]
+    .iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect()
+}
+
 /// A streamed model turn completing the task with `summary`.
 pub(crate) fn complete_turn(call_id: &str, summary: &str) -> String {
     tool_call_turn(call_id, "complete_task", json!({ "summary": summary }))

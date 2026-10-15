@@ -174,6 +174,35 @@ impl CompletionVerifierConfig {
     }
 }
 
+/// Refuses `config` for agent `agent` when a reply in text ends its task
+/// ([`AgentToolConfig::text_reply_ends_task`](arko_agents::agent_config::AgentToolConfig::text_reply_ends_task))
+/// and one of `verifiers` reviews it or runs on it: a verifier reviews
+/// `complete_task` calls, and a verifier agent gives its verdict with one.
+pub(crate) fn refuse_text_endings(
+    verifiers: &[CompletionVerifierConfig],
+    agent: &str,
+    config: &arko_agents::AgentConfig,
+) -> Result<(), String> {
+    if !config.tool_config.ends_task_with_text() {
+        return Ok(());
+    }
+    for verifier in verifiers {
+        if verifier.applies_to(agent) {
+            return Err(format!(
+                "agent '{agent}' ends its task with a reply in text (text_reply_ends_task), which completion verifier '{}' can't review: a verifier reviews complete_task calls. Turn the setting off for this agent.",
+                verifier.name
+            ));
+        }
+        if verifier.verifier_agent == agent {
+            return Err(format!(
+                "completion verifier '{}' runs agent '{agent}', which ends its task with a reply in text (text_reply_ends_task): a verifier gives its verdict with complete_task. Turn the setting off for this agent.",
+                verifier.name
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationDecision {

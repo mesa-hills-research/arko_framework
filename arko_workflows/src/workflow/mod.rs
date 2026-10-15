@@ -2023,6 +2023,11 @@ impl WorkflowBuilder {
             }
         }
 
+        for (name, config) in &self.agents {
+            crate::verification::refuse_text_endings(&self.completion_verifiers, name, config)
+                .map_err(WorkflowError::BuilderInvalid)?;
+        }
+
         for distiller in &self.distillation_configs {
             if let Some(target) = distiller
                 .target_agents

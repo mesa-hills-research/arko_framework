@@ -10,7 +10,8 @@ use super::*;
 use crate::WorkflowBuilder;
 use crate::persistence::PersistenceConfig;
 use crate::test_support::{
-    ProbeTool, Reply, ResponsesServer, Workspace, agent_config, complete_turn, tool_call_turn,
+    ProbeTool, Reply, ResponsesServer, Workspace, agent_config, complete_turn, text_turn,
+    tool_call_turn,
 };
 use crate::verification::CompletionVerifierConfig;
 use crate::workflow::Workflow;
@@ -223,6 +224,61 @@ async fn standing_notes_are_in_later_prompts_and_one_time_notes_reach_earlier_ru
         assert_eq!(continued[0].matches(text).count(), 1, "{text}");
     }
     assert!(continued[0].contains("New notes on your task, oldest first."));
+}
+
+/// An agent whose reply in text ends its task completes with the reply as
+/// its result's summary, and a note posted while that reply is on its way
+/// (after the run's last turn boundary) reaches it once when it is
+/// continued, as with a final `complete_task`.
+#[tokio::test]
+async fn a_note_posted_during_a_final_text_reply_reaches_the_continuation() {
+    let workspace = Workspace::new();
+    let go = Arc::new(tokio::sync::Notify::new());
+    let asked = Arc::new(tokio::sync::Notify::new());
+    let server = {
+        let (go, asked) = (go.clone(), asked.clone());
+        ResponsesServer::start_async(move |index, _| {
+            let (go, asked) = (go.clone(), asked.clone());
+            Box::pin(async move {
+                Some(Reply::Stream(match index {
+                    0 => {
+                        asked.notify_one();
+                        go.notified().await;
+                        text_turn("r0", "The answer is 391.")
+                    }
+                    _ => text_turn("r1", "Noted."),
+                }))
+            })
+        })
+        .await
+    };
+    let mut config = agent_config("Friendly replier");
+    config.tool_config.text_reply_ends_task = true;
+    let workflow = Workflow::builder()
+        .name("notes-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("replier", config)
+        .build()
+        .unwrap();
+    let (first, ()) = tokio::join!(workflow.run_agent("replier", "What is 17 * 23?"), async {
+        asked.notified().await;
+        workflow
+            .post_note(Note::new("Also show your working.").once())
+            .unwrap();
+        go.notify_one();
+    });
+    let first = first.unwrap();
+    assert_eq!(first.status, AgentRunStatus::Completed);
+    assert_eq!(first.summary, "The answer is 391.");
+    let prompt = &requests_of(&server, "What is 17 * 23?")[0];
+    assert!(!prompt.contains("Also show your working."), "{prompt}");
+
+    let continued = workflow.continue_agent(&first, "Carry on.").await.unwrap();
+    assert_eq!(continued.summary, "Noted.");
+    let carried = requests_of(&server, "Carry on.");
+    assert_eq!(carried.len(), 1);
+    assert_eq!(carried[0].matches("Also show your working.").count(), 1);
 }
 
 /// The audience decides who gets a note: every agent, the agents named, or

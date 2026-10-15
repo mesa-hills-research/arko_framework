@@ -1361,6 +1361,8 @@ Source: [verification/mod.rs](src/verification/mod.rs); execution: [engine](src/
 
 A `CompletionVerifierConfig` registered with `WorkflowBuilder::completion_verifier` gates an agent's `complete_task` call on a review by another registered agent. Configurations run in registration order. A rejection returns the verifier's feedback to the agent for repair; a correctness gate fails the task once its cap is exceeded. Targets are registration names. A configuration never reviews its own verifier agent, even when that agent is listed as a target. Targets are required: `build` rejects a configuration without one, so a verifier never attaches to agents it wasn't aimed at (or to other verifiers). Use distinct configuration names: repair counts and conversation reuse are keyed by target task ID and configuration name. A review in progress when the run is stopped decides nothing: the target agent is cancelled with the run, not failed. A completion an agent makes after a [graceful stop](#graceful-stop)'s wrap-up notice is not reviewed: it reports progress, and the run it is continued in after a restart is reviewed as usual.
 
+A verifier reviews `complete_task` calls, and its own agent gives the verdict with one. So `build`, and the start of a run with a configuration of its own (a subagent's), refuse `AgentToolConfig::text_reply_ends_task` on a target agent and on a verifier agent: with it, the agent ends its task with a reply in text, which no verifier sees.
+
 ### `CompletionVerifierConfig`, `VerificationKind`, and `RepairContextConfig`
 
 `CompletionVerifierConfig` implements `Debug`, `Clone`, `Serialize`, and `Deserialize`. Public fields:

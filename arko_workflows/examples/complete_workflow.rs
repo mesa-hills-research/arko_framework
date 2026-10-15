@@ -446,6 +446,10 @@ fn agent_config(
         // note asking for a tool call. True sends it to the user as a
         // message (AgentEvent::MessageToUser) and the agent carries on.
         text_reply_as_message: false,
+        // Default false: the task ends with a complete_task call. True makes
+        // a reply in plain text the final reply, which ends the task, and
+        // complete_task is no longer offered.
+        text_reply_ends_task: false,
     };
     let mut builder = AgentConfig::builder(id.to_string(), name.to_string(), llm_config)
         .role_description(role.to_string())

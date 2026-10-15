@@ -2715,6 +2715,14 @@ impl WorkflowEngine {
                     .get(agent_name)
                     .ok_or_else(|| WorkflowError::AgentNotFound(agent_name.to_string()))?,
             };
+            // A configuration given at the start (a subagent's) is checked
+            // here. The builder checked the workflow's own.
+            crate::verification::refuse_text_endings(
+                &ctx.completion_verifiers,
+                agent_name,
+                base_config,
+            )
+            .map_err(WorkflowError::BuilderInvalid)?;
             let workspace = match &options.workspace {
                 Some(workspace) => super::options::run_workspace(&ctx.workspace, workspace)?,
                 None => ctx.workspace.clone(),

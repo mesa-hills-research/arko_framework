@@ -117,6 +117,46 @@ fn a_verifier_needs_an_explicit_target() {
     assert!(!verifier.applies_to("reviewer"), "never its own agent");
 }
 
+/// A verifier reviews `complete_task` calls, and gives its verdict with
+/// one: an agent it reviews, and its own agent, can't end their tasks with a
+/// reply in text. Other agents can.
+#[test]
+fn text_endings_are_refused_where_a_verifier_reviews_or_runs() {
+    let workspace = Workspace::new();
+    let replying = || {
+        let mut config = agent_config("Friendly replier");
+        config.tool_config.text_reply_ends_task = true;
+        config
+    };
+    let verifier = || CompletionVerifierConfig::correctness("check", "reviewer").target("coder");
+    let message = invalid(
+        builder(&workspace.0, &["reviewer", "planner"])
+            .agent("coder", replying())
+            .completion_verifier(verifier())
+            .build(),
+    );
+    assert!(
+        message.contains("agent 'coder' ends its task with a reply in text")
+            && message.contains("completion verifier 'check' can't review"),
+        "{message}"
+    );
+    let message = invalid(
+        builder(&workspace.0, &["coder", "planner"])
+            .agent("reviewer", replying())
+            .completion_verifier(verifier())
+            .build(),
+    );
+    assert!(
+        message.contains("completion verifier 'check' runs agent 'reviewer'"),
+        "{message}"
+    );
+    builder(&workspace.0, &["coder", "reviewer"])
+        .agent("planner", replying())
+        .completion_verifier(verifier())
+        .build()
+        .unwrap();
+}
+
 /// Memory tools follow each agent's access: `read_memory` for an agent that
 /// can read a tier, `write_memory` for one that can write one,
 /// `list_memories` for either, none for an agent without access; and
