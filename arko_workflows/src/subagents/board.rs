@@ -670,7 +670,7 @@ impl Board {
         };
         record.workspace = workspace.clone();
         record.isolated = isolated.clone();
-        let prompt = subagent_prompt(config, &record);
+        let prompt = subagent_prompt(config, self.workflow_run_id, &record);
         self.prepared.lock().insert(run_id, prepared);
         self.state.lock().runs.push(record);
         self.launch(ctx, run_id, PendingLaunch::Start { prompt });
@@ -1933,7 +1933,7 @@ async fn run(
         // A run stopped before it started starts now, from its task.
         (PendingLaunch::Resume { .. }, Some(config)) if recorded_result(ctx, run_id).is_none() => {
             PendingLaunch::Start {
-                prompt: subagent_prompt(config, &record),
+                prompt: subagent_prompt(config, ctx.workflow_run_id, &record),
             }
         }
         (launch, _) => launch,
@@ -2221,8 +2221,8 @@ fn task_holds(task: &Task, item: &MailItem) -> bool {
         })
 }
 
-/// The request [`SubagentHook::prepare`](super::SubagentHook::prepare) gets
-/// for `record`.
+/// The request [`SubagentHook::prepare`](super::SubagentHook::prepare) and
+/// [`StartContext`](super::StartContext) get for `record`.
 fn start_request(workflow_run_id: Uuid, record: &SubagentRecord) -> StartRequest {
     StartRequest {
         workflow_run_id,
@@ -2236,12 +2236,27 @@ fn start_request(workflow_run_id: Uuid, record: &SubagentRecord) -> StartRequest
     }
 }
 
-/// A subagent's initial prompt: its task, then who it works for and where.
-fn subagent_prompt(config: &SubagentsConfig, record: &SubagentRecord) -> String {
-    let mut text = format!(
-        "{}\n\n# Working as an agent run\nYou are agent run {}, started by agent `{}` (your lead) to carry out the task above while it goes on with its own work. Your report (your complete_task summary) goes to your lead when you finish. While you work, message_agent with to \"lead\" sends your lead a message (a finding it needs now, or a question only it can answer), and wait_for_agents waits for its answer. Its messages reach you at your next step.",
-        record.task, record.handle, record.caller_agent
-    );
+/// A subagent's initial prompt: its task, then who it works for and where,
+/// after the host's context when it gives one
+/// ([`SubagentsConfig::start_context`]).
+fn subagent_prompt(
+    config: &SubagentsConfig,
+    workflow_run_id: Uuid,
+    record: &SubagentRecord,
+) -> String {
+    let context = config
+        .start_context
+        .as_ref()
+        .and_then(|context| context(&start_request(workflow_run_id, record)))
+        .filter(|context| !context.trim().is_empty());
+    let mut text = match context {
+        Some(context) => format!("{}\n\n# Your task\n\n{}", context.trim(), record.task),
+        None => record.task.clone(),
+    };
+    text.push_str(&format!(
+        "\n\n# Working as an agent run\nYou are agent run {}, started by agent `{}` (your lead) to carry out the task above while it goes on with its own work. Your report (your complete_task summary) goes to your lead when you finish. While you work, message_agent with to \"lead\" sends your lead a message (a finding it needs now, or a question only it can answer), and wait_for_agents waits for its answer. Its messages reach you at your next step.",
+        record.handle, record.caller_agent
+    ));
     if config.questions_to_lead {
         text.push_str(" A question you ask goes to your lead, which asks the user if it needs to.");
     }

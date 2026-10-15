@@ -121,6 +121,9 @@ pub struct SubagentsConfig {
     pub workspace_provider: Option<Arc<dyn WorkspaceProvider>>,
     /// Adjusts a subagent's configuration as it starts.
     pub hook: Option<Arc<dyn SubagentHook>>,
+    /// Context for each run's first message, such as the project's
+    /// instructions; see [`StartContext`].
+    pub start_context: Option<StartContext>,
     /// The host's own `start_agent` parameters, whose values the
     /// [hook](Self::hook) receives.
     pub start_parameters: Vec<ToolParameterDefinition>,
@@ -139,6 +142,7 @@ impl Default for SubagentsConfig {
             questions_to_lead: true,
             workspace_provider: None,
             hook: None,
+            start_context: None,
             start_parameters: Vec::new(),
         }
     }
@@ -161,6 +165,7 @@ impl std::fmt::Debug for SubagentsConfig {
             .field("questions_to_lead", &self.questions_to_lead)
             .field("workspace_provider", &self.workspace_provider.is_some())
             .field("hook", &self.hook.is_some())
+            .field("start_context", &self.start_context.is_some())
             .field(
                 "start_parameters",
                 &self
@@ -242,6 +247,12 @@ impl SubagentsConfig {
         self
     }
 
+    /// Gives each run context in its first message; see [`StartContext`].
+    pub fn start_context(mut self, context: StartContext) -> Self {
+        self.start_context = Some(context);
+        self
+    }
+
     /// Adds a parameter of the host's own to `start_agent`. Its value, as
     /// the caller gave it, reaches the [hook](Self::hook) in
     /// [`StartRequest::parameters`].
@@ -316,6 +327,19 @@ where
         self(request, config)
     }
 }
+
+/// Gives a subagent run context in its first message as it starts, such as
+/// the project's instructions: the message starts with the text it returns
+/// (under the host's own headings), and the task follows under `# Your
+/// task`. `None`, or blank text, leaves the message as it is without it.
+/// Set with [`SubagentsConfig::start_context`].
+///
+/// It is called once per run, as the run starts (or, when it was stopped
+/// before it started, as it starts later), so a change in the host's
+/// context reaches the runs started after it. The text is part of the
+/// run's task prompt: a handover restates it, and the run keeps it when it
+/// is continued or resumed.
+pub type StartContext = Arc<dyn Fn(&StartRequest) -> Option<String> + Send + Sync>;
 
 /// Where a subagent is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -1182,6 +1182,138 @@ async fn an_isolated_subagent_works_in_its_providers_workspace() {
     assert_eq!(record.isolated.as_ref().unwrap().path, path);
 }
 
+/// The user messages a request sends, joined.
+fn user_text(body: &str) -> String {
+    let body: Value = serde_json::from_str(body).unwrap();
+    let mut text = Vec::new();
+    for item in body["input"].as_array().unwrap() {
+        if item["role"] != "user" {
+            continue;
+        }
+        match &item["content"] {
+            Value::String(content) => text.push(content.clone()),
+            Value::Array(parts) => text.extend(
+                parts
+                    .iter()
+                    .filter_map(|part| part["text"].as_str().map(str::to_string)),
+            ),
+            _ => {}
+        }
+    }
+    text.join("\n")
+}
+
+/// The host's start context comes first in a run's first message, with the
+/// task under its own heading after it, and is asked for as each run
+/// starts; a run it gives none (or blank text) starts as without it. A
+/// handover restates it with the task.
+#[tokio::test]
+async fn the_hosts_start_context_opens_the_first_message() {
+    let server = ResponsesServer::start(|_, body| {
+        let role = role(body);
+        let turn = turn(body);
+        let id = format!("{role}_{turn}");
+        let text = user_text(body);
+        Some(match role.as_str() {
+            "lead" => match turn {
+                0 => tool_call_turn(
+                    &id,
+                    "start_agent",
+                    json!({ "agent": "worker", "task": "Count the files." }),
+                ),
+                1 => tool_call_turn(
+                    &id,
+                    "start_agent",
+                    json!({ "agent": "worker", "task": "Sort the files." }),
+                ),
+                2 | 3 => tool_call_turn(&id, "wait_for_agents", json!({})),
+                _ => tool_call_turn(&id, "complete_task", json!({ "summary": "lead done" })),
+            },
+            "r1" if text.contains("# Handover report") => {
+                tool_call_turn(&id, "complete_task", json!({ "summary": "Counted." }))
+            }
+            "r1" if text.contains("Your conversation is getting long") => tool_call_turn(
+                &id,
+                "handover_report",
+                json!({ "report": "REPORT: counted half." }),
+            ),
+            // Under the handover size, then over it.
+            "r1" => tool_call_turn(&id, "where", json!({})).replace(
+                "\"input_tokens\":10",
+                if turn == 0 {
+                    "\"input_tokens\":5000"
+                } else {
+                    "\"input_tokens\":20000"
+                },
+            ),
+            _ => tool_call_turn(&id, "complete_task", json!({ "summary": "Sorted." })),
+        })
+    })
+    .await;
+    let workspace = Workspace::new();
+    let asked = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let config = SubagentsConfig::default().start_context(Arc::new({
+        let asked = asked.clone();
+        move |request: &StartRequest| {
+            asked
+                .lock()
+                .push((request.handle.clone(), request.agent.clone()));
+            Some(if request.handle == "r1" {
+                "# Project rules\n\nUse tabs.\n".to_string()
+            } else {
+                "  \n".to_string()
+            })
+        }
+    }));
+    let mut worker = agent_config("Worker");
+    worker.handover = Some(arko_agents::HandoverConfig::at_input_tokens(10_000));
+    let workflow = builder_with(&server, &workspace, config, worker)
+        .global_tool(Arc::new(Where))
+        .build()
+        .unwrap();
+    within(workflow.run_agent("lead", "Delegate."))
+        .await
+        .unwrap();
+    until(|| {
+        workflow
+            .subagents()
+            .iter()
+            .all(|run| run.state == SubagentState::Finished)
+    })
+    .await;
+    assert_eq!(
+        *asked.lock(),
+        [
+            ("r1".to_string(), "worker".to_string()),
+            ("r2".to_string(), "worker".to_string())
+        ]
+    );
+    let first = bodies_of(&server, "r1");
+    let opening = user_text(&first[0]);
+    assert!(
+        opening.contains(
+            "# Project rules\n\nUse tabs.\n\n# Your task\n\nCount the files.\n\n# Working as an agent run\nYou are agent run r1,"
+        ),
+        "{opening}"
+    );
+    // The fresh conversation after the handover restates it, once.
+    let fresh = user_text(first.last().unwrap());
+    assert!(fresh.contains("REPORT: counted half."), "{fresh}");
+    assert_eq!(fresh.matches("Use tabs.").count(), 1, "{fresh}");
+    assert!(
+        fresh.contains("# Project rules\n\nUse tabs.\n\n# Your task\n\nCount the files."),
+        "{fresh}"
+    );
+    let second = user_text(&bodies_of(&server, "r2")[0]);
+    assert!(
+        second.contains("Sort the files.\n\n# Working as an agent run\nYou are agent run r2,"),
+        "{second}"
+    );
+    assert!(!second.contains("# Your task"), "{second}");
+    // The record keeps the task as the lead gave it.
+    assert_eq!(workflow.subagents()[0].task, "Count the files.");
+}
+
 /// A subagent running when its workflow stops comes back from the
 /// checkpoint stopped, with its lead's knowledge of it, and
 /// `resume_subagents` relaunches it where it was; its report then reaches
