@@ -6,7 +6,7 @@ E {"ErrorEncountered":{"error_message":"Held by the host.","requires_approval_to
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"budget_exceeded","error_message":"Held by the host."}} task=61e31a60d2631a89
 E {"TaskStateChanged":"InProgress"}
 N observer saw User: Do the task
-R msgs=1 model=gpt-5.6-luna request=30dbbb2712563e91
+R msgs=1 model=gpt-5.6-luna request=c89b7680d3308fe0
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=221e00ad7421de85

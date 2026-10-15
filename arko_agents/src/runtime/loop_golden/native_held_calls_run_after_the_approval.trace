@@ -1,6 +1,6 @@
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
-R msgs=1 model=gpt-5.6-luna request=57f6809297595541
+R msgs=1 model=gpt-5.6-luna request=2b767472b425e590
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=b2fad5f809a767e8
@@ -24,7 +24,7 @@ S durable=1 msgs=2 native_results=3 native_calls=0 text_results=0 running=1 inje
 E {"ToolResult":{"output":"read ran three","tool_call_id":"id5","tool_name":"read"}}
 S durable=0 msgs=2 native_results=4 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=ba8646762628cc51
 E {"TaskStateChanged":"InProgress"}
-R msgs=3 model=gpt-5.6-luna request=54dd5b8ba97325a3
+R msgs=3 model=gpt-5.6-luna request=515c8e9c1cb07d2c
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=97dd0635d9517736

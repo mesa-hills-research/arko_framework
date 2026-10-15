@@ -10,6 +10,32 @@ pub const WRITE_FILE_TOOL_NAME: &str = "write_file";
 const PATH_PARAM_NAME: &str = "path";
 const CONTENT_PARAM_NAME: &str = "content";
 
+/// The sentence `write_file`'s description gains when the agent is also
+/// offered `edit_file`.
+pub const EDIT_FILE_HINT: &str = "To change part of a file, use `edit_file`.";
+
+/// `write_file`'s definition as an agent with `tool_config` is shown it:
+/// the built-in `write_file` (not a host's own tool of that name) gains
+/// [`EDIT_FILE_HINT`] when the agent is also offered `edit_file`. Any other
+/// definition is returned unchanged. As with
+/// [`read_file::offered_definition`](super::read_file::offered_definition),
+/// the same configuration always shows the same definition.
+pub fn offered_definition(
+    mut definition: ToolDefinition,
+    tool_config: &crate::agent_config::AgentToolConfig,
+) -> ToolDefinition {
+    if definition.name == WRITE_FILE_TOOL_NAME
+        && matches!(definition.tool_type_details, ToolTypeDetails::BuiltIn)
+        && tool_config
+            .available_tool_names
+            .iter()
+            .any(|name| name == super::EDIT_FILE_TOOL_NAME)
+    {
+        definition.description = format!("{} {EDIT_FILE_HINT}", definition.description);
+    }
+    definition
+}
+
 #[derive(Debug, Clone)]
 pub struct WriteFileTool;
 
@@ -30,10 +56,9 @@ impl Tool for WriteFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: WRITE_FILE_TOOL_NAME.to_string(),
-            description: "Create a new file in the workspace or overwrite an existing one. \
-                NOTE - if you are using this tool to update existing code, you MUST output all \
-                unchanged content as well, as the entire value of the content parameter will \
-                become the new content of the file.".to_string(),
+            description: "Creates a file, with any directories it needs, or replaces all of \
+                an existing one's content."
+                .to_string(),
             output_based_example: Some(
                 "<write_file>\n\
                 <path>src/config.rs</path>\n\
@@ -52,7 +77,7 @@ impl Tool for WriteFileTool {
                 },
                 ToolParameterDefinition {
                     name: CONTENT_PARAM_NAME.to_string(),
-                    description: "The content to write to the file.".to_string(),
+                    description: "The file's whole content.".to_string(),
                     param_type: ToolParameterType::String,
                     required: true,
                     is_path: false,
@@ -142,5 +167,41 @@ impl Tool for WriteFileTool {
             content_bytes.len(),
             file_path_str
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_config::AgentToolConfig;
+
+    #[test]
+    fn the_description_points_to_edit_file_when_it_is_offered() {
+        let config = |names: &[&str]| AgentToolConfig {
+            available_tool_names: names.iter().map(|name| name.to_string()).collect(),
+            ..AgentToolConfig::default()
+        };
+        let plain = WriteFileTool.definition();
+        assert!(!plain.description.contains("edit_file"));
+        let offered = offered_definition(plain.clone(), &config(&["write_file", "edit_file"]));
+        assert_eq!(
+            offered.description,
+            format!("{} {EDIT_FILE_HINT}", plain.description)
+        );
+        for names in [&["write_file"][..], &["write_file", "apply_diff"]] {
+            assert_eq!(
+                offered_definition(plain.clone(), &config(names)).description,
+                plain.description
+            );
+        }
+        // A host's own write_file is shown as it is.
+        let custom = ToolDefinition {
+            tool_type_details: ToolTypeDetails::DeveloperDefined,
+            ..plain.clone()
+        };
+        assert_eq!(
+            offered_definition(custom, &config(&["write_file", "edit_file"])).description,
+            plain.description
+        );
     }
 }

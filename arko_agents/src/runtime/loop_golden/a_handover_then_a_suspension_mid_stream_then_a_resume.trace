@@ -1,7 +1,7 @@
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
 E {"HandoverRequested":{"input_tokens":0}}
-R msgs=2 model=gpt-5.6-luna request=de1090d1d1608b9a
+R msgs=2 model=gpt-5.6-luna request=d0b28fb502ea3013
 E {"AssistantResponseChunk":"Report: nothing is done yet; next, do the step."}
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"golden","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
@@ -9,7 +9,7 @@ S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 inje
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=1 state="InProgress" task=2316c1d53f5132cf
 E {"ConversationHandedOver":{"handovers":1,"input_tokens":0,"report":"Report: nothing is done yet; next, do the step."}}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=1 state="InProgress" task=2316c1d53f5132cf
-R msgs=1 model=gpt-5.6-luna request=e1b7359ec5ce14c7
+R msgs=1 model=gpt-5.6-luna request=e213a593c70e2bfe
 E {"AssistantResponseChunk":"Working on it"}
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=1 handovers=1 state="InProgress" task=f6e5e65eaab58b9a
@@ -22,7 +22,7 @@ M {"content":[{"Text":"Working on it"}],"id":null,"reasoning_artifact":null,"rol
 M {"content":[{"Text":"# Workflow context update\n\nSent during the stream."}],"id":null,"reasoning_artifact":null,"role":"User"}
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=1 state="InProgress" task=8477dbc06ccec048
-R msgs=3 model=gpt-5.6-luna request=4ce4067b97c966eb
+R msgs=3 model=gpt-5.6-luna request=3df223984dfd98d2
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=1 state="InProgress" task=aacb9048f7786a94

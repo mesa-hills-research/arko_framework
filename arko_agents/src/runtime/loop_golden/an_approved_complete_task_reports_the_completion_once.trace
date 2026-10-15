@@ -1,13 +1,13 @@
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
-R msgs=1 model=gpt-5.6-luna request=b5c44a4af91fa165
+R msgs=1 model=gpt-5.6-luna request=7b14e36eeebd51b4
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=221e00ad7421de85
 E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id2","tool_name":"complete_task"}}
-E {"TaskStateChanged":{"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id2","tool_description":"Use this tool to signify that the current task is fully completed. Provide a summary of what was accomplished.","tool_name":"complete_task"}}}
-E {"ToolCallAwaitingApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id2","tool_description":"Use this tool to signify that the current task is fully completed. Provide a summary of what was accomplished.","tool_name":"complete_task"}}
-S durable=0 msgs=2 native_results=0 native_calls=1 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id2","tool_description":"Use this tool to signify that the current task is fully completed. Provide a summary of what was accomplished.","tool_name":"complete_task"}} task=020d7084d5ba33ba
+E {"TaskStateChanged":{"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id2","tool_description":"Ends the task. Call it when the task is done, or when you can't go further. The summary is the task's result, so write it in full.","tool_name":"complete_task"}}}
+E {"ToolCallAwaitingApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id2","tool_description":"Ends the task. Call it when the task is done, or when you can't go further. The summary is the task's result, so write it in full.","tool_name":"complete_task"}}
+S durable=0 msgs=2 native_results=0 native_calls=1 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id2","tool_description":"Ends the task. Call it when the task is done, or when you can't go further. The summary is the task's result, so write it in full.","tool_name":"complete_task"}} task=050a2e595a860200
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=c5cbf68fa3c413d0
 E {"ToolResult":{"output":"done","tool_call_id":"id2","tool_name":"complete_task"}}
 E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
@@ -19,23 +19,23 @@ M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role"
 M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant","tool_calls":[{"arguments":{"summary":"done"},"id":"done","name":"complete_task"}]}
 M {"content":[{"ToolResult":{"call_id":"done","is_error":false,"name":"complete_task","output":"done"}}],"id":null,"reasoning_artifact":null,"role":"User"}
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=52bdbde77d9f3283
-R msgs=1 model=gpt-5.6-luna request=48d6296c3ac23914
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=bda16c8eb04b58ba
+R msgs=1 model=gpt-5.6-luna request=fba4ce452a6d08d1
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=3540cf778a986198
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=c126ffca61a92d0b
 E {"AssistantResponseChunk":"\n\n"}
 E {"ToolCallInitiated":{"tool_call_id":"id5","tool_name":"complete_task"}}
 E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id5","tool_name":"complete_task"}}
-E {"TaskStateChanged":{"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id5","tool_description":"Use this tool to signify that the current task is fully completed. Provide a summary of what was accomplished.","tool_name":"complete_task"}}}
-E {"ToolCallAwaitingApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id5","tool_description":"Use this tool to signify that the current task is fully completed. Provide a summary of what was accomplished.","tool_name":"complete_task"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id5","tool_description":"Use this tool to signify that the current task is fully completed. Provide a summary of what was accomplished.","tool_name":"complete_task"}} task=a894c5439e1a90f0
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=590fb8fc2d7e5b8a
+E {"TaskStateChanged":{"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id5","tool_description":"Ends the task. Call it when the task is done, or when you can't go further. The summary is the task's result, so write it in full.","tool_name":"complete_task"}}}
+E {"ToolCallAwaitingApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id5","tool_description":"Ends the task. Call it when the task is done, or when you can't go further. The summary is the task's result, so write it in full.","tool_name":"complete_task"}}
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingToolApproval":{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"summary":"done"},"tool_call_id":"id5","tool_description":"Ends the task. Call it when the task is done, or when you can't go further. The summary is the task's result, so write it in full.","tool_name":"complete_task"}} task=e1d0a8d3262d7d03
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=dbbdcc856146f2f1
 E {"ToolResult":{"output":"done","tool_call_id":"id5","tool_name":"complete_task"}}
 E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=59092c7eb1584150
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=3bc1f8db701c0ee5
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=37c0ebfc7f51c841
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=fa6f02a7acc849ca
 E "TaskStreamEnd"
---- conversation: 2 messages, system prompt ba61cb6754594d5e
+--- conversation: 2 messages, system prompt 08c6670afdf61d85
 M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
 M {"content":[{"Text":"<complete_task>\n<summary>done</summary>\n</complete_task>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}

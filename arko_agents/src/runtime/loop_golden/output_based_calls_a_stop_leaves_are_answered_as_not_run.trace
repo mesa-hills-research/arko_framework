@@ -1,53 +1,53 @@
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=a532357e65c0d4b4
-R msgs=1 model=gpt-5.6-luna request=9222d9f2ef5ca786
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=4d771f6776ba84b1
+R msgs=1 model=gpt-5.6-luna request=536e26bf2d76c7ef
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=b8c97d32be2e75c5
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=b78e0470b5748d2e
 E {"AssistantResponseChunk":"\n\n\n\n\n\n\n\n\n\n"}
 E {"ToolCallInitiated":{"tool_call_id":"id2","tool_name":"step"}}
 E {"ToolCallFormatted":{"parameters":{"what":"hang"},"tool_call_id":"id2","tool_name":"step"}}
-S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=a6796ce0d7bf2d29
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=02e8dba28a572592
 E {"ToolRejected":{"reason":"The task was suspended while this call was running, so the call was stopped before it finished. Call it again if it is still needed.","tool_call_id":"id2","tool_name":"step"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=922384d17ccdbe72
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=f8b80fa67f5044ab
 E {"ToolRejected":{"reason":"The task was suspended before this call ran, so it was not run. Call it again if it is still needed.","tool_call_id":"id3","tool_name":"step"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state="InProgress" task=53b07a0e7068a24e
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state="InProgress" task=8e04f675200061eb
 E {"ToolRejected":{"reason":"The task was suspended before this call ran, so it was not run. Call it again if it is still needed.","tool_call_id":"id4","tool_name":"step"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=3 running=0 injections=0 handovers=0 state="InProgress" task=e4694d4a170a0c6a
-S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=be2d96f22e1b5d03
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=3 running=0 injections=0 handovers=0 state="InProgress" task=30e41a94c6d90dab
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=782381b90aa35fc6
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=be2d96f22e1b5d03
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=782381b90aa35fc6
 E "TaskStreamEnd"
---- conversation: 3 messages, system prompt c7b275fb7bcc5e75
+--- conversation: 3 messages, system prompt 8c1fbb0756752154
 M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
 M {"content":[{"Text":"<batched_tool_call>\n<step>\n<what>hang</what>\n</step>\n<step>\n<what>b</what>\n</step>\n<step>\n<what>c</what>\n</step>\n</batched_tool_call>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
 M {"content":[{"Text":"Tool step failed during execution. Error: The task was suspended while this call was running, so the call was stopped before it finished. Call it again if it is still needed.\n\n---\n\nTool step: The task was suspended before this call ran, so it was not run. Call it again if it is still needed.\n\n---\n\nTool step: The task was suspended before this call ran, so it was not run. Call it again if it is still needed."}],"id":null,"reasoning_artifact":null,"role":"User"}
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=be2d96f22e1b5d03
-R msgs=3 model=gpt-5.6-luna request=ad05fd0c98044c99
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=782381b90aa35fc6
+R msgs=3 model=gpt-5.6-luna request=619cc8afb54db39a
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=50cacd255093dbb7
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=1121d49c8e7664de
 E {"AssistantResponseChunk":"\n\n"}
 E {"ToolCallInitiated":{"tool_call_id":"id5","tool_name":"complete_task"}}
 E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id5","tool_name":"complete_task"}}
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=7eef54219cc7b4d1
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=de46936fb6a681dc
 E {"ToolResult":{"output":"done","tool_call_id":"id5","tool_name":"complete_task"}}
 E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=13cb1da46dbdd76b
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=1d244738da7a1f66
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=3649d1e24c219fa0
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=31dd43e3eeb819c7
 E "TaskStreamEnd"
---- conversation: 4 messages, system prompt c7b275fb7bcc5e75
+--- conversation: 4 messages, system prompt 8c1fbb0756752154
 M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
 M {"content":[{"Text":"<batched_tool_call>\n<step>\n<what>hang</what>\n</step>\n<step>\n<what>b</what>\n</step>\n<step>\n<what>c</what>\n</step>\n</batched_tool_call>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
 M {"content":[{"Text":"Tool step failed during execution. Error: The task was suspended while this call was running, so the call was stopped before it finished. Call it again if it is still needed.\n\n---\n\nTool step: The task was suspended before this call ran, so it was not run. Call it again if it is still needed.\n\n---\n\nTool step: The task was suspended before this call ran, so it was not run. Call it again if it is still needed."}],"id":null,"reasoning_artifact":null,"role":"User"}
 M {"content":[{"Text":"<complete_task>\n<summary>done</summary>\n</complete_task>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=7390314882f610bc
-R msgs=1 model=gpt-5.6-luna request=dcff686ae27d7398
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=a90eb1021c0bcd51
+R msgs=1 model=gpt-5.6-luna request=821a5badddb8d105
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=4248f220f9024efd
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=09ea3c2e2c60f40e
 E {"AssistantResponseChunk":"\n\n\n\n\n\n\n\n\n\n"}
 E {"ToolCallInitiated":{"tool_call_id":"id8","tool_name":"step"}}
 E {"ToolCallFormatted":{"parameters":{"what":"hang"},"tool_call_id":"id8","tool_name":"step"}}
@@ -57,64 +57,64 @@ E {"ToolCallInitiated":{"tool_call_id":"id10","tool_name":"step"}}
 E {"ToolCallFormatted":{"parameters":{"what":"c"},"tool_call_id":"id10","tool_name":"step"}}
 E {"TaskStateChanged":{"AwaitingBatchToolApproval":{"batch_id":"id11","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"hang"},"tool_call_id":"id8","tool_description":"Does the step step","tool_name":"step"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"b"},"tool_call_id":"id9","tool_description":"Does the step step","tool_name":"step"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"c"},"tool_call_id":"id10","tool_description":"Does the step step","tool_name":"step"}]}}}
 E {"BatchToolCallAwaitingApproval":{"batch_id":"id11","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"hang"},"tool_call_id":"id8","tool_description":"Does the step step","tool_name":"step"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"b"},"tool_call_id":"id9","tool_description":"Does the step step","tool_name":"step"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"c"},"tool_call_id":"id10","tool_description":"Does the step step","tool_name":"step"}]}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingBatchToolApproval":{"batch_id":"id11","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"hang"},"tool_call_id":"id8","tool_description":"Does the step step","tool_name":"step"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"b"},"tool_call_id":"id9","tool_description":"Does the step step","tool_name":"step"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"c"},"tool_call_id":"id10","tool_description":"Does the step step","tool_name":"step"}]}} task=790bb5aa022cd72a
-S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=5f0a43be56e945cb
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingBatchToolApproval":{"batch_id":"id11","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"hang"},"tool_call_id":"id8","tool_description":"Does the step step","tool_name":"step"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"b"},"tool_call_id":"id9","tool_description":"Does the step step","tool_name":"step"},{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"what":"c"},"tool_call_id":"id10","tool_description":"Does the step step","tool_name":"step"}]}} task=11074ea9ed076b97
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=ed4112add5233ec8
 E {"ToolRejected":{"reason":"The task was suspended while this call was running, so the call was stopped before it finished. Call it again if it is still needed.","tool_call_id":"id8","tool_name":"step"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=c347bd92cce79f8a
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=7e03a48fbca266cb
 E {"ToolRejected":{"reason":"The task was suspended before this call ran, so it was not run. Call it again if it is still needed.","tool_call_id":"id9","tool_name":"step"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state="InProgress" task=13629dd664b4bd26
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state="InProgress" task=14519bf31b64f84b
 E {"ToolRejected":{"reason":"The task was suspended before this call ran, so it was not run. Call it again if it is still needed.","tool_call_id":"id10","tool_name":"step"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=3 running=0 injections=0 handovers=0 state="InProgress" task=7e0e6a2f3e0faa02
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=3 running=0 injections=0 handovers=0 state="InProgress" task=6357a8a43bce65cb
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=8e6d744fb46516c7
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=907dff66530463be
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=8e6d744fb46516c7
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=907dff66530463be
 E "TaskStreamEnd"
---- conversation: 3 messages, system prompt c7b275fb7bcc5e75
+--- conversation: 3 messages, system prompt 8c1fbb0756752154
 M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
 M {"content":[{"Text":"<batched_tool_call>\n<step>\n<what>hang</what>\n</step>\n<step>\n<what>b</what>\n</step>\n<step>\n<what>c</what>\n</step>\n</batched_tool_call>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
 M {"content":[{"Text":"Tool step failed during execution. Error: The task was suspended while this call was running, so the call was stopped before it finished. Call it again if it is still needed.\n\n---\n\nTool step: The task was suspended before this call ran, so it was not run. Call it again if it is still needed.\n\n---\n\nTool step: The task was suspended before this call ran, so it was not run. Call it again if it is still needed."}],"id":null,"reasoning_artifact":null,"role":"User"}
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=8e6d744fb46516c7
-R msgs=3 model=gpt-5.6-luna request=5aed70905c72628b
+S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=907dff66530463be
+R msgs=3 model=gpt-5.6-luna request=16c330cf03ff1238
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=82c27c65fb476f1b
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=fba3a6389b1ed2e6
 E {"AssistantResponseChunk":"\n\n"}
 E {"ToolCallInitiated":{"tool_call_id":"id12","tool_name":"complete_task"}}
 E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id12","tool_name":"complete_task"}}
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=3fea3eae2be6a901
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=804d22265140a2f2
 E {"ToolResult":{"output":"done","tool_call_id":"id12","tool_name":"complete_task"}}
 E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=04bdbbec135266db
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=5115e15026cc5556
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=6acc02c197624a54
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=fffb66c8fde16d4b
 E "TaskStreamEnd"
---- conversation: 4 messages, system prompt c7b275fb7bcc5e75
+--- conversation: 4 messages, system prompt 8c1fbb0756752154
 M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
 M {"content":[{"Text":"<batched_tool_call>\n<step>\n<what>hang</what>\n</step>\n<step>\n<what>b</what>\n</step>\n<step>\n<what>c</what>\n</step>\n</batched_tool_call>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
 M {"content":[{"Text":"Tool step failed during execution. Error: The task was suspended while this call was running, so the call was stopped before it finished. Call it again if it is still needed.\n\n---\n\nTool step: The task was suspended before this call ran, so it was not run. Call it again if it is still needed.\n\n---\n\nTool step: The task was suspended before this call ran, so it was not run. Call it again if it is still needed."}],"id":null,"reasoning_artifact":null,"role":"User"}
 M {"content":[{"Text":"<complete_task>\n<summary>done</summary>\n</complete_task>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=40ffb295c2274cc6
-R msgs=1 model=gpt-5.6-luna request=896391e60dea4468
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=4cd595be0bee5c61
+R msgs=1 model=gpt-5.6-luna request=86fd71d513c61a15
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=8390f5893aeabb89
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=3437dd6e0a6b85f0
 E {"AssistantResponseChunk":"\n\n\n\n\n\n\n\n\n\n\n"}
 E {"ToolCallInitiated":{"tool_call_id":"id15","tool_name":"step"}}
 E {"ToolCallFormatted":{"parameters":{"path":"../outside.txt","what":"a"},"tool_call_id":"id15","tool_name":"step"}}
 E {"ToolCallInitiated":{"tool_call_id":"id16","tool_name":"step"}}
 E {"ToolCallFormatted":{"parameters":{"what":"fail"},"tool_call_id":"id16","tool_name":"step"}}
-S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=234161d6e5aca176
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=d279078761359385
 E {"TaskStateChanged":{"Failed":{"reason":"Tool 'step' execution failed: Execution failed: step could not do it"}}}
 E {"ErrorEncountered":{"error_message":"Tool 'step' execution failed: Execution failed: step could not do it","requires_approval_to_retry":false,"tool_call_id":"id16"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Failed":{"reason":"Tool 'step' execution failed: Execution failed: step could not do it"}} task=7b57771e752b2ae4
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Failed":{"reason":"Tool 'step' execution failed: Execution failed: step could not do it"}} task=0f29a40eccaa36a9
 E {"ToolRejected":{"reason":"The task failed on an earlier tool error, so this call was not run.","tool_call_id":"id15","tool_name":"step"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Failed":{"reason":"Tool 'step' execution failed: Execution failed: step could not do it"}} task=deade0b75d48dd29
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Failed":{"reason":"Tool 'step' execution failed: Execution failed: step could not do it"}} task=4fca3264be00894e
 E {"ToolRejected":{"reason":"The task failed on an earlier tool error, so this call was not run.","tool_call_id":"id17","tool_name":"step"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state={"Failed":{"reason":"Tool 'step' execution failed: Execution failed: step could not do it"}} task=b6ebf15884a3306f
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Failed":{"reason":"Tool 'step' execution failed: Execution failed: step could not do it"}} task=7b57771e752b2ae4
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state={"Failed":{"reason":"Tool 'step' execution failed: Execution failed: step could not do it"}} task=7cc89b3f3f92855e
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Failed":{"reason":"Tool 'step' execution failed: Execution failed: step could not do it"}} task=0f29a40eccaa36a9
 E "TaskStreamEnd"
---- conversation: 2 messages, system prompt c7b275fb7bcc5e75
+--- conversation: 2 messages, system prompt 8c1fbb0756752154
 M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
 M {"content":[{"Text":"<batched_tool_call>\n<step>\n<what>a</what>\n<path>../outside.txt</path>\n</step>\n<step>\n<what>fail</what>\n</step>\n<step>\n<what>c</what>\n</step>\n</batched_tool_call>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}

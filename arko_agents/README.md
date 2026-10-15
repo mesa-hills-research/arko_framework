@@ -394,7 +394,9 @@ tool_config.tool_specific_configs.insert(
 
 When an agent is offered both `read_file` and the terminal tools, `read_file`'s
 description gains one sentence (`read_file::TERMINAL_HINT`) pointing to the terminal for
-large or generated files. It is part of the tool's description, not of the agent's
+large or generated files. Likewise, when it is offered both `write_file` and `edit_file`,
+`write_file`'s description gains one sentence (`write_file::EDIT_FILE_HINT`) pointing to
+`edit_file` for changes to part of a file. Each is part of the tool's description, not of the agent's
 instructions: the same configuration always shows the same definitions, and a
 workflow's resume check, which compares configurations, not tool definitions, is not
 affected. (In output-based mode the definitions are in the system prompt written when a

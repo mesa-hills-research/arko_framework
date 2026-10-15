@@ -1,6 +1,6 @@
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
-R msgs=1 model=gpt-5.6-luna request=4d589790b26063d7
+R msgs=1 model=gpt-5.6-luna request=32fd5c3155dfe482
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=7e1b36a0af0b5628
@@ -20,7 +20,7 @@ S durable=1 msgs=2 native_results=3 native_calls=0 text_results=0 running=1 inje
 E {"ToolResult":{"output":"The host's own output.","tool_call_id":"id3","tool_name":"gate"}}
 S durable=0 msgs=2 native_results=4 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=99863183ccb8c343
 E {"TaskStateChanged":"InProgress"}
-R msgs=3 model=gpt-5.6-luna request=f011b4d81d8a0221
+R msgs=3 model=gpt-5.6-luna request=c9b89bf274f88498
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=997d165bdb531a68

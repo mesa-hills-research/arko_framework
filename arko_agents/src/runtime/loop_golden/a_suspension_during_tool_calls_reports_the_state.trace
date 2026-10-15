@@ -1,6 +1,6 @@
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
-R msgs=1 model=gpt-5.6-luna request=f95b0f1ddcf11d0d
+R msgs=1 model=gpt-5.6-luna request=b9a1006c34354f9c
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=2b1064390afb3a38
@@ -20,7 +20,7 @@ M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant
 M {"content":[{"ToolResult":{"call_id":"h","is_error":true,"name":"hangs","output":"The task was suspended while this call was running, so the call was stopped before it finished. Call it again if it is still needed."}},{"ToolResult":{"call_id":"s","is_error":true,"name":"step","output":"The task was suspended before this call ran, so it was not run. Call it again if it is still needed."}}],"id":null,"reasoning_artifact":null,"role":"User"}
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=9655d0c3e82e33c3
-R msgs=3 model=gpt-5.6-luna request=bcd27dce4b353b6b
+R msgs=3 model=gpt-5.6-luna request=5094e1c0f67fd734
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=54f7bda7b12c012a

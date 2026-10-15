@@ -18,7 +18,7 @@ impl CompleteTaskTool {
     }
 
     pub fn default_summary_description() -> String {
-        "A concise summary of the completed task, all actions taken, and the outcome.".to_string()
+        "The task's result, in full: what you did and found, and anything left undone.".to_string()
     }
 }
 
@@ -39,7 +39,7 @@ impl Tool for CompleteTaskTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: COMPLETE_TASK_TOOL_NAME.to_string(),
-            description: "Use this tool to signify that the current task is fully completed. Provide a summary of what was accomplished.".to_string(),
+            description: "Ends the task. Call it when the task is done, or when you can't go further. The summary is the task's result, so write it in full.".to_string(),
             output_based_example: None,
             parameters: vec![ToolParameterDefinition {
                 name: COMPLETE_TASK_SUMMARY_PARAM_NAME.to_string(),

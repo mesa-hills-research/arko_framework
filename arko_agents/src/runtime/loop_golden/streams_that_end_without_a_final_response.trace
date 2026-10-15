@@ -1,6 +1,6 @@
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f1c7627a3cb932e9
-R msgs=1 model=gpt-5.6-luna request=b5c44a4af91fa165
+R msgs=1 model=gpt-5.6-luna request=7b14e36eeebd51b4
 E {"AssistantResponseChunk":"Partial answer"}
 E {"ToolCallInitiated":{"tool_call_id":"id2","tool_name":"step"}}
 E {"ToolRejected":{"reason":"The model's response failed before this call finished; it was not run.","tool_call_id":"id2","tool_name":"step"}}
@@ -8,7 +8,7 @@ S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 inje
 E {"ErrorEncountered":{"error_message":"Model response not usable (attempt 1/10): Your response did not call a tool, so the task is still open. Continue with your tools, or call complete_task with a summary if the task is finished.","requires_approval_to_retry":false,"tool_call_id":null}}
 E {"RetryScheduled":{"attempt":1,"delay_ms":0,"elapsed_ms":0,"rate_limit":false}}
 S durable=0 msgs=3 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=e046ad0d88f9d3a5
-R msgs=3 model=gpt-5.6-luna request=216907f1715d8eeb
+R msgs=3 model=gpt-5.6-luna request=b38a5ae0fcc0409e
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=50bd563e9a6a0b97
@@ -27,11 +27,11 @@ M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant
 M {"content":[{"ToolResult":{"call_id":"done","is_error":false,"name":"complete_task","output":"done"}}],"id":null,"reasoning_artifact":null,"role":"User"}
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=18fc7ad4f66ddb01
-R msgs=1 model=gpt-5.6-luna request=5f77150a059ddb21
+R msgs=1 model=gpt-5.6-luna request=e697beb6d2162430
 E {"ErrorEncountered":{"error_message":"LLM error (attempt 1/10): Response stream ended before completion: the response stream ended with no output","requires_approval_to_retry":false,"tool_call_id":null}}
 E {"RetryScheduled":{"attempt":1,"delay_ms":2000,"elapsed_ms":0,"rate_limit":false}}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=18fc7ad4f66ddb01
-R msgs=1 model=gpt-5.6-luna request=5f77150a059ddb21
+R msgs=1 model=gpt-5.6-luna request=e697beb6d2162430
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=a2446f7050dbb52d
@@ -48,7 +48,7 @@ M {"content":[{"Text":""}],"id":null,"reasoning_artifact":null,"role":"Assistant
 M {"content":[{"ToolResult":{"call_id":"done","is_error":false,"name":"complete_task","output":"done"}}],"id":null,"reasoning_artifact":null,"role":"User"}
 E {"TaskStateChanged":"InProgress"}
 S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=f5ab15c3fdb8f5ff
-R msgs=1 model=gpt-5.6-luna request=80e64bc9b54b63fe
+R msgs=1 model=gpt-5.6-luna request=772f3ce48871895f
 E {"AssistantResponseChunk":"I can't do"}
 E {"RefusalReceived":{"explanation":"I can't help with that.","source":"model"}}
 E {"RefusedInput":{"messages":[{"message_index":0,"runtime":false}]}}
@@ -56,7 +56,7 @@ E {"TaskStateChanged":{"AwaitingErrorRecoveryApproval":{"cause":"refusal","error
 E {"ErrorEncountered":{"error_kind":"refusal","error_message":"Failure requires a request, credential, or configuration change. LLM error (attempt 1/10): Model refused the request: refused by model: I can't help with that.","requires_approval_to_retry":true,"tool_call_id":null}}
 S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"refusal","error_kind":"refusal","error_message":"Failure requires a request, credential, or configuration change. LLM error (attempt 1/10): Model refused the request: refused by model: I can't help with that."}} task=1d27da7b9f552acf
 E {"TaskStateChanged":"InProgress"}
-R msgs=3 model=gpt-5.6-luna request=056c142c131231d7
+R msgs=3 model=gpt-5.6-luna request=220686a8593a50f4
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
 S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=9590e84910bcc9be

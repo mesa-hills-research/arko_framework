@@ -1480,8 +1480,9 @@ impl AgentConfig {
     /// A tool's definition as the agent is shown it, in either tool calling
     /// mode: with [`complete_task_summary_prompt_override`](Self::complete_task_summary_prompt_override)
     /// as `complete_task`'s `summary` description, and the built-in
-    /// `read_file` as the agent's tools shape it (see
-    /// [`read_file::offered_definition`](crate::tool::builtins::read_file::offered_definition)).
+    /// `read_file` and `write_file` as the agent's tools shape them (see
+    /// [`read_file::offered_definition`](crate::tool::builtins::read_file::offered_definition)
+    /// and [`write_file::offered_definition`](crate::tool::builtins::write_file::offered_definition)).
     ///
     /// The definition follows from the configuration alone, so the same
     /// configuration always shows the same definitions (the prompt cache
@@ -1503,6 +1504,8 @@ impl AgentConfig {
                 }
             }
         }
+        let definition =
+            crate::tool::builtins::write_file::offered_definition(definition, &self.tool_config);
         crate::tool::builtins::read_file::offered_definition(definition, &self.tool_config)
     }
 

@@ -1,9 +1,9 @@
 E {"TaskStateChanged":"InProgress"}
-S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=886e1221e1a329b4
-R msgs=1 model=gpt-5.6-luna request=1763525905becbd2
+S durable=0 msgs=1 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=9b74b9f49f9323b1
+R msgs=1 model=gpt-5.6-luna request=114aefc75b829cdb
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=d16ff203b7b0f55a
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=5b2c059875ba45f3
 E {"ToolCallInitiated":{"tool_call_id":"id2","tool_name":"check"}}
 E {"ToolParamName":{"param_name":"path","tool_call_id":"id2"}}
 E {"ToolParamValueChunk":{"chunk":"../outside.txt","param_name":"path","tool_call_id":"id2"}}
@@ -17,34 +17,34 @@ E {"ToolParamValueChunk":{"chunk":"fail","param_name":"what","tool_call_id":"id3
 E {"ToolParamEnd":{"param_name":"what","tool_call_id":"id3"}}
 E {"AssistantResponseChunk":"Checking both.\n\n\n\n\n\n\n\n\n"}
 E {"ToolCallFormatted":{"parameters":{"path":"../outside.txt"},"tool_call_id":"id2","tool_name":"check"}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=e49d13adacad0023
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state="InProgress" task=506de366548d78c6
 E {"ToolCallFormatted":{"parameters":{"path":"inside.txt","what":"fail"},"tool_call_id":"id3","tool_name":"check"}}
 E {"TaskStateChanged":{"AwaitingBatchToolApproval":{"batch_id":"id4","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"path":"inside.txt","what":"fail"},"tool_call_id":"id3","tool_description":"Does the check step","tool_name":"check"}]}}}
 E {"BatchToolCallAwaitingApproval":{"batch_id":"id4","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"path":"inside.txt","what":"fail"},"tool_call_id":"id3","tool_description":"Does the check step","tool_name":"check"}]}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"AwaitingBatchToolApproval":{"batch_id":"id4","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"path":"inside.txt","what":"fail"},"tool_call_id":"id3","tool_description":"Does the check step","tool_name":"check"}]}} task=0cf74a52c943cf97
-S durable=1 msgs=2 native_results=0 native_calls=0 text_results=1 running=1 injections=0 handovers=0 state="InProgress" task=c7ef52b00c7b9daf
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state="InProgress" task=051129dd1cebf2f0
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"AwaitingBatchToolApproval":{"batch_id":"id4","pending_calls":[{"approval_reason":{"tool_not_auto_approved":true},"parameters":{"path":"inside.txt","what":"fail"},"tool_call_id":"id3","tool_description":"Does the check step","tool_name":"check"}]}} task=9fffb8a9d42ab890
+S durable=1 msgs=2 native_results=0 native_calls=0 text_results=1 running=1 injections=0 handovers=0 state="InProgress" task=63ef28d64b3dc410
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state="InProgress" task=d298ac168ffccdbf
 E {"TaskStateChanged":{"AwaitingErrorRecoveryApproval":{"cause":"tool_error","error_message":"Tool 'check' execution failed: The path for parameter 'path' must be within the workspace '/arko-golden-workspace'.\nTool 'check' execution failed: Execution failed: check could not do it"}}}
 E {"ErrorEncountered":{"error_message":"Tool 'check' execution failed: The path for parameter 'path' must be within the workspace '/arko-golden-workspace'.\nTool 'check' execution failed: Execution failed: check could not do it","requires_approval_to_retry":true,"tool_call_id":null}}
-S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"tool_error","error_message":"Tool 'check' execution failed: The path for parameter 'path' must be within the workspace '/arko-golden-workspace'.\nTool 'check' execution failed: Execution failed: check could not do it"}} task=4246fd7e74439883
+S durable=0 msgs=2 native_results=0 native_calls=0 text_results=2 running=0 injections=0 handovers=0 state={"AwaitingErrorRecoveryApproval":{"cause":"tool_error","error_message":"Tool 'check' execution failed: The path for parameter 'path' must be within the workspace '/arko-golden-workspace'.\nTool 'check' execution failed: Execution failed: check could not do it"}} task=11a6b383dab22560
 E {"TaskStateChanged":"InProgress"}
-R msgs=3 model=gpt-5.6-luna request=bffa57341ca0921a
+R msgs=3 model=gpt-5.6-luna request=a8fca3dce1311943
 E {"UsageReported":{"billing":"metered","input_cost":0.0,"input_tokens":0,"output_cost":0.0,"output_tokens":0,"total_cost":0.0}}
 E {"ModelCallUsageReported":{"call_id":"fixture","context_usage_percent":0.0,"input_delta_from_previous_call":0,"input_tokens":0,"max_input_tokens":1000,"model":"test","output_tokens":0,"provider":"test"}}
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=99b91ca0ad58a060
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state="InProgress" task=a16f2f0b193d23b7
 E {"ToolCallInitiated":{"tool_call_id":"id5","tool_name":"complete_task"}}
 E {"ToolParamName":{"param_name":"summary","tool_call_id":"id5"}}
 E {"ToolParamValueChunk":{"chunk":"done","param_name":"summary","tool_call_id":"id5"}}
 E {"ToolParamEnd":{"param_name":"summary","tool_call_id":"id5"}}
 E {"AssistantResponseChunk":"\n\n"}
 E {"ToolCallFormatted":{"parameters":{"summary":"done"},"tool_call_id":"id5","tool_name":"complete_task"}}
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=03d521f2dd1d5266
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=1 injections=0 handovers=0 state="InProgress" task=1367d843ece93cd1
 E {"ToolResult":{"output":"done","tool_call_id":"id5","tool_name":"complete_task"}}
 E {"TaskStateChanged":{"Completed":{"summary":"done"}}}
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=81045779a724c76a
-S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=ddf4513c338efb25
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=1 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=bb3d189e40b4af6b
+S durable=0 msgs=4 native_results=0 native_calls=0 text_results=0 running=0 injections=0 handovers=0 state={"Completed":{"summary":"done"}} task=d916e05ef2406766
 E "TaskStreamEnd"
---- conversation: 4 messages, system prompt 177450d9d4fb40a9
+--- conversation: 4 messages, system prompt eea3acbac1d47bb8
 M {"content":[{"Text":"Do the task"}],"id":null,"reasoning_artifact":null,"role":"User"}
 M {"content":[{"Text":"Checking both.\n<batched_tool_call>\n<check>\n<path>../outside.txt</path>\n</check>\n<check>\n<path>inside.txt</path>\n<what>fail</what>\n</check>\n</batched_tool_call>"}],"id":null,"reasoning_artifact":null,"role":"Assistant"}
 M {"content":[{"Text":"Tool check failed during execution. Error: The path for parameter 'path' must be within the workspace '/arko-golden-workspace'.\n\n---\n\nTool check failed during execution. Error: Execution failed: check could not do it"}],"id":null,"reasoning_artifact":null,"role":"User"}

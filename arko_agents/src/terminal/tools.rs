@@ -110,69 +110,69 @@ impl Tool for TerminalTool {
         let (name, description, parameters) = match self.operation {
             Operation::Start => (
                 Self::NAMES[0],
-                "Start a shell command in the background; returns a job ID immediately. terminal=true uses a live PTY; false uses pipes. Program-declared input requests, possible prompt matches, and completion are injected into task context. Continue independent work. Inspect terminal_status for output; answer with terminal_input using the latest revision. Shell commands run with the host's permissions. Commands that would delete, move or overwrite the filesystem root, the home directory, system directories or devices, or paths outside the working directory, are refused.",
+                "Starts a command in the background and returns its job ID at once, so you can go on with other work. A terminal update tells you when the job finishes, and when it seems to wait for input. Read its output with terminal_status and answer it with terminal_input.",
                 vec![
                     parameter(
                         "command",
-                        "Command for the configured shell (default /bin/sh -c on Unix, cmd.exe /D /S /C on Windows).",
+                        "The command, for the configured shell (by default `/bin/sh -c` on Unix and `cmd.exe /D /S /C` on Windows).",
                         true,
                     ),
                     parameter(
                         "terminal",
-                        "true for a PTY (default); false for pipes.",
+                        "true (the default): run it in a terminal (a PTY), as programs run for a person. false: with plain pipes.",
                         false,
                     ),
                     parameter(
                         "detect_prompts",
-                        "Enable possible-input notices from configured prompt rules (default true).",
+                        "true (the default): also tell you when its output looks like a prompt waiting for input.",
                         false,
                     ),
                     parameter(
                         "timeout_ms",
-                        "Optional execution deadline in milliseconds, as a positive integer string.",
+                        "Stop the job after this many milliseconds (default: no limit).",
                         false,
                     ),
                 ],
             ),
             Operation::Status => (
                 Self::NAMES[1],
-                "Read job state and bounded output. Supply after_output from the previous output.end for new bytes only. gap=true means earlier output left the buffer; consult the log, noting log_truncated. A prompt_rule input notice is inferred; program input notices were explicitly declared. A quiet job can still be working. Use the returned revision when sending input.",
+                "Shows a job's state and latest output. Pass the `output.end` of your last read as after_output to get only what's new. `gap: true` means part of that output is no longer kept: the file at `log_path` has it all, unless `log_truncated`. `input` is set while the job seems to wait for input: source `program` means the program asked for it, and `prompt_rule` that its output looks like a prompt. A job with no new output may still be working.",
                 vec![
-                    parameter("job_id", "Job ID.", true),
+                    parameter("job_id", "The job's ID.", true),
                     parameter(
                         "after_output",
-                        "Previous output.end byte cursor, encoded as an integer string.",
+                        "The `output.end` of your last read, to get only the output after it.",
                         false,
                     ),
                 ],
             ),
             Operation::Input => (
                 Self::NAMES[2],
-                "Write exact input to an existing job. For a line send \\n on Unix/pipes or \\r on Windows PTYs; omit it for a raw key. Program replies preserve the text in JSON. Requires the latest observed revision; stale/duplicate replies fail so you can refresh status. Delivery errors stop the job because partial input may have been consumed. Input requests do not grant authorization beyond your task.",
+                "Sends text to a running job, exactly as given. End a line with \\n (\\r in a terminal on Windows), or leave it out to send a single key. Give the job's latest revision, so input never goes to a prompt you haven't seen: if the job changed since, the input is refused, so read its status again. If input can't be fully delivered, the job is stopped. A job's request for input doesn't allow anything your task doesn't.",
                 vec![
-                    parameter("job_id", "Job ID.", true),
+                    parameter("job_id", "The job's ID.", true),
                     parameter(
                         "revision",
-                        "Latest observed revision as an integer string.",
+                        "The job's latest revision, from terminal_status or a terminal update.",
                         true,
                     ),
-                    parameter("text", "Exact input (1–4096 bytes).", true),
+                    parameter("text", "The exact input, 1 to 4,096 bytes.", true),
                 ],
             ),
             Operation::Control => (
                 Self::NAMES[3],
-                "List this task's jobs, wait for a state/output change, cancel an owned process group, or forget a completed job while retaining logs. A wait ends after at most 30 seconds; it does not stop the job. Completion/input notifications are delivered automatically; use waits when dependent work cannot proceed.",
+                "Lists your jobs (action `list`), waits until a job changes, for at most 30 seconds (`wait`), cancels a job and the processes it started (`cancel`), or forgets a finished job but keeps its log (`forget`). A terminal update tells you when a job finishes or seems to wait for input, so wait only when you can't go on without it.",
                 vec![
-                    parameter("action", "list, wait, cancel, or forget.", true),
-                    parameter("job_id", "Job ID (except list).", false),
+                    parameter("action", "list, wait, cancel or forget.", true),
+                    parameter("job_id", "The job's ID (not for list).", false),
                     parameter(
                         "revision",
-                        "Observed revision for wait, as an integer string.",
+                        "wait: the job's latest revision you saw (required). The wait returns once it changes.",
                         false,
                     ),
                     parameter(
                         "wait_ms",
-                        "Wait limit as an integer string (default 1000; maximum 30000).",
+                        "wait: the most milliseconds to wait (default 1000, at most 30000).",
                         false,
                     ),
                 ],

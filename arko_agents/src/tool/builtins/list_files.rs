@@ -38,9 +38,8 @@ impl Tool for ListFilesTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: LIST_FILES_TOOL_NAME.to_string(),
-            description: "Recursively lists all files and directories in the specified directory, \
-                respecting .gitignore rules at all levels. Returns a tree structure similar to \
-                the File Tree environment detail.".to_string(),
+            description: "Lists the files and directories in a directory, at every depth, as \
+                a tree. What .gitignore files leave out is left out.".to_string(),
             output_based_example: Some(
                 "<list_files>\n<directory>src</directory>\n</list_files>".to_string()
             ),
