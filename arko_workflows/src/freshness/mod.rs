@@ -71,6 +71,12 @@ impl Default for ContextFreshnessConfig {
                     },
                 ),
                 (
+                    "edit_file".to_string(),
+                    ToolResourceEffect::WriteFile {
+                        parameter: "path".to_string(),
+                    },
+                ),
+                (
                     "apply_diff".to_string(),
                     ToolResourceEffect::WriteFile {
                         parameter: "path".to_string(),
@@ -317,8 +323,8 @@ impl ResourceTracker {
     /// workflow's workspace, or the run's own, see
     /// [`RunOptions::workspace`](crate::workflow::RunOptions::workspace)). A
     /// path parameter's key is the path the built-in file tools
-    /// (`read_file`, `write_file`, `apply_diff`, `list_files`) open, resolved
-    /// against `working_directory` with arko_agents'
+    /// (`read_file`, `write_file`, `edit_file`, `apply_diff`, `list_files`)
+    /// open, resolved against `working_directory` with arko_agents'
     /// [`resolve_path`](arko_agents::utils::resolve_path), which the
     /// runtime's workspace check also uses; `None` for a path that can't be
     /// resolved, which no tool opens.
@@ -612,8 +618,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn tool_paths_resolve_as_the_built_in_tools_open_them() {
-        // The default effects: read_file, write_file and apply_diff on
-        // `path`, list_files on `directory`.
+        // The default effects: read_file, write_file, edit_file and
+        // apply_diff on `path`, list_files on `directory`.
         let tracker = ResourceTracker::new(
             PathBuf::from("/workspace"),
             ContextFreshnessConfig::default(),
@@ -638,7 +644,7 @@ mod tests {
             file(" src/lib.rs\n"),
             PathBuf::from("/workspace/src/lib.rs")
         );
-        for tool in ["write_file", "apply_diff"] {
+        for tool in ["write_file", "edit_file", "apply_diff"] {
             assert_eq!(
                 key(tool, "path", "\tsrc/lib.rs "),
                 (

@@ -110,7 +110,7 @@ Source: [workflow/mod.rs](src/workflow/mod.rs). `Workflow` and `WorkflowBuilder`
 | `rename_memory_tier_on_resume(self, from: impl Into<String>, to: impl Into<String>) -> Self` | On resume, restore the checkpoint's memory tier `from` into the configured tier `to`. A `from` the checkpoint lacks is logged as a warning. |
 | `drop_memory_tier_on_resume(self, name: impl Into<String>) -> Self` | On resume, discard the checkpoint's memory tier `name` instead of failing because it isn't configured. |
 | `ephemeral(self) -> Self` | Clear the persistence and resume settings made so far. Later setters can enable them again. |
-| `context_freshness(self, config: ContextFreshnessConfig) -> Self` | Enable versioned resource tracking. `ContextFreshnessConfig::default()` maps the built-in file tools `read_file`, `list_files`, `write_file`, and `apply_diff`, and Claude Code's `Read`, `Write`, `Edit`, `MultiEdit`, and `NotebookEdit`. See [Context freshness](#context-freshness). |
+| `context_freshness(self, config: ContextFreshnessConfig) -> Self` | Enable versioned resource tracking. `ContextFreshnessConfig::default()` maps the built-in file tools `read_file`, `list_files`, `write_file`, `edit_file`, and `apply_diff`, and Claude Code's `Read`, `Write`, `Edit`, `MultiEdit`, and `NotebookEdit`. See [Context freshness](#context-freshness). |
 | `global_tool(self, tool: Arc<dyn arko_agents::tool::Tool>) -> Self` | Register a tool for every agent and add its name to each agent's available tools. |
 | `agent_tool(self, agent_name: impl Into<String>, tool: Arc<dyn arko_agents::tool::Tool>) -> Self` | Register a tool for one agent and add its name to that agent's available tools. |
 | `tool_result_interceptor(self, interceptor: Arc<dyn ToolResultInterceptor>) -> Self` | Append an interceptor for every agent's tool results. |
@@ -1322,7 +1322,7 @@ All six types implement `Debug`, `Clone`, `Serialize`, and `Deserialize`; `Resou
 | --- | --- |
 | `read_file` | `ReadFile { parameter: "path" }` |
 | `list_files` | `ReadDirectoryTree { parameter: "directory" }` |
-| `write_file`, `apply_diff` | `WriteFile { parameter: "path" }` |
+| `write_file`, `edit_file`, `apply_diff` | `WriteFile { parameter: "path" }` |
 | `Read` (Claude Code) | `ReadFile { parameter: "file_path" }` |
 | `Write`, `Edit`, `MultiEdit` (Claude Code) | `WriteFile { parameter: "file_path" }` |
 | `NotebookEdit` (Claude Code) | `WriteFile { parameter: "notebook_path" }` |

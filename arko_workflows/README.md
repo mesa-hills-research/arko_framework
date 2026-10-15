@@ -405,7 +405,7 @@ let workflow = Workflow::builder()
 ```
 
 `ContextFreshnessConfig::default()` tracks reads through `read_file` and
-`list_files` and writes through `write_file` and `apply_diff`, and blocks stale
+`list_files` and writes through `write_file`, `edit_file` and `apply_diff`, and blocks stale
 writes. The mapping from tool names to resources is configurable. Notices state
 that a resource changed; they do not include the change. A write that makes
 another agent's read stale also fires the `OnFreshnessConflict` hook once per
