@@ -217,6 +217,16 @@ or new message counts as a message. Another one right after it gets the usual no
 still reaches the attempt limit. The system prompt tells the model that a plain-text reply
 reaches the user. Output-based mode ignores the setting.
 
+With `tool_config.text_reply_ends_task` on (off by default), a native response with text and
+no tool call is the agent's final reply instead: the task completes with the text as its
+summary, exactly as a `complete_task` call with it would, and the agent isn't offered
+`complete_task`. Text written beside tool calls stays progress. A response with neither
+text nor a tool call still gets the note and counts as a recovery attempt, and a handover
+report that is due comes first. The system prompt tells the model that a response without a
+tool call ends the task. The reply needs no approval and passes no execution middleware, so
+arko_workflows refuses the setting on an agent a completion verifier reviews or runs on. It
+is refused together with `text_reply_as_message`, and output-based mode ignores it.
+
 The runtime runs only the tools the agent is offered, in either tool calling mode. In
 native mode, a call to any other tool, registered or not, gets an error result and emits
 `UnavailableToolAttempted`; output-based parsing recognizes only the offered tools' tags,
@@ -980,7 +990,8 @@ stream, including one cut by the opt-in stream idle timeout, or an error reporte
 stream started) is sent again unchanged, without a note in the conversation: the model
 had no part in it. A response the runtime cannot use is retried with a note that tells
 the model what to do: a native response without a tool call (unless
-`text_reply_as_message` makes it a message to the user, see [Tools](#tools)), an
+`text_reply_as_message` makes it a message to the user, or `text_reply_ends_task` the
+final reply, see [Tools](#tools)), an
 output-based response without one, or output-based calls that cannot be read. Such a retry is not an outage: it
 is made at once, without backoff, and bounded by the attempt limit (10 under
 `InformAgentAndContinue`, which has none), not by the elapsed budget. Any completed
@@ -1187,7 +1198,10 @@ workflow's `send_message`, custom tools) are served to Claude Code in-process as
 server `arko`, so the model sees them as `mcp__arko__<name>` (the system prompt says so).
 They run as for any agent, with the execution middleware, result interception and time
 limits. With `text_reply_as_message` on, a turn that ends without `complete_task` sends
-its final text as `MessageToUser` before the runtime's note. Claude Code's built-in tools (`claude_code::BUILT_IN_TOOLS`: `Read`, `Edit`,
+its final text as `MessageToUser` before the runtime's note. With `text_reply_ends_task`
+on, a turn that ends with text completes the task with it, and `complete_task` isn't
+served. The turns Claude Code is told to end (after `ask_user`, for a handover report or a
+`/compact`) and the turns arko interrupts aren't replies. Claude Code's built-in tools (`claude_code::BUILT_IN_TOOLS`: `Read`, `Edit`,
 `Bash`, `Grep`, `WebFetch`, …) are offered when `available_tool_names` lists them, and
 only then; `ClaudeCodeTools::{read_only, editing, shell, web, all}` list common sets. A
 name that isn't an arko tool is offered as a built-in, so tools a newer CLI adds can be

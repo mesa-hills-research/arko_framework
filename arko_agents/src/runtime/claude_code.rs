@@ -64,6 +64,10 @@ const MAX_OPEN_TURNS: u32 = 10;
 
 const OPEN_TURN_NOTE: &str = "Your turn ended without calling complete_task, so the task is still open. Continue with your tools, or call mcp__arko__complete_task with a summary if the task is finished.";
 
+/// The note after a turn that ended without text, for an agent whose reply
+/// in text ends the task ([`AgentToolConfig::text_reply_ends_task`](crate::agent_config::AgentToolConfig::text_reply_ends_task)).
+const OPEN_TURN_NO_REPLY_NOTE: &str = "Your turn ended without a reply, so the task is still open. Continue with your tools, or reply in plain text, without a tool call, if the task is finished: that reply ends the task.";
+
 /// The note after an open turn whose final text was sent to the user as a
 /// message ([`AgentToolConfig::text_reply_as_message`](crate::agent_config::AgentToolConfig::text_reply_as_message)).
 const OPEN_TURN_MESSAGE_NOTE: &str = "Your reply was sent to the user as a message. Your turn ended without calling complete_task, so the task is still open: continue with your tools, or call mcp__arko__complete_task with a summary if the task is finished.";
@@ -875,9 +879,15 @@ impl ClaudeCodeRun {
             self.skill_prompt_context.as_ref(),
         );
         let mut prompt = builder.build_system_prompt(&self.task)?;
-        prompt.push_str(&format!(
-            "## Tool names\nThe tools of this task are served by the MCP server `{ARKO_TOOL_SERVER}`, so you see each as `mcp__{ARKO_TOOL_SERVER}__<name>`: `complete_task` is `mcp__{ARKO_TOOL_SERVER}__complete_task`.\n"
-        ));
+        if self.task.agent_config.tool_config.ends_task_with_text() {
+            prompt.push_str(&format!(
+                "## Tool names\nThe tools of this task are served by the MCP server `{ARKO_TOOL_SERVER}`, so you see each as `mcp__{ARKO_TOOL_SERVER}__<name>`.\n"
+            ));
+        } else {
+            prompt.push_str(&format!(
+                "## Tool names\nThe tools of this task are served by the MCP server `{ARKO_TOOL_SERVER}`, so you see each as `mcp__{ARKO_TOOL_SERVER}__<name>`: `complete_task` is `mcp__{ARKO_TOOL_SERVER}__complete_task`.\n"
+            ));
+        }
         Ok(prompt)
     }
 
@@ -1404,11 +1414,12 @@ impl ClaudeCodeRun {
             }
             _ => None,
         };
+        // `complete_task` is arko's, also where it isn't offered.
         let built_ins: Vec<String> = config
             .tool_config
             .available_tool_names
             .iter()
-            .filter(|name| self.registry.get(name).is_none())
+            .filter(|name| self.registry.get(name).is_none() && *name != COMPLETE_TASK_TOOL_NAME)
             .cloned()
             .collect();
         let mut cc_settings = serde_json::Map::new();
@@ -3369,6 +3380,25 @@ impl ClaudeCodeRun {
             }
             return self.session_failed(message).await.map(Some);
         }
+        // The final reply of an agent whose reply in text ends the task: a
+        // turn that ends with text, other than those above (Claude Code was
+        // told to end them, or arko ended them) and the handover report. A
+        // compaction or a report request the model hasn't seen yet waits,
+        // as it waits for a `complete_task` call.
+        if self.task.agent_config.tool_config.ends_task_with_text()
+            && !(self.handover_due() && self.report_delivered)
+            && self.ended_on_text()
+            && let Some(reply) = result
+                .result
+                .as_ref()
+                .filter(|text| !text.trim().is_empty())
+        {
+            self.set_state(TaskState::Completed {
+                summary: reply.trim().to_string(),
+            })
+            .await?;
+            return Ok(Some(SessionEnd::Stop));
+        }
         if self.compaction == Some(Compaction::Due) {
             return self.compact_now(session).await;
         }
@@ -3391,17 +3421,26 @@ impl ClaudeCodeRun {
             self.complete_handover(report).await?;
             return Ok(Some(SessionEnd::Restart));
         }
+        let ends_with_text = self.task.agent_config.tool_config.ends_task_with_text();
         self.open_turns += 1;
         if self.open_turns > MAX_OPEN_TURNS {
+            let without = if ends_with_text {
+                "a reply"
+            } else {
+                "calling complete_task"
+            };
             self.set_state(TaskState::Interrupted {
-                reason: format!(
-                    "{MAX_OPEN_TURNS} turns in a row ended without calling complete_task."
-                ),
+                reason: format!("{MAX_OPEN_TURNS} turns in a row ended without {without}."),
             })
             .await?;
             return Ok(Some(SessionEnd::Stop));
         }
-        let mut note = OPEN_TURN_NOTE.to_string();
+        let mut note = if ends_with_text {
+            OPEN_TURN_NO_REPLY_NOTE
+        } else {
+            OPEN_TURN_NOTE
+        }
+        .to_string();
         if self.task.agent_config.tool_config.text_reply_as_message
             && let Some(text) = result
                 .result
@@ -3424,6 +3463,18 @@ impl ClaudeCodeRun {
         }
         self.emit_context_receipts().await?;
         Ok(None)
+    }
+
+    /// Whether the turn's last response called no tool: the conversation
+    /// ends on the model's text (Claude Code's turn result is its text).
+    fn ended_on_text(&self) -> bool {
+        self.task
+            .conversation
+            .messages
+            .last()
+            .is_some_and(|message| {
+                message.role == ai::Role::Assistant && message.tool_calls.is_empty()
+            })
     }
 
     /// The session failed (it exited, or a turn ended in an error Claude

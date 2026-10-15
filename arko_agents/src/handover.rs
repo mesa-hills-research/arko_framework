@@ -62,6 +62,14 @@ pub const DEFAULT_REPORT_REQUEST: &str = concat!(
     report_contents!()
 );
 
+/// [`DEFAULT_REPORT_REQUEST`] for an agent not offered `complete_task`
+/// (its reply in text ends the task:
+/// [`AgentToolConfig::text_reply_ends_task`](crate::agent_config::AgentToolConfig::text_reply_ends_task)).
+pub const DEFAULT_REPORT_REQUEST_NO_COMPLETION: &str = concat!(
+    "Your conversation is getting long, so it will be replaced with a fresh one that starts from your task and a report you write now. Call `handover_report` with that report. Your other tool calls are not run until you do. ",
+    report_contents!()
+);
+
 /// What the runtime asks for when the agent gives the report as a reply
 /// without a tool call (see the [module docs](self)). Other tool calls are
 /// rejected until it does (it may still call `complete_task` if the task is
@@ -157,9 +165,16 @@ impl HandoverConfig {
     /// agent gives the report with the [`HANDOVER_REPORT_TOOL_NAME`] tool
     /// (`with_tool`) and [`DEFAULT_TEXT_REPORT_REQUEST`] otherwise.
     pub fn report_request(&self, with_tool: bool) -> &str {
+        self.report_request_for(with_tool, true)
+    }
+
+    /// [`report_request`](Self::report_request) for an agent offered
+    /// `complete_task` or not (`completes`): the default request mentions
+    /// it only where it is offered.
+    pub fn report_request_for(&self, with_tool: bool, completes: bool) -> &str {
         self.report_request
             .as_deref()
-            .unwrap_or(default_report_request(with_tool))
+            .unwrap_or(default_report_request_for(with_tool, completes))
     }
 
     pub fn validate(&self) -> Result<(), ArkoAgentsError> {
@@ -196,10 +211,17 @@ impl HandoverConfig {
 /// gives the report with the [`HANDOVER_REPORT_TOOL_NAME`] tool
 /// (`with_tool`), [`DEFAULT_TEXT_REPORT_REQUEST`] otherwise.
 pub fn default_report_request(with_tool: bool) -> &'static str {
-    if with_tool {
-        DEFAULT_REPORT_REQUEST
-    } else {
-        DEFAULT_TEXT_REPORT_REQUEST
+    default_report_request_for(with_tool, true)
+}
+
+/// [`default_report_request`] for an agent offered `complete_task` or not
+/// (`completes`): [`DEFAULT_REPORT_REQUEST_NO_COMPLETION`] for one given
+/// the tool and not offered `complete_task`.
+pub fn default_report_request_for(with_tool: bool, completes: bool) -> &'static str {
+    match (with_tool, completes) {
+        (true, true) => DEFAULT_REPORT_REQUEST,
+        (true, false) => DEFAULT_REPORT_REQUEST_NO_COMPLETION,
+        (false, _) => DEFAULT_TEXT_REPORT_REQUEST,
     }
 }
 

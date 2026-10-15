@@ -570,10 +570,12 @@ impl AgentLoop {
         Ok(Flow::Proceed)
     }
 
-    /// A native turn without calls: the handover report, when it is due
-    /// and the agent isn't offered `handover_report`, or a response without
-    /// a tool call, which gets a note and is asked again under the error
-    /// policy. Calls the stream announced are rejected.
+    /// A native turn without calls. It is the handover report when one is
+    /// due and the agent isn't offered `handover_report`, the final reply
+    /// of an agent whose reply in text ends the task (which completes it),
+    /// or else a response without a tool call, which gets a note and is
+    /// asked again under the error policy. Calls the stream announced are
+    /// rejected.
     async fn native_turn_without_calls(
         &mut self,
         final_generation_response: Option<ai::GenerationResponse>,
@@ -581,39 +583,57 @@ impl AgentLoop {
     ) -> Result<Flow, ArkoAgentsError> {
         self.reject_announced_calls(&mut native_stream_call_ids, UNDELIVERED_CALL)
             .await?;
+        let text = final_generation_response
+            .as_ref()
+            .map(|response| message_text(&response.message))
+            .unwrap_or_default();
         if self.handover_report_due() {
-            let report = final_generation_response
-                .as_ref()
-                .map(|response| message_text(&response.message))
-                .unwrap_or_default();
-            self.take_handover_report(report).await?;
+            self.take_handover_report(text).await?;
+            return Ok(self.end_of_pass());
+        }
+        if self.task.agent_config.tool_config.ends_task_with_text() && !text.trim().is_empty() {
+            self.complete_with_reply(text).await?;
             return Ok(self.end_of_pass());
         }
         if self.task.agent_config.tool_config.text_reply_as_message
             && !self.recovery.text_reply_sent
+            && !text.trim().is_empty()
         {
-            let text = final_generation_response
-                .as_ref()
-                .map(|response| message_text(&response.message))
-                .unwrap_or_default();
-            if !text.trim().is_empty() {
-                self.recovery.text_reply_sent = true;
-                self.emit_event(AgentEvent::MessageToUser {
-                    message: text,
-                    tool_call_id: None,
-                })
-                .await?;
-                self.add_runtime_message(TEXT_REPLY_SENT)?;
-                return Ok(self.end_of_pass());
-            }
+            self.recovery.text_reply_sent = true;
+            self.emit_event(AgentEvent::MessageToUser {
+                message: text,
+                tool_call_id: None,
+            })
+            .await?;
+            self.add_runtime_message(TEXT_REPLY_SENT)?;
+            return Ok(self.end_of_pass());
         }
         log::warn!(
             "LLM response for task {} did not contain a native tool call.",
             self.task.id
         );
-        self.handle_model_output_failure(NO_NATIVE_TOOL_CALL.to_string())
-            .await?;
+        let note = if self.task.agent_config.tool_config.ends_task_with_text() {
+            NO_NATIVE_TOOL_CALL_OR_REPLY
+        } else {
+            NO_NATIVE_TOOL_CALL
+        };
+        self.handle_model_output_failure(note.to_string()).await?;
         Ok(self.end_of_pass())
+    }
+
+    /// The final reply of an agent whose reply in text ends the task
+    /// ([`AgentToolConfig::text_reply_ends_task`](crate::agent_config::AgentToolConfig::text_reply_ends_task)):
+    /// the task completes with the reply as its summary, as a
+    /// `complete_task` call with it would complete it.
+    async fn complete_with_reply(&mut self, reply: String) -> Result<(), ArkoAgentsError> {
+        self.reset_llm_recovery();
+        self.task.set_state(TaskState::Completed {
+            summary: reply.trim().to_string(),
+        });
+        self.emit_event(AgentEvent::TaskStateChanged(
+            self.task.current_state.clone(),
+        ))
+        .await
     }
 
     /// A native call's checks, in order: arguments that aren't JSON,

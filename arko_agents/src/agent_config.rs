@@ -452,7 +452,8 @@ where
 #[serde(from = "AgentToolConfigRepr")]
 pub struct AgentToolConfig {
     /// The tools the agent is offered, besides `complete_task`, which is
-    /// always offered. The runtime offers and runs only these (those the
+    /// always offered (unless a reply in text ends the task:
+    /// [`text_reply_ends_task`](Self::text_reply_ends_task)). The runtime offers and runs only these (those the
     /// task's registry holds): a native call to any other tool gets an error
     /// result and `AgentEvent::UnavailableToolAttempted`, and output-based
     /// parsing recognizes only these tools' tags.
@@ -536,6 +537,40 @@ pub struct AgentToolConfig {
     /// setting, when `available_tool_names` lists it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub text_reply_as_message: bool,
+    /// Opt-in (off by default): a reply in plain text, without a tool call,
+    /// is the agent's final reply and ends the task, as if it had called
+    /// `complete_task` with that text as the summary. The agent is not
+    /// offered `complete_task`, even where `available_tool_names` lists it,
+    /// and text written beside tool calls stays what it is: text of a
+    /// response that goes on with its calls.
+    ///
+    /// On, in native mode, a response with text and no tool call completes
+    /// the task with the text (trimmed) as the summary: the task's state is
+    /// `Completed { summary }` and the host gets the
+    /// `TaskStateChanged` event a `complete_task` call sends (the text
+    /// itself has streamed as `AssistantResponseChunk`). A response without
+    /// text or a tool call is still a response the runtime can't use, with
+    /// a note that asks for a tool call or a reply. A handover report that
+    /// is due comes first: a reply then is the report (or, for an agent
+    /// offered `handover_report`, gets the note asking for that call), and
+    /// the task ends with a reply in the fresh conversation. A reply cut off
+    /// at the output-token limit ends the task too, after
+    /// `OutputTokenLimitReached`. A Claude Code agent's turn that ends with
+    /// text completes the task the same way, except a turn Claude Code was
+    /// told to end without tools (after `ask_user`, or for a handover or a
+    /// `/compact`), and a turn that ends without text gets the runtime's
+    /// note. Output-based mode ignores the setting: its format asks for a
+    /// tool call in every response, and `complete_task` ends the task.
+    ///
+    /// Unlike a `complete_task` call, a reply in text needs no approval and
+    /// runs through no execution middleware, so a host's checks of
+    /// `complete_task` calls don't see it: arko_workflows refuses the
+    /// setting on an agent a completion verifier reviews, and on a
+    /// verifier agent. [`AgentConfig::validate`] refuses it together with
+    /// [`text_reply_as_message`](Self::text_reply_as_message), which gives
+    /// the same reply another meaning.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub text_reply_ends_task: bool,
 }
 
 /// The terminal tool that starts a command; an agent offered it has a
@@ -572,6 +607,8 @@ struct AgentToolConfigRepr {
     read_file_line_ranges: bool,
     #[serde(default)]
     text_reply_as_message: bool,
+    #[serde(default)]
+    text_reply_ends_task: bool,
     /// Removed: every call of a response runs now. Read only to warn when a
     /// configuration had turned batching off.
     #[serde(default)]
@@ -599,6 +636,7 @@ impl From<AgentToolConfigRepr> for AgentToolConfig {
             result_limits: repr.result_limits,
             read_file_line_ranges: repr.read_file_line_ranges,
             text_reply_as_message: repr.text_reply_as_message,
+            text_reply_ends_task: repr.text_reply_ends_task,
         }
     }
 }
@@ -609,13 +647,26 @@ fn default_auto_approve_tool_use_false() -> bool {
 
 impl AgentToolConfig {
     /// The names of the tools the agent is offered and can run:
-    /// `available_tool_names` and `complete_task`.
+    /// `available_tool_names` and `complete_task`, without `complete_task`
+    /// for an agent whose reply in text ends the task
+    /// ([`ends_task_with_text`](Self::ends_task_with_text)).
     pub fn offered_tool_names(&self) -> HashSet<String> {
+        let complete_task = crate::tool::builtins::COMPLETE_TASK_TOOL_NAME;
+        let offers_complete_task = !self.ends_task_with_text();
         self.available_tool_names
             .iter()
             .cloned()
-            .chain([crate::tool::builtins::COMPLETE_TASK_TOOL_NAME.to_string()])
+            .chain(offers_complete_task.then(|| complete_task.to_string()))
+            .filter(|name| offers_complete_task || name != complete_task)
             .collect()
+    }
+
+    /// Whether a reply in plain text, without a tool call, ends the task:
+    /// [`text_reply_ends_task`](Self::text_reply_ends_task) in native mode
+    /// (output-based mode ignores it). Such an agent is not offered
+    /// `complete_task`.
+    pub fn ends_task_with_text(&self) -> bool {
+        self.text_reply_ends_task && self.tool_calling_mode == ToolCallingMode::Native
     }
 
     /// The host-side time limit of a call to `tool_name`: its
@@ -663,6 +714,12 @@ impl AgentToolConfig {
     }
 
     fn validate(&self) -> Result<(), ArkoAgentsError> {
+        if self.text_reply_ends_task && self.text_reply_as_message {
+            return Err(ArkoAgentsError::BuilderError {
+                struct_name: "AgentToolConfig".into(),
+                message: "text_reply_ends_task and text_reply_as_message can't both be on: one makes a reply in plain text the final reply, the other a message that doesn't end the task.".into(),
+            });
+        }
         if self.result_limits.max_result_tokens == Some(0)
             || self
                 .tool_specific_configs
@@ -710,6 +767,7 @@ impl Default for AgentToolConfig {
             result_limits: ToolResultLimits::default(),
             read_file_line_ranges: false,
             text_reply_as_message: false,
+            text_reply_ends_task: false,
         }
     }
 }
@@ -1996,6 +2054,73 @@ mod validation_tests {
         assert_eq!(saved["tool_config"]["text_reply_as_message"], true);
         let loaded: AgentConfig = serde_json::from_value(saved).unwrap();
         assert!(loaded.tool_config.text_reply_as_message);
+    }
+
+    /// `text_reply_ends_task` is off in a configuration saved without it,
+    /// and written only when on. On, `complete_task` isn't offered, even
+    /// where `available_tool_names` lists it, except in output-based mode,
+    /// which ignores the setting.
+    #[test]
+    fn text_reply_ends_task_loads_off_and_is_written_when_on() {
+        let saved = serde_json::to_value(luna()).unwrap();
+        assert!(
+            saved["tool_config"].get("text_reply_ends_task").is_none(),
+            "{saved}"
+        );
+        let loaded: AgentConfig = serde_json::from_value(saved).unwrap();
+        assert!(!loaded.tool_config.text_reply_ends_task);
+        assert!(!loaded.tool_config.ends_task_with_text());
+        assert!(
+            loaded
+                .tool_config
+                .offered_tool_names()
+                .contains(crate::tool::builtins::COMPLETE_TASK_TOOL_NAME)
+        );
+
+        let mut config = luna();
+        config.tool_config.text_reply_ends_task = true;
+        config
+            .tool_config
+            .available_tool_names
+            .push(crate::tool::builtins::COMPLETE_TASK_TOOL_NAME.into());
+        let saved = serde_json::to_value(&config).unwrap();
+        assert_eq!(saved["tool_config"]["text_reply_ends_task"], true);
+        let loaded: AgentConfig = serde_json::from_value(saved).unwrap();
+        assert!(loaded.tool_config.text_reply_ends_task);
+        assert!(loaded.tool_config.ends_task_with_text());
+        assert!(
+            !loaded
+                .tool_config
+                .offered_tool_names()
+                .contains(crate::tool::builtins::COMPLETE_TASK_TOOL_NAME)
+        );
+        assert!(loaded.validate().is_ok());
+
+        let mut output_based = loaded.clone();
+        output_based.tool_config.tool_calling_mode = ToolCallingMode::OutputBased;
+        assert!(!output_based.tool_config.ends_task_with_text());
+        assert!(
+            output_based
+                .tool_config
+                .offered_tool_names()
+                .contains(crate::tool::builtins::COMPLETE_TASK_TOOL_NAME)
+        );
+    }
+
+    /// `text_reply_ends_task` and `text_reply_as_message` give a reply in
+    /// text two meanings: they are refused together.
+    #[test]
+    fn text_reply_ends_task_is_refused_with_text_reply_as_message() {
+        let mut config = luna();
+        config.tool_config.text_reply_ends_task = true;
+        config.tool_config.text_reply_as_message = true;
+        let error = config.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("text_reply_ends_task and text_reply_as_message can't both be on"),
+            "{error}"
+        );
+        config.tool_config.text_reply_as_message = false;
+        assert!(config.validate().is_ok());
     }
 
     /// A zero command timeout (which ended every wait at once) is rejected,

@@ -519,3 +519,7 @@ mod result_limit_tests;
 #[cfg(test)]
 #[path = "message_user_tests.rs"]
 mod message_user_tests;
+
+#[cfg(test)]
+#[path = "text_reply_tests.rs"]
+mod text_reply_tests;

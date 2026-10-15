@@ -42,10 +42,12 @@ impl AgentLoop {
 
     /// The result of a call rejected because the handover report is due.
     pub(super) fn handover_report_due_reason(&self) -> &'static str {
-        if self.offers_report_tool() {
-            HANDOVER_REPORT_TOOL_DUE
-        } else {
-            HANDOVER_REPORT_DUE
+        let completes = !self.task.agent_config.tool_config.ends_task_with_text();
+        match (self.offers_report_tool(), completes) {
+            (true, true) => HANDOVER_REPORT_TOOL_DUE,
+            (true, false) => HANDOVER_REPORT_TOOL_DUE_NO_COMPLETION,
+            (false, true) => HANDOVER_REPORT_DUE,
+            (false, false) => HANDOVER_REPORT_DUE_NO_COMPLETION,
         }
     }
 
@@ -141,10 +143,11 @@ impl AgentLoop {
             .get_or_insert_with(|| HandoverRequest::new(context_size.unwrap_or(0)));
         request.report_requested = true;
         let input_tokens = request.input_tokens;
-        let report_request = config.as_ref().map_or(
-            crate::handover::default_report_request(with_tool),
-            |config| config.report_request(with_tool),
-        );
+        let completes = !self.task.agent_config.tool_config.ends_task_with_text();
+        let report_request = match &config {
+            Some(config) => config.report_request_for(with_tool, completes),
+            None => crate::handover::default_report_request_for(with_tool, completes),
+        };
         self.task.conversation.add_user_message(report_request);
         self.task.mark_last_message_runtime();
         self.task.increment_user_message_count();
@@ -167,9 +170,12 @@ impl AgentLoop {
         report: String,
     ) -> Result<(), ArkoAgentsError> {
         if self.offers_report_tool() {
-            return self
-                .handle_model_output_failure(NO_REPORT_TOOL_CALL.to_string())
-                .await;
+            let note = if self.task.agent_config.tool_config.ends_task_with_text() {
+                NO_REPORT_TOOL_CALL_NO_COMPLETION
+            } else {
+                NO_REPORT_TOOL_CALL
+            };
+            return self.handle_model_output_failure(note.to_string()).await;
         }
         if report.trim().is_empty() {
             return self

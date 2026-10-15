@@ -6,7 +6,7 @@ use futures::StreamExt;
 const IMAGE_DATA: &str = "cGl4ZWxzLWZpeHR1cmU=";
 
 #[derive(Debug)]
-struct ImageTool;
+pub(super) struct ImageTool;
 #[async_trait]
 impl Tool for ImageTool {
     fn definition(&self) -> ToolDefinition {
@@ -46,7 +46,7 @@ impl Tool for ImageTool {
 }
 
 #[derive(Debug)]
-struct TextTool;
+pub(super) struct TextTool;
 #[async_trait]
 impl Tool for TextTool {
     fn definition(&self) -> ToolDefinition {

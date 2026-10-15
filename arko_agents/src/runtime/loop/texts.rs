@@ -5,6 +5,9 @@ use super::*;
 
 /// The result of a tool call made while a handover report is due.
 pub(super) const HANDOVER_REPORT_DUE: &str = "This call was not run: your handover report is due. Reply with the report as plain text, without calling a tool (call complete_task instead if the task is done).";
+/// [`HANDOVER_REPORT_DUE`] for an agent not offered `complete_task` (its
+/// reply in text ends the task, once the report is in).
+pub(super) const HANDOVER_REPORT_DUE_NO_COMPLETION: &str = "This call was not run: your handover report is due. Reply with the report as plain text, without calling a tool.";
 
 /// The note after a reply to a report request that had no text.
 pub(super) const NO_HANDOVER_REPORT: &str = "Your reply had no text, so no handover report was received. Reply with the handover report as plain text, without calling a tool.";
@@ -12,10 +15,16 @@ pub(super) const NO_HANDOVER_REPORT: &str = "Your reply had no text, so no hando
 /// For an agent offered `handover_report`: the result of another tool call
 /// made while the report is due.
 pub(super) const HANDOVER_REPORT_TOOL_DUE: &str = "This call was not run: your handover report is due. Call handover_report with the report (or complete_task if the task is done).";
+/// [`HANDOVER_REPORT_TOOL_DUE`] for an agent not offered `complete_task`.
+pub(super) const HANDOVER_REPORT_TOOL_DUE_NO_COMPLETION: &str =
+    "This call was not run: your handover report is due. Call handover_report with the report.";
 
 /// For an agent offered `handover_report`: the note after a reply without a
 /// tool call while the report is due.
 pub(super) const NO_REPORT_TOOL_CALL: &str = "Your response did not call a tool, so no handover report was received. Call handover_report with the report (or complete_task if the task is done).";
+/// [`NO_REPORT_TOOL_CALL`] for an agent not offered `complete_task`: its
+/// reply ends the task only once the report is in.
+pub(super) const NO_REPORT_TOOL_CALL_NO_COMPLETION: &str = "Your response did not call a tool, so no handover report was received, and the task is still open: your reply ends it only after the handover. Call handover_report with the report first.";
 
 /// The results of `handover_report` calls: the report taken, no report
 /// asked for, and a call without a report.
@@ -28,6 +37,10 @@ pub(super) const EMPTY_REPORT_CALL: &str = "No handover report was received: the
 /// conversation before it asks again; see
 /// [`AgentLoop::handle_model_output_failure`].
 pub(super) const NO_NATIVE_TOOL_CALL: &str = "Your response did not call a tool, so the task is still open. Continue with your tools, or call complete_task with a summary if the task is finished.";
+/// [`NO_NATIVE_TOOL_CALL`] for an agent whose reply in text ends the task
+/// ([`AgentToolConfig::text_reply_ends_task`](crate::agent_config::AgentToolConfig::text_reply_ends_task)),
+/// after a response with neither.
+pub(super) const NO_NATIVE_TOOL_CALL_OR_REPLY: &str = "Your response had no text and no tool call, so the task is still open. Continue with your tools, or reply in plain text, without a tool call, if the task is finished: that reply ends the task.";
 pub(super) const NO_TEXT_TOOL_CALL: &str = "Your response did not contain a tool call. Use one of your tools in the format the system prompt describes, or complete_task if the task is finished.";
 
 /// The note after a reply in plain text that was sent to the user as a

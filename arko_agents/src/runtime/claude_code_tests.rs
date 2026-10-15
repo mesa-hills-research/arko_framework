@@ -2387,3 +2387,214 @@ async fn claude_codes_own_compaction_is_reported() {
     let argv: Vec<String> = serde_json::from_value(fake.logged("argv")[0]["argv"].clone()).unwrap();
     assert!(!argv.iter().any(|arg| arg.contains("autoCompactEnabled")));
 }
+
+// `text_reply_ends_task`: a turn that ends with text is the final reply.
+
+/// `config` for an agent whose reply in text ends the task.
+fn replying(fake: &Fake, tools: &[&str]) -> AgentConfig {
+    let mut config = config(fake, tools);
+    config.tool_config.text_reply_ends_task = true;
+    config
+}
+
+/// The summaries of the run's completions, as the host is told of them.
+fn completions(events: &[AgentEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::TaskStateChanged(TaskState::Completed { summary }) => Some(summary.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A turn that ends with text completes the task with the text as its
+/// summary, reported as a `complete_task` completion is. `complete_task`
+/// isn't served (nor offered as a built-in), and the system prompt doesn't
+/// name it. A turn whose last response called a tool isn't a reply (the
+/// fake reports its earlier text as the turn's result), and one that ends
+/// without text gets a note that doesn't name `complete_task`.
+#[tokio::test]
+async fn a_turn_that_ends_with_text_completes_the_task() {
+    let fake = Fake::new(json!([
+        [
+            {"text": "Looking.", "input_tokens": 100},
+            {"tool": "Grep", "input": {"pattern": "a"}},
+        ],
+        [{"tool": "Grep", "input": {"pattern": "b"}}],
+        [
+            {"text": "Searching again."},
+            {"tool": "Grep", "input": {"pattern": "c"}},
+            {"text": "Found 3 files."},
+        ],
+    ]));
+    let mut config = replying(&fake, &["Grep"]);
+    config
+        .tool_config
+        .available_tool_names
+        .push("complete_task".into());
+    let task = Task::new(config, "Count the files.".into(), fake.workspace(), None);
+    let (task, events) = start(task).finish().await;
+
+    assert_eq!(
+        task.current_state,
+        TaskState::Completed {
+            summary: "Found 3 files.".into()
+        }
+    );
+    assert_eq!(completions(&events), ["Found 3 files."]);
+    assert!(matches!(events.last(), Some(AgentEvent::TaskStreamEnd)));
+    let users = user_texts(&fake);
+    assert_eq!(users.len(), 3, "{users:#?}");
+    for note in &users[1..] {
+        assert!(note.starts_with(super::OPEN_TURN_NO_REPLY_NOTE), "{note}");
+    }
+    assert!(!super::OPEN_TURN_NO_REPLY_NOTE.contains("complete_task"));
+    let served = &fake.logged("tools")[0]["tools"];
+    assert!(
+        !served
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "complete_task"),
+        "{served}"
+    );
+    let argv: Vec<String> = serde_json::from_value(fake.logged("argv")[0]["argv"].clone()).unwrap();
+    let tools = argv.iter().position(|arg| arg == "--tools").unwrap();
+    assert_eq!(argv[tools + 1], "Grep");
+    let system = task.conversation.system_message.clone().unwrap();
+    assert!(!system.contains("complete_task"), "{system}");
+    assert!(system.contains("is your final reply"), "{system}");
+}
+
+/// After `ask_user`, Claude Code is told to end its turn: that turn's text
+/// is not the final reply, and the task waits for the answer. The reply
+/// after it ends the task.
+#[tokio::test]
+async fn the_turn_after_ask_user_is_not_the_final_reply() {
+    let fake = Fake::new(json!([
+        [
+            {"tool": "mcp__arko__ask_user", "input": {"questions": "Which file?"}},
+            {"text": "I asked which file."},
+        ],
+        [{"text": "Edited main.rs."}],
+    ]));
+    let task = Task::new(
+        replying(&fake, &["ask_user"]),
+        "Edit a file.".into(),
+        fake.workspace(),
+        None,
+    );
+    let mut run = start(task);
+    let seen = run
+        .events_until(|event| matches!(event, AgentEvent::UserQuestionsAsked { .. }))
+        .await;
+    assert!(completions(&seen).is_empty(), "{seen:#?}");
+    run.commands
+        .send(UserCommand::SubmitUserResponse {
+            response: "main.rs".into(),
+        })
+        .await
+        .unwrap();
+    let (task, events) = run.finish().await;
+    assert_eq!(
+        task.current_state,
+        TaskState::Completed {
+            summary: "Edited main.rs.".into()
+        }
+    );
+    assert_eq!(completions(&events), ["Edited main.rs."]);
+}
+
+/// The handover report comes before the final reply: the text of the turn
+/// the report was asked for in is the report, and the reply in the fresh
+/// conversation ends the task.
+#[tokio::test]
+async fn a_handover_report_is_not_the_final_reply() {
+    let fake = Fake::new(json!([
+        [
+            {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 400},
+            {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
+            {"text": "REPORT: searched a and b; next, c."},
+        ],
+        [{"text": "Searched a, b and c."}],
+    ]));
+    let mut config = replying(&fake, &["Grep"]);
+    config.handover = Some(HandoverConfig::at_input_tokens(1000));
+    let task = Task::new(config, "Search a, b and c.".into(), fake.workspace(), None);
+    let (task, events) = start(task).finish().await;
+    assert_eq!(task.handovers.len(), 1);
+    assert_eq!(
+        task.handovers[0].report,
+        "REPORT: searched a and b; next, c."
+    );
+    assert_eq!(completions(&events), ["Searched a, b and c."]);
+}
+
+/// A final reply whose request crossed the handover size ends the task:
+/// the report asked for meanwhile hadn't reached the model, as a
+/// `complete_task` call would end it.
+#[tokio::test]
+async fn a_reply_before_the_report_request_reaches_the_model_ends_the_task() {
+    let fake = Fake::new(json!([[{"text": "The answer.", "input_tokens": 1500}]]));
+    let mut config = replying(&fake, &[]);
+    config.handover = Some(HandoverConfig::at_input_tokens(1000));
+    let task = Task::new(config, "A question.".into(), fake.workspace(), None);
+    let (task, events) = start(task).finish().await;
+    assert_eq!(completions(&events), ["The answer."]);
+    assert!(task.handovers.is_empty());
+    assert_eq!(fake.logged("user").len(), 1);
+}
+
+/// `/compact` and the turn arko interrupted for it are not final replies;
+/// the reply after the compaction ends the task. A reply whose request
+/// crossed the size ends the task before compacting, as `complete_task`
+/// does, and the next run compacts first.
+#[tokio::test]
+async fn a_compaction_is_not_the_final_reply() {
+    let fake = Fake::new(json!([
+        [
+            {"tool": "Grep", "input": {"pattern": "a"}, "input_tokens": 400},
+            {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 1500},
+            {"text": "Not reached: the turn was interrupted."},
+        ],
+        {"compact": {"pre_tokens": 1520, "post_tokens": 300}},
+        [
+            {"tool": "Grep", "input": {"pattern": "b"}, "input_tokens": 500},
+            {"text": "First answer.", "input_tokens": 1600},
+        ],
+        {"compact": {"pre_tokens": 1610, "post_tokens": 200}},
+        [{"text": "Second answer."}],
+    ]));
+    let mut config = replying(&fake, &["Grep"]);
+    config.handover = Some(HandoverConfig {
+        compact_in_claude_code: true,
+        ..HandoverConfig::at_input_tokens(1000)
+    });
+    let task = Task::new(config, "First question.".into(), fake.workspace(), None);
+    let (mut task, events) = start(task).finish().await;
+    assert_eq!(completions(&events), ["First answer."]);
+    let compactions = |events: &[AgentEvent]| {
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::ConversationCompacted { .. }))
+            .count()
+    };
+    assert_eq!(compactions(&events), 1);
+    assert_eq!(user_texts(&fake)[1], "/compact");
+
+    task.prepare_for_resumption_from_completed("Second question.".into())
+        .unwrap();
+    let (task, events) = start(task).finish().await;
+    assert_eq!(completions(&events), ["Second answer."]);
+    assert_eq!(compactions(&events), 1);
+    let users = user_texts(&fake);
+    assert_eq!(users[3], "/compact", "{users:#?}");
+    assert!(users[4].starts_with("Second question."), "{users:#?}");
+    assert_eq!(
+        task.current_state,
+        TaskState::Completed {
+            summary: "Second answer.".into()
+        }
+    );
+}

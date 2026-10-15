@@ -19,6 +19,11 @@ Defaults that change what an agent sees of its tool results, in arko's own runti
   note asking for a tool call. `AgentToolConfig::text_reply_as_message` (`false`) sends it
   to the user as a message instead. The built-in `message_user` tool, offered when listed,
   sends a message either way.
+- `AgentToolConfig::text_reply_ends_task` (`false`) makes that reply the agent's final
+  reply instead: it completes the task with the text as the summary, and the agent isn't
+  offered `complete_task`. It works in native mode and on Claude Code models, and is
+  refused together with `text_reply_as_message` and on agents a completion verifier
+  reviews or runs on. See [Tools](reference-map.md#tools-arko_agents).
 - Error kinds (`arko_ai::ErrorKind`) are recorded with pauses and failures, and stop
   nothing by themselves.
 
