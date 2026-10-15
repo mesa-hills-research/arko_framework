@@ -85,7 +85,7 @@ const COMPACT_COMMAND: &str = "/compact";
 const COMPACTED: &str = "Claude Code compacted your conversation: the summary above replaces the earlier messages. Continue the task from where you left off.";
 
 /// Heads the list of the calls held while a compaction was due.
-const HELD_CALLS: &str = "For the compaction, arko held these tool calls of yours and ended your turn, so they did not run; make them again if they are still needed:";
+const HELD_CALLS: &str = "For the compaction, arko held these tool calls of yours and ended your turn, so they did not run. Where Claude Code said the user rejected them, that was this hold, not the user. Make them again if they are still needed:";
 
 /// A call's result as Claude Code is served it: `text`, then each image's
 /// label on a line of its own, and the images as MCP image content.
