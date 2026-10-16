@@ -66,6 +66,12 @@ pub struct ModelCallUsage {
     /// Never a token or account id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// The provider refused the reasoning summaries the request asked for,
+    /// and the request was sent again without them: the OpenAI provider on
+    /// a 400 saying the organization must be verified to generate reasoning
+    /// summaries. The provider's client asks for none from then on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reasoning_summaries_refused: bool,
 }
 
 /// How much of a subscription plan's usage limits is used, as the ChatGPT
@@ -279,6 +285,7 @@ impl ModelCallUsage {
             rerouted: false,
             plan_usage: None,
             account: None,
+            reasoning_summaries_refused: false,
         }
     }
 

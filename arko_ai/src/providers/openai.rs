@@ -24,7 +24,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -35,6 +35,9 @@ mod oauth_recovery_tests;
 
 #[cfg(test)]
 mod refusal_tests;
+
+#[cfg(test)]
+mod summaries_tests;
 
 #[cfg(test)]
 mod trace_tests;
@@ -289,6 +292,21 @@ fn response_error(
     Error::provider_error(label, Some(status.as_u16()), header_delay, body)
 }
 
+/// Whether an error body (of a 400) refuses the request's reasoning
+/// summaries, as OpenAI does for an organization that isn't verified for
+/// them: "Your organization must be verified to generate reasoning
+/// summaries. ...", with `param` `reasoning.summary`.
+fn refuses_reasoning_summaries(body: &str) -> bool {
+    let Ok(body) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    let error = &body["error"];
+    error["param"].as_str() == Some("reasoning.summary")
+        || error["message"]
+            .as_str()
+            .is_some_and(|message| message.to_lowercase().contains("reasoning summaries"))
+}
+
 /// Retries of a rate-limited OAuth refresh when rate-limit retries are
 /// enabled: about an hour of backoff before the 429 is returned.
 const OAUTH_REFRESH_MAX_RATE_LIMIT_RETRIES: u32 = 8;
@@ -484,6 +502,9 @@ pub struct OpenAIClient {
     oauth_refresh_timeout: Option<Duration>,
     /// Timing of the opt-in rate-limit retries of a refresh; tests shorten it.
     oauth_refresh_retry: OAuthRefreshRetry,
+    /// The organization refused reasoning summaries (it isn't verified for
+    /// them): requests ask for none from then on. Shared by clones.
+    summaries_refused: Arc<AtomicBool>,
 }
 
 /// What a refresh replaces; checked once the credential lock is held.
@@ -520,6 +541,7 @@ impl OpenAIClient {
             auth_epoch: Arc::new(AtomicU64::new(0)),
             oauth_refresh_timeout: Some(OAUTH_REFRESH_TIMEOUT),
             oauth_refresh_retry: OAUTH_REFRESH_RETRY,
+            summaries_refused: Arc::default(),
         }
     }
 
@@ -550,6 +572,7 @@ impl OpenAIClient {
             auth_epoch: Arc::new(AtomicU64::new(0)),
             oauth_refresh_timeout: Some(OAUTH_REFRESH_TIMEOUT),
             oauth_refresh_retry: OAUTH_REFRESH_RETRY,
+            summaries_refused: Arc::default(),
         }
     }
 
@@ -570,6 +593,7 @@ impl OpenAIClient {
             auth_epoch: Arc::new(AtomicU64::new(0)),
             oauth_refresh_timeout: Some(OAUTH_REFRESH_TIMEOUT),
             oauth_refresh_retry: OAUTH_REFRESH_RETRY,
+            summaries_refused: Arc::default(),
         }
     }
 
@@ -1112,15 +1136,22 @@ impl OpenAIClient {
         self.auth.read().await.clone()
     }
 
+    /// Sends `request`, refreshing ChatGPT credentials once on a 401 they
+    /// can recover from. A 400 refusing the reasoning summaries it asks for
+    /// (an organization not verified for them) sends it once more without
+    /// them, and the client asks for none from then on: the third value is
+    /// then `true`.
     async fn send_response_request(
         &self,
-        request: &OpenAIRequest,
+        request: &mut OpenAIRequest,
         mut auth: OpenAIAuth,
         conversation: &Conversation,
         trace: &mut Option<TraceCall>,
-    ) -> Result<(reqwest::Response, OpenAIAuth), Error> {
+    ) -> Result<(reqwest::Response, OpenAIAuth, bool), Error> {
         let conversation_key = conversation.prompt_cache_key.as_str();
-        for attempt in 0..2 {
+        let mut summaries_dropped = false;
+        let mut refreshed = false;
+        loop {
             let url = self.responses_url(&auth);
             let builder = self
                 .http_client
@@ -1150,7 +1181,7 @@ impl OpenAIClient {
                 hook.observe_response(conversation_key, response.headers());
             }
             if response.status().is_success() {
-                return Ok((response, auth));
+                return Ok((response, auth, summaries_dropped));
             }
             let status = response.status();
             let retry_after = retry_after_from_headers(&response);
@@ -1158,11 +1189,28 @@ impl OpenAIClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<unavailable error body>".into());
+            if status == reqwest::StatusCode::BAD_REQUEST
+                && refuses_reasoning_summaries(&body)
+                && let Some(reasoning) = request
+                    .reasoning
+                    .as_mut()
+                    .filter(|reasoning| reasoning.summary.is_some())
+            {
+                // Nothing was streamed: the same request goes again without
+                // the summaries, and no request asks for them again.
+                log::warn!(
+                    "OpenAI refused reasoning summaries for this organization (it isn't verified for them): requests ask for none from now on."
+                );
+                self.summaries_refused.store(true, Ordering::Relaxed);
+                reasoning.summary = None;
+                summaries_dropped = true;
+                continue;
+            }
             let error = response_error("OpenAI request failed", status, retry_after, &body);
             let expired = matches!(&error, Error::ProviderError {
                 status: Some(401), code: Some(code), ..
             } if code == "token_expired");
-            let recoverable = attempt == 0
+            let recoverable = !refreshed
                 && status == reqwest::StatusCode::UNAUTHORIZED
                 && auth.is_chatgpt_oauth();
             let recovered = if recoverable && expired {
@@ -1196,6 +1244,7 @@ impl OpenAIClient {
                     return Err(error);
                 }
                 auth = updated;
+                refreshed = true;
             } else {
                 if let Some(trace) = trace.take() {
                     trace.fail(
@@ -1206,7 +1255,6 @@ impl OpenAIClient {
                 return Err(error);
             }
         }
-        unreachable!("each request either returns or refreshes once")
     }
 
     /// Builds the HTTP request, letting an installed [`OpenAIRequestHook`]
@@ -1367,11 +1415,11 @@ impl ProviderClient for OpenAIClient {
                 "OpenAI stream ended before the response completed".to_string(),
             ));
         }
-        let request = self.build_request(conversation, config, auth.is_chatgpt_oauth())?;
+        let mut request = self.build_request(conversation, config, auth.is_chatgpt_oauth())?;
 
         let mut trace = self.begin_trace(conversation, &request, false);
-        let (response, auth) = self
-            .send_response_request(&request, auth, conversation, &mut trace)
+        let (response, auth, summaries_dropped) = self
+            .send_response_request(&mut request, auth, conversation, &mut trace)
             .await?;
         let head = ResponseHead::new(&request.model, response.headers());
 
@@ -1405,14 +1453,16 @@ impl ProviderClient for OpenAIClient {
                 }
             }
         };
-        Ok(Self::generation_response(
+        let mut response = Self::generation_response(
             &response_data,
             &conversation.model,
             config,
             auth.is_chatgpt_oauth(),
             StreamedOutput::default(),
             &head,
-        ))
+        );
+        response.model_call_usage.reasoning_summaries_refused = summaries_dropped;
+        Ok(response)
     }
 
     async fn generate_stream(
@@ -1437,13 +1487,13 @@ impl ProviderClient for OpenAIClient {
         request.stream = Some(true);
 
         let mut trace = self.begin_trace(conversation, &request, true);
-        let (response, auth) = self
-            .send_response_request(&request, auth, conversation, &mut trace)
+        let (response, auth, summaries_dropped) = self
+            .send_response_request(&mut request, auth, conversation, &mut trace)
             .await?;
         let head = ResponseHead::new(&request.model, response.headers());
 
         let (model, config) = (conversation.model.clone(), config.clone());
-        Ok(super::idle::parse_with_idle_timeout(
+        let stream = super::idle::parse_with_idle_timeout(
             response.bytes_stream(),
             self.stream_idle_timeout,
             move |bytes| {
@@ -1456,7 +1506,20 @@ impl ProviderClient for OpenAIClient {
                     trace,
                 )
             },
-        ))
+        );
+        if !summaries_dropped {
+            return Ok(stream);
+        }
+        // The response says the summaries were refused.
+        Ok(stream
+            .map(|event| match event {
+                Ok(StreamEvent::End(mut response)) => {
+                    response.model_call_usage.reasoning_summaries_refused = true;
+                    Ok(StreamEvent::End(response))
+                }
+                other => other,
+            })
+            .boxed())
     }
 }
 
@@ -2322,7 +2385,7 @@ impl OpenAIClient {
             request.reasoning = Some(OpenAIReasoning {
                 mode: config.openai_reasoning_mode.filter(|_| !is_chatgpt_oauth),
                 effort: Some(*effort),
-                summary: if *include_summaries {
+                summary: if *include_summaries && !self.summaries_refused.load(Ordering::Relaxed) {
                     Some("auto".to_string())
                 } else {
                     None
