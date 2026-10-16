@@ -35,7 +35,7 @@ pub use parsing::{
     ToolParsingConfig, assemble_tool_calls, strip_output_based_only_blocks,
 };
 pub use runtime::{
-    AgentRuntime, ContextImage, DEFAULT_BYTES_PER_TOKEN, HostDecisions, TurnContext,
+    AgentRuntime, CacheRefresh, ContextImage, DEFAULT_BYTES_PER_TOKEN, HostDecisions, TurnContext,
     TurnContextSource, calibrated_bytes_per_token,
     command::{ToolApprovalDecision, UserCommand},
     event::{AgentEvent, ShortenReason},

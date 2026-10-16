@@ -340,6 +340,27 @@ impl Workflow {
             .cloned()
     }
 
+    /// Keeps the prompt cache of `run`, an agent run the host started that
+    /// isn't running (waiting for the user's next message), warm: its next
+    /// request with a short ping after it, the output capped where the
+    /// provider allows, the reply discarded, so the provider reads the cached
+    /// conversation and its cache lifetime starts over. A Claude Code agent
+    /// pings a fork of its session that isn't saved. Nothing is added to the
+    /// run's task or the event log; the cost is charged to the agent in the
+    /// workflow's budget and ledger. Returns the request's usage (its cache
+    /// reads show what it kept). See
+    /// [`AgentRuntime::refresh_prompt_cache`](arko_agents::AgentRuntime::refresh_prompt_cache)
+    /// for the routes it supports; others return
+    /// `WorkflowError::Agent(ArkoAgentsError::LLM(Error::UnsupportedFeature))`.
+    /// A running run returns `BuilderInvalid`.
+    pub async fn refresh_prompt_cache(
+        &self,
+        run: &AgentResult,
+    ) -> Result<arko_agents::CacheRefresh, WorkflowError> {
+        self.ensure_running().await?;
+        self.engine.refresh_prompt_cache(run, &self.context).await
+    }
+
     /// Adds a run of `agent_name` holding `task`, completed, to continue
     /// with [`continue_agent`](Self::continue_agent) like any completed run:
     /// a branch of a run of this workflow or of another one
@@ -3089,3 +3110,7 @@ mod reconfigure_tests;
 #[cfg(test)]
 #[path = "cut_back_tests.rs"]
 mod cut_back_tests;
+
+#[cfg(test)]
+#[path = "keep_warm_tests.rs"]
+mod keep_warm_tests;

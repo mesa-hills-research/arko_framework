@@ -3211,6 +3211,108 @@ impl ClaudeCodeRun {
     }
 
     /// Records a thread's pending usage.
+    /// A request's usage, priced for `model`, as Claude Code reports it
+    /// (Anthropic's exclusive input counts).
+    fn usage_info(&self, usage: &Value, model: &ai::Model) -> ai::UsageInfo {
+        let count = |field: &str| usage.get(field).and_then(Value::as_u64).unwrap_or(0) as usize;
+        let mut info = ai::UsageInfo::new(PendingUsage::input(usage), count("output_tokens"))
+            .with_cached_tokens(count("cache_read_input_tokens"))
+            .with_cache_write_tokens(count("cache_creation_input_tokens"));
+        // The list-price estimate counts 1-hour writes at their own rate.
+        info.cache_write_1h_tokens = usage
+            .pointer("/cache_creation/ephemeral_1h_input_tokens")
+            .and_then(Value::as_u64)
+            .map(|tokens| tokens as usize);
+        info.calculate_cost(
+            model,
+            Some(&self.task.agent_config.llm_config.generation_config),
+        );
+        let metered = self
+            .task
+            .agent_config
+            .claude_code
+            .as_ref()
+            .is_some_and(|settings| settings.metered_billing);
+        info.with_billing(if metered {
+            ai::BillingKind::Metered
+        } else {
+            ai::BillingKind::Subscription
+        })
+    }
+
+    /// Keeps the session's prompt cache warm between turns: a ping in a
+    /// fork of the session that Claude Code doesn't save (`--fork-session
+    /// --no-session-persistence`), launched with the session's own flags,
+    /// so its request reads the conversation's cache. The reply is
+    /// discarded; the task and its session are unchanged. Returns the
+    /// ping's usage. Checked against Claude Code 2.1.299: such a fork read
+    /// the conversation's cache and left no transcript.
+    pub(super) async fn refresh_prompt_cache(mut self) -> Result<ai::UsageInfo, ArkoAgentsError> {
+        let session = self
+            .task
+            .claude_code_session
+            .clone()
+            .filter(|_| {
+                self.task.claude_code_fork_of.is_none()
+                    && !self.task.conversation.messages.is_empty()
+            })
+            .ok_or_else(|| {
+                ArkoAgentsError::LLM(ai::Error::UnsupportedFeature(
+                    "The prompt cache can't be refreshed: the task has no Claude Code session yet."
+                        .to_string(),
+                ))
+            })?;
+        if self.task.conversation.system_message.is_none() {
+            let prompt = self.system_prompt()?;
+            self.task.conversation.system_message = Some(prompt);
+        }
+        let (requests, mut host_requests) = mpsc::unbounded_channel();
+        let mut options = self.session_options(&requests);
+        options.session = cc::SessionStart::Resume {
+            session,
+            fork: true,
+            at: self.task.claude_code_resume_at.clone(),
+        };
+        options.max_turns = Some(1);
+        options.extra_args.push("--no-session-persistence".into());
+        let failed = |error: cc::ClaudeError| ArkoAgentsError::Runtime(error.to_string());
+        let mut claude = cc::ClaudeSession::start(options).await.map_err(failed)?;
+        claude
+            .send(crate::runtime::CACHE_PING)
+            .await
+            .map_err(failed)?;
+        // The ping runs no tool: a call it makes is refused.
+        let result = loop {
+            tokio::select! {
+                message = claude.next_message() => match message {
+                    Some(cc::Message::Result(result)) => break result,
+                    Some(_) => {}
+                    None => {
+                        return Err(ArkoAgentsError::Runtime(
+                            "Claude Code exited before it answered the cache refresh.".to_string(),
+                        ));
+                    }
+                },
+                Some(request) = host_requests.recv() => match request {
+                    HostRequest::PreToolUse { tool_name, reply, .. } => {
+                        let _ = reply.send(refused(&tool_name, "it refreshes the cache only."));
+                    }
+                    HostRequest::Permission { reply, .. } => {
+                        let _ = reply.send(cc::PermissionDecision::deny(
+                            "arko refreshes the cache only.",
+                        ));
+                    }
+                    HostRequest::PostToolUse { reply, .. } => {
+                        let _ = reply.send(cc::Hook::proceed());
+                    }
+                },
+            }
+        };
+        let _ = claude.close().await;
+        let model = self.task.agent_config.llm_config.model.clone();
+        Ok(self.usage_info(&result.raw["usage"], &model))
+    }
+
     async fn flush_thread(&mut self, thread: &Option<String>) -> Result<(), ArkoAgentsError> {
         let Some(pending) = self.pending_usage.remove(thread) else {
             return Ok(());
@@ -3222,8 +3324,6 @@ impl ClaudeCodeRun {
                 .and_then(Value::as_u64)
                 .unwrap_or(0) as usize
         };
-        let cache_read = count("cache_read_input_tokens");
-        let cache_write = count("cache_creation_input_tokens");
         let input = PendingUsage::input(&pending.usage);
         let output = count("output_tokens");
         // Claude Code may serve another model: its refusal fallback keeps
@@ -3253,26 +3353,7 @@ impl ClaudeCodeRun {
                 self.cache_lifetime = Some(ai::prompt_cache::ANTHROPIC_PROMPT_CACHE_LIFETIME);
             }
         }
-        let mut info = ai::UsageInfo::new(input, output)
-            .with_cached_tokens(cache_read)
-            .with_cache_write_tokens(cache_write);
-        // The list-price estimate counts 1-hour writes at their own rate.
-        info.cache_write_1h_tokens = written_1h;
-        info.calculate_cost(
-            &model,
-            Some(&self.task.agent_config.llm_config.generation_config),
-        );
-        let metered = self
-            .task
-            .agent_config
-            .claude_code
-            .as_ref()
-            .is_some_and(|settings| settings.metered_billing);
-        let info = info.with_billing(if metered {
-            ai::BillingKind::Metered
-        } else {
-            ai::BillingKind::Subscription
-        });
+        let info = self.usage_info(&pending.usage, &model);
         if thread.is_some() {
             self.subagent_calls.push(self.task.usage_history.len());
         }

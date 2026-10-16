@@ -72,6 +72,7 @@ use decisions::*;
 mod wait;
 use wait::*;
 mod boundary;
+mod keep_warm;
 mod start;
 
 /// Where the loop of [`AgentLoop::run`] goes after a phase of a pass.

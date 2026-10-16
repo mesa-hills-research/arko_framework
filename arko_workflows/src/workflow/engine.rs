@@ -3717,6 +3717,38 @@ impl WorkflowEngine {
         self.recover_nested(previous, ctx, recovery).await
     }
 
+    /// Keeps the prompt cache of a run that isn't running warm (see
+    /// [`Workflow::refresh_prompt_cache`](super::Workflow::refresh_prompt_cache)).
+    pub(crate) async fn refresh_prompt_cache(
+        &self,
+        previous: &AgentResult,
+        ctx: &Arc<SharedContext>,
+    ) -> Result<arko_agents::CacheRefresh, WorkflowError> {
+        if ctx.registry.is_running(previous.agent_run_id) {
+            return Err(WorkflowError::BuilderInvalid(format!(
+                "agent run {} is running: its own requests keep its cache warm",
+                previous.agent_run_id
+            )));
+        }
+        let current =
+            recorded_result(ctx, previous.agent_run_id).unwrap_or_else(|| previous.clone());
+        let agent_name = current.agent_name;
+        let mut task = current.task;
+        // The tools and skills the run is offered when it goes on, so the
+        // request has its prefix.
+        let mut registry = self.build_tool_registry(&agent_name, ctx, RunRole::of(ctx, 0, task.id));
+        let skill_prompt_context = Self::setup_skills(
+            &mut task.agent_config,
+            &mut registry,
+            &task.current_working_directory,
+        )?;
+        let refresh = AgentRuntime::new(self.llm_client.clone())
+            .refresh_prompt_cache(task, Arc::new(registry), skill_prompt_context)
+            .await?;
+        ctx.budget.add_agent_cost(&agent_name, &refresh.usage);
+        Ok(refresh)
+    }
+
     /// Continue a cancelled agent run (see
     /// [`Workflow::reopen_agent`](super::Workflow::reopen_agent)) where its
     /// task stopped, with `prompt` after [`REOPENED_NOTE`]: it is recovered

@@ -763,6 +763,46 @@ async fn a_reply_streams_as_it_comes_and_retries_are_reported() {
     )));
 }
 
+/// A cache refresh pings a fork of the session that isn't saved: the ping
+/// reads the conversation (and its cache), its usage comes back, and the
+/// session's own conversation never sees it.
+#[tokio::test]
+async fn a_cache_refresh_pings_a_fork_that_isn_t_saved() {
+    let fake = Fake::new(json!([
+        [{"text": "Hi."}],
+        [{"text": "ok", "input_tokens": 900, "cached": 850}],
+        [{"text": "Again."}],
+    ]));
+    let task = Task::new(chat_config(&fake), "Hello.".into(), fake.workspace(), None);
+    let (mut task, _) = start(task).finish().await;
+    let session = task.claude_code_session.clone().unwrap();
+    let refresh = AgentRuntime::new(Arc::new(arko_ai::LLMClient::new()))
+        .refresh_prompt_cache(task.clone(), Arc::new(ToolRegistry::new()), None)
+        .await
+        .unwrap();
+    assert_eq!(refresh.usage.input_tokens, 900);
+    assert_eq!(refresh.usage.cached_tokens, Some(850));
+    let argv: Vec<String> = serde_json::from_value(fake.logged("argv")[1]["argv"].clone()).unwrap();
+    let joined = argv.join(" ");
+    assert!(
+        joined.contains(&format!("--resume={session} --fork-session")),
+        "{joined}"
+    );
+    assert!(joined.contains("--max-turns 1") && joined.contains("--no-session-persistence"));
+    let pinged = &histories(&fake)[1];
+    assert_eq!(pinged.last().map(String::as_str), Some("Hi."));
+
+    task.prepare_for_resumption_from_completed("Again?".into())
+        .unwrap();
+    let (task, _) = start(task).finish().await;
+    let history = &histories(&fake)[2];
+    assert!(
+        !history.iter().any(|entry| entry.contains("single word ok")),
+        "{history:?}"
+    );
+    assert_eq!(texts(&task).last().map(String::as_str), Some("Again."));
+}
+
 /// Records what a tool image sink is given: the call's ID, name and images.
 #[derive(Default)]
 struct Images(std::sync::Mutex<Vec<(uuid::Uuid, String, usize)>>);

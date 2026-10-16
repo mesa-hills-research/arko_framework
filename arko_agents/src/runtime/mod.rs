@@ -28,6 +28,19 @@ mod tool_run;
 pub mod turn_context;
 
 const DEFAULT_EVENT_CHANNEL_SIZE: usize = 100;
+
+/// What a prompt-cache refresh asks after the conversation: a one-word
+/// reply (see [`AgentRuntime::refresh_prompt_cache`]).
+pub(crate) const CACHE_PING: &str =
+    "Reply with the single word ok. This message only checks the connection.";
+
+/// What a prompt-cache refresh cost; see [`AgentRuntime::refresh_prompt_cache`].
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct CacheRefresh {
+    /// The refresh request's usage: its cache reads show what it kept.
+    pub usage: arko_ai::UsageInfo,
+}
 const DEFAULT_COMMAND_CHANNEL_SIZE: usize = 10;
 
 /// Whether the host decides every wait of a run itself: every tool
@@ -148,6 +161,59 @@ impl AgentRuntime {
     pub fn with_stop_signal(mut self, signal: StopSignal) -> Self {
         self.stop_signal = signal;
         self
+    }
+
+    /// Keeps `task`'s prompt cache warm while it waits between turns: its
+    /// next request (system prompt, tools, conversation) with a short ping
+    /// after it, the output capped where the provider allows (one token on
+    /// Anthropic, OpenAI's minimum of 16; the ChatGPT backend takes no cap)
+    /// and the reply discarded, so the provider reads the cached prefix and
+    /// its lifetime starts over. A Claude Code task pings a fork of its
+    /// session that isn't saved. Nothing is added to the task. Returns the
+    /// request's usage. Unsupported (`arko_ai::Error::UnsupportedFeature`)
+    /// for Gemini, OpenRouter models other than Anthropic's, a manual
+    /// Anthropic thinking budget, and a task that has made no request with
+    /// its current prompt. `tool_registry` and `skill_prompt_context` are
+    /// the task's own, as for [`run_task`](Self::run_task), so the request
+    /// offers the same tools. The host refreshes a task its runtime isn't
+    /// running.
+    pub async fn refresh_prompt_cache(
+        &self,
+        task: Task,
+        tool_registry: Arc<ToolRegistry>,
+        skill_prompt_context: Option<SkillPromptContext>,
+    ) -> Result<CacheRefresh, ArkoAgentsError> {
+        let (event_sender, _events) = mpsc::channel(DEFAULT_EVENT_CHANNEL_SIZE);
+        let (_commands, command_receiver) = mpsc::channel(DEFAULT_COMMAND_CHANNEL_SIZE);
+        let usage = if task.agent_config.runs_in_claude_code() {
+            claude_code::ClaudeCodeRun::new(
+                task,
+                tool_registry,
+                event_sender,
+                command_receiver,
+                skill_prompt_context,
+                None,
+                None,
+            )
+            .refresh_prompt_cache()
+            .await?
+        } else {
+            AgentLoop::new(
+                task,
+                Arc::clone(&self.llm_client),
+                tool_registry,
+                event_sender,
+                command_receiver,
+                None,
+                true,
+                skill_prompt_context,
+                None,
+                None,
+            )
+            .refresh_prompt_cache()
+            .await?
+        };
+        Ok(CacheRefresh { usage })
     }
 
     /// Runs a task with the given agent configuration and tool registry.

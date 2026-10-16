@@ -50,7 +50,8 @@ with a "uuid"), in FAKE_CLAUDE_STATE plus ".sessions" across processes.
 resumes, and fails as Claude Code does when no message has the UUID.
 --fork-session with --session-id=<new> starts the new session as a copy of
 the one --resume names (cut back as --resume-session-at says), which stays
-as it was.
+as it was. --no-session-persistence keeps the session in the process only.
+A turn's result carries the usage of its last step.
 
 A "/compact" message plays the next entry of the script when it is
 {"compact": {"pre_tokens": 1500, "post_tokens": 300}}: the compaction as
@@ -84,15 +85,20 @@ def flag(*names):
 
 FORK = "--fork-session" in ARGS
 PARENT = flag("--resume=")
-# A fork takes the ID --session-id gives it; a resume goes on in the
-# conversation it names.
-SESSION = (flag("--session-id=") if FORK else None) or flag("--session-id=", "--resume=") \
-    or "fake-session"
+# Kept in this process only, not saved for a later resume.
+UNSAVED = "--no-session-persistence" in ARGS
+# A fork takes the ID --session-id gives it (else a new one); a resume goes
+# on in the conversation it names.
+SESSION = (flag("--session-id=") or str(uuid.uuid4()) if FORK else None) \
+    or flag("--session-id=", "--resume=") or "fake-session"
 SESSIONS = os.environ.get("FAKE_CLAUDE_STATE", "state") + ".sessions"
+MEMORY = {}
 
 
 def sessions():
-    return json.load(open(SESSIONS)) if os.path.exists(SESSIONS) else {}
+    saved = json.load(open(SESSIONS)) if os.path.exists(SESSIONS) else {}
+    saved.update(MEMORY)
+    return saved
 
 
 def conversation():
@@ -100,6 +106,9 @@ def conversation():
 
 
 def keep(conversation):
+    if UNSAVED:
+        MEMORY[SESSION] = conversation
+        return
     saved = sessions()
     saved[SESSION] = conversation
     with open(SESSIONS, "w") as out:
@@ -392,7 +401,8 @@ def turn(text, message_uuid=None):
         if "tool" in step:
             call_tool(step, index)
     send({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
-          "session_id": SESSION, "duration_ms": 5, "result": final})
+          "session_id": SESSION, "duration_ms": 5, "result": final,
+          "usage": usage(steps[-1] if steps else {}, 5)})
 
 
 def handle(message):

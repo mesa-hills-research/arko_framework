@@ -13,6 +13,8 @@ enum Answer {
     Stall,
     /// A response that calls `complete_task`.
     Complete,
+    /// A whole (not streamed) response of text, with cache reads.
+    Text,
 }
 
 /// Serves `answers` to consecutive requests; returns the base URL and the
@@ -48,6 +50,25 @@ async fn serve(answers: Vec<Answer>) -> (String, Arc<std::sync::Mutex<Vec<Value>
                 .lock()
                 .unwrap()
                 .push(serde_json::from_slice(&body).unwrap());
+            if let Answer::Text = answer {
+                let message = serde_json::json!({
+                    "type": "message", "id": "msg_1", "status": "completed", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "ok", "annotations": []}],
+                });
+                let response = serde_json::json!({
+                    "id": "resp_1", "object": "response", "created_at": 0,
+                    "status": "completed", "model": "gpt-5.6-luna", "output": [message],
+                    "usage": {"input_tokens": 1200, "input_tokens_details": {"cached_tokens": 1100},
+                              "output_tokens": 1},
+                })
+                .to_string();
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                    response.len()
+                );
+                socket.write_all(reply.as_bytes()).await.unwrap();
+                continue;
+            }
             let head =
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
             socket.write_all(head.as_bytes()).await.unwrap();
@@ -56,6 +77,7 @@ async fn serve(answers: Vec<Answer>) -> (String, Arc<std::sync::Mutex<Vec<Value>
                     socket.write_all(b": thinking\n\n").await.unwrap();
                     stalled.push(socket);
                 }
+                Answer::Text => unreachable!("answered above"),
                 Answer::Complete => {
                     let call = serde_json::json!({
                         "type": "function_call", "id": "fc_1", "call_id": "call_1",
@@ -171,4 +193,52 @@ async fn without_a_stream_idle_timeout_a_quiet_stream_is_waited_for() {
         timeout(Duration::from_secs(2), agent.run()).await.is_err(),
         "the request is still waiting"
     );
+}
+
+/// A cache refresh sends the task's next request (its system prompt, tools,
+/// conversation and cache key) with a short ping after it and OpenAI's
+/// smallest output limit, and returns the request's usage.
+#[tokio::test]
+async fn a_cache_refresh_sends_the_next_request_with_a_ping() {
+    let (url, bodies) = serve(vec![Answer::Text]).await;
+    let (mut agent, _events, _commands) = agent(&url, LLMRetryConfig::default());
+    agent.task.conversation.system_message = Some("You are a test agent.".into());
+    agent.task.conversation.add_user_message("Finish.");
+    agent.task.conversation.add_assistant_message("Done.");
+    agent.task.set_state(TaskState::Completed {
+        summary: "Done.".into(),
+    });
+    let key = agent.task.conversation.prompt_cache_key.clone();
+    let usage = agent.refresh_prompt_cache().await.unwrap();
+    assert_eq!(usage.input_tokens, 1200);
+    assert_eq!(usage.cached_tokens, Some(1100));
+    let body = bodies.lock().unwrap()[0].clone();
+    assert_eq!(body["instructions"], "You are a test agent.");
+    assert_eq!(body["max_output_tokens"], 16);
+    assert_eq!(body["prompt_cache_key"].as_str(), Some(key.as_str()));
+    assert_eq!(body["tools"][0]["name"], "complete_task");
+    let input = body["input"].as_array().unwrap();
+    assert_eq!(input.len(), 3);
+    assert_eq!(input[2]["content"], crate::runtime::CACHE_PING);
+}
+
+/// Where a request can't keep the cache warm, nothing is sent.
+#[tokio::test]
+async fn a_cache_refresh_is_refused_where_it_can_t_help() {
+    let unsupported = |agent: AgentLoop| async move {
+        match agent.refresh_prompt_cache().await {
+            Err(ArkoAgentsError::LLM(ai::Error::UnsupportedFeature(reason))) => reason,
+            other => panic!("{other:?}"),
+        }
+    };
+    let (fresh, _events, _commands) = agent("http://127.0.0.1:9", LLMRetryConfig::default());
+    assert!(unsupported(fresh).await.contains("no request"));
+
+    let (mut gemini, _events, _commands) = agent("http://127.0.0.1:9", LLMRetryConfig::default());
+    gemini.task.conversation.system_message = Some("prompt".into());
+    gemini.task.conversation.add_user_message("Finish.");
+    gemini.task.conversation.model =
+        ai::Model::get(ai::Provider::Google, "gemini-3.5-flash").unwrap();
+    gemini.task.agent_config.llm_config.model = gemini.task.conversation.model.clone();
+    assert!(unsupported(gemini).await.contains("can't be kept warm"));
 }

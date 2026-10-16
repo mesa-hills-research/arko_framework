@@ -1216,6 +1216,17 @@ Claude subscription within its usage limits, 5 minutes on an API key. Claude Cod
 subagents (its `Agent` tool) and helper requests cache for 5 minutes whatever the main
 conversation's TTL, so a stop of more than about 4½ minutes loses their caches.
 
+**Keeping a cache warm.** `AgentRuntime::refresh_prompt_cache(task, registry,
+skill_prompt_context)` keeps a waiting task's cache from expiring: it sends the task's next
+request (system prompt, tools, conversation) with a short ping after it, the output capped
+where the provider allows (one token on Anthropic, OpenAI's minimum of 16; the ChatGPT
+backend takes no cap, and the ping asks for one word), discards the reply, and returns the
+request's usage in `CacheRefresh`. A Claude Code task pings a fork of its session that
+Claude Code doesn't save (`--fork-session --no-session-persistence`). Nothing is added to the
+task. Gemini, OpenRouter models other than Anthropic's, a manual Anthropic thinking budget
+and a task that has made no request with its current prompt return
+`arko_ai::Error::UnsupportedFeature`.
+
 | Situation | Action | Cache effect |
 | --- | --- | --- |
 | The reset is far off | `Pause`, so the rest of the window isn't spent before someone decides | The request that resumes after the cache expired reads the context uncached, once |
