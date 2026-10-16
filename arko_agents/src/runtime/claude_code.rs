@@ -909,18 +909,28 @@ impl ClaudeCodeRun {
     }
 
     fn system_prompt(&self) -> Result<String, ArkoAgentsError> {
+        // Offered nothing (neither arko's tools nor Claude Code's built-ins,
+        // and a reply in text ends the task), the agent is told nothing
+        // about tools.
+        let offers_tools = !self
+            .task
+            .agent_config
+            .tool_config
+            .offered_tool_names()
+            .is_empty();
         let builder = PromptBuilder::new(
             &self.task.agent_config,
             vec![],
             &self.parsing,
             self.skill_prompt_context.as_ref(),
-        );
+        )
+        .tools_offered(offers_tools);
         let mut prompt = builder.build_system_prompt(&self.task)?;
-        if self.task.agent_config.tool_config.ends_task_with_text() {
+        if offers_tools && self.task.agent_config.tool_config.ends_task_with_text() {
             prompt.push_str(&format!(
                 "## Tool names\nThe tools of this task are served by the MCP server `{ARKO_TOOL_SERVER}`, so you see each as `mcp__{ARKO_TOOL_SERVER}__<name>`.\n"
             ));
-        } else {
+        } else if offers_tools {
             prompt.push_str(&format!(
                 "## Tool names\nThe tools of this task are served by the MCP server `{ARKO_TOOL_SERVER}`, so you see each as `mcp__{ARKO_TOOL_SERVER}__<name>`: `complete_task` is `mcp__{ARKO_TOOL_SERVER}__complete_task`.\n"
             ));

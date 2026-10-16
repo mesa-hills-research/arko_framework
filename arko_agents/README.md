@@ -263,6 +263,11 @@ its tools or call `complete_task` (see [Model-call recovery](#model-call-recover
 configured model (or the refusal fallback) doesn't accept
 (`Model::supports_forced_tool_choice`) fails validation, at build and when a task starts.
 
+An agent offered no tools at all (an empty `available_tool_names` with `text_reply_ends_task`
+on, so it isn't offered `complete_task` either) is a plain chat: its requests carry no tool
+configuration, its system prompt has no section about tools, and each reply ends the task.
+On a Claude Code model it runs with Claude Code's built-in tools off.
+
 ### Several calls in one response
 
 Every call of a response runs, and each gets exactly one result; no response is rejected

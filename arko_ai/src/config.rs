@@ -430,6 +430,16 @@ impl GenerationConfig {
         self
     }
 
+    /// The tool configuration a request sends: `tool_config` when it lists
+    /// at least one tool. A configuration with no tools sends nothing, on
+    /// every provider: no tool list, tool choice or parallel-call setting,
+    /// which providers refuse without tools.
+    pub fn offered_tools(&self) -> Option<&ToolConfig> {
+        self.tool_config
+            .as_ref()
+            .filter(|tool_config| !tool_config.tools.is_empty())
+    }
+
     /// Enables or disables interleaved thinking for supported Anthropic models.
     pub fn with_interleaved_thinking(mut self, enabled: bool) -> Self {
         self.interleaved_thinking = Some(enabled);

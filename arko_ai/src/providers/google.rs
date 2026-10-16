@@ -624,7 +624,7 @@ impl GoogleClient {
         super::ensure_supported_inputs(conversation)?;
         let sanitized = super::without_foreign_settings(&conversation.model, config);
         let config: &GenerationConfig = &sanitized;
-        if let Some(tool_config) = &config.tool_config
+        if let Some(tool_config) = config.offered_tools()
             && tool_config.parallel_tool_calls == Some(false)
         {
             return Err(Error::UnsupportedFeature(
@@ -646,8 +646,7 @@ impl GoogleClient {
         let (thinking_level, thinking_summaries) = self.resolve_thinking(conversation, config)?;
 
         let tool_choice = config
-            .tool_config
-            .as_ref()
+            .offered_tools()
             .and_then(|tool_config| tool_config.tool_choice.as_ref())
             .map(|choice| {
                 let (mode, tools) = match choice {
@@ -676,7 +675,7 @@ impl GoogleClient {
             tool_choice,
         };
 
-        let tools = config.tool_config.as_ref().map(|tool_config| {
+        let tools = config.offered_tools().map(|tool_config| {
             tool_config
                 .tools
                 .iter()

@@ -2411,7 +2411,7 @@ impl OpenAIClient {
             });
         }
 
-        if let Some(tool_config) = &config.tool_config {
+        if let Some(tool_config) = config.offered_tools() {
             request.tools = Some(
                 tool_config
                     .tools

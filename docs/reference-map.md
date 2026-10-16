@@ -417,6 +417,7 @@ follows is left out).
 |---|---|---|
 | `ToolConfig::tool_choice` | `None`: nothing sent to OpenAI, OpenRouter or Gemini, so the provider's `auto` applies; Anthropic sends `{"type": "auto"}` | `Auto`, `Required`, `None`, `Specific(name)`. A forced choice (`Required`, `Specific`) is `Error::InvalidRequest` before sending on Claude Fable 5.1, Mythos 5.1, Opus 5.5 and Sonnet 5.5 and with a manual thinking budget, on the Anthropic provider and on OpenRouter for `anthropic/` slugs of registered Claude models (where OpenRouter reasoning counts as a budget on Claude before 4.6, and `reasoning.max_tokens` on Opus 4.6 and Sonnet 4.6); with an OpenRouter catalog, also on models that don't list `tool_choice`. `Model::supports_forced_tool_choice(config)` tells in advance. |
 | `ToolConfig::parallel_tool_calls` | `None`: the provider's default, several calls allowed | `Some(false)`: OpenAI and OpenRouter send `parallel_tool_calls: false`, Anthropic `disable_parallel_tool_use: true` inside `tool_choice` (not with `ToolChoice::None`); Gemini fails with `Error::UnsupportedFeature`. |
+| `ToolConfig::tools` empty | — | A configuration without tools is sent as none: no tools, tool choice or parallel-call setting on any provider (`GenerationConfig::offered_tools`). |
 | `ToolDefinition::strict` | `None`: not sent | Sent to OpenAI, Anthropic and OpenRouter (for Claude on OpenRouter with the `structured-outputs-2025-11-13` beta header); Gemini ignores it without a warning. |
 | Arguments that aren't valid JSON | — | Kept as text in `ToolCall::invalid_arguments` with `arguments: null`; replayed verbatim to OpenAI and to OpenRouter `openai/` models, as `{}` to the others. |
 
@@ -1014,6 +1015,7 @@ How a native response's calls run (an output-based response holds one call, or o
 - `complete_task` always runs alone, after the calls before it. After an earlier call of its turn was rejected or failed, it doesn't complete the task, and its result says so.
 - A response without a tool call doesn't end the task: a note asks the model to continue or call `complete_task`, and the response counts as a model-call recovery attempt (under `LLMErrorPolicy::PauseAndAwaitApproval` the task pauses at once). With `text_reply_as_message`, a reply with text is first sent to the user as a message instead, and with `text_reply_ends_task` it completes the task (see the table above).
 - A `tool_config` in the model's `GenerationConfig` supplies `tool_choice` and `parallel_tool_calls`; its tool list is ignored, with a warning in the log. Without one, no tool choice is sent.
+- An agent offered no tools (no listed tool its registry holds, and `text_reply_ends_task` on, so no `complete_task`) sends no tool configuration at all, and its system prompt has no "Tool Usage" section (no "Tool names" section on Claude Code models, which run with `--tools ""`).
 
 In both modes:
 

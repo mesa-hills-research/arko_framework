@@ -69,6 +69,9 @@ impl AgentLoop {
         )
     }
 
+    /// The request settings for `model`: `generation_config` with, in native
+    /// mode, the agent's tools. An agent offered no tool at all sends no tool
+    /// configuration (see [`offers_tools`](Self::offers_tools)).
     fn generation_config_for(
         &self,
         model: &ai::Model,
@@ -76,11 +79,25 @@ impl AgentLoop {
     ) -> ai::GenerationConfig {
         let mut config = generation_config.clone();
         if self.is_native_mode() {
-            config = config.with_tool_config(
-                self.build_native_tool_config(model, generation_config.tool_config.as_ref()),
-            );
+            let tools =
+                self.build_native_tool_config(model, generation_config.tool_config.as_ref());
+            config.tool_config = (!tools.tools.is_empty()).then_some(tools);
         }
         config
+    }
+
+    /// Whether the agent is offered any tool: one of its tools the registry
+    /// holds, or `complete_task`. An agent offered none (no tools, and a reply
+    /// in text ends its task) makes requests without tools, and its system
+    /// prompt says nothing about tools.
+    pub(super) fn offers_tools(&self) -> bool {
+        self.task
+            .agent_config
+            .tool_config
+            .available_tool_names
+            .iter()
+            .any(|name| self.tool_registry.get(name).is_some())
+            || self.tool_registry.get(COMPLETE_TASK_TOOL_NAME).is_some()
     }
 
     /// The conversation and settings of the next request: the task's, or

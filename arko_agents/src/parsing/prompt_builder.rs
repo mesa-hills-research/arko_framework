@@ -15,6 +15,7 @@ pub struct PromptBuilder<'a> {
     available_tools_defs: Vec<&'a ToolDefinition>,
     parsing_config: &'a super::ToolParsingConfig,
     skill_prompt_context: Option<&'a SkillPromptContext>,
+    tools_offered: bool,
 }
 
 impl<'a> PromptBuilder<'a> {
@@ -30,7 +31,16 @@ impl<'a> PromptBuilder<'a> {
             available_tools_defs,
             parsing_config,
             skill_prompt_context,
+            tools_offered: true,
         }
+    }
+
+    /// Whether the agent is offered any tool (by default it is). In native
+    /// mode, the system prompt of an agent offered none has no section about
+    /// tool use.
+    pub fn tools_offered(mut self, offered: bool) -> Self {
+        self.tools_offered = offered;
+        self
     }
 
     /// Returns true if the agent is configured for native tool calling.
@@ -83,7 +93,8 @@ impl<'a> PromptBuilder<'a> {
             prompt.push('\n');
         }
 
-        if self.is_native_mode() {
+        // An agent offered no tools gets no section about them.
+        if self.is_native_mode() && self.tools_offered {
             let calls = if self.agent_config.asks_one_tool_call_per_turn() {
                 "Call at most one tool per response."
             } else {
@@ -101,7 +112,7 @@ impl<'a> PromptBuilder<'a> {
                 You have tools available through the native tool calling interface. {calls} \
                 {ending}\n\n"
             ));
-        } else {
+        } else if !self.is_native_mode() {
             prompt.push_str("## Tools Available\n");
             prompt.push_str(
                 "You have access to the following tools. \

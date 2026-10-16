@@ -239,8 +239,7 @@ impl AnthropicClient {
 
         let forced_tool_choice = matches!(
             config
-                .tool_config
-                .as_ref()
+                .offered_tools()
                 .and_then(|tools| tools.tool_choice.as_ref()),
             Some(ToolChoice::Required | ToolChoice::Specific(_))
         );
@@ -1058,7 +1057,7 @@ impl AnthropicClient {
             }
         }
 
-        if let Some(tool_config) = &config.tool_config {
+        if let Some(tool_config) = config.offered_tools() {
             request.tools = Some(
                 tool_config
                     .tools

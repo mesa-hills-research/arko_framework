@@ -131,7 +131,8 @@ impl AgentLoop {
                 tool_defs_for_prompt.iter().collect(),
                 &self.parsing_config,
                 self.skill_prompt_context.as_ref(),
-            );
+            )
+            .tools_offered(self.offers_tools());
             let system_prompt = prompt_builder.build_system_prompt(&self.task)?;
             self.task.conversation.system_message = Some(system_prompt);
 

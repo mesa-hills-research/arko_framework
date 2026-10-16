@@ -2828,6 +2828,31 @@ async fn a_turn_that_ends_with_text_completes_the_task() {
     assert!(system.contains("is your final reply"), "{system}");
 }
 
+/// An agent offered nothing (no tools, and a reply in text ends the task)
+/// runs with Claude Code's built-ins off and a system prompt that says
+/// nothing about tools, and its reply ends the task.
+#[tokio::test]
+async fn an_agent_offered_no_tools_is_told_nothing_about_tools() {
+    let fake = Fake::new(json!([[{"text": "Hi there.", "input_tokens": 100}]]));
+    let task = Task::new(
+        replying(&fake, &[]),
+        "Hello.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (task, events) = start(task).finish().await;
+
+    assert_eq!(completions(&events), ["Hi there."]);
+    let argv: Vec<String> = serde_json::from_value(fake.logged("argv")[0]["argv"].clone()).unwrap();
+    let tools = argv.iter().position(|arg| arg == "--tools").unwrap();
+    assert_eq!(argv[tools + 1], "");
+    let served = &fake.logged("tools")[0]["tools"];
+    assert_eq!(served, &json!([]));
+    let system = task.conversation.system_message.clone().unwrap();
+    assert!(!system.contains("## Tool"), "{system}");
+    assert!(!system.contains("mcp__"), "{system}");
+}
+
 /// After `ask_user`, Claude Code is told to end its turn: that turn's text
 /// is not the final reply, and the task waits for the answer. The reply
 /// after it ends the task.

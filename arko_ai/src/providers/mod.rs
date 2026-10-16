@@ -13,6 +13,8 @@ pub(crate) use foreign::without_foreign_settings;
 #[cfg(test)]
 mod tool_image_tests;
 mod tool_images;
+#[cfg(test)]
+mod tool_less_tests;
 
 use crate::{
     config::GenerationConfig,

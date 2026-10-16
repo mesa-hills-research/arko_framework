@@ -248,6 +248,9 @@ the Anthropic provider and for Claude models on OpenRouter;
 `Model::supports_forced_tool_choice(config)` tells in advance. `with_parallel_tool_calls(false)` asks for one call per response. It
 is available where `Model::supports_disabling_parallel_tool_calls` is true (OpenAI,
 Anthropic, OpenRouter); for Gemini the request fails with `Error::UnsupportedFeature`.
+A `ToolConfig` with no tools is sent as no tool configuration at all, on every provider: no
+tool list, tool choice or parallel-call setting (`GenerationConfig::offered_tools` is what
+a request sends).
 
 A call's `arguments` are parsed JSON; arguments that are not valid JSON are kept as text
 in `ToolCall::invalid_arguments`, with `arguments` set to `null`, and

@@ -484,13 +484,9 @@ impl OpenRouterClient {
             )?;
         }
 
-        let (tools, tool_choice, parallel_tool_calls) = match &config.tool_config {
-            Some(tool_config)
-                if !tool_config.tools.is_empty() || tool_config.tool_choice.is_some() =>
-            {
-                if !tool_config.tools.is_empty() {
-                    ensure_parameter(info, slug, "tools", &["tools"])?;
-                }
+        let (tools, tool_choice, parallel_tool_calls) = match config.offered_tools() {
+            Some(tool_config) => {
+                ensure_parameter(info, slug, "tools", &["tools"])?;
                 if tool_config.tool_choice.is_some() {
                     ensure_parameter(info, slug, "tool_choice", &["tool_choice"])?;
                 }
@@ -513,12 +509,11 @@ impl OpenRouterClient {
                     anthropic_betas.push(STRUCTURED_OUTPUTS_BETA);
                 }
                 (
-                    (!tool_config.tools.is_empty()).then(|| tool_definitions(tool_config)),
+                    Some(tool_definitions(tool_config)),
                     tool_config.tool_choice.as_ref().map(tool_choice),
                     tool_config.parallel_tool_calls,
                 )
             }
-            Some(tool_config) => (None, None, tool_config.parallel_tool_calls),
             None => (None, None, None),
         };
 
