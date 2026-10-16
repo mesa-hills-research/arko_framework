@@ -52,7 +52,8 @@ calling, for example `{"job_id":"…","revision":"3","text":"Y\n"}`.
 
 Each update reaches its owner once. An update that finds no runtime bound (the
 agent's turn has ended) waits for the next runtime the owner binds, such as the
-one of its next turn.
+one of its next turn. One sent while the agent makes the last request of its
+turn waits with its task (`Task::pending_context_injections`) for the next turn.
 
 ## Held jobs
 
