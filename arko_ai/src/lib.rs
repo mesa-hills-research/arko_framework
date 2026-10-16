@@ -3,6 +3,7 @@ pub mod codex_auth;
 pub mod config;
 pub mod conversation;
 pub mod error;
+pub mod image_store;
 pub mod input_limit;
 pub mod message;
 pub mod model;

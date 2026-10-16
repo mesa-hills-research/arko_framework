@@ -50,7 +50,11 @@ impl Content {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// An image in a message. Serialized as `{"Url": ..}` or `{"Base64":
+/// {"data": .., "mime_type": ..}}`; inside
+/// [`with_image_store`](crate::image_store::with_image_store), a base64
+/// image is saved in the store and written as a reference instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Image {
     Url(String),
     Base64 { data: String, mime_type: String },
