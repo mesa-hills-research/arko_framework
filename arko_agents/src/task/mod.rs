@@ -475,6 +475,18 @@ pub struct Task {
     /// a completed task, say) are sent when the task runs again.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub claude_code_synced: usize,
+    /// The system prompt changed after the Claude Code session recorded
+    /// its first one ([`Task::reconfigure`]): the session's launches pass
+    /// `--system-prompt-snapshot off`, so that it gets the current prompt.
+    /// A handover's fresh session records the current one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub claude_code_prompt_changed: bool,
+    /// The task runs with a configuration its host gave it after it started
+    /// ([`Task::reconfigure`]), not the one it was started with. A workflow
+    /// resumed from a checkpoint keeps it, without comparing it with the
+    /// agent's registered configuration.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reconfigured: bool,
     /// The tool calls that started running and have no recorded result yet,
     /// in the order they started. The runtime records a call here before it
     /// runs (and reports the task to its
@@ -653,6 +665,8 @@ impl Task {
             conversation_model_call_start: 0,
             claude_code_session: None,
             claude_code_synced: 0,
+            claude_code_prompt_changed: false,
+            reconfigured: false,
             running_tool_calls: Vec::new(),
             parent: None,
         }
@@ -726,6 +740,50 @@ impl Task {
         } else {
             self.end_time = None;
         }
+    }
+
+    /// Continues the task with `config` in place of its configuration: its
+    /// next run offers `config`'s tools and writes a system message from
+    /// `config` in place of the current one. The conversation, with its
+    /// prompt cache key, and the task's usage stay. Between turns only (a
+    /// task pending, completed, or awaiting the user's answer), and with the
+    /// same model (provider and ID): `InvalidTaskState` otherwise, and
+    /// `config`'s own validation errors. A Claude Code task's session gets
+    /// the new prompt and flags when it resumes
+    /// ([`claude_code_prompt_changed`](Self::claude_code_prompt_changed)).
+    /// The new tools and prompt are a different prefix, so the next request
+    /// writes the provider's prompt cache afresh.
+    pub fn reconfigure(&mut self, config: AgentConfig) -> Result<(), ArkoAgentsError> {
+        if !matches!(
+            self.current_state,
+            TaskState::Pending
+                | TaskState::Completed { .. }
+                | TaskState::AwaitingUserResponse { .. }
+        ) {
+            return Err(ArkoAgentsError::InvalidTaskState(format!(
+                "a task is reconfigured only between turns (pending, completed, or awaiting the user's answer), not {:?}",
+                self.current_state
+            )));
+        }
+        let (current, next) = (
+            &self.agent_config.llm_config.model,
+            &config.llm_config.model,
+        );
+        if current.provider != next.provider || current.id != next.id {
+            return Err(ArkoAgentsError::InvalidTaskState(format!(
+                "a reconfigured task keeps its model ({:?} '{}'), not '{}' of {:?}",
+                current.provider, current.id, next.id, next.provider
+            )));
+        }
+        config.validate()?;
+        self.agent_config_id = config.id.clone();
+        self.agent_config = config;
+        self.conversation.system_message = None;
+        self.reconfigured = true;
+        if self.claude_code_session.is_some() {
+            self.claude_code_prompt_changed = true;
+        }
+        Ok(())
     }
 
     /// Prepares a task that was 'Completed' for resumption.

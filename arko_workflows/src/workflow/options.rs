@@ -59,7 +59,7 @@ impl RunOptions {
 /// [`Workflow::continue_agent_with`]: crate::Workflow::continue_agent_with
 /// [`Workflow::restart_with`]: crate::Workflow::restart_with
 /// [`Workflow::continue_agent`]: crate::Workflow::continue_agent
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct ContinueOptions {
     /// Images that go with the prompt, after its text in the same message.
@@ -67,6 +67,9 @@ pub struct ContinueOptions {
     /// (`WorkflowError::BuilderInvalid` with
     /// [`arko_ai::Model::image_refusal`]'s reason), before the run goes on.
     pub images: Vec<arko_ai::Image>,
+    /// The configuration the run continues with, in place of the one saved
+    /// in its task (see [`ContinueOptions::reconfigure`]).
+    pub config: Option<arko_agents::AgentConfig>,
 }
 
 impl ContinueOptions {
@@ -78,6 +81,27 @@ impl ContinueOptions {
     /// Sends `images` with the prompt; see [`ContinueOptions::images`].
     pub fn images(mut self, images: impl IntoIterator<Item = arko_ai::Image>) -> Self {
         self.images = images.into_iter().collect();
+        self
+    }
+
+    /// Continues the run with `config` in place of the configuration saved
+    /// in its task, such as a switch between a chat (no tools) and an agent
+    /// (tools): the same conversation, with its prompt cache key and run ID,
+    /// under `config`'s tools and a system message written from `config`.
+    /// The workflow adds its tools to `config` as it does for a new run
+    /// (none to a chat). The model must stay the same; the new tools and
+    /// system message make the next request write the provider's prompt
+    /// cache afresh. A Claude Code agent's session resumes with the new
+    /// flags and prompt. The task keeps the configuration from then on, also
+    /// across a resume from a checkpoint, which doesn't compare it with the
+    /// agent's registered one. Only [`Workflow::continue_agent_with`] and
+    /// a continued run's [`Workflow::restart_with`] take it
+    /// (`BuilderInvalid` otherwise).
+    ///
+    /// [`Workflow::continue_agent_with`]: crate::Workflow::continue_agent_with
+    /// [`Workflow::restart_with`]: crate::Workflow::restart_with
+    pub fn reconfigure(mut self, config: arko_agents::AgentConfig) -> Self {
+        self.config = Some(config);
         self
     }
 }

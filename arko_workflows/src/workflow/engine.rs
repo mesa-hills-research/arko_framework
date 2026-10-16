@@ -1332,10 +1332,13 @@ pub(crate) struct StartOptions {
     pub images: Vec<arko_ai::Image>,
 }
 
-/// A message to an agent run: its text, and images after it.
+/// A message to an agent run: its text, and images after it; and the
+/// configuration the run continues with, when the host changes it (see
+/// [`ContinueOptions::reconfigure`](super::ContinueOptions::reconfigure)).
 pub(crate) struct UserInput<'a> {
     pub text: &'a str,
     pub images: Vec<arko_ai::Image>,
+    pub config: Option<AgentConfig>,
 }
 
 impl<'a> From<&'a str> for UserInput<'a> {
@@ -1343,6 +1346,7 @@ impl<'a> From<&'a str> for UserInput<'a> {
         Self {
             text,
             images: Vec::new(),
+            config: None,
         }
     }
 }
@@ -2622,6 +2626,11 @@ impl WorkflowEngine {
         role: RunRole,
     ) -> AgentConfig {
         let mut config = base_config.clone();
+        // A chat (an agent offered no tools of its own) stays one: it gets
+        // none of the workflow's tools either.
+        if config.tool_config.offered_tool_names().is_empty() {
+            return config;
+        }
 
         let (reads, writes) = ctx.memory.access_of(agent_name);
         if reads {
@@ -2820,7 +2829,13 @@ impl WorkflowEngine {
                 &recipients,
                 ctx.paused.load(std::sync::atomic::Ordering::Acquire),
             );
-            if options.roster {
+            // A chat (an agent offered no tools) can't message anyone.
+            let chat = task
+                .agent_config
+                .tool_config
+                .offered_tool_names()
+                .is_empty();
+            if options.roster && !chat {
                 initial_prompt.push_str(ROSTER_HEADING);
                 initial_prompt.push_str(&render_recipients(ctx, &roster));
             }
@@ -3280,9 +3295,9 @@ impl WorkflowEngine {
                 }
             )
         {
-            if !options.images.is_empty() {
+            if !options.images.is_empty() || options.config.is_some() {
                 return Err(WorkflowError::BuilderInvalid(
-                    "images can't go with the message that continues a run whose completion a verifier could not review; continue it without them, then send them".to_string(),
+                    "a run whose completion a verifier could not review continues with its message alone: continue it without images or a new configuration, then send them".to_string(),
                 ));
             }
             return self
@@ -3298,6 +3313,7 @@ impl WorkflowEngine {
         let input = UserInput {
             text: continuation_prompt,
             images: options.images,
+            config: options.config,
         };
         self.continue_at(previous, input, ctx, 0, None, false).await
     }
@@ -3331,10 +3347,32 @@ impl WorkflowEngine {
             ));
         }
         let agent_name = &previous.agent_name;
-        refuse_unsendable_images(agent_name, &previous.task.agent_config, &input.images)?;
-        self.admit(agent_name, Some(previous.agent_run_id), review, ctx)?;
         let mut task = previous.task.clone();
         task.parent = parent;
+        if let Some(config) = input.config {
+            // A configuration given now is checked as one given at a start
+            // is, and gets the workflow's tools as a new run's does.
+            crate::verification::refuse_text_endings(
+                &ctx.completion_verifiers,
+                agent_name,
+                &config,
+            )
+            .map_err(WorkflowError::BuilderInvalid)?;
+            let prepared = self.prepare_agent_config_for(
+                agent_name,
+                &config,
+                ctx,
+                RunRole::of(ctx, depth, task.id),
+            );
+            task.reconfigure(prepared).map_err(|error| match error {
+                arko_agents::ArkoAgentsError::InvalidTaskState(reason) => {
+                    WorkflowError::BuilderInvalid(reason)
+                }
+                other => WorkflowError::BuilderInvalid(other.to_string()),
+            })?;
+        }
+        refuse_unsendable_images(agent_name, &task.agent_config, &input.images)?;
+        self.admit(agent_name, Some(previous.agent_run_id), review, ctx)?;
         let mut registry =
             self.build_tool_registry(agent_name, ctx, RunRole::of(ctx, depth, task.id));
         let skill_prompt_context = Self::setup_skills(
@@ -3646,6 +3684,11 @@ impl WorkflowEngine {
         options: super::ContinueOptions,
         ctx: &Arc<SharedContext>,
     ) -> Result<AgentResult, WorkflowError> {
+        if options.config.is_some() {
+            return Err(WorkflowError::BuilderInvalid(
+                "a reopened run keeps its configuration: reopen it, then continue it with a new one".to_string(),
+            ));
+        }
         refuse_unsendable_images(
             &previous.agent_name,
             &previous.task.agent_config,

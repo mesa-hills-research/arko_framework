@@ -727,7 +727,8 @@ impl Workflow {
     /// [`restart`](Self::restart) with `options`: images go with `note`
     /// ([`ContinueOptions::images`]) when the run is reopened or continued.
     /// A run that is recovered gets no message, so images for it are
-    /// refused (`BuilderInvalid`): send them with the next message.
+    /// refused (`BuilderInvalid`): send them with the next message. Only a
+    /// continued run takes [`ContinueOptions::reconfigure`].
     pub async fn restart_with(
         &self,
         run: &StoppedRun,
@@ -746,9 +747,9 @@ impl Workflow {
             )));
         }
         match run.restart {
-            Restart::Recover if !options.images.is_empty() => {
+            Restart::Recover if !options.images.is_empty() || options.config.is_some() => {
                 Err(WorkflowError::BuilderInvalid(format!(
-                    "agent run {} is recovered, which takes no message: send the images with the message after it",
+                    "agent run {} is recovered, which takes no message: send the images, or the new configuration, with the message after it",
                     run.result.agent_run_id
                 )))
             }
@@ -2730,7 +2731,8 @@ fn validate_resumed_agent_configs(
         let stopped = result.status == AgentRunStatus::Cancelled
             && result.stopped_by.is_some()
             && !engine::is_superseded(result);
-        if !continued && !stopped {
+        // A run the host reconfigured keeps the configuration it gave it.
+        if (!continued && !stopped) || result.task.reconfigured {
             continue;
         }
         let Some(current) = prepared
@@ -3017,3 +3019,7 @@ mod run_stop_tests;
 #[cfg(test)]
 #[path = "user_image_tests.rs"]
 mod user_image_tests;
+
+#[cfg(test)]
+#[path = "reconfigure_tests.rs"]
+mod reconfigure_tests;

@@ -103,7 +103,7 @@ impl AgentLoop {
     /// The conversation and settings of the next request: the task's, or
     /// after a refusal with [`AgentConfig::refusal_fallback`] set, the same
     /// conversation sent to the fallback model.
-    fn next_request(&mut self) -> (ai::Conversation, ai::GenerationConfig) {
+    pub(super) fn next_request(&mut self) -> (ai::Conversation, ai::GenerationConfig) {
         let fallback = self
             .task
             .agent_config
@@ -136,9 +136,12 @@ impl AgentLoop {
                 // The ChatGPT backend's turn-state token routes the configured
                 // model's turn; the fallback request starts its own.
                 conversation.openai_turn_state = None;
-                (conversation, config)
+                (as_sent(conversation, &config), config)
             }
-            None => (conversation, self.build_generation_config()),
+            None => {
+                let config = self.build_generation_config();
+                (as_sent(conversation, &config), config)
+            }
         }
     }
 
@@ -221,5 +224,18 @@ impl AgentLoop {
         // so failures that keep coming stay bounded).
         self.pause_ordinary_recovery_clock();
         self.stream_response(response_stream).await
+    }
+}
+
+/// `conversation` as a request with `config` sends it: a request that
+/// offers no tools (an agent switched to a chat, say) sends its earlier
+/// tool calls and results as text (`arko_ai::Conversation::tool_history_as_text`).
+fn as_sent(conversation: ai::Conversation, config: &ai::GenerationConfig) -> ai::Conversation {
+    if config.offered_tools().is_some() {
+        return conversation;
+    }
+    match conversation.tool_history_as_text() {
+        std::borrow::Cow::Owned(flattened) => flattened,
+        std::borrow::Cow::Borrowed(_) => conversation,
     }
 }

@@ -589,6 +589,36 @@ async fn context_arrives_with_the_next_result() {
     assert!(task.pending_context_injections.is_empty());
 }
 
+/// A completed task continued with a new configuration resumes its session
+/// with the new tools and system prompt, telling Claude Code not to reuse
+/// the prompt it recorded.
+#[tokio::test]
+async fn a_reconfigured_task_resumes_its_session_with_the_new_prompt_and_tools() {
+    let fake = Fake::new(json!([[complete("First")], [complete("Second")]]));
+    let task = Task::new(config(&fake, &[]), "Start.".into(), fake.workspace(), None);
+    let (mut task, _) = start(task).finish().await;
+    let session = task.claude_code_session.clone().unwrap();
+    let mut searching = config(&fake, &["Grep"]);
+    searching.instructions = "Search with Grep from now on.".into();
+    task.reconfigure(searching).unwrap();
+    task.prepare_for_resumption_from_completed("Search.".into())
+        .unwrap();
+    let (task, _) = start(task).finish().await;
+    assert!(matches!(&task.current_state, TaskState::Completed { summary } if summary == "Second"));
+
+    let argv = |index: usize| -> Vec<String> {
+        serde_json::from_value(fake.logged("argv")[index]["argv"].clone()).unwrap()
+    };
+    assert!(!argv(0).iter().any(|arg| arg == "--system-prompt-snapshot"));
+    let resumed = argv(1);
+    let joined = resumed.join(" ");
+    assert!(joined.contains("--system-prompt-snapshot off"), "{joined}");
+    assert!(joined.contains(&format!("--resume={session}")), "{joined}");
+    assert!(joined.contains("--tools Grep"), "{joined}");
+    assert!(joined.contains("Search with Grep from now on."), "{joined}");
+    assert!(task.claude_code_prompt_changed);
+}
+
 fn pixels() -> arko_ai::Image {
     arko_ai::Image::new_base64("cGl4ZWxz", "image/png")
 }

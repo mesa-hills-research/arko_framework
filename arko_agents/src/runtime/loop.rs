@@ -543,3 +543,7 @@ mod request_started_tests;
 #[cfg(test)]
 #[path = "user_image_tests.rs"]
 mod user_image_tests;
+
+#[cfg(test)]
+#[path = "reconfigure_tests.rs"]
+mod reconfigure_tests;

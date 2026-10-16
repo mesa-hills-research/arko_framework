@@ -1606,6 +1606,8 @@ impl ClaudeCodeRun {
             } else {
                 cc::SystemPrompt::Append(system)
             },
+            // The session recorded an earlier prompt: this one replaces it.
+            system_prompt_snapshot: self.task.claude_code_prompt_changed.then_some(false),
             built_in_tools: if built_ins.is_empty() {
                 cc::BuiltInTools::None
             } else {
@@ -4150,9 +4152,11 @@ impl ClaudeCodeRun {
             .conversation
             .add_user_message_with_contents(content);
         self.task.increment_user_message_count();
-        // The next session is a new Claude Code conversation.
+        // The next session is a new Claude Code conversation, which records
+        // the current prompt.
         self.task.claude_code_session = None;
         self.task.claude_code_synced = 0;
+        self.task.claude_code_prompt_changed = false;
         for name in self.registry.list_tool_names() {
             if let Some(tool) = self.registry.get(&name) {
                 tool.reset_context(self.task.id);

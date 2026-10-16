@@ -268,7 +268,9 @@ on, so it isn't offered `complete_task` either) is a plain chat: its requests ca
 configuration, its system prompt has no section about tools, and each reply ends the task.
 On a Claude Code model it runs with Claude Code's built-in tools off. A handover set on it
 asks for the report as a reply in text, so its requests stay without tools (see
-[Conversation handover](#conversation-handover)).
+[Conversation handover](#conversation-handover)). A request without tools sends earlier tool
+calls and results as text (`arko_ai::Conversation::tool_history_as_text`), so a conversation
+that used tools goes on as a chat.
 
 ### Several calls in one response
 
@@ -910,6 +912,17 @@ Claude Code agent receives them as image blocks of its input. A request with an 
 the model can't take is refused before it is sent (see
 [Tool images and Gemini 3.x](../docs/reference-map.md#tool-images-and-gemini-3x-arko_ai)).
 `arko_ai::Model::image_refusal` tells a host beforehand whether an image can go.
+
+**A new configuration.** `Task::reconfigure(config)` continues a task under another
+configuration, between turns (pending, completed, or awaiting the user's answer) and with
+the same model: the next run offers `config`'s tools and writes a system message from it,
+in place of the current one, and the conversation, its prompt cache key and the task's
+usage stay. That is how a chat becomes an agent and back. The new tools and system message
+are a new prefix, so the next request writes the prompt cache afresh. The task records it
+(`Task::reconfigured`). A Claude Code task's session resumes with the new flags, and with
+`--system-prompt-snapshot off` from then on (`Task::claude_code_prompt_changed`), since
+Claude Code otherwise sends the prompt it recorded at the session's first request; a
+handover's fresh session records the new one.
 
 Tasks serialize to JSON (`Task::save_to_path`, `Task::load_from_path`). Running a
 returned task again continues it: a task that is pending, in progress, or interrupted
