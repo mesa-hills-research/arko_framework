@@ -17,6 +17,8 @@ the next turn's index). Steps:
                                          Claude Code does
   {"retry": {"attempt": 1, ...}}         an api_retry system message with
                                          these fields
+  {"exit_unrecorded": 3}                 as a turn's first step: the CLI
+                                         exits before it saves the message
   {"tool": "mcp__arko__probe", "input": {...}, "input_tokens": 500}
                                          a tool call
   {"exit": 3}                            the CLI crashes
@@ -50,7 +52,9 @@ with a "uuid"), in FAKE_CLAUDE_STATE plus ".sessions" across processes.
 resumes, and fails as Claude Code does when no message has the UUID.
 --fork-session with --session-id=<new> starts the new session as a copy of
 the one --resume names (cut back as --resume-session-at says), which stays
-as it was. --no-session-persistence keeps the session in the process only.
+as it was. Like Claude Code, a cut and a fork are saved only with the
+launch's first new message, a fork's ID must be new, and --resume of a
+session that doesn't exist fails. --no-session-persistence keeps the session in the process only.
 A turn's result carries the usage of its last step.
 
 A "/compact" message plays the next entry of the script when it is
@@ -101,7 +105,15 @@ def sessions():
     return saved
 
 
+# The conversation as this launch starts it, saved only with its first new
+# message, as Claude Code saves a cut (--resume-session-at) and creates a
+# fork then.
+PENDING = None
+
+
 def conversation():
+    if PENDING is not None:
+        return PENDING
     return sessions().get(SESSION, [])
 
 
@@ -117,14 +129,24 @@ def keep(conversation):
 
 def record(text, message_uuid=None):
     """Adds a message to the session's conversation and returns its UUID."""
+    global PENDING
     message_uuid = message_uuid or str(uuid.uuid4())
-    keep(conversation() + [{"uuid": message_uuid, "text": text}])
+    entries = conversation()
+    PENDING = None
+    keep(entries + [{"uuid": message_uuid, "text": text}])
     return message_uuid
 
 
 if FORK and PARENT:
     # The fork starts as a copy of the parent's conversation, which stays.
-    keep(sessions().get(PARENT, []))
+    # Its ID must be new.
+    if SESSION in sessions():
+        sys.stderr.write("Session ID %s is already in use.\n" % SESSION)
+        sys.exit(1)
+    PENDING = sessions().get(PARENT, [])
+elif PARENT and PARENT not in sessions():
+    sys.stderr.write("No conversation found with session ID: %s\n" % PARENT)
+    sys.exit(1)
 
 RESUME_AT = flag("--resume-session-at=")
 if RESUME_AT:
@@ -133,7 +155,7 @@ if RESUME_AT:
     if not found:
         sys.stderr.write("No message found with message.uuid of: %s\n" % RESUME_AT)
         sys.exit(1)
-    keep(entries[:found[0] + 1])
+    PENDING = entries[:found[0] + 1]
 
 
 def log(event, **fields):
@@ -321,6 +343,11 @@ def call_tool(step, index):
 
 def turn(text, message_uuid=None):
     log("user", text=text, history=[entry["text"] for entry in conversation()])
+    # The CLI exits before it saves the message.
+    upcoming = next_turn(advance=False)
+    if isinstance(upcoming, list) and upcoming and "exit_unrecorded" in upcoming[0]:
+        next_turn()
+        sys.exit(upcoming[0]["exit_unrecorded"])
     record(text, message_uuid)
     if not state.get("listed"):
         state["listed"] = True

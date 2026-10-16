@@ -710,6 +710,9 @@ pub(super) struct ClaudeCodeRun {
     streamed_text: HashSet<String>,
     /// When Claude Code started retrying the current request, while it does.
     retrying_since: Option<std::time::Instant>,
+    /// What the session will have received once Claude Code has the input
+    /// sent after a cut back or a branch (see `record_sent`).
+    synced_on_send: Option<usize>,
     /// A step was left out for the handover under way (once per handover).
     step_left_out: bool,
     /// The message the next session resumes at.
@@ -808,6 +811,7 @@ impl ClaudeCodeRun {
             streaming: None,
             streamed_text: HashSet::new(),
             retrying_since: None,
+            synced_on_send: None,
             host: None,
             snapshots: TaskSnapshots::default(),
             host_stop: crate::stop::StopSignal::never(),
@@ -1591,17 +1595,26 @@ impl ClaudeCodeRun {
         }
         self.served_tools = Some(ai::ToolConfig::new(served));
         // A cut back resumes at the entry the task recorded; a branch first
-        // copies the session it was branched from into its own.
+        // copies the session it was branched from into its own. Both hold
+        // until the session has the task's first new message (see
+        // `record_sent`): Claude Code saves a cut, and creates a fork, only
+        // with that message.
         let recorded_at = self.task.claude_code_resume_at.clone();
         let session = match (
             &self.task.claude_code_session,
             &self.task.claude_code_fork_of,
         ) {
-            (Some(session), Some(parent)) => cc::SessionStart::Fork {
-                session: parent.clone(),
-                at: recorded_at,
-                new_session: session.clone(),
-            },
+            (Some(_), Some(parent)) => {
+                // Each attempt forks under an ID of its own: one an attempt
+                // that failed may have created can't be used again.
+                let id = Uuid::new_v4().to_string();
+                self.task.claude_code_session = Some(id.clone());
+                cc::SessionStart::Fork {
+                    session: parent.clone(),
+                    at: recorded_at,
+                    new_session: id,
+                }
+            }
             (Some(session), None) => cc::SessionStart::Resume {
                 session: session.clone(),
                 fork: false,
@@ -1699,9 +1712,6 @@ impl ClaudeCodeRun {
         let (requests, receiver) = mpsc::unbounded_channel();
         let options = self.session_options(&requests);
         let session = cc::ClaudeSession::start(options).await?;
-        // The session has resumed (or forked) where the task said.
-        self.task.claude_code_resume_at = None;
-        self.task.claude_code_fork_of = None;
         if let Some(tools) = session.initialization().get("tools") {
             log::debug!("Task {}: Claude Code tools: {tools}", self.task.id);
         }
@@ -1864,6 +1874,13 @@ impl ClaudeCodeRun {
             );
             self.note_handover_request().await?;
         }
+        // After a cut back or a branch, the session has the task's input only
+        // once Claude Code saved it: until then the task keeps the cut's
+        // point as what the session has, so a task saved in between (and
+        // run again after a crash) sends it again from the same entry.
+        let synced_before = self.task.claude_code_synced;
+        let resuming_a_cut =
+            self.task.claude_code_resume_at.is_some() || self.task.claude_code_fork_of.is_some();
         let input = if self.compaction == Some(Compaction::Due) {
             self.compaction = Some(Compaction::Sent { compacted: false });
             Value::String(COMPACT_COMMAND.to_string())
@@ -1889,6 +1906,10 @@ impl ClaudeCodeRun {
         } else {
             self.unsent_input()?
         };
+        if resuming_a_cut {
+            self.synced_on_send = Some(self.task.claude_code_synced);
+            self.task.claude_code_synced = synced_before;
+        }
         self.api_error = None;
         self.error_kind = None;
         // A session that ended before its turn did: reported now.
@@ -2643,11 +2664,27 @@ impl ClaudeCodeRun {
         result
     }
 
+    /// Claude Code answered the input sent after a cut back or a branch: it
+    /// has saved the input, so the cut (or the fork) is saved too, and the
+    /// messages sent with it count as sent.
+    fn confirm_resumed(&mut self) {
+        if let Some(synced) = self.synced_on_send.take() {
+            self.task.claude_code_synced = synced;
+            self.task.claude_code_resume_at = None;
+            self.task.claude_code_fork_of = None;
+        }
+    }
+
     async fn handle_message_inner(
         &mut self,
         message: cc::Message,
         session: &cc::ClaudeSession,
     ) -> Result<(), ArkoAgentsError> {
+        // Any message of the turn but Claude Code's status: the turn runs,
+        // so Claude Code has the input.
+        if !matches!(message, cc::Message::System(_)) {
+            self.confirm_resumed();
+        }
         match message {
             cc::Message::Assistant(assistant) => {
                 // A failed request's own message (see `api_error` below)

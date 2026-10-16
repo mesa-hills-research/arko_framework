@@ -944,9 +944,12 @@ conversation's length) as a new task with its own ID and no usage, and the origi
 A Claude Code task records, for each message, its last entry in the session's transcript
 (`Task::claude_code_entries`): a cut resumes the session at the entry before the cut
 (`--resume-session-at`), sending the host's messages after it again, and a branch forks the
-session into its own (`Task::claude_code_fork_of`, `--fork-session --session-id`). A cut that
-would leave the model's work without a known entry (a task recorded before entries were, or
-before a compaction) is refused.
+session into its own (`Task::claude_code_fork_of`, `--fork-session --session-id`). Claude
+Code saves a cut, and creates a fork, only with the first new message, so the task keeps the
+resume point until the session answers that message: a launch that fails first (the CLI
+exits, or the host crashes) resumes at the same entry again, and a fork tries again under a
+new ID. A cut that would leave the model's work without a known entry (a task recorded
+before entries were, or before a compaction) is refused.
 
 Tasks serialize to JSON (`Task::save_to_path`, `Task::load_from_path`). Running a
 returned task again continues it: a task that is pending, in progress, or interrupted

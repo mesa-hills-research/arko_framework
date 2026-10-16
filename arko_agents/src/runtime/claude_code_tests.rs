@@ -897,6 +897,143 @@ async fn a_cut_back_over_the_handover_size_still_hands_over() {
     );
 }
 
+/// Runs `task` until it completes, approving the recovery of a failed
+/// session if it pauses for one.
+async fn finish_through_a_failure(mut run: Run) -> (Task, Vec<AgentEvent>) {
+    let mut events = run
+        .events_until(|event| {
+            matches!(
+                event,
+                AgentEvent::TaskStateChanged(
+                    TaskState::Completed { .. } | TaskState::AwaitingErrorRecoveryApproval { .. }
+                )
+            )
+        })
+        .await;
+    if matches!(
+        events.last(),
+        Some(AgentEvent::TaskStateChanged(
+            TaskState::AwaitingErrorRecoveryApproval { .. }
+        ))
+    ) {
+        run.commands
+            .send(UserCommand::ApproveErrorRecovery { message: None })
+            .await
+            .unwrap();
+    }
+    let (task, more) = run.finish().await;
+    events.extend(more);
+    (task, events)
+}
+
+/// The launch after a cut back, saved before Claude Code has the edited
+/// message, keeps the cut's point: Claude Code saves the cut only with that
+/// message, so a launch that failed before it (the CLI exited, or the host
+/// crashed) resumes at the same entry again and sends the edited message,
+/// never the conversation from before the cut.
+#[tokio::test]
+async fn a_cut_holds_its_resume_point_until_the_session_has_the_message() {
+    let fake = Fake::new(json!([
+        [{"text": "One."}],
+        [{"text": "Two."}],
+        [{"exit_unrecorded": 3}],
+        [{"text": "Two, edited."}],
+    ]));
+    let task = Task::new(chat_config(&fake), "First.".into(), fake.workspace(), None);
+    let (mut task, _) = start(task).finish().await;
+    task.prepare_for_resumption_from_completed("Second.".into())
+        .unwrap();
+    let (mut task, _) = start(task).finish().await;
+    let reply = task.claude_code_entries[&1].clone();
+    task.cut_back(2).unwrap();
+    task.prepare_for_resumption_from_completed("Second, edited.".into())
+        .unwrap();
+    let recorder = Arc::new(Recorder::default());
+    let (task, _) = finish_through_a_failure(start_with(task, recording(&recorder))).await;
+
+    // The task saved before the failed launch still says where to resume.
+    assert!(recorder.snapshots().iter().any(|(saved, durable)| {
+        *durable
+            && saved.claude_code_resume_at.as_deref() == Some(reply.as_str())
+            && saved.claude_code_synced == 2
+            && saved.conversation.messages.len() == 3
+    }));
+    // The launch that worked resumed at the reply and got the edit.
+    let users = fake.logged("user");
+    let last = users.last().unwrap();
+    assert!(
+        last["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Second, edited."),
+        "{last}"
+    );
+    let history: Vec<String> = serde_json::from_value(last["history"].clone()).unwrap();
+    assert_eq!(history.len(), 2, "{history:?}");
+    assert!(history[0].starts_with("First."));
+    assert_eq!(history[1], "One.");
+    let argv = fake.logged("argv");
+    let argv: Vec<String> = serde_json::from_value(argv.last().unwrap()["argv"].clone()).unwrap();
+    assert!(
+        argv.contains(&format!("--resume-session-at={reply}")),
+        "{argv:?}"
+    );
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "Two, edited.")
+    );
+    assert!(task.claude_code_resume_at.is_none());
+}
+
+/// A branch whose first launch failed before Claude Code saved its message
+/// forks again, under a new ID (a failed attempt's ID may be taken), from
+/// the same point of the original session.
+#[tokio::test]
+async fn a_branch_forks_again_after_a_failed_first_launch() {
+    let fake = Fake::new(json!([
+        [{"text": "One."}],
+        [{"text": "Two."}],
+        [{"exit_unrecorded": 3}],
+        [{"text": "Plan B, then."}],
+    ]));
+    let task = Task::new(chat_config(&fake), "First.".into(), fake.workspace(), None);
+    let (mut task, _) = start(task).finish().await;
+    task.prepare_for_resumption_from_completed("Second.".into())
+        .unwrap();
+    let (original, _) = start(task).finish().await;
+    let mut branch = original.branch(2).unwrap();
+    branch
+        .prepare_for_resumption_from_completed("Plan B.".into())
+        .unwrap();
+    let (branch, _) = finish_through_a_failure(start(branch)).await;
+    assert!(
+        matches!(&branch.current_state, TaskState::Completed { summary } if summary == "Plan B, then.")
+    );
+    let forks: Vec<String> = fake
+        .logged("argv")
+        .iter()
+        .filter_map(|entry| {
+            let argv: Vec<String> = serde_json::from_value(entry["argv"].clone()).unwrap();
+            argv.iter()
+                .any(|arg| arg == "--fork-session")
+                .then(|| {
+                    argv.iter()
+                        .find_map(|arg| arg.strip_prefix("--session-id=").map(str::to_string))
+                })
+                .flatten()
+        })
+        .collect();
+    assert_eq!(forks.len(), 2, "{forks:?}");
+    assert_ne!(forks[0], forks[1]);
+    assert_eq!(
+        branch.claude_code_session.as_deref(),
+        Some(forks[1].as_str())
+    );
+    assert!(branch.claude_code_fork_of.is_none());
+    let history = histories(&fake).last().unwrap().clone();
+    assert_eq!(history.len(), 2, "{history:?}");
+    assert_eq!(history[1], "One.");
+}
+
 /// Records what a tool image sink is given: the call's ID, name and images.
 #[derive(Default)]
 struct Images(std::sync::Mutex<Vec<(uuid::Uuid, String, usize)>>);
