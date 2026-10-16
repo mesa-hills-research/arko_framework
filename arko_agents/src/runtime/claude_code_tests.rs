@@ -704,6 +704,65 @@ async fn a_cut_resumes_the_session_before_the_message_and_a_branch_forks_it() {
     assert!(texts(&cut)[2].starts_with("Faro."));
 }
 
+/// The reply and the thinking stream as Claude Code streams them, and the
+/// complete messages don't repeat them; Claude Code's retries are reported
+/// as the runtime reports its own.
+#[tokio::test]
+async fn a_reply_streams_as_it_comes_and_retries_are_reported() {
+    let fake = Fake::new(json!([[
+        {"retry": {"attempt": 1, "max_retries": 10, "retry_delay_ms": 1500,
+                   "error_status": 529, "error": "overloaded"}},
+        {"retry": {"attempt": 2, "max_retries": 10, "retry_delay_ms": 3000,
+                   "error_status": 429, "error": "rate_limit"}},
+        {"thinking": "Let me think about it.", "text": "The answer is four, of course.",
+         "stream": true},
+    ]]));
+    let task = Task::new(
+        chat_config(&fake),
+        "What is 2 + 2?".into(),
+        fake.workspace(),
+        None,
+    );
+    let (task, events) = start(task).finish().await;
+    assert!(
+        matches!(&task.current_state, TaskState::Completed { summary } if summary == "The answer is four, of course.")
+    );
+    let text: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::AssistantResponseChunk(chunk) => Some(chunk.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, ["The answer ", "is four, ", "of course."]);
+    let thinking: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ReasoningChunk(chunk) => Some(chunk.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(thinking, ["Let me ", "think about ", "it."]);
+    let retries: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::RetryScheduled {
+                attempt,
+                delay_ms,
+                rate_limit,
+                ..
+            } => Some((*attempt, *delay_ms, *rate_limit)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(retries, [(1, 1500, false), (2, 3000, true)]);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ErrorEncountered { error_message, requires_approval_to_retry: false, .. }
+            if error_message.contains("overloaded, status 529") && error_message.contains("attempt 1 of 10")
+    )));
+}
+
 /// Records what a tool image sink is given: the call's ID, name and images.
 #[derive(Default)]
 struct Images(std::sync::Mutex<Vec<(uuid::Uuid, String, usize)>>);
@@ -1733,8 +1792,18 @@ async fn a_failed_login_pauses_as_non_retryable() {
         ]]));
         let task = Task::new(config(&fake, &[]), "Do it.".into(), fake.workspace(), None);
         let mut run = start(task);
+        // Claude Code's retry is reported first (an error needing no
+        // decision); the pause's error follows.
         let events = run
-            .events_until(|event| matches!(event, AgentEvent::ErrorEncountered { .. }))
+            .events_until(|event| {
+                matches!(
+                    event,
+                    AgentEvent::ErrorEncountered {
+                        requires_approval_to_retry: true,
+                        ..
+                    }
+                )
+            })
             .await;
         let pause = events.iter().find_map(|event| match event {
             AgentEvent::TaskStateChanged(TaskState::AwaitingErrorRecoveryApproval {

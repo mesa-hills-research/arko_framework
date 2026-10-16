@@ -18,7 +18,7 @@
 //! keeps it: the runtime sends Claude Code's `/compact` between turns, and
 //! the agent goes on from Claude Code's summary.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -703,6 +703,13 @@ pub(super) struct ClaudeCodeRun {
     step_results: bool,
     /// The message ID of the model's latest response.
     response: Option<String>,
+    /// The main conversation's response streaming now (its message ID).
+    streaming: Option<String>,
+    /// The responses whose text or thinking streamed as it came, which their
+    /// complete messages don't report again.
+    streamed_text: HashSet<String>,
+    /// When Claude Code started retrying the current request, while it does.
+    retrying_since: Option<std::time::Instant>,
     /// A step was left out for the handover under way (once per handover).
     step_left_out: bool,
     /// The message the next session resumes at.
@@ -798,6 +805,9 @@ impl ClaudeCodeRun {
             response: None,
             step_left_out: false,
             resume_at: None,
+            streaming: None,
+            streamed_text: HashSet::new(),
+            retrying_since: None,
             host: None,
             snapshots: TaskSnapshots::default(),
             host_stop: crate::stop::StopSignal::never(),
@@ -2651,16 +2661,23 @@ impl ClaudeCodeRun {
                     self.answered = self.last_entry.take();
                     self.step_results = false;
                 }
+                // The response's text and thinking streamed as they came
+                // (`content_block_delta`): not again.
+                let streamed = id.is_some_and(|id| self.streamed_text.contains(id));
                 let mut text = String::new();
                 let mut calls = Vec::new();
                 for block in &assistant.content {
                     match block {
                         cc::ContentBlock::Text(chunk) => {
-                            self.emit(AgentEvent::AssistantResponseChunk(chunk.clone()))
-                                .await?;
+                            if !streamed {
+                                self.emit(AgentEvent::AssistantResponseChunk(chunk.clone()))
+                                    .await?;
+                            }
                             text.push_str(chunk);
                         }
-                        cc::ContentBlock::Thinking(thinking) if !thinking.is_empty() => {
+                        cc::ContentBlock::Thinking(thinking)
+                            if !thinking.is_empty() && !streamed =>
+                        {
                             self.emit(AgentEvent::ReasoningChunk(thinking.clone()))
                                 .await?;
                         }
@@ -2770,6 +2787,11 @@ impl ClaudeCodeRun {
             } => match event["type"].as_str() {
                 Some("message_start") => {
                     let message = &event["message"];
+                    if parent_tool_use_id.is_none() {
+                        // A response: any retry before it is over.
+                        self.streaming = message["id"].as_str().map(str::to_string);
+                        self.retrying_since = None;
+                    }
                     self.request_started(message, &parent_tool_use_id).await?;
                     if let (Some(key), Some(usage)) = (message["id"].as_str(), message.get("usage"))
                     {
@@ -2803,6 +2825,30 @@ impl ClaudeCodeRun {
                             self.refusal_details = pending.stop_details.clone();
                         }
                         self.flush_thread(&parent_tool_use_id).await?;
+                    }
+                }
+                // The main conversation's text and thinking as they come; a
+                // subagent's are its own.
+                Some("content_block_delta") if parent_tool_use_id.is_none() => {
+                    let delta = &event["delta"];
+                    let chunk = match delta["type"].as_str() {
+                        Some("text_delta") => delta["text"]
+                            .as_str()
+                            .map(|text| AgentEvent::AssistantResponseChunk(text.to_string())),
+                        Some("thinking_delta") => delta["thinking"]
+                            .as_str()
+                            .map(|thinking| AgentEvent::ReasoningChunk(thinking.to_string())),
+                        _ => None,
+                    };
+                    if let Some(chunk) = chunk.filter(|chunk| match chunk {
+                        AgentEvent::AssistantResponseChunk(text)
+                        | AgentEvent::ReasoningChunk(text) => !text.is_empty(),
+                        _ => false,
+                    }) {
+                        if let Some(id) = &self.streaming {
+                            self.streamed_text.insert(id.clone());
+                        }
+                        self.emit(chunk).await?;
                     }
                 }
                 _ => {}
@@ -2844,11 +2890,52 @@ impl ClaudeCodeRun {
                 self.compacted(&system.raw).await?;
             }
             cc::Message::System(system) if system.subtype == "api_retry" => {
-                log::info!("Task {}: Claude Code is retrying a request.", self.task.id);
+                self.retry_scheduled(&system.raw).await?;
             }
             _ => {}
         }
         Ok(())
+    }
+
+    /// Claude Code will retry a failed request (its `api_retry` message):
+    /// reported as the runtime reports its own retries, an error that needs
+    /// no decision and the retry with its delay.
+    async fn retry_scheduled(&mut self, raw: &Value) -> Result<(), ArkoAgentsError> {
+        let field = |name: &str| raw.get(name).and_then(Value::as_u64);
+        let attempt = field("attempt").unwrap_or(1);
+        let error = raw.get("error").and_then(Value::as_str);
+        let status = field("error_status").and_then(|status| u16::try_from(status).ok());
+        let since = *self
+            .retrying_since
+            .get_or_insert_with(std::time::Instant::now);
+        let what = match (error, status) {
+            (Some(error), Some(status)) => format!("{error}, status {status}"),
+            (Some(error), None) => error.to_string(),
+            (None, Some(status)) => format!("status {status}"),
+            (None, None) => "an error".to_string(),
+        };
+        let attempts = field("max_retries").map_or(String::new(), |max| format!(" of {max}"));
+        log::info!(
+            "Task {}: Claude Code is retrying a request ({what}), attempt {attempt}{attempts}.",
+            self.task.id
+        );
+        let kind = ai::ErrorKind::from_claude_code(error, status, None, "");
+        self.emit(AgentEvent::ErrorEncountered {
+            error_message: format!(
+                "Claude Code's request failed ({what}); it retries (attempt {attempt}{attempts})."
+            ),
+            requires_approval_to_retry: false,
+            tool_call_id: None,
+            error_kind: Some(kind).filter(|kind| *kind != ai::ErrorKind::Unknown),
+        })
+        .await?;
+        self.emit(AgentEvent::RetryScheduled {
+            attempt: u32::try_from(attempt).unwrap_or(u32::MAX),
+            delay_ms: field("retry_delay_ms").unwrap_or(0),
+            elapsed_ms: since.elapsed().as_millis() as u64,
+            rate_limit: status == Some(429) || error == Some("rate_limit"),
+        })
+        .await
     }
 
     /// Records `uuid` as the transcript entry of the conversation's last
@@ -4224,6 +4311,7 @@ impl ClaudeCodeRun {
         self.task.running_tool_calls.clear();
         self.pending_usage.clear();
         self.streamed.clear();
+        self.streamed_text.clear();
         self.cache_warned = false;
         self.cache_pause_episode = false;
         self.context_size = None;

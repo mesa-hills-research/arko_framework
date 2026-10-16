@@ -11,6 +11,12 @@ the next turn's index). Steps:
 
   {"text": "...", "input_tokens": 500}    an assistant text message
   {"thinking": "..."}                    an assistant thinking block
+  a text or thinking step with "stream": true streams it first, a few
+                                         words per content_block_delta (with
+                                         --include-partial-messages), as
+                                         Claude Code does
+  {"retry": {"attempt": 1, ...}}         an api_retry system message with
+                                         these fields
   {"tool": "mcp__arko__probe", "input": {...}, "input_tokens": 500}
                                          a tool call
   {"exit": 3}                            the CLI crashes
@@ -233,6 +239,17 @@ def assistant(content, step):
                     else block["thinking"] if block["type"] == "thinking"
                     else "%s %s" % (block["name"], json.dumps(block["input"]))
                     for block in content)
+    if step.get("stream"):
+        for index, block in enumerate(content):
+            kind = block["type"]
+            if kind not in ("text", "thinking"):
+                continue
+            words = block[kind].split(" ")
+            pieces = [" ".join(words[i:i + 2]) for i in range(0, len(words), 2)]
+            for number, piece in enumerate(pieces):
+                piece = piece if number == len(pieces) - 1 else piece + " "
+                stream_event({"type": "content_block_delta", "index": index,
+                              "delta": {"type": kind + "_delta", kind: piece}})
     send({"type": "assistant", "parent_tool_use_id": None, "session_id": SESSION,
           "uuid": record(text),
           "message": {"id": "msg_%d" % state["message"], "role": "assistant",
@@ -327,6 +344,10 @@ def turn(text, message_uuid=None):
             continue
         if "system" in step:
             send(dict({"type": "system", "session_id": SESSION}, **step["system"]))
+            continue
+        if "retry" in step:
+            send(dict({"type": "system", "subtype": "api_retry", "session_id": SESSION},
+                      **step["retry"]))
             continue
         if "refused" in step:
             # Claude Code keeps no content from a refused response.

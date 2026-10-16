@@ -1235,7 +1235,11 @@ Claude Code CLI, under its login, instead of through `LLMClient` requests (see
 arko_ai's *Claude Code*). Claude Code runs the agent loop; the runtime drives the session
 and keeps the task, its events, commands, approvals and handovers as for any agent.
 Nothing else changes for a host: `AgentRuntime::run_task` picks the Claude Code runtime
-from the model's provider.
+from the model's provider. The reply and the model's thinking stream as Claude Code streams
+them (`AssistantResponseChunk` and `ReasoningChunk` from its partial messages, a few tokens at
+a time; a subagent's stay its own), and Claude Code's retries of a failed request are
+reported as the runtime reports its own: `ErrorEncountered` needing no decision, then
+`RetryScheduled` with the attempt, Claude Code's delay and whether it waits out a rate limit.
 
 ```rust
 use arko_agents::{ClaudeCodeSettings, ClaudeCodeTools};
