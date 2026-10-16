@@ -1520,6 +1520,7 @@ Thread-safe workflow spend, per-agent LLM spend and limits, and a detailed ledge
 | `pub fn remaining(&self) -> Option<f64>` | `limit - spent`, floored at zero; `None` without a limit. |
 | `pub fn limit(&self) -> Option<f64>` | The workflow limit, as it is now. |
 | `pub fn snapshot_ledger(&self) -> CostLedger` | Clone of the ledger. |
+| `pub fn ledger_len(&self) -> usize` | The number of ledger entries: one more per cost added (agent or manual), never fewer while the workflow runs. A host that derives figures from the ledger recomputes them when it changes instead of cloning the ledger on every read. |
 | `pub fn totals_by_agent(&self) -> BTreeMap<String, CostTotals>` | Each agent's running totals (billed, at list prices, tokens, calls), kept as costs are added. |
 
 The recording methods keep a cost even when it exceeds the budget, and their result consumes a newly reached warning. The manager does not validate its inputs; supply finite, nonnegative values. `WorkflowBuilder` validates configured limits and thresholds, and `Workflow::add_manual_cost` validates the amount, fires the budget hooks, and returns `WorkflowError::BudgetExceeded`.

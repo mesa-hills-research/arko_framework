@@ -538,8 +538,15 @@ impl BudgetManager {
         self.ledger.lock().clone()
     }
 
-    /// How many entries the ledger holds.
-    pub(crate) fn ledger_len(&self) -> usize {
+    /// How many entries the ledger holds: one more for each cost added (an
+    /// agent's model call or a manual cost), and never fewer while the
+    /// workflow runs. A host that derives figures from the ledger (such as a
+    /// status line read many times a second) keeps them until the length
+    /// changes, instead of cloning the ledger on every read. The entry is in
+    /// the ledger before the cost's hooks fire, but a run's `UsageReported`
+    /// event can arrive before its cost is recorded, so compare the length
+    /// rather than wait for the event.
+    pub fn ledger_len(&self) -> usize {
         self.ledger.lock().entries.len()
     }
 }
@@ -628,6 +635,8 @@ mod tests {
         );
         assert_eq!(totals["worker"].calls, 1);
         assert_eq!(totals.len(), 2);
+        // Every cost, manual ones included, is one more ledger entry.
+        assert_eq!(budget.ledger_len(), 4);
         let resumed = BudgetManager::from_ledger(None, None, budget.snapshot_ledger());
         assert_eq!(resumed.totals_by_agent(), totals);
     }
