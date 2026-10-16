@@ -151,3 +151,71 @@ async fn images_a_model_can_t_take_are_refused_before_anything_is_sent() {
     assert!(message.contains("doesn't take images"), "{message}");
     assert_eq!(server.requests(), 1);
 }
+
+/// Records what the workflow's tool image sink is given.
+#[derive(Default)]
+struct Images(std::sync::Mutex<Vec<(uuid::Uuid, uuid::Uuid, String)>>);
+
+impl arko_agents::ToolImageSink for Images {
+    fn tool_images(
+        &self,
+        task_id: uuid::Uuid,
+        tool_call_id: uuid::Uuid,
+        tool_name: &str,
+        images: &[arko_agents::ToolImage],
+    ) {
+        assert_eq!(images.len(), 1);
+        self.0
+            .lock()
+            .unwrap()
+            .push((task_id, tool_call_id, tool_name.to_string()));
+    }
+}
+
+/// The workflow's sink gets the image an agent's `read_file` call shows,
+/// by its run and the call's ID in the run's events.
+#[tokio::test]
+async fn the_workflow_s_sink_gets_the_images_tools_return() {
+    use crate::test_support::tool_call_turn;
+    let workspace = Workspace::new();
+    std::fs::write(
+        workspace.0.join("a.png"),
+        b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x02\0\0\0",
+    )
+    .unwrap();
+    let server = ResponsesServer::start(|index, _| {
+        Some(match index {
+            0 => tool_call_turn("r0", "read_file", json!({"path": "a.png"})),
+            _ => complete_turn("c1", "done"),
+        })
+    })
+    .await;
+    let mut reader = agent_config("Reader");
+    reader.tool_config.available_tool_names = vec!["read_file".into()];
+    let images = Arc::new(Images::default());
+    let workflow = Workflow::builder()
+        .name("tool-image-sink-test")
+        .workspace(&workspace.0)
+        .llm_client(Arc::new(server.client()))
+        .agent("reader", reader)
+        .tool_image_sink(images.clone())
+        .build()
+        .unwrap();
+    let mut events = workflow.subscribe_events();
+    let result = workflow
+        .run_agent("reader", "Look at a.png.")
+        .await
+        .unwrap();
+    let recorded = images.0.lock().unwrap().clone();
+    let [(run, call, name)] = recorded.as_slice() else {
+        panic!("{recorded:?}");
+    };
+    assert_eq!((*run, name.as_str()), (result.agent_run_id, "read_file"));
+    let mut formatted = false;
+    while let Ok(event) = events.try_recv() {
+        if let arko_agents::AgentEvent::ToolCallFormatted { tool_call_id, .. } = event.event {
+            formatted |= tool_call_id == *call;
+        }
+    }
+    assert!(formatted);
+}

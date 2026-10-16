@@ -61,6 +61,7 @@ impl AgentLoop {
             middleware: self.execution_middleware.clone(),
             stop: self.host_stop.or(&self.calls_stop.signal()),
             model: self.task.conversation.model.clone(),
+            image_sink: self.image_sink.clone(),
         })
     }
 

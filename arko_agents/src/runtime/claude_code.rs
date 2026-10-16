@@ -713,6 +713,9 @@ pub(super) struct ClaudeCodeRun {
     /// The host's stop signal for the task's arko tool calls; see
     /// [`AgentRuntime::with_stop_signal`](super::AgentRuntime::with_stop_signal).
     pub(super) host_stop: crate::stop::StopSignal,
+    /// Receives the images the task's calls return; see
+    /// [`AgentRuntime::with_tool_image_sink`](super::AgentRuntime::with_tool_image_sink).
+    pub(super) image_sink: Option<Arc<dyn crate::tool::ToolImageSink>>,
     /// Fired when the host stops the session, so that a running arko tool
     /// call winds down; see [`TaskContext::stop`](crate::tool::TaskContext::stop).
     calls_stop: crate::stop::StopSource,
@@ -798,6 +801,7 @@ impl ClaudeCodeRun {
             host: None,
             snapshots: TaskSnapshots::default(),
             host_stop: crate::stop::StopSignal::never(),
+            image_sink: None,
             calls_stop: crate::stop::StopSource::new(),
         }
     }
@@ -1662,6 +1666,7 @@ impl ClaudeCodeRun {
                 middleware: self.middleware.clone(),
                 stop: self.host_stop.or(&self.calls_stop.signal()),
                 model: self.task.agent_config.llm_config.model.clone(),
+                image_sink: self.image_sink.clone(),
             }),
             config: self.task.agent_config.clone(),
             registry: self.registry.clone(),
@@ -2704,6 +2709,16 @@ impl ClaudeCodeRun {
                     let Some(call) = self.calls.get(tool_use_id) else {
                         continue;
                     };
+                    // A built-in's images (Claude Code's `Read`): an arko
+                    // tool's reached the sink as it ran.
+                    if call.built_in
+                        && let Some(sink) = &self.image_sink
+                    {
+                        let images = result_images(content);
+                        if !images.is_empty() {
+                            sink.tool_images(self.task.id, call.id, &call.name, &images);
+                        }
+                    }
                     let (id, name, record) = (call.id, call.name.clone(), call.record.clone());
                     results.push(if *is_error {
                         ai::ToolResult::error_from_tool_call(&record, &text)

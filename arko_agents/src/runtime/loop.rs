@@ -177,6 +177,9 @@ pub struct AgentLoop {
     /// The host's stop signal for the task's calls; see
     /// [`AgentRuntime::with_stop_signal`](super::AgentRuntime::with_stop_signal).
     pub(super) host_stop: crate::stop::StopSignal,
+    /// Receives the images the task's calls return; see
+    /// [`AgentRuntime::with_tool_image_sink`](super::AgentRuntime::with_tool_image_sink).
+    pub(super) image_sink: Option<Arc<dyn crate::tool::ToolImageSink>>,
     /// Fired when `CancelTask` or `SuspendTask` arrives while calls run, so
     /// that a call the runtime waits for winds down; see
     /// [`TaskContext::stop`](crate::tool::TaskContext::stop).
@@ -284,6 +287,7 @@ impl AgentLoop {
             step_left_out: false,
             snapshots: Default::default(),
             host_stop: crate::stop::StopSignal::never(),
+            image_sink: None,
             calls_stop: crate::stop::StopSource::new(),
             slow_down_cache_checked: false,
             handover_skip_warned: false,

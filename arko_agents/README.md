@@ -572,7 +572,9 @@ mode they go inside the call's own result, after its text, each after its descri
 arko_ai sends them there where the model accepts images in tool results, and otherwise
 after all of the turn's results, each after "Image from tool NAME, call ID: DESCRIPTION".
 In output-based mode they follow the results' text the same way. Images are not passed to
-result interceptors and never appear in events. `read_file` and MCP tools return PNG,
+result interceptors and never appear in events: a host that shows them gets each call's
+images from a `ToolImageSink` (`AgentRuntime::with_tool_image_sink`), keyed by the call's ID
+in the events. `read_file` and MCP tools return PNG,
 JPEG, GIF and WebP images this way too. See [tool images](../docs/reference-map.md#tool-images-arko_agents)
 for size limits, embedded resources and Claude Code forwarding.
 

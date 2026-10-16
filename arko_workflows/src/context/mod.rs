@@ -41,6 +41,8 @@ pub struct SharedContext {
     /// The host's handover thresholds, by agent: in place of the
     /// configuration's (`WorkflowBuilder::agent_handover_threshold`).
     pub(crate) handover_thresholds: HashMap<String, arko_agents::HandoverThreshold>,
+    /// Receives the images tool calls return (`WorkflowBuilder::tool_image_sink`).
+    pub(crate) tool_image_sink: Option<Arc<dyn arko_agents::ToolImageSink>>,
     /// Failure policy used when composing interceptors for agent runs.
     pub interception_failure_policy: InterceptionFailurePolicy,
     pub completion_verifiers: Vec<crate::verification::CompletionVerifierConfig>,

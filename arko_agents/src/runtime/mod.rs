@@ -72,6 +72,7 @@ pub struct AgentRuntime {
     handover_threshold: HandoverThreshold,
     task_snapshots: Option<Arc<dyn TaskSnapshotSink>>,
     stop_signal: StopSignal,
+    image_sink: Option<Arc<dyn crate::tool::ToolImageSink>>,
 }
 
 impl AgentRuntime {
@@ -85,7 +86,16 @@ impl AgentRuntime {
             handover_threshold: HandoverThreshold::default(),
             task_snapshots: None,
             stop_signal: StopSignal::never(),
+            image_sink: None,
         }
+    }
+
+    /// Gives `sink` the images the tool calls of the tasks this runtime runs
+    /// return, keyed by each call's ID; see
+    /// [`ToolImageSink`](crate::tool::ToolImageSink).
+    pub fn with_tool_image_sink(mut self, sink: Arc<dyn crate::tool::ToolImageSink>) -> Self {
+        self.image_sink = Some(sink);
+        self
     }
 
     /// Runs tasks with `decisions`: while it is set, the host decides every
@@ -190,6 +200,7 @@ impl AgentRuntime {
             run.handover_threshold = self.handover_threshold.clone();
             run.snapshots = TaskSnapshots::new(self.task_snapshots.clone());
             run.host_stop = self.stop_signal.clone();
+            run.image_sink = self.image_sink.clone();
             run.bind_tools(&command_sender);
             let join_handle = tokio::spawn(async move { run.run().await });
             return (event_receiver, command_sender, join_handle);
@@ -212,6 +223,7 @@ impl AgentRuntime {
         agent_loop.handover_threshold = self.handover_threshold.clone();
         agent_loop.snapshots = TaskSnapshots::new(self.task_snapshots.clone());
         agent_loop.host_stop = self.stop_signal.clone();
+        agent_loop.image_sink = self.image_sink.clone();
         agent_loop.bind_tools(&command_sender);
 
         let task_join_handle = tokio::spawn(async move { agent_loop.run().await });

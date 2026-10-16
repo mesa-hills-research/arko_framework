@@ -6,7 +6,7 @@
 use crate::tool::{
     InterceptedResult, InterceptionFailurePolicy, TaskContext, Tool, ToolCallContext, ToolError,
     ToolExecutionContext, ToolExecutionDecision, ToolExecutionMiddleware, ToolExecutionOutcome,
-    ToolOutput, ToolResultInterceptor,
+    ToolImageSink, ToolOutput, ToolResultInterceptor,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -26,6 +26,8 @@ pub(super) struct RunEnvironment {
     pub stop: crate::stop::StopSignal,
     /// The model whose image capabilities apply to tool results.
     pub model: arko_ai::Model,
+    /// Receives the images calls return; see [`ToolImageSink`].
+    pub image_sink: Option<Arc<dyn ToolImageSink>>,
 }
 
 impl RunEnvironment {
@@ -224,6 +226,16 @@ pub(super) async fn run_tool(
             };
             match result {
                 Ok(mut output) => {
+                    if let Some(sink) = &environment.image_sink
+                        && !output.images.is_empty()
+                    {
+                        sink.tool_images(
+                            environment.task_id,
+                            run.tool_call_id,
+                            &run.tool_name,
+                            &output.images,
+                        );
+                    }
                     output.admit_images(&environment.model);
                     if let Some(middleware) = middleware
                         && let Err(error) = middleware

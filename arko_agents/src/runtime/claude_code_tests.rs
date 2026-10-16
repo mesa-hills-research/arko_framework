@@ -704,6 +704,72 @@ async fn a_cut_resumes_the_session_before_the_message_and_a_branch_forks_it() {
     assert!(texts(&cut)[2].starts_with("Faro."));
 }
 
+/// Records what a tool image sink is given: the call's ID, name and images.
+#[derive(Default)]
+struct Images(std::sync::Mutex<Vec<(uuid::Uuid, String, usize)>>);
+
+impl crate::tool::ToolImageSink for Images {
+    fn tool_images(
+        &self,
+        _task_id: uuid::Uuid,
+        tool_call_id: uuid::Uuid,
+        tool_name: &str,
+        images: &[crate::tool::ToolImage],
+    ) {
+        self.0
+            .lock()
+            .unwrap()
+            .push((tool_call_id, tool_name.to_string(), images.len()));
+    }
+}
+
+/// The host's sink gets the images of an arko tool's call once (not again
+/// when Claude Code reports the result) and those of Claude Code's own
+/// `Read`, each by the call's ID in the events.
+#[tokio::test]
+async fn the_host_s_sink_gets_arko_and_built_in_tool_images() {
+    let fake = Fake::new(json!([[
+        {"tool": "mcp__arko__read_file", "input": {"path": "a.png"}},
+        {"tool": "Read", "input": {"file_path": "b.png"}, "output": [
+            {"type": "text", "text": "b.png"},
+            {"type": "image", "source": {"type": "base64", "data": "cGl4ZWxz", "media_type": "image/png"}},
+        ]},
+        complete("Seen both"),
+    ]]));
+    std::fs::write(
+        fake.workspace().join("a.png"),
+        b"\x89PNG\r\n\x1a\nimage-fixture",
+    )
+    .unwrap();
+    let task = Task::new(
+        config(&fake, &["read_file", "Read"]),
+        "Look at both.".into(),
+        fake.workspace(),
+        None,
+    );
+    let images = Arc::new(Images::default());
+    let runtime =
+        AgentRuntime::new(Arc::new(arko_ai::LLMClient::new())).with_tool_image_sink(images.clone());
+    let (task, events) = start_with(task, runtime).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let recorded = images.0.lock().unwrap().clone();
+    let names: Vec<_> = recorded
+        .iter()
+        .map(|(_, name, count)| (name.as_str(), *count))
+        .collect();
+    assert_eq!(names, [("read_file", 1), ("Read", 1)]);
+    for (id, name, _) in &recorded {
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ToolCallFormatted { tool_call_id, tool_name, .. }
+                    if tool_call_id == id && tool_name == name
+            )),
+            "{name}"
+        );
+    }
+}
+
 fn pixels() -> arko_ai::Image {
     arko_ai::Image::new_base64("cGl4ZWxz", "image/png")
 }

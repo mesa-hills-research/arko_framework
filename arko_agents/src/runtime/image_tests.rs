@@ -559,3 +559,58 @@ fn google_gif_results_are_described_without_blocking_other_images() {
     assert!(output.text.starts_with("Screenshots"));
     assert!(output.text.contains("Google models don't take GIF images"));
 }
+
+/// A sink's report: the task, the call, the tool and the images.
+type Reported = (Uuid, Uuid, String, Vec<ToolImage>);
+
+/// Records what a tool image sink is given.
+#[derive(Default)]
+pub(super) struct ImageRecorder(pub std::sync::Mutex<Vec<Reported>>);
+
+impl crate::tool::ToolImageSink for ImageRecorder {
+    fn tool_images(
+        &self,
+        task_id: Uuid,
+        tool_call_id: Uuid,
+        tool_name: &str,
+        images: &[ToolImage],
+    ) {
+        self.0.lock().unwrap().push((
+            task_id,
+            tool_call_id,
+            tool_name.to_string(),
+            images.to_vec(),
+        ));
+    }
+}
+
+/// The host's sink gets a call's images keyed by the call's runtime ID, as
+/// the tool returned them: also when the model can't take them and its
+/// result leaves them out. A call without images isn't reported.
+#[tokio::test]
+async fn the_host_s_sink_gets_each_call_s_images() {
+    let (mut agent, _events, _commands) = harness(ToolCallingMode::Native);
+    agent.task.conversation.model.supports_image_input = false;
+    let recorder = Arc::new(ImageRecorder::default());
+    agent.image_sink = Some(recorder.clone());
+    let (seen, plain) = (Uuid::new_v4(), Uuid::new_v4());
+    let result = agent
+        .execute_native_tool(&call("one", "view_image"), seen)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.images.is_empty(), "the model takes no images");
+    agent
+        .execute_native_tool(&call("two", "plain_text"), plain)
+        .await
+        .unwrap()
+        .unwrap();
+    let recorded = recorder.0.lock().unwrap();
+    let [(task_id, tool_call_id, name, images)] = recorded.as_slice() else {
+        panic!("{}", recorded.len());
+    };
+    assert_eq!((*task_id, *tool_call_id), (agent.task.id, seen));
+    assert_eq!(name, "view_image");
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].description, "fixture.png, 12 × 8");
+}

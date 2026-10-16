@@ -73,6 +73,32 @@ impl ToolImage {
     }
 }
 
+/// Receives the images tool calls return, for a host that shows them
+/// (thumbnails under a call, an image viewer). Set with
+/// [`AgentRuntime::with_tool_image_sink`](crate::runtime::AgentRuntime::with_tool_image_sink).
+///
+/// Called once for each call that returned images, as the call ends, with
+/// the runtime's ID of the call (the `tool_call_id` of its events), the
+/// tool's name and the images as the tool returned them, before those the
+/// model can't take are left out of its result. Covers every arko tool
+/// (`read_file`, MCP tools, a host's own), and for a Claude Code agent
+/// also Claude Code's built-in tools that return images (`Read`). A call
+/// whose result is recovered after its task stopped is not reported again.
+/// It runs on the call's task: keep it quick (hand the images to another
+/// thread to scale or store them).
+///
+/// Events carry no image bytes: every subscriber of a workflow's event
+/// broadcast, and its event log, would get a copy.
+pub trait ToolImageSink: Send + Sync {
+    fn tool_images(
+        &self,
+        task_id: uuid::Uuid,
+        tool_call_id: uuid::Uuid,
+        tool_name: &str,
+        images: &[ToolImage],
+    );
+}
+
 /// Structured output is opt-in; existing string-returning tools need no changes.
 #[derive(Debug, Clone, Default)]
 pub struct ToolOutput {

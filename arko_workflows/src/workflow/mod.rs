@@ -1522,6 +1522,7 @@ pub struct WorkflowBuilder {
     global_interceptors: Vec<Arc<dyn ToolResultInterceptor>>,
     agent_interceptors: HashMap<String, Vec<Arc<dyn ToolResultInterceptor>>>,
     handover_thresholds: HashMap<String, arko_agents::HandoverThreshold>,
+    tool_image_sink: Option<Arc<dyn arko_agents::ToolImageSink>>,
     completion_verifiers: Vec<CompletionVerifierConfig>,
     distillation_configs: Vec<DistillationConfig>,
     services_config: Option<WorkflowServicesConfig>,
@@ -1569,6 +1570,7 @@ impl WorkflowBuilder {
             global_interceptors: Vec::new(),
             agent_interceptors: HashMap::new(),
             handover_thresholds: HashMap::new(),
+            tool_image_sink: None,
             completion_verifiers: Vec::new(),
             distillation_configs: Vec::new(),
             services_config: None,
@@ -1847,6 +1849,16 @@ impl WorkflowBuilder {
     ) -> Self {
         self.handover_thresholds
             .insert(agent_name.into(), threshold);
+        self
+    }
+
+    /// Gives `sink` the images every agent's tool calls return (a file
+    /// `read_file` shows, an MCP tool's image, Claude Code's `Read`), for a
+    /// host that shows them, keyed by the agent run (`task_id`) and the
+    /// call's `tool_call_id`, as its events name them. Events carry no image
+    /// bytes. See [`ToolImageSink`](arko_agents::ToolImageSink).
+    pub fn tool_image_sink(mut self, sink: Arc<dyn arko_agents::ToolImageSink>) -> Self {
+        self.tool_image_sink = Some(sink);
         self
     }
 
@@ -2600,6 +2612,7 @@ impl WorkflowBuilder {
             global_interceptors: self.global_interceptors,
             agent_interceptors: self.agent_interceptors,
             handover_thresholds: self.handover_thresholds,
+            tool_image_sink: self.tool_image_sink,
             interception_failure_policy: self.interception_failure_policy.unwrap_or_default(),
             completion_verifiers: self.completion_verifiers,
             verification_attempts: parking_lot::Mutex::new(HashMap::new()),

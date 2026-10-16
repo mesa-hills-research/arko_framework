@@ -2931,6 +2931,9 @@ impl WorkflowEngine {
         if let Some(threshold) = ctx.handover_thresholds.get(agent_name) {
             runtime = runtime.with_handover_threshold(threshold.clone());
         }
+        if let Some(sink) = &ctx.tool_image_sink {
+            runtime = runtime.with_tool_image_sink(sink.clone());
+        }
         // Saved as it runs, with the usage it has been charged for so far.
         let journal = self
             .persistence

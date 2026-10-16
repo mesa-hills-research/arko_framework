@@ -828,6 +828,7 @@ Most items are re-exported at the crate root (`arko_agents::AgentConfig`). Items
 | `AgentRuntime::with_handover_threshold`, `HandoverThreshold::{new, set, get}` | A handover threshold the host can change while the task runs, in place of the configured one. | `arko_agents/src/handover.rs` | [Conversation handover (arko_agents)](#conversation-handover-arko_agents) |
 | `AgentRuntime::with_stop_signal(signal)` | The host's `StopSignal` for the tasks' tool calls: it reaches each call as part of `TaskContext::stop`. Firing it changes nothing else; default: a signal that never fires. | `arko_agents/src/runtime/mod.rs` | [Stopping tool calls (arko_agents)](#stopping-tool-calls-arko_agents) |
 | `AgentRuntime::with_task_snapshots`, `TaskSnapshotSink::task_changed(task, durable)` (`arko_agents::snapshot`) | A sink the running task is reported to at its safe points; `durable` reports (before tool calls start, unless every call of the group is `ToolRecovery::Rerun` or a Claude Code read-only built-in) return once it is saved. | `arko_agents/src/snapshot.rs`, `arko_agents/src/runtime/mod.rs` | [Task snapshots and recovery](../arko_agents/README.md#task-snapshots-and-recovery) |
+| `ToolImageSink::tool_images(task_id, tool_call_id, tool_name, images)`, `AgentRuntime::with_tool_image_sink`, `WorkflowBuilder::tool_image_sink` | Gives the host the images each tool call returns, once per call, keyed by the call's runtime ID (as its events name it), before the model's filtering; events carry no image bytes. | `arko_agents/src/tool/mod.rs`, `arko_workflows/src/workflow/mod.rs` | [Tool images (arko_agents)](#tool-images-arko_agents) |
 | `UserCommand::{ApproveToolUse, RejectToolUse, SubmitBatchToolApprovals, SubmitUserResponse}`, `ToolApprovalDecision::{Approve, Reject}` | Answers to approval and question waits. An approval can carry `custom_tool_output` (used instead of running the tool) and `message_to_agent`. | `arko_agents/src/runtime/command.rs` | [Approvals and workspace paths](../arko_agents/README.md#approvals-and-workspace-paths) |
 | `UserCommand::{ApproveErrorRecovery, ContinueAfterError, RejectErrorRecovery, ResolveRefusal}` | Answers to an error-recovery pause. | `arko_agents/src/runtime/command.rs` | [Runtime (arko_agents)](#runtime-arko_agents) |
 | `UserCommand::{InjectContext, HostDeciding, RequestHandover, CancelTask, SuspendTask}` | Context updates, wait control, a handover, and stopping the run. | `arko_agents/src/runtime/command.rs` | [Runtime (arko_agents)](#runtime-arko_agents) |
@@ -1046,6 +1047,17 @@ Custom tools return `ToolOutput { text, images }` from `execute_with_output`.
 Each `ToolImage` has a source description and an `arko_ai::Image`. The runtime
 keeps images with their tool result, saves them with the task, and forwards them
 to the model. Events and result interceptors carry the text alone.
+
+A host that shows the images (thumbnails under a call) gets them from a
+`ToolImageSink` (`AgentRuntime::with_tool_image_sink`,
+`WorkflowBuilder::tool_image_sink`): `tool_images(task_id, tool_call_id,
+tool_name, images)` is called once for each call that returned images, as the
+call ends, with the runtime's call ID its events carry and the images as the
+tool returned them, before the ones the model can't take are left out. It covers
+`read_file`, MCP tools and a host's own tools, and on a Claude Code model also
+Claude Code's own `Read`. A call recovered after its task stopped is not
+reported again. Image bytes stay out of the events because a workflow's
+broadcast copies each event to every subscriber and into its event log.
 
 The built-in `read_file` detects PNG, JPEG, GIF and WebP by file signature.
 MCP tools accept those MIME types in image blocks and embedded blob resources,

@@ -57,9 +57,9 @@ pub use task::{
 pub use tool::{
     InterceptedResult, InterceptionFailurePolicy, InterceptorConfig, TaskContext, Tool,
     ToolCallContext, ToolDefinition, ToolError, ToolExecutionContext, ToolExecutionDecision,
-    ToolExecutionMiddleware, ToolExecutionOutcome, ToolImage, ToolOutput, ToolParameterDefinition,
-    ToolParameterType, ToolRecovery, ToolRegistry, ToolResultInterceptor, ToolTypeDetails,
-    builtins,
+    ToolExecutionMiddleware, ToolExecutionOutcome, ToolImage, ToolImageSink, ToolOutput,
+    ToolParameterDefinition, ToolParameterType, ToolRecovery, ToolRegistry, ToolResultInterceptor,
+    ToolTypeDetails, builtins,
 };
 
 pub use arko_ai::ModelCallUsage;
