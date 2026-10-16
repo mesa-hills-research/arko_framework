@@ -307,6 +307,16 @@ Result images count as image input: a model without it rejects them before sendi
 and inside results; `Conversation::redact_tool_result` replaces only a result's text and
 keeps its images.
 
+### User images
+
+A user message takes images after its text
+(`Conversation::add_user_message_with_contents(vec![Content::Text(..), Content::Image(..)])`),
+sent as each provider's image input: `input_image` items on OpenAI, `image` blocks on
+Anthropic and Gemini, `image_url` parts on OpenRouter. `Model::image_refusal(&image)` says
+why an image can't go to a model, before a request is built: the model has no image input,
+the image is a URL and the model is an Anthropic, Gemini or Claude Code one (these take
+images as data, `Image::from_bytes`), or it is a GIF for Gemini.
+
 ## Stop reasons and refusals
 
 Every `GenerationResponse` carries a normalized `stop_reason` (`EndTurn`, `ToolUse`,

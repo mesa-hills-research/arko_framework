@@ -15,6 +15,8 @@ mod tool_image_tests;
 mod tool_images;
 #[cfg(test)]
 mod tool_less_tests;
+#[cfg(test)]
+mod user_image_tests;
 
 use crate::{
     config::GenerationConfig,

@@ -2195,6 +2195,42 @@ impl Model {
             }
     }
 
+    /// Why `image` can't go to this model in a user message, or `None` when
+    /// it can. A model without image input takes none. Anthropic and Google
+    /// models take an image as data, not by URL (their requests refuse a
+    /// URL), and Claude Code would pass a URL on as text. Google's image
+    /// formats leave out GIF
+    /// (<https://ai.google.dev/gemini-api/docs/image-understanding#supported-image-formats>).
+    pub fn image_refusal(&self, image: &crate::message::Image) -> Option<String> {
+        use crate::message::Image;
+        if !self.supports_image_input {
+            return Some(format!("model '{}' doesn't take images", self.id));
+        }
+        match image {
+            Image::Url(_)
+                if matches!(
+                    self.provider,
+                    Provider::Anthropic | Provider::Google | Provider::ClaudeCode
+                ) =>
+            {
+                Some(format!(
+                    "model '{}' takes images as data, not by URL",
+                    self.id
+                ))
+            }
+            Image::Base64 { mime_type, .. }
+                if self.provider == Provider::Google
+                    && mime_type.trim().eq_ignore_ascii_case("image/gif") =>
+            {
+                Some(format!(
+                    "model '{}' doesn't take GIF images: convert it to PNG or JPEG",
+                    self.id
+                ))
+            }
+            _ => None,
+        }
+    }
+
     pub fn supports_openai_prompt_cache_options(&self) -> bool {
         self.provider == Provider::OpenAI
             && (self.is_openai_gpt_5_6()
