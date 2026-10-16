@@ -10,6 +10,7 @@ played one turn per user message across processes (FAKE_CLAUDE_STATE keeps
 the next turn's index). Steps:
 
   {"text": "...", "input_tokens": 500}    an assistant text message
+  {"thinking": "..."}                    an assistant thinking block
   {"tool": "mcp__arko__probe", "input": {...}, "input_tokens": 500}
                                          a tool call
   {"exit": 3}                            the CLI crashes
@@ -217,6 +218,7 @@ def assistant(content, step):
             "id": "msg_%d" % state["message"], "model": step.get("model", "claude-opus-5-5"),
             "usage": usage(step, 1)}})
     text = " ".join(block["text"] if block["type"] == "text"
+                    else block["thinking"] if block["type"] == "thinking"
                     else "%s %s" % (block["name"], json.dumps(block["input"]))
                     for block in content)
     send({"type": "assistant", "parent_tool_use_id": None, "session_id": SESSION,
@@ -346,6 +348,11 @@ def turn(text, message_uuid=None):
                 result["terminal_reason"] = step["terminal_reason"]
             send(result)
             return
+        if "thinking" in step:
+            # A thinking block, as Opus on Claude Code sends one before its
+            # text and calls.
+            assistant([{"type": "thinking", "thinking": step["thinking"], "signature": "sig"}],
+                      step)
         if "text" in step:
             assistant([{"type": "text", "text": step["text"]}], step)
             final = step["text"]

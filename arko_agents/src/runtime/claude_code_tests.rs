@@ -283,6 +283,46 @@ async fn a_turn_without_complete_task_gets_a_note() {
     );
 }
 
+/// A thinking block reaches the host as reasoning, before the response's
+/// text, and stays out of the agent's text in the conversation.
+#[tokio::test]
+async fn thinking_reaches_the_host_as_reasoning_before_the_text() {
+    let fake = Fake::new(json!([[
+        {"thinking": "The thing is small.\nDo it at once."},
+        {"text": "Doing it.", "continues": true},
+        complete("Done"),
+    ]]));
+    let task = Task::new(
+        config(&fake, &[]),
+        "Do the thing.".into(),
+        fake.workspace(),
+        None,
+    );
+    let (task, events) = start(task).finish().await;
+    assert!(matches!(task.current_state, TaskState::Completed { .. }));
+    let streamed: Vec<(&str, &str)> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ReasoningChunk(text) => Some(("thinking", text.as_str())),
+            AgentEvent::AssistantResponseChunk(text) => Some(("text", text.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        streamed,
+        [
+            ("thinking", "The thing is small.\nDo it at once."),
+            ("text", "Doing it.")
+        ]
+    );
+    let texts = texts(&task);
+    assert!(texts.iter().any(|text| text == "Doing it."), "{texts:?}");
+    assert!(
+        !texts.iter().any(|text| text.contains("small")),
+        "{texts:?}"
+    );
+}
+
 /// A Claude Code agent's `message_user` calls reach the host as
 /// `MessageToUser`, and with `text_reply_as_message` so does the text of a
 /// turn that ends without `complete_task`; off, that text isn't sent.
