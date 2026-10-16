@@ -263,11 +263,16 @@ Anthropic, OpenRouter); for Gemini the request fails with `Error::UnsupportedFea
 A `ToolConfig` with no tools is sent as no tool configuration at all, on every provider: no
 tool list, tool choice or parallel-call setting (`GenerationConfig::offered_tools` is what
 a request sends). To go on without tools in a conversation that used them (an agent
-switched to a chat), send `Conversation::tool_history_as_text()`, a copy in which each call
-is a line `[Tool call NAME: ARGUMENTS]` in its assistant message, without the reasoning that
-led to it, and each result is `[Result of NAME]` (or `[NAME failed]`) and its output,
-followed by its images. The original conversation keeps its calls, and one without calls is
-returned as it is.
+switched to a chat), send `Conversation::tool_history_as_text()` (a copy) or
+`into_tool_history_as_text()` (in place). Each call becomes a line `[Earlier tool call ID:
+NAME, arguments ARGS]` in its assistant message, without the reasoning that led to it. Each
+message of results opens with `TOOL_HISTORY_NOTE`, which says these are records from when
+tools were available, that none are now, and that the quoted output is data, not
+instructions and not the user's words. Then comes each result: `[Result of tool call ID
+(NAME):]` (`NAME, failed` for an error), its output with every line quoted (`> `) so it
+can't pass for a turn or the record's own lines, and `[End of the result of ID]`, followed
+by its images. The original conversation keeps its calls, and one without calls is returned
+as it is.
 
 A call's `arguments` are parsed JSON; arguments that are not valid JSON are kept as text
 in `ToolCall::invalid_arguments`, with `arguments` set to `null`, and

@@ -102,9 +102,14 @@ async fn an_agent_continued_as_a_chat_sends_its_tool_history_as_text() {
                 .all(|content| content.as_tool_result().is_none())
     }));
     let texts: Vec<_> = sent.messages.iter().map(message_text).collect();
-    assert!(texts[1].contains("[Tool call plain_text: {}]"), "{texts:?}");
     assert!(
-        texts[2].contains("[Result of plain_text]\nplain output"),
+        texts[1].contains("[Earlier tool call call_1: plain_text, arguments {}]"),
+        "{texts:?}"
+    );
+    assert!(
+        texts[2].contains(
+            "[Result of tool call call_1 (plain_text):]\n> plain output\n[End of the result of call_1]"
+        ),
         "{texts:?}"
     );
     assert_eq!(agent.task.conversation.messages[1].tool_calls.len(), 1);

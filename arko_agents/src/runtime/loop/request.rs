@@ -234,8 +234,6 @@ fn as_sent(conversation: ai::Conversation, config: &ai::GenerationConfig) -> ai:
     if config.offered_tools().is_some() {
         return conversation;
     }
-    match conversation.tool_history_as_text() {
-        std::borrow::Cow::Owned(flattened) => flattened,
-        std::borrow::Cow::Borrowed(_) => conversation,
-    }
+    // In place: the conversation is already the request's own copy.
+    conversation.into_tool_history_as_text()
 }

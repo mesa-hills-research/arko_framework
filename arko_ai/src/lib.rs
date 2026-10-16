@@ -16,6 +16,7 @@ pub mod retry;
 pub mod stop;
 pub mod tool;
 mod tool_history;
+pub use tool_history::TOOL_HISTORY_NOTE;
 pub mod trace;
 pub mod usage;
 
