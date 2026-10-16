@@ -1094,6 +1094,15 @@ impl Workflow {
         self.context.budget.snapshot_ledger()
     }
 
+    /// Each agent's running cost totals (billed, at list prices, tokens and
+    /// calls), without copying the ledger; see
+    /// [`BudgetManager::totals_by_agent`](crate::budget::BudgetManager::totals_by_agent).
+    pub fn cost_totals_by_agent(
+        &self,
+    ) -> std::collections::BTreeMap<String, crate::budget::CostTotals> {
+        self.context.budget.totals_by_agent()
+    }
+
     /// Access the shared context (memory, messages, budget, etc.)
     pub fn context(&self) -> &Arc<SharedContext> {
         &self.context

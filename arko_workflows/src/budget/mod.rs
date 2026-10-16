@@ -3,7 +3,7 @@
 /// Tracks accumulated cost across all agents and manual additions,
 /// maintaining both a lock-free running total (for fast threshold checks)
 /// and a detailed serializable ledger (for persistence and analysis).
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
@@ -122,6 +122,37 @@ pub struct AddCostResult {
     pub exceeded_crossed: bool,
 }
 
+/// One agent's running cost totals; see [`BudgetManager::totals_by_agent`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct CostTotals {
+    /// What the account was billed, in dollars (calls a plan covered count
+    /// zero).
+    pub billed: f64,
+    /// What the calls would have cost at list prices: the billed amount of
+    /// metered calls, and the list-price estimate of those a plan covered
+    /// (Claude Code, the ChatGPT login).
+    pub list_price: f64,
+    /// Input tokens, cached input included.
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    /// The model calls counted.
+    pub calls: usize,
+}
+
+impl CostTotals {
+    fn add(&mut self, billed: f64, usage: &arko_ai::UsageInfo) {
+        self.billed += billed;
+        self.list_price += if usage.billing == arko_ai::BillingKind::Subscription {
+            usage.total_cost
+        } else {
+            billed
+        };
+        self.input_tokens += usage.input_tokens;
+        self.output_tokens += usage.output_tokens;
+        self.calls += 1;
+    }
+}
+
 /// Tracks accumulated cost across all agents in a workflow.
 ///
 /// Uses a dual strategy: an atomic counter for lock-free budget threshold
@@ -129,6 +160,8 @@ pub struct AddCostResult {
 /// detailed per-entry recording.
 pub struct BudgetManager {
     spent: AtomicU64,
+    /// Each agent's running totals ([`totals_by_agent`](Self::totals_by_agent)).
+    agent_totals: Mutex<BTreeMap<String, CostTotals>>,
     /// The limit, scaled ([`NO_LIMIT`]: none); it can change while agents
     /// run ([`set_limit`](Self::set_limit)).
     limit: AtomicU64,
@@ -152,6 +185,7 @@ impl BudgetManager {
     pub fn new(limit: Option<f64>, warning: Option<f64>) -> Self {
         Self {
             spent: AtomicU64::new(0),
+            agent_totals: Mutex::default(),
             limit: AtomicU64::new(scaled_limit(limit)),
             warning: warning.map(|w| (w * COST_SCALE) as u64),
             warned: AtomicBool::new(false),
@@ -195,15 +229,21 @@ impl BudgetManager {
         let warning_scaled = warning.map(|value| (value * COST_SCALE) as u64);
         let spent = (total * COST_SCALE) as u64;
         let mut agent_spent = HashMap::new();
+        let mut agent_totals = BTreeMap::new();
         for entry in &ledger.entries {
-            if let CostSource::Agent { agent_name, .. } = &entry.source {
+            if let CostSource::Agent { agent_name, usage } = &entry.source {
                 let spent = agent_spent.entry(agent_name.clone()).or_insert(0_u64);
                 *spent = spent.saturating_add((entry.amount * COST_SCALE) as u64);
+                agent_totals
+                    .entry(agent_name.clone())
+                    .or_insert_with(CostTotals::default)
+                    .add(entry.amount, usage);
             }
         }
         let limit = scaled_limit(limit);
         Self {
             spent: AtomicU64::new(spent),
+            agent_totals: Mutex::new(agent_totals),
             limit: AtomicU64::new(limit),
             warning: warning_scaled,
             warned: AtomicBool::new(warning_scaled.is_some_and(|value| spent >= value)),
@@ -229,6 +269,11 @@ impl BudgetManager {
     /// [`UsageInfo`]: arko_ai::UsageInfo
     pub fn add_agent_cost(&self, agent_name: &str, usage: &arko_ai::UsageInfo) -> AddCostResult {
         let amount = usage.billed();
+        self.agent_totals
+            .lock()
+            .entry(agent_name.to_string())
+            .or_default()
+            .add(amount, usage);
         let entry = CostEntry {
             amount,
             source: CostSource::Agent {
@@ -479,6 +524,15 @@ impl BudgetManager {
         (limit != NO_LIMIT).then(|| limit as f64 / COST_SCALE)
     }
 
+    /// Each agent's running totals: what its model calls were billed, what
+    /// they would have cost at list prices, their tokens and their count.
+    /// Kept as costs are added (and rebuilt from the ledger on resume), so a
+    /// host reading them often doesn't copy the whole ledger. Manual costs
+    /// belong to no agent and aren't in them.
+    pub fn totals_by_agent(&self) -> BTreeMap<String, CostTotals> {
+        self.agent_totals.lock().clone()
+    }
+
     /// Returns a snapshot of the cost ledger for persistence or analysis.
     pub fn snapshot_ledger(&self) -> CostLedger {
         self.ledger.lock().clone()
@@ -538,6 +592,44 @@ mod tests {
         cancel.add_manual_cost(1.0, "test", None);
         assert!(cancel.is_exceeded());
         assert!(cancel.hold_reason("coder").is_none(), "cancelled, not held");
+    }
+
+    /// Each agent's totals add its calls up as they come: billed amounts, list
+    /// prices (a plan-covered call's estimate), tokens and calls; manual
+    /// costs aren't an agent's. A resumed budget rebuilds them from its
+    /// ledger.
+    #[test]
+    fn each_agent_s_totals_are_kept_as_costs_come() {
+        let budget = BudgetManager::new(None, None);
+        let metered = UsageInfo {
+            billed_cost: Some(0.5),
+            ..UsageInfo::new(1000, 100)
+        };
+        let covered = UsageInfo {
+            total_cost: 0.75,
+            billed_cost: Some(0.0),
+            billing: BillingKind::Subscription,
+            ..UsageInfo::new(2000, 200)
+        };
+        budget.add_agent_cost("main", &metered);
+        budget.add_agent_cost("main", &covered);
+        budget.add_agent_cost("worker", &metered);
+        budget.add_manual_cost(3.0, "embeddings", None);
+        let totals = budget.totals_by_agent();
+        assert_eq!(
+            totals["main"],
+            CostTotals {
+                billed: 0.5,
+                list_price: 1.25,
+                input_tokens: 3000,
+                output_tokens: 300,
+                calls: 2,
+            }
+        );
+        assert_eq!(totals["worker"].calls, 1);
+        assert_eq!(totals.len(), 2);
+        let resumed = BudgetManager::from_ledger(None, None, budget.snapshot_ledger());
+        assert_eq!(resumed.totals_by_agent(), totals);
     }
 
     #[test]

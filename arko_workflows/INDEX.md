@@ -334,6 +334,7 @@ Dropping a handle without calling `wait` or `into_parts` aborts the agent's runt
 | `result(&self) -> WorkflowResult` | Snapshot of recorded results, metadata, the cost ledger, and the run's `cancellation`. Does not finish or checkpoint; also available once the run is stopped. |
 | `agent_status(&self, agent_name: &str) -> Option<AgentStatus>` | A registered agent's status in this run, as `list_recipients` reports it; `None` for an unknown name. See [Agent statuses](#agent-statuses). |
 | `cost_ledger(&self) -> CostLedger` | Clone of the chronological ledger of automatic and manual costs. |
+| `cost_totals_by_agent(&self) -> BTreeMap<String, CostTotals>` | Each agent's running totals, kept as costs are added (rebuilt from the ledger on resume), without copying the ledger: `CostTotals { billed, list_price, input_tokens, output_tokens, calls }`, where `list_price` counts the billed amount of metered calls and the list-price estimate of those a plan covered. Manual costs belong to no agent. |
 | `set_budget(&self, limit: Option<f64>) -> Result<(), WorkflowError>` | Change the workflow's limit (`None`: none) while agents run; it applies from their next model requests. Raising it releases the agents held on it: waiting runs continue at once, and a run returned as `AgentPaused` continues with `resume_agent`. Lowering it holds agents once spend is over it. A non-finite or negative limit returns `BuilderInvalid`. The limit is saved with the next checkpoint (with the task journal, a live checkpoint is written at once while agents run); see [Budget holds](#budget-holds) for resuming. `OnBudgetExceeded` fires again when spend goes over the new limit. |
 | `set_agent_budget(&self, agent: &str, limit: Option<f64>) -> Result<(), WorkflowError>` | The same for an agent's own limit; an unknown agent returns `AgentNotFound`. |
 | `budget(&self) -> Option<f64>` | The workflow's current limit. |
@@ -1519,6 +1520,7 @@ Thread-safe workflow spend, per-agent LLM spend and limits, and a detailed ledge
 | `pub fn remaining(&self) -> Option<f64>` | `limit - spent`, floored at zero; `None` without a limit. |
 | `pub fn limit(&self) -> Option<f64>` | The workflow limit, as it is now. |
 | `pub fn snapshot_ledger(&self) -> CostLedger` | Clone of the ledger. |
+| `pub fn totals_by_agent(&self) -> BTreeMap<String, CostTotals>` | Each agent's running totals (billed, at list prices, tokens, calls), kept as costs are added. |
 
 The recording methods keep a cost even when it exceeds the budget, and their result consumes a newly reached warning. The manager does not validate its inputs; supply finite, nonnegative values. `WorkflowBuilder` validates configured limits and thresholds, and `Workflow::add_manual_cost` validates the amount, fires the budget hooks, and returns `WorkflowError::BudgetExceeded`.
 
