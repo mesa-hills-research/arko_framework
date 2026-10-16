@@ -133,11 +133,19 @@ impl TerminalConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct StartOptions {
     pub terminal: bool,
     pub detect_prompts: bool,
     pub timeout: Option<Duration>,
+    /// The job is held for its host (default `false`): it sends no terminal
+    /// updates and isn't listed until [`TerminalManager::release`] moves it
+    /// to the background. For a host that waits for the job itself (a
+    /// command run to completion) and may hand it to the agent later.
+    pub held: bool,
+    /// The arguments before the command for this job, instead of
+    /// [`TerminalConfig::shell_args`] (default `None`).
+    pub shell_args: Option<Vec<String>>,
 }
 impl Default for StartOptions {
     fn default() -> Self {
@@ -145,8 +153,19 @@ impl Default for StartOptions {
             terminal: true,
             detect_prompts: true,
             timeout: None,
+            held: false,
+            shell_args: None,
         }
     }
+}
+
+/// A job that finished in the background (not held), as
+/// [`TerminalManager::subscribe_finished`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobFinished {
+    pub owner: Uuid,
+    pub job_id: Uuid,
+    pub state: JobState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,6 +260,9 @@ struct Record {
     terminal: bool,
     output_end: u64,
     log_truncated: bool,
+    /// See [`StartOptions::held`]. False in records saved before it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    held: bool,
 }
 
 #[derive(Debug)]
@@ -351,6 +373,8 @@ pub struct TerminalManager {
     /// The command guard's `allow_outside_workspace`, which can change
     /// while jobs run.
     allow_outside_workspace: std::sync::atomic::AtomicBool,
+    /// Where jobs that finish in the background are reported.
+    finished: tokio::sync::broadcast::Sender<JobFinished>,
     _directory_lock: Arc<std::fs::File>,
 }
 impl std::fmt::Debug for TerminalManager {
@@ -397,6 +421,7 @@ impl TerminalManager {
             jobs: Mutex::new(HashMap::new()),
             runtimes: Mutex::new(HashMap::new()),
             closing: false.into(),
+            finished: tokio::sync::broadcast::channel(64).0,
             _directory_lock: Arc::new(lock),
         });
         for entry in std::fs::read_dir(&manager.config.directory)? {
@@ -534,8 +559,10 @@ impl TerminalManager {
                     .as_ref()
                     .is_some_and(|current| Arc::ptr_eq(&current.pending, &binding.pending));
                 if current && let Ok(job) = manager.owned(owner, id) {
-                    let data = job.data.lock().unwrap();
+                    let mut data = job.data.lock().unwrap();
+                    // A held job's events wait for its release.
                     if data.last_event.is_some()
+                        && !data.record.held
                         && let Ok(latest) =
                             data.snapshot(&manager.config, None, manager.config.excerpt_bytes)
                     {
@@ -545,6 +572,9 @@ impl TerminalManager {
                                 .expect("terminal snapshot serialization")
                         );
                         permit.send(UserCommand::InjectContext { content });
+                        // Sent: a runtime the owner binds later (its next
+                        // turn) doesn't get it again.
+                        data.last_event = None;
                     }
                 }
             }
@@ -602,6 +632,7 @@ impl TerminalManager {
             terminal: options.terminal,
             output_end: 0,
             log_truncated: false,
+            held: options.held,
         };
         let data = Arc::new(Mutex::new(JobData {
             record,
@@ -614,8 +645,19 @@ impl TerminalManager {
                 .join(id.to_string())
                 .join("output.log"),
         )?;
+        let own_args;
+        let config = match &options.shell_args {
+            Some(args) => {
+                own_args = TerminalConfig {
+                    shell_args: args.clone(),
+                    ..self.config.clone()
+                };
+                &own_args
+            }
+            None => &self.config,
+        };
         let process = match io::spawn(
-            &self.config,
+            config,
             command,
             context.current_working_directory,
             options.terminal,
@@ -717,6 +759,42 @@ impl TerminalManager {
     pub fn cancel(&self, owner: Uuid, id: Uuid) -> Result<()> {
         self.owned(owner, id)?.cancel.send_replace(true);
         Ok(())
+    }
+
+    /// Moves a held job (see [`StartOptions::held`]) to the background: it
+    /// is listed, and its terminal updates go to its owner from now on,
+    /// starting with an event it already has. A job that has finished
+    /// stays held ([`TerminalError::Finished`]), as its host has its result.
+    pub fn release(self: &Arc<Self>, owner: Uuid, id: Uuid) -> Result<TerminalSnapshot> {
+        let job = self.owned(owner, id)?;
+        let (snapshot, event) = {
+            let mut data = job.data.lock().unwrap();
+            if data.record.state.is_terminal() {
+                return Err(TerminalError::Finished);
+            }
+            if data.record.held {
+                let record = Record {
+                    held: false,
+                    ..data.record.clone()
+                };
+                persist(&self.config, &record)?;
+                data.record.held = false;
+            }
+            (
+                data.snapshot(&self.config, None, self.config.excerpt_bytes)?,
+                data.last_event.clone(),
+            )
+        };
+        if let Some(event) = event {
+            self.deliver(owner, event);
+        }
+        Ok(snapshot)
+    }
+
+    /// The jobs that finish in the background (not held) from now on: a
+    /// host can wake an idle agent for them.
+    pub fn subscribe_finished(&self) -> tokio::sync::broadcast::Receiver<JobFinished> {
+        self.finished.subscribe()
     }
 
     /// Wait for a revision change, input request, or completion; never more than 30s.

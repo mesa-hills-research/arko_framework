@@ -335,10 +335,18 @@ pub(super) async fn run(
             .snapshot(&config, None, config.excerpt_bytes)
             .expect("valid output window");
         data.last_event = Some(snapshot.clone());
-        (data.record.owner, snapshot)
+        (data.record.owner, snapshot, data.record.held)
     };
     if let Some(manager) = manager.upgrade() {
-        manager.deliver(final_notice.0, final_notice.1);
+        let (owner, snapshot, held) = final_notice;
+        if !held {
+            let _ = manager.finished.send(JobFinished {
+                owner,
+                job_id: snapshot.job_id,
+                state: snapshot.state,
+            });
+        }
+        manager.deliver(owner, snapshot);
     }
     changed.send_replace(data.lock().unwrap().record.revision);
 }

@@ -50,6 +50,27 @@ and a wait ends after at most 30 seconds), unless a per-tool setting gives one.
 Integer parameters are passed as strings in both native and text-based tool
 calling, for example `{"job_id":"…","revision":"3","text":"Y\n"}`.
 
+Each update reaches its owner once. An update that finds no runtime bound (the
+agent's turn has ended) waits for the next runtime the owner binds, such as the
+one of its next turn.
+
+## Held jobs
+
+A host that runs a command to completion itself, such as a shell tool, can hand
+the command to the agent while it runs. `StartOptions { held: true, .. }` starts
+a held job: it sends no terminal updates and `terminal_control list` leaves it
+out, while the host reads it with `status` and `wait` as usual.
+`TerminalManager::release(owner, job_id)` moves it to the background. From then
+on it is listed, and its updates go to its owner, starting with an event it
+already has. A job that finished before the release stays held, and `release`
+returns `TerminalError::Finished`, as the host has its result.
+`StartOptions::shell_args` gives one job its own arguments before the command,
+for example a non-interactive mode for commands run to completion.
+
+`TerminalManager::subscribe_finished()` reports each job that finishes in the
+background, with its owner, ID and state, so that a host can start a turn of an
+idle agent for it.
+
 ## Configuration
 
 `TerminalConfig::new(directory)` sets these defaults:
