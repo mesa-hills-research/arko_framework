@@ -321,11 +321,14 @@ impl AgentLoop {
     /// native tool calling, the largest tool result added since the latest
     /// answered request is shortened (to a preview, or one already that
     /// small to its notice alone) and the request is sent again, at most
-    /// [`MAX_OVERFLOW_RECOVERIES`] times in a row. Returns whether it is
-    /// sent again; otherwise recovery goes on as for any error that
-    /// retrying can't fix, and the task stops with the error's kind. A
-    /// handover is no recovery: its report request would be over the limit
-    /// too.
+    /// [`MAX_OVERFLOW_RECOVERIES`] times in a row. When that can't help
+    /// (after those attempts, or with no result large enough to have caused
+    /// it), an agent that hands over does so without the step that made the
+    /// request too large; see
+    /// [`hand_over_without_the_step`](Self::hand_over_without_the_step).
+    /// Returns whether a request is sent again; otherwise recovery goes on
+    /// as for any error that retrying can't fix, and the task stops with
+    /// the error's kind.
     pub(super) async fn recover_from_overflow(
         &mut self,
         error: &ai::Error,
@@ -338,12 +341,14 @@ impl AgentLoop {
                 .result_limits
                 .overflow_guard
             || !self.is_native_mode()
-            || self.overflow_recoveries >= MAX_OVERFLOW_RECOVERIES
         {
             return Ok(false);
         }
+        if self.overflow_recoveries >= MAX_OVERFLOW_RECOVERIES {
+            return self.hand_over_without_the_step(error).await;
+        }
         let Some((message, index, _)) = self.largest_new_result() else {
-            return Ok(false);
+            return self.hand_over_without_the_step(error).await;
         };
         let ratio = self.bytes_per_token;
         let preview = self
@@ -370,7 +375,7 @@ impl AgentLoop {
         let tokens = result_budget::tokens(output.len(), ratio);
         // Too small to be what made the request too large.
         if tokens < result_budget::MIN_KEPT_TOKENS {
-            return Ok(false);
+            return self.hand_over_without_the_step(error).await;
         }
         // A preview first; one shortened before (by the guard, a cap or the
         // previous attempt) keeps its notice alone.
@@ -422,6 +427,91 @@ impl AgentLoop {
         })
         .await?;
         self.emit_event(shortened).await?;
+        Ok(true)
+    }
+
+    /// The last step of [`recover_from_overflow`](Self::recover_from_overflow),
+    /// for an agent that hands over (it has `handover`, or the host set a
+    /// threshold): the step the request added since the latest answered
+    /// request, which fit, is left out (the model's reply, its results, and
+    /// the runtime's messages after them, such as a report request), and the
+    /// report is asked for at the next turn boundary from the conversation
+    /// as it was, with [`STEP_LEFT_OUT`](crate::handover::STEP_LEFT_OUT)
+    /// before the request. Context updates added since stay: they hold what
+    /// the host sent. Returns whether a request is sent again: not without
+    /// a handover, without an answered request in this conversation, with a
+    /// report already given, or with no reply or results to leave out (the
+    /// report request itself was too large).
+    async fn hand_over_without_the_step(
+        &mut self,
+        error: &ai::Error,
+    ) -> Result<bool, ArkoAgentsError> {
+        let hands_over =
+            self.task.agent_config.handover.is_some() || self.handover_threshold.get().is_some();
+        let reported = self
+            .task
+            .handover_requested
+            .as_ref()
+            .is_some_and(|request| request.report.is_some());
+        let messages = &self.task.conversation.messages;
+        let Some(start) = self
+            .answered_request
+            .filter(|mark| {
+                mark.conversation == self.task.conversation_usage_start
+                    && mark.messages <= messages.len()
+            })
+            .map(|mark| mark.messages)
+            .filter(|_| hands_over && !reported)
+        else {
+            return Ok(false);
+        };
+        let in_step = |message: &ai::Message| {
+            message.role == ai::Role::Assistant
+                || message
+                    .content
+                    .iter()
+                    .any(|content| content.as_tool_result().is_some())
+        };
+        if !messages[start..].iter().any(in_step) {
+            return Ok(false);
+        }
+        let added = self.task.conversation.messages.split_off(start);
+        let runtime = &self.task.runtime_messages;
+        let kept: Vec<ai::Message> = added
+            .into_iter()
+            .enumerate()
+            .filter(|(offset, message)| !in_step(message) && !runtime.contains(&(start + offset)))
+            .map(|(_, message)| message)
+            .collect();
+        self.task.conversation.messages.extend(kept);
+        // The messages kept after `start` are the host's, not the runtime's.
+        self.task.runtime_messages.retain(|index| *index < start);
+        self.task
+            .runtime_text_messages
+            .retain(|index| *index < start);
+        if self.details_sent_with.is_some_and(|index| index >= start) {
+            self.details_sent_with = None;
+        }
+        self.task.handover_requested = Some(HandoverRequest::new(
+            self.task.current_conversation_context_size().unwrap_or(0),
+        ));
+        self.step_left_out = true;
+        // Sent again at once; not an ordinary recovery attempt.
+        self.recovery.indefinite_interactions =
+            self.recovery.indefinite_interactions.saturating_add(1);
+        log::warn!(
+            "Task {}: the request was over the model's input limit even with its results shortened, so its latest step was left out and the agent hands over.",
+            self.task.id
+        );
+        self.emit_event(AgentEvent::ErrorEncountered {
+            error_message: format!(
+                "The request was over the model's input limit even with its results shortened, so its latest step was left out and the agent hands over from the conversation before it: {error}"
+            ),
+            requires_approval_to_retry: false,
+            tool_call_id: None,
+            error_kind: Some(ai::ErrorKind::ContextOverflow),
+        })
+        .await?;
         Ok(true)
     }
 }

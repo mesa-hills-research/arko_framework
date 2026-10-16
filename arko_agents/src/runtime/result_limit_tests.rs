@@ -820,6 +820,96 @@ async fn an_overflow_is_recovered_from_twice_at_most_then_fails_with_its_kind() 
     std::fs::remove_dir_all(directory).unwrap();
 }
 
+/// Keeps the conversation a handover replaces.
+#[derive(Default)]
+struct Replaced(std::sync::Mutex<Vec<ai::Message>>);
+
+impl crate::handover::HandoverHook for Replaced {
+    fn on_handover(&self, task: &Task, _report: &str) -> crate::handover::HandoverSeed {
+        *self.0.lock().unwrap() = task.conversation.messages.clone();
+        crate::handover::HandoverSeed::for_task(task)
+    }
+}
+
+/// When shortening can't bring the request under the limit, an agent that
+/// hands over leaves out the step that made it too large (the reply and
+/// its results) and gives its report from the conversation of the last
+/// answered request, told that the step was left out. The fresh
+/// conversation goes on. (Without `handover`, the error stands, as above.)
+#[tokio::test]
+async fn an_overflow_shortening_cant_fix_hands_over_without_the_step() {
+    let directory = workspace();
+    let (mut agent, mut events, _commands) = harness(1_000_000, &["dump"], &directory);
+    agent.task.agent_config.handover = Some(HandoverConfig::at_input_tokens(900_000));
+    let replaced = Arc::new(Replaced::default());
+    agent.handover_hook = Some(replaced.clone());
+    push(
+        &mut agent,
+        vec![
+            respond(&[("huge", "dump", json!({"bytes": 400_000}))], 100),
+            overflow(),
+            overflow(),
+            overflow(),
+            report("REPORT: I was dumping the data.", 120),
+            complete(),
+        ],
+    );
+    let (task, events) = run(agent, &mut events).await;
+    assert!(
+        matches!(task.current_state, TaskState::Completed { .. }),
+        "{:?}",
+        task.current_state
+    );
+    assert_eq!(task.handovers.len(), 1);
+    assert_eq!(task.handovers[0].report, "REPORT: I was dumping the data.");
+    // Two shortenings, then the handover, each reported as an error that
+    // needs no decision; the handover at the last answered request's input.
+    assert_eq!(shortened(&events).len(), 2);
+    let errors = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                AgentEvent::ErrorEncountered {
+                    requires_approval_to_retry: false,
+                    error_kind: Some(ai::ErrorKind::ContextOverflow),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(errors, 3);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::HandoverRequested { input_tokens: 100 }))
+    );
+    // The replaced conversation had neither the call nor its result.
+    let old = replaced.0.lock().unwrap().clone();
+    assert!(!old.iter().any(|message| {
+        message
+            .tool_calls
+            .iter()
+            .any(|call| call.id.as_deref() == Some("huge"))
+    }));
+    assert!(
+        !old.iter()
+            .flat_map(|message| &message.content)
+            .filter_map(ai::Content::as_tool_result)
+            .any(|result| result.call_id.as_deref() == Some("huge"))
+    );
+    let request = old
+        .iter()
+        .map(message_text)
+        .find(|text| text.contains("Call `handover_report`"))
+        .unwrap();
+    assert!(
+        request.starts_with(crate::handover::STEP_LEFT_OUT),
+        "{request}"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 /// One shortening is enough when the provider then accepts the request.
 /// With the guard off, the overflow is not recovered from: the task pauses
 /// at once, with the error's kind.
