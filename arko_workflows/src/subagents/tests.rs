@@ -1375,8 +1375,9 @@ async fn the_hosts_start_context_opens_the_first_message() {
 
 /// A subagent running when its workflow stops comes back from the
 /// checkpoint stopped, with its lead's knowledge of it, and
-/// `resume_subagents` relaunches it where it was; its report then reaches
-/// its lead.
+/// `resume_subagents` relaunches it where it was. The news that it stopped,
+/// which the lead hadn't received, is withdrawn, and its report then
+/// reaches its lead alone.
 #[tokio::test]
 async fn subagents_survive_a_stop_and_a_resume() {
     let server = ResponsesServer::start(|_, body| {
@@ -1442,13 +1443,16 @@ async fn subagents_survive_a_stop_and_a_resume() {
         .into_iter()
         .find(|run| run.result.agent_name == "lead")
         .unwrap();
+    let stopped = |news: &[MailItem]| news.iter().any(|item| item.kind == MailKind::Stopped);
+    let news = resumed.pending_news(lead.result.agent_run_id);
+    assert!(stopped(&news), "the stop's news: {news:?}");
     assert_eq!(resumed.resume_subagents(), ["r1"]);
+    let news = resumed.pending_news(lead.result.agent_run_id);
+    assert!(!stopped(&news), "withdrawn: {news:?}");
     until(|| resumed.subagents()[0].state == SubagentState::Finished).await;
     let news = resumed.pending_news(lead.result.agent_run_id);
-    assert!(
-        news.iter().any(|item| item.body == "Done at last."),
-        "{news:?}"
-    );
+    let bodies: Vec<&str> = news.iter().map(|item| item.body.as_str()).collect();
+    assert_eq!(bodies, ["Done at last."]);
 }
 
 /// Background runs need workflow services, and host parameters may not

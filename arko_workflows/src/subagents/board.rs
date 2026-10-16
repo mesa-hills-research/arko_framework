@@ -990,7 +990,8 @@ impl Board {
     }
 
     /// Relaunches the subagents a stop of the workflow ended, or that were
-    /// running when it ended: their handles.
+    /// running when it ended: their handles. The news that one stopped,
+    /// which its lead hasn't received, is withdrawn: it goes on.
     pub(crate) fn resume_all(&self, ctx: &Arc<SharedContext>) -> Vec<String> {
         let runs = self
             .records()
@@ -1002,6 +1003,22 @@ impl Board {
                 ) || (run.state == SubagentState::Stopped && stopped_with_workflow(ctx, run.run_id))
             })
             .collect::<Vec<_>>();
+        let withdrawn = {
+            let mut state = self.state.lock();
+            let before = state.mail.len();
+            state.mail.retain(|item| {
+                item.kind != MailKind::Stopped
+                    || item.delivered_at.is_some()
+                    || !runs
+                        .iter()
+                        .any(|run| item.from == MailSender::Run(run.run_id))
+            });
+            state.mail.len() != before
+        };
+        if withdrawn {
+            self.bump();
+            self.save_soon(ctx);
+        }
         let mut resumed = Vec::new();
         for run in runs {
             let launch = run.pending.clone().unwrap_or(PendingLaunch::Resume {

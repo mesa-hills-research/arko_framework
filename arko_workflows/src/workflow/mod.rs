@@ -446,8 +446,10 @@ impl Workflow {
     /// Relaunches the background subagents that were running, or queued,
     /// when the workflow stopped (after a resume from a checkpoint), in the
     /// background: returns their ids (`r1`, ...). Their reports reach their
-    /// leads as usual. A subagent that isn't relaunched waits, and a message
-    /// from its lead restarts it.
+    /// leads as usual. The news that a relaunched one stopped with the
+    /// workflow, which its lead hasn't received, is withdrawn, so the lead
+    /// isn't told to restart a subagent that goes on. A subagent that isn't
+    /// relaunched waits, and a message from its lead restarts it.
     pub fn resume_subagents(&self) -> Vec<String> {
         self.context.subagents.resume_all(&self.context)
     }
